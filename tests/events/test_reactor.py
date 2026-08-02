@@ -209,6 +209,187 @@ def test_no_submit_claim_debt_drains_before_cycle_entry_gate():
     assert reactor._no_submit_claim_requeue_debt == {}
 
 
+def test_paused_no_held_wake_parks_before_claim_auction_or_receipt():
+    conn, store = _store()
+    event = _forecast_event("paused-no-held")
+    store.insert_or_ignore(event)
+    before = tuple(
+        row[0]
+        for row in conn.execute(
+            "SELECT event_id FROM opportunity_event_processing "
+            "WHERE processing_status = 'pending' ORDER BY event_id"
+        )
+    )
+    decision_log_before = conn.execute(
+        "SELECT COUNT(*) FROM decision_log"
+    ).fetchone()[0]
+    calls = {"source": 0, "auction": 0, "submit": 0}
+
+    def submit(_event, _decision_time):
+        calls["submit"] += 1
+        return None
+
+    def process_global_batch(*_args, **_kwargs):
+        calls["auction"] += 1
+        raise AssertionError("paused/no-held wake must not enter global auction")
+
+    submit.process_global_batch = process_global_batch  # type: ignore[attr-defined]
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: calls.__setitem__("source", calls["source"] + 1) or True,
+        executable_snapshot_gate=lambda *_args: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=submit,
+        reject=lambda *_args: None,
+        paused_entry_wake_gate=lambda: True,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+
+    result = reactor.process_pending(
+        decision_time=datetime(2026, 5, 24, 18, 0, tzinfo=timezone.utc),
+        limit=10,
+    )
+
+    after = tuple(
+        row[0]
+        for row in conn.execute(
+            "SELECT event_id FROM opportunity_event_processing "
+            "WHERE processing_status = 'pending' ORDER BY event_id"
+        )
+    )
+    processing = conn.execute(
+        "SELECT attempt_count, claimed_at FROM opportunity_event_processing "
+        "WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert result.processed == result.rejected == result.retried == result.dead_lettered == 0
+    assert result.proof_accepted == 0
+    assert result.rejection_reasons == ["ENTRIES_PAUSED_NO_HELD_WORK"]
+    assert calls == {"source": 0, "auction": 0, "submit": 0}
+    assert before == after == (event.event_id,)
+    assert tuple(processing) == (0, None)
+    assert conn.execute("SELECT COUNT(*) FROM edli_no_submit_receipts").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM decision_log").fetchone()[0] == decision_log_before == 0
+
+
+def test_paused_wake_resumes_same_pending_event_exactly_once():
+    conn, store = _store()
+    event = _forecast_event("paused-resume-exactly-once")
+    store.insert_or_ignore(event)
+    paused = [True]
+    submitted: list[str] = []
+
+    def submit(current_event, _decision_time):
+        submitted.append(current_event.event_id)
+        return None
+
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda *_args: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=submit,
+        reject=lambda *_args: None,
+        paused_entry_wake_gate=lambda: paused[0],
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+    decision_time = datetime(2026, 5, 24, 18, 3, tzinfo=timezone.utc)
+
+    parked = reactor.process_pending(decision_time=decision_time, limit=10)
+    assert parked.retried == 0
+    assert submitted == []
+    paused[0] = False
+
+    resumed = reactor.process_pending(decision_time=decision_time, limit=10)
+    repeated = reactor.process_pending(decision_time=decision_time, limit=10)
+
+    assert resumed.processed == 1
+    assert repeated.processed == 0
+    assert submitted == [event.event_id]
+    row = conn.execute(
+        "SELECT processing_status, attempt_count, claimed_at "
+        "FROM opportunity_event_processing WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    assert tuple(row[:2]) == ("processed", 1)
+    assert row[2] == decision_time.isoformat()
+
+
+def test_paused_entry_park_requires_no_held_work_or_completion_obligation():
+    from src.events.reactor import _paused_entry_wake_should_park
+
+    assert _paused_entry_wake_should_park(
+        pause_reason="operator",
+        held_family_provider=lambda: frozenset(),
+        held_sell_completion_obligation=False,
+    ) is True
+    assert _paused_entry_wake_should_park(
+        pause_reason="operator",
+        held_family_provider=lambda: frozenset({("Dallas", "2026-05-24", "high")}),
+        held_sell_completion_obligation=False,
+    ) is False
+    assert _paused_entry_wake_should_park(
+        pause_reason="operator",
+        held_family_provider=lambda: frozenset(),
+        held_sell_completion_obligation=True,
+    ) is False
+
+
+def test_paused_entry_park_uses_durable_completion_reader(monkeypatch):
+    import src.events.reactor as reactor_module
+
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_has_durable_held_sell_completion_obligation",
+        lambda: True,
+    )
+
+    assert reactor_module._edli_held_sell_completion_obligation(()) is True
+    assert reactor_module._paused_entry_wake_should_park(
+        pause_reason="operator",
+        held_family_provider=lambda: frozenset(),
+        held_sell_completion_obligation=reactor_module._edli_held_sell_completion_obligation(()),
+    ) is False
+
+
+def test_paused_no_held_cycle_parks_before_active_lock(monkeypatch):
+    import src.engine.event_reactor_adapter as adapter_module
+    import src.events.reactor as reactor_module
+    import src.main as main
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda *_args, **_kwargs: {"enabled": True, "event_writer_enabled": True},
+    )
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_reactor_held_family_provider",
+        lambda: (lambda: frozenset()),
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_has_durable_held_sell_completion_obligation",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        adapter_module,
+        "_entry_pause_blocks_live_submit",
+        lambda _conn: "operator_pause",
+    )
+
+    lock = threading.Lock()
+    assert reactor_module.run_edli_event_reactor_cycle(active_lock=lock) is False
+    assert lock.acquire(blocking=False) is True
+    lock.release()
+
+
 def test_no_submit_claim_debt_cannot_requeue_newer_aba_generation():
     conn, store = _store()
     event = _forecast_event("claim-drain-aba")

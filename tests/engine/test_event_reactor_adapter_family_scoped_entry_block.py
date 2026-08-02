@@ -220,3 +220,58 @@ def test_live_global_batch_wires_family_block_into_selection_policy(monkeypatch)
         "EDLI_STAGE_LIVE_CAP_RESERVED:1"
     )
     assert policy(SimpleNamespace(action="SELL", family_key=FAMILY_A)) is None
+
+
+def test_paused_held_batch_wires_exact_held_family_restriction(monkeypatch):
+    from src.engine import global_batch_runtime
+
+    captured = {}
+
+    def fake_process(events, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(events=tuple(events), winner_event_id=None, receipts={})
+
+    monkeypatch.setattr(global_batch_runtime, "process_current_global_batch", fake_process)
+    monkeypatch.setattr(
+        era,
+        "_entry_pause_blocks_live_submit",
+        lambda _conn: "operator_pause",
+    )
+    trade_conn = sqlite3.connect(":memory:")
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        trade_conn,
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=sqlite3.connect(":memory:"),
+        topology_conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
+        auction_capital_authority=SimpleNamespace(),
+        held_family_provider=lambda: frozenset({("Dallas", "2026-07-25", "high")}),
+    )
+
+    adapter.process_global_batch((_make_event(city="Dallas", target_date="2026-07-25", metric="high"),), NOW)
+
+    assert captured["buy_candidates_enabled"] is False
+    assert captured["restrict_to_family_keys"] == frozenset({FAMILY_A})
+    assert captured["restrict_to_family_keys"].isdisjoint({FAMILY_B})
+
+
+def test_pause_race_final_submit_gate_has_zero_venue_side_effect(monkeypatch):
+    called = []
+    monkeypatch.setattr(
+        era,
+        "_entry_pause_blocks_live_submit",
+        lambda _conn: "operator_pause",
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        sqlite3.connect(":memory:"),
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        auction_capital_authority=SimpleNamespace(),
+        executor_submit=lambda *_args: called.append(True),
+    )
+
+    receipt = adapter(_make_event(city="Dallas", target_date="2026-07-25", metric="high"), NOW)
+
+    assert receipt.submitted is False
+    assert receipt.venue_call_started is False
+    assert receipt.reason == "entries_paused:operator_pause"
+    assert called == []

@@ -6236,6 +6236,12 @@ def _entry_pause_blocks_live_submit(conn: sqlite3.Connection | None) -> str | No
     before reserving live cap or appending ``ExecutionCommandCreated``. Otherwise
     an operator pause still creates durable command/cap artifacts and depends on
     post-facto release recovery.
+
+    SCOPE: global new-entry admission only; the global SELL path is checked
+    before this gate and remains reduce-only eligible. DRAIN: the reactor parks
+    no-held wakes, while held families run with BUY candidates disabled. RESET:
+    each wake re-reads the durable control state, and resume naturally admits
+    the still-PENDING event identities.
     """
 
     def _pause_reason_from_state(state: Mapping[str, object]) -> str | None:
@@ -6385,6 +6391,7 @@ def event_bound_live_adapter_from_trade_conn(
     selection_cancelled: Callable[[], bool] | None = None,
     selection_completion_fairness_reserved: bool = False,
     selection_completion_reserved: bool = False,
+    held_family_provider: Callable[[], object] | None = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -7251,6 +7258,30 @@ def event_bound_live_adapter_from_trade_conn(
             events
         )
         entry_submit_suppression_reason = _entry_global_submit_suppression_reason()
+        entry_pause_reason = _entry_pause_blocks_live_submit(
+            live_cap_conn or trade_conn
+        )
+        paused_held_family_keys = None
+        if entry_pause_reason is not None and held_family_provider is not None:
+            try:
+                held_family_keys = set()
+                for raw_family in held_family_provider() or ():
+                    city, target_date, metric = raw_family
+                    if not all((city, target_date, metric)):
+                        continue
+                    held_family_keys.add(
+                        weather_family_id(
+                            city=str(city),
+                            target_date=str(target_date),
+                            metric=str(metric).lower(),
+                        )
+                    )
+                paused_held_family_keys = frozenset(held_family_keys)
+            except Exception:  # noqa: BLE001 - global runtime retains its own fail-closed read
+                logging.getLogger(__name__).warning(
+                    "paused held-family restriction read failed; retaining runtime held-only gate",
+                    exc_info=True,
+                )
         day0_urgent_batch = bool(events) and all(
             str(getattr(event, "event_type", "") or "")
             == "DAY0_EXTREME_UPDATED"
@@ -9356,6 +9387,7 @@ def event_bound_live_adapter_from_trade_conn(
                 # on metadata for unrelated speculative BUY families.
                 buy_candidates_enabled=(
                     entry_submit_suppression_reason is None
+                    and entry_pause_reason is None
                     and not selection_completion_reserved
                 ),
                 fractional_kelly_multiplier=Decimal(
@@ -9368,10 +9400,9 @@ def event_bound_live_adapter_from_trade_conn(
                 epoch_superseded=_epoch_superseded,
                 selection_cancelled=_day0_selection_cancelled,
                 # Delta facts narrow refresh I/O, never the economic feasible set.
-                # Restricting the auction here made unchanged positive candidates
-                # disappear after another family moved, so CASH was only optimal
-                # inside the changed-family slice rather than across the venue.
-                restrict_to_family_keys=None,
+                # The paused held-family restriction is the explicit reduce-only
+                # admission scope; otherwise leave the auction universe global.
+                restrict_to_family_keys=paused_held_family_keys,
             )
             logging.getLogger(__name__).debug(
                 "global probability family cache: hits=%d ineligible_hits=%d "

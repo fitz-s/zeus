@@ -706,6 +706,58 @@ def _is_global_reduce_only_exit_receipt(receipt: EventSubmissionReceipt) -> bool
     )
 
 
+def _paused_entry_wake_should_park(
+    *,
+    pause_reason: str | None,
+    held_family_provider: Callable[[], frozenset[tuple[str, str, str]]] | None,
+    held_sell_completion_obligation: bool,
+) -> bool:
+    """Park a paused wake only when no held work needs the reactor."""
+
+    # SCOPE: global new-entry admission only; held exposure and held-SELL
+    # completion remain eligible for the reduce-only reactor path. DRAIN: keep
+    # every opportunity row PENDING and let the next wake re-read pause and
+    # canonical held state. RESET: a cleared pause, held exposure, or a durable
+    # held-SELL obligation leaves this gate without changing event identity.
+    if (
+        pause_reason is None
+        or str(pause_reason).startswith("entries_pause_control_unreadable:")
+        or held_sell_completion_obligation
+        or held_family_provider is None
+    ):
+        return False
+    try:
+        held_families = held_family_provider()
+    except Exception:  # noqa: BLE001 - unknown exposure must keep exit work alive
+        return False
+    if held_families is None:
+        return False
+    return not bool(held_families)
+
+
+def _edli_has_durable_held_sell_completion_obligation() -> bool:
+    """Read exact held-SELL debt from the durable wake queue, fail-closed."""
+
+    try:
+        from src.runtime.reactor_wake import exact_held_sell_completion_wake_ids
+
+        return bool(exact_held_sell_completion_wake_ids())
+    except Exception:  # noqa: BLE001 - unreadable debt must keep exits alive
+        logging.getLogger("zeus.events.reactor").warning(
+            "durable held-SELL completion obligation read failed; retaining reactor work",
+            exc_info=True,
+        )
+        return True
+
+
+def _edli_held_sell_completion_obligation(
+    producer_requests: tuple[object, ...],
+) -> bool:
+    """Combine this wake's requests with the canonical durable debt reader."""
+
+    return bool(producer_requests) or _edli_has_durable_held_sell_completion_obligation()
+
+
 Submit = Callable[[OpportunityEvent, datetime], bool | None | EventSubmissionReceipt]
 
 
@@ -1065,6 +1117,7 @@ class OpportunityEventReactor:
         reject: Reject,
         config: ReactorConfig | None = None,
         cycle_entry_gate: Callable[[], bool] | None = None,
+        paused_entry_wake_gate: Callable[[], bool] | None = None,
         regret_ledger: Any | None = None,
         decision_provenance_hook: Any | None = None,
         family_snapshot_refresher: "Callable[..., bool] | None" = None,
@@ -1082,6 +1135,7 @@ class OpportunityEventReactor:
         self._reject = reject
         self._config = config or ReactorConfig()
         self._cycle_entry_gate = cycle_entry_gate
+        self._paused_entry_wake_gate = paused_entry_wake_gate
         self._regret_ledger = regret_ledger
         # ALWAYS-DECIDABLE invariant (operator law 2026-06-12). The SAME decision-time targeted
         # family snapshot refresher the adapter uses (main._edli_decision_family_snapshot_refresher,
@@ -1200,6 +1254,19 @@ class OpportunityEventReactor:
         cancelled: Callable[[], bool] | None = None,
     ) -> ReactorResult:
         result = ReactorResult()
+        paused_entry_wake_gate = getattr(self, "_paused_entry_wake_gate", None)
+        if paused_entry_wake_gate is not None:
+            try:
+                should_park = bool(paused_entry_wake_gate())
+            except Exception:  # noqa: BLE001 - unknown held state must keep exits alive
+                logging.getLogger("zeus.events.reactor").warning(
+                    "reactor paused-entry park probe failed; retaining reactor work",
+                    exc_info=True,
+                )
+                should_park = False
+            if should_park:
+                result.rejection_reasons.append("ENTRIES_PAUSED_NO_HELD_WORK")
+                return result
         self._drain_no_submit_claim_requeues(
             wait_ms=_reactor_claim_busy_timeout_ms()
         )
@@ -6921,11 +6988,18 @@ def run_edli_event_reactor_cycle(
     if active_lock.locked():
         _log.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
         return False
+    if not producer_fast_path and _urgent_wake_pending():
+        return False
+    if _defer_for_held_position_monitor("edli_event_reactor"):
+        return False
     from src.riskguard.risk_level import RiskLevel
     from src.riskguard.riskguard import get_current_level
 
+    held_sell_completion_obligation = _edli_held_sell_completion_obligation(
+        producer_held_sell_reauction_requests
+    )
     held_sell_completion_cycle = bool(
-        completion_wake and producer_held_sell_reauction_requests
+        completion_wake and held_sell_completion_obligation
     )
     if (
         get_current_level() != RiskLevel.GREEN
@@ -6935,6 +7009,19 @@ def run_edli_event_reactor_cycle(
             "EDLI reactor skipped before runtime DB setup: new entries are globally blocked"
         )
         return not completion_wake
+    from src.engine.event_reactor_adapter import _entry_pause_blocks_live_submit
+
+    held_family_provider = _edli_reactor_held_family_provider()
+    if _paused_entry_wake_should_park(
+        pause_reason=_entry_pause_blocks_live_submit(None),
+        held_family_provider=held_family_provider,
+        held_sell_completion_obligation=held_sell_completion_obligation,
+    ):
+        _log.info(
+            "EDLI reactor parked paused new-entry wake before active-lock acquire: "
+            "no canonical held exposure or held-SELL completion obligation"
+        )
+        return False
     import sqlite3  # transient world-DB lock classification for fail-soft emit boundary
     from src.engine.event_reactor_adapter import (
         edli_source_truth_gate,
@@ -7522,6 +7609,7 @@ def run_edli_event_reactor_cycle(
             selection_completion_reserved=(
                 _monitor_completion_mode.reduce_only
             ),
+            held_family_provider=held_family_provider,
         )
 
         entry_risk_gate = riskguard_allows_new_entries(
@@ -7546,6 +7634,11 @@ def run_edli_event_reactor_cycle(
                 _monitor_completion_mode.reduce_only
                 or get_current_level() == RiskLevel.GREEN
             ),
+            paused_entry_wake_gate=lambda: _paused_entry_wake_should_park(
+                pause_reason=_entry_pause_blocks_live_submit(conn),
+                held_family_provider=held_family_provider,
+                held_sell_completion_obligation=held_sell_completion_obligation,
+            ),
             final_intent_submit=submit_adapter,
             reject=lambda _event, _stage, _reason: None,
             regret_ledger=regret_ledger,
@@ -7558,7 +7651,7 @@ def run_edli_event_reactor_cycle(
             day0_hourly_refresher=_reactor_day0_hourly_refresher,
             # Held-position families are refreshed FIRST (money at risk); NO liquidity ordering
             # (operator correction 2026-06-12). Fail-soft read-only provider on zeus_trades.
-            held_family_provider=_edli_reactor_held_family_provider(),
+            held_family_provider=held_family_provider,
             # Current Gamma-empty/no-listed-market proof terminalizes only the blocked event; a
             # future event for the same family can still process if the venue lists later.
             family_market_absence_provider=_reactor_family_market_absence_provider,
