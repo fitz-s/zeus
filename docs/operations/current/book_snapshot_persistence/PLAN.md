@@ -990,3 +990,27 @@ was the registry-parity net doing its job: `EXPECTED_TRADE_DB_TABLES` now
 declares `family_book_states`/`family_book_observations`. The transport
 outbox is deliberately absent from the registry — it lives in a private
 spool file, never the canonical trade DB.
+
+### Measured: what `max_page_count` actually bounds under WAL
+
+`PRAGMA max_page_count` bounds the MAIN database file, not the `-wal`, so
+"1 GiB ceiling" is not by itself a 1 GiB footprint claim. Measured on this
+interpreter (SQLite 3.53.2) rather than assumed:
+
+- Under normal operation the WAL is bounded by `wal_autocheckpoint` (1000
+  pages) with `journal_size_limit` (64 MiB) capping what is retained after a
+  checkpoint. Steady-state WAL stayed at 64 KiB across 2000 committed writes;
+  a TRUNCATE checkpoint took it to 0.
+- AT the ceiling the interesting case appears: checkpointing cannot drain the
+  WAL into a main file that is not allowed to grow, so the WAL holds the
+  frames. Total footprint therefore exceeds the page ceiling — but it
+  CONVERGES rather than running away, because once the wall is hit this
+  module's own writes fail and no new frames are appended. Verified by
+  hammering 3000 further inserts after the wall: WAL size was byte-identical
+  before and after (3143592 both times at a deliberately pathological
+  256-page ceiling).
+
+So the guarantee is: bounded, and self-limiting at the wall — not "≤1 GiB
+exactly". In practice the 500 MB soft admission gate binds first and the file
+ceiling is never approached; the ceiling exists so that a bug in the soft gate
+still terminates in a failed telemetry write rather than a full disk.
