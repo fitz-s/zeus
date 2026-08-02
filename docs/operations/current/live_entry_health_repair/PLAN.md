@@ -1357,3 +1357,58 @@ reservation-debt sample as a scoped blocker. It does not use a global
 reservation count as an entry gate. Authorized slice: `src/execution/command_recovery.py`,
 `scripts/check_live_restart_preflight.py`, focused existing tests, and this plan.
 No live checkout, process, venue, DB, deploy, push, or PR action is in scope.
+
+### 2026-08-02 Follow-up -- Remove held-monitor deadline amplification
+
+Live artifact `291009` ran for 383.536 seconds with a configured 75-second
+held-monitor budget. The batch `/books` read failed after an SSL handshake
+timeout, then the monitor admitted one unbounded singular retry per position;
+each admitted position also replaced the cycle deadline with a fresh
+`monotonic() + 75s` probability deadline. Later monitor and recovery jobs were
+therefore rejected by the same still-held process claim.
+
+The first-principles invariant is one finite tranche, not a sequence of local
+budgets. `monitor_deadline` is the sole admission deadline for optional batch
+book I/O, any singular held quote read, probability SQLite reads, and admission
+of later positions. Every network caller receives only the remaining time as
+its per-phase HTTP timeout ceiling.
+Batch transport failure marks every missing token attempted for that cycle and
+defers those positions; it never opens a second singular fan-out. The next
+cycle installs a fresh prefetch cache and retries from current venue truth.
+
+This hot-fix removes the observed retry/deadline-reset amplification; a sync
+HTTP phase timeout is not a killable total wall-clock deadline. DNS or a stuck
+transport can still outlive the remaining budget. Absolute wall-clock recovery
+therefore remains a separate process-supervisor/backfill requirement and is not
+claimed by this slice.
+
+SCOPE is one full-book or targeted held-monitor invocation. DRAIN is return of
+the bounded batch/position work under the remaining-time transport ceilings,
+followed by the existing next scheduler/recovery tick. RESET is cycle-local: the next
+invocation creates a new deadline and empty attempted-token set. Missing quote
+or probability authority remains DATA_DEGRADED and cannot create a statistical
+EXIT or fresh `MONITOR_REFRESHED`. Deadline expiry revokes new I/O but does not
+revoke an already-preclassified absorbing local hard fact: one dead-bin rescue
+records the direct exit decision without inventing a fresh quote, and venue
+submission still requires current executable truth. The next cycle clears the
+attempt mark and retries; no gap blocks command recovery or settlement.
+
+Authorized files are `src/engine/cycle_runtime.py`,
+`src/engine/monitor_refresh.py`, `src/data/polymarket_client.py`, focused
+existing tests, their existing registry/rationale rows if freshness requires,
+and this plan. Forbidden: extending the 75-second budget, worker threads,
+market orders, weakening the `[0.05, 0.95]` submitted-price band, stale-as-fresh
+q/quotes, duplicate SELL paths, lifecycle changes, DB/schema changes, entry
+pause changes, or city/order-specific handling.
+
+Acceptance: a batch transport failure cannot call singular book readers; two
+missing tokens are typed deferred without resetting or multiplying the
+configured budget. An admitted singular durable-debt read and every probability
+read receive the same absolute deadline, never a refreshed 75 seconds. A
+preclassified local dead-bin fact remains a direct exit decision after deadline
+expiry without starting network I/O; it is not silently converted into HOLD. A
+healthy next cycle clears attempted/deferred state and refreshes all positions.
+Focused batch-failure, shared-deadline, next-cycle recovery, monitor fairness,
+compilation, planning-lock, and diff checks pass before exact-SHA deployment.
+The separate killable-supervisor work remains required before claiming a hard
+240-second monitor guarantee.

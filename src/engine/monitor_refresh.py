@@ -2916,7 +2916,14 @@ def monitor_quote_refresh(
     get_orderbook = getattr(clob, "get_orderbook", None)
     try:
         if book is None:
-            book = get_orderbook(tid) if callable(get_orderbook) else None
+            deadline = getattr(pos, _HELD_MONITOR_DEADLINE_ATTR, None)
+            if deadline is not None and isinstance(clob, PolymarketClient):
+                remaining = float(deadline) - time.monotonic()
+                if remaining <= 0.0:
+                    return None
+                book = clob.get_orderbook_snapshot(tid, timeout=remaining)
+            else:
+                book = get_orderbook(tid) if callable(get_orderbook) else None
             _remember_monitor_orderbook(clob, tid, book)
         if book is not None:
             from src.data.market_scanner import _top_book_level_decimal
@@ -5603,6 +5610,8 @@ def refresh_exact_zero_position(
     conn,
     clob: PolymarketClient,
     pos: Position,
+    *,
+    refresh_quote: bool = True,
 ) -> EdgeContext:
     """Build a held-position context after settlement truth fixes q at zero."""
 
@@ -5632,11 +5641,15 @@ def refresh_exact_zero_position(
         if pos.last_monitor_market_price is not None
         else pos.entry_price
     )
-    quote = monitor_quote_refresh(
-        conn,
-        clob,
-        pos,
-        retry_after_prefetch=True,
+    quote = (
+        monitor_quote_refresh(
+            conn,
+            clob,
+            pos,
+            retry_after_prefetch=True,
+        )
+        if refresh_quote
+        else None
     )
     if quote is not None:
         pos.last_monitor_best_bid = quote.best_bid

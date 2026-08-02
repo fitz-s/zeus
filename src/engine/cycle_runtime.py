@@ -4776,6 +4776,7 @@ def _prefetch_held_monitor_orderbooks(
     local_only: bool = False,
     preserve_existing: bool = False,
     mark_unfetched_attempted: bool = True,
+    deadline_monotonic: float | None = None,
 ) -> frozenset[str]:
     from src.data.market_scanner import _configured_batch_orderbook_getter
     from src.engine.monitor_refresh import (
@@ -4838,14 +4839,26 @@ def _prefetch_held_monitor_orderbooks(
         return frozenset(missing_token_ids if installed else token_ids)
     batch_transport_failed = False
     try:
-        network_books = getter(missing_token_ids)
+        if deadline_monotonic is not None:
+            remaining = float(deadline_monotonic) - time.monotonic()
+            if remaining <= 0.0:
+                raise TimeoutError("held monitor orderbook deadline elapsed")
+            from src.data.polymarket_client import PolymarketClient
+
+            network_books = (
+                getter(missing_token_ids, timeout=remaining)
+                if isinstance(clob, PolymarketClient)
+                else getter(missing_token_ids)
+            )
+        else:
+            network_books = getter(missing_token_ids)
     except Exception as exc:  # noqa: BLE001 - one failed batch must not fan out.
         batch_transport_failed = True
         summary["held_monitor_orderbook_prefetch_error"] = str(exc)[:500]
         network_books = {}
         deps.logger.warning(
-            "held monitor batch orderbook prefetch failed; allowing one bounded "
-            "targeted quote retry per held position: %s",
+            "held monitor batch orderbook prefetch failed; deferring missing "
+            "positions until the next bounded cycle: %s",
             exc,
         )
     else:
@@ -4865,11 +4878,7 @@ def _prefetch_held_monitor_orderbooks(
     installed = install_monitor_orderbook_prefetch(
         clob,
         books,
-        attempted_token_ids=(
-            existing_attempted
-            if batch_transport_failed
-            else existing_attempted | set(missing_token_ids)
-        ),
+        attempted_token_ids=existing_attempted | set(missing_token_ids),
     )
     summary["held_monitor_orderbook_prefetch_installed"] = installed
     summary["held_monitor_orderbooks_prefetched"] = len(books) if installed else 0
@@ -6317,6 +6326,12 @@ def execute_monitoring_phase(
             summary["held_monitor_dead_bin_deadline_rescue_position"] = str(
                 getattr(pos, "trade_id", "") or ""
             )
+        deadline_rescue_hard_fact = durable_hard_facts.get(id(pos))
+        local_dead_bin_deadline_rescue = bool(
+            deadline_rescue
+            and getattr(deadline_rescue_hard_fact, "action", None)
+            == "EXIT_DEAD_BIN"
+        )
         summary["held_monitor_positions_scanned"] = (
             summary.get("held_monitor_positions_scanned", 0) + 1
         )
@@ -6499,8 +6514,7 @@ def execute_monitoring_phase(
 
         held_token_id = _position_held_token_id(pos)
         is_durable_debt_network_attempt = False
-        is_batch_transport_retry = False
-        if held_token_id in network_book_tokens:
+        if held_token_id in network_book_tokens and not local_dead_bin_deadline_rescue:
             if network_prefetch_unavailable:
                 summary["held_monitor_positions_deferred_for_orderbook_gap"] = (
                     summary.get(
@@ -6554,6 +6568,7 @@ def execute_monitoring_phase(
                     now_utc=monitor_now_utc,
                     deps=deps,
                     preserve_existing=True,
+                    deadline_monotonic=monitor_deadline,
                 )
                 summary["held_monitor_orderbooks_prefetched"] = (
                     int(summary.get("held_monitor_orderbooks_prefetched", 0) or 0)
@@ -6577,14 +6592,19 @@ def execute_monitoring_phase(
                         summary[
                             "held_monitor_orderbook_prefetch_transport_failed"
                         ] = True
-                    if network_prefetch_batch_transport_failed:
-                        summary[
-                            "held_monitor_orderbook_prefetch_defer_reason"
-                        ] = "ORDERBOOK_BATCH_UNAVAILABLE_TARGETED_RETRY"
-                    else:
-                        network_prefetch_unavailable = True
-                        summary["held_monitor_orderbook_prefetch_defer_reason"] = (
-                            "ORDERBOOK_BATCH_UNAVAILABLE"
+                    network_prefetch_unavailable = True
+                    summary["held_monitor_orderbook_prefetch_defer_reason"] = (
+                        "ORDERBOOK_BATCH_UNAVAILABLE"
+                    )
+                    if time.monotonic() >= monitor_deadline:
+                        deferred_count = len(monitor_positions) - position_index
+                        summary["held_monitor_positions_deferred"] = deferred_count
+                        summary["held_monitor_defer_reason"] = "cycle_budget_exhausted"
+                        summary["held_monitor_deadline_deferred_positions"] = (
+                            deferred_count
+                        )
+                        summary["held_monitor_deadline_defer_reason"] = (
+                            "MONITOR_DEADLINE_EXPIRED_DURING_BATCH_PREFETCH"
                         )
                 if not network_prefetch.get(
                     "held_monitor_orderbook_prefetch_installed",
@@ -6606,21 +6626,6 @@ def execute_monitoring_phase(
                         + 1
                     )
                     continue
-                if network_prefetch_batch_transport_failed:
-                    if time.monotonic() >= monitor_deadline:
-                        deferred_count = len(monitor_positions) - position_index
-                        summary["held_monitor_positions_deferred"] = deferred_count
-                        summary["held_monitor_defer_reason"] = (
-                            "cycle_budget_exhausted"
-                        )
-                        summary["held_monitor_deadline_deferred_positions"] = (
-                            deferred_count
-                        )
-                        summary["held_monitor_deadline_defer_reason"] = (
-                            "MONITOR_DEADLINE_EXPIRED_BEFORE_TARGETED_RETRY"
-                        )
-                        break
-                    is_batch_transport_retry = True
                 if urgent_preemption_requested():
                     # This position is already counted as scanned above; only
                     # the unvisited tail is deferred.
@@ -6629,6 +6634,24 @@ def execute_monitoring_phase(
                     summary["held_monitor_positions_deferred"] = deferred_count
                     summary["held_monitor_defer_reason"] = "urgent_day0_wake"
                     break
+        elif local_dead_bin_deadline_rescue and held_token_id:
+            # The shared deadline revokes permission to start more I/O, not an
+            # already-proved local settlement fact.  Mark this token attempted
+            # for this cycle so exact-zero refresh records the direct exit
+            # decision without opening a quote read.  The next monitor cycle
+            # clears this transient mark and retries from a fresh book.
+            _mark_held_monitor_orderbook_attempted(
+                clob,
+                quote_positions,
+                held_token_id,
+            )
+            summary["held_monitor_dead_bin_deadline_rescue_without_io"] = (
+                summary.get(
+                    "held_monitor_dead_bin_deadline_rescue_without_io",
+                    0,
+                )
+                + 1
+            )
 
         hours_to_settlement = None
         monitor_result_written = False
@@ -6755,7 +6778,19 @@ def execute_monitoring_phase(
                     deps.logger.warning(
                         "day0 hard-fact lane failed for %s (non-fatal): %s", pos.trade_id, _hf_exc
                     )
-            if _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN":
+            if (
+                local_dead_bin_deadline_rescue
+                and _hard_fact is not None
+                and _hard_fact.action == "EXIT_DEAD_BIN"
+            ):
+                # No remote market metadata read may start after the cycle
+                # deadline.  Static close evidence is local and remains safe.
+                closed_market_info = _closed_by_static_market_end_info(
+                    conn,
+                    pos,
+                    decision_time=deps._utcnow(),
+                )
+            elif _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN":
                 # Terminal value is already exactly one. Venue metadata cannot
                 # change the hold decision, so only the local close timestamp is
                 # relevant; remote market/book reads would delay unrelated exits.
@@ -6936,7 +6971,12 @@ def execute_monitoring_phase(
             if _hard_fact is not None and _hard_fact.action == "EXIT_DEAD_BIN":
                 from src.engine.monitor_refresh import refresh_exact_zero_position
 
-                edge_ctx = refresh_exact_zero_position(conn, clob, pos)
+                edge_ctx = refresh_exact_zero_position(
+                    conn,
+                    clob,
+                    pos,
+                    refresh_quote=not local_dead_bin_deadline_rescue,
+                )
                 summary["day0_hard_fact_probability_refresh_bypassed"] = (
                     summary.get(
                         "day0_hard_fact_probability_refresh_bypassed",
@@ -6963,27 +7003,21 @@ def execute_monitoring_phase(
                     + 1
                 )
             else:
-                # SCOPE: one admitted position's current-probability SQLite reads.
-                # DRAIN: its finite read budget interrupts the stale read; the
-                # outer sweep then admits the next eligible position while its
-                # own batch budget remains open. RESET: this transient deadline
-                # is removed immediately after the position refresh returns.
-                # The outer admission deadline remains the sole bound on starting
-                # later positions; never pass its already-spent start instant to
-                # a sibling's independent probability read.
-                position_probability_deadline = (
-                    time.monotonic() + monitor_budget_seconds
-                )
+                # SCOPE: this monitor invocation's remaining quote/probability
+                # work. DRAIN: every admitted network and SQLite read receives
+                # the one cycle deadline; later positions defer when it expires.
+                # RESET: the transient attribute is removed after this refresh,
+                # and the next invocation creates a fresh cycle deadline.
                 setattr(
                     pos,
                     _HELD_MONITOR_DEADLINE_ATTR,
-                    position_probability_deadline,
+                    monitor_deadline,
                 )
                 try:
                     edge_ctx = refresh_position(conn, clob, pos)
                 finally:
                     if (
-                        (is_durable_debt_network_attempt or is_batch_transport_retry)
+                        is_durable_debt_network_attempt
                         and held_token_id
                     ):
                         _mark_held_monitor_orderbook_attempted(
@@ -7006,8 +7040,11 @@ def execute_monitoring_phase(
                 portfolio=portfolio,
             )
             if run_exit_preflight and not (
-                _hard_fact is not None
-                and _hard_fact.action == "HOLD_STRUCTURAL_WIN"
+                local_dead_bin_deadline_rescue
+                or (
+                    _hard_fact is not None
+                    and _hard_fact.action == "HOLD_STRUCTURAL_WIN"
+                )
             ):
                 exit_context, refreshed_retry_quote = _refresh_pending_exit_retry_quote_from_current_clob(
                     conn=conn,

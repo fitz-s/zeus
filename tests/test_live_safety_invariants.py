@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-08-01; last_reused=2026-08-01
+# Lifecycle: created=2026-03-31; last_reviewed=2026-08-02; last_reused=2026-08-02
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-08-01
+# Last reused/audited: 2026-08-02
 # Authority basis: finite-evidence single-q global SELL ownership; 7-day capital-loop audit
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -625,10 +625,10 @@ def test_live_monitor_deadline_defers_stale_fusion_and_dispatches_reseed(monkeyp
     assert not hasattr(position, "_zeus_held_monitor_deadline_monotonic")
 
 
-def test_monitor_probability_deadlines_are_per_position_and_isolate_stale_reads(
+def test_monitor_probability_reads_share_the_cycle_deadline(
     monkeypatch,
 ):
-    """An admitted sibling gets a fresh finite q-read budget after one stale read."""
+    """Every admitted sibling receives only the cycle's remaining q-read budget."""
     from src.engine import cycle_runtime
 
     first = _make_position(
@@ -704,7 +704,7 @@ def test_monitor_probability_deadlines_are_per_position_and_isolate_stale_reads(
 
     assert deadlines == [
         ("stale-read-first", pytest.approx(1.0)),
-        ("fresh-read-second", pytest.approx(1.9)),
+        ("fresh-read-second", pytest.approx(1.0)),
     ]
     assert first.last_monitor_prob_is_fresh is False
     assert second.last_monitor_prob_is_fresh is True
@@ -1360,7 +1360,8 @@ def test_monitoring_phase_active_network_hard_fact_exits_after_local_tranche(
 def test_monitoring_phase_known_network_dead_bin_crosses_exhausted_budget(
     monkeypatch,
 ):
-    """Preclassified terminal loss keeps its exit slot after budget expiry."""
+    """A dead-bin rescue cannot start network I/O after the shared deadline."""
+    from src.data.polymarket_client import PolymarketClient
     from src.engine import cycle_runtime
     from src.execution.day0_hard_fact_exit import HardFactVerdict
 
@@ -1385,17 +1386,31 @@ def test_monitoring_phase_known_network_dead_bin_crosses_exhausted_budget(
     ]
     events: list[str] = []
 
-    class Clob:
-        def get_orderbook_snapshots(self, token_ids):
-            events.append("network_fetch")
-            assert tuple(token_ids) == ("dead-network-token",)
-            return {
-                "dead-network-token": {
-                    "asset_id": "dead-network-token",
-                    "bids": [{"price": "0.21", "size": "20"}],
-                    "asks": [{"price": "0.23", "size": "20"}],
-                }
-            }
+    class Clob(PolymarketClient):
+        def __init__(self):
+            pass
+
+        def get_orderbook_snapshots(self, token_ids, *, timeout=None):
+            events.append("batch_io")
+            raise AssertionError(f"deadline rescue opened batch I/O: {token_ids}")
+
+        def get_orderbook(self, token_id):
+            events.append("singular_io")
+            raise AssertionError(f"deadline rescue opened singular I/O: {token_id}")
+
+        def get_orderbook_snapshot(self, token_id, *, timeout=None):
+            events.append("snapshot_io")
+            raise AssertionError(f"deadline rescue opened snapshot I/O: {token_id}")
+
+        def get_best_bid_ask(self, token_id):
+            events.append("retry_quote_io")
+            raise AssertionError(f"deadline rescue opened retry quote I/O: {token_id}")
+
+        def get_clob_market_info(self, condition_id, *, timeout=None):
+            events.append("market_info_io")
+            raise AssertionError(
+                f"deadline rescue opened market-info I/O: {condition_id}"
+            )
 
     monkeypatch.setattr(
         cycle_runtime,
@@ -1435,13 +1450,7 @@ def test_monitoring_phase_known_network_dead_bin_crosses_exhausted_budget(
         "_emit_monitor_refreshed_canonical_if_available",
         lambda *_args, **_kwargs: True,
     )
-    clock_calls = {"count": 0}
-
-    def exhausted_clock():
-        clock_calls["count"] += 1
-        return 0.0 if clock_calls["count"] == 1 else 1.0
-
-    monkeypatch.setattr(cycle_runtime.time, "monotonic", exhausted_clock)
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: 0.0)
     monitor_results = []
     artifact = type(
         "Artifact",
@@ -1462,17 +1471,26 @@ def test_monitoring_phase_known_network_dead_bin_crosses_exhausted_budget(
         _monitor_test_tracker(),
         summary,
         deps=deps,
-        run_exit_preflight=False,
-        held_position_monitor_budget_seconds=0.5,
+        run_exit_preflight=True,
+        held_position_monitor_budget_seconds=0.0,
         defer_partial_orderbook_gaps=True,
     )
 
-    assert events == ["network_fetch"]
-    assert summary["day0_hard_fact_direct_exit_decisions"] == 1
+    assert events == []
+    assert "held_monitor_orderbook_prefetch_transport_failed" not in summary
+    assert "held_monitor_orderbook_prefetch_error" not in summary
     assert summary["held_monitor_positions_deferred"] == 2
+    assert summary["held_monitor_deadline_defer_reason"] == (
+        "MONITOR_DEADLINE_EXPIRED"
+    )
     assert summary["held_monitor_budget_bypass_scanned"] == 1
+    assert summary["held_monitor_dead_bin_deadline_rescue_without_io"] == 1
+    assert summary["day0_hard_fact_direct_exit_decisions"] == 1
+    assert summary["exits"] == 1
+    assert len(monitor_results) == 1
     assert monitor_results[0].position_id == dead_bin.trade_id
     assert monitor_results[0].should_exit is True
+    assert monitor_results[0].exit_reason.startswith("DAY0_HARD_FACT_BIN_DEAD")
 
 
 def test_monitoring_phase_orders_rotated_dead_bin_rescue_before_selected_peer(
@@ -2282,8 +2300,15 @@ def test_monitoring_phase_network_pending_exit_precedes_local_active_under_budge
             }
         },
     )
-    clock = iter((0.0, 0.0, 0.6))
-    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: next(clock))
+    clock_values = (0.0, 0.0, 0.0, 0.6)
+    clock_calls = {"count": 0}
+
+    def stable_elapsed_clock():
+        index = min(clock_calls["count"], len(clock_values) - 1)
+        clock_calls["count"] += 1
+        return clock_values[index]
+
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", stable_elapsed_clock)
 
     def fake_refresh(_conn, _clob, position):
         events.append(f"refresh:{position.trade_id}")
@@ -9737,7 +9762,7 @@ def test_held_monitor_prefetch_clears_prior_cycle_when_batch_fetch_fails():
     )
 
     assert monitor_refresh.prefetched_monitor_orderbook(clob, "token-stale") is None
-    assert not monitor_refresh.monitor_orderbook_prefetch_attempted(
+    assert monitor_refresh.monitor_orderbook_prefetch_attempted(
         clob,
         "token-stale",
     )
@@ -9747,12 +9772,106 @@ def test_held_monitor_prefetch_clears_prior_cycle_when_batch_fetch_fails():
     assert len(warnings) == 1
 
 
-@pytest.mark.parametrize("singular_failure", (False, True))
-def test_monitoring_batch_transport_retry_is_position_scoped(
+def test_held_monitor_production_book_reads_receive_only_cycle_remaining_time(
     monkeypatch,
-    singular_failure,
 ):
-    """A failed batch gets one singular retry per position without fan-out defer."""
+    from src.data.polymarket_client import PolymarketClient
+    from src.engine import cycle_runtime, monitor_refresh
+
+    position = _make_position(
+        trade_id="shared-deadline-production-book",
+        token_id="shared-deadline-token",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+    )
+    clock = [3.0]
+    batch_timeouts = []
+    singular_timeouts = []
+    clob = PolymarketClient(public_http_timeout=2.0)
+
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(monitor_refresh.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def batch(token_ids, *, timeout):
+        batch_timeouts.append(timeout)
+        return {
+            token_ids[0]: {
+                "asset_id": token_ids[0],
+                "bids": [{"price": "0.40", "size": "20"}],
+                "asks": [{"price": "0.42", "size": "20"}],
+            }
+        }
+
+    monkeypatch.setattr(clob, "get_orderbook_snapshots", batch)
+    summary = {}
+    cycle_runtime._prefetch_held_monitor_orderbooks(
+        None,
+        clob,
+        [position],
+        summary,
+        now_utc=datetime(2026, 8, 2, 21, 0, tzinfo=timezone.utc),
+        deps=_monitor_test_deps("test_shared_batch_deadline"),
+        deadline_monotonic=10.0,
+    )
+    assert batch_timeouts == [pytest.approx(7.0)]
+
+    monitor_refresh.install_monitor_orderbook_prefetch(clob, {})
+    setattr(position, "_zeus_held_monitor_deadline_monotonic", 10.0)
+
+    def singular(token_id, *, timeout=None):
+        singular_timeouts.append(timeout)
+        return {
+            "asset_id": token_id,
+            "bids": [{"price": "0.40", "size": "20"}],
+            "asks": [{"price": "0.42", "size": "20"}],
+        }
+
+    monkeypatch.setattr(clob, "get_orderbook_snapshot", singular)
+    quote = monitor_refresh.monitor_quote_refresh(None, clob, position)
+    assert quote is not None
+    assert singular_timeouts == [pytest.approx(7.0)]
+
+
+def test_polymarket_book_http_phases_are_clamped_to_remaining_budget(monkeypatch):
+    from src.data.polymarket_client import PolymarketClient
+
+    captured = []
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return []
+
+    clob = PolymarketClient(public_http_timeout=2.0)
+
+    def public_post(path, *, json_body, timeout=None):
+        captured.append((path, timeout))
+        return Response()
+
+    monkeypatch.setattr(clob, "_public_post", public_post)
+    assert clob.get_orderbook_snapshots(["deadline-token"], timeout=0.2) == {}
+
+    assert captured[0][0] == "/books"
+    request_timeout = captured[0][1]
+    assert request_timeout is not None
+    assert request_timeout.connect == pytest.approx(0.2)
+    assert request_timeout.read == pytest.approx(0.2)
+    assert request_timeout.write == pytest.approx(0.2)
+    assert request_timeout.pool == pytest.approx(0.2)
+
+
+def test_monitoring_batch_transport_failure_defers_without_singular_fanout(
+    monkeypatch,
+):
+    """A failed batch defers all gaps; a healthy next cycle retries from scratch."""
     from src.engine import cycle_runtime, monitor_refresh
 
     positions = [
@@ -9770,18 +9889,23 @@ def test_monitoring_batch_transport_retry_is_position_scoped(
     singular_calls = []
 
     class BatchTransportClob:
+        fail_batch = True
+
         def get_orderbook_snapshots(self, _token_ids):
-            raise RuntimeError("/books transport unavailable")
+            if self.fail_batch:
+                raise RuntimeError("/books transport unavailable")
+            return {
+                position.token_id: {
+                    "asset_id": position.token_id,
+                    "bids": [{"price": "0.40", "size": "20"}],
+                    "asks": [{"price": "0.42", "size": "20"}],
+                }
+                for position in positions
+            }
 
         def get_orderbook(self, token_id):
             singular_calls.append(token_id)
-            if singular_failure and token_id == positions[0].token_id:
-                raise RuntimeError("singular quote unavailable")
-            return {
-                "asset_id": token_id,
-                "bids": [{"price": "0.40", "size": "20"}],
-                "asks": [{"price": "0.42", "size": "20"}],
-            }
+            raise AssertionError("batch failure must not fan out singular reads")
 
     monkeypatch.setattr(
         cycle_runtime,
@@ -9791,10 +9915,7 @@ def test_monitoring_batch_transport_retry_is_position_scoped(
 
     def fake_refresh(_conn, clob, position):
         quote = monitor_refresh.monitor_quote_refresh(None, clob, position)
-        if position is positions[0] and singular_failure:
-            assert quote is None
-        else:
-            assert quote is not None
+        assert quote is not None
         refreshes.append(position.trade_id)
         return _monitor_test_edge_context(position)
 
@@ -9815,9 +9936,10 @@ def test_monitoring_batch_transport_retry_is_position_scoped(
     )
 
     summary = {"monitors": 0, "exits": 0}
+    clob = BatchTransportClob()
     cycle_runtime.execute_monitoring_phase(
         None,
-        BatchTransportClob(),
+        clob,
         _make_portfolio(*positions),
         _monitor_test_artifact(),
         _monitor_test_tracker(),
@@ -9827,12 +9949,34 @@ def test_monitoring_batch_transport_retry_is_position_scoped(
         held_position_monitor_budget_seconds=10.0,
     )
 
-    assert singular_calls == [position.token_id for position in positions]
+    assert singular_calls == []
+    assert refreshes == []
+    assert canonical_refreshes == []
+    assert summary["held_monitor_orderbook_prefetch_transport_failed"] is True
+    assert summary["held_monitor_positions_deferred_for_orderbook_gap"] == 2
+    assert summary["monitors"] == 0
+
+    clob.fail_batch = False
+    recovered_summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        clob,
+        _make_portfolio(*positions),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        recovered_summary,
+        deps=_monitor_test_deps("test_monitor_batch_transport_recovery"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=10.0,
+    )
+
+    assert singular_calls == []
     assert refreshes == [position.trade_id for position in positions]
     assert canonical_refreshes == refreshes
-    assert summary["held_monitor_orderbook_prefetch_transport_failed"] is True
-    assert summary.get("held_monitor_positions_deferred_for_orderbook_gap", 0) == 0
-    assert summary["monitors"] == 2
+    assert recovered_summary["monitors"] == 2
+    assert not recovered_summary.get(
+        "held_monitor_orderbook_prefetch_transport_failed", False
+    )
 
 
 def test_monitoring_batch_transport_does_not_retry_after_deadline(
@@ -9887,7 +10031,7 @@ def test_monitoring_batch_transport_does_not_retry_after_deadline(
     assert singular_calls == []
     assert refreshes == []
     assert summary["held_monitor_deadline_defer_reason"] == (
-        "MONITOR_DEADLINE_EXPIRED_BEFORE_TARGETED_RETRY"
+        "MONITOR_DEADLINE_EXPIRED_DURING_BATCH_PREFETCH"
     )
 
 

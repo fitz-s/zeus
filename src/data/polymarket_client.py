@@ -638,13 +638,18 @@ class PolymarketClient:
         from src.state.db import assert_no_world_mutex_held_for_io
         assert_no_world_mutex_held_for_io("get_orderbook_snapshot")
 
-        if timeout is None:
+        request_timeout = (
+            self._bounded_public_http_timeout(timeout)
+            if timeout is not None
+            else None
+        )
+        if request_timeout is None:
             resp = self._public_get("/book", params={"token_id": token_id})
         else:
             resp = self._public_get(
                 "/book",
                 params={"token_id": token_id},
-                timeout=timeout,
+                timeout=request_timeout,
             )
         resp.raise_for_status()
         data = resp.json()
@@ -697,10 +702,19 @@ class PolymarketClient:
             seen.add(tok)
             body.append({"token_id": tok})
 
-        if timeout is None:
+        request_timeout = (
+            self._bounded_public_http_timeout(timeout)
+            if timeout is not None
+            else None
+        )
+        if request_timeout is None:
             resp = self._public_post("/books", json_body=body)
         else:
-            resp = self._public_post("/books", json_body=body, timeout=timeout)
+            resp = self._public_post(
+                "/books",
+                json_body=body,
+                timeout=request_timeout,
+            )
         resp.raise_for_status()
         payload = resp.json()
         if not isinstance(payload, list):
