@@ -2125,11 +2125,14 @@ def _latest_matched_order_fact_candidates(
             fact.matched_size AS order_fact_matched_size,
             fact.source AS order_fact_source,
             fact.raw_payload_json AS order_fact_raw_payload_json,
+            env.order_type AS env_order_type,
             {trade_fact_exists} AS existing_fill_trade_fact,
             {position_phase} AS position_phase
           FROM venue_commands cmd
           JOIN canonical_order_truth fact
             ON fact.command_id = cmd.command_id
+          LEFT JOIN venue_submission_envelopes env
+            ON env.envelope_id = cmd.envelope_id
           {position_join}
          WHERE cmd.intent_kind IN ('ENTRY', 'EXIT')
            AND cmd.state IN ({command_placeholders})
@@ -10375,7 +10378,8 @@ def reconcile_matched_order_facts(
                 and str(row.get("intent_kind") or "").upper() == "EXIT"
                 and str(row.get("side") or "").upper() == "SELL"
                 and str(
-                    _first_present(point_order or {}, "order_type", "orderType")
+                    row.get("env_order_type")
+                    or _first_present(point_order or {}, "order_type", "orderType")
                     or ""
                 ).upper()
                 == "FAK"

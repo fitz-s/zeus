@@ -13368,6 +13368,7 @@ class TestRecoveryResolutionTable:
         ),
         (
             (4.0, 4.0, "2026-04-26T00:09:00Z", "6", "2", "FAK", "FAK", "EXPIRED"),
+            (4.0, 4.0, "2026-04-26T00:09:00Z", "6", "2", "FAK", None, "REVIEW_REQUIRED"),
             (4.0, 4.0, "2026-04-26T00:07:00Z", "6", "2", "FAK", "FAK", "EXPIRED"),
             (0.017, 0.017, "2026-04-26T00:09:00Z", "5.99", "5.99", "FAK", "FAK", "EXPIRED"),
             (0.017, 0.017, "2026-04-26T00:09:00Z", "5.995", "5.995", "FAK", "FAK", "REVIEW_REQUIRED"),
@@ -13425,17 +13426,49 @@ class TestRecoveryResolutionTable:
             """,
             (projected_shares, chain_shares, chain_seen_at),
         )
-        _insert(
-            conn,
-            command_id="cmd-exit",
-            position_id="pos-001",
-            intent_kind="EXIT",
-            side="SELL",
-            order_type=command_order_type,
-            size=6.0,
-            price=0.46,
-            created_at="2026-04-26T00:04:00Z",
-        )
+        if command_order_type == "FAK":
+            # Historical REVIEW_REQUIRED rows may retain a FAK envelope even
+            # though current command persistence rejects new taker envelopes.
+            legal_envelope_id = "env-cmd-exit-legal"
+            fak_envelope_id = "env-cmd-exit-fak"
+            _insert(
+                conn,
+                command_id="cmd-exit",
+                position_id="pos-001",
+                intent_kind="EXIT",
+                side="SELL",
+                order_type="GTC",
+                envelope_id=legal_envelope_id,
+                size=6.0,
+                price=0.46,
+                created_at="2026-04-26T00:04:00Z",
+            )
+            _ensure_envelope(
+                conn,
+                token_id="tok-001",
+                selected_outcome_token_id="tok-001",
+                side="SELL",
+                order_type="FAK",
+                envelope_id=fak_envelope_id,
+                price=0.46,
+                size=6.0,
+            )
+            conn.execute(
+                "UPDATE venue_commands SET envelope_id = ? WHERE command_id = ?",
+                (fak_envelope_id, "cmd-exit"),
+            )
+        else:
+            _insert(
+                conn,
+                command_id="cmd-exit",
+                position_id="pos-001",
+                intent_kind="EXIT",
+                side="SELL",
+                order_type=command_order_type,
+                size=6.0,
+                price=0.46,
+                created_at="2026-04-26T00:04:00Z",
+            )
         _advance_to_acked(
             conn,
             command_id="cmd-exit",
@@ -13519,11 +13552,10 @@ class TestRecoveryResolutionTable:
         )
         from src.execution.exit_safety import can_submit_replacement_sell
 
-        if command_order_type == point_order_type == "FAK":
+        if command_order_type == "FAK" and point_order_type in {"FAK", None}:
             point_order = {
                 "orderID": "ord-exit-partial",
                 "status": "MATCHED",
-                "order_type": "FAK",
                 "side": "SELL",
                 "asset_id": "tok-001",
                 "original_size": point_original_size,
@@ -13531,12 +13563,16 @@ class TestRecoveryResolutionTable:
                 "price": "0.46",
                 "trades": ["trade-exit-partial"],
             }
+            if point_order_type is not None:
+                point_order["order_type"] = point_order_type
+            event_count_before = len(_get_events(conn, "cmd-exit"))
             generic = reconcile_matched_order_facts(
                 conn,
                 SimpleNamespace(get_order=lambda _order_id: point_order),
             )
-            assert generic["errors"] == 0
+            assert generic == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
             assert _get_state(conn, "cmd-exit") == "REVIEW_REQUIRED"
+            assert len(_get_events(conn, "cmd-exit")) == event_count_before
 
         summary = reconcile_matched_cancel_review_required_entries(conn)
 
