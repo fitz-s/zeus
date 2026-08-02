@@ -162,6 +162,7 @@ def _provenance_json(
         "nearest_grid_distance_km": payload.get("nearest_grid_distance_km"),
         "nearest_grid_provenance_source": payload.get("nearest_grid_provenance_source"),
         "nearest_grid_resolution_deg": payload.get("nearest_grid_resolution_deg"),
+        "member_axis": _member_axis_provenance(payload),
     }
     # Reuse precomputed evidence when available to avoid duplicate timezone/range parsing.
     evidence = contract_evidence if contract_evidence is not None else _contract_evidence_fields(
@@ -193,6 +194,58 @@ def _provenance_json(
     if isinstance(payload.get("boundary_normalization"), dict):
         prov["boundary_normalization"] = payload["boundary_normalization"]
     return json.dumps(prov, ensure_ascii=False)
+
+
+def _member_axis_provenance(payload: dict) -> dict[str, Any]:
+    """Bind ``members_json`` positions to explicit cross-scope member identities.
+
+    Legacy or malformed member axes remain ingestible but are UNVERIFIED, so a
+    multi-family joint provider cannot mistake equal array offsets for evidence
+    of covariance.
+    """
+
+    raw_members = payload.get("members")
+    if not isinstance(raw_members, list) or not raw_members:
+        return {"status": "UNVERIFIED", "reason": "MEMBERS_MISSING"}
+    member_ids: list[int] = []
+    pairs: list[list[object]] = []
+    for index, member in enumerate(raw_members):
+        if not isinstance(member, dict) or "member" not in member:
+            return {
+                "status": "UNVERIFIED",
+                "reason": "MEMBER_ID_MISSING",
+                "first_bad_index": index,
+            }
+        try:
+            member_id = int(member["member"])
+        except (TypeError, ValueError):
+            return {
+                "status": "UNVERIFIED",
+                "reason": "MEMBER_ID_INVALID",
+                "first_bad_index": index,
+            }
+        member_ids.append(member_id)
+        pairs.append([member_id, member.get("value_native_unit")])
+    if len(set(member_ids)) != len(member_ids):
+        return {"status": "UNVERIFIED", "reason": "MEMBER_ID_DUPLICATE"}
+    if member_ids != list(range(len(member_ids))):
+        return {
+            "status": "UNVERIFIED",
+            "reason": "MEMBER_AXIS_NOT_CANONICAL",
+            "member_ids": member_ids,
+        }
+    canonical_ids = json.dumps(member_ids, separators=(",", ":"))
+    try:
+        canonical_pairs = json.dumps(pairs, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        return {"status": "UNVERIFIED", "reason": "MEMBER_VALUE_NOT_CANONICAL"}
+    return {
+        "status": "VERIFIED",
+        "semantics": "ecmwf_ens_member_id_order_v1",
+        "member_ids": member_ids,
+        "member_axis_hash": hashlib.sha256(canonical_ids.encode()).hexdigest(),
+        "member_values_by_id_hash": hashlib.sha256(canonical_pairs.encode()).hexdigest(),
+    }
 
 
 def _is_finite_number(value: object) -> bool:
