@@ -109,7 +109,9 @@ def canonical_decimal_text(value: object) -> str:
     return format(result.normalize(), "f")
 
 
-def _position_events_available(conn: sqlite3.Connection) -> bool:
+def partial_exit_events_available(conn: sqlite3.Connection) -> bool:
+    """Return whether this connection carries the canonical partial-exit journal."""
+
     try:
         return conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'position_events'"
@@ -426,7 +428,7 @@ def recorded_partial_exit_fill_cursors(
     the newly proven exact slice is booked on replay.
     """
 
-    if not position_id or not _position_events_available(conn):
+    if not position_id or not partial_exit_events_available(conn):
         return {}
     try:
         rows = conn.execute(
@@ -484,7 +486,7 @@ def partial_exit_realized_pnl_fold(
     envelope is typed debt and must be repaired from canonical venue facts.
     """
 
-    if not position_id or not _position_events_available(conn):
+    if not position_id or not partial_exit_events_available(conn):
         return Decimal("0")
     try:
         rows = conn.execute(
@@ -579,7 +581,7 @@ def legacy_partial_exit_repair_fills(
     else is typed debt; in particular, this never silently substitutes zero.
     """
 
-    if not position_id or not _position_events_available(conn):
+    if not position_id or not partial_exit_events_available(conn):
         return []
     try:
         rows = conn.execute(

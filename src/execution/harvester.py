@@ -372,7 +372,13 @@ def _canonical_partial_exit_residual_basis(
 ) -> tuple[Decimal, Decimal] | None:
     """Return exact residual shares/cost from the latest canonical fill."""
 
-    from src.state.fill_dedup import PartialExitEconomicDebtError
+    from src.state.fill_dedup import (
+        PartialExitEconomicDebtError,
+        partial_exit_events_available,
+    )
+
+    if not partial_exit_events_available(conn):
+        return None
 
     row = conn.execute(
         """
@@ -2813,8 +2819,21 @@ def _settle_positions(
         from src.state.fill_dedup import canonical_decimal_text
 
         pnl_text = canonical_decimal_text(pnl)
+        settlement_record_pnl: object = pnl_text
+        if (
+            residual_basis is None
+            and partial_exit_realized_pnl == 0
+            and closed is not None
+            and getattr(closed, "pnl", None) is not None
+        ):
+            # No partial-exit economics means this is the unchanged legacy
+            # close path. Preserve its public value/type while still writing
+            # the normalized Decimal value to canonical stores below.
+            pnl = Decimal(str(closed.pnl))
+            pnl_text = canonical_decimal_text(pnl)
+            settlement_record_pnl = closed.pnl
         if closed is not None:
-            closed.pnl = pnl_text
+            closed.pnl = settlement_record_pnl
         outcome = 1 if exit_price > 0 else 0
 
         if closed is not None:
@@ -2826,7 +2845,7 @@ def _settle_positions(
                 direction=closed.direction,
                 p_posterior=closed.p_posterior,
                 outcome=outcome,
-                pnl=pnl_text,
+                pnl=settlement_record_pnl,
                 decision_snapshot_id=closed.decision_snapshot_id,
                 edge_source=closed.edge_source,
                 strategy=closed.strategy,
