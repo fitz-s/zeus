@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-08-01
+# Last reused or audited: 2026-08-02
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-08-01; last_reused=2026-08-01
+# Lifecycle: created=2026-05-19; last_reviewed=2026-08-02; last_reused=2026-08-02
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -1298,6 +1298,10 @@ def _write_pending_exit_projection_regression_db(
     *,
     now: datetime,
     released: bool = False,
+    terminal_voided: bool = False,
+    terminal_voided_phase_after: str = "day0_window",
+    terminal_voided_status: str = "TERMINAL_NO_FILL",
+    later_exit_filled: bool = False,
 ) -> None:
     trade_conn = sqlite3.connect(sd / "zeus_trades.db")
     try:
@@ -1392,10 +1396,11 @@ def _write_pending_exit_projection_regression_db(
                 },
             ),
         ]
+        next_sequence = 12
         if released:
             events.append(
                 (
-                    12,
+                    next_sequence,
                     "EXIT_RETRY_RELEASED",
                     now - timedelta(minutes=5, seconds=52),
                     "pending_exit",
@@ -1407,7 +1412,36 @@ def _write_pending_exit_projection_regression_db(
                     },
                 )
             )
-        next_sequence = 13 if released else 12
+            next_sequence += 1
+        if terminal_voided:
+            events.append(
+                (
+                    next_sequence,
+                    "EXIT_ORDER_VOIDED",
+                    now - timedelta(minutes=5, seconds=52),
+                    "pending_exit",
+                    terminal_voided_phase_after,
+                    terminal_voided_status,
+                    {
+                        "error": "CANCELED",
+                        "status": terminal_voided_status,
+                    },
+                )
+            )
+            next_sequence += 1
+        if later_exit_filled:
+            events.append(
+                (
+                    next_sequence,
+                    "EXIT_ORDER_FILLED",
+                    now - timedelta(minutes=5, seconds=51),
+                    "pending_exit",
+                    "economically_closed",
+                    "filled",
+                    {"status": "filled"},
+                )
+            )
+            next_sequence += 1
         events.extend([
             (
                 next_sequence,
@@ -3409,6 +3443,112 @@ def test_pending_exit_projection_release_then_held_is_not_regression(
     assert surface["pending_exit_projection_regression_sample"][0][
         "latest_exit_event_type"
     ] == "EXIT_ORDER_REJECTED"
+
+
+def test_pending_exit_terminal_no_fill_void_then_held_is_not_regression(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A command-bound terminal zero-fill void authorizes held re-auction."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    monkeypatch.setattr(
+        live_health,
+        "_main_daemon_surface",
+        lambda status_summary, heartbeat: {
+            "ok": True,
+            "issue": None,
+            "attested": True,
+            "pid": 123,
+            "command": "python -m src.main",
+        },
+    )
+    monkeypatch.setattr(
+        live_health,
+        "_process_code_surface",
+        lambda main_daemon_surface: {"ok": True, "issue": None, "evaluated": True},
+    )
+    now = datetime.now(timezone.utc)
+    _write_forecast_event_bridge_dbs(
+        sd,
+        posterior_computed_at=(now - timedelta(seconds=30)).isoformat(),
+        fsr_created_at=(now - timedelta(seconds=20)).isoformat(),
+    )
+    _write_pending_exit_projection_regression_db(
+        sd,
+        now=now,
+        terminal_voided=True,
+    )
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["pending_exit_release_loop"]
+    assert surface["pending_exit_projection_regression_count"] == 0
+    assert surface["pending_exit_projection_regression_sample"] == []
+    assert surface["ok"] is True
+    assert "pending_exit_release_loop" not in result["failing_surfaces"]
+
+
+@pytest.mark.parametrize(
+    ("phase_after", "venue_status"),
+    (("day0_window", "CANCELED"), ("pending_exit", "TERMINAL_NO_FILL")),
+)
+def test_pending_exit_void_without_exact_terminal_release_stays_regression(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    phase_after: str,
+    venue_status: str,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_pending_exit_projection_regression_db(
+        sd,
+        now=now,
+        terminal_voided=True,
+        terminal_voided_phase_after=phase_after,
+        terminal_voided_status=venue_status,
+    )
+
+    surface = live_health._pending_exit_release_loop_surface(
+        sd,
+        now,
+        main_daemon_surface={"attested": True, "issue": None},
+    )
+
+    assert surface["pending_exit_projection_regression_count"] == 1
+    assert surface["pending_exit_projection_regression_sample"][0][
+        "latest_exit_event_type"
+    ] == "EXIT_ORDER_VOIDED"
+
+
+def test_pending_exit_later_fill_supersedes_terminal_void_release(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    now = datetime.now(timezone.utc)
+    _write_pending_exit_projection_regression_db(
+        sd,
+        now=now,
+        terminal_voided=True,
+        later_exit_filled=True,
+    )
+
+    surface = live_health._pending_exit_release_loop_surface(
+        sd,
+        now,
+        main_daemon_surface={"attested": True, "issue": None},
+    )
+
+    assert surface["pending_exit_projection_regression_count"] == 1
+    assert surface["pending_exit_projection_regression_sample"][0][
+        "latest_exit_event_type"
+    ] == "EXIT_ORDER_FILLED"
 
 
 def test_pending_exit_runtime_gate_block_yields_degraded(

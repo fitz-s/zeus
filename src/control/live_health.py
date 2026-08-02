@@ -2545,6 +2545,8 @@ def _pending_exit_release_loop_surface(
                            'EXIT_INTENT',
                            'EXIT_ORDER_REJECTED',
                            'EXIT_ORDER_POSTED',
+                           'EXIT_ORDER_FILLED',
+                           'EXIT_ORDER_VOIDED',
                            'EXIT_RETRY_RELEASED'
                        )
                        AND datetime(occurred_at) >= datetime(?)
@@ -2636,7 +2638,17 @@ def _pending_exit_release_loop_surface(
             ON rp.position_id = le.position_id
          WHERE pc.phase IN ('active', 'day0_window')
            AND pc.order_status IN ('filled', 'partial')
-           AND le.latest_exit_event_type <> 'EXIT_RETRY_RELEASED'
+           AND NOT (
+               le.latest_exit_event_type = 'EXIT_RETRY_RELEASED'
+               OR (
+                   le.latest_exit_event_type = 'EXIT_ORDER_VOIDED'
+                   AND COALESCE(le.latest_exit_phase_after, '') IN (
+                       'active',
+                       'day0_window'
+                   )
+                   AND COALESCE(le.latest_exit_venue_status, '') = 'TERMINAL_NO_FILL'
+               )
+           )
            AND rp.position_id IS NULL
            AND (
                COALESCE(CAST(pc.chain_shares AS REAL), 0.0) > 0.0
