@@ -375,6 +375,7 @@ class WriteCoordinator:
                 process_lock = self._process_locks[db_path]
                 monitor_waiter_fd: int | None = None
                 turnstile_fd: int | None = None
+                file_fd: int | None = None
                 process_acquired = False
                 try:
                     if priority is WritePriority.MONITOR:
@@ -407,7 +408,7 @@ class WriteCoordinator:
                         blocking=not background,
                     )
                     process_acquired = True
-                    fd = self._acquire_file_lock(
+                    file_fd = self._acquire_file_lock(
                         db_path,
                         deadline=deadline,
                         db=db,
@@ -415,22 +416,42 @@ class WriteCoordinator:
                         blocking=not background,
                     )
                 except BaseException:
-                    if process_acquired:
-                        process_lock.release()
+                    self._cleanup_current_gate(
+                        turnstile_fd=turnstile_fd,
+                        monitor_waiter_fd=monitor_waiter_fd,
+                        file_fd=file_fd,
+                        process_lock=process_lock,
+                        process_acquired=process_acquired,
+                        release_file=True,
+                        release_process=True,
+                    )
                     raise
-                finally:
-                    try:
-                        if turnstile_fd is not None:
-                            self._release_turnstile(turnstile_fd)
-                    finally:
-                        if monitor_waiter_fd is not None:
-                            self._release_turnstile(monitor_waiter_fd)
+                cleanup_error = self._cleanup_current_gate(
+                    turnstile_fd=turnstile_fd,
+                    monitor_waiter_fd=monitor_waiter_fd,
+                    file_fd=file_fd,
+                    process_lock=process_lock,
+                    process_acquired=process_acquired,
+                    release_file=False,
+                    release_process=False,
+                )
+                if cleanup_error is not None:
+                    self._cleanup_current_gate(
+                        turnstile_fd=None,
+                        monitor_waiter_fd=None,
+                        file_fd=file_fd,
+                        process_lock=process_lock,
+                        process_acquired=process_acquired,
+                        release_file=True,
+                        release_process=True,
+                    )
+                    raise cleanup_error
                 acquired.append(
                     _AcquiredGate(
                         db=db,
                         db_path=db_path,
                         lock_path=unified_writer_lock_path(db_path),
-                        fd=fd,
+                        fd=file_fd,
                         process_lock=process_lock,
                     )
                 )
@@ -507,25 +528,29 @@ class WriteCoordinator:
         path = writer_turnstile_path(db_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return fd
-            except BlockingIOError as exc:
-                if not blocking:
-                    os.close(fd)
-                    raise WriteLeaseTimeout(
-                        f"DB writer turnstile deferred for owner={owner} db={db.value}"
-                    ) from exc
-                if deadline is not None and self._clock() >= deadline:
-                    os.close(fd)
-                    raise WriteLeaseTimeout(
-                        f"DB writer turnstile timed out for owner={owner} db={db.value}"
-                    ) from exc
-                sleep_for = 0.01
-                if deadline is not None:
-                    sleep_for = max(0.001, min(sleep_for, deadline - self._clock()))
-                self._sleep(sleep_for)
+        owned = False
+        try:
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    owned = True
+                    return fd
+                except BlockingIOError as exc:
+                    if not blocking:
+                        raise WriteLeaseTimeout(
+                            f"DB writer turnstile deferred for owner={owner} db={db.value}"
+                        ) from exc
+                    if deadline is not None and self._clock() >= deadline:
+                        raise WriteLeaseTimeout(
+                            f"DB writer turnstile timed out for owner={owner} db={db.value}"
+                        ) from exc
+                    sleep_for = 0.01
+                    if deadline is not None:
+                        sleep_for = max(0.001, min(sleep_for, deadline - self._clock()))
+                    self._sleep(sleep_for)
+        finally:
+            if not owned:
+                os.close(fd)
 
     def _acquire_monitor_waiter_reservation(
         self,
@@ -583,10 +608,63 @@ class WriteCoordinator:
 
     @staticmethod
     def _release_turnstile(fd: int) -> None:
+        first_error = None
         try:
             fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
+        except BaseException as exc:
+            first_error = exc
+        try:
             os.close(fd)
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+        if first_error is not None:
+            raise first_error
+
+    def _cleanup_current_gate(
+        self,
+        *,
+        turnstile_fd: int | None,
+        monitor_waiter_fd: int | None,
+        file_fd: int | None,
+        process_lock: threading.Lock,
+        process_acquired: bool,
+        release_file: bool,
+        release_process: bool,
+    ) -> BaseException | None:
+        first_error: BaseException | None = None
+
+        def attempt(cleanup: Callable[[], None]) -> None:
+            nonlocal first_error
+            try:
+                cleanup()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+
+        if turnstile_fd is not None:
+            attempt(lambda: self._release_turnstile(turnstile_fd))
+        if monitor_waiter_fd is not None:
+            attempt(lambda: self._release_turnstile(monitor_waiter_fd))
+        if release_file and file_fd is not None:
+            def release_file() -> None:
+                file_error = None
+                try:
+                    fcntl.flock(file_fd, fcntl.LOCK_UN)
+                except BaseException as exc:
+                    file_error = exc
+                try:
+                    os.close(file_fd)
+                except BaseException as exc:
+                    if file_error is None:
+                        file_error = exc
+                if file_error is not None:
+                    raise file_error
+
+            attempt(release_file)
+        if release_process and process_acquired:
+            attempt(process_lock.release)
+        return first_error
 
     def _release_gates(self, acquired: list[_AcquiredGate]) -> None:
         for gate in reversed(acquired):

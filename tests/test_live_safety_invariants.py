@@ -14297,6 +14297,74 @@ def test_gate_cleanup_releases_reservation_when_turnstile_release_fails(monkeypa
     assert released == [22, 11]
 
 
+def test_turnstile_oserror_closes_fd_once(tmp_path, monkeypatch):
+    from src.state import write_coordinator as module
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator
+
+    coordinator = WriteCoordinator({DBIdentity.TRADE: tmp_path / "turnstile-oserror.db"})
+    closed = []
+    real_close = module.os.close
+    monkeypatch.setattr(module.fcntl, "flock", lambda *_args: (_ for _ in ()).throw(OSError("boom")))
+    monkeypatch.setattr(module.os, "close", lambda fd: (closed.append(fd), real_close(fd))[1])
+    with pytest.raises(OSError, match="boom"):
+        coordinator._acquire_turnstile(
+            tmp_path / "turnstile-oserror.db",
+            deadline=None,
+            db=DBIdentity.TRADE,
+            owner="turnstile-oserror",
+            blocking=False,
+        )
+    assert len(closed) == 1
+
+
+def test_gate_cleanup_releases_file_and_process_after_turnstile_fault(
+    monkeypatch, tmp_path
+):
+    from src.state import write_coordinator as module
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WritePriority
+
+    path = (tmp_path / "gate-cleanup-order.db").resolve()
+    coordinator = WriteCoordinator({DBIdentity.TRADE: path})
+    order = []
+
+    class ProcessLock:
+        released = False
+
+        def release(self):
+            order.append("process_release")
+            self.released = True
+
+    coordinator._process_locks[path] = ProcessLock()
+    coordinator._acquire_monitor_waiter_reservation = lambda *_a, **_k: 11
+    coordinator._acquire_turnstile = lambda *_a, **_k: 22
+    coordinator._acquire_process_lock = lambda *_a, **_k: None
+    coordinator._acquire_file_lock = lambda *_a, **_k: 33
+    monkeypatch.setattr(
+        coordinator,
+        "_release_turnstile",
+        lambda fd: (order.append(f"release_{fd}"),
+                    (_ for _ in ()).throw(OSError("turnstile release failed"))
+                    if fd == 22 else None)[1],
+    )
+    monkeypatch.setattr(module.fcntl, "flock", lambda fd, op: order.append(f"file_unlock_{fd}"))
+    monkeypatch.setattr(module.os, "close", lambda fd: (order.append(f"file_close_{fd}"), None)[1])
+    with pytest.raises(OSError, match="turnstile release failed"):
+        coordinator._acquire_gates(
+            (DBIdentity.TRADE,),
+            deadline=None,
+            owner="gate-cleanup-order",
+            priority=WritePriority.MONITOR,
+        )
+    assert order == [
+        "release_22",
+        "release_11",
+        "file_unlock_33",
+        "file_close_33",
+        "process_release",
+    ]
+    assert coordinator._process_locks[path].released is True
+
+
 def test_full_recovery_quantum_is_one_row_and_specialized_debts_stay_in_full_lane(
     monkeypatch,
 ):
