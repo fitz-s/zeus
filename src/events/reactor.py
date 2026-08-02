@@ -710,19 +710,18 @@ def _paused_entry_wake_should_park(
     *,
     pause_reason: str | None,
     held_family_provider: Callable[[], frozenset[tuple[str, str, str]]] | None,
-    held_sell_completion_obligation: bool,
 ) -> bool:
-    """Park a paused wake only when no held work needs the reactor."""
+    """Park a paused wake only when no canonical held family needs the reactor."""
 
     # SCOPE: global new-entry admission only; held exposure and held-SELL
     # completion remain eligible for the reduce-only reactor path. DRAIN: keep
     # every opportunity row PENDING and let the next wake re-read pause and
-    # canonical held state. RESET: a cleared pause, held exposure, or a durable
-    # held-SELL obligation leaves this gate without changing event identity.
+    # canonical held state. RESET: a cleared pause or materialized held exposure
+    # leaves this gate without changing event identity. A durable held-SELL wake
+    # is control debt, not exposure authority, and cannot bypass this gate.
     if (
         pause_reason is None
         or str(pause_reason).startswith("entries_pause_control_unreadable:")
-        or held_sell_completion_obligation
         or held_family_provider is None
     ):
         return False
@@ -733,29 +732,6 @@ def _paused_entry_wake_should_park(
     if held_families is None:
         return False
     return not bool(held_families)
-
-
-def _edli_has_durable_held_sell_completion_obligation() -> bool:
-    """Read exact held-SELL debt from the durable wake queue, fail-closed."""
-
-    try:
-        from src.runtime.reactor_wake import exact_held_sell_completion_wake_ids
-
-        return bool(exact_held_sell_completion_wake_ids())
-    except Exception:  # noqa: BLE001 - unreadable debt must keep exits alive
-        logging.getLogger("zeus.events.reactor").warning(
-            "durable held-SELL completion obligation read failed; retaining reactor work",
-            exc_info=True,
-        )
-        return True
-
-
-def _edli_held_sell_completion_obligation(
-    producer_requests: tuple[object, ...],
-) -> bool:
-    """Combine this wake's requests with the canonical durable debt reader."""
-
-    return bool(producer_requests) or _edli_has_durable_held_sell_completion_obligation()
 
 
 Submit = Callable[[OpportunityEvent, datetime], bool | None | EventSubmissionReceipt]
@@ -1265,7 +1241,9 @@ class OpportunityEventReactor:
                 )
                 should_park = False
             if should_park:
-                result.rejection_reasons.append("ENTRIES_PAUSED_NO_HELD_WORK")
+                result.rejection_reasons.append(
+                    "ENTRIES_PAUSED_NO_CANONICAL_HELD_FAMILIES"
+                )
                 return result
         self._drain_no_submit_claim_requeues(
             wait_ms=_reactor_claim_busy_timeout_ms()
@@ -6995,11 +6973,8 @@ def run_edli_event_reactor_cycle(
     from src.riskguard.risk_level import RiskLevel
     from src.riskguard.riskguard import get_current_level
 
-    held_sell_completion_obligation = _edli_held_sell_completion_obligation(
-        producer_held_sell_reauction_requests
-    )
     held_sell_completion_cycle = bool(
-        completion_wake and held_sell_completion_obligation
+        completion_wake and producer_held_sell_reauction_requests
     )
     if (
         get_current_level() != RiskLevel.GREEN
@@ -7015,11 +6990,10 @@ def run_edli_event_reactor_cycle(
     if _paused_entry_wake_should_park(
         pause_reason=_entry_pause_blocks_live_submit(None),
         held_family_provider=held_family_provider,
-        held_sell_completion_obligation=held_sell_completion_obligation,
     ):
         _log.info(
             "EDLI reactor parked paused new-entry wake before active-lock acquire: "
-            "no canonical held exposure or held-SELL completion obligation"
+            "canonical held families are empty; durable held-SELL debt remains queued"
         )
         return False
     import sqlite3  # transient world-DB lock classification for fail-soft emit boundary
@@ -7637,7 +7611,6 @@ def run_edli_event_reactor_cycle(
             paused_entry_wake_gate=lambda: _paused_entry_wake_should_park(
                 pause_reason=_entry_pause_blocks_live_submit(conn),
                 held_family_provider=held_family_provider,
-                held_sell_completion_obligation=held_sell_completion_obligation,
             ),
             final_intent_submit=submit_adapter,
             reject=lambda _event, _stage, _reason: None,

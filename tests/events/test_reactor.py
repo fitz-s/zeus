@@ -209,10 +209,30 @@ def test_no_submit_claim_debt_drains_before_cycle_entry_gate():
     assert reactor._no_submit_claim_requeue_debt == {}
 
 
-def test_paused_no_held_wake_parks_before_claim_auction_or_receipt():
+def test_paused_no_held_debt_wake_parks_before_claim_auction_or_receipt(tmp_path):
+    from src.events.reactor import _paused_entry_wake_should_park
+    from src.runtime import reactor_wake
+
     conn, store = _store()
     event = _forecast_event("paused-no-held")
     store.insert_or_ignore(event)
+    wake_path = tmp_path / "wake.json"
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="paused-no-held-position",
+        family=("Dallas", "2026-05-24", "high"),
+        probability_content_identity="q-paused-no-held",
+        held_token_id="token-paused-no-held",
+        held_best_bid=0.12,
+        bid_observed_at="2026-05-24T17:59:00+00:00",
+    )
+    wake = reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=wake_path,
+        wake_id="paused-no-held-debt",
+        forecast_families=(request.family,),
+        held_sell_reauction_requests=(request,),
+    )
     before = tuple(
         row[0]
         for row in conn.execute(
@@ -241,7 +261,10 @@ def test_paused_no_held_wake_parks_before_claim_auction_or_receipt():
         riskguard_gate=lambda _event: True,
         final_intent_submit=submit,
         reject=lambda *_args: None,
-        paused_entry_wake_gate=lambda: True,
+        paused_entry_wake_gate=lambda: _paused_entry_wake_should_park(
+            pause_reason="operator_pause",
+            held_family_provider=lambda: frozenset(),
+        ),
         config=ReactorConfig(),
         regret_ledger=NoTradeRegretLedger(conn),
     )
@@ -265,12 +288,18 @@ def test_paused_no_held_wake_parks_before_claim_auction_or_receipt():
     ).fetchone()
     assert result.processed == result.rejected == result.retried == result.dead_lettered == 0
     assert result.proof_accepted == 0
-    assert result.rejection_reasons == ["ENTRIES_PAUSED_NO_HELD_WORK"]
+    assert result.rejection_reasons == [
+        "ENTRIES_PAUSED_NO_CANONICAL_HELD_FAMILIES"
+    ]
     assert calls == {"source": 0, "auction": 0, "submit": 0}
     assert before == after == (event.event_id,)
     assert tuple(processing) == (0, None)
     assert conn.execute("SELECT COUNT(*) FROM edli_no_submit_receipts").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM decision_log").fetchone()[0] == decision_log_before == 0
+    assert reactor_wake.read_reactor_wake(path=wake_path) == wake
+    assert reactor_wake.exact_held_sell_completion_wake_ids(path=wake_path) == {
+        wake.wake_id
+    }
 
 
 def test_paused_wake_resumes_same_pending_event_exactly_once():
@@ -317,41 +346,77 @@ def test_paused_wake_resumes_same_pending_event_exactly_once():
     assert row[2] == decision_time.isoformat()
 
 
-def test_paused_entry_park_requires_no_held_work_or_completion_obligation():
+def test_paused_entry_park_requires_canonical_held_work():
     from src.events.reactor import _paused_entry_wake_should_park
 
     assert _paused_entry_wake_should_park(
         pause_reason="operator",
         held_family_provider=lambda: frozenset(),
-        held_sell_completion_obligation=False,
     ) is True
     assert _paused_entry_wake_should_park(
         pause_reason="operator",
         held_family_provider=lambda: frozenset({("Dallas", "2026-05-24", "high")}),
-        held_sell_completion_obligation=False,
-    ) is False
-    assert _paused_entry_wake_should_park(
-        pause_reason="operator",
-        held_family_provider=lambda: frozenset(),
-        held_sell_completion_obligation=True,
     ) is False
 
 
-def test_paused_entry_park_uses_durable_completion_reader(monkeypatch):
-    import src.events.reactor as reactor_module
+def test_paused_debt_drains_once_after_canonical_family_materializes(tmp_path):
+    from src.events import reactor
+    from src.runtime import reactor_wake
 
-    monkeypatch.setattr(
-        reactor_module,
-        "_edli_has_durable_held_sell_completion_obligation",
-        lambda: True,
+    path = tmp_path / "wake.json"
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="paused-debt-no-held",
+        family=("Dallas", "2026-07-25", "high"),
+        probability_content_identity="q-paused-debt",
+        held_token_id="token-paused-debt",
+        held_best_bid=0.12,
+        bid_observed_at="2026-07-25T12:00:00+00:00",
+    )
+    wake = reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        wake_id="paused-debt-wake",
+        forecast_families=(request.family,),
+        held_sell_reauction_requests=(request,),
     )
 
-    assert reactor_module._edli_held_sell_completion_obligation(()) is True
-    assert reactor_module._paused_entry_wake_should_park(
+    assert reactor._paused_entry_wake_should_park(
         pause_reason="operator",
         held_family_provider=lambda: frozenset(),
-        held_sell_completion_obligation=reactor_module._edli_held_sell_completion_obligation(()),
+    ) is True
+    held_families = set()
+    assert reactor._paused_entry_wake_should_park(
+        pause_reason="operator",
+        held_family_provider=lambda: frozenset(held_families),
+    ) is True
+    held_families.add(request.family)
+    assert reactor._paused_entry_wake_should_park(
+        pause_reason="operator",
+        held_family_provider=lambda: frozenset(held_families),
     ) is False
+
+    cut_result = _held_sell_completion_result(
+        position_id=request.position_id,
+        token_id=request.held_token_id,
+        probability_content_identity=request.probability_content_identity,
+    )
+    receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,),
+        result=cut_result,
+    )
+    assert len(receipts) == 1
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        receipts,
+        path=path,
+    ) is True
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        (request,),
+        path=path,
+    ) is True
+    assert reactor_wake.read_reactor_wake(path=path) == wake
+    assert reactor_wake.acknowledge_reactor_wake(wake, path=path) is True
+    assert reactor_wake.read_reactor_wake(path=path) is None
 
 
 def test_paused_no_held_cycle_parks_before_active_lock(monkeypatch):
@@ -372,11 +437,6 @@ def test_paused_no_held_cycle_parks_before_active_lock(monkeypatch):
         reactor_module,
         "_edli_reactor_held_family_provider",
         lambda: (lambda: frozenset()),
-    )
-    monkeypatch.setattr(
-        reactor_module,
-        "_edli_has_durable_held_sell_completion_obligation",
-        lambda: False,
     )
     monkeypatch.setattr(
         adapter_module,
