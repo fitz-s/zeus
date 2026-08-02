@@ -1091,9 +1091,18 @@ def select_prepared_global_auction(
         ):
             raise ValueError("GLOBAL_SINGLE_POSITION_FRACTION_INVALID")
         if single_position_pct > 0:
+            committed_micro = dict(
+                wealth_witness.native_commitments_micro
+            ).get(candidate.token_id, 0)
+            committed_usd = Decimal(committed_micro) / Decimal("1000000")
+            remaining_position_budget = max(
+                Decimal("0"),
+                single_position_pct * Decimal(wealth_witness.wealth_floor_usd)
+                - committed_usd,
+            )
             allocator_limit = min(
                 allocator_limit,
-                single_position_pct * Decimal(wealth_witness.wealth_floor_usd),
+                remaining_position_budget,
             )
         return allocator_limit
 

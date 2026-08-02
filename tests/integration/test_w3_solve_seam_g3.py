@@ -17694,6 +17694,40 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
         concentration_limited.decision.max_spend_usd
         < selected.decision.max_spend_usd
     )
+    committed_wealth = PortfolioWealthWitness(
+        ledger_snapshot_id=wealth.ledger_snapshot_id,
+        position_set_hash=wealth.position_set_hash,
+        wealth_floor_usd=wealth.wealth_floor_usd,
+        wealth_ceiling_usd=wealth.wealth_ceiling_usd,
+        spendable_cash_usd=wealth.spendable_cash_usd,
+        reservations_usd=wealth.reservations_usd,
+        collateral_authority=wealth.collateral_authority,
+        captured_at_utc=wealth.captured_at_utc,
+        max_age=wealth.max_age,
+        witness_identity=wealth.witness_identity,
+        native_commitments_micro=tuple(
+            sorted({asset.token_id: 25_000_000 for asset in assets}.items())
+        ),
+    )
+    committed_kwargs = {
+        **auction_kwargs,
+        "wealth_witness": committed_wealth,
+        "current_wealth_identity_resolver": (
+            lambda: committed_wealth.economic_identity
+        ),
+    }
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            live_config,
+            "sizing_defaults",
+            lambda: configured_sizing,
+        )
+        cumulative_limited = select_prepared_global_auction(
+            prepared_by_event,
+            **committed_kwargs,
+        )
+    assert cumulative_limited.decision.candidate is not None
+    assert cumulative_limited.decision.max_spend_usd <= Decimal("15")
     assert selected.decision.candidate is not None, selected.decision.no_trade_reason
     fallthrough = select_prepared_global_auction(
         prepared_by_event,
