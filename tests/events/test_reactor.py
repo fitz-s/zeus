@@ -498,7 +498,10 @@ def test_targeted_forecast_wake_uses_carrier_exception_at_both_pause_gates():
     assert "forecast_posterior_wake or bool(targeted_event_ids)" in source
 
 
-@pytest.mark.parametrize("failure_mode", ("empty", "build_locked", "emit_locked"))
+@pytest.mark.parametrize(
+    "failure_mode",
+    ("empty", "interrupted", "build_locked", "emit_locked"),
+)
 def test_published_paused_forecast_wake_without_durable_carrier_keeps_queue_untouched(
     monkeypatch,
     tmp_path,
@@ -508,9 +511,11 @@ def test_published_paused_forecast_wake_without_durable_carrier_keeps_queue_unto
     import src.events.event_writer as event_writer_module
     import src.events.reactor as reactor_module
     import src.main as main
+    import src.observability.status_summary as status_summary
     import src.runtime.bankroll_provider as bankroll_provider
     import src.state.db as db
     import src.state.portfolio as portfolio_module
+    from src.events.event_writer import EventWriter
     from src.riskguard import riskguard
     from src.riskguard.risk_level import RiskLevel
     from src.runtime import reactor_wake
@@ -518,7 +523,7 @@ def test_published_paused_forecast_wake_without_durable_carrier_keeps_queue_unto
     world_path = tmp_path / f"world-{failure_mode}.db"
     forecasts_path = tmp_path / f"forecasts-{failure_mode}.db"
     trade_path = tmp_path / f"trades-{failure_mode}.db"
-    wake_path = tmp_path / f"wake-{failure_mode}.json"
+    wake_path = tmp_path / reactor_wake.REACTOR_WAKE_FILENAME
     world = sqlite3.connect(world_path)
     init_schema(world)
     ordinary = _forecast_event(f"paused-ordinary-{failure_mode}")
@@ -528,44 +533,126 @@ def test_published_paused_forecast_wake_without_durable_carrier_keeps_queue_unto
     sqlite3.connect(forecasts_path).close()
     sqlite3.connect(trade_path).close()
 
-    family = ("Chicago", "2026-08-03", "high")
+    family = ("Chicago", "2026-05-25", "high")
+    first_decision_time = datetime(2026, 5, 24, 18, 3, tzinfo=timezone.utc)
     wake = reactor_wake.publish_reactor_wake(
         source="replacement_forecast_materializer",
         reason="forecast_posterior_advanced",
         path=wake_path,
         wake_id=f"posterior-wake-{failure_mode}",
+        published_at=first_decision_time,
         forecast_families=(family,),
     )
+    wake_queue_file = reactor_wake._wake_queue_target(wake, path=wake_path)
+    wake_queue_bytes = wake_queue_file.read_bytes()
     carrier = _forecast_event(
         f"latest-carrier-{failure_mode}",
         target_date=family[1],
     )
     venue_buy_commands: list[str] = []
+    batch_identities: list[tuple[str, str]] = []
+    failure = [failure_mode]
+    paused = [True]
+
+    class TestClock(datetime):
+        current = first_decision_time
+
+        @classmethod
+        def now(cls, tz=None):
+            if tz is None:
+                return cls.current.replace(tzinfo=None)
+            return cls.current.astimezone(tz)
 
     def build_carrier(*_args, **_kwargs):
-        if failure_mode == "empty":
+        if failure[0] == "empty":
             return []
-        if failure_mode == "build_locked":
+        if failure[0] == "interrupted":
+            raise sqlite3.OperationalError("interrupted")
+        if failure[0] == "build_locked":
             raise sqlite3.OperationalError("database is locked")
         return [carrier]
 
-    def write_many(_self, _events):
-        if failure_mode == "emit_locked":
+    original_write_many = EventWriter.write_many
+
+    def write_many(self, events):
+        if failure[0] == "emit_locked":
             raise sqlite3.OperationalError("database is locked")
-        raise AssertionError("writer is unreachable for this failure mode")
+        return original_write_many(self, events)
+
+    class SubmitAdapter:
+        _live_submit_count = [0]
+        _live_ack_count = [0]
+
+        def __call__(self, *_args, **_kwargs):
+            venue_buy_commands.append("direct_submit")
+            raise AssertionError("forecast carrier must use the global batch seam")
+
+        def process_global_batch(
+            self,
+            events,
+            _decision_time,
+            *,
+            claim_unpaged_winner=None,
+        ):
+            assert claim_unpaged_winner is not None
+            batch_identities.extend(
+                (event.event_id, event.causal_snapshot_id) for event in events
+            )
+            reason = (
+                "entries_paused:operator"
+                if paused[0]
+                else "GLOBAL_AUCTION_NO_TRADE:NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
+            )
+            return GlobalBatchSubmitResult(
+                receipts={
+                    event.event_id: EventSubmissionReceipt(
+                        submitted=False,
+                        event_id=event.event_id,
+                        causal_snapshot_id=event.causal_snapshot_id,
+                        reason=reason,
+                        proof_accepted=False,
+                    )
+                    for event in events
+                },
+                winner_event_id=None,
+                venue_submit_count=0,
+                economic_cut_completed=not paused[0],
+            )
+
+    submit_adapter = SubmitAdapter()
 
     def venue_adapter(*_args, **_kwargs):
-        venue_buy_commands.append("adapter_built")
-        raise AssertionError("empty forecast target must not reach venue adapter setup")
+        return submit_adapter
+
+    def world_connection():
+        conn = sqlite3.connect(world_path)
+        conn.row_factory = sqlite3.Row
+        return conn
 
     monkeypatch.setattr(
         main,
         "_settings_section",
         lambda *_args, **_kwargs: {"enabled": True, "event_writer_enabled": True},
     )
+    monkeypatch.setattr(main, "_start_edli_reactor_wake_listener", lambda: None)
+    monkeypatch.setattr(
+        main,
+        "_edli_live_entry_readiness_block",
+        lambda _cfg: (None, {}),
+    )
     monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(main, "_forecast_wake_held_families", lambda _families: frozenset())
     monkeypatch.setattr(main, "_edli_next_redecision_source", lambda: "pause-antibody")
     monkeypatch.setattr(main, "_edli_build_forecast_snapshot_events", build_carrier)
+    monkeypatch.setattr(
+        main,
+        "_edli_refresh_global_allocator",
+        lambda *_args, **_kwargs: {
+            "configured": False,
+            "entry": {"reason": "listener_test_no_capital_authority"},
+        },
+    )
     monkeypatch.setattr(
         main,
         "_edli_acquire_mutex",
@@ -576,22 +663,35 @@ def test_published_paused_forecast_wake_without_durable_carrier_keeps_queue_unto
         "_start_venue_background_maintenance_after_reactor_if_required",
         lambda: None,
     )
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", threading.Lock())
     monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(
         adapter_module,
         "_entry_pause_blocks_live_submit",
-        lambda _conn: "operator_pause",
+        lambda _conn: "operator_pause" if paused[0] else None,
     )
     monkeypatch.setattr(
         adapter_module,
         "event_bound_live_adapter_from_trade_conn",
         venue_adapter,
     )
+    monkeypatch.setattr(adapter_module, "edli_source_truth_gate", lambda _event: True)
+    monkeypatch.setattr(
+        adapter_module,
+        "executable_snapshot_gate_from_trade_conn",
+        lambda *_args, **_kwargs: (lambda *_gate_args, **_gate_kwargs: True),
+    )
+    monkeypatch.setattr(
+        adapter_module,
+        "riskguard_allows_new_entries",
+        lambda **_kwargs: (lambda _event: True),
+    )
     monkeypatch.setattr(event_writer_module.EventWriter, "write_many", write_many)
     monkeypatch.setattr(bankroll_provider, "warm_from_collateral_snapshot", lambda: True)
     monkeypatch.setattr(portfolio_module, "load_runtime_open_portfolio", lambda _conn: object())
+    monkeypatch.setattr(status_summary, "write_cycle_result", lambda _pulse: None)
     monkeypatch.setattr(db, "ZEUS_FORECASTS_DB_PATH", forecasts_path)
-    monkeypatch.setattr(db, "get_world_connection", lambda: sqlite3.connect(world_path))
+    monkeypatch.setattr(db, "get_world_connection", world_connection)
     monkeypatch.setattr(
         db,
         "get_forecasts_connection_read_only",
@@ -600,9 +700,11 @@ def test_published_paused_forecast_wake_without_durable_carrier_keeps_queue_unto
     monkeypatch.setattr(
         db,
         "get_trade_connection_with_world_required",
-        lambda **_kwargs: pytest.fail("empty carrier wake must retry before trade setup"),
+        lambda **_kwargs: sqlite3.connect(trade_path),
     )
     monkeypatch.setattr(db, "world_write_mutex", lambda: threading.Lock())
+    monkeypatch.setattr("src.config.state_path", lambda filename: tmp_path / filename)
+    monkeypatch.setattr(reactor_module, "datetime", TestClock)
     monkeypatch.setattr(
         reactor_module,
         "_edli_reactor_held_family_provider",
@@ -618,31 +720,111 @@ def test_published_paused_forecast_wake_without_durable_carrier_keeps_queue_unto
         "_current_local_day_families",
         lambda *_args, **_kwargs: set(),
     )
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_decision_family_snapshot_refresher",
+        lambda _conn: (lambda *_args, **_kwargs: None),
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_reactor_cycle_advance_enqueuer",
+        lambda: (lambda *_args, **_kwargs: None),
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_reactor_day0_hourly_refresher",
+        lambda: (lambda *_args, **_kwargs: None),
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_reactor_family_market_absence_provider",
+        lambda: (lambda *_args, **_kwargs: False),
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_pre_submit_authority_provider_from_book_evidence_conn",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: "stable")
     monkeypatch.setattr(
         reactor_wake,
         "reactor_wakes_since",
         lambda *_args, **_kwargs: (),
     )
+    main._edli_initialize_reactor_wake_cursor()
 
-    result = reactor_module.run_edli_event_reactor_cycle(
-        active_lock=threading.Lock(),
-        producer_wake_reason=wake.reason,
-        producer_wake_ids=(wake.wake_id,),
-        producer_wake_published_at=wake.published_at,
-        producer_wake_families=wake.forecast_families,
-    )
+    assert main._edli_reactor_wake_poll_once() is False
 
     check = sqlite3.connect(world_path)
-    processing = check.execute(
+    assert check.execute(
         "SELECT processing_status, attempt_count FROM opportunity_event_processing WHERE event_id = ?",
         (ordinary.event_id,),
-    ).fetchone()
+    ).fetchone() == ("pending", 0)
     check.close()
-    assert result is False
-    assert processing == ("pending", 0)
     assert venue_buy_commands == []
+    assert main._edli_last_reactor_wake_id is None
+    assert wake_queue_file.read_bytes() == wake_queue_bytes
     assert reactor_wake.read_reactor_wake(path=wake_path) == wake
+
+    failure[0] = None
+    recovered_poll = main._edli_reactor_wake_poll_once()
+    check = sqlite3.connect(world_path)
+    carrier_after_pause = check.execute(
+        "SELECT processing_status, attempt_count, claimed_at "
+        "FROM opportunity_event_processing WHERE event_id = ?",
+        (carrier.event_id,),
+    ).fetchone()
+    assert recovered_poll is True, (
+        carrier_after_pause,
+        tuple(batch_identities),
+        main._edli_last_reactor_wake_id,
+        reactor_wake.read_reactor_wake(path=wake_path),
+    )
+    assert tuple(carrier_after_pause[:2]) == ("pending", 1)
+    assert check.execute(
+        "SELECT processing_status, attempt_count FROM opportunity_event_processing WHERE event_id = ?",
+        (ordinary.event_id,),
+    ).fetchone() == ("pending", 0)
+    check.close()
+    assert not wake_queue_file.exists()
+    assert reactor_wake.read_reactor_wake(path=wake_path) is None
+    assert venue_buy_commands == []
+
+    paused[0] = False
+    TestClock.current = datetime.fromisoformat(carrier_after_pause[2]) + timedelta(
+        microseconds=1
+    )
+    resumed_wake = reactor_wake.publish_reactor_wake(
+        source="replacement_forecast_materializer",
+        reason="forecast_posterior_advanced",
+        path=wake_path,
+        wake_id=f"posterior-wake-{failure_mode}-pause-clear",
+        published_at=TestClock.current,
+        forecast_families=(family,),
+    )
+    resumed_queue_file = reactor_wake._wake_queue_target(
+        resumed_wake,
+        path=wake_path,
+    )
+
+    assert main._edli_reactor_wake_poll_once() is True
+    assert not resumed_queue_file.exists()
+    assert reactor_wake.read_reactor_wake(path=wake_path) is None
+    check = sqlite3.connect(world_path)
+    assert check.execute(
+        "SELECT processing_status, attempt_count FROM opportunity_event_processing WHERE event_id = ?",
+        (carrier.event_id,),
+    ).fetchone() == ("processed", 2)
+    assert check.execute(
+        "SELECT processing_status, attempt_count FROM opportunity_event_processing WHERE event_id = ?",
+        (ordinary.event_id,),
+    ).fetchone() == ("pending", 0)
+    check.close()
+    assert batch_identities == [
+        (carrier.event_id, carrier.causal_snapshot_id),
+        (carrier.event_id, carrier.causal_snapshot_id),
+    ]
+    assert venue_buy_commands == []
 
 
 def test_paused_exact_held_sell_parks_when_exposure_provider_is_unavailable(caplog):
