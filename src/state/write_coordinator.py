@@ -36,9 +36,10 @@ class DBIdentity(str, enum.Enum):
 class WritePriority(str, enum.Enum):
     """Admission class for the process-shared writer turnstile.
 
-    MONITOR and RECOVERY_CRITICAL wait on the kernel turnstile; BACKGROUND
-    probes it nonblocking. The turnstile provides this admission boundary, not
-    a total order between the two waiting classes.
+    MONITOR registers a kernel-lock waiter reservation before waiting on the
+    turnstile; RECOVERY_CRITICAL waits on the turnstile; BACKGROUND probes the
+    reservation and turnstile nonblocking. This prevents BACKGROUND from
+    overtaking a registered MONITOR, not a total order between waiters.
     """
 
     STANDARD = "standard"
@@ -174,6 +175,13 @@ def writer_turnstile_path(db_path: Path | str) -> Path:
 
     resolved = _resolve_path(db_path)
     return resolved.with_name(resolved.name + ".writer-turnstile")
+
+
+def writer_monitor_waiter_path(db_path: Path | str) -> Path:
+    """Return the lock-only reservation path for MONITOR waiters."""
+
+    resolved = _resolve_path(db_path)
+    return resolved.with_name(resolved.name + ".writer-monitor-waiters")
 
 
 def _priority_uses_turnstile(priority: WritePriority) -> bool:
@@ -365,9 +373,23 @@ class WriteCoordinator:
             for db in ordered:
                 db_path = self._db_paths[db]
                 process_lock = self._process_locks[db_path]
+                monitor_waiter_fd: int | None = None
                 turnstile_fd: int | None = None
                 process_acquired = False
                 try:
+                    if priority is WritePriority.MONITOR:
+                        monitor_waiter_fd = self._acquire_monitor_waiter_reservation(
+                            db_path,
+                            deadline=deadline,
+                            db=db,
+                            owner=owner,
+                        )
+                    elif priority is WritePriority.BACKGROUND_RECOVERY:
+                        monitor_waiter_fd = self._acquire_background_reservation(
+                            db_path,
+                            db=db,
+                            owner=owner,
+                        )
                     if _priority_uses_turnstile(priority):
                         turnstile_fd = self._acquire_turnstile(
                             db_path,
@@ -399,6 +421,8 @@ class WriteCoordinator:
                 finally:
                     if turnstile_fd is not None:
                         self._release_turnstile(turnstile_fd)
+                    if monitor_waiter_fd is not None:
+                        self._release_turnstile(monitor_waiter_fd)
                 acquired.append(
                     _AcquiredGate(
                         db=db,
@@ -500,6 +524,51 @@ class WriteCoordinator:
                 if deadline is not None:
                     sleep_for = max(0.001, min(sleep_for, deadline - self._clock()))
                 self._sleep(sleep_for)
+
+    def _acquire_monitor_waiter_reservation(
+        self,
+        db_path: Path,
+        *,
+        deadline: float | None,
+        db: DBIdentity,
+        owner: str,
+    ) -> int:
+        path = writer_monitor_waiter_path(db_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                return fd
+            except BlockingIOError as exc:
+                if deadline is not None and self._clock() >= deadline:
+                    os.close(fd)
+                    raise WriteLeaseTimeout(
+                        f"DB monitor waiter reservation timed out for owner={owner} db={db.value}"
+                    ) from exc
+                sleep_for = 0.01
+                if deadline is not None:
+                    sleep_for = max(0.001, min(sleep_for, deadline - self._clock()))
+                self._sleep(sleep_for)
+
+    @staticmethod
+    def _acquire_background_reservation(
+        db_path: Path,
+        *,
+        db: DBIdentity,
+        owner: str,
+    ) -> int:
+        path = writer_monitor_waiter_path(db_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fd
+        except BlockingIOError as exc:
+            os.close(fd)
+            raise WriteLeaseTimeout(
+                f"DB writer monitor waiter reservation deferred for owner={owner} db={db.value}"
+            ) from exc
 
     @staticmethod
     def _release_turnstile(fd: int) -> None:

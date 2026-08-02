@@ -13891,6 +13891,49 @@ def _writer_process_waiter(db_path, started, result_queue):
         result_queue.put((type(exc).__name__, str(exc)))
 
 
+def _turnstile_holder_process(db_path, ready, release):
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator
+
+    coordinator = WriteCoordinator({DBIdentity.TRADE: Path(db_path)})
+    fd = coordinator._acquire_turnstile(
+        db_path,
+        deadline=None,
+        db=DBIdentity.TRADE,
+        owner="turnstile-holder",
+        blocking=True,
+    )
+    try:
+        ready.set()
+        release.wait(timeout=30)
+    finally:
+        coordinator._release_turnstile(fd)
+
+
+def _registered_monitor_waiter_process(db_path, registered, result_queue):
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WritePriority
+
+    try:
+        coordinator = WriteCoordinator({DBIdentity.TRADE: Path(db_path)})
+        acquire = coordinator._acquire_monitor_waiter_reservation
+
+        def signal_registered(*args, **kwargs):
+            fd = acquire(*args, **kwargs)
+            registered.set()
+            return fd
+
+        coordinator._acquire_monitor_waiter_reservation = signal_registered
+        with coordinator.transaction(
+            (DBIdentity.TRADE,),
+            owner="registered-monitor-waiter",
+            priority=WritePriority.MONITOR,
+            connection_factory=lambda path: sqlite3.connect(path, timeout=5),
+        ) as tx:
+            tx.connection.execute("INSERT INTO writes(owner) VALUES ('monitor')")
+        result_queue.put("ok")
+    except BaseException as exc:  # pragma: no cover - child failure is asserted by parent.
+        result_queue.put((type(exc).__name__, str(exc)))
+
+
 def test_process_shared_trade_turnstile_allows_seven_exactly_once_writes(tmp_path):
     """Real WAL writers contend through one TRADE gate without duplicate rows."""
     db_path = tmp_path / "turnstile-seven.db"
@@ -14101,6 +14144,94 @@ def test_process_death_resets_holder_and_waiter_state(tmp_path):
     assert waiter_queue.get(timeout=2) == "ok"
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT owner FROM writes").fetchall() == [("monitor",)]
+
+
+def test_cross_process_monitor_reservation_blocks_background_loop(tmp_path):
+    """A registered MONITOR reservation defeats non-FIFO flock overtaking."""
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WriteLeaseTimeout
+
+    db_path = tmp_path / "monitor-reservation-loop.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE writes(owner TEXT PRIMARY KEY)")
+    ctx = multiprocessing.get_context("spawn")
+    holder_ready, holder_release = ctx.Event(), ctx.Event()
+    holder = ctx.Process(
+        target=_turnstile_holder_process,
+        args=(str(db_path), holder_ready, holder_release),
+    )
+    holder.start()
+    assert holder_ready.wait(timeout=5)
+    registered, result_queue = ctx.Event(), ctx.Queue()
+    monitor = ctx.Process(
+        target=_registered_monitor_waiter_process,
+        args=(str(db_path), registered, result_queue),
+    )
+    monitor.start()
+    assert registered.wait(timeout=5)
+
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+    successes = 0
+    for _ in range(157):
+        try:
+            with coordinator.lease(
+                (DBIdentity.TRADE,),
+                owner="background-loop",
+                priority="background_recovery",
+                deadline_ms=0,
+            ):
+                successes += 1
+        except WriteLeaseTimeout:
+            pass
+    assert successes == 0
+    holder_release.set()
+    holder.join(timeout=5)
+    monitor.join(timeout=5)
+    assert holder.exitcode == 0
+    assert monitor.exitcode == 0
+    assert result_queue.get(timeout=2) == "ok"
+
+
+def test_monitor_waiter_death_releases_kernel_reservation(tmp_path):
+    """Killing a queued waiter clears only its kernel reservation."""
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator
+
+    db_path = tmp_path / "monitor-reservation-death.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE writes(owner TEXT PRIMARY KEY)")
+    ctx = multiprocessing.get_context("spawn")
+    holder_ready, holder_release = ctx.Event(), ctx.Event()
+    holder = ctx.Process(
+        target=_turnstile_holder_process,
+        args=(str(db_path), holder_ready, holder_release),
+    )
+    holder.start()
+    assert holder_ready.wait(timeout=5)
+    registered, result_queue = ctx.Event(), ctx.Queue()
+    waiter = ctx.Process(
+        target=_registered_monitor_waiter_process,
+        args=(str(db_path), registered, result_queue),
+    )
+    waiter.start()
+    assert registered.wait(timeout=5)
+    waiter.terminate()
+    waiter.join(timeout=5)
+    assert waiter.exitcode != 0
+    holder_release.set()
+    holder.join(timeout=5)
+    assert holder.exitcode == 0
+
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+    with coordinator.transaction(
+        (DBIdentity.TRADE,),
+        owner="background-after-waiter-death",
+        priority="background_recovery",
+        connection_factory=lambda path: sqlite3.connect(path, timeout=5),
+    ) as tx:
+        tx.connection.execute("INSERT INTO writes(owner) VALUES ('background')")
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT owner FROM writes").fetchall() == [("background",)]
 
 
 def test_full_recovery_quantum_is_one_row_and_specialized_debts_stay_in_full_lane(
