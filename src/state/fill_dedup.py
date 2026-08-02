@@ -90,6 +90,17 @@ def _decimal(value: object) -> Decimal | None:
     return result if result.is_finite() else None
 
 
+def canonical_decimal_text(value: object) -> str:
+    """Serialize one finite economic Decimal without passing through float."""
+
+    result = _decimal(value)
+    if result is None:
+        raise PartialExitEconomicDebtError(
+            f"partial EXIT economic value is not a finite decimal: {value!r}"
+        )
+    return format(result.normalize(), "f")
+
+
 def _position_events_available(conn: sqlite3.Connection) -> bool:
     try:
         return conn.execute(
@@ -454,6 +465,8 @@ def recorded_partial_exit_fill_cursors(
 def partial_exit_realized_pnl_fold(
     conn: sqlite3.Connection,
     position_id: str,
+    *,
+    allow_unrepaired_legacy: bool = False,
 ) -> Decimal:
     """Fold persisted, stable-identity partial EXIT deltas exactly once.
 
@@ -500,7 +513,7 @@ def partial_exit_realized_pnl_fold(
     for row, payload in parsed:
         identity = str(payload.get("economic_fill_identity") or "").strip()
         if not identity:
-            if has_repair:
+            if allow_unrepaired_legacy or has_repair:
                 continue
             raise PartialExitEconomicDebtError(
                 f"partial EXIT economics repair required: position_id={position_id} event_id={row['event_id']}"
@@ -580,6 +593,7 @@ def legacy_partial_exit_repair_fills(
     if not legacy_by_order:
         return []
 
+    repaired = recorded_partial_exit_fill_cursors(conn, position_id)
     exact: list[EconomicExitFill] = []
     for order_id, legacy_quantity in legacy_by_order.items():
         fills = economic_exit_fills_for_position(
@@ -592,5 +606,5 @@ def legacy_partial_exit_repair_fills(
                 f"position_id={position_id} order_id={order_id} "
                 f"legacy={legacy_quantity} canonical={canonical_quantity}"
             )
-        exact.extend(fills)
+        exact.extend(fill for fill in fills if fill.identity not in repaired)
     return exact

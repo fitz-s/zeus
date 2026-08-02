@@ -353,7 +353,7 @@ def _current_phase_in_db(conn, trade_id: str) -> dict:
     return {"status": "ok", "phase": phase_str}
 
 
-def _canonical_partial_exit_realized_pnl(conn, position_id: str) -> float:
+def _canonical_partial_exit_realized_pnl(conn, position_id: str) -> Decimal:
     """Fold canonical partial EXIT economics before residual settlement.
 
     The shared fold preserves legacy/minimal connections that never had
@@ -363,7 +363,7 @@ def _canonical_partial_exit_realized_pnl(conn, position_id: str) -> float:
 
     from src.state.fill_dedup import partial_exit_realized_pnl_fold
 
-    return float(partial_exit_realized_pnl_fold(conn, position_id))
+    return partial_exit_realized_pnl_fold(conn, position_id)
 
 
 def _repair_legacy_partial_exit_economics(conn, pos) -> None:
@@ -378,6 +378,7 @@ def _repair_legacy_partial_exit_economics(conn, pos) -> None:
     from src.state.db import append_many_and_project
     from src.state.fill_dedup import (
         PartialExitEconomicDebtError,
+        canonical_decimal_text,
         legacy_partial_exit_repair_fills,
         partial_exit_realized_pnl_fold,
     )
@@ -398,34 +399,39 @@ def _repair_legacy_partial_exit_economics(conn, pos) -> None:
             f"partial EXIT repair phase unsupported: position_id={trade_id} phase={phase}"
         )
     unit_cost = cost / shares
-    cumulative = Decimal("0")
-    for fill in fills:
+    cumulative = partial_exit_realized_pnl_fold(
+        conn, trade_id, allow_unrepaired_legacy=True
+    )
+    repair_events: list[dict] = []
+    projection: dict | None = None
+    sequence_no = _next_canonical_sequence_no(conn, trade_id)
+    for offset, fill in enumerate(fills):
         allocated_cost = fill.quantity * unit_cost
         delta = fill.notional - allocated_cost
         cumulative += delta
         occurred_at = datetime.now(timezone.utc).isoformat()
-        events, projection = build_monitor_refreshed_canonical_write(
+        built_events, projection = build_monitor_refreshed_canonical_write(
             pos,
-            sequence_no=_next_canonical_sequence_no(conn, trade_id),
+            sequence_no=sequence_no + offset,
             phase_after=str(phase),
             source_module="src.execution.harvester",
             occurred_at=occurred_at,
         )
-        event = dict(events[0])
+        event = dict(built_events[0])
         payload = json.loads(str(event["payload_json"] or "{}"))
         payload.update(
             {
                 "semantic_event": "PARTIAL_EXIT_ECONOMICS_REPAIRED",
                 "economic_fill_identity": fill.identity,
-                "economic_fill_cumulative_shares": float(fill.quantity),
-                "economic_fill_cumulative_notional_usd": float(fill.notional),
-                "filled_shares": float(fill.quantity),
-                "filled_notional_usd": float(fill.notional),
-                "remaining_shares": float(shares),
-                "fill_price": float(fill.unit_price),
-                "allocated_cost_basis_usd": float(allocated_cost),
-                "realized_pnl_delta_usd": float(delta),
-                "cumulative_realized_pnl_usd": float(cumulative),
+                "economic_fill_cumulative_shares": canonical_decimal_text(fill.quantity),
+                "economic_fill_cumulative_notional_usd": canonical_decimal_text(fill.notional),
+                "filled_shares": canonical_decimal_text(fill.quantity),
+                "filled_notional_usd": canonical_decimal_text(fill.notional),
+                "remaining_shares": canonical_decimal_text(shares),
+                "fill_price": canonical_decimal_text(fill.unit_price),
+                "allocated_cost_basis_usd": canonical_decimal_text(allocated_cost),
+                "realized_pnl_delta_usd": canonical_decimal_text(delta),
+                "cumulative_realized_pnl_usd": canonical_decimal_text(cumulative),
             }
         )
         event["event_id"] = (
@@ -436,8 +442,10 @@ def _repair_legacy_partial_exit_economics(conn, pos) -> None:
         event["order_id"] = fill.venue_order_id or None
         event["payload_json"] = json.dumps(payload, sort_keys=True)
         projection["updated_at"] = occurred_at
-        projection["realized_pnl_usd"] = float(cumulative)
-        append_many_and_project(conn, [event], projection)
+        projection["realized_pnl_usd"] = canonical_decimal_text(cumulative)
+        repair_events.append(event)
+    if repair_events and projection is not None:
+        append_many_and_project(conn, repair_events, projection)
     # Validate the newly append-only repair fold before settlement consumes it.
     partial_exit_realized_pnl_fold(conn, trade_id)
 
@@ -456,9 +464,11 @@ def _dual_write_canonical_settlement_if_available(
     settlement_temperature_metric: str = "",
     settlement_source: str = "",
     settlement_value: object | None = None,
+    realized_pnl_usd: object | None = None,
 ) -> bool:
     from src.engine.lifecycle_events import build_settlement_canonical_write
     from src.state.db import append_many_and_project
+    from src.state.fill_dedup import canonical_decimal_text
 
     trade_id = getattr(pos, "trade_id", "")
 
@@ -519,6 +529,8 @@ def _dual_write_canonical_settlement_if_available(
             settlement_source=settlement_source,
             settlement_value=settlement_value,
         )
+        if realized_pnl_usd is not None:
+            projection["realized_pnl_usd"] = canonical_decimal_text(realized_pnl_usd)
         append_many_and_project(conn, events, projection)
     except Exception as exc:
         raise RuntimeError(
@@ -2705,14 +2717,15 @@ def _settle_positions(
 
         from src.execution.exit_lifecycle import mark_settled
         closed = mark_settled(portfolio, pos.trade_id, settlement_price, "SETTLEMENT")
-        residual_pnl = (
-            closed.pnl
-            if closed is not None
-            else round(shares * exit_price - settlement_cost_basis, 2)
+        residual_pnl = Decimal(str(shares)) * Decimal(str(exit_price)) - Decimal(
+            str(settlement_cost_basis)
         )
-        pnl = round(partial_exit_realized_pnl + residual_pnl, 2)
+        pnl = partial_exit_realized_pnl + residual_pnl
+        from src.state.fill_dedup import canonical_decimal_text
+
+        pnl_text = canonical_decimal_text(pnl)
         if closed is not None:
-            closed.pnl = pnl
+            closed.pnl = pnl_text
         outcome = 1 if exit_price > 0 else 0
 
         if closed is not None:
@@ -2724,7 +2737,7 @@ def _settle_positions(
                 direction=closed.direction,
                 p_posterior=closed.p_posterior,
                 outcome=outcome,
-                pnl=round(pnl, 2),
+                pnl=pnl_text,
                 decision_snapshot_id=closed.decision_snapshot_id,
                 edge_source=closed.edge_source,
                 strategy=closed.strategy,
@@ -2758,7 +2771,7 @@ def _settle_positions(
             "winning_bin": evidence_winning_bin, "position_bin": pos.bin_label,
             "direction": pos.direction, "won": won,
             "position_won": bool(exit_price > 0),
-            "pnl": round(pnl, 2), "entry_price": pos.entry_price,
+            "pnl": pnl_text, "entry_price": pos.entry_price,
             "exit_price": getattr(closed or pos, "exit_price", settlement_price),
             "p_posterior": pos.p_posterior,
             "outcome": outcome,
@@ -2800,6 +2813,7 @@ def _settle_positions(
             settlement_temperature_metric=settlement_temperature_metric,
             settlement_source=settlement_source,
             settlement_value=settlement_value,
+            realized_pnl_usd=pnl,
         )
 
         # SD-1: write settlement outcome back to trade_decisions
@@ -2813,7 +2827,7 @@ def _settle_positions(
                            status = CASE WHEN status IN ('entered', 'day0_window') THEN 'settled' ELSE status END
                        WHERE runtime_trade_id = ?
                          AND status NOT IN ('exited', 'unresolved_ghost', 'settled')""",
-                    (round(pnl, 4), rtid),
+                    (pnl_text, rtid),
                 )
         except Exception as exc:
             logger.warning('SD-1: failed to update trade_decisions for %s: %s', pos.trade_id, exc)
