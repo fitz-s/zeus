@@ -5005,6 +5005,106 @@ def _get_events(conn, command_id):
     return list_events(conn, command_id)
 
 
+def _seed_partial_exit_dust_case(conn, *, filled_size="156.6", residual="0.4"):
+    _insert(
+        conn,
+        command_id="cmd-entry",
+        position_id="pos-001",
+        size=157.0,
+        price=0.20,
+    )
+    _advance_to_acked(
+        conn,
+        command_id="cmd-entry",
+        venue_order_id="ord-entry",
+    )
+    _seed_pending_entry_projection(
+        conn,
+        command_id="cmd-entry",
+        order_id="ord-entry",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               shares = ?,
+               chain_state = 'synced',
+               chain_shares = ?,
+               chain_avg_price = 0.20,
+               chain_cost_basis_usd = 0.08,
+               cost_basis_usd = 0.08,
+               entry_price = 0.20,
+               chain_seen_at = '2026-04-26T00:09:00+00:00',
+               order_id = 'ord-exit',
+               order_status = 'sell_pending_confirmation',
+               updated_at = '2026-04-26T00:09:00+00:00'
+         WHERE position_id = 'pos-001'
+        """,
+        (residual, residual),
+    )
+    _seed_full_exit_intent(conn, position_id="pos-001", shares=157.0)
+    _insert(
+        conn,
+        command_id="cmd-exit",
+        position_id="pos-001",
+        intent_kind="EXIT",
+        side="SELL",
+        size=157.0,
+        price=0.11,
+        token_id="tok-001",
+        created_at="2026-04-26T00:04:00Z",
+    )
+    _advance_to_partial(
+        conn,
+        command_id="cmd-exit",
+        venue_order_id="ord-exit",
+    )
+    _append_trade_fact(
+        conn,
+        command_id="cmd-exit",
+        order_id="ord-exit",
+        trade_id="trade-dust",
+        state="CONFIRMED",
+        filled_size=filled_size,
+        fill_price="0.11",
+        tx_hash="0xdust",
+    )
+
+
+def _configure_partial_exit_dust_client(mock_client, *, point_status):
+    mock_client.get_open_orders.return_value = [
+        {"orderID": "ord-exit", "status": "LIVE"},
+    ]
+    mock_client.get_order.return_value = (
+        None
+        if point_status is None
+        else {
+            "orderID": "ord-exit",
+            "status": point_status,
+            "original_size": "157",
+            "size_matched": "156.6",
+            "remaining_size": "0.4",
+        }
+    )
+    mock_client.get_trades.return_value = [
+        {
+            "id": "trade-dust",
+            "status": "CONFIRMED",
+            "transaction_hash": "0xdust",
+            "market": "condition-test",
+            "maker_orders": [
+                {
+                    "order_id": "ord-exit",
+                    "asset_id": "tok-001",
+                    "side": "SELL",
+                    "matched_amount": "156.6",
+                    "price": "0.11",
+                },
+            ],
+        },
+    ]
+
+
 def _connect_file_db(path):
     from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
@@ -24070,6 +24170,214 @@ class TestRecoveryResolutionTable:
             "order_id": current_order_id,
             "order_status": "sell_pending_confirmation",
         }
+
+    def test_partial_exit_point_terminal_overrides_stale_open_order_list(
+        self,
+        conn,
+        mock_client,
+        monkeypatch,
+    ):
+        """Fresh point terminal truth closes only the unfilled GTC remainder."""
+        from src.execution import command_recovery
+
+        _seed_partial_exit_dust_case(conn)
+        _configure_partial_exit_dust_client(mock_client, point_status="CANCELED")
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-04-26T00:09:00+00:00",
+        )
+
+        summary = command_recovery.reconcile_partial_remainders(
+            conn,
+            mock_client,
+            live_tick_scope=True,
+        )
+        release = command_recovery.reconcile_pending_exit_terminal_order_releases(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert release == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-exit") == "EXPIRED"
+        assert [event["event_type"] for event in _get_events(conn, "cmd-exit")][-1] == "EXPIRED"
+        fact = conn.execute(
+            """
+            SELECT state, matched_size, remaining_size, raw_payload_json
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-exit'
+            """
+        ).fetchone()
+        payload = json.loads(fact["raw_payload_json"])
+        assert (fact["state"], fact["matched_size"], fact["remaining_size"]) == (
+            "EXPIRED",
+            "156.6",
+            "0",
+        )
+        assert payload["open_order_absent"] is False
+        assert payload["open_order_list_conflict"] is True
+        assert payload["point_order_authority"] == "terminal_point_status_over_open_order_list"
+        assert payload["point_order_status"] == "CANCELED"
+        assert payload["point_order"]["size_matched"] == "156.6"
+        current = conn.execute(
+            """
+            SELECT phase, shares, chain_shares, order_id, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": 0.4,
+            "chain_shares": 0.4,
+            "order_id": None,
+            "order_status": "filled",
+        }
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE intent_kind = 'EXIT'"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'pos-001'
+               AND event_type = 'EXIT_RETRY_RELEASED'
+            """
+        ).fetchone()[0] == 1
+
+    def test_partial_exit_point_live_preserves_partial_order_and_dust(
+        self,
+        conn,
+        mock_client,
+        monkeypatch,
+    ):
+        """A live point order remains active even when its remainder is sub-minimum."""
+        from src.execution import command_recovery
+
+        _seed_partial_exit_dust_case(conn)
+        _configure_partial_exit_dust_client(mock_client, point_status="LIVE")
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-04-26T00:09:00+00:00",
+        )
+
+        summary = command_recovery.reconcile_partial_remainders(
+            conn,
+            mock_client,
+            live_tick_scope=True,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        assert _get_state(conn, "cmd-exit") == "PARTIAL"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = 'cmd-exit'"
+        ).fetchone()[0] == 0
+        current = conn.execute(
+            "SELECT phase, shares, order_id, order_status FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "shares": 0.4,
+            "order_id": "ord-exit",
+            "order_status": "sell_pending_confirmation",
+        }
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE intent_kind = 'EXIT'"
+        ).fetchone()[0] == 1
+
+    def test_partial_exit_point_unavailable_stays_fail_closed(
+        self,
+        conn,
+        mock_client,
+        monkeypatch,
+    ):
+        """Open-order absence plus no point response is not terminal proof."""
+        from src.execution import command_recovery
+
+        _seed_partial_exit_dust_case(conn)
+        _configure_partial_exit_dust_client(mock_client, point_status=None)
+        mock_client.get_open_orders.return_value = []
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-04-26T00:09:00+00:00",
+        )
+
+        summary = command_recovery.reconcile_partial_remainders(
+            conn,
+            mock_client,
+            live_tick_scope=True,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        assert _get_state(conn, "cmd-exit") == "PARTIAL"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = 'cmd-exit'"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE intent_kind = 'EXIT'"
+        ).fetchone()[0] == 1
+
+    @pytest.mark.parametrize(
+        ("point_status", "expected_fact_state"),
+        (
+            ("CANCELED", "EXPIRED"),
+            ("CANCELLED", "EXPIRED"),
+            ("EXPIRED", "EXPIRED"),
+            ("REJECTED", "EXPIRED"),
+        ),
+    )
+    def test_partial_exit_terminal_synonyms_are_idempotent_over_stale_list(
+        self,
+        conn,
+        mock_client,
+        monkeypatch,
+        point_status,
+        expected_fact_state,
+    ):
+        from src.execution import command_recovery
+
+        _seed_partial_exit_dust_case(conn)
+        _configure_partial_exit_dust_client(mock_client, point_status=point_status)
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-04-26T00:09:00+00:00",
+        )
+
+        first = command_recovery.reconcile_partial_remainders(
+            conn,
+            mock_client,
+            live_tick_scope=True,
+        )
+        first_release = command_recovery.reconcile_pending_exit_terminal_order_releases(conn)
+        second = command_recovery.reconcile_partial_remainders(
+            conn,
+            mock_client,
+            live_tick_scope=True,
+        )
+        second_release = command_recovery.reconcile_pending_exit_terminal_order_releases(conn)
+
+        assert first["advanced"] == 1
+        assert first_release["advanced"] == 1
+        assert second == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        assert second_release == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = 'cmd-exit'"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = 'cmd-exit' AND event_type = 'EXPIRED'"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'pos-001'
+               AND event_type = 'EXIT_RETRY_RELEASED'
+            """
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT state FROM venue_order_facts WHERE command_id = 'cmd-exit'"
+        ).fetchone()[0] == expected_fact_state
 
     def test_partial_remainder_stays_partial_while_order_is_still_open(
         self,

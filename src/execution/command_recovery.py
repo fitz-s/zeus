@@ -13862,6 +13862,7 @@ def _append_partial_remainder_terminal_order_fact(
     point_order_status: str,
     point_order: dict | None,
     authenticated_trade_count: int | None = None,
+    open_order_present: bool = False,
 ) -> int:
     command_id = str(command.get("command_id") or "")
     venue_order_id = str(command.get("venue_order_id") or "")
@@ -13879,12 +13880,19 @@ def _append_partial_remainder_terminal_order_fact(
         ),
         "venue_order_id": venue_order_id,
         "command_id": command_id,
-        "open_order_absent": True,
+        "open_order_absent": not open_order_present,
         "point_order_status": point_order_status,
         "point_order": point_order,
         "remaining_size": "0",
         "matched_size": matched_size,
     }
+    if open_order_present:
+        payload.update(
+            {
+                "open_order_list_conflict": True,
+                "point_order_authority": "terminal_point_status_over_open_order_list",
+            }
+        )
     if authenticated_trade_count is not None:
         payload["authenticated_trade_count"] = authenticated_trade_count
     return append_order_fact(
@@ -14126,25 +14134,10 @@ def _point_order_terminal_for_partial_remainder(client, venue_order_id: str) -> 
         raise RuntimeError("client lacks get_order; partial remainder terminal proof is unknown")
     raw = _venue_order_payload(get_order(venue_order_id))
     if raw is None:
-        return True, "NOT_FOUND", None
+        return False, "UNAVAILABLE", None
     status = _order_status(raw)
     if status in _TERMINAL_NO_FILL_VENUE_STATUSES:
         return True, status, raw
-    # GONE-ORDER TERMINAL PROOF (2026-06-16): a PARTIAL whose remainder is already
-    # confirmed ABSENT from client.get_open_orders (the only candidates that reach
-    # this function — see reconcile_partial_remainders) and whose client.get_order
-    # returns UNKNOWN/empty (the venue has NO live record: OrderState(status='UNKNOWN',
-    # raw={}) -> _venue_order_payload synthesizes only {'status':'UNKNOWN','orderID':..}
-    # with no size/matched/price fields) is GONE — the unfilled remainder was cancelled/
-    # purged and the venue retains no order. Absent-from-open-orders + no-live-record is
-    # terminal proof; the recorded matched_size (the real partial fill) is preserved on
-    # the EXPIRED fact. Without this, such orders sit PARTIALLY_MATCHED forever (open ->
-    # HOLD_REST_IN_PROGRESS blocks the family; NOT terminal_unfilled -> never escalates),
-    # zero new ENTRY orders despite a healthy +edge decision lane (live 2026-06-16). A
-    # LIVE/RESTING/PARTIALLY_MATCHED/MATCHED/FILLED status (a real live/fill record) is
-    # NOT terminalized here — only the no-live-record UNKNOWN/absent case.
-    if _point_order_no_live_record(raw, expected_order_id=venue_order_id):
-        return True, status or "NOT_FOUND", raw
     return False, status or "UNKNOWN", raw
 
 
@@ -14223,14 +14216,14 @@ def reconcile_partial_remainders(
                 else:
                     summary["stayed"] += 1
                 continue
-            if venue_order_id in open_order_ids:
-                summary["stayed"] += 1
-                continue
             now = _now_iso()
             point_terminal, point_status, point_order = _point_order_terminal_for_partial_remainder(
                 client,
                 venue_order_id,
             )
+            if not point_terminal and venue_order_id in open_order_ids:
+                summary["stayed"] += 1
+                continue
             if not point_terminal:
                 # MATCHED is treated like FILLED here (GATE #84 follow-up, 2026-06-22):
                 # a partial remainder ABSENT from open orders whose point order reports
@@ -14391,6 +14384,7 @@ def reconcile_partial_remainders(
                             if authenticated is not None
                             else None
                         ),
+                        open_order_present=venue_order_id in open_order_ids,
                     )
                 resolved_findings = _resolve_m5_local_orphan_findings(
                     conn,
