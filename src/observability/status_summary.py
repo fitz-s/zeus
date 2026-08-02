@@ -140,6 +140,37 @@ _BUSINESS_CYCLE_KEYS = _BUSINESS_CYCLE_KEYS_PRESERVED_ON_AUX_PULSE - {
 }
 
 
+def _is_full_book_exit_monitor_cycle(cycle: dict) -> bool:
+    return (
+        str(cycle.get("mode") or "") == "exit_monitor"
+        and not bool(cycle.get("targeted_exit_monitor"))
+    )
+
+
+def _is_targeted_exit_monitor_cycle(cycle: dict) -> bool:
+    return (
+        str(cycle.get("mode") or "") == "exit_monitor"
+        and bool(cycle.get("targeted_exit_monitor"))
+    )
+
+
+def _merge_full_book_exit_monitor_cycle(prior_cycle: dict, incoming_cycle: dict) -> dict:
+    """Replace current monitor state while retaining prior business counters.
+
+    A full-book artifact is a replacement boundary: every prior cycle key not
+    explicitly classified as business activity is transient monitor state. This
+    keeps future monitor counters/lists/reasons from becoming sticky without a
+    fragile per-key transient allowlist.
+    """
+    merged_cycle = {
+        key: prior_cycle[key]
+        for key in _BUSINESS_CYCLE_KEYS_PRESERVED_ON_AUX_PULSE
+        if key in prior_cycle
+    }
+    merged_cycle.update(incoming_cycle)
+    return merged_cycle
+
+
 def _cycle_has_business_activity(cycle: dict | None) -> bool:
     if not isinstance(cycle, dict):
         return False
@@ -214,7 +245,19 @@ def _write_cycle_status(
     if cycle_summary is not None:
         incoming_cycle = dict(cycle_summary)
         prior_cycle = prior.get("cycle") if isinstance(prior, dict) else None
-        if (
+        full_book_exit_monitor = _is_full_book_exit_monitor_cycle(incoming_cycle)
+        targeted_exit_monitor = _is_targeted_exit_monitor_cycle(incoming_cycle)
+        if isinstance(prior_cycle, dict) and full_book_exit_monitor:
+            status["cycle"] = _merge_full_book_exit_monitor_cycle(
+                prior_cycle, incoming_cycle
+            )
+        elif isinstance(prior_cycle, dict) and targeted_exit_monitor:
+            # Targeted monitor artifacts are not full-book current state.
+            # Production targeted runs do not write status, but keeping this
+            # boundary here prevents a future caller from clearing or
+            # replacing the current full-book monitor projection.
+            status["cycle"] = dict(prior_cycle)
+        elif (
             isinstance(prior_cycle, dict)
             and "candidates" in prior_cycle
             and "candidates" not in incoming_cycle

@@ -1,7 +1,7 @@
 # Created: 2026-04-19
-# Last reused/audited: 2026-07-10
+# Last reused/audited: 2026-08-02
 # Authority basis: Phase 10B DT-Seam Cleanup, 2026-04-29 design simplification audit F4, 2026-05-01 stale live-state artifact tracking, and 2026-05-15 K1 forecast DB split status-summary false-flag repair.
-# Lifecycle: created=2026-04-19; last_reviewed=2026-05-21; last_reused=2026-07-10
+# Lifecycle: created=2026-04-19; last_reviewed=2026-08-02; last_reused=2026-08-02
 # Purpose: Phase 10B "DT-Seam Cleanup" antibodies (R-CL..R-CP).
 #          Dedicated test file per critic-carol cycle-3 L2 convention.
 #          Do NOT co-locate with test_phase10a_hygiene.py.
@@ -424,6 +424,138 @@ class TestRCPV2RowCountSensor:
             },
             "source_errors": [],
         }
+
+    def _patch_status_pulse_projection_only(self, status_summary_module, status_path, monkeypatch):
+        """Keep merge tests on the status projection boundary, without DB I/O."""
+        monkeypatch.setattr(status_summary_module, "STATUS_PATH", status_path)
+        monkeypatch.setattr(
+            status_summary_module,
+            "_refresh_minimal_runtime_read_model_for_status",
+            lambda status: True,
+        )
+        monkeypatch.setattr(
+            status_summary_module,
+            "_refresh_current_open_entry_orders_for_status",
+            lambda status: None,
+        )
+        monkeypatch.setattr(status_summary_module, "_refresh_control_status_for_pulse", lambda status: None)
+        monkeypatch.setattr(
+            status_summary_module,
+            "_refresh_pulse_infrastructure_status",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(status_summary_module, "_project_recommended_commands", lambda status: None)
+        monkeypatch.setattr(status_summary_module, "_get_execution_capability_status", lambda: {})
+        monkeypatch.setattr(
+            status_summary_module,
+            "annotate_truth_payload",
+            lambda payload, path, generated_at, authority: payload,
+        )
+
+    def test_full_book_exit_monitor_replaces_prior_transient_projection(self, tmp_path, monkeypatch):
+        """A healthy full-book pass cannot inherit prior monitor alarms or lists."""
+        from src.observability import status_summary as status_summary_module
+
+        status_path = tmp_path / "status_summary.json"
+        status_path.write_text(json.dumps({
+            "cycle": {
+                "mode": "exit_monitor",
+                "candidates": 7,
+                "processed": 7,
+                "monitoring_error": "FULL_BOOK_MONITOR_CANONICAL_PROGRESS_MISSING",
+                "monitor_canonical_write_failed": 2,
+                "monitor_exit_quote_missing_positions": ["stale-1"],
+                "monitor_exit_quote_missing_reasons": ["stale-reason"],
+                "monitor_future_transient_counter": 99,
+                "future_monitor_transient_counter": 101,
+                "held_monitor_defer_reason": "stale-defer",
+                "pending_exit_positions": ["stale-2"],
+                "monitor_closed_market_pending_settlement_positions": ["settled-1"],
+                "portfolio_rotation_error": "stale-rotation",
+                "day0_static_closed_market_tradable_bid_preserved": 1,
+            },
+        }))
+        self._patch_status_pulse_projection_only(status_summary_module, status_path, monkeypatch)
+
+        incoming = {
+            "mode": "exit_monitor",
+            "started_at": "2026-08-02T20:40:00+00:00",
+            "completed_at": "2026-08-02T20:40:01+00:00",
+            "monitors": 2,
+            "exits": 0,
+        }
+        status_summary_module.write_cycle_pulse(incoming)
+        cycle = json.loads(status_path.read_text())["cycle"]
+
+        assert cycle["candidates"] == 7
+        assert cycle["processed"] == 7
+        assert cycle["monitors"] == 2
+        assert cycle["exits"] == 0
+        for key in (
+            "monitoring_error",
+            "monitor_canonical_write_failed",
+            "monitor_exit_quote_missing_positions",
+            "monitor_exit_quote_missing_reasons",
+            "monitor_future_transient_counter",
+            "future_monitor_transient_counter",
+            "held_monitor_defer_reason",
+            "pending_exit_positions",
+            "monitor_closed_market_pending_settlement_positions",
+            "portfolio_rotation_error",
+            "day0_static_closed_market_tradable_bid_preserved",
+        ):
+            assert key not in cycle
+        assert "last_auxiliary_pulse" not in cycle
+
+    def test_targeted_exit_monitor_preserves_full_book_projection(self, tmp_path, monkeypatch):
+        """A targeted monitor artifact is never a replacement for full-book state."""
+        from src.observability import status_summary as status_summary_module
+
+        status_path = tmp_path / "status_summary.json"
+        prior_cycle = {
+            "mode": "exit_monitor",
+            "monitors": 2,
+            "monitoring_error": "FULL_BOOK_MONITOR_CANONICAL_PROGRESS_MISSING",
+            "monitor_canonical_write_failed": 1,
+            "monitor_exit_quote_missing_positions": ["current-1"],
+        }
+        status_path.write_text(json.dumps({"cycle": prior_cycle}))
+        self._patch_status_pulse_projection_only(status_summary_module, status_path, monkeypatch)
+
+        status_summary_module.write_cycle_pulse({
+            "mode": "exit_monitor",
+            "targeted_exit_monitor": True,
+            "monitors": 1,
+            "monitoring_error": "TARGETED_MONITOR_ONLY",
+        })
+
+        assert json.loads(status_path.read_text())["cycle"] == prior_cycle
+
+    def test_heartbeat_auxiliary_merge_preserves_business_and_monitor_projection(self, tmp_path, monkeypatch):
+        """A heartbeat pulse keeps prior business and full-book monitor fields."""
+        from src.observability import status_summary as status_summary_module
+
+        status_path = tmp_path / "status_summary.json"
+        prior_cycle = {
+            "mode": "exit_monitor",
+            "candidates": 7,
+            "processed": 7,
+            "monitoring_error": "FULL_BOOK_MONITOR_CANONICAL_PROGRESS_MISSING",
+            "monitor_canonical_write_failed": 2,
+            "monitor_exit_quote_missing_positions": ["current-1"],
+        }
+        status_path.write_text(json.dumps({"cycle": prior_cycle}))
+        self._patch_status_pulse_projection_only(status_summary_module, status_path, monkeypatch)
+
+        status_summary_module.write_cycle_pulse({"mode": "heartbeat_pulse", "heartbeat": True})
+        cycle = json.loads(status_path.read_text())["cycle"]
+
+        assert cycle["candidates"] == 7
+        assert cycle["processed"] == 7
+        assert cycle["monitoring_error"] == prior_cycle["monitoring_error"]
+        assert cycle["monitor_canonical_write_failed"] == 2
+        assert cycle["monitor_exit_quote_missing_positions"] == ["current-1"]
+        assert cycle["last_auxiliary_pulse"] == {"mode": "heartbeat_pulse", "heartbeat": True}
 
     def _empty_calibration_serving(self):
         return {
