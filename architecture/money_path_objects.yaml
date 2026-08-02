@@ -124,6 +124,21 @@ state_machines:
       - tests/money_path/test_002_execution_lifecycle_replay.py
       - tests/test_command_recovery.py
       - tests/test_order_truth_reducer.py
+  partial_exit_economic_events:
+    owner: src/execution/exit_lifecycle.py and src/execution/harvester.py
+    description: >
+      Semantic event tags stored inside canonical position-event payloads for
+      an exactly-once capital reduction and its legacy-economics repair. These
+      are economic fact vocabulary, not lifecycle phases or venue-command
+      states. They are registered explicitly because partial-exit realized PnL
+      and residual cost basis must remain machine-routable through MP-ECO and
+      MP-RED checks.
+    states:
+      - CAPITAL_REDUCTION_FILLED
+      - PARTIAL_EXIT_ECONOMICS_REPAIRED
+    invariant_tests:
+      - tests/test_exit_safety.py
+      - tests/test_harvester_settlement_redeem.py
   settlement_command:
     # 2026-07-25: on-chain redemption decoupled entirely (Zeus never submits
     # redeem tx; Polymarket settles win/loss on our behalf). harvester.py no

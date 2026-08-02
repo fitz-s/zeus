@@ -293,3 +293,8 @@
   the six contract clauses above; `py_compile`, planning-lock, and
   `git diff --check` pass. No live checkout, process, or production DB is read
   or mutated. Rollback is one hot-fix commit.
+- **Architecture registration:** harmonize the new payload vocabulary with the
+  existing `architecture/money_path_objects.yaml` fail-closed registry as
+  `partial_exit_economic_events`; it supersedes no lifecycle or command state.
+  `tests/test_exit_safety.py` and `tests/test_harvester_settlement_redeem.py`
+  provide the MP-ECO-001/002 and MP-RED-001/002 behavioral evidence.
