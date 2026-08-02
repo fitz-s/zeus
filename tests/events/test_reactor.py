@@ -377,6 +377,123 @@ def test_paused_entry_park_requires_exact_canonical_held_sell_work():
             {(request.position_id, request.family)}
         ),
     ) is False
+    assert _paused_entry_wake_should_park(
+        pause_reason="operator",
+        held_sell_request_exposure_provider=lambda: frozenset(),
+        allow_forecast_carrier_progress=True,
+    ) is False
+
+
+def test_paused_targeted_forecast_carrier_redecides_without_touching_ordinary_queue():
+    """A pause fences BUY actuation, not the latest targeted FSR carrier."""
+
+    conn, store = _store()
+    carrier = _forecast_event("paused-latest-carrier")
+    ordinary = _forecast_event("paused-ordinary-queue")
+    store.insert_or_ignore(carrier)
+    store.insert_or_ignore(ordinary)
+    paused = [True]
+    batch_identities: list[tuple[str, str]] = []
+    venue_buy_commands: list[str] = []
+
+    def submit(*_args, **_kwargs):
+        venue_buy_commands.append("unexpected")
+        raise AssertionError("paused carrier must not reach direct BUY submit")
+
+    def process_global_batch(events, _decision_time, *, claim_unpaged_winner=None):
+        assert claim_unpaged_winner is not None
+        assert tuple(event.event_id for event in events) == (carrier.event_id,)
+        batch_identities.extend(
+            (event.event_id, event.causal_snapshot_id) for event in events
+        )
+        reason = (
+            "entries_paused:operator"
+            if paused[0]
+            else "GLOBAL_AUCTION_NO_TRADE:NO_CURRENT_EXECUTABLE_POSITIVE_ORDER"
+        )
+        return GlobalBatchSubmitResult(
+            receipts={
+                event.event_id: EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason=reason,
+                    proof_accepted=False,
+                )
+                for event in events
+            },
+            winner_event_id=None,
+            venue_submit_count=0,
+            economic_cut_completed=not paused[0],
+        )
+
+    submit.process_global_batch = process_global_batch  # type: ignore[attr-defined]
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda *_args: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=submit,
+        reject=lambda *_args: None,
+        # This is the targeted forecast-posterior wake exception. The adapter's
+        # entries_paused receipt remains the BUY actuation fence.
+        paused_entry_wake_gate=lambda: False,
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+    decision_time = datetime(2026, 5, 24, 18, 3, tzinfo=timezone.utc)
+
+    parked = reactor.process_pending(
+        decision_time=decision_time,
+        limit=10,
+        targeted_event_ids=frozenset({carrier.event_id}),
+        targeted_only=True,
+    )
+
+    assert parked.retried == 1
+    assert venue_buy_commands == []
+    parked_row = conn.execute(
+        "SELECT processing_status, attempt_count, claimed_at FROM opportunity_event_processing WHERE event_id = ?",
+        (carrier.event_id,),
+    ).fetchone()
+    assert tuple(parked_row[:2]) == ("pending", 1)
+    retry_at = datetime.fromisoformat(parked_row[2])
+    assert conn.execute(
+        "SELECT processing_status, attempt_count FROM opportunity_event_processing WHERE event_id = ?",
+        (ordinary.event_id,),
+    ).fetchone() == ("pending", 0)
+
+    paused[0] = False
+    resumed = reactor.process_pending(
+        decision_time=retry_at + timedelta(microseconds=1),
+        limit=10,
+        targeted_event_ids=frozenset({carrier.event_id}),
+        targeted_only=True,
+    )
+
+    assert resumed.processed == 1
+    assert batch_identities == [
+        (carrier.event_id, carrier.causal_snapshot_id),
+        (carrier.event_id, carrier.causal_snapshot_id),
+    ]
+    assert venue_buy_commands == []
+    assert conn.execute(
+        "SELECT processing_status, attempt_count FROM opportunity_event_processing WHERE event_id = ?",
+        (carrier.event_id,),
+    ).fetchone() == ("processed", 2)
+    assert conn.execute(
+        "SELECT processing_status, attempt_count FROM opportunity_event_processing WHERE event_id = ?",
+        (ordinary.event_id,),
+    ).fetchone() == ("pending", 0)
+
+
+def test_targeted_forecast_wake_uses_carrier_exception_at_both_pause_gates():
+    from src.events.reactor import run_edli_event_reactor_cycle
+
+    source = inspect.getsource(run_edli_event_reactor_cycle)
+
+    assert "forecast_posterior_wake" in source
+    assert source.count("allow_forecast_carrier_progress=forecast_posterior_wake") == 2
 
 
 def test_paused_exact_held_sell_parks_when_exposure_provider_is_unavailable(caplog):

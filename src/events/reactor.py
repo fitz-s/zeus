@@ -713,19 +713,24 @@ def _paused_entry_wake_should_park(
     held_sell_request_exposure_provider: (
         Callable[[], frozenset[tuple[str, tuple[str, str, str]]]] | None
     ) = None,
+    allow_forecast_carrier_progress: bool = False,
 ) -> bool:
-    """Park paused entry work unless this wake has exact canonical held SELL work."""
+    """Park paused BUY work unless this wake has protected non-BUY progress."""
 
-    # SCOPE: global new-entry admission only. DRAIN: keep every opportunity row
-    # PENDING until the pause clears, or this producer carries one exact held-SELL
-    # request whose canonical position/family still has money at risk. RESET: a
-    # cleared pause or a matching current request leaves this gate without changing
-    # event identity. Unknown control retains the exit path; unavailable exact
-    # exposure parks this global actuation while the local monitor keeps running.
+    # SCOPE: global new-entry BUY actuation only; it never blocks a targeted
+    # forecast_posterior_advanced carrier from enqueue/supersession or its bounded
+    # no-submit redecision bookkeeping. DRAIN: that targeted carrier reaches the
+    # existing adapter pause fence and remains retryable, while ordinary paused
+    # queue rows stay unclaimed; exact canonical held-SELL work keeps its existing
+    # reduce-only route. RESET: clearing the global pause re-decides the same latest
+    # carrier identity. Unknown control retains the exit path; unavailable exact
+    # exposure parks global held-SELL actuation while the local monitor keeps running.
     if (
         pause_reason is None
         or str(pause_reason).startswith("entries_pause_control_unreadable:")
     ):
+        return False
+    if allow_forecast_carrier_progress:
         return False
     if not held_sell_reauction_requests:
         return True
@@ -7018,10 +7023,16 @@ def run_edli_event_reactor_cycle(
         if all(family) and family not in forecast_wake_families:
             forecast_wake_families.add(family)
             forecast_wake_family_order.append(family)
-    targeted_forecast_wake = (
-        producer_wake_reason
-        in {"forecast_posterior_advanced", GLOBAL_AUCTION_COMPLETION_WAKE_REASON}
+    forecast_posterior_wake = (
+        producer_wake_reason == "forecast_posterior_advanced"
         and bool(forecast_wake_families)
+    )
+    targeted_forecast_wake = (
+        forecast_posterior_wake
+        or (
+            producer_wake_reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+            and bool(forecast_wake_families)
+        )
     )
     producer_fast_path = committed_event_wake or targeted_forecast_wake
     _urgent_wake_pending = _reactor_wake_cancellation_probe(
@@ -7065,6 +7076,7 @@ def run_edli_event_reactor_cycle(
             producer_held_sell_reauction_requests if completion_wake else ()
         ),
         held_sell_request_exposure_provider=held_sell_request_exposure_provider,
+        allow_forecast_carrier_progress=forecast_posterior_wake,
     ):
         _log.info(
             "EDLI reactor parked paused new-entry wake before active-lock acquire: "
@@ -7691,6 +7703,7 @@ def run_edli_event_reactor_cycle(
                 held_sell_request_exposure_provider=(
                     held_sell_request_exposure_provider
                 ),
+                allow_forecast_carrier_progress=forecast_posterior_wake,
             ),
             final_intent_submit=submit_adapter,
             reject=lambda _event, _stage, _reason: None,

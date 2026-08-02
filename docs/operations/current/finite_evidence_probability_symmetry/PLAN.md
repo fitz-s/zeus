@@ -4,6 +4,28 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-02 FSR pause scope preserves posterior-carrier progression
+
+The global `entries_paused` containment correctly forbids new BUY actuation,
+but its reactor wake park also returned before a
+`forecast_posterior_advanced` wake could emit, supersede, and drain the latest
+FSR carrier. Active FSR rows therefore retained obsolete posterior identities
+while fresh replacement posteriors continued to materialize.
+
+The hot-fix permits only a targeted `forecast_posterior_advanced` carrier wake
+through both reactor pause checks. Its bounded targeted carrier reaches the
+existing adapter pause fence, which creates no BUY venue command and leaves the
+carrier retryable; ordinary paused queue rows remain unclaimed. Exact held-SELL
+requests retain their existing reduce-only path. SCOPE is new-entry BUY
+actuation only. DRAIN is the targeted FSR enqueue/supersession plus bounded
+no-submit redecision, followed by existing retry-floor scheduling. RESET is
+clearing `entries_paused`, which re-decides the same latest carrier identity.
+
+Acceptance requires a paused fresh-posterior carrier to progress without a
+BUY command, an ordinary paused queue row to remain unclaimed, and the same
+carrier identity to re-decide after the retry floor and pause reset; focused
+and full reactor tests, compile, planning/map, and diff checks must pass.
+
 ## 2026-07-31 Source-clock location-batch failure isolation
 
 Current canonical raw-capture evidence showed provider issue-to-capture delays
