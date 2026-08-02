@@ -1149,7 +1149,11 @@ def test_exit_lifecycle_partial_fill_reduces_open_position_exposure(conn):
     ).fetchone()
     assert event is not None
     assert event["event_type"] == "MONITOR_REFRESHED"
-    assert json.loads(event["payload_json"])["semantic_event"] == "PARTIAL_FILL_OBSERVED"
+    payload = json.loads(event["payload_json"])
+    assert payload["semantic_event"] == "CAPITAL_REDUCTION_FILLED"
+    assert payload["economic_fill_identity"] == (
+        "status-fill:v1:pos-partial-exit:ord-partial-exit"
+    )
 
 
 @pytest.mark.parametrize(
@@ -1349,6 +1353,7 @@ def test_madrid_partial_exit_realized_pnl_is_canonical_and_settlement_adds_resid
         token_id=YES_TOKEN,
         no_token_id=NO_TOKEN,
         condition_id="condition-capital-reduction",
+        env="live",
         last_monitor_market_price=0.60,
     )
     intent = exit_lifecycle.ExitIntent(
@@ -1793,8 +1798,7 @@ def test_partial_exit_decimal_fill_events_are_exact_and_batch_projected(
     ]
     assert [p["cumulative_realized_pnl_usd"] for p in payloads] == ["0.3", "0.72"]
     assert partial_exit_realized_pnl_fold(conn, position_id) == Decimal("0.72")
-    assert append_calls[0] == (2, "0.72")
-    assert sum(event_count == 2 for event_count, _ in append_calls) == 1
+    assert append_calls == [(3, "0.72")]
     current = conn.execute(
         "SELECT shares, realized_pnl_usd FROM position_current WHERE position_id = ?",
         (position_id,),
@@ -1805,8 +1809,8 @@ def test_partial_exit_decimal_fill_events_are_exact_and_batch_projected(
 
 def test_status_first_receipt_is_reconciled_against_canonical_fill(conn):
     from src.execution import exit_lifecycle
-    from src.state.fill_dedup import economic_exit_fills_for_position, partial_exit_realized_pnl_fold
-    from src.state.portfolio import Position
+    from src.state.fill_dedup import partial_exit_realized_pnl_fold
+    from src.state.portfolio import PortfolioState, Position
     from src.state.venue_command_repo import append_trade_fact
 
     position_id = "pos-status-first-canonical"
@@ -1826,11 +1830,13 @@ def test_status_first_receipt_is_reconciled_against_canonical_fill(conn):
         shares=10.0,
         cost_basis_usd=1.0,
         state="pending_exit",
+        exit_state="sell_pending",
         token_id=YES_TOKEN,
         no_token_id=NO_TOKEN,
         condition_id="condition-status-first-canonical",
         last_exit_order_id=order_id,
         last_monitor_at=_NOW.isoformat(),
+        last_monitor_market_price=0.60,
     )
     _seed_exit_intent_event(
         conn,
@@ -1848,20 +1854,45 @@ def test_status_first_receipt_is_reconciled_against_canonical_fill(conn):
         price=0.60,
         venue_order_id=order_id,
     )
-    assert exit_lifecycle._complete_intentional_position_reduction(
-        position,
-        intended_shares=Decimal("2"),
-        confirmed_filled_shares=Decimal("0.6"),
-        fill_price=0.60,
-        order_id=order_id,
-        status="CONFIRMED",
-        conn=conn,
-    ) == Decimal("0.6")
+    _ack_exit(conn, command_id=command_id, venue_order_id=order_id)
+    portfolio = PortfolioState(positions=[position])
+
+    class StatusFirstClob:
+        polls = 0
+
+        def get_order_status(self, seen_order_id):
+            assert seen_order_id == order_id
+            self.polls += 1
+            return {
+                "status": "PARTIAL",
+                "matched_size": "0.6",
+                "remaining_size": "1.4",
+                "avgPrice": 0.60,
+            }
+
+    clob = StatusFirstClob()
+    first = exit_lifecycle.check_pending_exits(portfolio, clob, conn=conn)
+    assert first["unchanged"] == 1
+    assert clob.polls == 1
+    assert position.shares == pytest.approx(9.4)
     before = conn.execute(
         "SELECT COUNT(*) FROM position_events "
         "WHERE position_id = ? AND caused_by = 'partial_exit_fill'",
         (position_id,),
     ).fetchone()[0]
+    assert before == 1
+    status_payload = json.loads(
+        conn.execute(
+            "SELECT payload_json FROM position_events "
+            "WHERE position_id = ? AND caused_by = 'partial_exit_fill'",
+            (position_id,),
+        ).fetchone()[0]
+    )
+    assert status_payload["economic_fill_identity"] == (
+        f"status-fill:v1:{position_id}:{order_id}"
+    )
+    assert status_payload["filled_shares"] == "0.6"
+    assert status_payload["filled_notional_usd"] == "0.36"
     append_trade_fact(
         conn,
         trade_id="trade-status-first-canonical",
@@ -1876,29 +1907,122 @@ def test_status_first_receipt_is_reconciled_against_canonical_fill(conn):
         raw_payload_json={"trade_id": "trade-status-first-canonical"},
         tx_hash="0xstatusfirstcanonical",
     )
-    fills = economic_exit_fills_for_position(conn, position_id, venue_order_id=order_id)
-    assert exit_lifecycle._complete_intentional_position_reduction(
-        position,
-        intended_shares=Decimal("2"),
-        confirmed_filled_shares=Decimal("0.6"),
-        fill_price=0.60,
-        order_id=order_id,
-        status="CONFIRMED",
-        conn=conn,
-        economic_fills=fills,
-    ) == Decimal("0")
+    second = exit_lifecycle.check_pending_exits(portfolio, clob, conn=conn)
+    assert second.get("reduced_from_trade_fact", 0) == 0
+    assert clob.polls == 1
+    assert position.state == "holding"
+    assert position.exit_state == ""
+    assert position.shares == pytest.approx(9.4)
     assert conn.execute(
         "SELECT COUNT(*) FROM position_events "
         "WHERE position_id = ? AND caused_by = 'partial_exit_fill'",
         (position_id,),
     ).fetchone()[0] == before
     assert partial_exit_realized_pnl_fold(conn, position_id) == Decimal("0.3")
+    event_count = conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ? "
+        "AND event_type = 'EXIT_RETRY_RELEASED'",
+        (position_id,),
+    ).fetchone()[0] == 1
+    third = exit_lifecycle.check_pending_exits(portfolio, clob, conn=conn)
+    assert third["pending_exit_scan_candidates"] == 0
+    assert clob.polls == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0] == event_count
+    assert partial_exit_realized_pnl_fold(conn, position_id) == Decimal("0.3")
+
+
+def test_status_first_projection_failure_leaves_local_and_canonical_unchanged(
+    conn, monkeypatch
+):
+    from src.execution import exit_lifecycle
+    from src.state import db as state_db
+    from src.state.portfolio import PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-status-projection-crash",
+        market_id="mkt-status-projection-crash",
+        city="Paris",
+        cluster="Paris",
+        target_date="2026-08-03",
+        bin_label="30C",
+        direction="buy_yes",
+        strategy_key="center_buy",
+        size_usd=1.0,
+        entry_price=0.10,
+        shares=10.0,
+        cost_basis_usd=1.0,
+        state="pending_exit",
+        exit_state="sell_pending",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-status-projection-crash",
+        last_exit_order_id="ord-status-projection-crash",
+        last_monitor_market_price=0.60,
+    )
+    _seed_exit_intent_event(
+        conn,
+        position_id=position.trade_id,
+        shares=2.0,
+        close_position=False,
+        order_id=position.last_exit_order_id,
+    )
+    _insert_exit_command(
+        conn,
+        command_id="cmd-status-projection-crash",
+        position_id=position.trade_id,
+        token_id=YES_TOKEN,
+        size=2.0,
+        price=0.60,
+        venue_order_id=position.last_exit_order_id,
+    )
+
+    class PartialClob:
+        def get_order_status(self, _order_id):
+            return {
+                "status": "PARTIAL",
+                "matched_size": "0.6",
+                "remaining_size": "1.4",
+                "avgPrice": "0.60",
+            }
+
+    before = dict(position.__dict__)
+
+    def fail_projection(*_args, **_kwargs):
+        raise RuntimeError("injected append_many_and_project crash")
+
+    monkeypatch.setattr(state_db, "append_many_and_project", fail_projection)
+    with pytest.raises(RuntimeError, match="injected append_many_and_project crash"):
+        exit_lifecycle.check_pending_exits(
+            PortfolioState(positions=[position]), PartialClob(), conn=conn
+        )
+
+    assert position.__dict__ == before
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events "
+        "WHERE position_id = ? AND caused_by = 'partial_exit_fill'",
+        (position.trade_id,),
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_current WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()[0] == 0
+    assert _execution_facts(conn, position.trade_id) == []
 
 
 def test_mixed_legacy_and_new_partial_exit_repair_is_cumulative_and_atomic(conn):
     from src.execution import exit_lifecycle
     from src.execution.harvester import _repair_legacy_partial_exit_economics
-    from src.state.fill_dedup import partial_exit_realized_pnl_fold
+    from src.state.fill_dedup import (
+        PartialExitEconomicDebtError,
+        partial_exit_realized_pnl_fold,
+    )
     from src.state.portfolio import Position
     from src.state.projection import upsert_position_current
     from src.engine.lifecycle_events import build_position_current_projection
@@ -2028,7 +2152,11 @@ def test_mixed_legacy_and_new_partial_exit_repair_is_cumulative_and_atomic(conn)
         (position_id,),
     ).fetchall()
     assert len(repair_rows) == 1
-    assert json.loads(repair_rows[0][0])["cumulative_realized_pnl_usd"] == "-0.29"
+    repair_payload = json.loads(repair_rows[0][0])
+    assert repair_payload["cumulative_realized_pnl_usd"] == "-0.29"
+    assert repair_payload["repaired_legacy_event_id"] == (
+        f"{position_id}:legacy-partial"
+    )
     assert Decimal(str(conn.execute(
         "SELECT realized_pnl_usd FROM position_current WHERE position_id = ?",
         (position_id,),
@@ -2040,12 +2168,72 @@ def test_mixed_legacy_and_new_partial_exit_repair_is_cumulative_and_atomic(conn)
         (position_id,),
     ).fetchone()[0] == 1
 
+    # A prior repair covers only its named legacy event. A later identity-less
+    # event remains debt until its own canonical fill proves it.
+    sequence_no = conn.execute(
+        "SELECT MAX(sequence_no) + 1 FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    conn.execute(
+        """INSERT INTO position_events (
+               event_id, position_id, event_version, sequence_no, event_type,
+               occurred_at, phase_before, phase_after, strategy_key,
+               source_module, payload_json, order_id, caused_by, env
+           ) VALUES (?, ?, 1, ?, 'MONITOR_REFRESHED', ?, 'pending_exit', 'pending_exit',
+                     'center_buy', 'tests.test_exit_safety', ?, ?, 'partial_exit_fill', 'live')""",
+        (
+            f"{position_id}:later-legacy-partial",
+            position_id,
+            sequence_no,
+            (_NOW + timedelta(seconds=1)).isoformat(),
+            json.dumps(
+                {
+                    "semantic_event": "CAPITAL_REDUCTION_FILLED",
+                    "filled_shares": "0.2",
+                    "remaining_shares": "8.1",
+                    "fill_price": "0.7",
+                    "order_id": "ord-mixed-later-legacy",
+                },
+                sort_keys=True,
+            ),
+            "ord-mixed-later-legacy",
+        ),
+    )
+    with pytest.raises(PartialExitEconomicDebtError, match="later-legacy-partial"):
+        partial_exit_realized_pnl_fold(conn, position_id)
+    with pytest.raises(PartialExitEconomicDebtError, match="later-legacy-partial"):
+        _repair_legacy_partial_exit_economics(conn, position)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events "
+        "WHERE position_id = ? AND caused_by = 'partial_exit_economics_repair'",
+        (position_id,),
+    ).fetchone()[0] == 1
+    assert Decimal(
+        str(
+            conn.execute(
+                "SELECT realized_pnl_usd FROM position_current WHERE position_id = ?",
+                (position_id,),
+            ).fetchone()[0]
+        )
+    ) == Decimal("-0.29")
+
 
 def test_tel_aviv_chain_reflected_residual_keeps_exact_decimal_pnl(conn):
+    from src.execution import exit_lifecycle
     from src.execution.harvester import _settle_positions
     from src.state.portfolio import PortfolioState, Position
-    from src.state.projection import upsert_position_current
-    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.venue_command_repo import append_trade_fact
+
+    initial_shares = Decimal("157")
+    initial_cost = Decimal("59.908")
+    partial_fill = Decimal("156.6")
+    partial_price = Decimal("0.11")
+    residual_shares = initial_shares - partial_fill
+    expected_whole_pnl = (
+        partial_fill * partial_price + residual_shares - initial_cost
+    )
+    order_id = "ord-tel-aviv-exact-residual"
+    command_id = "cmd-tel-aviv-exact-residual"
 
     position = Position(
         trade_id="pos-tel-aviv-exact-residual",
@@ -2056,49 +2244,294 @@ def test_tel_aviv_chain_reflected_residual_keeps_exact_decimal_pnl(conn):
         bin_label="30C",
         direction="buy_yes",
         strategy_key="center_buy",
-        size_usd=999.0,
-        entry_price=9.99,
-        shares=999.0,
-        cost_basis_usd=999.0,
+        size_usd=float(initial_cost),
+        entry_price=float(initial_cost / initial_shares),
+        shares=float(initial_shares),
+        cost_basis_usd=float(initial_cost),
         state="holding",
         token_id=YES_TOKEN,
         no_token_id=NO_TOKEN,
         condition_id="condition-tel-aviv-exact-residual",
         env="live",
         fill_authority="venue_position_observed",
-        chain_shares=100.0,
-        chain_avg_price=0.42282,
-        chain_cost_basis_usd=42.282,
+        chain_shares=float(initial_shares),
+        chain_avg_price=float(initial_cost / initial_shares),
+        chain_cost_basis_usd=float(initial_cost),
         chain_verified_at=_NOW.isoformat(),
+        last_monitor_market_price=float(partial_price),
     )
-    upsert_position_current(conn, build_position_current_projection(position))
-    _seed_exit_intent_event(
-        conn,
-        position_id=position.trade_id,
-        shares=1.0,
+    intent = exit_lifecycle.ExitIntent(
+        trade_id=position.trade_id,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        token_id=YES_TOKEN,
+        shares=156.8,
+        current_market_price=float(partial_price),
+        best_bid=float(partial_price),
         close_position=False,
+        capital_certificate={"held_shares": "157"},
     )
+    exit_lifecycle._record_exit_intent_before_execution_gates(
+        conn,
+        position,
+        intent,
+    )
+    intent_occurred_at = conn.execute(
+        "SELECT occurred_at FROM position_events "
+        "WHERE position_id = ? AND event_type = 'EXIT_INTENT' "
+        "ORDER BY sequence_no DESC LIMIT 1",
+        (position.trade_id,),
+    ).fetchone()[0]
+    _insert_exit_command(
+        conn,
+        command_id=command_id,
+        position_id=position.trade_id,
+        token_id=YES_TOKEN,
+        size=156.8,
+        price=float(partial_price),
+        venue_order_id=order_id,
+        created_at=(
+            datetime.fromisoformat(intent_occurred_at.replace("Z", "+00:00"))
+            + timedelta(microseconds=1)
+        ),
+    )
+    _ack_exit(conn, command_id=command_id, venue_order_id=order_id)
+    position.last_exit_order_id = order_id
+    position.exit_state = "sell_placed"
+    position.order_status = "sell_placed"
+    assert exit_lifecycle._dual_write_canonical_pending_exit_if_available(
+        conn,
+        position,
+        reason=intent.reason,
+        error="",
+        event_type="EXIT_ORDER_POSTED",
+    )
+
+    class StatusFirstClob:
+        polls = 0
+
+        def get_order_status(self, seen_order_id):
+            assert seen_order_id == order_id
+            self.polls += 1
+            return {
+                "status": "PARTIAL",
+                "matched_size": str(partial_fill),
+                "remaining_size": ".2",
+                "avgPrice": str(partial_price),
+            }
+
+    portfolio = PortfolioState(positions=[position])
+    clob = StatusFirstClob()
+    first = exit_lifecycle.check_pending_exits(portfolio, clob, conn=conn)
+    assert first["unchanged"] == 1
+    assert clob.polls == 1
+    assert Decimal(str(position.effective_shares)) == residual_shares
+    assert Decimal(str(position.chain_shares)) == residual_shares
+
+    append_trade_fact(
+        conn,
+        trade_id="trade-tel-aviv-exact-residual",
+        venue_order_id=order_id,
+        command_id=command_id,
+        state="CONFIRMED",
+        filled_size=str(partial_fill),
+        fill_price=str(partial_price),
+        source="REST",
+        observed_at=_NOW.isoformat(),
+        raw_payload_hash=hashlib.sha256(b"tel-aviv-exact-residual").hexdigest(),
+        raw_payload_json={"size_matched": str(partial_fill), "status": "CONFIRMED"},
+    )
+    second = exit_lifecycle.check_pending_exits(portfolio, clob, conn=conn)
+    assert second.get("reduced_from_trade_fact", 0) == 0
+    assert clob.polls == 1
+    assert position.state == "holding"
 
     assert _settle_positions(
         conn,
-        PortfolioState(positions=[position]),
+        portfolio,
         "Tel Aviv",
         "2026-08-03",
         "30C",
         settlement_condition_id="condition-tel-aviv-exact-residual",
-        settlement_condition_yes_won=False,
+        settlement_condition_yes_won=True,
     ) == 1
     row = conn.execute(
         "SELECT realized_pnl_usd FROM position_current WHERE position_id = ?",
         (position.trade_id,),
     ).fetchone()
     assert row[0] is not None, row
-    assert Decimal(str(row[0])) == Decimal("-42.282")
+    assert expected_whole_pnl == Decimal("-42.282")
+    assert Decimal(str(row[0])) == expected_whole_pnl
     settled_event = conn.execute(
         "SELECT payload_json FROM position_events WHERE position_id = ? AND event_type = 'SETTLED'",
         (position.trade_id,),
     ).fetchone()
-    assert json.loads(settled_event[0])["pnl"] == "-42.282"
+    assert Decimal(json.loads(settled_event[0])["pnl"]) == expected_whole_pnl
+
+
+def test_harvester_partial_exit_debt_rolls_back_whole_settlement_event(
+    conn, monkeypatch
+):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from src.execution import harvester
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import PortfolioState, Position
+    from src.state.projection import upsert_position_current
+
+    position = Position(
+        trade_id="pos-harvester-partial-debt",
+        market_id="mkt-harvester-partial-debt",
+        city="Paris",
+        cluster="Paris",
+        target_date="2026-08-03",
+        bin_label="30C",
+        direction="buy_yes",
+        strategy_key="center_buy",
+        size_usd=5.0,
+        entry_price=0.50,
+        shares=10.0,
+        cost_basis_usd=5.0,
+        state="holding",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-harvester-partial-debt",
+        env="live",
+        last_monitor_at=_NOW.isoformat(),
+    )
+    portfolio = PortfolioState(positions=[position])
+    upsert_position_current(conn, build_position_current_projection(position))
+    conn.execute(
+        """INSERT INTO position_events (
+               event_id, position_id, event_version, sequence_no, event_type,
+               occurred_at, phase_before, phase_after, strategy_key,
+               source_module, payload_json, order_id, caused_by, env
+           ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, 'pending_exit', 'active',
+                     'center_buy', 'tests.test_exit_safety', ?, ?, 'partial_exit_fill', 'live')""",
+        (
+            f"{position.trade_id}:legacy-partial",
+            position.trade_id,
+            _NOW.isoformat(),
+            json.dumps(
+                {
+                    "semantic_event": "CAPITAL_REDUCTION_FILLED",
+                    "filled_shares": "1",
+                    "remaining_shares": "10",
+                    "fill_price": "0.6",
+                    "order_id": "ord-harvester-partial-debt",
+                },
+                sort_keys=True,
+            ),
+            "ord-harvester-partial-debt",
+        ),
+    )
+    conn.execute("CREATE TABLE event_atomic_probe (kind TEXT NOT NULL)")
+
+    @contextmanager
+    def use_test_connection(*_args, **_kwargs):
+        yield conn
+
+    event = {
+        "title": "Paris high temperature on August 3",
+        "slug": "paris-high-2026-08-03",
+        "markets": [{"question": "Will Paris be 30C?"}],
+    }
+    city = SimpleNamespace(
+        name="Paris", settlement_unit="C", settlement_source="wunderground"
+    )
+    outcome = SimpleNamespace(yes_won=True, range_low=30, range_high=30)
+
+    monkeypatch.setattr(harvester, "load_portfolio", lambda: portfolio)
+    monkeypatch.setattr(harvester, "_fetch_settled_events", lambda: [event])
+    monkeypatch.setattr(
+        harvester,
+        "_supplement_held_position_settlement_events",
+        lambda _portfolio, events: events,
+    )
+    monkeypatch.setattr(
+        harvester, "forecasts_connection_with_trades_flocked", use_test_connection
+    )
+    monkeypatch.setattr(
+        harvester,
+        "_preflight_harvester_stage2_db_shape",
+        lambda *_args: {
+            "stage2_status": "ready",
+            "stage2_missing_trade_tables": [],
+            "stage2_missing_shared_tables": [],
+        },
+    )
+    monkeypatch.setattr(harvester, "get_tracker", lambda: SimpleNamespace())
+    monkeypatch.setattr(harvester, "_match_city", lambda *_args: city)
+    monkeypatch.setattr(harvester, "_extract_target_date", lambda _event: "2026-08-03")
+    monkeypatch.setattr(harvester, "infer_temperature_metric", lambda *_args: "high")
+    monkeypatch.setattr(
+        harvester, "_extract_resolved_market_outcomes", lambda _event: [outcome]
+    )
+    monkeypatch.setattr(harvester, "_canonical_bin_label", lambda *_args: "30C")
+    monkeypatch.setattr(harvester, "_lookup_settlement_obs", lambda *_args, **_kwargs: {})
+
+    def write_truth(*_args, **_kwargs):
+        conn.execute("INSERT INTO event_atomic_probe VALUES ('settlement_truth')")
+        return {
+            "authority": "VERIFIED",
+            "winning_bin": "30C",
+            "settlement_value": 30,
+        }
+
+    monkeypatch.setattr(harvester, "_write_settlement_truth", write_truth)
+    monkeypatch.setattr(harvester, "_extract_all_bin_labels", lambda _event: ["30C"])
+    monkeypatch.setattr(
+        harvester,
+        "_snapshot_contexts_for_market",
+        lambda *_args: ([{
+            "learning_snapshot_ready": True,
+            "authority_level": "frozen_decision",
+            "temperature_metric": "high",
+        }], []),
+    )
+    monkeypatch.setattr(
+        harvester, "_log_snapshot_context_resolution", lambda *_args, **_kwargs: None
+    )
+
+    def write_learning(*_args, **_kwargs):
+        conn.execute("INSERT INTO event_atomic_probe VALUES ('learning_pair')")
+        return 1
+
+    monkeypatch.setattr(harvester, "maybe_write_learning_pair", write_learning)
+    monkeypatch.setattr(
+        harvester,
+        "maybe_refit_bucket",
+        lambda *_args: conn.execute(
+            "INSERT INTO event_atomic_probe VALUES ('learning_refit')"
+        ),
+    )
+    monkeypatch.setattr(harvester, "record_settlement_result", lambda *_args: 0)
+    monkeypatch.setattr(
+        harvester,
+        "rediscover_disputed_settlements",
+        lambda: {"status": "skipped_test"},
+    )
+
+    result = harvester.run_harvester()
+
+    assert result["pairs_created"] == 0
+    assert result["positions_settled"] == 0
+    assert conn.execute("SELECT COUNT(*) FROM event_atomic_probe").fetchone()[0] == 0
+    assert portfolio.positions[0].state == "holding"
+    assert conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()[0] == "active"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ? "
+        "AND event_type = 'SETTLED'",
+        (position.trade_id,),
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ? "
+        "AND caused_by = 'partial_exit_economics_repair'",
+        (position.trade_id,),
+    ).fetchone()[0] == 0
 
 
 def test_confirmed_partial_reduction_trade_fact_reopens_exact_remaining_claim(conn):
@@ -4539,6 +4972,7 @@ def test_exit_lifecycle_cancel_after_partial_only_retries_remaining_exposure(con
         target_date="2026-04-27",
         bin_label="50-51°F",
         direction="buy_yes",
+        strategy_key="center_buy",
         size_usd=10.0,
         entry_price=0.50,
         shares=20.0,
@@ -4548,6 +4982,8 @@ def test_exit_lifecycle_cancel_after_partial_only_retries_remaining_exposure(con
         last_exit_order_id="ord-partial-cancel",
         token_id=YES_TOKEN,
         no_token_id=NO_TOKEN,
+        condition_id="condition-partial-cancel",
+        env="live",
         last_monitor_market_price=0.45,
         last_monitor_best_bid=0.44,
     )

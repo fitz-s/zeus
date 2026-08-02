@@ -8,6 +8,7 @@ Spec §8.1: Hourly cycle:
 5. Remove settled positions from portfolio
 """
 
+import copy
 import json
 import logging
 import math
@@ -366,6 +367,46 @@ def _canonical_partial_exit_realized_pnl(conn, position_id: str) -> Decimal:
     return partial_exit_realized_pnl_fold(conn, position_id)
 
 
+def _canonical_partial_exit_residual_basis(
+    conn, position_id: str
+) -> tuple[Decimal, Decimal] | None:
+    """Return exact residual shares/cost from the latest canonical fill."""
+
+    from src.state.fill_dedup import PartialExitEconomicDebtError
+
+    row = conn.execute(
+        """
+        SELECT event_id, payload_json
+          FROM position_events
+         WHERE position_id = ?
+           AND caused_by IN ('partial_exit_fill', 'partial_exit_economics_repair')
+         ORDER BY sequence_no DESC, event_id DESC
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(str(row["payload_json"] or "{}"))
+        raw_cost = payload.get("remaining_cost_basis_usd")
+        if raw_cost is None:
+            return None
+        shares = Decimal(str(payload["remaining_shares"]))
+        cost = Decimal(str(raw_cost))
+    except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+        raise PartialExitEconomicDebtError(
+            "partial EXIT residual basis malformed: "
+            f"position_id={position_id} event_id={row['event_id']}"
+        ) from exc
+    if not shares.is_finite() or not cost.is_finite() or shares < 0 or cost < 0:
+        raise PartialExitEconomicDebtError(
+            "partial EXIT residual basis invalid: "
+            f"position_id={position_id} event_id={row['event_id']}"
+        )
+    return shares, cost
+
+
 def _repair_legacy_partial_exit_economics(conn, pos) -> None:
     """Append exact economics for old partial events before settlement.
 
@@ -405,7 +446,8 @@ def _repair_legacy_partial_exit_economics(conn, pos) -> None:
     repair_events: list[dict] = []
     projection: dict | None = None
     sequence_no = _next_canonical_sequence_no(conn, trade_id)
-    for offset, fill in enumerate(fills):
+    for offset, repair in enumerate(fills):
+        fill = repair.fill
         allocated_cost = fill.quantity * unit_cost
         delta = fill.notional - allocated_cost
         cumulative += delta
@@ -422,12 +464,14 @@ def _repair_legacy_partial_exit_economics(conn, pos) -> None:
         payload.update(
             {
                 "semantic_event": "PARTIAL_EXIT_ECONOMICS_REPAIRED",
+                "repaired_legacy_event_id": repair.legacy_event_id,
                 "economic_fill_identity": fill.identity,
                 "economic_fill_cumulative_shares": canonical_decimal_text(fill.quantity),
                 "economic_fill_cumulative_notional_usd": canonical_decimal_text(fill.notional),
                 "filled_shares": canonical_decimal_text(fill.quantity),
                 "filled_notional_usd": canonical_decimal_text(fill.notional),
                 "remaining_shares": canonical_decimal_text(shares),
+                "remaining_cost_basis_usd": canonical_decimal_text(cost),
                 "fill_price": canonical_decimal_text(fill.unit_price),
                 "allocated_cost_basis_usd": canonical_decimal_text(allocated_cost),
                 "realized_pnl_delta_usd": canonical_decimal_text(delta),
@@ -931,7 +975,15 @@ def run_harvester() -> dict:
         conn.execute("SAVEPOINT harvester_settlement")
         _savepoint_released = False
         try:
-            for event in settled_events:
+            for event_index, event in enumerate(settled_events):
+                portfolio_snapshot = copy.deepcopy(portfolio.__dict__)
+                settlement_records_start = len(settlement_records)
+                total_pairs_before_event = total_pairs
+                positions_settled_before_event = positions_settled
+                tracker_dirty_before_event = tracker_dirty
+                event_savepoint = f"harvester_settlement_event_{event_index}"
+                conn.execute(f"SAVEPOINT {event_savepoint}")
+                event_failed = False
                 try:
                     city = _match_city(
                         (event.get("title") or "").lower(),
@@ -1088,8 +1140,23 @@ def run_harvester() -> dict:
                         tracker_dirty = True
 
                 except Exception as e:
-                    logger.error("Harvester error for event %s: %s",
-                                 event.get("slug", "?"), e)
+                    event_failed = True
+                    conn.execute(f"ROLLBACK TO SAVEPOINT {event_savepoint}")
+                    conn.execute(f"RELEASE SAVEPOINT {event_savepoint}")
+                    portfolio.__dict__.clear()
+                    portfolio.__dict__.update(portfolio_snapshot)
+                    del settlement_records[settlement_records_start:]
+                    total_pairs = total_pairs_before_event
+                    positions_settled = positions_settled_before_event
+                    tracker_dirty = tracker_dirty_before_event
+                    logger.error(
+                        "Harvester rolled back event %s after error: %s",
+                        event.get("slug", "?"),
+                        e,
+                    )
+                finally:
+                    if not event_failed:
+                        conn.execute(f"RELEASE SAVEPOINT {event_savepoint}")
 
             # T1C: settlement record write is now isolated in record_settlement_result().
             # On-chain redemption is decoupled from settlement close entirely
@@ -2710,10 +2777,32 @@ def _settle_positions(
                 )
                 continue
         phase_before = _canonical_phase_before_for_settlement(pos)
-        _repair_legacy_partial_exit_economics(conn, pos)
-        partial_exit_realized_pnl = _canonical_partial_exit_realized_pnl(
-            conn, pos.trade_id
-        )
+        from src.state.fill_dedup import PartialExitEconomicDebtError
+
+        conn.execute("SAVEPOINT partial_exit_settlement_economics")
+        try:
+            _repair_legacy_partial_exit_economics(conn, pos)
+            partial_exit_realized_pnl = _canonical_partial_exit_realized_pnl(
+                conn, pos.trade_id
+            )
+            residual_basis = _canonical_partial_exit_residual_basis(
+                conn, pos.trade_id
+            )
+            if residual_basis is not None:
+                exact_residual_shares, exact_residual_cost = residual_basis
+                if exact_residual_shares != Decimal(str(shares)):
+                    raise PartialExitEconomicDebtError(
+                        "partial EXIT residual shares conflict with settlement exposure: "
+                        f"position_id={pos.trade_id} canonical={exact_residual_shares} "
+                        f"settlement={shares}"
+                    )
+                settlement_cost_basis = exact_residual_cost
+        except PartialExitEconomicDebtError:
+            conn.execute("ROLLBACK TO SAVEPOINT partial_exit_settlement_economics")
+            conn.execute("RELEASE SAVEPOINT partial_exit_settlement_economics")
+            raise
+        else:
+            conn.execute("RELEASE SAVEPOINT partial_exit_settlement_economics")
 
         from src.execution.exit_lifecycle import mark_settled
         closed = mark_settled(portfolio, pos.trade_id, settlement_price, "SETTLEMENT")

@@ -4946,8 +4946,8 @@ def _execute_live_exit(
         if order_id and clob:
             status, status_payload = _check_order_fill(clob, order_id)
             if status in FILL_STATUSES:
-                actual_price = _extract_fill_price(status_payload)
-                if actual_price is None:
+                actual_price_decimal = _extract_fill_price_decimal(status_payload)
+                if actual_price_decimal is None:
                     _mark_exit_fill_economics_missing(
                         position,
                         status=status,
@@ -4975,7 +4975,7 @@ def _execute_live_exit(
                         position,
                         intended_shares=intended_shares,
                         confirmed_filled_shares=confirmed_shares,
-                        fill_price=actual_price,
+                        fill_price=actual_price_decimal,
                         order_id=order_id,
                         status=status,
                         conn=conn,
@@ -4984,6 +4984,7 @@ def _execute_live_exit(
                         "position_reduced: "
                         f"{reduced} shares; {exit_context.exit_reason}"
                     )
+                actual_price = float(actual_price_decimal)
                 phase_before = _canonical_phase_before_for_economic_close(position)
                 closed = compute_economic_close(portfolio, position.trade_id, actual_price, exit_context.exit_reason)
                 if closed is not None:
@@ -5622,8 +5623,8 @@ def _partial_exit_delta(
     *,
     status: str,
     payload: object,
-    current_open_shares: float,
-) -> tuple[float, float] | None:
+    current_open_shares: object,
+) -> tuple[Decimal, Decimal] | None:
     """Return (newly_filled_shares, remaining_shares) for a partial exit fill."""
 
     remaining_keys = ("remaining_size", "remainingSize", "remaining", "open_size", "openSize")
@@ -5637,7 +5638,12 @@ def _partial_exit_delta(
     )
     if _payload_has_invalid_decimal(payload, *remaining_keys, *cumulative_keys):
         return None
-    open_shares = Decimal(str(max(0.0, float(current_open_shares))))
+    try:
+        open_shares = Decimal(str(current_open_shares))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not open_shares.is_finite():
+        return None
     if open_shares <= 0:
         return None
     remaining = _payload_decimal(payload, *remaining_keys)
@@ -5658,15 +5664,15 @@ def _partial_exit_delta(
     newly_filled = open_shares - remaining
     if newly_filled <= 0:
         return None
-    return float(newly_filled), float(remaining)
+    return newly_filled, remaining
 
 
 def _apply_partial_exit_fill(
     position: Position,
     *,
-    filled_shares: float,
-    remaining_shares: float,
-    fill_price: float,
+    filled_shares: object,
+    remaining_shares: object,
+    fill_price: object,
     order_id: str,
     status: str,
 ) -> bool:
@@ -5677,46 +5683,60 @@ def _apply_partial_exit_fill(
     slice in nested_fills for audit/replay.
     """
 
-    open_shares = float(position.effective_shares)
-    if open_shares <= 0 or remaining_shares < 0 or remaining_shares >= open_shares:
+    open_shares = Decimal(str(position.effective_shares))
+    filled = Decimal(str(filled_shares))
+    remaining = Decimal(str(remaining_shares))
+    price = Decimal(str(fill_price))
+    if (
+        not all(value.is_finite() for value in (open_shares, filled, remaining, price))
+        or open_shares <= 0
+        or remaining < 0
+        or remaining >= open_shares
+    ):
         return False
-    filled_shares = max(0.0, min(float(filled_shares), open_shares))
-    remaining_shares = max(0.0, min(float(remaining_shares), open_shares))
-    filled_ratio = filled_shares / open_shares
-    remaining_ratio = remaining_shares / open_shares
-    original_size = float(position.size_usd or 0.0)
-    original_cost = float(position.effective_cost_basis_usd or 0.0)
+    filled = max(Decimal("0"), min(filled, open_shares))
+    remaining = max(Decimal("0"), min(remaining, open_shares))
+    filled_ratio = filled / open_shares
+    remaining_ratio = remaining / open_shares
+    original_size = Decimal(str(position.size_usd or 0))
+    original_cost = Decimal(str(position.effective_cost_basis_usd or 0))
     realized_cost = original_cost * filled_ratio
-    realized_pnl = round(filled_shares * float(fill_price) - realized_cost, 2)
+    realized_pnl = filled * price - realized_cost
     position.nested_fills.append(
         {
             "type": "partial_exit_fill",
             "order_id": order_id,
             "status": status,
-            "filled_shares": filled_shares,
-            "remaining_shares": remaining_shares,
-            "fill_price": float(fill_price),
-            "realized_cost_basis_usd": realized_cost,
-            "realized_pnl": realized_pnl,
+            "filled_shares": float(filled),
+            "remaining_shares": float(remaining),
+            "fill_price": float(price),
+            "realized_cost_basis_usd": float(realized_cost),
+            "realized_pnl": float(realized_pnl),
             "observed_at": _utcnow().isoformat(),
         }
     )
-    position.shares = remaining_shares
-    position.size_usd = original_size * remaining_ratio
+    position.shares = float(remaining)
+    position.size_usd = float(original_size * remaining_ratio)
     if position.cost_basis_usd > 0:
-        position.cost_basis_usd = original_cost * remaining_ratio
+        position.cost_basis_usd = float(original_cost * remaining_ratio)
     # F1 (PR1 critic SEV-1): balance-only positions route effective_shares via
     # chain_shares.  Without this block, effective_exposure() returns stale
     # pre-exit chain aggregate until the next reconcile cycle — exit-sizing code
     # that calls effective_exposure() between cycles would overstate exposure and
     # re-issue exit orders the venue rejects.
     if position.has_chain_observed_authority:
-        original_chain_shares = float(getattr(position, "chain_shares", 0.0) or 0.0)
-        original_chain_cost = float(getattr(position, "chain_cost_basis_usd", 0.0) or 0.0)
+        original_chain_shares = Decimal(
+            str(getattr(position, "chain_shares", 0) or 0)
+        )
+        original_chain_cost = Decimal(
+            str(getattr(position, "chain_cost_basis_usd", 0) or 0)
+        )
         if original_chain_shares > 0:
-            position.chain_shares = original_chain_shares * remaining_ratio
+            position.chain_shares = float(original_chain_shares * remaining_ratio)
         if original_chain_cost > 0:
-            position.chain_cost_basis_usd = original_chain_cost * remaining_ratio
+            position.chain_cost_basis_usd = float(
+                original_chain_cost * remaining_ratio
+            )
     position.exit_state = "sell_pending"
     return True
 
@@ -5726,8 +5746,8 @@ def _log_partial_exit_execution_fact(
     position: Position,
     *,
     status: str,
-    fill_price: float,
-    filled_shares: float,
+    fill_price: object,
+    filled_shares: object,
     order_id: str,
 ) -> None:
     from src.state.db import log_execution_fact
@@ -5744,8 +5764,8 @@ def _log_partial_exit_execution_fact(
         )
         or None,
         filled_at=_utcnow().isoformat(),
-        fill_price=fill_price,
-        shares=filled_shares,
+        fill_price=float(Decimal(str(fill_price))),
+        shares=float(Decimal(str(filled_shares))),
         venue_status=status or "PARTIAL",
         terminal_exec_status=status or "PARTIAL",
         command_id=_exit_command_id_for_order(conn, position, order_id),
@@ -5771,6 +5791,7 @@ def _build_partial_exit_projection_event(
     allocated_cost_basis_usd: object | None = None,
     realized_pnl_delta_usd: object | None = None,
     cumulative_realized_pnl_usd: object | None = None,
+    remaining_cost_basis_usd: object | None = None,
     semantic_event: str = "PARTIAL_FILL_OBSERVED",
 ) -> tuple[dict, dict]:
     import json as _json
@@ -5807,6 +5828,7 @@ def _build_partial_exit_projection_event(
         "allocated_cost_basis_usd": allocated_cost_basis_usd,
         "realized_pnl_delta_usd": realized_pnl_delta_usd,
         "cumulative_realized_pnl_usd": cumulative_realized_pnl_usd,
+        "remaining_cost_basis_usd": remaining_cost_basis_usd,
     }
     payload.update(
         {
@@ -5898,59 +5920,71 @@ def _dual_write_partial_exit_projection_if_available(
 
 def _dual_write_partial_exit_projection_batch(
     conn: sqlite3.Connection | None,
-    position: Position,
+    fill_position: Position,
     *,
     order_id: str,
     status: str,
     slices: Sequence[dict[str, object]],
     cumulative_realized_pnl_usd: object,
+    released_position: Position | None = None,
+    previous_next_retry_at: str = "",
+    previous_retry_count: int = 0,
+    previous_error: str = "",
 ) -> bool:
-    """Append all canonical partial-fill events with one final projection."""
+    """Append exact fill events and one final projection in one transaction."""
 
-    if conn is None or not slices:
+    if conn is None or (not slices and released_position is None):
         return False
-    try:
-        from src.state.db import append_many_and_project
-        from src.state.fill_dedup import canonical_decimal_text
+    from src.state.db import append_many_and_project
+    from src.state.fill_dedup import canonical_decimal_text
 
-        trade_id = str(getattr(position, "trade_id", "") or "")
-        sequence_no = _next_canonical_sequence_no(conn, trade_id)
-        events: list[dict] = []
-        projection: dict | None = None
-        for offset, item in enumerate(slices):
-            event, projection = _build_partial_exit_projection_event(
-                conn,
-                position,
-                sequence_no=sequence_no + offset,
-                filled_shares=item["quantity"],
-                remaining_shares=item["remaining_shares"],
-                fill_price=item["unit_price"],
-                order_id=order_id,
-                status=status,
-                fill_identity=str(item["identity"]),
-                economic_fill_identity=str(item["identity"]),
-                economic_fill_cumulative_shares=item["cumulative_qty"],
-                economic_fill_cumulative_notional_usd=item["cumulative_notional"],
-                filled_notional_usd=item["notional"],
-                allocated_cost_basis_usd=item["allocated_cost"],
-                realized_pnl_delta_usd=item["pnl_delta"],
-                cumulative_realized_pnl_usd=item["cumulative_realized"],
-                semantic_event="CAPITAL_REDUCTION_FILLED",
-            )
-            events.append(event)
-        assert projection is not None
-        projection["realized_pnl_usd"] = canonical_decimal_text(
-            cumulative_realized_pnl_usd
+    trade_id = str(getattr(fill_position, "trade_id", "") or "")
+    sequence_no = _next_canonical_sequence_no(conn, trade_id)
+    events: list[dict] = []
+    projection: dict | None = None
+    for offset, item in enumerate(slices):
+        event, projection = _build_partial_exit_projection_event(
+            conn,
+            fill_position,
+            sequence_no=sequence_no + offset,
+            filled_shares=item["quantity"],
+            remaining_shares=item["remaining_shares"],
+            fill_price=item["unit_price"],
+            order_id=order_id,
+            status=status,
+            fill_identity=str(item["identity"]),
+            economic_fill_identity=str(item["identity"]),
+            economic_fill_cumulative_shares=item["cumulative_qty"],
+            economic_fill_cumulative_notional_usd=item["cumulative_notional"],
+            filled_notional_usd=item["notional"],
+            allocated_cost_basis_usd=item["allocated_cost"],
+            realized_pnl_delta_usd=item["pnl_delta"],
+            cumulative_realized_pnl_usd=item["cumulative_realized"],
+            remaining_cost_basis_usd=item.get("remaining_cost_basis"),
+            semantic_event="CAPITAL_REDUCTION_FILLED",
         )
-        append_many_and_project(conn, events, projection)
-        return True
-    except Exception:  # noqa: BLE001 - caller must retain venue fact on write failure
-        logger.exception(
-            "PARTIAL_EXIT_PROJECTION_BATCH_FAILED position_id=%s order_id=%s",
-            getattr(position, "trade_id", ""),
-            order_id,
+        events.append(event)
+    if released_position is not None:
+        released = _build_exit_retry_released_event_and_projection(
+            released_position,
+            sequence_no=sequence_no + len(events),
+            previous_next_retry_at=previous_next_retry_at,
+            previous_retry_count=previous_retry_count,
+            previous_error=previous_error,
+            release_reason="CAPITAL_REDUCTION_FILLED",
+            caused_by="capital_reduction_filled",
         )
-        return False
+        if released is None:
+            raise RuntimeError("confirmed reduction canonical release build failed")
+        release_event, projection = released
+        events.append(release_event)
+    if not events or projection is None:
+        raise RuntimeError("partial EXIT canonical batch is empty")
+    projection["realized_pnl_usd"] = canonical_decimal_text(
+        cumulative_realized_pnl_usd
+    )
+    append_many_and_project(conn, events, projection)
+    return True
 
 
 def _canonical_exit_intent_payload(
@@ -6353,13 +6387,16 @@ def _complete_intentional_position_reduction(
     *,
     intended_shares: Decimal,
     confirmed_filled_shares: Decimal,
-    fill_price: float,
+    fill_price: object,
     order_id: str,
     status: str,
     conn: sqlite3.Connection | None,
     economic_fills: Sequence[object] | None = None,
+    release_after_fill: bool = True,
 ) -> Decimal:
-    """Apply a confirmed partial-position SELL without manufacturing closure."""
+    """Append exact partial economics before publishing the local reduction."""
+
+    import copy
 
     trade_id = str(getattr(position, "trade_id", "") or "")
     already_applied = _recorded_reduction_fill_shares(
@@ -6369,8 +6406,10 @@ def _complete_intentional_position_reduction(
     )
     intended_shares = Decimal(intended_shares)
     total_filled = Decimal(confirmed_filled_shares)
+    fill_price_decimal = _positive_finite_decimal(fill_price)
     if (
-        total_filled <= Decimal("1e-9")
+        fill_price_decimal is None
+        or total_filled <= Decimal("1e-9")
         or total_filled > intended_shares + Decimal("1e-9")
     ):
         raise RuntimeError("reduction finality has an invalid confirmed fill size")
@@ -6385,6 +6424,15 @@ def _complete_intentional_position_reduction(
             f"partial EXIT basis missing: position_id={trade_id}"
         )
     unit_cost = basis_cost / basis_shares
+    staged_fill_position = copy.deepcopy(position)
+    remaining_shares = basis_shares
+    position_fill_to_apply = Decimal("0")
+    batch_slices: list[dict[str, object]] = []
+    cumulative_realized = (
+        _recorded_reduction_realized_pnl(conn, position_id=trade_id)
+        if conn is not None
+        else Decimal("0")
+    )
     # A canonical MATCHED/CONFIRMED fact must still be reconciled after a
     # status-first receipt already reduced the local position.
     if newly_filled > Decimal("1e-9") or economic_fills:
@@ -6417,17 +6465,8 @@ def _complete_intentional_position_reduction(
             unreflected_fill = open_shares - expected_remaining
             if abs(unreflected_fill) <= tolerance:
                 remaining_shares = open_shares
-            elif not _apply_partial_exit_fill(
-                position,
-                filled_shares=float(unreflected_fill),
-                remaining_shares=float(remaining_shares),
-                fill_price=fill_price,
-                order_id=order_id,
-                status=status,
-            ):
-                raise RuntimeError(
-                    "confirmed reduction could not converge to fill target"
-                )
+            else:
+                position_fill_to_apply = unreflected_fill
         else:
             if newly_filled <= Decimal("1e-9"):
                 remaining_shares = open_shares
@@ -6437,17 +6476,7 @@ def _complete_intentional_position_reduction(
                 )
             else:
                 remaining_shares = open_shares - newly_filled
-                if not _apply_partial_exit_fill(
-                    position,
-                    filled_shares=float(newly_filled),
-                    remaining_shares=float(remaining_shares),
-                    fill_price=fill_price,
-                    order_id=order_id,
-                    status=status,
-                ):
-                    raise RuntimeError(
-                        "confirmed reduction could not update open exposure"
-                    )
+                position_fill_to_apply = newly_filled
         from src.state.fill_dedup import (
             PartialExitEconomicDebtError,
             partial_exit_realized_pnl_fold,
@@ -6545,15 +6574,14 @@ def _complete_intentional_position_reduction(
                     }
                 )
         else:
-            # Direct status receipts have no venue-trade-fact identity yet. Keep
-            # their historical behavior but give the cumulative receipt one
-            # stable cursor so MATCHED/CONFIRMED replay cannot double-book it.
+            # A status-first receipt gets one stable command-bound cursor so a
+            # later MATCHED/CONFIRMED fact can verify it without double-booking.
             identity = f"status-fill:v1:{trade_id}:{order_id}"
             prior_qty, prior_notional = cursors.get(
                 identity,
-                (already_applied, already_applied * Decimal(str(fill_price))),
+                (already_applied, already_applied * fill_price_decimal),
             )
-            cumulative_notional = total_filled * Decimal(str(fill_price))
+            cumulative_notional = total_filled * fill_price_decimal
             delta_qty = total_filled - prior_qty
             delta_notional = cumulative_notional - prior_notional
             if delta_qty > Decimal("1e-9") and delta_notional > 0:
@@ -6574,71 +6602,97 @@ def _complete_intentional_position_reduction(
             raise PartialExitEconomicDebtError(
                 f"partial EXIT fill/economics mismatch: position_id={trade_id} fill={newly_filled} economics={slice_quantity}"
             )
-        cumulative_realized = partial_exit_realized_pnl_fold(conn, trade_id) if conn else Decimal("0")
-        batch_slices: list[dict[str, object]] = []
+        cumulative_realized = (
+            partial_exit_realized_pnl_fold(conn, trade_id)
+            if conn
+            else Decimal("0")
+        )
+        remaining_quantity = slice_quantity
+        remaining_cost_basis = basis_cost
+        local_cost_quantity = position_fill_to_apply
         for item in slices:
             quantity = item["quantity"]
             notional = item["notional"]
+            remaining_quantity -= quantity
             allocated_cost = quantity * unit_cost
+            locally_applied = min(quantity, local_cost_quantity)
+            remaining_cost_basis -= locally_applied * unit_cost
+            local_cost_quantity -= locally_applied
             pnl_delta = notional - allocated_cost
             cumulative_realized += pnl_delta
             batch_slices.append(
                 {
                     **item,
-                    "remaining_shares": remaining_shares,
+                    "remaining_shares": remaining_shares + remaining_quantity,
                     "allocated_cost": allocated_cost,
                     "pnl_delta": pnl_delta,
                     "cumulative_realized": cumulative_realized,
+                    "remaining_cost_basis": remaining_cost_basis,
                 }
             )
-        if batch_slices:
-            persisted = _dual_write_partial_exit_projection_batch(
-                conn,
-                position,
-                order_id=order_id,
-                status=status,
-                slices=batch_slices,
-                cumulative_realized_pnl_usd=cumulative_realized,
-            )
-            if conn is not None and not persisted:
-                raise RuntimeError("confirmed reduction canonical projection failed")
+
+    if position_fill_to_apply > Decimal("1e-9") and not _apply_partial_exit_fill(
+        staged_fill_position,
+        filled_shares=position_fill_to_apply,
+        remaining_shares=remaining_shares,
+        fill_price=fill_price_decimal,
+        order_id=order_id,
+        status=status,
+    ):
+        raise RuntimeError("confirmed reduction could not converge to fill target")
 
     previous_next_retry_at = str(
         getattr(position, "next_exit_retry_at", "") or ""
     )
     previous_retry_count = int(getattr(position, "exit_retry_count", 0) or 0)
     previous_error = str(getattr(position, "last_exit_error", "") or "")
-    position.exit_state = ""
-    position.next_exit_retry_at = ""
-    position.exit_retry_count = 0
-    position.exit_reason = ""
-    position.last_exit_error = ""
-    position.last_exit_order_id = ""
-    position.order_status = "filled"
-    _release_pending_exit(position)
-    released = _dual_write_exit_retry_released_if_available(
-        conn,
-        position,
-        previous_next_retry_at=previous_next_retry_at,
-        previous_retry_count=previous_retry_count,
-        previous_error=previous_error,
-        release_reason="CAPITAL_REDUCTION_FILLED",
-        caused_by="capital_reduction_filled",
+    final_position = staged_fill_position
+    released_position: Position | None = None
+    raw_state = getattr(position, "state", "")
+    state_name = str(getattr(raw_state, "value", raw_state) or "")
+    should_release = state_name == "pending_exit" or bool(
+        str(getattr(position, "exit_state", "") or "")
     )
-    if conn is not None and not released:
-        raise RuntimeError("confirmed reduction canonical release failed")
+    if release_after_fill and should_release:
+        released_position = copy.deepcopy(staged_fill_position)
+        released_position.exit_state = ""
+        released_position.next_exit_retry_at = ""
+        released_position.exit_retry_count = 0
+        released_position.exit_reason = ""
+        released_position.last_exit_error = ""
+        released_position.last_exit_order_id = ""
+        released_position.order_status = "filled"
+        _release_pending_exit(released_position)
+        final_position = released_position
+
+    if conn is not None and (batch_slices or released_position is not None):
+        _dual_write_partial_exit_projection_batch(
+            conn,
+            staged_fill_position,
+            order_id=order_id,
+            status=status,
+            slices=batch_slices,
+            cumulative_realized_pnl_usd=cumulative_realized,
+            released_position=released_position,
+            previous_next_retry_at=previous_next_retry_at,
+            previous_retry_count=previous_retry_count,
+            previous_error=previous_error,
+        )
+
+    position.__dict__.clear()
+    position.__dict__.update(final_position.__dict__)
     if conn is not None and newly_filled > Decimal("1e-9"):
         _log_partial_exit_execution_fact(
             conn,
             position,
             status=status,
-            fill_price=fill_price,
-            filled_shares=float(newly_filled),
+            fill_price=fill_price_decimal,
+            filled_shares=newly_filled,
             order_id=order_id,
         )
     if newly_filled > Decimal("1e-9"):
         _emit_typed_realized_fill(
-            actual_price=fill_price,
+            actual_price=float(fill_price_decimal),
             expected_price=float(
                 getattr(position, "last_monitor_market_price", 0.0)
                 or getattr(position, "entry_price", 0.0)
@@ -7232,7 +7286,7 @@ def check_pending_exits(
                         pos,
                         intended_shares=Decimal(fill["intended_reduction_shares"]),
                         confirmed_filled_shares=Decimal(fill["filled_size"]),
-                        fill_price=float(fill["fill_price"]),
+                        fill_price=fill["fill_price"],
                         order_id=str(fill["venue_order_id"]),
                         status=str(fill.get("fill_states") or "CONFIRMED"),
                         conn=conn,
@@ -7373,7 +7427,7 @@ def check_pending_exits(
                         pos,
                         intended_shares=Decimal(fill["intended_reduction_shares"]),
                         confirmed_filled_shares=Decimal(fill["filled_size"]),
-                        fill_price=float(fill["fill_price"]),
+                        fill_price=fill["fill_price"],
                         order_id=exit_order_id,
                         status=str(fill.get("fill_states") or "CONFIRMED"),
                         conn=conn,
@@ -7435,8 +7489,8 @@ def check_pending_exits(
         if status in FILL_STATUSES:
             # A filled reduction order changes exposure but does not close the
             # remaining claim. Full-close intents retain the economic-close path.
-            actual_price = _extract_fill_price(status_payload)
-            if actual_price is None:
+            actual_price_decimal = _extract_fill_price_decimal(status_payload)
+            if actual_price_decimal is None:
                 _mark_exit_fill_economics_missing(
                     pos,
                     status=status,
@@ -7554,7 +7608,7 @@ def check_pending_exits(
                         pos,
                         intended_shares=intended_shares,
                         confirmed_filled_shares=confirmed_shares,
-                        fill_price=actual_price,
+                        fill_price=actual_price_decimal,
                         order_id=exit_order_id,
                         status=status,
                         conn=conn,
@@ -7567,6 +7621,7 @@ def check_pending_exits(
                     raise
                 stats["reduced"] = stats.get("reduced", 0) + int(reduced > 0)
                 continue
+            actual_price = float(actual_price_decimal)
             closes_position = (
                 current_holding is not None
                 and holding_at_authority is not None
@@ -7628,9 +7683,9 @@ def check_pending_exits(
                 current_open_shares=pos.effective_shares,
             )
             if partial:
-                filled_shares, remaining_shares = partial
-                actual_price = _extract_fill_price(status_payload)
-                if actual_price is None:
+                _filled_delta, remaining_shares = partial
+                actual_price_decimal = _extract_fill_price_decimal(status_payload)
+                if actual_price_decimal is None:
                     _mark_exit_fill_economics_missing(
                         pos,
                         status=status,
@@ -7638,15 +7693,59 @@ def check_pending_exits(
                         conn=conn,
                     )
                 else:
-                    partial_applied = _apply_partial_exit_fill(
-                        pos,
-                        filled_shares=filled_shares,
-                        remaining_shares=remaining_shares,
-                        fill_price=actual_price,
-                        order_id=exit_order_id,
-                        status=status,
+                    command_row = None
+                    if conn is not None:
+                        command_row = conn.execute(
+                            """
+                            SELECT size, created_at
+                              FROM venue_commands
+                             WHERE position_id = ? AND venue_order_id = ?
+                             ORDER BY updated_at DESC, created_at DESC
+                             LIMIT 1
+                            """,
+                            (pos.trade_id, exit_order_id),
+                        ).fetchone()
+                    command_size = (
+                        _positive_decimal(command_row["size"])
+                        if command_row is not None
+                        else None
                     )
+                    intent_kwargs = (
+                        {
+                            "order_id": exit_order_id,
+                            "before_time": str(command_row["created_at"] or ""),
+                        }
+                        if command_row is not None
+                        else {"order_id": exit_order_id}
+                    )
+                    intended_shares = (
+                        _canonical_reduction_intent_shares(conn, pos, **intent_kwargs)
+                        or _canonical_full_exit_intent_shares(conn, pos, **intent_kwargs)
+                        or command_size
+                    )
+                    confirmed_shares = (
+                        _confirmed_reduction_fill_shares(
+                            status_payload,
+                            intended_shares=intended_shares,
+                        )
+                        if intended_shares is not None
+                        else None
+                    )
+                    if confirmed_shares is not None:
+                        reduced = _complete_intentional_position_reduction(
+                            pos,
+                            intended_shares=intended_shares,
+                            confirmed_filled_shares=confirmed_shares,
+                            fill_price=actual_price_decimal,
+                            order_id=exit_order_id,
+                            status=status or "PARTIAL",
+                            conn=conn,
+                            release_after_fill=False,
+                        )
+                        partial_applied = reduced > 0
                 if partial_applied and conn is not None:
+                    from src.state.fill_dedup import canonical_decimal_text
+
                     log_exit_attempt_event(
                         conn,
                         pos,
@@ -7654,32 +7753,26 @@ def check_pending_exits(
                         status=status or "PARTIAL",
                         current_market_price=pos.last_monitor_market_price or pos.entry_price,
                         best_bid=getattr(pos, "last_monitor_best_bid", None),
-                        shares=filled_shares,
+                        shares=float(confirmed_shares),
                         details={
                             "semantic_event": "PARTIAL_FILL_OBSERVED",
-                            "filled_shares": filled_shares,
-                            "remaining_shares": remaining_shares,
-                            "fill_price": actual_price,
+                            "filled_shares": canonical_decimal_text(confirmed_shares),
+                            "remaining_shares": canonical_decimal_text(remaining_shares),
+                            "fill_price": canonical_decimal_text(actual_price_decimal),
                         },
                     )
-                    _dual_write_partial_exit_projection_if_available(
+                    # EXIT_ORDER_ATTEMPTED deliberately clears non-final fill
+                    # fields. Restore the already-canonicalized partial receipt
+                    # only after both the event batch and telemetry append have
+                    # succeeded.
+                    _log_partial_exit_execution_fact(
                         conn,
                         pos,
-                        filled_shares=filled_shares,
-                        remaining_shares=remaining_shares,
-                        fill_price=actual_price,
-                        order_id=exit_order_id,
                         status=status or "PARTIAL",
+                        fill_price=actual_price_decimal,
+                        filled_shares=confirmed_shares,
+                        order_id=exit_order_id,
                     )
-                    if status not in VOID_STATUSES:
-                        _log_partial_exit_execution_fact(
-                            conn,
-                            pos,
-                            status=status or "PARTIAL",
-                            fill_price=actual_price,
-                            filled_shares=filled_shares,
-                            order_id=exit_order_id,
-                        )
             if status in VOID_STATUSES:
                 # INV-47 SCOPE: the exact position+command+held-token global
                 # MAKER_REST SELL. DRAIN: command recovery proves a durable,
@@ -7708,13 +7801,13 @@ def check_pending_exits(
                         error=status,
                     )
                     log_exit_retry_event(conn, pos, reason=f"SELL_{status}", error=status)
-                    if partial_applied and actual_price is not None:
+                    if partial_applied:
                         _log_partial_exit_execution_fact(
                             conn,
                             pos,
-                            status=status or "PARTIAL",
-                            fill_price=actual_price,
-                            filled_shares=filled_shares,
+                            status=status,
+                            fill_price=actual_price_decimal,
+                            filled_shares=confirmed_shares,
                             order_id=exit_order_id,
                         )
                 stats["retried"] += 1
@@ -7916,6 +8009,114 @@ def check_pending_retries(
     return True
 
 
+def _build_exit_retry_released_event_and_projection(
+    position: Position,
+    *,
+    sequence_no: int,
+    previous_next_retry_at: str,
+    previous_retry_count: int,
+    previous_error: str,
+    event_type: str = "EXIT_RETRY_RELEASED",
+    release_reason: str = "EXIT_RETRY_COOLDOWN_EXPIRED",
+    caused_by: str = "exit_retry_cooldown_expired",
+) -> tuple[dict, dict] | None:
+    """Build one retry-release event and its final active projection.
+
+    A released pending exit is still a live held position; it must immediately
+    re-enter normal monitor redecision. The release cannot be only an in-memory
+    mutation, because restart/chain-correction projection would reload the old
+    ``pending_exit/retry_pending`` state and strand the position again.
+    """
+
+    trade_id = str(getattr(position, "trade_id", "") or "")
+    if not trade_id:
+        return None
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.lifecycle_manager import fold_lifecycle_phase, phase_for_runtime_position
+
+    occurred_at = datetime.now(timezone.utc).isoformat()
+    if not any(
+        getattr(position, field, "")
+        for field in (
+            "last_monitor_at",
+            "last_exit_at",
+            "chain_verified_at",
+            "day0_entered_at",
+            "entered_at",
+            "order_posted_at",
+        )
+    ):
+        position.order_posted_at = occurred_at
+    phase_after = phase_for_runtime_position(
+        state=getattr(position, "state", ""),
+        exit_state=getattr(position, "exit_state", ""),
+        chain_state=getattr(position, "chain_state", ""),
+    ).value
+    if phase_after == LifecyclePhase.PENDING_EXIT.value:
+        return None
+    projection = build_position_current_projection(position)
+    projection["phase"] = phase_after
+    projection["updated_at"] = occurred_at
+    projection["order_status"] = "filled"
+    projection["next_exit_retry_at"] = ""
+    projection["exit_retry_count"] = 0
+    env = str(getattr(position, "env", "") or "live")
+    if env not in {"live", "test", "replay", "backtest"}:
+        env = "live"
+    payload = {
+        "status": "ready",
+        "exit_reason": getattr(position, "exit_reason", "") or release_reason,
+        "error": previous_error,
+        "previous_retry_count": previous_retry_count,
+        "retry_count": 0,
+        "previous_next_retry_at": previous_next_retry_at,
+        "next_retry_at": "",
+        "release_reason": release_reason,
+    }
+    if release_reason == "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED":
+        obligation = _held_sell_reauction_obligation(
+            position,
+            generation_material={
+                "event_type": event_type,
+                "sequence_no": sequence_no,
+                "previous_error": previous_error,
+                "release_reason": release_reason,
+            },
+        )
+        if not obligation:
+            return None
+        payload["held_sell_reauction_obligation"] = obligation
+    event = {
+        "event_id": f"{trade_id}:{event_type.lower()}:{sequence_no}",
+        "position_id": trade_id,
+        "event_version": 1,
+        "sequence_no": sequence_no,
+        "event_type": event_type,
+        "occurred_at": occurred_at,
+        "phase_before": LifecyclePhase.PENDING_EXIT.value,
+        "phase_after": fold_lifecycle_phase(
+            LifecyclePhase.PENDING_EXIT.value,
+            phase_after,
+        ).value,
+        "strategy_key": str(
+            getattr(position, "strategy_key", "")
+            or getattr(position, "strategy", "")
+            or ""
+        ),
+        "decision_id": None,
+        "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
+        "order_id": None,
+        "command_id": None,
+        "caused_by": caused_by,
+        "idempotency_key": f"{trade_id}:{event_type.lower()}:{sequence_no}",
+        "venue_status": "ready",
+        "source_module": "src.execution.exit_lifecycle",
+        "env": env,
+        "payload_json": json.dumps(payload, default=str, sort_keys=True),
+    }
+    return event, projection
+
+
 def _dual_write_exit_retry_released_if_available(
     conn: sqlite3.Connection | None,
     position: Position,
@@ -7927,13 +8128,7 @@ def _dual_write_exit_retry_released_if_available(
     release_reason: str = "EXIT_RETRY_COOLDOWN_EXPIRED",
     caused_by: str = "exit_retry_cooldown_expired",
 ) -> bool:
-    """Persist retry cooldown release and projection in one canonical write.
-
-    A released pending exit is still a live held position; it must immediately
-    re-enter normal monitor redecision. The release cannot be only an in-memory
-    mutation, because restart/chain-correction projection would reload the old
-    ``pending_exit/retry_pending`` state and strand the position again.
-    """
+    """Persist retry cooldown release and projection in one canonical write."""
 
     if conn is None:
         return False
@@ -7941,91 +8136,21 @@ def _dual_write_exit_retry_released_if_available(
     if not trade_id:
         return False
     try:
-        from src.engine.lifecycle_events import build_position_current_projection
         from src.state.db import append_many_and_project
-        from src.state.lifecycle_manager import fold_lifecycle_phase, phase_for_runtime_position
 
-        sequence_no = _next_canonical_sequence_no(conn, trade_id)
-        occurred_at = datetime.now(timezone.utc).isoformat()
-        if not any(
-            getattr(position, field, "")
-            for field in (
-                "last_monitor_at",
-                "last_exit_at",
-                "chain_verified_at",
-                "day0_entered_at",
-                "entered_at",
-                "order_posted_at",
-            )
-        ):
-            position.order_posted_at = occurred_at
-        phase_after = phase_for_runtime_position(
-            state=getattr(position, "state", ""),
-            exit_state=getattr(position, "exit_state", ""),
-            chain_state=getattr(position, "chain_state", ""),
-        ).value
-        if phase_after == LifecyclePhase.PENDING_EXIT.value:
+        built = _build_exit_retry_released_event_and_projection(
+            position,
+            sequence_no=_next_canonical_sequence_no(conn, trade_id),
+            previous_next_retry_at=previous_next_retry_at,
+            previous_retry_count=previous_retry_count,
+            previous_error=previous_error,
+            event_type=event_type,
+            release_reason=release_reason,
+            caused_by=caused_by,
+        )
+        if built is None:
             return False
-        projection = build_position_current_projection(position)
-        projection["phase"] = phase_after
-        projection["updated_at"] = occurred_at
-        projection["order_status"] = "filled"
-        projection["next_exit_retry_at"] = ""
-        projection["exit_retry_count"] = 0
-        env = str(getattr(position, "env", "") or "live")
-        if env not in {"live", "test", "replay", "backtest"}:
-            env = "live"
-        payload = {
-            "status": "ready",
-            "exit_reason": getattr(position, "exit_reason", "") or release_reason,
-            "error": previous_error,
-            "previous_retry_count": previous_retry_count,
-            "retry_count": 0,
-            "previous_next_retry_at": previous_next_retry_at,
-            "next_retry_at": "",
-            "release_reason": release_reason,
-        }
-        if release_reason == "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED":
-            obligation = _held_sell_reauction_obligation(
-                position,
-                generation_material={
-                    "event_type": event_type,
-                    "sequence_no": sequence_no,
-                    "previous_error": previous_error,
-                    "release_reason": release_reason,
-                },
-            )
-            if not obligation:
-                return False
-            payload["held_sell_reauction_obligation"] = obligation
-        event = {
-            "event_id": f"{trade_id}:{event_type.lower()}:{sequence_no}",
-            "position_id": trade_id,
-            "event_version": 1,
-            "sequence_no": sequence_no,
-            "event_type": event_type,
-            "occurred_at": occurred_at,
-            "phase_before": LifecyclePhase.PENDING_EXIT.value,
-            "phase_after": fold_lifecycle_phase(
-                LifecyclePhase.PENDING_EXIT.value,
-                phase_after,
-            ).value,
-            "strategy_key": str(
-                getattr(position, "strategy_key", "")
-                or getattr(position, "strategy", "")
-                or ""
-            ),
-            "decision_id": None,
-            "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
-            "order_id": None,
-            "command_id": None,
-            "caused_by": caused_by,
-            "idempotency_key": f"{trade_id}:{event_type.lower()}:{sequence_no}",
-            "venue_status": "ready",
-            "source_module": "src.execution.exit_lifecycle",
-            "env": env,
-            "payload_json": json.dumps(payload, default=str, sort_keys=True),
-        }
+        event, projection = built
         append_many_and_project(conn, [event], projection)
         return True
     except Exception as exc:  # noqa: BLE001
@@ -8310,10 +8435,23 @@ def _extract_fill_price(
     sell_result: OrderResult | dict | object,
 ) -> Optional[float]:
     """Extract explicit venue fill price only."""
+    decimal = _extract_fill_price_decimal(sell_result)
+    return None if decimal is None else float(decimal)
+
+
+def _extract_fill_price_decimal(
+    sell_result: OrderResult | dict | object,
+) -> Decimal | None:
+    """Extract an exact venue fill price without crossing binary float."""
+
     if isinstance(sell_result, OrderResult) and sell_result.fill_price not in (None, ""):
-        return _positive_finite_float(sell_result.fill_price)
+        return _positive_finite_decimal(sell_result.fill_price)
     if isinstance(sell_result, dict):
-        return _first_explicit_fill_price(sell_result)
+        for key in ("avgPrice", "avg_price", "fillPrice", "fill_price"):
+            if key in sell_result and sell_result[key] not in (None, ""):
+                value = _positive_finite_decimal(sell_result[key])
+                if value is not None:
+                    return value
     return None
 
 
@@ -8327,16 +8465,21 @@ def _first_explicit_fill_price(payload: dict) -> Optional[float]:
 
 
 def _positive_finite_float(value: object) -> Optional[float]:
+    decimal = _positive_finite_decimal(value)
+    return None if decimal is None else float(decimal)
+
+
+def _positive_finite_decimal(value: object) -> Decimal | None:
     try:
-        numeric = float(value)
-    except (TypeError, ValueError):
+        numeric = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
         return None
     if (
-        not math.isfinite(numeric)
-        or numeric < float(LIVE_ORDER_MIN_UNIT_PRICE)
-        or numeric > float(LIVE_ORDER_MAX_UNIT_PRICE)
+        not numeric.is_finite()
+        or numeric < LIVE_ORDER_MIN_UNIT_PRICE
+        or numeric > LIVE_ORDER_MAX_UNIT_PRICE
     ):
-        if math.isfinite(numeric) and numeric > 0.0:
+        if numeric.is_finite() and numeric > 0:
             logger.critical(
                 "LIVE_FILL_PRICE_OUT_OF_BOUNDS_RECEIPT price=%s; suppressing normal fill projection",
                 numeric,

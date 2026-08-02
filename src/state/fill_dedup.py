@@ -82,6 +82,14 @@ class EconomicExitFill:
     notional: Decimal
 
 
+@dataclass(frozen=True)
+class LegacyPartialExitRepair:
+    """One exact canonical fill proving one legacy event's economics."""
+
+    legacy_event_id: str
+    fill: EconomicExitFill
+
+
 def _decimal(value: object) -> Decimal | None:
     try:
         result = Decimal(str(value))
@@ -495,7 +503,7 @@ def partial_exit_realized_pnl_fold(
         ) from exc
 
     parsed: list[tuple[object, dict]] = []
-    has_repair = False
+    repaired_legacy_event_ids: set[str] = set()
     for row in rows:
         try:
             payload = json.loads(str(row["payload_json"] or "{}"))
@@ -503,17 +511,32 @@ def partial_exit_realized_pnl_fold(
             raise PartialExitEconomicDebtError(
                 f"partial EXIT event payload malformed: position_id={position_id} event_id={row['event_id']}"
             ) from exc
-        has_repair = has_repair or str(row["caused_by"] or "") == (
-            "partial_exit_economics_repair"
-        )
+        repaired_event_id = str(
+            payload.get("repaired_legacy_event_id") or ""
+        ).strip()
+        if repaired_event_id:
+            repaired_legacy_event_ids.add(repaired_event_id)
         parsed.append((row, payload))
+
+    legacy_event_ids = {
+        str(row["event_id"])
+        for row, payload in parsed
+        if str(row["caused_by"] or "") == "partial_exit_fill"
+        and not str(payload.get("economic_fill_identity") or "").strip()
+    }
+    unknown_coverage = repaired_legacy_event_ids - legacy_event_ids
+    if unknown_coverage:
+        raise PartialExitEconomicDebtError(
+            "partial EXIT repair references unknown legacy events: "
+            f"position_id={position_id} event_ids={sorted(unknown_coverage)}"
+        )
 
     total = Decimal("0")
     seen: set[str] = set()
     for row, payload in parsed:
         identity = str(payload.get("economic_fill_identity") or "").strip()
         if not identity:
-            if allow_unrepaired_legacy or has_repair:
+            if allow_unrepaired_legacy or str(row["event_id"]) in repaired_legacy_event_ids:
                 continue
             raise PartialExitEconomicDebtError(
                 f"partial EXIT economics repair required: position_id={position_id} event_id={row['event_id']}"
@@ -547,7 +570,7 @@ def partial_exit_realized_pnl_fold(
 def legacy_partial_exit_repair_fills(
     conn: sqlite3.Connection,
     position_id: str,
-) -> list[EconomicExitFill]:
+) -> list[LegacyPartialExitRepair]:
     """Prove the exact canonical fills needed to repair old partial events.
 
     Old payloads recorded a quantity/price observation but not the stable
@@ -561,10 +584,10 @@ def legacy_partial_exit_repair_fills(
     try:
         rows = conn.execute(
             """
-            SELECT event_id, order_id, payload_json
+            SELECT event_id, order_id, caused_by, payload_json
               FROM position_events
              WHERE position_id = ?
-               AND caused_by = 'partial_exit_fill'
+               AND caused_by IN ('partial_exit_fill', 'partial_exit_economics_repair')
              ORDER BY sequence_no, event_id
             """,
             (position_id,),
@@ -573,7 +596,19 @@ def legacy_partial_exit_repair_fills(
         raise PartialExitEconomicDebtError(
             f"partial EXIT repair lookup failed: position_id={position_id}: {exc}"
         ) from exc
-    legacy_by_order: dict[str, Decimal] = {}
+    covered_legacy_event_ids: set[str] = set()
+    for row in rows:
+        try:
+            payload = json.loads(str(row["payload_json"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        repaired_event_id = str(
+            payload.get("repaired_legacy_event_id") or ""
+        ).strip()
+        if repaired_event_id:
+            covered_legacy_event_ids.add(repaired_event_id)
+
+    legacy_by_order: dict[str, list[tuple[str, Decimal]]] = {}
     for row in rows:
         try:
             payload = json.loads(str(row["payload_json"] or "{}"))
@@ -583,28 +618,49 @@ def legacy_partial_exit_repair_fills(
             ) from exc
         if payload.get("economic_fill_identity"):
             continue
+        event_id = str(row["event_id"] or "").strip()
+        if event_id in covered_legacy_event_ids:
+            continue
         order_id = str(row["order_id"] or payload.get("order_id") or "").strip()
         quantity = _decimal(payload.get("filled_shares"))
-        if not order_id or quantity is None or quantity <= 0:
+        if not event_id or not order_id or quantity is None or quantity <= 0:
             raise PartialExitEconomicDebtError(
                 f"partial EXIT repair identity/quantity missing: position_id={position_id} event_id={row['event_id']}"
             )
-        legacy_by_order[order_id] = legacy_by_order.get(order_id, Decimal("0")) + quantity
+        legacy_by_order.setdefault(order_id, []).append((event_id, quantity))
     if not legacy_by_order:
         return []
 
     repaired = recorded_partial_exit_fill_cursors(conn, position_id)
-    exact: list[EconomicExitFill] = []
-    for order_id, legacy_quantity in legacy_by_order.items():
+    exact: list[LegacyPartialExitRepair] = []
+    for order_id, legacy_events in legacy_by_order.items():
         fills = economic_exit_fills_for_position(
             conn, position_id, venue_order_id=order_id
         )
-        canonical_quantity = sum((fill.quantity for fill in fills), Decimal("0"))
-        if not fills or canonical_quantity != legacy_quantity:
-            raise PartialExitEconomicDebtError(
-                "partial EXIT repair cannot prove exact fill identity/quantity: "
-                f"position_id={position_id} order_id={order_id} "
-                f"legacy={legacy_quantity} canonical={canonical_quantity}"
+        available = [fill for fill in fills if fill.identity not in repaired]
+        fill_index = 0
+        for legacy_event_id, legacy_quantity in legacy_events:
+            selected: list[EconomicExitFill] = []
+            selected_quantity = Decimal("0")
+            while fill_index < len(available) and selected_quantity < legacy_quantity:
+                fill = available[fill_index]
+                fill_index += 1
+                selected.append(fill)
+                selected_quantity += fill.quantity
+            if not selected or selected_quantity != legacy_quantity:
+                raise PartialExitEconomicDebtError(
+                    "partial EXIT repair cannot prove exact fill identity/quantity: "
+                    f"position_id={position_id} order_id={order_id} "
+                    f"event_id={legacy_event_id} legacy={legacy_quantity} "
+                    f"canonical={selected_quantity}"
+                )
+            exact.extend(
+                LegacyPartialExitRepair(legacy_event_id=legacy_event_id, fill=fill)
+                for fill in selected
             )
-        exact.extend(fill for fill in fills if fill.identity not in repaired)
+        if fill_index < len(available):
+            raise PartialExitEconomicDebtError(
+                "partial EXIT repair has canonical fills without a legacy event: "
+                f"position_id={position_id} order_id={order_id}"
+            )
     return exact
