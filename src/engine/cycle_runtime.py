@@ -6963,10 +6963,21 @@ def execute_monitoring_phase(
                     + 1
                 )
             else:
+                # SCOPE: one admitted position's current-probability SQLite reads.
+                # DRAIN: its finite read budget interrupts the stale read; the
+                # outer sweep then admits the next eligible position while its
+                # own batch budget remains open. RESET: this transient deadline
+                # is removed immediately after the position refresh returns.
+                # The outer admission deadline remains the sole bound on starting
+                # later positions; never pass its already-spent start instant to
+                # a sibling's independent probability read.
+                position_probability_deadline = (
+                    time.monotonic() + monitor_budget_seconds
+                )
                 setattr(
                     pos,
                     _HELD_MONITOR_DEADLINE_ATTR,
-                    monitor_deadline,
+                    position_probability_deadline,
                 )
                 try:
                     edge_ctx = refresh_position(conn, clob, pos)

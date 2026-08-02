@@ -362,15 +362,15 @@ def test_open_portfolio_loader_marks_runtime_exposure_without_family_filter(
 
 
 @pytest.mark.parametrize(
-    ("monotonic_values", "expected_count", "expected_reason"),
+    ("advance_after_first", "expected_count", "expected_reason"),
     (
-        ([0.0, 0.0, 1.0, 1.0], 1, "cycle_budget_exhausted"),
-        ([0.0, 0.0, 0.0, 0.0], 3, ""),
+        (True, 1, "cycle_budget_exhausted"),
+        (False, 3, ""),
     ),
 )
 def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
     monkeypatch,
-    monotonic_values,
+    advance_after_first,
     expected_count,
     expected_reason,
 ):
@@ -410,6 +410,7 @@ def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
     portfolio = _make_portfolio(first, second, third)
     visited: list[str] = []
     readthrough_deadlines: list[float] = []
+    clock = [0.0]
 
     def fake_refresh(conn, clob, position):
         visited.append(position.trade_id)
@@ -421,6 +422,8 @@ def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
         position.last_monitor_edge = 0.12
         position.last_monitor_market_price = 0.49
         position.last_monitor_market_price_is_fresh = True
+        if advance_after_first and position is first:
+            clock[0] = 1.0
         return SimpleNamespace(
             p_market=np.array([0.49]),
             p_posterior=0.61,
@@ -438,12 +441,7 @@ def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
             applied_validations=["replacement_posterior"],
         )
 
-    def fake_monotonic():
-        if monotonic_values:
-            return monotonic_values.pop(0)
-        return 1.0
-
-    monkeypatch.setattr(cycle_runtime.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", fake_refresh)
     monkeypatch.setattr(Position, "evaluate_exit", fake_evaluate_exit)
     monkeypatch.setattr(
@@ -625,6 +623,98 @@ def test_live_monitor_deadline_defers_stale_fusion_and_dispatches_reseed(monkeyp
         position.applied_validations
     )
     assert not hasattr(position, "_zeus_held_monitor_deadline_monotonic")
+
+
+def test_monitor_probability_deadlines_are_per_position_and_isolate_stale_reads(
+    monkeypatch,
+):
+    """An admitted sibling gets a fresh finite q-read budget after one stale read."""
+    from src.engine import cycle_runtime
+
+    first = _make_position(
+        trade_id="stale-read-first",
+        state="holding",
+        chain_state="synced",
+    )
+    second = _make_position(
+        trade_id="fresh-read-second",
+        state="holding",
+        chain_state="synced",
+    )
+    clock = [0.0]
+    deadlines: list[tuple[str, float]] = []
+    results = []
+
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
+
+    def refresh(_conn, _clob, position):
+        deadlines.append(
+            (
+                position.trade_id,
+                position._zeus_held_monitor_deadline_monotonic,
+            )
+        )
+        if position is first:
+            # Model a Day0 SQLite deadline failure: this position stays stale,
+            # while consuming most of the outer admission budget.
+            position.last_monitor_prob = None
+            position.last_monitor_prob_is_fresh = False
+            position.last_monitor_edge = None
+            position.last_monitor_market_price = 0.49
+            position.last_monitor_market_price_is_fresh = True
+            clock[0] = 0.9
+            return SimpleNamespace(
+                p_market=np.array([0.49]),
+                p_posterior=float("nan"),
+                forward_edge=float("nan"),
+                confidence_band_lower=float("nan"),
+                confidence_band_upper=float("nan"),
+            )
+        return _monitor_test_edge_context(position)
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "EVIDENCE_UNAVAILABLE"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, result: results.append(result)},
+    )()
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(first, second),
+        artifact,
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_per_position_probability_deadline"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=1.0,
+    )
+
+    assert deadlines == [
+        ("stale-read-first", pytest.approx(1.0)),
+        ("fresh-read-second", pytest.approx(1.9)),
+    ]
+    assert first.last_monitor_prob_is_fresh is False
+    assert second.last_monitor_prob_is_fresh is True
+    assert [result.fresh_prob for result in results] == [None, pytest.approx(0.61)]
+    assert summary["held_monitor_positions_scanned"] == 2
+    assert summary.get("held_monitor_positions_deferred", 0) == 0
+    assert all(
+        not hasattr(position, "_zeus_held_monitor_deadline_monotonic")
+        for position in (first, second)
+    )
 
 
 def test_monitor_reservations_cover_large_held_book_within_three_degraded_cycles():

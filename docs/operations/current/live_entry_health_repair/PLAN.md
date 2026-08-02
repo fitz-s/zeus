@@ -1307,3 +1307,30 @@ Restore truthful live entry admission after the global auction reached a real wi
   planning-lock/topology check, source-rationale validation, YAML parse, and
   `git diff --check` pass. No live/DB/process/venue proof is claimed from this
   worktree-only verification.
+
+### 2026-08-02 Follow-up -- Per-position probability-read deadline isolation
+
+The B73 sweep still created one monotonic deadline at batch start and passed
+that spent instant to every later position. A slow current-Day0 SQLite read
+could therefore make an otherwise admitted sibling immediately stale or
+deferred without receiving its own finite probability-read opportunity.
+
+The correction keeps B73's outer sweep admission deadline and durable
+oldest-debt ordering unchanged. Once a position is admitted, `cycle_runtime`
+derives a fresh finite deadline from that admission instant and the existing
+monitor budget, attaches it only for that position's probability refresh, and
+removes it on return. A stale probability remains fail-closed for that position;
+quote freshness and all economic/venue behavior remain separate.
+
+SCOPE is one admitted held position's current-probability SQLite reads. DRAIN is
+that read's finite SQLite deadline followed by the next eligible position while
+the outer admission budget remains open. RESET is removal of the transient
+position deadline after refresh. No concurrency, thread, scheduler
+`max_instances`, outer-budget extension, q/economics/lifecycle/sizing, venue,
+price-band, or global-entry-pause behavior changes.
+
+The B73 source/test/plan scope remains unchanged. Acceptance adds a sibling
+admitted after a slow first read receiving a new finite deadline, and a stale
+probability read failing closed only for that position while its eligible sibling
+continues. Existing outer admission, oldest-debt/fairness, urgent-preemption,
+and no-concurrency antibodies remain mandatory.
