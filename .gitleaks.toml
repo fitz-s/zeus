@@ -12,33 +12,42 @@
 # When adding an entry: also add the [REVIEW-SAFE: <TAG>] banner at the source
 # site so a human reading the file sees the clearance without consulting this
 # config.
-
+#
+# HOW TO SCOPE AN ENTRY — read before adding one.
+#
+# In gitleaks 8.30.1 an allowlist's `regexes` and `paths` combine as OR, not
+# AND. An entry that lists both does not mean "this literal, in this file"; it
+# means "this literal ANYWHERE, or ANYTHING in this file". The path arm exempts
+# the entire file, so a real credential committed there later passes silently.
+# `condition = "AND"` does not fix this: the key parses without error and
+# changes nothing.
+#
+# Verified 2026-08-02 by fixture, per entry shape:
+#   regexes + paths : an unrelated 40-char high-entropy secret placed in a
+#                     listed file was NOT reported.
+#   regexes only    : the same secret in the same file WAS reported; only the
+#                     named literal was suppressed.
+#
+# So: prefer regex-only, and choose literals specific enough that clearing them
+# repo-wide is harmless. Use `paths` alone only for a deliberate whole-subtree
+# ruling (the tests/ entry below), never as a narrowing qualifier — it widens.
+#
 # Use the gitleaks default rules as a base; allowlist below is additive.
 [extend]
 useDefault = true
 
 [[allowlists]]
-description = "WU PUBLIC WEB KEY — wunderground.com browser-embedded public key. Operator ruling 2026-04-21, re-confirmed 2026-05-01. See docs/reference/security_false_positives.md [REVIEW-SAFE: WU_PUBLIC_KEY]."
+description = "WU PUBLIC WEB KEY — wunderground.com browser-embedded public key. Cleared everywhere: the value is published by wunderground.com itself, so it is not a credential in any file. Operator ruling 2026-04-21, re-confirmed 2026-05-01. See docs/reference/security_false_positives.md [REVIEW-SAFE: WU_PUBLIC_KEY]."
 regexes = [
     '''e1f10a1e78da46f5b10a1e78da96f525''',
 ]
-paths = [
-    '''src/data/observation_client\.py''',
-    '''src/data/daily_obs_append\.py''',
-    '''src/data/wu_hourly_client\.py''',
-    '''docs/reference/security_false_positives\.md''',
-    '''docs/operations/repo_review_.*/security\.md''',
-    '''docs/operations/repo_review_.*/SYNTHESIS\.md''',
-    '''docs/operations/repo_review_.*/architecture\.md''',
-    '''docs/operations/task_2026-04-14_session_backlog\.md''',
-]
 
-# Test fixture path: `tests/**` files routinely contain synthetic identifiers
-# (token_id, condition_id, decision_id, idempotency_key, etc.) that look like
-# API keys / tokens to gitleaks but are NEVER real credentials. Allowlist all
-# of `tests/` for the generic-api-key + generic-secret rule families. Real
-# secrets in tests would be a separate audit class — operator will surface
-# them via the docs/reference/security_false_positives.md banner pattern, not via raw values.
+# Deliberate whole-subtree ruling, not a narrowing qualifier: `tests/**` files
+# routinely carry synthetic identifiers (token_id, condition_id, decision_id,
+# idempotency_key, order_id) that read as API keys to gitleaks. The operator
+# ruling accepts the consequence that a real credential committed under tests/
+# would not be reported here; that case is handled as a separate audit class
+# via the docs/reference/security_false_positives.md banner pattern.
 [[allowlists]]
 description = "Test fixtures with synthetic IDs (operator-cleared 2026-05-01)"
 paths = [
@@ -46,41 +55,44 @@ paths = [
 ]
 
 [[allowlists]]
-description = "SCHEMA_PINNED_HASH — tests/state/_schema_pinned_hash.txt contains a single SHA256 hex digest of the DB schema sqlite_master dump. It is a structural integrity pin, not a secret. Path-scoped allowlist: only this file. See docs/reference/security_false_positives.md [REVIEW-SAFE: SCHEMA_PINNED_HASH]."
+description = "DOC_EXAMPLE_FIXTURE_TOKEN — the [REVIEW-SAFE: TEST_FIXTURE_TOKENS] entry quotes its own example token inline, so the false-positive index itself trips generic-api-key on full-history scans. The literal is the documented example, not a credential. See docs/reference/security_false_positives.md [REVIEW-SAFE: TEST_FIXTURE_TOKENS]."
 regexes = [
-    '''[0-9a-f]{64}''',
-]
-paths = [
-    '''tests/state/_schema_pinned_hash\.txt''',
+    '''abc123def456''',
 ]
 
 [[allowlists]]
-description = "STRATEGY_KEY_CONSTANTS — _STRATEGY_KEY = 'c1_*' / 'c2_*' module-level constants in candidate strategy files. The variable name _STRATEGY_KEY triggers gitleaks generic-api-key because of '_KEY'; the value is a human-readable strategy identifier, not a credential. See docs/reference/security_false_positives.md [REVIEW-SAFE: STRATEGY_KEY_CONSTANTS]."
+description = "DAY0_SEMANTIC_SURFACE_KEY — day0_daily_extrema_unconditioned_count is a run-mode failure-surface field name, not a credential. generic-api-key matches it because the assigned name ends in _key (semantic_key = \"...\"). Historical site src/engine/event_reactor_adapter.py; live site src/control/live_health.py. See docs/reference/security_false_positives.md [REVIEW-SAFE: DAY0_SEMANTIC_SURFACE_KEY]."
+regexes = [
+    '''day0_daily_extrema_unconditioned_count''',
+]
+
+[[allowlists]]
+description = "STRATEGY_KEY_CONSTANTS — _STRATEGY_KEY = 'c1_*' / 'c2_*' module-level constants in candidate strategy files. The variable name _STRATEGY_KEY triggers gitleaks generic-api-key because of '_KEY'; the value is a human-readable strategy identifier, not a credential, in any file. See docs/reference/security_false_positives.md [REVIEW-SAFE: STRATEGY_KEY_CONSTANTS]."
 regexes = [
     '''c1_joint_tail_bayes''',
     '''c2_opening_stale_fok''',
 ]
-paths = [
-    '''src/strategy/candidates/c1_joint_tail_bayes\.py''',
-    '''src/strategy/candidates/c2_opening_stale_fok\.py''',
-]
 
 [[allowlists]]
-description = "DOCS_OUTCOME_LABEL — docs/operations markdown files contain inline code examples showing outcome_label=NO and outcome_label=YES (Polymarket token outcome labels). These are domain vocabulary in prose, not credentials. The generic-api-key rule pattern-matches 'key=VALUE' constructs with sufficient entropy. Operator ruling 2026-06-01. See docs/reference/security_false_positives.md [REVIEW-SAFE: DOCS_OUTCOME_LABEL]."
+description = "DOCS_OUTCOME_LABEL — inline code examples showing outcome_label=NO and outcome_label=YES (Polymarket token outcome labels). These are domain vocabulary, not credentials, in any file. Operator ruling 2026-06-01. See docs/reference/security_false_positives.md [REVIEW-SAFE: DOCS_OUTCOME_LABEL]."
 regexes = [
     '''outcome_label=NO''',
     '''outcome_label=YES''',
 ]
-paths = [
-    '''docs/operations/.*\.md''',
-]
 
 [[allowlists]]
-description = "DECISION_GUARD_CELL_KEYS — q_lcb_guard_cell_key / selection_guard_cell_key are settlement-bin provenance identifiers inside CandidateDecision diagnostics, not credentials. See docs/reference/security_false_positives.md [REVIEW-SAFE: DECISION_GUARD_CELL_KEYS]."
+description = "DECISION_GUARD_CELL_KEYS — q_lcb_guard_cell_key / selection_guard_cell_key are settlement-bin provenance identifiers inside CandidateDecision diagnostics, not credentials. regexTarget=\"match\" because the clearance is the assignment shape, not the value: the extracted secret is a bare bin name that must stay reportable elsewhere. See docs/reference/security_false_positives.md [REVIEW-SAFE: DECISION_GUARD_CELL_KEYS]."
+regexTarget = "match"
 regexes = [
     '''q_lcb_guard_cell_key="[^"]+"''',
     '''selection_guard_cell_key="[^"]+"''',
 ]
-paths = [
-    '''src/decision/family_decision_engine\.py''',
-]
+
+# NOTE — SCHEMA_PINNED_HASH has no entry here, deliberately.
+# tests/state/_schema_pinned_hash.txt holds a bare 64-char SHA256 digest with no
+# `key = ` assignment context, so no default rule fires on it; verified
+# 2026-08-02 against a fixture copy of the real file. The entry it previously
+# carried allowlisted the regex `[0-9a-f]{64}`, which (per the OR semantics
+# above) cleared every 64-hex string repo-wide — any sha256-shaped credential
+# anywhere would have passed. The clearance was unnecessary and the blast radius
+# was the whole repository, so the entry is removed rather than narrowed.
