@@ -6,7 +6,7 @@
 #   byte-identical reconciliation events vs the legacy long-connection path.
 # Reuse: Run when command_recovery orchestration, venue_sync_contract, or the
 #   scheduled _edli_command_recovery_cycle connection topology changes.
-# Last reused/audited: 2026-07-28
+# Last reused/audited: 2026-08-02
 # Authority basis: operator directive 2026-06-11 ("cleanest STRUCTURAL fix") +
 #   the dependency_db_locked live incident (riskguard DATA_DEGRADED since ~03:36Z).
 """Relationship tests for the three-phase venue/DB sync contract.
@@ -89,6 +89,25 @@ def _make_conn_factory(db_path: Path, recorder: _Recorder, *, attach_world_path:
         return c
 
     return factory
+
+
+def _patch_exchange_reconcile_seed_envelopes(monkeypatch, helper_module):
+    """Keep legacy recovery fixtures compatible with the current post-only gate."""
+    del helper_module
+    from dataclasses import replace
+
+    from src.state import venue_command_repo
+
+    original = venue_command_repo.insert_submission_envelope
+
+    def _insert_post_only(conn, envelope, *, envelope_id=None):
+        return original(
+            conn,
+            replace(envelope, post_only=True),
+            envelope_id=envelope_id,
+        )
+
+    monkeypatch.setattr(venue_command_repo, "insert_submission_envelope", _insert_post_only)
 
 
 class _RecordingClient:
@@ -1498,14 +1517,15 @@ def test_restart_preflight_backfills_all_settled_exit_fills_before_terminalizing
     """A stale terminal EXIT closes only after local facts equal authenticated fills."""
     import tests.test_exchange_reconcile as h
     from src.execution import command_recovery, venue_sync_contract
+    _patch_exchange_reconcile_seed_envelopes(monkeypatch, h)
 
     db_path = tmp_path / "recovery-restart-settled-exit-partial.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    from src.state.db import init_schema
+    from src.state.db import init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
 
-    init_schema(seed_conn)
+    init_schema_trade_only(seed_conn)
     init_collateral_schema(seed_conn)
     token = "restart-settled-exit-partial-token"
     h.seed_position_baseline(
@@ -1542,8 +1562,11 @@ def test_restart_preflight_backfills_all_settled_exit_fills_before_terminalizing
         state="PARTIAL",
     )
     order_id = "ord-restart-settled-exit-partial"
-    local_trades = (("trade-1", "10"), ("trade-2", "12.86"))
-    for trade_id, size in local_trades:
+    local_trades = (
+        ("trade-1", "10", "MATCHED", None),
+        ("trade-2", "12.86", "CONFIRMED", "tx-trade-2"),
+    )
+    for trade_id, size, state, tx_hash in local_trades:
         h.append_trade_fact(
             seed_conn,
             command_id="cmd-restart-settled-exit-partial",
@@ -1552,8 +1575,8 @@ def test_restart_preflight_backfills_all_settled_exit_fills_before_terminalizing
             trade_id=trade_id,
             size=size,
             fill_price="0.29",
-            state="CONFIRMED",
-            tx_hash=f"tx-{trade_id}",
+            state=state,
+            tx_hash=tx_hash,
         )
     seed_conn.commit()
     seed_conn.close()
@@ -1566,7 +1589,18 @@ def test_restart_preflight_backfills_all_settled_exit_fills_before_terminalizing
         _confirmed_maker_trade(trade_id="trade-2", order_id=order_id, token=token, size="12.86"),
         _confirmed_maker_trade(trade_id="trade-4", order_id=order_id, token=token, size="5"),
     ]
-    client = _RecordingClient(recorder, orders={}, open_orders=[], trades=venue_trades)
+    client = _RecordingClient(
+        recorder,
+        orders={
+            order_id: {
+                "orderID": order_id,
+                "status": "CANCELED",
+                "matchedSize": "36.29",
+            }
+        },
+        open_orders=[],
+        trades=venue_trades,
+    )
     monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", factory)
 
     summary = command_recovery.reconcile_unresolved_commands(
@@ -1615,13 +1649,24 @@ def test_restart_preflight_backfills_all_settled_exit_fills_before_terminalizing
         ).fetchone()
         trade_facts = verify.execute(
             """
+            WITH latest AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY trade_id ORDER BY local_sequence DESC
+                ) AS rn
+                  FROM venue_trade_facts
+                 WHERE command_id = ?
+            )
             SELECT trade_id, state, filled_size
-              FROM venue_trade_facts
-             WHERE command_id = ?
+              FROM latest
+             WHERE rn = 1
              ORDER BY trade_id
             """,
             ("cmd-restart-settled-exit-partial",),
         ).fetchall()
+        all_trade_fact_count = verify.execute(
+            "SELECT COUNT(*) FROM venue_trade_facts WHERE command_id = ?",
+            ("cmd-restart-settled-exit-partial",),
+        ).fetchone()[0]
         terminal_fact_count = verify.execute(
             """
             SELECT COUNT(*)
@@ -1646,8 +1691,11 @@ def test_restart_preflight_backfills_all_settled_exit_fills_before_terminalizing
         "trade-4",
     }
     assert all(row["state"] == "CONFIRMED" for row in trade_facts)
+    assert all_trade_fact_count == 5
     assert sum((Decimal(row["filled_size"]) for row in trade_facts), Decimal("0")) == Decimal("36.29")
     assert terminal_fact_count == 1
+    assert recorder.client_calls
+    assert all(method in _RecordingClient._NETWORK for method, _, _ in recorder.client_calls)
     for method, open_ids, open_labels in recorder.client_calls:
         assert not open_ids, (
             f"venue call {method} occurred while DB connections were open: {open_labels}"
@@ -1882,7 +1930,14 @@ def test_live_tick_closes_pending_exit_remainder_from_complete_account_trades(
 
 @pytest.mark.parametrize(
     "failure_mode",
-    ("local_conflict", "missing_market", "mismatched_market", "point_timeout"),
+    (
+        "local_conflict",
+        "confirmed_tx_conflict",
+        "unrelated_preliminary",
+        "missing_market",
+        "mismatched_market",
+        "point_timeout",
+    ),
 )
 def test_restart_preflight_keeps_settled_exit_partial_when_proof_is_incomplete(
     monkeypatch,
@@ -1893,12 +1948,13 @@ def test_restart_preflight_keeps_settled_exit_partial_when_proof_is_incomplete(
     import tests.test_exchange_reconcile as h
     from src.execution import command_recovery, venue_sync_contract
     from src.state.collateral_ledger import init_collateral_schema
-    from src.state.db import init_schema
+    from src.state.db import init_schema_trade_only
+    _patch_exchange_reconcile_seed_envelopes(monkeypatch, h)
 
     db_path = tmp_path / f"recovery-restart-settled-exit-{failure_mode}.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    init_schema(seed_conn)
+    init_schema_trade_only(seed_conn)
     init_collateral_schema(seed_conn)
     token = "restart-settled-exit-conflict-token"
     command_id = "cmd-restart-settled-exit-conflict"
@@ -1926,18 +1982,56 @@ def test_restart_preflight_keeps_settled_exit_partial_when_proof_is_incomplete(
         price=0.29,
         state="PARTIAL",
     )
+    local_first_command_id = command_id
+    local_first_order_id = order_id
+    local_first_state = "CONFIRMED"
     local_first_size = "9" if failure_mode == "local_conflict" else "10"
-    for trade_id, size in (("trade-1", local_first_size), ("trade-2", "12.86")):
+    local_first_tx = "tx-trade-1"
+    if failure_mode == "confirmed_tx_conflict":
+        local_first_tx = "tx-wrong"
+    elif failure_mode == "unrelated_preliminary":
+        unrelated_position_id = "pos-unrelated-preliminary"
+        local_first_command_id = "cmd-unrelated-preliminary"
+        local_first_order_id = "ord-unrelated-preliminary"
+        local_first_state = "MATCHED"
+        local_first_tx = None
+        h.seed_position_baseline(
+            seed_conn,
+            position_id=unrelated_position_id,
+            order_id="ord-unrelated-entry",
+        )
+        h.seed_command(
+            seed_conn,
+            command_id=local_first_command_id,
+            venue_order_id=local_first_order_id,
+            position_id=unrelated_position_id,
+            token_id=token,
+            side="SELL",
+            size=383.6,
+            price=0.29,
+            state="ACKED",
+        )
+    for trade_id, size, fact_command_id, fact_order_id, state, tx_hash in (
+        (
+            "trade-1",
+            local_first_size,
+            local_first_command_id,
+            local_first_order_id,
+            local_first_state,
+            local_first_tx,
+        ),
+        ("trade-2", "12.86", command_id, order_id, "CONFIRMED", "tx-trade-2"),
+    ):
         h.append_trade_fact(
             seed_conn,
-            command_id=command_id,
-            venue_order_id=order_id,
+            command_id=fact_command_id,
+            venue_order_id=fact_order_id,
             token_id=token,
             trade_id=trade_id,
             size=size,
             fill_price="0.29",
-            state="CONFIRMED",
-            tx_hash=f"tx-{trade_id}",
+            state=state,
+            tx_hash=tx_hash,
         )
     seed_conn.commit()
     seed_conn.close()
@@ -1958,7 +2052,18 @@ def test_restart_preflight_keeps_settled_exit_partial_when_proof_is_incomplete(
         "default_trade_conn_factory",
         _make_conn_factory(db_path, recorder),
     )
-    client = _RecordingClient(recorder, orders={}, open_orders=[], trades=venue_trades)
+    client = _RecordingClient(
+        recorder,
+        orders={
+            order_id: {
+                "orderID": order_id,
+                "status": "CANCELED",
+                "matchedSize": "36.29",
+            }
+        },
+        open_orders=[],
+        trades=venue_trades,
+    )
     if failure_mode == "point_timeout":
         def _timeout_get_order(_order_id):
             recorder.on_client_call("get_order")
@@ -1982,9 +2087,10 @@ def test_restart_preflight_keeps_settled_exit_partial_when_proof_is_incomplete(
         assert verify.execute(
             "SELECT state FROM venue_commands WHERE command_id = ?", (command_id,)
         ).fetchone()[0] == "PARTIAL"
+        expected_target_fact_count = 1 if failure_mode == "unrelated_preliminary" else 2
         assert verify.execute(
             "SELECT COUNT(*) FROM venue_trade_facts WHERE command_id = ?", (command_id,)
-        ).fetchone()[0] == 2
+        ).fetchone()[0] == expected_target_fact_count
         assert verify.execute(
             "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = ? AND state = 'EXPIRED'",
             (command_id,),
@@ -1994,6 +2100,8 @@ def test_restart_preflight_keeps_settled_exit_partial_when_proof_is_incomplete(
         ).fetchone()[0] == "settled"
     finally:
         verify.close()
+    assert recorder.client_calls
+    assert all(method in _RecordingClient._NETWORK for method, _, _ in recorder.client_calls)
 
 
 def test_restart_preflight_projects_matched_exit_fills_before_preflight(monkeypatch, tmp_path):

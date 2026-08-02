@@ -14055,7 +14055,13 @@ def _backfill_terminal_exit_trade_facts(
     authenticated: dict,
     observed_at: str,
 ) -> int:
-    """Append only missing exact CONFIRMED legs; reject any local conflict."""
+    """Append missing confirmed legs while preserving local account conflicts.
+
+    Preliminary MATCHED facts are an earlier observation of the same fill, not
+    an independent account-truth assertion.  They must still match the bound
+    command/order and fill economics, while only a prior CONFIRMED fact can
+    establish a conflicting transaction hash.
+    """
 
     command_id = str(command.get("command_id") or "")
     venue_order_id = str(command.get("venue_order_id") or "")
@@ -14074,6 +14080,7 @@ def _backfill_terminal_exit_trade_facts(
         exact_confirmed = False
         for row in rows:
             fact = _dict_row(row)
+            fact_state = str(fact.get("state") or "").upper()
             if (
                 str(fact.get("command_id") or "") != command_id
                 or str(fact.get("venue_order_id") or "").lower() != venue_order_id.lower()
@@ -14082,10 +14089,11 @@ def _backfill_terminal_exit_trade_facts(
             if (
                 not _decimal_matches(fact.get("filled_size"), leg["filled_size"])
                 or not _decimal_matches(fact.get("fill_price"), leg["fill_price"])
-                or str(fact.get("tx_hash") or "").lower() != str(leg["tx_hash"]).lower()
             ):
                 raise RuntimeError(f"confirmed trade {trade_id} conflicts with account truth")
-            if str(fact.get("state") or "").upper() == "CONFIRMED":
+            if fact_state == "CONFIRMED":
+                if str(fact.get("tx_hash") or "").lower() != str(leg["tx_hash"]).lower():
+                    raise RuntimeError(f"confirmed trade {trade_id} conflicts with account truth")
                 exact_confirmed = True
         if exact_confirmed:
             continue
