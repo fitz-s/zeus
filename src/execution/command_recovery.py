@@ -12869,6 +12869,69 @@ def repair_confirmed_chain_absence_positive_projections(conn: sqlite3.Connection
     return summary
 
 
+def _cancel_pending_partial_exit_candidates(
+    conn: sqlite3.Connection,
+    *,
+    updated_before: str | None = None,
+) -> list[dict]:
+    """Select only the proven CANCEL_PENDING partial EXIT remainder shape.
+
+    This is deliberately separate from ``_PARTIAL_REMAINDER_STATES`` so the
+    recovery lane cannot widen ENTRY or treat a zero-fill cancel as a partial
+    fill.  The persisted ``PARTIALLY_MATCHED`` fact is the positive remainder
+    proof; the account-trade and point-order checks happen before mutation.
+    """
+
+    if not all(
+        _table_exists(conn, table)
+        for table in ("venue_commands", "venue_order_facts", "position_current")
+    ):
+        return []
+    rows = conn.execute(
+        "WITH " + _canonical_order_truth_cte() + """
+            SELECT cmd.*,
+                   pc.condition_id AS position_condition_id,
+                   pc.phase AS position_phase,
+                   pc.chain_shares AS position_chain_shares,
+                   fact.fact_id AS order_fact_id,
+                   fact.state AS order_fact_state,
+                   fact.matched_size AS order_fact_matched_size,
+                   fact.remaining_size AS order_fact_remaining_size,
+                   fact.source AS order_fact_source,
+                   fact.raw_payload_json AS order_fact_raw_payload_json
+              FROM venue_commands cmd
+              JOIN canonical_order_truth fact
+                ON fact.command_id = cmd.command_id
+               AND fact.venue_order_id = cmd.venue_order_id
+              JOIN position_current pc
+                ON pc.position_id = cmd.position_id
+             WHERE cmd.intent_kind = 'EXIT'
+               AND UPPER(COALESCE(cmd.side, '')) = 'SELL'
+               AND cmd.state = 'CANCEL_PENDING'
+               AND COALESCE(cmd.venue_order_id, '') != ''
+               AND pc.phase IN ('pending_exit', 'active', 'day0_window')
+               AND fact.state = 'PARTIALLY_MATCHED'
+               AND fact.source IN ('REST', 'WS_USER', 'WS_MARKET', 'DATA_API', 'CHAIN')
+               AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
+               AND CAST(COALESCE(fact.remaining_size, '0') AS REAL) = 0
+               AND CAST(COALESCE(cmd.size, '0') AS REAL)
+                   > CAST(COALESCE(fact.matched_size, '0') AS REAL)
+               AND CAST(COALESCE(pc.chain_shares, pc.shares, '0') AS REAL) > 0
+               AND ABS(
+                   CAST(COALESCE(pc.chain_shares, pc.shares, '0') AS REAL)
+                   - (
+                       CAST(COALESCE(cmd.size, '0') AS REAL)
+                       - CAST(COALESCE(fact.matched_size, '0') AS REAL)
+                   )
+               ) <= 0.000000001
+               AND (? IS NULL OR cmd.updated_at < ?)
+             ORDER BY cmd.updated_at, cmd.command_id
+        """,
+        (updated_before, updated_before),
+    ).fetchall()
+    return [_dict_row(row) for row in rows]
+
+
 def _partial_remainder_candidates(
     conn: sqlite3.Connection,
     *,
@@ -12886,6 +12949,10 @@ def _partial_remainder_candidates(
         return _command_fill_coverage_state(command, fill_summary) == "partial"
 
     state_placeholders = ",".join("?" for _ in _PARTIAL_REMAINDER_STATES)
+    cancel_pending_partial_exits = _cancel_pending_partial_exit_candidates(
+        conn,
+        updated_before=updated_before,
+    )
     if terminal_exit_only:
         phase_placeholders = ",".join("?" for _ in _HARD_TERMINAL_REPAIR_PHASES)
         rows = conn.execute(
@@ -12908,7 +12975,13 @@ def _partial_remainder_candidates(
                 updated_before,
             ),
         ).fetchall()
-        return [_dict_row(row) for row in rows]
+        return sorted(
+            [*cancel_pending_partial_exits, *(_dict_row(row) for row in rows)],
+            key=lambda command: (
+                str(command.get("updated_at") or ""),
+                str(command.get("command_id") or ""),
+            ),
+        )
     if not live_tick_scope:
         sql = f"""
         SELECT *
@@ -12923,11 +12996,16 @@ def _partial_remainder_candidates(
             sql,
             (*tuple(_PARTIAL_REMAINDER_STATES), updated_before, updated_before),
         ).fetchall()
-        return [
+        candidates = list(cancel_pending_partial_exits)
+        candidates.extend(
             command
             for row in rows
             if _needs_remainder_reconcile(command := _dict_row(row))
-        ]
+        )
+        return sorted(candidates, key=lambda command: (
+            str(command.get("updated_at") or ""),
+            str(command.get("command_id") or ""),
+        ))
 
     open_phase_placeholders = ",".join("?" for _ in _RUNTIME_OPEN_REPAIR_PHASES)
     proof_rank = _order_fact_proof_rank_sql("latest")
@@ -12970,11 +13048,16 @@ def _partial_remainder_candidates(
             *tuple(_RUNTIME_OPEN_REPAIR_PHASES),
         ),
     ).fetchall()
-    return [
+    candidates = list(cancel_pending_partial_exits)
+    candidates.extend(
         command
         for row in rows
         if _needs_remainder_reconcile(command := _dict_row(row))
-    ]
+    )
+    return sorted(candidates, key=lambda command: (
+        str(command.get("updated_at") or ""),
+        str(command.get("command_id") or ""),
+    ))
 
 
 def _open_order_id(order: object) -> str | None:
@@ -13574,6 +13657,63 @@ def _phase_after_terminal_exit_no_fill(
         return None
 
 
+def _exit_command_has_positive_or_unresolved_cancel_truth(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    command_id: str | None = None,
+    venue_order_id: str | None = None,
+) -> bool:
+    """Block EXIT release on exact-command fill truth or unresolved cancel."""
+
+    try:
+        row = conn.execute(
+            """
+            SELECT 1
+              FROM venue_commands cmd
+             WHERE cmd.position_id = ?
+               AND cmd.intent_kind = 'EXIT'
+               AND (? IS NULL OR cmd.command_id = ?)
+               AND (? IS NULL OR cmd.venue_order_id = ?)
+               AND (
+                    cmd.state = 'CANCEL_PENDING'
+                    OR EXISTS (
+                        SELECT 1
+                          FROM venue_order_facts fact
+                         WHERE fact.command_id = cmd.command_id
+                           AND COALESCE(cmd.venue_order_id, '') != ''
+                           AND fact.venue_order_id = cmd.venue_order_id
+                           AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                          FROM venue_trade_facts trade
+                         WHERE trade.command_id = cmd.command_id
+                           AND COALESCE(cmd.venue_order_id, '') != ''
+                           AND trade.venue_order_id = cmd.venue_order_id
+                           AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
+                    )
+               )
+             LIMIT 1
+            """,
+            (
+                position_id,
+                command_id,
+                command_id,
+                venue_order_id,
+                venue_order_id,
+            ),
+        ).fetchone()
+    except sqlite3.Error as exc:
+        logger.warning(
+            "recovery: EXIT release proof unavailable for %s; blocking release: %s",
+            position_id,
+            exc,
+        )
+        return True
+    return row is not None
+
+
 def _release_exit_after_terminal_no_fill(
     conn: sqlite3.Connection,
     *,
@@ -13598,6 +13738,18 @@ def _release_exit_after_terminal_no_fill(
     current_row = _dict_row(current)
     phase_before = str(current_row.get("phase") or "")
     if phase_before not in {"active", "day0_window", "pending_exit"}:
+        return False
+    if _exit_command_has_positive_or_unresolved_cancel_truth(
+        conn,
+        position_id=position_id,
+        command_id=command_id,
+        venue_order_id=venue_order_id,
+    ):
+        logger.warning(
+            "recovery: refusing terminal no-fill EXIT release for %s; "
+            "same command/order has positive or unresolved cancel truth",
+            command_id,
+        )
         return False
     phase_after = (
         _phase_after_terminal_exit_no_fill(command, observed_at=observed_at)
@@ -14232,6 +14384,218 @@ def _point_order_terminal_for_partial_remainder(client, venue_order_id: str) -> 
     return False, status or "UNKNOWN", raw
 
 
+def _recover_cancel_pending_partial_exit(
+    conn: sqlite3.Connection,
+    client,
+    *,
+    command: dict,
+    open_order_ids: set[str],
+    observed_at: str,
+) -> bool:
+    """Close only the disappeared remainder of a proven partial EXIT cancel.
+
+    The command remains an execution record of the partial fill.  The command
+    transition is ``CANCEL_PENDING -> CANCEL_ACKED``; a still-pending position
+    is then released through the typed reauction event in the same transaction.
+    """
+
+    command_id = str(command.get("command_id") or "").strip()
+    venue_order_id = str(command.get("venue_order_id") or "").strip()
+    if (
+        str(command.get("intent_kind") or "").upper() != "EXIT"
+        or str(command.get("state") or "") != "CANCEL_PENDING"
+        or not command_id
+        or not venue_order_id
+    ):
+        return False
+    position_id = str(command.get("position_id") or "").strip()
+    current_row = conn.execute(
+        "SELECT * FROM position_current WHERE position_id = ? LIMIT 1",
+        (position_id,),
+    ).fetchone()
+    if current_row is None:
+        return False
+    current = _dict_row(current_row)
+    phase_before = str(current.get("phase") or "")
+    if phase_before not in {"pending_exit", "active", "day0_window"}:
+        return False
+
+    matched_size = _positive_decimal_or_none(command.get("order_fact_matched_size"))
+    command_size = _positive_decimal_or_none(command.get("size"))
+    residual = _positive_decimal_or_none(current.get("chain_shares"))
+    if (
+        matched_size is None
+        or command_size is None
+        or residual is None
+        or command.get("order_fact_state") != "PARTIALLY_MATCHED"
+        or not _decimal_is_zero(command.get("order_fact_remaining_size"))
+        or command_size <= matched_size
+        or not _decimal_matches(residual, command_size - matched_size)
+    ):
+        return False
+
+    durable_payload = _json_dict(command.get("order_fact_raw_payload_json"))
+    required_predicates = durable_payload.get("required_predicates")
+    durable_partial_proof = (
+        durable_payload.get("proof_class") == "terminal_partial_order_fact"
+        and isinstance(required_predicates, dict)
+        and required_predicates.get("terminal_order_remainder_zero") is True
+        and required_predicates.get("canonical_trade_facts_match_terminal_order_fact") is True
+        and required_predicates.get("cumulative_fill_below_requested_size") is True
+    )
+
+    point_terminal, point_status, point_order = _point_order_terminal_for_partial_remainder(
+        client,
+        venue_order_id,
+    )
+    if not point_terminal:
+        # An open-order hit or a non-terminal point status is not a disappeared
+        # remainder.  UNKNOWN/absent point truth may only be bridged by the
+        # durable positive partial fact plus authenticated account legs.
+        if point_status not in {"UNKNOWN", "NOT_FOUND", "UNAVAILABLE", ""}:
+            return False
+        if venue_order_id in open_order_ids or not durable_partial_proof:
+            return False
+    elif point_order is not None:
+        point_order_id = str(_extract_order_id(point_order) or "")
+        if point_order_id and point_order_id.lower() != venue_order_id.lower():
+            raise RuntimeError(
+                f"terminal partial EXIT point order identity conflicts for {command_id}"
+            )
+        point_matched_raw = _first_present(
+            point_order,
+            "matched_size",
+            "matchedSize",
+            "size_matched",
+            "sizeMatched",
+            "makingAmount",
+            "making_amount",
+        )
+        if point_matched_raw in (None, "") or not _decimal_matches(
+            point_matched_raw,
+            matched_size,
+        ):
+            raise RuntimeError(
+                f"terminal partial EXIT point fill conflicts with canonical fact for {command_id}"
+            )
+        original_size = _first_present(
+            point_order,
+            "original_size",
+            "originalSize",
+            "size",
+            "order_size",
+        )
+        if original_size not in (None, "") and not _decimal_matches(original_size, command_size):
+            raise RuntimeError(
+                f"terminal partial EXIT point economics conflict for {command_id}"
+            )
+        point_remaining = _first_present(
+            point_order,
+            "remaining_size",
+            "remainingSize",
+            "size_remaining",
+        )
+        if point_remaining not in (None, "") and not _decimal_is_zero(point_remaining):
+            raise RuntimeError(
+                f"terminal partial EXIT point order is not terminated for {command_id}"
+            )
+        point_price = _point_order_fill_price(
+            point_order,
+            fallback=None,
+            side=command.get("side"),
+        )
+        if point_price not in (None, "") and not _decimal_matches(
+            point_price,
+            command.get("price"),
+        ):
+            raise RuntimeError(
+                f"terminal partial EXIT point price conflicts for {command_id}"
+            )
+        point_side = _first_present(point_order, "side")
+        if point_side not in (None, "") and _normalised_order_side(point_side) != _normalised_order_side(
+            command.get("side")
+        ):
+            raise RuntimeError(
+                f"terminal partial EXIT point side conflicts for {command_id}"
+            )
+        point_token = _first_present(point_order, "asset_id", "token_id", "assetId")
+        if point_token not in (None, "") and str(point_token) != str(command.get("token_id") or ""):
+            raise RuntimeError(
+                f"terminal partial EXIT point token conflicts for {command_id}"
+            )
+
+    authenticated = _terminal_exit_confirmed_trade_legs(client, command)
+    if not _decimal_matches(authenticated["filled_size"], matched_size):
+        raise RuntimeError(
+            f"authenticated partial EXIT fills do not equal canonical fact for {command_id}"
+        )
+
+    safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+    sp_name = f"sp_cancel_pending_partial_exit_{safe_command_id}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        backfilled_trade_count = _backfill_terminal_exit_trade_facts(
+            conn,
+            command=command,
+            authenticated=authenticated,
+            observed_at=observed_at,
+        )
+        fill_summary = _positive_fill_trade_fact_summary(
+            conn,
+            command_id,
+            venue_order_id=venue_order_id,
+        )
+        if not _decimal_matches(fill_summary["filled_size"], matched_size):
+            raise RuntimeError(
+                f"canonical partial EXIT trade facts do not equal order fact for {command_id}"
+            )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type=CommandEventType.CANCEL_ACKED.value,
+            occurred_at=observed_at,
+            payload={
+                "reason": "cancel_pending_partial_exit_remainder_recovered",
+                "proof_class": "cancel_pending_partial_exit_authenticated_remainder_only",
+                "venue_order_id": venue_order_id,
+                "venue_order_fact_id": command.get("order_fact_id"),
+                "venue_order_fact_state": command.get("order_fact_state"),
+                "matched_size": _decimal_text(matched_size),
+                "remaining_size": "0",
+                "residual_shares": _decimal_text(residual),
+                "point_order_status": point_status,
+                "authenticated_trade_count": authenticated["count"],
+                "backfilled_trade_count": backfilled_trade_count,
+                "required_predicates": {
+                    "command_state_cancel_pending": True,
+                    "exit_sell_command_identity": True,
+                    "canonical_positive_partial_order_fact": True,
+                    "terminal_order_remainder_zero": True,
+                    "authenticated_confirmed_trade_legs": True,
+                    "canonical_trade_facts_match_order_fact": True,
+                    "unfilled_remainder_only": True,
+                    "position_lifecycle_unchanged": True,
+                    "no_venue_mutation": True,
+                },
+            },
+        )
+        if phase_before == "pending_exit":
+            release = reconcile_pending_exit_terminal_order_releases(
+                conn,
+                position_id=position_id,
+            )
+            if release["advanced"] != 1 or release["errors"] or release["stayed"]:
+                raise RuntimeError(
+                    f"partial EXIT reauction release did not drain {command_id}: {release}"
+                )
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+    return True
+
+
 def reconcile_partial_remainders(
     conn: sqlite3.Connection,
     client,
@@ -14277,6 +14641,20 @@ def reconcile_partial_remainders(
         venue_order_id = str(command.get("venue_order_id") or "")
         command_state = str(command.get("state") or "")
         try:
+            if command_state == "CANCEL_PENDING" and str(
+                command.get("intent_kind") or ""
+            ).upper() == "EXIT":
+                if _recover_cancel_pending_partial_exit(
+                    conn,
+                    client,
+                    command=command,
+                    open_order_ids=open_order_ids,
+                    observed_at=_now_iso(),
+                ):
+                    summary["advanced"] += 1
+                else:
+                    summary["stayed"] += 1
+                continue
             fill_summary = _positive_fill_trade_fact_summary(conn, command_id)
             fill_coverage = _command_fill_coverage_state(command, fill_summary)
             if command_state == CommandState.FILLED.value and fill_coverage != "partial":
@@ -14572,8 +14950,26 @@ def _pending_exit_terminal_order_release_rows(
           JOIN position_current pc
             ON pc.position_id = cmd.position_id
          WHERE cmd.intent_kind = 'EXIT'
+           AND UPPER(COALESCE(cmd.side, '')) = 'SELL'
            AND CAST(COALESCE(fact.matched_size, '0') AS REAL) > 0
            AND (
+                (
+                    cmd.state = 'CANCELLED'
+                    AND fact.state = 'PARTIALLY_MATCHED'
+                    AND ABS(CAST(COALESCE(fact.remaining_size, '0') AS REAL))
+                        <= 0.000000001
+                    AND CAST(COALESCE(cmd.size, '0') AS REAL)
+                        > CAST(COALESCE(fact.matched_size, '0') AS REAL)
+                    AND CAST(COALESCE(pc.chain_shares, '0') AS REAL) > 0
+                    AND ABS(
+                        CAST(COALESCE(pc.chain_shares, '0') AS REAL)
+                        - (
+                            CAST(COALESCE(cmd.size, '0') AS REAL)
+                            - CAST(COALESCE(fact.matched_size, '0') AS REAL)
+                        )
+                    ) <= 0.000000001
+                )
+                OR
                 (
                     cmd.state IN ('CANCELLED', 'EXPIRED')
                     AND fact.state IN ('CANCEL_CONFIRMED', 'EXPIRED', 'VENUE_WIPED')
@@ -14595,8 +14991,16 @@ def _pending_exit_terminal_order_release_rows(
                 )
            )
            AND pc.phase = 'pending_exit'
-           AND pc.order_status = 'sell_pending_confirmation'
-           AND pc.order_id = cmd.venue_order_id
+           AND (
+                (
+                    cmd.state = 'CANCELLED'
+                    AND fact.state = 'PARTIALLY_MATCHED'
+                )
+                OR (
+                    pc.order_status = 'sell_pending_confirmation'
+                    AND pc.order_id = cmd.venue_order_id
+                )
+           )
            {position_predicate}
            AND NOT EXISTS (
                 SELECT 1
@@ -14643,6 +15047,13 @@ def pending_exit_has_terminal_order_release_debt(
             conn,
             position_id=scoped_position_id,
         )
+        partial_candidates = _cancel_pending_partial_exit_candidates(conn)
+        if any(
+            str(candidate.get("position_id") or "") == scoped_position_id
+            and str(candidate.get("position_phase") or "") == "pending_exit"
+            for candidate in partial_candidates
+        ):
+            return True
     except sqlite3.Error as exc:
         logger.warning(
             "recovery: terminal EXIT release-debt check failed closed for %s: %s",
@@ -14653,7 +15064,11 @@ def pending_exit_has_terminal_order_release_debt(
     return bool(rows)
 
 
-def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> dict:
+def reconcile_pending_exit_terminal_order_releases(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str | None = None,
+) -> dict:
     """Return held remainders with no live EXIT order to normal redecision.
 
     A terminal command is not a resting order.  Preserve the real residual
@@ -14664,7 +15079,10 @@ def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> 
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
-    rows, pc_columns = _pending_exit_terminal_order_release_rows(conn)
+    rows, pc_columns = _pending_exit_terminal_order_release_rows(
+        conn,
+        position_id=position_id,
+    )
     if not pc_columns:
         return summary
 
@@ -14690,13 +15108,29 @@ def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> 
                 },
                 observed_at=occurred_at,
             )
+            is_cancelled_partial = (
+                str(candidate.get("command_state") or "") == "CANCELLED"
+                and str(candidate.get("order_fact_state") or "") == "PARTIALLY_MATCHED"
+            )
+            if is_cancelled_partial:
+                event_key = f"{position_id}:partial_exit_remainder_reauction:{command_id}"
+            exact_stale_order = (
+                str(current.get("order_id") or "").lower()
+                == str(candidate.get("venue_order_id") or "").lower()
+            )
             projection = dict(current)
             projection.update(
                 {
                     "phase": phase_after,
-                    "order_id": None,
-                    "order_status": "filled",
-                    "exit_reason": "PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED",
+                    "order_id": None if exact_stale_order else current.get("order_id"),
+                    "order_status": (
+                        "filled" if exact_stale_order else current.get("order_status")
+                    ),
+                    "exit_reason": (
+                        "PARTIAL_EXIT_REMAINDER_REAUCTION_REQUIRED"
+                        if is_cancelled_partial
+                        else "PARTIAL_EXIT_REMAINDER_TERMINAL_RELEASED"
+                    ),
                     "exit_retry_count": 0,
                     "next_exit_retry_at": None,
                     "updated_at": occurred_at,
@@ -14796,10 +15230,16 @@ def reconcile_pending_exit_terminal_order_releases(conn: sqlite3.Connection) -> 
                 "env": _latest_position_env(conn, position_id),
                 "payload_json": json.dumps(
                     {
-                        "reason": "terminal_partial_exit_remainder_returned_to_redecision",
+                        "reason": (
+                            "PARTIAL_EXIT_REMAINDER_REAUCTION_REQUIRED"
+                            if is_cancelled_partial
+                            else "terminal_partial_exit_remainder_returned_to_redecision"
+                        ),
                         "proof_class": (
                             "post_fill_chain_confirmed_positive_remainder"
                             if candidate.get("command_state") == "FILLED"
+                            else "cancel_pending_partial_exit_authenticated_remainder"
+                            if is_cancelled_partial
                             else "terminal_positive_exit_order_fact"
                         ),
                         "command_state": candidate.get("command_state"),

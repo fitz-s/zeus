@@ -5005,11 +5005,22 @@ def _get_events(conn, command_id):
     return list_events(conn, command_id)
 
 
-def _seed_partial_exit_dust_case(conn, *, filled_size="156.6", residual="0.4"):
+def _seed_partial_exit_dust_case(
+    conn,
+    *,
+    position_id="pos-001",
+    command_id="cmd-exit",
+    order_id="ord-exit",
+    filled_size="156.6",
+    residual="0.4",
+    trade_state="CONFIRMED",
+    trade_tx_hash="0xdust",
+    trade_id="trade-dust",
+):
     _insert(
         conn,
         command_id="cmd-entry",
-        position_id="pos-001",
+        position_id=position_id,
         size=157.0,
         price=0.20,
     )
@@ -5020,6 +5031,7 @@ def _seed_partial_exit_dust_case(conn, *, filled_size="156.6", residual="0.4"):
     )
     _seed_pending_entry_projection(
         conn,
+        position_id=position_id,
         command_id="cmd-entry",
         order_id="ord-entry",
     )
@@ -5035,18 +5047,18 @@ def _seed_partial_exit_dust_case(conn, *, filled_size="156.6", residual="0.4"):
                cost_basis_usd = 0.08,
                entry_price = 0.20,
                chain_seen_at = '2026-04-26T00:09:00+00:00',
-               order_id = 'ord-exit',
+               order_id = ?,
                order_status = 'sell_pending_confirmation',
                updated_at = '2026-04-26T00:09:00+00:00'
-         WHERE position_id = 'pos-001'
+         WHERE position_id = ?
         """,
-        (residual, residual),
+        (residual, residual, order_id, position_id),
     )
-    _seed_full_exit_intent(conn, position_id="pos-001", shares=157.0)
+    _seed_full_exit_intent(conn, position_id=position_id, shares=157.0)
     _insert(
         conn,
-        command_id="cmd-exit",
-        position_id="pos-001",
+        command_id=command_id,
+        position_id=position_id,
         intent_kind="EXIT",
         side="SELL",
         size=157.0,
@@ -5056,53 +5068,135 @@ def _seed_partial_exit_dust_case(conn, *, filled_size="156.6", residual="0.4"):
     )
     _advance_to_partial(
         conn,
-        command_id="cmd-exit",
-        venue_order_id="ord-exit",
+        command_id=command_id,
+        venue_order_id=order_id,
     )
     _append_trade_fact(
         conn,
-        command_id="cmd-exit",
-        order_id="ord-exit",
-        trade_id="trade-dust",
-        state="CONFIRMED",
+        command_id=command_id,
+        order_id=order_id,
+        trade_id=trade_id,
+        state=trade_state,
         filled_size=filled_size,
         fill_price="0.11",
-        tx_hash="0xdust",
+        tx_hash=trade_tx_hash,
     )
 
 
-def _configure_partial_exit_dust_client(mock_client, *, point_status):
+def _configure_partial_exit_dust_client(
+    mock_client,
+    *,
+    point_status,
+    order_id="ord-exit",
+    trade_id="trade-dust",
+    matched_size="156.6",
+    original_size="157",
+    point_remaining="0.4",
+):
     mock_client.get_open_orders.return_value = [
-        {"orderID": "ord-exit", "status": "LIVE"},
+        {"orderID": order_id, "status": "LIVE"},
     ]
     mock_client.get_order.return_value = (
         None
         if point_status is None
         else {
-            "orderID": "ord-exit",
+            "orderID": order_id,
             "status": point_status,
-            "original_size": "157",
-            "size_matched": "156.6",
-            "remaining_size": "0.4",
+            "original_size": original_size,
+            "size_matched": matched_size,
+            "remaining_size": point_remaining,
         }
     )
     mock_client.get_trades.return_value = [
         {
-            "id": "trade-dust",
+            "id": trade_id,
             "status": "CONFIRMED",
             "transaction_hash": "0xdust",
             "market": "condition-test",
             "maker_orders": [
                 {
-                    "order_id": "ord-exit",
+                    "order_id": order_id,
                     "asset_id": "tok-001",
                     "side": "SELL",
-                    "matched_amount": "156.6",
+                    "matched_amount": matched_size,
                     "price": "0.11",
                 },
             ],
         },
     ]
+
+
+def _seed_cancel_pending_partial_exit_dust_case(
+    conn,
+    *,
+    position_id="pos-001",
+    command_id="cmd-exit",
+    order_id="ord-exit",
+    preliminary_trade=False,
+    durable_partial_proof=True,
+    trade_tx_hash="0xdust",
+    production_evidence=False,
+    filled_size="156.6",
+    residual="0.4",
+):
+    from src.state.venue_command_repo import append_event
+
+    _seed_partial_exit_dust_case(
+        conn,
+        position_id=position_id,
+        command_id=command_id,
+        order_id=order_id,
+        filled_size=filled_size,
+        residual=residual,
+        trade_state="MATCHED" if preliminary_trade else "CONFIRMED",
+        trade_tx_hash=None if preliminary_trade else trade_tx_hash,
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="CANCEL_REQUESTED",
+        occurred_at="2026-04-26T00:08:00Z",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = CASE WHEN ? THEN 'day0_window' ELSE phase END,
+               order_status = CASE WHEN ? THEN 'filled' ELSE 'backoff_exhausted' END,
+               city = CASE WHEN ? THEN 'Tel Aviv' ELSE city END,
+               cluster = CASE WHEN ? THEN 'Tel Aviv' ELSE cluster END,
+               target_date = CASE WHEN ? THEN '2026-08-02' ELSE target_date END,
+               exit_reason = 'EXIT_ORDER_TERMINAL_NO_FILL_RELEASED [DUST...0.4 below min 5]',
+               updated_at = '2026-04-26T00:08:00Z'
+         WHERE position_id = ?
+        """,
+        (
+            production_evidence,
+            production_evidence,
+            production_evidence,
+            production_evidence,
+            production_evidence,
+            position_id,
+        ),
+    )
+    payload = {
+        "proof_class": "terminal_partial_order_fact"
+        if durable_partial_proof
+        else "unproven_partial_order_fact",
+        "required_predicates": {
+            "terminal_order_remainder_zero": True,
+            "canonical_trade_facts_match_terminal_order_fact": True,
+            "cumulative_fill_below_requested_size": True,
+        },
+    }
+    _append_order_fact(
+        conn,
+        command_id=command_id,
+        order_id=order_id,
+        state="PARTIALLY_MATCHED",
+        matched_size=filled_size,
+        remaining_size="0",
+        raw_payload_json=payload,
+    )
 
 
 def _connect_file_db(path):
@@ -24242,6 +24336,425 @@ class TestRecoveryResolutionTable:
                AND event_type = 'EXIT_RETRY_RELEASED'
             """
         ).fetchone()[0] == 1
+
+    def test_cancel_pending_partial_exit_production_shape_is_recovered_without_lifecycle_rollback(
+        self,
+        conn,
+        mock_client,
+        monkeypatch,
+    ):
+        """Causal antibody for production seq606: partial fill cannot be no-fill released."""
+        from src.execution import command_recovery
+
+        position_id = "e06cf942-a8d"
+        command_id = "e645c9eeb02847e7"
+        order_id = "old-venue-order-e645c9eeb02847e7"
+        _seed_cancel_pending_partial_exit_dust_case(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            order_id=order_id,
+            production_evidence=True,
+        )
+        _configure_partial_exit_dust_client(
+            mock_client,
+            point_status="CANCELED",
+            order_id=order_id,
+            point_remaining="0",
+        )
+        mock_client.get_open_orders.return_value = [{"orderID": order_id, "status": "LIVE"}]
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-08-02T15:22:40.797616+00:00",
+        )
+        candidates = command_recovery._partial_remainder_candidates(
+            conn,
+            live_tick_scope=True,
+        )
+        assert [row["command_id"] for row in candidates] == [command_id]
+        assert [row["command_id"] for row in command_recovery._partial_remainder_candidates(
+            conn,
+        )] == [command_id]
+        assert [row["command_id"] for row in command_recovery._partial_remainder_candidates(
+            conn,
+            terminal_exit_only=True,
+        )] == [command_id]
+
+        calls = {"count": 0}
+        original_backfill = command_recovery._backfill_terminal_exit_trade_facts
+
+        def counted_backfill(*args, **kwargs):
+            calls["count"] += 1
+            return original_backfill(*args, **kwargs)
+
+        monkeypatch.setattr(
+            command_recovery,
+            "_backfill_terminal_exit_trade_facts",
+            counted_backfill,
+        )
+        summary = command_recovery.reconcile_partial_remainders(
+            conn,
+            mock_client,
+            live_tick_scope=True,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert calls["count"] == 1
+        assert _get_state(conn, command_id) == "CANCELLED"
+        event = _get_events(conn, command_id)[-1]
+        assert event["event_type"] == "CANCEL_ACKED"
+        payload = json.loads(event["payload_json"])
+        assert payload["proof_class"] == "cancel_pending_partial_exit_authenticated_remainder_only"
+        assert payload["required_predicates"]["position_lifecycle_unchanged"] is True
+        assert payload["required_predicates"]["no_venue_mutation"] is True
+        fact = conn.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        assert dict(fact) == {
+            "state": "PARTIALLY_MATCHED",
+            "matched_size": "156.6",
+            "remaining_size": "0",
+        }
+        current = conn.execute(
+            """
+            SELECT phase, order_status, shares, chain_shares, order_id
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "day0_window",
+            "order_status": "filled",
+            "shares": 0.4,
+            "chain_shares": 0.4,
+            "order_id": order_id,
+        }
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND sequence_no = 606
+               AND occurred_at = '2026-08-02T15:22:40.797616+00:00'
+               AND event_type = 'EXIT_RETRY_RELEASED'
+               AND phase_before = 'pending_exit'
+               AND phase_after = 'day0_window'
+            """,
+            (position_id,),
+        ).fetchone()[0] == 0
+        assert not command_recovery.pending_exit_has_terminal_order_release_debt(
+            conn,
+            position_id=position_id,
+        )
+        assert command_recovery._partial_remainder_candidates(
+            conn,
+            live_tick_scope=True,
+        ) == []
+        assert {
+            call[0].split(".", 1)[0]
+            for call in mock_client.method_calls
+        } <= {"get_order", "get_open_orders", "get_trades"}
+
+    def test_cancel_pending_partial_exit_large_pending_remainder_releases_to_reauction(
+        self,
+        conn,
+        mock_client,
+        monkeypatch,
+    ):
+        from src.execution import command_recovery
+
+        _seed_cancel_pending_partial_exit_dust_case(
+            conn,
+            filled_size="150",
+            residual="7",
+        )
+        _configure_partial_exit_dust_client(
+            mock_client,
+            point_status="CANCELED",
+            matched_size="150",
+            point_remaining="0",
+        )
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-05-16T12:00:00+00:00",
+        )
+
+        summary = command_recovery.reconcile_partial_remainders(
+            conn,
+            mock_client,
+            live_tick_scope=True,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-exit") == "CANCELLED"
+        event = conn.execute(
+            """
+            SELECT event_type, phase_before, phase_after, payload_json
+              FROM position_events
+             WHERE position_id = 'pos-001'
+               AND event_type = 'EXIT_RETRY_RELEASED'
+            """
+        ).fetchone()
+        assert event["phase_before"] == "pending_exit"
+        assert event["phase_after"] == "active"
+        assert json.loads(event["payload_json"])["reason"] == (
+            "PARTIAL_EXIT_REMAINDER_REAUCTION_REQUIRED"
+        )
+        current = conn.execute(
+            """
+            SELECT phase, order_id, order_status, shares, chain_shares,
+                   cost_basis_usd, chain_cost_basis_usd
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "order_id": None,
+            "order_status": "filled",
+            "shares": 7.0,
+            "chain_shares": 7.0,
+            "cost_basis_usd": 0.08,
+            "chain_cost_basis_usd": 0.08,
+        }
+        assert not command_recovery.pending_exit_has_terminal_order_release_debt(
+            conn,
+            position_id="pos-001",
+        )
+        assert command_recovery.reconcile_pending_exit_terminal_order_releases(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+
+    def test_cancel_pending_partial_exit_point_remaining_is_not_position_residual(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.execution import command_recovery
+
+        _seed_cancel_pending_partial_exit_dust_case(conn)
+        _configure_partial_exit_dust_client(mock_client, point_status="CANCELED")
+
+        summary = command_recovery.reconcile_partial_remainders(
+            conn,
+            mock_client,
+            live_tick_scope=True,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 0, "stayed": 0, "errors": 1}
+        assert _get_state(conn, "cmd-exit") == "CANCEL_PENDING"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events "
+            "WHERE command_id = 'cmd-exit' AND event_type = 'CANCEL_ACKED'"
+        ).fetchone()[0] == 0
+
+    def test_cancel_pending_partial_exit_divergent_chain_residual_is_not_candidate(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.execution import command_recovery
+
+        _seed_cancel_pending_partial_exit_dust_case(conn, residual="0.5")
+        _configure_partial_exit_dust_client(
+            mock_client,
+            point_status="CANCELED",
+            point_remaining="0",
+        )
+
+        assert command_recovery._cancel_pending_partial_exit_candidates(conn) == []
+        assert command_recovery.reconcile_partial_remainders(
+            conn,
+            mock_client,
+            live_tick_scope=True,
+        ) == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        assert _get_state(conn, "cmd-exit") == "CANCEL_PENDING"
+
+    def test_cancel_pending_partial_exit_backfill_is_idempotent_exactly_once(
+        self,
+        conn,
+        mock_client,
+        monkeypatch,
+    ):
+        from src.execution import command_recovery
+
+        _seed_cancel_pending_partial_exit_dust_case(conn)
+        _configure_partial_exit_dust_client(
+            mock_client,
+            point_status="CANCELED",
+            point_remaining="0",
+        )
+        calls = {"count": 0}
+        original_backfill = command_recovery._backfill_terminal_exit_trade_facts
+
+        def counted_backfill(*args, **kwargs):
+            calls["count"] += 1
+            return original_backfill(*args, **kwargs)
+
+        monkeypatch.setattr(
+            command_recovery,
+            "_backfill_terminal_exit_trade_facts",
+            counted_backfill,
+        )
+        first = command_recovery.reconcile_partial_remainders(conn, mock_client, live_tick_scope=True)
+        second = command_recovery.reconcile_partial_remainders(conn, mock_client, live_tick_scope=True)
+
+        assert first["advanced"] == 1
+        assert second == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        assert calls["count"] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = 'cmd-exit' AND event_type = 'CANCEL_ACKED'"
+        ).fetchone()[0] == 1
+
+    def test_cancel_pending_partial_exit_accepts_preliminary_null_tx_fact(self, conn, mock_client):
+        from src.execution import command_recovery
+
+        _seed_cancel_pending_partial_exit_dust_case(conn, preliminary_trade=True)
+        _configure_partial_exit_dust_client(
+            mock_client,
+            point_status="CANCELED",
+            point_remaining="0",
+        )
+
+        summary = command_recovery.reconcile_partial_remainders(conn, mock_client, live_tick_scope=True)
+
+        assert summary["advanced"] == 1
+        trade = conn.execute(
+            """
+            SELECT state, tx_hash, filled_size
+              FROM venue_trade_facts
+             WHERE trade_id = 'trade-dust'
+               AND state = 'CONFIRMED'
+            """
+        ).fetchone()
+        assert dict(trade) == {
+            "state": "CONFIRMED",
+            "tx_hash": "0xdust",
+            "filled_size": "156.6",
+        }
+
+    def test_cancel_pending_partial_exit_divergent_confirmed_fact_fails_closed(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.execution import command_recovery
+
+        _seed_cancel_pending_partial_exit_dust_case(
+            conn,
+            trade_tx_hash="0xconflict",
+        )
+        _configure_partial_exit_dust_client(
+            mock_client,
+            point_status="CANCELED",
+            point_remaining="0",
+        )
+
+        summary = command_recovery.reconcile_partial_remainders(conn, mock_client, live_tick_scope=True)
+
+        assert summary["errors"] == 1
+        assert _get_state(conn, "cmd-exit") == "CANCEL_PENDING"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = 'cmd-exit' AND event_type = 'CANCEL_ACKED'"
+        ).fetchone()[0] == 0
+        current = conn.execute(
+            "SELECT phase, order_status FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "order_status": "backoff_exhausted",
+        }
+
+    def test_cancel_pending_partial_exit_missing_authenticated_proof_stays(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.execution import command_recovery
+
+        _seed_cancel_pending_partial_exit_dust_case(conn)
+        _configure_partial_exit_dust_client(
+            mock_client,
+            point_status="CANCELED",
+            point_remaining="0",
+        )
+        mock_client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_partial_remainders(conn, mock_client, live_tick_scope=True)
+
+        assert summary == {"scanned": 1, "advanced": 0, "stayed": 0, "errors": 1}
+        assert _get_state(conn, "cmd-exit") == "CANCEL_PENDING"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = 'cmd-exit' AND event_type = 'CANCEL_ACKED'"
+        ).fetchone()[0] == 0
+
+    def test_cancel_pending_partial_exit_unavailable_point_without_durable_proof_stays(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.execution import command_recovery
+
+        _seed_cancel_pending_partial_exit_dust_case(conn, durable_partial_proof=False)
+        _configure_partial_exit_dust_client(mock_client, point_status=None)
+        mock_client.get_open_orders.return_value = []
+
+        summary = command_recovery.reconcile_partial_remainders(conn, mock_client, live_tick_scope=True)
+
+        assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        assert _get_state(conn, "cmd-exit") == "CANCEL_PENDING"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = 'cmd-exit' AND event_type = 'CANCEL_ACKED'"
+        ).fetchone()[0] == 0
+
+    def test_cancel_pending_partial_selector_does_not_widen_entry_or_zero_fill(
+        self,
+        conn,
+    ):
+        from src.execution import command_recovery
+
+        _insert(conn, command_id="cmd-entry-zero", position_id="pos-entry-zero")
+        _advance_to_cancel_pending(
+            conn,
+            command_id="cmd-entry-zero",
+            venue_order_id="ord-entry-zero",
+        )
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-entry-zero",
+            command_id="cmd-entry-zero",
+            order_id="ord-entry-zero",
+        )
+        _append_order_fact(
+            conn,
+            command_id="cmd-entry-zero",
+            order_id="ord-entry-zero",
+            state="PARTIALLY_MATCHED",
+            matched_size="0",
+            remaining_size="0",
+        )
+
+        assert command_recovery._cancel_pending_partial_exit_candidates(conn) == []
+        assert all(
+            row["command_id"] != "cmd-entry-zero"
+            for row in command_recovery._partial_remainder_candidates(
+                conn,
+                live_tick_scope=True,
+            )
+        )
 
     def test_partial_exit_point_live_preserves_partial_order_and_dust(
         self,
