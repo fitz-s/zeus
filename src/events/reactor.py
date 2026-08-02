@@ -7489,6 +7489,17 @@ def run_edli_event_reactor_cycle(
         # this helper independently treats an empty set as a strict no-op.
         if _edli_publish_committed_day0_catchup(catchup_day0_event_ids):
             return False
+        if forecast_posterior_wake and not targeted_event_ids:
+            # SCOPE: this exact forecast-posterior publisher wake. DRAIN: retry
+            # the wake until its builder+writer produces at least one durable
+            # carrier ID; never fall through to the ordinary paused backlog.
+            # RESET: a durable carrier ID restores bounded targeted processing,
+            # while dependent-wake supersession keeps its existing return-False
+            # path above.
+            _log.info(
+                "EDLI targeted forecast wake retained: no durable carrier IDs"
+            )
+            return False
         if not producer_fast_path and _urgent_wake_pending():
             _log.info(
                 "EDLI reactor maintenance preempted after emit by urgent producer wake"
@@ -7732,7 +7743,8 @@ def run_edli_event_reactor_cycle(
             decision_time=process_pending_decision_time,
             limit=proof_limit,
             targeted_event_ids=frozenset(targeted_event_ids),
-            targeted_only=producer_fast_path and bool(targeted_event_ids),
+            targeted_only=producer_fast_path
+            and (forecast_posterior_wake or bool(targeted_event_ids)),
             cancelled=_process_pending_cancelled(
                 committed_day0_wake=committed_day0_wake,
                 producer_fast_path=producer_fast_path,

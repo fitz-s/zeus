@@ -494,6 +494,155 @@ def test_targeted_forecast_wake_uses_carrier_exception_at_both_pause_gates():
 
     assert "forecast_posterior_wake" in source
     assert source.count("allow_forecast_carrier_progress=forecast_posterior_wake") == 2
+    assert "forecast_posterior_wake and not targeted_event_ids" in source
+    assert "forecast_posterior_wake or bool(targeted_event_ids)" in source
+
+
+@pytest.mark.parametrize("failure_mode", ("empty", "build_locked", "emit_locked"))
+def test_published_paused_forecast_wake_without_durable_carrier_keeps_queue_untouched(
+    monkeypatch,
+    tmp_path,
+    failure_mode,
+):
+    import src.engine.event_reactor_adapter as adapter_module
+    import src.events.event_writer as event_writer_module
+    import src.events.reactor as reactor_module
+    import src.main as main
+    import src.runtime.bankroll_provider as bankroll_provider
+    import src.state.db as db
+    import src.state.portfolio as portfolio_module
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+    from src.runtime import reactor_wake
+
+    world_path = tmp_path / f"world-{failure_mode}.db"
+    forecasts_path = tmp_path / f"forecasts-{failure_mode}.db"
+    trade_path = tmp_path / f"trades-{failure_mode}.db"
+    wake_path = tmp_path / f"wake-{failure_mode}.json"
+    world = sqlite3.connect(world_path)
+    init_schema(world)
+    ordinary = _forecast_event(f"paused-ordinary-{failure_mode}")
+    EventStore(world).insert_or_ignore(ordinary)
+    world.commit()
+    world.close()
+    sqlite3.connect(forecasts_path).close()
+    sqlite3.connect(trade_path).close()
+
+    family = ("Chicago", "2026-08-03", "high")
+    wake = reactor_wake.publish_reactor_wake(
+        source="replacement_forecast_materializer",
+        reason="forecast_posterior_advanced",
+        path=wake_path,
+        wake_id=f"posterior-wake-{failure_mode}",
+        forecast_families=(family,),
+    )
+    carrier = _forecast_event(
+        f"latest-carrier-{failure_mode}",
+        target_date=family[1],
+    )
+    venue_buy_commands: list[str] = []
+
+    def build_carrier(*_args, **_kwargs):
+        if failure_mode == "empty":
+            return []
+        if failure_mode == "build_locked":
+            raise sqlite3.OperationalError("database is locked")
+        return [carrier]
+
+    def write_many(_self, _events):
+        if failure_mode == "emit_locked":
+            raise sqlite3.OperationalError("database is locked")
+        raise AssertionError("writer is unreachable for this failure mode")
+
+    def venue_adapter(*_args, **_kwargs):
+        venue_buy_commands.append("adapter_built")
+        raise AssertionError("empty forecast target must not reach venue adapter setup")
+
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda *_args, **_kwargs: {"enabled": True, "event_writer_enabled": True},
+    )
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_edli_next_redecision_source", lambda: "pause-antibody")
+    monkeypatch.setattr(main, "_edli_build_forecast_snapshot_events", build_carrier)
+    monkeypatch.setattr(
+        main,
+        "_edli_acquire_mutex",
+        lambda mutex, *, timeout: mutex.acquire(timeout=timeout),
+    )
+    monkeypatch.setattr(
+        main,
+        "_start_venue_background_maintenance_after_reactor_if_required",
+        lambda: None,
+    )
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(
+        adapter_module,
+        "_entry_pause_blocks_live_submit",
+        lambda _conn: "operator_pause",
+    )
+    monkeypatch.setattr(
+        adapter_module,
+        "event_bound_live_adapter_from_trade_conn",
+        venue_adapter,
+    )
+    monkeypatch.setattr(event_writer_module.EventWriter, "write_many", write_many)
+    monkeypatch.setattr(bankroll_provider, "warm_from_collateral_snapshot", lambda: True)
+    monkeypatch.setattr(portfolio_module, "load_runtime_open_portfolio", lambda _conn: object())
+    monkeypatch.setattr(db, "ZEUS_FORECASTS_DB_PATH", forecasts_path)
+    monkeypatch.setattr(db, "get_world_connection", lambda: sqlite3.connect(world_path))
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_read_only",
+        lambda: sqlite3.connect(forecasts_path),
+    )
+    monkeypatch.setattr(
+        db,
+        "get_trade_connection_with_world_required",
+        lambda **_kwargs: pytest.fail("empty carrier wake must retry before trade setup"),
+    )
+    monkeypatch.setattr(db, "world_write_mutex", lambda: threading.Lock())
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_reactor_held_family_provider",
+        lambda: (lambda: frozenset()),
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_held_sell_request_exposure_provider",
+        lambda: (lambda: frozenset()),
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_current_local_day_families",
+        lambda *_args, **_kwargs: set(),
+    )
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: "stable")
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_since",
+        lambda *_args, **_kwargs: (),
+    )
+
+    result = reactor_module.run_edli_event_reactor_cycle(
+        active_lock=threading.Lock(),
+        producer_wake_reason=wake.reason,
+        producer_wake_ids=(wake.wake_id,),
+        producer_wake_published_at=wake.published_at,
+        producer_wake_families=wake.forecast_families,
+    )
+
+    check = sqlite3.connect(world_path)
+    processing = check.execute(
+        "SELECT processing_status, attempt_count FROM opportunity_event_processing WHERE event_id = ?",
+        (ordinary.event_id,),
+    ).fetchone()
+    check.close()
+    assert result is False
+    assert processing == ("pending", 0)
+    assert venue_buy_commands == []
+    assert reactor_wake.read_reactor_wake(path=wake_path) == wake
 
 
 def test_paused_exact_held_sell_parks_when_exposure_provider_is_unavailable(caplog):
@@ -2285,7 +2434,8 @@ def test_position_fill_wake_is_an_exact_targeted_reactor_fast_path():
     assert 'producer_wake_reason == "position_fill_projected"' in source
     assert "committed_position_fill_wake" in source
     assert "or committed_position_fill_wake" in source
-    assert "targeted_only=producer_fast_path and bool(targeted_event_ids)" in source
+    assert "targeted_only=producer_fast_path" in source
+    assert "forecast_posterior_wake or bool(targeted_event_ids)" in source
 
 
 def test_targeted_forecast_wake_ignores_only_older_remaining_backlog(monkeypatch):
