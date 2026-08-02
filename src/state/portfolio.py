@@ -131,7 +131,7 @@ _CI_SEP_EPS: float = 1e-9
 _ZERO_D: Decimal = Decimal(0)
 # Single global friction margin M_x (COLLISION.md §保号: m_e = m_x = 1 tick).
 # Polymarket price granularity is one cent; the exit stop charges one tick per
-# share to the sell branch (exit_margin = _EXIT_TICK × shares).
+# sold share to the sell branch (margin = _EXIT_TICK × shares_sold).
 _EXIT_TICK: Decimal = Decimal("0.01")
 _EXIT_BID_FEE_EPS: float = 1e-6  # keep polymarket_fee finite at extreme bids
 # Breadcrumbs the exit stop re-derives every cycle. Stripped from the carried
@@ -963,9 +963,9 @@ class Position:
 
         Actuation is ALL-shares (build_exit_intent hard-codes shares=effective_shares;
         the partial-quantity path is the separate global-auction authority), so the
-        local stop is a boolean SELL, never a partial x*. The honest curve is the
-        single fillable-prefix breakpoint: walk the held-side bid ladder best-first,
-        x_fill = min(held, visible cumulative depth), proceeds = Σ rung·(price − fee).
+        local stop is a boolean signal into that auction. The caller must still expose
+        every executable cumulative prefix: walk the held-side bid ladder best-first
+        and append ``(x, L(x))`` after each positive rung up to the holding.
         Proceeds are NEVER extrapolated past visible depth — the unfillable remainder
         (held − x_fill) is held on BOTH sides of predicted_bin_law's comparison
         ((held−x)·q⁻ + L(x) vs held·q⁻) and cancels, so pricing the fillable prefix
@@ -998,6 +998,7 @@ class Position:
             remaining = held
             proceeds = 0.0
             filled = 0.0
+            breakpoints: list[tuple[Decimal, Decimal]] = []
             for price, size in levels:
                 if remaining <= 0.0:
                     break
@@ -1007,7 +1008,10 @@ class Position:
                 proceeds += take * _net_per_share(float(price))
                 filled += take
                 remaining -= take
-            return ((Decimal(str(filled)), Decimal(str(proceeds))),)
+                breakpoints.append(
+                    (Decimal(str(filled)), Decimal(str(proceeds)))
+                )
+            return tuple(breakpoints)
 
         bid_size = exit_context.bid_size
         if bid_size is not None and float(bid_size) >= 0.0:
@@ -1048,7 +1052,7 @@ class Position:
             held_shares=held_shares,
             q_mean=q_mean,
             bid_breakpoints=bid_breakpoints,
-            exit_margin=_EXIT_TICK * held_shares,
+            exit_margin_per_share=_EXIT_TICK,
             lock=lock,
             evidence_ok=evidence_ok,
             riskguard_red=self.exit_reason == "red_force_exit",

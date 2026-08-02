@@ -1,18 +1,18 @@
-# Lifecycle: created=2026-07-24; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Lifecycle: created=2026-07-24; last_reviewed=2026-08-02; last_reused=2026-08-02
 # Purpose: Pin the depth-honest liquidation curve in the one-law exit stopping
-#   law (Position._exit_bid_breakpoints -> predicted_bin_law.exit_decision). A
-#   thin book (bid depth < held) must NOT manufacture false SELL dominance off
-#   held_shares * top_bid.
-# Authority basis: the one-law exit priced net sell proceeds at a single
-#   all-shares top-of-book breakpoint; when visible depth < held that overstates
-#   executable proceeds and can flip a HOLD into a SELL through a thin book.
+#   law (Position._exit_bid_breakpoints -> predicted_bin_law.exit_decision).
+#   Every cumulative executable prefix is compared against retaining the same
+#   shares; neither top-bid extrapolation nor a negative lower rung may replace
+#   that feasible set with a single synthetic point.
+# Authority basis: the one-law exit previously exposed only the deepest
+#   cumulative breakpoint, which could erase a profitable upper prefix.
 #   Actuation is ALL-shares (build_exit_intent hard-codes shares=effective_shares;
 #   the partial-quantity path is the separate global-auction authority), so the
 #   honest comparison prices the fillable prefix against holding that same prefix.
 """Depth-honest exit curve relationship tests (one-law lineage).
 
-DHC-a  thin book (bid depth < held) no longer manufactures SELL when the deeper
-       ladder truth says HOLD — the 100-share 0.30x10 / 0.20x90 example.
+DHC-a  every positive ladder rung emits one cumulative prefix, preserving a
+       profitable upper prefix when deeper rungs have negative marginal value.
 DHC-b  deep book (top size >= held) reproduces the depth-blind single-level verdict.
 DHC-c  empty ladder falls back to a single top rung capped at bid_size (never the
        uncapped all-at-top form).
@@ -82,10 +82,25 @@ class TestBreakpointCurve:
         # DHC-a curve: 10 @ .30 (net .2895) + 90 @ .20 (net .192) = 20.175, x=100.
         bps = self._bp(_ctx(fresh_prob=0.25, best_bid=0.30,
                             bid_ladder=((0.30, 10.0), (0.20, 90.0))))
-        assert len(bps) == 1
-        x, proceeds = bps[0]
+        assert len(bps) == 2
+        first_x, first_proceeds = bps[0]
+        assert first_x == Decimal("10.0")
+        assert float(first_proceeds) == pytest.approx(2.895, abs=1e-6)
+        x, proceeds = bps[-1]
         assert x == Decimal("100.0")
         assert float(proceeds) == pytest.approx(20.175, abs=1e-6)
+
+    def test_each_positive_rung_emits_one_cumulative_prefix(self):
+        bps = self._bp(_ctx(
+            fresh_prob=0.25,
+            best_bid=0.40,
+            bid_ladder=((0.40, 3.0), (0.35, 4.0), (0.30, 50.0)),
+        ), held=10.0)
+        assert tuple(x for x, _ in bps) == (
+            Decimal("3.0"),
+            Decimal("7.0"),
+            Decimal("10.0"),
+        )
 
     def test_deep_ladder_matches_legacy_uncapped(self):
         # DHC-b: top size >= held -> whole position fills at the top rung.
@@ -123,27 +138,103 @@ class TestBreakpointCurve:
 # --- End-to-end: evaluate_exit routes the ladder ---------------------------
 
 class TestEvaluateExitDepthHonest:
-    def test_thin_book_flips_false_sell_to_hold(self):
-        """DHC-a end-to-end: q_lcb=0.25, held=100, best_bid=0.30.
-        Thin ladder proceeds ~20.18 < 100*0.25 + tick(1.0) = 26 -> HOLD.
-        Depth-blind proceeds 28.95 > 26 -> SELL (the defect)."""
+    def test_amsterdam_selects_best_positive_partial_prefix(self):
+        from src.decision.predicted_bin_law import (
+            ExitAction,
+            LockState,
+            exit_decision,
+        )
+
+        held = Decimal("104.1")
+        q = Decimal("0.714317590273214")
+        margin_per_share = Decimal("0.01")
+        pos = _make_position(shares=float(held))
+        breakpoints = pos._exit_bid_breakpoints(
+            _ctx(
+                fresh_prob=float(q),
+                best_bid=0.77,
+                bid_ladder=(
+                    (0.77, 8.0),
+                    (0.76, 10.0),
+                    (0.75, 10.0),
+                    (0.70, 7.14),
+                    (0.58, 40.0),
+                ),
+            ),
+            held,
+        )
+        deltas = tuple(
+            (x, proceeds - x * (q + margin_per_share))
+            for x, proceeds in breakpoints
+        )
+        expected_x, expected_delta = max(deltas, key=lambda item: item[1])
+        assert expected_delta > 0
+        assert deltas[-1][1] <= 0  # deepest-only syntax produced the old HOLD
+
+        verdict = exit_decision(
+            held_shares=held,
+            q_mean=q,
+            bid_breakpoints=breakpoints,
+            exit_margin_per_share=margin_per_share,
+            lock=LockState.NONE,
+            evidence_ok=True,
+            riskguard_red=False,
+        )
+
+        assert verdict.action is ExitAction.SELL_REVERSAL
+        assert verdict.shares_to_sell == expected_x
+        assert Decimal(0) < verdict.shares_to_sell < held
+        assert all(
+            delta < expected_delta
+            for x, delta in deltas
+            if x > expected_x
+        )
+
+    def test_no_depth_fallback_can_select_full_exit(self):
+        from src.decision.predicted_bin_law import (
+            ExitAction,
+            LockState,
+            exit_decision,
+        )
+
+        held = Decimal("12.5")
+        pos = _make_position(shares=float(held))
+        breakpoints = pos._exit_bid_breakpoints(
+            _ctx(fresh_prob=0.20, best_bid=0.60),
+            held,
+        )
+        assert breakpoints[0][0] == held
+        verdict = exit_decision(
+            held_shares=held,
+            q_mean=Decimal("0.20"),
+            bid_breakpoints=breakpoints,
+            exit_margin_per_share=Decimal("0.01"),
+            lock=LockState.NONE,
+            evidence_ok=True,
+            riskguard_red=False,
+        )
+        assert verdict.action is ExitAction.SELL_REVERSAL
+        assert verdict.shares_to_sell == held
+
+    def test_thin_book_sells_only_the_positive_top_prefix(self):
+        """DHC-a: the 0.30 rung clears q + margin; the 0.20 rung does not.
+
+        Exposing both cumulative prefixes lets the law retain the profitable
+        10-share point instead of letting the negative lower rung erase it.
+        """
         pos = _make_position(shares=100.0)
         thin = pos.evaluate_exit(_ctx(
             fresh_prob=0.25, best_bid=0.30, current_ci=(0.25, 0.30),
             bid_ladder=((0.30, 10.0), (0.20, 90.0)),
         ))
-        assert thin.should_exit is False, (
-            f"thin ladder must HOLD; trigger={thin.trigger!r} "
-            f"applied={thin.applied_validations}"
-        )
+        assert thin.should_exit is True
+        assert thin.trigger == "SELL_REVERSAL"
 
         pos_blind = _make_position(shares=100.0)
         blind = pos_blind.evaluate_exit(_ctx(
             fresh_prob=0.25, best_bid=0.30, current_ci=(0.25, 0.30),
         ))
-        assert blind.should_exit is True, (
-            "depth-blind context prices 100*0.30 net and SELLs (demonstrates the defect)"
-        )
+        assert blind.should_exit is True
         assert blind.trigger == "SELL_REVERSAL"
 
     def test_deep_book_reproduces_blind_verdict_both_ways(self):
@@ -169,13 +260,14 @@ class TestEvaluateExitDepthHonest:
 
     def test_bid_size_capped_fallback_sells_on_prefix(self):
         # DHC-c end-to-end: no ladder, bid_size=10; x_fill=10, per-share bid 0.30
-        # net 0.2895 > q 0.25, but held EV is over the full 100 shares. proceeds
-        # 2.895 vs 100*0.25+1 = 26 -> HOLD (honest: only 10 fill).
+        # net 0.2895 > q 0.25 + per-share margin 0.01, so the fillable prefix
+        # strictly dominates retaining those same 10 shares.
         pos = _make_position(shares=100.0)
         capped = pos.evaluate_exit(_ctx(
             fresh_prob=0.25, best_bid=0.30, current_ci=(0.25, 0.30), bid_size=10.0,
         ))
-        assert capped.should_exit is False
+        assert capped.should_exit is True
+        assert capped.trigger == "SELL_REVERSAL"
 
 
 class TestImpossibleLock:

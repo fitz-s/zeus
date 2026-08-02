@@ -90,8 +90,9 @@ class ExitDecision:
 
     ``value_kept`` = posterior-mean value of the shares retained ((h−x)·q).
     ``value_sold`` = net liquidation proceeds L(x) realized on the sold shares.
-    Their sum minus the flat exit margin is the sell-branch value that beat the
-    hold value h·q when the action is SELL_REVERSAL."""
+    Their sum minus the per-share exit margin on ``shares_to_sell`` is the
+    sell-branch value that beat the hold value h·q when the action is
+    SELL_REVERSAL."""
 
     action: ExitAction
     shares_to_sell: Decimal
@@ -178,7 +179,7 @@ def exit_decision(
     held_shares: Decimal,
     q_mean: Decimal,
     bid_breakpoints: Sequence[tuple[Decimal, Decimal]],
-    exit_margin: Decimal,
+    exit_margin_per_share: Decimal,
     lock: LockState,
     evidence_ok: bool,
     riskguard_red: bool,
@@ -199,9 +200,10 @@ def exit_decision(
        evaluate). A GUARANTEED/IMPOSSIBLE lock is independent physical authority
        and still decides even with stale/absent evidence.
     3. Otherwise compare, over the breakpoints, the sell-branch value
-       ``max_x[(h−x)·q + L(x)] − M_x`` against the hold value ``h·q`` using the
-       lock-folded posterior-predictive mean. SELL_REVERSAL at the argmax x iff
-       it strictly wins; else HOLD. Equivalently SELL iff ``L(x) > x·q + M_x``.
+       ``max_x[(h−x)·q + L(x) − x·m_x]`` against the hold value ``h·q`` using
+       the lock-folded posterior-predictive mean. SELL_REVERSAL at the argmax x
+       iff it strictly wins; else HOLD. Equivalently SELL iff
+       ``L(x) > x·(q + m_x)``.
 
     ``q_mean`` is intentionally the only payoff-probability parameter: confidence
     tails cannot silently re-enter the fixed-action expectation through an alias.
@@ -231,7 +233,11 @@ def exit_decision(
     best_proceeds = _ZERO
     best_value = hold_value  # the HOLD baseline
     for shares, proceeds in sorted(bid_breakpoints, key=lambda bp: bp[0]):
-        candidate = (held_shares - shares) * q + proceeds - exit_margin
+        candidate = (
+            (held_shares - shares) * q
+            + proceeds
+            - exit_margin_per_share * shares
+        )
         if candidate > best_value:
             best_value = candidate
             best_x = shares

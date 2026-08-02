@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-07-23; last_reviewed=2026-07-30; last_reused=2026-07-30
+# Lifecycle: created=2026-07-23; last_reviewed=2026-08-02; last_reused=2026-08-02
 # Purpose: Exhaustive money-path unit coverage for src/decision/predicted_bin_law.py
 #   — the single predicted-bin entry/exit law. Antibodies for every spec-mandated
 #   trap: the native NO lower-bound flip, lock folding, strict entry break-even,
@@ -118,7 +118,7 @@ def test_exit_holds_when_bid_below_posterior_mean():
         held_shares=D("100"),
         q_mean=D("0.90"),
         bid_breakpoints=[(D("100"), D("85.00"))],
-        exit_margin=D("0.01"),
+        exit_margin_per_share=D("0.01"),
         lock=LockState.NONE,
         evidence_ok=True,
         riskguard_red=False,
@@ -135,7 +135,7 @@ def test_exit_sells_full_when_bid_dominates_hold():
         held_shares=D("100"),
         q_mean=D("0.50"),
         bid_breakpoints=[(D("100"), D("80.00"))],
-        exit_margin=D("0.01"),
+        exit_margin_per_share=D("0.01"),
         lock=LockState.NONE,
         evidence_ok=True,
         riskguard_red=False,
@@ -157,7 +157,7 @@ def test_exit_partial_argmax_picks_interior_breakpoint_when_bid_decays():
             (D("50"), D("47.00")),
             (D("100"), D("87.00")),
         ],
-        exit_margin=D("0.01"),
+        exit_margin_per_share=D("0.01"),
         lock=LockState.NONE,
         evidence_ok=True,
         riskguard_red=False,
@@ -166,6 +166,52 @@ def test_exit_partial_argmax_picks_interior_breakpoint_when_bid_decays():
     assert d.shares_to_sell == D("50")
     assert d.value_kept == D("45.00")  # (100-50)*0.90
     assert d.value_sold == D("47.00")
+
+
+def test_exit_margin_is_proportional_to_shares_sold():
+    # The 10-share prefix has +0.15 before friction. Per-share margin charges
+    # 0.10 and preserves its +0.05 delta; charging the full holding's 1.00
+    # margin to this partial prefix would incorrectly turn it into a HOLD.
+    d = exit_decision(
+        held_shares=D("100"),
+        q_mean=D("0.50"),
+        bid_breakpoints=[
+            (D("10"), D("5.15")),
+            (D("100"), D("50.00")),
+        ],
+        exit_margin_per_share=D("0.01"),
+        lock=LockState.NONE,
+        evidence_ok=True,
+        riskguard_red=False,
+    )
+    assert d.action is ExitAction.SELL_REVERSAL
+    assert d.shares_to_sell == D("10")
+
+
+def test_exit_exact_hold_tie_and_all_negative_prefixes_hold():
+    tied = exit_decision(
+        held_shares=D("100"),
+        q_mean=D("0.50"),
+        bid_breakpoints=[(D("10"), D("5.10"))],
+        exit_margin_per_share=D("0.01"),
+        lock=LockState.NONE,
+        evidence_ok=True,
+        riskguard_red=False,
+    )
+    negative = exit_decision(
+        held_shares=D("100"),
+        q_mean=D("0.50"),
+        bid_breakpoints=[
+            (D("10"), D("5.09")),
+            (D("100"), D("50.99")),
+        ],
+        exit_margin_per_share=D("0.01"),
+        lock=LockState.NONE,
+        evidence_ok=True,
+        riskguard_red=False,
+    )
+    assert tied.action is ExitAction.HOLD
+    assert negative.action is ExitAction.HOLD
 
 
 def test_exit_breakpoint_order_does_not_change_verdict():
@@ -178,7 +224,7 @@ def test_exit_breakpoint_order_does_not_change_verdict():
         held_shares=D("100"),
         q_mean=D("0.90"),
         bid_breakpoints=unordered,
-        exit_margin=D("0.01"),
+        exit_margin_per_share=D("0.01"),
         lock=LockState.NONE,
         evidence_ok=True,
         riskguard_red=False,
@@ -191,7 +237,7 @@ def test_exit_no_bid_holds():
         held_shares=D("100"),
         q_mean=D("0.90"),
         bid_breakpoints=[],
-        exit_margin=D("0.01"),
+        exit_margin_per_share=D("0.01"),
         lock=LockState.NONE,
         evidence_ok=True,
         riskguard_red=False,
@@ -209,7 +255,7 @@ def test_red_preempts_guaranteed_lock_and_good_evidence():
         held_shares=D("100"),
         q_mean=D("0.95"),
         bid_breakpoints=[(D("100"), D("50.00"))],
-        exit_margin=D("0.01"),
+        exit_margin_per_share=D("0.01"),
         lock=LockState.GUARANTEED,
         evidence_ok=True,
         riskguard_red=True,
@@ -226,7 +272,7 @@ def test_red_preempts_evidence_gate():
         held_shares=D("100"),
         q_mean=D("0.90"),
         bid_breakpoints=[(D("100"), D("70.00"))],
-        exit_margin=D("0.01"),
+        exit_margin_per_share=D("0.01"),
         lock=LockState.NONE,
         evidence_ok=False,
         riskguard_red=True,
@@ -240,7 +286,7 @@ def test_evidence_unavailable_only_when_lock_none():
         held_shares=D("100"),
         q_mean=D("0.90"),
         bid_breakpoints=[(D("100"), D("95.00"))],
-        exit_margin=D("0.01"),
+        exit_margin_per_share=D("0.01"),
         lock=LockState.NONE,
         evidence_ok=False,
         riskguard_red=False,
@@ -256,7 +302,7 @@ def test_guaranteed_lock_with_garbage_evidence_still_holds():
         held_shares=D("100"),
         q_mean=D("0.10"),  # garbage; overridden by GUARANTEED fold to 1
         bid_breakpoints=[(D("100"), D("99.50"))],
-        exit_margin=D("0.01"),
+        exit_margin_per_share=D("0.01"),
         lock=LockState.GUARANTEED,
         evidence_ok=False,
         riskguard_red=False,
@@ -273,7 +319,7 @@ def test_impossible_lock_folds_mean_to_zero_and_sells_on_any_positive_bid():
         held_shares=D("100"),
         q_mean=D("0.50"),  # ignored; IMPOSSIBLE folds to 0
         bid_breakpoints=[(D("100"), D("3.00"))],
-        exit_margin=D("0.01"),
+        exit_margin_per_share=D("0.01"),
         lock=LockState.IMPOSSIBLE,
         evidence_ok=False,
         riskguard_red=False,
@@ -324,7 +370,7 @@ def test_hysteresis_no_overlap_same_state_never_both_enter_and_exit():
         held_shares=D("1"),
         q_mean=q_in_band,
         bid_breakpoints=[(D("1"), net_bid)],
-        exit_margin=m,
+        exit_margin_per_share=m,
         lock=LockState.NONE,
         evidence_ok=True,
         riskguard_red=False,
