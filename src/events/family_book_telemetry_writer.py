@@ -22,7 +22,8 @@ WAL, zero contention with the trade DB by construction, since nothing else
 ever opens it. Writes land in a bounded, DELETABLE outbox table
 (``family_book_telemetry_outbox_schema.py`` -- the fix for round-4's
 "unbounded mirror" finding). The worker thread NEVER opens the canonical
-trade DB for writing (round-4's "second uncoordinated writer" finding).
+trade DB for writing (round-4's "second uncoordinated writer" finding); its
+only canonical touch is a one-shot READ-ONLY cache seed at startup.
 
 **Delivery (``run_bounded_ingest``, called by the DAEMON, not this module's
 worker thread)**: a small, pure function that reads ONE bounded batch from
@@ -76,6 +77,7 @@ from src.state.schema.family_book_telemetry_outbox_schema import (
     fetch_batch as _outbox_fetch_batch,
     insert_outbox_row,
     latest_per_family as _outbox_latest_per_family,
+    pending_budget as _outbox_pending_budget,
     pending_stats as _outbox_pending_stats,
 )
 
@@ -87,7 +89,17 @@ _HEARTBEAT_INTERVAL = timedelta(minutes=30)
 _LOG_RATE_LIMIT_SECONDS = 60.0
 _WORKER_POLL_SECONDS = 0.1  # bounded shutdown latency; no periodic work left in the loop
 _READY_TIMEOUT_DEFAULT = 5.0
-_SPOOL_DISK_BUDGET_BYTES_DEFAULT = 500_000_000  # 500 MB -- Y1 hard spool budget
+# Round-6 Z2: two DISTINCT ceilings, named for what each actually is. The
+# first is an ADMISSION threshold on undelivered payload bytes -- a soft gate
+# the capture path consults and honors. The second is a PHYSICAL ceiling
+# SQLite enforces on the spool file itself: past it the engine returns
+# SQLITE_FULL to this module's own writes, so a bug in the soft gate (or a
+# burst that outruns it) still cannot eat the disk the live-money DB needs.
+# Pages are 4 KiB by default -> 262144 pages ~= 1 GiB, deliberately well above
+# the 500 MB admission threshold so the soft gate is what normally binds and
+# the hard ceiling is a backstop, not a routine limit.
+_SPOOL_PENDING_BUDGET_BYTES_DEFAULT = 500_000_000  # admission threshold
+_SPOOL_MAX_PAGE_COUNT_DEFAULT = 262_144  # physical file ceiling (~1 GiB @ 4 KiB pages)
 _INGEST_BATCH_SIZE_DEFAULT = 500
 _INGEST_BYTE_BUDGET_DEFAULT = 5_000_000  # 5 MB canonical transaction cap
 # SQLite's multi-connection WAL-reset fix landed in 3.51.3 (and backports
@@ -104,6 +116,10 @@ _CNT_SAMPLED_OUT = "family_book_telemetry_sampled_out_total"
 _CNT_WRITE_FAILURES = "family_book_telemetry_write_failures_total"
 _CNT_MALFORMED_ENVELOPE = "family_book_telemetry_malformed_envelope_total"
 _CNT_SPOOL_BUDGET_EXCEEDED = "family_book_telemetry_spool_budget_exceeded_total"
+_CNT_SPOOL_BUDGET_UNREADABLE = "family_book_telemetry_spool_budget_unreadable_total"
+_CNT_ACK_FAILURES = "family_book_telemetry_ack_failures_total"
+_CNT_WORKER_ITEM_ERRORS = "family_book_telemetry_worker_item_error_total"
+_CNT_INGEST_DEFERRED = "family_book_telemetry_ingest_deferred_total"
 _CNT_WRITTEN_OUTBOX = "family_book_telemetry_written_outbox_total"
 _CNT_STARTUP_FAILED = "family_book_telemetry_startup_failed_total"
 _CNT_INGEST_FAILURES = "family_book_telemetry_ingest_failures_total"
@@ -121,6 +137,11 @@ def _telemetry_enabled() -> bool:
 class ReadinessResult:
     ready: bool
     reason: Optional[str] = None
+    # False iff the worker started but could not seed its last-state cache:
+    # capture is correct, but the first observation per family is labelled
+    # STATE_CHANGE regardless of content. Distinct from ``ready`` so the
+    # caveat is visible instead of silently folded into success.
+    cache_seeded: bool = True
 
 
 @dataclass(frozen=True)
@@ -133,6 +154,11 @@ class IngestOutcome:
     disabled: bool = False
     contended: bool = False
     failed: bool = False
+    # Canonical commit succeeded but the spool ack (delete) did not: data is
+    # durable, the outbox will replay this batch. Distinct from ``failed``,
+    # which means nothing was delivered.
+    ack_failed: bool = False
+    deferred: bool = False
     reason: Optional[str] = None
 
 
@@ -147,7 +173,8 @@ _last_readiness: Optional[ReadinessResult] = None
 _capture_terminally_disabled = False
 _last_state_by_family: dict[str, tuple[str, datetime]] = {}
 _last_log_monotonic = 0.0
-_spool_disk_budget_bytes = _SPOOL_DISK_BUDGET_BYTES_DEFAULT
+_spool_pending_budget_bytes = _SPOOL_PENDING_BUDGET_BYTES_DEFAULT
+_spool_max_page_count = _SPOOL_MAX_PAGE_COUNT_DEFAULT
 
 
 def _default_spool_conn_factory() -> sqlite3.Connection:
@@ -166,6 +193,19 @@ def _default_spool_conn_factory() -> sqlite3.Connection:
     )
     conn = sqlite3.connect(str(spool_path), timeout=5.0)
     conn.execute("PRAGMA journal_mode=WAL")
+    return conn
+
+
+def _open_spool(factory: Callable[[], sqlite3.Connection]) -> sqlite3.Connection:
+    """Open a spool connection with its schema and PHYSICAL ceilings armed.
+    Every spool open in this module goes through here, so no path can acquire
+    an unbounded spool file (round-6 Z2)."""
+    conn = factory()
+    try:
+        _ensure_outbox_table(conn, max_page_count=_spool_max_page_count)
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
@@ -217,7 +257,7 @@ def start_worker(
     spool_conn_factory: Optional[Callable[[], sqlite3.Connection]] = None,
     readonly_canonical_conn_factory: Optional[Callable[[], sqlite3.Connection]] = None,
     maxsize: Optional[int] = None,
-    spool_disk_budget_bytes: Optional[int] = None,
+    spool_pending_budget_bytes: Optional[int] = None,
     ready_timeout: float = _READY_TIMEOUT_DEFAULT,
 ) -> ReadinessResult:
     """Start the capture-side worker thread and BLOCK for a ready/failed
@@ -227,7 +267,7 @@ def start_worker(
     second one. On failure, capture is disabled TERMINALLY (a typed counter
     fires; no retry loop from the decision thread -- see
     ``enqueue_family_book_observation``)."""
-    global _spool_conn_factory, _readonly_canonical_conn_factory, _spool_disk_budget_bytes
+    global _spool_conn_factory, _readonly_canonical_conn_factory, _spool_pending_budget_bytes
     if _worker_thread is not None and _worker_thread.is_alive():
         return _last_readiness or ReadinessResult(ready=True)
     with _worker_started_lock:
@@ -237,8 +277,8 @@ def start_worker(
             _spool_conn_factory = spool_conn_factory
         if readonly_canonical_conn_factory is not None:
             _readonly_canonical_conn_factory = readonly_canonical_conn_factory
-        if spool_disk_budget_bytes is not None:
-            _spool_disk_budget_bytes = spool_disk_budget_bytes
+        if spool_pending_budget_bytes is not None:
+            _spool_pending_budget_bytes = spool_pending_budget_bytes
         if maxsize is not None:
             _configure_queue(maxsize)
         return _start_worker_locked(ready_timeout)
@@ -260,6 +300,16 @@ def _start_worker_locked(ready_timeout: float) -> ReadinessResult:
     _worker_thread = thread
     thread.start()
     if not _ready_event.wait(timeout=ready_timeout):
+        # Round-6: a timeout means the thread is SLOW, not absent -- it may
+        # still be inside _open_spool and will happily come up and start
+        # writing after we have declared capture dead. Stop it and JOIN before
+        # returning, so "not ready" means no live worker, not an unsupervised
+        # one. Cleanup is keyed on "was started", never on "became ready".
+        _stop_event.set()
+        thread.join(timeout=ready_timeout)
+        if thread.is_alive():
+            logger.error("family_book_telemetry: worker survived startup-timeout join")
+        _worker_thread = None
         result = ReadinessResult(ready=False, reason="startup_timeout")
     else:
         result = _last_readiness or ReadinessResult(ready=False, reason="unknown")
@@ -307,7 +357,7 @@ def drain(timeout: float = 5.0) -> bool:
 
 def reset_for_test() -> None:
     global _spool_conn_factory, _readonly_canonical_conn_factory, _queue_high_water
-    global _capture_terminally_disabled, _spool_disk_budget_bytes, _last_readiness
+    global _capture_terminally_disabled, _spool_pending_budget_bytes, _last_readiness
     shutdown()
     _spool_conn_factory = _default_spool_conn_factory
     _readonly_canonical_conn_factory = _default_readonly_canonical_conn_factory
@@ -315,7 +365,7 @@ def reset_for_test() -> None:
     _last_state_by_family.clear()
     _queue_high_water = 0
     _capture_terminally_disabled = False
-    _spool_disk_budget_bytes = _SPOOL_DISK_BUDGET_BYTES_DEFAULT
+    _spool_pending_budget_bytes = _SPOOL_PENDING_BUDGET_BYTES_DEFAULT
     _last_readiness = None
     _stop_event.clear()
     _ready_event.clear()
@@ -337,7 +387,10 @@ def _rate_limited_warning(msg: str, *args: Any) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Worker loop: capture ONLY -- spool writes, no canonical access at all.
+# Worker loop: capture ONLY -- spool writes, and no WRITABLE canonical access
+# ever. (It does open canonical READ-ONLY exactly once, at startup, to seed the
+# last-state cache -- see _bootstrap_last_state_cache. "No canonical access at
+# all" would be a comment that lies about its own module.)
 # ---------------------------------------------------------------------------
 
 def _worker_loop() -> None:
@@ -350,22 +403,26 @@ def _worker_loop() -> None:
         _ready_event.set()
         return
     try:
-        conn = _spool_conn_factory()
-        _ensure_outbox_table(conn)
+        conn = _open_spool(_spool_conn_factory)
     except Exception as exc:
         _last_readiness = ReadinessResult(ready=False, reason=f"spool init failed: {exc!r}")
         _ready_event.set()
         logger.warning("family_book_telemetry: spool init failed", exc_info=True)
         return
 
+    # Round-6: seeding is a SEPARATE fact from readiness. A worker that came up
+    # with an unseeded cache is ready (it captures correctly) but will label the
+    # first observation of each family STATE_CHANGE even if the content is
+    # unchanged -- a real, bounded analysis caveat the operator can only account
+    # for if it is reported rather than folded into a single ready=True.
+    cache_seeded = True
     try:
         _bootstrap_last_state_cache(conn)
     except Exception:
-        # Best-effort (Y2/Y4): bootstrap failure never blocks startup -- the
-        # cache just starts empty, same as before the fix.
+        cache_seeded = False
         logger.warning("family_book_telemetry: cache bootstrap failed", exc_info=True)
 
-    _last_readiness = ReadinessResult(ready=True)
+    _last_readiness = ReadinessResult(ready=True, cache_seeded=cache_seeded)
     _ready_event.set()
 
     try:
@@ -375,7 +432,16 @@ def _worker_loop() -> None:
             except queue.Empty:
                 continue
             try:
-                conn = _process_one(conn, envelope)
+                # Round-6: a supervisor boundary around the WHOLE per-item body.
+                # _process_one guards its own known failure modes, but this
+                # thread is the SOLE capture worker: any unanticipated escape
+                # (a counter sink fault, a replacement-connection path raising)
+                # would kill capture silently for the daemon's whole lifetime.
+                try:
+                    conn = _process_one(conn, envelope)
+                except BaseException:
+                    _cnt_inc(_CNT_WORKER_ITEM_ERRORS)
+                    _rate_limited_warning("family_book_telemetry: worker item failed")
                 global _queue_high_water
                 size = _obs_queue.qsize()
                 if size > _queue_high_water:
@@ -444,13 +510,19 @@ def _process_one(conn: sqlite3.Connection, envelope: ObservationEnvelope) -> sql
     if row is None:  # sampled out -- nothing to write
         return conn
 
+    # Round-6 Z2: FAIL CLOSED. Capture is optional; the live-money DB's disk is
+    # not. If the pending backlog cannot be read, the backlog is unknown, and
+    # admitting a write on an unknown backlog is exactly how an optional plane
+    # consumes the money path's storage. Skip the write instead.
     try:
-        stats = _outbox_pending_stats(conn)
-        if stats["pending_bytes_approx"] >= _spool_disk_budget_bytes:
-            _cnt_inc(_CNT_SPOOL_BUDGET_EXCEEDED)
-            return conn
+        _pending_count, pending_bytes = _outbox_pending_budget(conn)
     except Exception:
-        pass  # budget check is advisory; never block capture on it failing
+        _cnt_inc(_CNT_SPOOL_BUDGET_UNREADABLE)
+        _rate_limited_warning("family_book_telemetry: spool budget unreadable, dropping capture")
+        return conn
+    if pending_bytes >= _spool_pending_budget_bytes:
+        _cnt_inc(_CNT_SPOOL_BUDGET_EXCEEDED)
+        return conn
 
     try:
         insert_outbox_row(conn, row)
@@ -486,9 +558,7 @@ def _rollback_or_replace(
     except Exception:
         pass
     try:
-        new_conn = conn_factory()
-        _ensure_outbox_table(new_conn)
-        return new_conn
+        return _open_spool(conn_factory)
     except Exception:
         _rate_limited_warning("family_book_telemetry: replacement connection setup failed")
         # Nothing usable to return; the caller's next write attempt will
@@ -588,6 +658,26 @@ def _sampling_decision(
 # caller owns and closes both connections.
 # ---------------------------------------------------------------------------
 
+def outbox_has_pending(spool_conn_factory: Optional[Callable[[], sqlite3.Connection]] = None) -> bool:
+    """Round-6 Z1: is there anything at all to deliver? Answered against the
+    PRIVATE spool only, so the caller can skip opening a canonical trade
+    connection entirely on an idle tick -- which is the overwhelmingly common
+    case. Unreadable spool reads as "nothing pending": the optional plane
+    yields rather than reaching for the live-money DB on a guess."""
+    factory = spool_conn_factory or _spool_conn_factory
+    try:
+        conn = _open_spool(factory)
+    except Exception:
+        return False
+    try:
+        count, _bytes = _outbox_pending_budget(conn)
+        return count > 0
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
 def run_bounded_ingest(
     canonical_conn: sqlite3.Connection,
     spool_conn_factory: Optional[Callable[[], sqlite3.Connection]] = None,
@@ -608,6 +698,12 @@ def run_bounded_ingest(
     transaction. Skips entirely (returns ``disabled=True``) if the kill
     switch is off -- the operator's emergency guard for canonical I/O, not
     merely new enqueues.
+
+    DDL boundary: this function issues DDL against the SPOOL only (via
+    ``_open_spool``, which owns schema + physical ceilings for every spool
+    open in this module). It issues NO DDL against ``canonical_conn`` -- the
+    trade schema bootstrap owns those tables, and a delivery pass must never
+    mutate schema on a connection it does not own.
     """
     if not _telemetry_enabled():
         _cnt_inc(_CNT_INGEST_DISABLED)
@@ -615,13 +711,12 @@ def run_bounded_ingest(
 
     factory = spool_conn_factory or _spool_conn_factory
     try:
-        spool_conn = factory()
+        spool_conn = _open_spool(factory)
     except Exception as exc:
         _cnt_inc(_CNT_INGEST_FAILURES)
         return IngestOutcome(0, 0, 0, failed=True, reason=f"spool_connect: {exc!r}")
 
     try:
-        _ensure_outbox_table(spool_conn)
         try:
             rows = _outbox_fetch_batch(spool_conn, after_seq=0, limit=batch_size)
         except Exception as exc:
@@ -683,14 +778,22 @@ def run_bounded_ingest(
         try:
             _outbox_delete_up_to(spool_conn, max_seq)
             spool_conn.commit()
-        except Exception:
+        except Exception as exc:
             # Canonical is already durable (idempotent upserts) -- a failed
             # ack just means the NEXT pass re-reads and re-no-ops these rows.
+            # Round-6: SAFE is not SILENT. A persistently failing ack means the
+            # outbox never drains while canonical ingestion keeps "succeeding",
+            # so it gets its own counter and its own outcome field.
             try:
                 spool_conn.rollback()
             except Exception:
                 pass
+            _cnt_inc(_CNT_ACK_FAILURES)
             _rate_limited_warning("family_book_telemetry: spool ack failed (safe -- will replay)")
+            return IngestOutcome(
+                len(batch), ingested_states, ingested_observations,
+                ack_failed=True, reason=f"spool_ack: {exc!r}",
+            )
 
         return IngestOutcome(len(batch), ingested_states, ingested_observations)
     finally:
@@ -701,9 +804,8 @@ def pending_outbox_stats(spool_conn_factory: Optional[Callable[[], sqlite3.Conne
     """Metrics: pending row count, approximate bytes, oldest enqueued_at_utc
     (Y1's required pending-rows/bytes/oldest-age observability)."""
     factory = spool_conn_factory or _spool_conn_factory
-    conn = factory()
+    conn = _open_spool(factory)
     try:
-        _ensure_outbox_table(conn)
         return _outbox_pending_stats(conn)
     finally:
         conn.close()

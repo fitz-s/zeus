@@ -874,3 +874,119 @@ call exists somewhere") with fully-executed unit tests
 enqueue -> sampling -> write pipeline end-to-end with real code, just not
 threaded through the full reactor from raw event ingestion. This is a
 disclosed, reasoned gap, not a silent one.
+
+---
+
+## Round 6 (final): the two blockers, and one reasoned divergence
+
+Round-5 deep review returned NO-GO for a default-ON merge at `ca6dee133`
+with two blockers. Both are addressed below. On Z1 the review's *concern* is
+implemented; its *prescribed remedy* is not, for a reason grounded in a
+constraint the reviewer could not see from outside. That reasoning is
+recorded here, not deferred.
+
+### Z1 — telemetry delivery must never compete with the money path
+
+**The concern (accepted).** A 30s periodic job opening the live-money trade
+DB is a second writer racing the reactor for the single SQLite write lock.
+Under WAL, `busy_timeout` is an error-return budget, not a priority
+mechanism, so an optional telemetry pass can make a money-path write wait.
+
+**The prescribed remedy (declined, with cause).** The review asked that
+delivery execute on the reactor's own `trade_conn` at a post-commit seam.
+That is not available here. The reactor's connection is
+`get_trade_connection_with_world_required(write_class=None)` (`reactor.py`)
+with `world` and `forecasts` ATTACHed, and the cycle commits money-path
+truth on it mid-cycle (`reactor.py:7086`) while continuing to work. Running
+telemetry INSERTs on that connection places optional writes inside the money
+path's transaction scope: a telemetry failure must roll back, and a rollback
+there discards whatever reactor work shares the transaction. That is exactly
+the transaction-poisoning failure class review X1 established must not exist
+— so the round-6 remedy, applied literally, would have reintroduced the
+round-2 defect. The reviewer could not weigh this: it depends on the
+reactor's connection flavor and mid-cycle commit, which were outside the
+reviewed diff.
+
+**What is implemented instead — the repo's own idiom for this exact
+problem.** Zeus already has optional periodic work that must not contend
+with the money path, and it does not solve it by sharing a transaction; it
+solves it by *yielding*: `if _cycle_lock.locked() or _edli_reactor_active():
+return` (`main.py:1761`, `:1846`, `:1896`, `:1920`). The telemetry ingest job
+now takes the same pair of guards, plus a spool-only pending precheck
+(`outbox_has_pending`) so an idle tick — the overwhelmingly common case —
+never opens a canonical connection at all. Net effect: telemetry touches the
+trade DB only when it has work AND the money path is idle. This achieves the
+review's stated goal (no contention) without its structural cost (shared
+transaction fate).
+
+Note also that a periodic `write_class="live"` trade writer is not novel
+here: `_c3_staleness_cancel_cycle`, `_run_ws_gap_reconcile_if_required`, and
+`_refresh_reconcile_findings_if_required` already are exactly that. The
+telemetry job is strictly more deferential than any of them.
+
+### Z2 — the spool must be computationally and physically bounded
+
+- The admission check was `COUNT(*) + SUM(LENGTH(...))` over the whole
+  outbox, per envelope — cost growing with the very backlog it bounded, so
+  capture got slower precisely when the spool was in trouble. Replaced with
+  O(1) `pending_count`/`pending_bytes` metadata maintained transactionally,
+  in the same transaction as each insert/delete. Counter rows are created by
+  the first row they count (upsert), which removes any need for a startup
+  backfill — and with it the open-time `commit()` such a pass would require.
+- Budget read failure now **fails closed** (drops the capture, typed
+  counter). Capture is optional; the live-money DB's disk is not. Admitting
+  writes against an unknown backlog is how an optional plane eats the money
+  path's storage.
+- The ceiling is now **physical**, not advisory: `PRAGMA max_page_count`
+  (~1 GiB) makes SQLite itself return `SQLITE_FULL` to this module's writes,
+  plus `journal_size_limit` to bound the WAL. The two layers are now named
+  for what each is — `_spool_pending_budget_bytes` (soft admission
+  threshold, 500 MB) and `_spool_max_page_count` (hard file ceiling) —
+  rather than one misleading "hard disk budget".
+- `(family_id, spool_seq DESC)` index for the restart-bootstrap query, which
+  runs a correlated `MAX(spool_seq)` per family on the startup path.
+
+### Folded-in HIGH/MEDIUM findings
+
+- Supervisor boundary around the whole per-item worker body: this is the
+  SOLE capture thread, so any unanticipated escape would kill capture
+  silently for the daemon's lifetime.
+- Ack failure gets a typed outcome (`ack_failed`) and counter. Safe is not
+  silent: a persistently failing ack means the outbox never drains while
+  canonical ingestion keeps reporting success.
+- Startup timeout now sets `_stop_event` and JOINs. A timeout means the
+  thread is slow, not absent — it could otherwise come up after we declared
+  capture dead and write unsupervised. Cleanup is keyed on "was started".
+- `cache_seeded` is a separate `ReadinessResult` field, logged at WARNING:
+  an unseeded cache labels the first observation per family `STATE_CHANGE`
+  regardless of content, a real analysis caveat that must be visible rather
+  than folded into `ready=True`.
+- Daemon lifecycle moved to `try/finally` with a bounded `drain()` before
+  worker stop, so enqueued envelopes reach the spool instead of dying in the
+  in-memory queue.
+- Corrected comments that claimed "no canonical access at all" — the worker
+  does open canonical READ-ONLY once at startup to seed its cache. A comment
+  that lies about its own module is worse than none.
+
+### Validation
+
+Six new tests, in `TestMoneyPathYield`, `TestSpoolHardBounds`,
+`TestAckFailureReplay`, `TestStartupTimeoutLeavesNoLiveThread`. Two of them
+were **mutation-checked** — the yield guard and the fail-closed budget branch
+were each deleted and the corresponding test confirmed to fail. Both
+initially passed against the mutant (the first because an empty outbox
+short-circuited the path under test; the second because dropping the metadata
+table also broke the insert, so the row was missing for an unrelated reason)
+and were rewritten until they failed for the right reason. A test that cannot
+fail is not evidence.
+
+Suite state: 57/57 feature tests pass. `tests/state/`, `tests/events/`,
+`tests/engine/`, and `tests/test_main_module_scope.py` were diffed against a
+clean `origin/live` baseline worktree: the failure sets are IDENTICAL — zero
+failures introduced by this branch. (The pre-existing failures there are
+unrelated and predate this work.) The one antibody this branch legitimately
+tripped, `test_a4_trade_tables_init_schema_creates_runtime_tables_and_migration_ledger`,
+was the registry-parity net doing its job: `EXPECTED_TRADE_DB_TABLES` now
+declares `family_book_states`/`family_book_observations`. The transport
+outbox is deliberately absent from the registry — it lives in a private
+spool file, never the canonical trade DB.

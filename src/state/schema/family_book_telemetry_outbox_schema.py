@@ -39,6 +39,21 @@ import sqlite3
 
 SCHEMA_VERSION = 1
 
+CREATE_META_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS family_book_telemetry_meta (
+    k TEXT PRIMARY KEY,
+    v INTEGER NOT NULL
+)
+"""
+
+# Round-6 Z2: the pending backlog is maintained here transactionally, in the
+# SAME transaction as every insert/delete, so the capture path's admission
+# check is an O(1) two-key lookup instead of a COUNT(*)+SUM(LENGTH(...))
+# full-table aggregate whose cost grew with the very backlog it was meant to
+# bound (capture got slower exactly when the spool was in trouble).
+_META_PENDING_COUNT = "pending_count"
+_META_PENDING_BYTES = "pending_bytes"
+
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS family_book_telemetry_outbox (
     spool_seq             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,6 +107,14 @@ CREATE TABLE IF NOT EXISTS family_book_telemetry_outbox (
 # buffer, not evidence; rows are deleted once safely ingested into the
 # canonical (append-only) trade-DB tables.
 
+# Round-6 Z2: ``latest_per_family`` (restart bootstrap) runs a correlated
+# MAX(spool_seq) per family; without this index that is a full scan per
+# family, on the startup path, while a backlog is at its largest.
+CREATE_FAMILY_SEQ_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_fb_outbox_family_seq
+    ON family_book_telemetry_outbox (family_id, spool_seq DESC)
+"""
+
 _COLUMNS = (
     "enqueued_at_utc", "state_id", "content_hash", "hash_version", "topology_hash",
     "complete_book", "canonical_payload", "payload_schema_version",
@@ -107,8 +130,38 @@ _COLUMNS = (
 )
 
 
-def ensure_table(conn: sqlite3.Connection) -> None:
+def ensure_table(conn: sqlite3.Connection, *, max_page_count: int = 0) -> None:
+    """Create the outbox and its pending-metadata sidecar, and arm the spool
+    file's PHYSICAL ceilings (round-6 Z2).
+
+    ``max_page_count`` makes the ceiling real rather than advisory: past it
+    SQLite itself returns SQLITE_FULL, so a runaway spool fails its own writes
+    instead of consuming the disk the live-money DB needs. ``journal_size_limit``
+    bounds the WAL that a large burst would otherwise leave permanently grown.
+    """
     conn.execute(CREATE_TABLE_SQL)
+    conn.execute(CREATE_META_TABLE_SQL)
+    conn.execute(CREATE_FAMILY_SEQ_INDEX_SQL)
+    conn.execute("PRAGMA journal_size_limit=67108864")  # 64 MiB
+    if max_page_count > 0:
+        conn.execute(f"PRAGMA max_page_count={int(max_page_count)}")
+
+
+def _bump_meta(conn: sqlite3.Connection, *, d_count: int, d_bytes: int) -> None:
+    """Adjust the pending counters inside the CALLER's transaction, so they
+    commit or roll back atomically with the row change they describe.
+
+    Upsert, not UPDATE: the counter rows come into existence with the first
+    row they count. That removes any need for a startup backfill pass -- and
+    with it the open-time ``commit()`` such a pass would require, which would
+    write to the spool before the caller's own transaction discipline applies.
+    """
+    for key, delta in ((_META_PENDING_COUNT, d_count), (_META_PENDING_BYTES, d_bytes)):
+        conn.execute(
+            "INSERT INTO family_book_telemetry_meta (k, v) VALUES (?, MAX(0, ?)) "
+            "ON CONFLICT(k) DO UPDATE SET v = MAX(0, v + ?)",
+            (key, delta, delta),
+        )
 
 
 def insert_outbox_row(conn: sqlite3.Connection, row: dict) -> int:
@@ -118,6 +171,11 @@ def insert_outbox_row(conn: sqlite3.Connection, row: dict) -> int:
     cur = conn.execute(
         f"INSERT INTO family_book_telemetry_outbox ({', '.join(_COLUMNS)}) VALUES ({placeholders})",
         tuple(row[c] for c in _COLUMNS),
+    )
+    _bump_meta(
+        conn,
+        d_count=1,
+        d_bytes=len(row["canonical_payload"]) + len(row["source_manifest_json"]),
     )
     return int(cur.lastrowid)
 
@@ -137,21 +195,44 @@ def fetch_batch(
 def delete_up_to(conn: sqlite3.Connection, max_seq: int) -> int:
     """Delete every row with spool_seq <= max_seq (the ingested batch).
     Returns the number of rows deleted."""
+    freed = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(LENGTH(canonical_payload) + LENGTH(source_manifest_json)), 0) "
+        "FROM family_book_telemetry_outbox WHERE spool_seq <= ?",
+        (max_seq,),
+    ).fetchone()
     cur = conn.execute(
         "DELETE FROM family_book_telemetry_outbox WHERE spool_seq <= ?", (max_seq,)
     )
+    _bump_meta(conn, d_count=-int(freed[0]), d_bytes=-int(freed[1]))
     return cur.rowcount
 
 
+def pending_budget(conn: sqlite3.Connection) -> tuple[int, int]:
+    """O(1) ``(pending_count, pending_bytes)`` for the capture-path admission
+    check -- two primary-key lookups, cost independent of backlog size.
+    Raises if the metadata table cannot be READ -- the caller must then fail
+    closed rather than admit writes with an unknown backlog (round-6 Z2). An
+    ABSENT key is not unknown: the counters are created by the first row they
+    count, so no key means no row was ever inserted, i.e. zero pending."""
+    rows = dict(
+        conn.execute(
+            "SELECT k, v FROM family_book_telemetry_meta WHERE k IN (?, ?)",
+            (_META_PENDING_COUNT, _META_PENDING_BYTES),
+        ).fetchall()
+    )
+    return int(rows.get(_META_PENDING_COUNT, 0)), int(rows.get(_META_PENDING_BYTES, 0))
+
+
 def pending_stats(conn: sqlite3.Connection) -> dict:
-    """count, approximate total bytes (canonical_payload + source_manifest_json,
-    the two large columns), and oldest enqueued_at_utc among pending rows."""
-    row = conn.execute(
-        "SELECT COUNT(*), COALESCE(SUM(LENGTH(canonical_payload) + LENGTH(source_manifest_json)), 0), "
-        "MIN(enqueued_at_utc) FROM family_book_telemetry_outbox"
-    ).fetchone()
-    count, approx_bytes, oldest = row
-    return {"pending_count": count, "pending_bytes_approx": approx_bytes, "oldest_enqueued_at_utc": oldest}
+    """Observability snapshot: pending rows, pending bytes, and oldest pending
+    ``enqueued_at_utc``. Counts/bytes come from the O(1) metadata; the oldest
+    timestamp is a single indexed MIN. Metrics path only -- the capture path
+    calls ``pending_budget`` instead."""
+    count, byts = pending_budget(conn)
+    oldest = conn.execute(
+        "SELECT MIN(enqueued_at_utc) FROM family_book_telemetry_outbox"
+    ).fetchone()[0]
+    return {"pending_count": count, "pending_bytes_approx": byts, "oldest_enqueued_at_utc": oldest}
 
 
 def latest_per_family(conn: sqlite3.Connection) -> dict[str, tuple[str, str]]:

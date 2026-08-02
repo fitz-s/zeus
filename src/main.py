@@ -5732,22 +5732,51 @@ _forecasts_wal_checkpoint_cycle = _make_wal_checkpoint_cycle("forecasts", defer_
 
 @_scheduler_job("family_book_telemetry_ingest")
 def _family_book_telemetry_ingest_cycle() -> None:
-    """book_snapshot_persistence round-5 fix Y3: canonical delivery of the
-    family-book telemetry outbox runs HERE, on an ordinary scheduler job with
-    its own short-lived ``write_class="live"`` trade connection -- the SAME
-    pattern every other periodic trade-DB touch in this daemon already uses
-    (see ``_make_wal_checkpoint_cycle`` above) -- rather than a standalone
-    background-thread writer coordinating against the primary via a
-    BULK-class flock that gave it no real priority. One bounded batch per
-    tick; @_scheduler_job never re-raises, so an ordinary SQLite/I/O failure
-    here degrades to next tick, never to a daemon crash.
+    """book_snapshot_persistence: canonical delivery of the family-book
+    telemetry outbox runs HERE, on an ordinary scheduler job with its own
+    short-lived ``write_class="live"`` trade connection -- the SAME pattern
+    the other periodic trade-DB writers in this daemon already use
+    (``_c3_staleness_cancel_cycle``, ``_run_ws_gap_reconcile_if_required``,
+    ``_refresh_reconcile_findings_if_required``).
+
+    Round-6 Z1 -- why a separate connection rather than the reactor's own.
+    The review asked for delivery to execute on the reactor's ``trade_conn``
+    at a post-commit seam, to guarantee telemetry never contends with the
+    money path. The concern is right; that particular remedy is not available
+    here. The reactor's connection is
+    ``get_trade_connection_with_world_required(write_class=None)`` with world
+    and forecasts ATTACHed (src/events/reactor.py), and the cycle commits
+    money-path truth on it mid-cycle. Executing telemetry INSERTs on that
+    connection would place optional writes inside the money path's transaction
+    scope: a telemetry failure would have to roll back, and a rollback there
+    discards whatever reactor work shares the transaction. That is precisely
+    the transaction-poisoning class review X1 established must not exist.
+
+    So we take the repo's OWN idiom for optional work that must not compete
+    with the money path -- yield, rather than share a transaction. The two
+    guards below are the same pair used by ``_run_ws_gap_reconcile_if_required``
+    and ``_run_venue_background_maintenance_once``: skip the tick entirely
+    while a decision cycle or reactor cycle is in flight. Combined with the
+    spool-only pending precheck (no canonical connection is opened at all when
+    there is nothing to deliver, the common case), telemetry touches the trade
+    DB only when it has work AND the money path is idle.
+
+    One bounded batch per tick; @_scheduler_job never re-raises, so an ordinary
+    SQLite/I/O failure degrades to the next tick, never to a daemon crash.
     """
-    from src.events.family_book_telemetry_writer import run_bounded_ingest
+    from src.events.family_book_telemetry_writer import outbox_has_pending, run_bounded_ingest
+
+    if _cycle_lock.locked() or _edli_reactor_active():
+        return
+    # Idle-tick fast path: decided against the PRIVATE spool, so an empty
+    # outbox never opens the live-money DB at all.
+    if not outbox_has_pending():
+        return
 
     conn = get_trade_connection(write_class="live")
     try:
         outcome = run_bounded_ingest(conn)
-        if outcome.failed:
+        if outcome.failed or outcome.ack_failed:
             logger.warning("family_book_telemetry_ingest: %s", outcome.reason)
     finally:
         conn.close()
@@ -7185,6 +7214,14 @@ def main():
                 "family_book_telemetry: capture disabled (startup failed: %s)",
                 _fbt_readiness.reason,
             )
+        elif not _fbt_readiness.cache_seeded:
+            # Ready, but the first observation per family this run will read as
+            # STATE_CHANGE regardless of content. Said out loud so the analysis
+            # can account for it rather than silently mis-reading the sample.
+            logger.warning(
+                "family_book_telemetry: capture worker ready, last-state cache NOT seeded "
+                "(first observation per family will label STATE_CHANGE)"
+            )
         else:
             logger.info("family_book_telemetry: capture worker ready")
     else:
@@ -7350,9 +7387,20 @@ def main():
     except (KeyboardInterrupt, SystemExit):
         logger.info("Zeus shutting down")
         scheduler.shutdown(wait=True)  # U7: wait=True so inflight cycles commit before exit
+    finally:
+        # Round-6: try/finally, not an except-only arm. Any other exit path out
+        # of scheduler.start() (an unexpected raise) previously left the capture
+        # thread running against an otherwise-dead daemon.
         if _family_book_telemetry_ready:
-            from src.events.family_book_telemetry_writer import shutdown as _shutdown_family_book_telemetry_worker
+            from src.events.family_book_telemetry_writer import (
+                drain as _drain_family_book_telemetry,
+                shutdown as _shutdown_family_book_telemetry_worker,
+            )
 
+            # Bounded drain first: envelopes already enqueued get spooled (and
+            # so survive to the next daemon's ingest) instead of dying in the
+            # in-memory queue. Bounded, because shutdown must not hang on it.
+            _drain_family_book_telemetry(timeout=2.0)
             _shutdown_family_book_telemetry_worker()
 
 

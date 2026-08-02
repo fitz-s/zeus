@@ -155,6 +155,13 @@ EXPECTED_TRADE_DB_TABLES = EXPECTED_RUNTIME_TRADE_TABLES | frozenset({
     "token_price_log",
     "token_suppression",
     "token_suppression_history",
+    # book_snapshot_persistence 2026-07-29: decision-time family order-book
+    # evidence. Content-addressed immutable state manifest + append-only
+    # sampled observation time series, both trade-class. (The transport outbox
+    # is deliberately ABSENT: it lives in a private spool file, never the
+    # canonical trade DB, so it is not a registry table.)
+    "family_book_states",
+    "family_book_observations",
 })
 
 # ---------------------------------------------------------------------------

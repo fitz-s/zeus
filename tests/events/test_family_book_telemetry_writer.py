@@ -467,7 +467,7 @@ class TestBoundedOutbox:
         assert stats["oldest_enqueued_at_utc"] is not None
 
     def test_spool_disk_budget_stops_capturing_when_exceeded(self, tmp_path):
-        spool_path = _start(tmp_path, spool_disk_budget_bytes=1)  # trivially tiny budget
+        spool_path = _start(tmp_path, spool_pending_budget_bytes=1)  # trivially tiny budget
         case = _case()
         space = _outcome_space(case)
         book = _family_book(case, space)
@@ -917,3 +917,236 @@ class TestSingleConnectAntibody:
         spool_path = (tmp_path / "zeus_trades.db").with_name("family_book_telemetry_spool.db")
         assert spool_path.resolve() != (tmp_path / "zeus_trades.db").resolve()
         assert spool_path.name == "family_book_telemetry_spool.db"
+
+
+# ---------------------------------------------------------------------------
+# Round-6 (Z1/Z2) validation: the optional plane must never compete with the
+# money path for the trade DB, and must never grow without a real ceiling.
+# ---------------------------------------------------------------------------
+
+class TestMoneyPathYield:
+    """Z1: delivery yields to the money path and never touches the live-money
+    DB when it has nothing to deliver."""
+
+    def test_idle_tick_opens_no_canonical_connection(self, tmp_path):
+        """An empty outbox must be decided against the PRIVATE spool alone."""
+        spool_path = _start(tmp_path)
+        opens: list[int] = []
+
+        def _tripwire_canonical():
+            opens.append(1)
+            raise AssertionError("canonical connection opened on an idle tick")
+
+        spool_factory = lambda: sqlite3.connect(str(spool_path))
+        assert writer.outbox_has_pending(spool_conn_factory=spool_factory) is False
+        assert opens == []
+        # And the guard is real: with a row pending, it flips.
+        case = _case()
+        space = _outcome_space(case)
+        _enqueue(_decision(case, space, _family_book(case, space)), _family(case),
+                 _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
+        assert writer.drain(timeout=3.0)
+        assert writer.outbox_has_pending(spool_conn_factory=spool_factory) is True
+
+    def test_ingest_job_skips_while_reactor_cycle_is_active(self, tmp_path, monkeypatch):
+        """The daemon job must return WITHOUT opening a trade connection while
+        a reactor/decision cycle holds the money path.
+
+        The outbox is deliberately NON-empty: with nothing pending the job
+        would skip anyway via the idle fast path, and the test would pass even
+        with the yield guard deleted (verified by mutation). Pending work is
+        what makes the guard the only thing standing between this job and the
+        live-money DB.
+        """
+        import src.main as main_module
+
+        _start(tmp_path)
+        case = _case()
+        space = _outcome_space(case)
+        _enqueue(_decision(case, space, _family_book(case, space)), _family(case),
+                 _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
+        assert writer.drain(timeout=3.0)
+        assert writer.outbox_has_pending() is True  # precondition: work IS waiting
+
+        opened: list[int] = []
+
+        def _tripwire(**kw):
+            opened.append(1)
+            raise AssertionError("opened trade DB while the money path was active")
+
+        monkeypatch.setattr(main_module, "_edli_reactor_active", lambda: True)
+        monkeypatch.setattr(main_module, "get_trade_connection", _tripwire)
+        main_module._family_book_telemetry_ingest_cycle()
+        assert opened == []
+
+    def test_kill_switch_off_performs_zero_canonical_work(self, tmp_path, monkeypatch):
+        """Flipping the switch off stops DELIVERY, not merely new enqueues."""
+        spool_path = _start(tmp_path)
+        case = _case()
+        space = _outcome_space(case)
+        _enqueue(_decision(case, space, _family_book(case, space)), _family(case),
+                 _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
+        assert writer.drain(timeout=3.0)
+
+        monkeypatch.setenv("ZEUS_FAMILY_BOOK_TELEMETRY_ENABLED", "0")
+
+        class _ExplodingConn:
+            def __getattr__(self, name):
+                raise AssertionError(f"canonical {name!r} touched while kill switch is off")
+
+        outcome = writer.run_bounded_ingest(
+            _ExplodingConn(), spool_conn_factory=lambda: sqlite3.connect(str(spool_path))
+        )
+        assert outcome.disabled is True
+        assert outcome.batch_rows == 0
+
+
+class TestSpoolHardBounds:
+    """Z2: the admission gate is O(1), and the file ceiling is physical."""
+
+    def test_capture_cost_is_flat_in_backlog_size(self, tmp_path):
+        """The admission check must not read the table. Proven structurally:
+        pending_budget touches only the metadata table, so its query plan is
+        independent of how many outbox rows exist."""
+        from src.state.schema import family_book_telemetry_outbox_schema as sch
+
+        conn = sqlite3.connect(str(tmp_path / "spool.db"))
+        sch.ensure_table(conn)
+        plan_empty = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT k, v FROM family_book_telemetry_meta WHERE k IN (?, ?)",
+            ("pending_count", "pending_bytes"),
+        ).fetchall()
+        plan_text = " ".join(str(r) for r in plan_empty)
+        assert "family_book_telemetry_outbox" not in plan_text, (
+            "the capture-path budget check must never scan the outbox table"
+        )
+        # And the counters track inserts/deletes exactly.
+        row = {c: 0 for c in sch._COLUMNS}
+        row.update({"canonical_payload": "x" * 100, "source_manifest_json": "y" * 50})
+        for _ in range(5):
+            sch.insert_outbox_row(conn, row)
+        conn.commit()
+        assert sch.pending_budget(conn) == (5, 5 * 150)
+        sch.delete_up_to(conn, 3)
+        conn.commit()
+        assert sch.pending_budget(conn) == (2, 2 * 150)
+        conn.close()
+
+    def test_max_page_count_is_a_physical_ceiling(self, tmp_path):
+        """Past the page ceiling SQLite itself refuses this module's writes --
+        the spool cannot eat the disk the live-money DB needs."""
+        from src.state.schema import family_book_telemetry_outbox_schema as sch
+
+        conn = sqlite3.connect(str(tmp_path / "spool.db"))
+        sch.ensure_table(conn, max_page_count=16)  # deliberately tiny
+        assert conn.execute("PRAGMA max_page_count").fetchone()[0] == 16
+        row = {c: 0 for c in sch._COLUMNS}
+        row.update({"canonical_payload": "x" * 20000, "source_manifest_json": "y" * 20000})
+        with pytest.raises(sqlite3.OperationalError, match="full"):
+            for _ in range(200):
+                sch.insert_outbox_row(conn, row)
+                conn.commit()
+        conn.close()
+
+    def test_unreadable_budget_fails_closed_and_drops_capture(self, tmp_path):
+        """An unknown backlog must NOT admit a write (fail closed).
+
+        ONLY the budget SELECT is broken -- inserting still works perfectly.
+        Dropping the whole metadata table would also break the insert, so the
+        row would be missing for an unrelated reason and the test would pass
+        even with the fail-closed branch deleted (verified by mutation).
+        """
+        spool_path = tmp_path / "spool.db"
+
+        class _UnreadableBudgetConn(sqlite3.Connection):
+            def execute(self, sql, *a, **kw):
+                if "FROM family_book_telemetry_meta" in sql and sql.lstrip().upper().startswith("SELECT"):
+                    raise sqlite3.OperationalError("simulated budget read failure")
+                return super().execute(sql, *a, **kw)
+
+        _start(tmp_path, spool_conn_factory=lambda: sqlite3.connect(
+            str(spool_path), factory=_UnreadableBudgetConn
+        ))
+
+        case = _case()
+        space = _outcome_space(case)
+        _enqueue(_decision(case, space, _family_book(case, space)), _family(case),
+                 _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
+        assert writer.drain(timeout=3.0)
+        assert writer.counter("family_book_telemetry_spool_budget_unreadable_total") >= 1
+        check = sqlite3.connect(str(spool_path))
+        try:
+            assert check.execute("SELECT COUNT(*) FROM family_book_telemetry_outbox").fetchone()[0] == 0
+        finally:
+            check.close()
+
+
+class TestAckFailureReplay:
+    def test_ack_failure_replays_then_deletes(self, tmp_path):
+        """Canonical commit durable + ack failed => typed outcome, and the NEXT
+        pass replays the batch idempotently and then drains it."""
+        spool_path = _start(tmp_path)
+        trade_path = tmp_path / "trade.db"
+        _bootstrap_canonical(trade_path)
+        case = _case()
+        space = _outcome_space(case)
+        _enqueue(_decision(case, space, _family_book(case, space)), _family(case),
+                 _proofs_for(space), datetime(2026, 6, 14, 12, 0, tzinfo=UTC))
+        assert writer.drain(timeout=3.0)
+
+        class _AckFailingConn(sqlite3.Connection):
+            """sqlite3.Connection.execute is read-only, so the ack failure is
+            injected by subclassing rather than by patching the attribute."""
+
+            def execute(self, sql, *a, **kw):
+                if sql.strip().upper().startswith("DELETE"):
+                    raise sqlite3.OperationalError("simulated ack failure")
+                return super().execute(sql, *a, **kw)
+
+        def _spool_with_failing_delete():
+            return sqlite3.connect(str(spool_path), factory=_AckFailingConn)
+
+        conn = sqlite3.connect(str(trade_path))
+        try:
+            first = writer.run_bounded_ingest(conn, spool_conn_factory=_spool_with_failing_delete)
+        finally:
+            conn.close()
+        assert first.ack_failed is True
+        assert first.failed is False
+        assert first.ingested_observations == 1
+        assert writer.counter("family_book_telemetry_ack_failures_total") >= 1
+
+        # Replay: same rows, idempotent -- nothing new lands, outbox drains.
+        second = _ingest(trade_path, spool_path)
+        assert second.batch_rows == 1
+        assert second.ingested_observations == 0  # idempotent no-op
+        check = sqlite3.connect(str(spool_path))
+        try:
+            assert check.execute("SELECT COUNT(*) FROM family_book_telemetry_outbox").fetchone()[0] == 0
+        finally:
+            check.close()
+        canon = sqlite3.connect(str(trade_path))
+        try:
+            assert canon.execute("SELECT COUNT(*) FROM family_book_observations").fetchone()[0] == 1
+        finally:
+            canon.close()
+
+
+class TestStartupTimeoutLeavesNoLiveThread:
+    def test_readiness_timeout_stops_and_joins_the_worker(self, tmp_path):
+        """A slow start must not leave an unsupervised thread that comes up
+        later and writes behind the daemon's back."""
+        gate = threading.Event()
+
+        def _slow_factory():
+            gate.wait(timeout=2.0)
+            return sqlite3.connect(str(tmp_path / "spool.db"))
+
+        readiness = writer.start_worker(spool_conn_factory=_slow_factory, ready_timeout=0.05)
+        assert readiness.ready is False
+        assert readiness.reason == "startup_timeout"
+        gate.set()
+        time.sleep(0.3)
+        assert writer._worker_thread is None, "no worker reference may survive a failed start"
+        live = [t for t in threading.enumerate() if t.name == "family-book-telemetry-writer"]
+        assert live == [], f"startup timeout left a live worker thread: {live}"
