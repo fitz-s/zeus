@@ -709,29 +709,47 @@ def _is_global_reduce_only_exit_receipt(receipt: EventSubmissionReceipt) -> bool
 def _paused_entry_wake_should_park(
     *,
     pause_reason: str | None,
-    held_family_provider: Callable[[], frozenset[tuple[str, str, str]]] | None,
+    held_sell_reauction_requests: tuple[object, ...] = (),
+    held_sell_request_exposure_provider: (
+        Callable[[], frozenset[tuple[str, tuple[str, str, str]]]] | None
+    ) = None,
 ) -> bool:
-    """Park a paused wake only when no canonical held family needs the reactor."""
+    """Park paused entry work unless this wake has exact canonical held SELL work."""
 
-    # SCOPE: global new-entry admission only; held exposure and held-SELL
-    # completion remain eligible for the reduce-only reactor path. DRAIN: keep
-    # every opportunity row PENDING and let the next wake re-read pause and
-    # canonical held state. RESET: a cleared pause or materialized held exposure
-    # leaves this gate without changing event identity. A durable held-SELL wake
-    # is control debt, not exposure authority, and cannot bypass this gate.
+    # SCOPE: global new-entry admission only. DRAIN: keep every opportunity row
+    # PENDING until the pause clears, or this producer carries one exact held-SELL
+    # request whose canonical position/family still has money at risk. RESET: a
+    # cleared pause or a matching current request leaves this gate without changing
+    # event identity. Unknown control or exposure must retain the exit path; BUY
+    # remains fail-closed at its independent final submit gate.
     if (
         pause_reason is None
         or str(pause_reason).startswith("entries_pause_control_unreadable:")
-        or held_family_provider is None
     ):
         return False
+    if not held_sell_reauction_requests:
+        return True
+    if held_sell_request_exposure_provider is None:
+        return False
     try:
-        held_families = held_family_provider()
+        canonical_exposure = held_sell_request_exposure_provider()
     except Exception:  # noqa: BLE001 - unknown exposure must keep exit work alive
         return False
-    if held_families is None:
+    if canonical_exposure is None:
         return False
-    return not bool(held_families)
+    for request in held_sell_reauction_requests:
+        position_id = str(getattr(request, "position_id", "") or "").strip()
+        raw_family = getattr(request, "family", ())
+        if not position_id or not isinstance(raw_family, tuple) or len(raw_family) != 3:
+            continue
+        family = (
+            str(raw_family[0] or "").strip(),
+            str(raw_family[1] or "").strip(),
+            str(raw_family[2] or "").strip().lower(),
+        )
+        if all(family) and (position_id, family) in canonical_exposure:
+            return False
+    return True
 
 
 Submit = Callable[[OpportunityEvent, datetime], bool | None | EventSubmissionReceipt]
@@ -5202,6 +5220,49 @@ def _edli_reactor_held_family_provider():
     return _provider
 
 
+def _edli_held_sell_request_exposure_provider():
+    """Read exact canonical held position/family pairs for paused SELL admission."""
+
+    def _provider() -> frozenset[tuple[str, tuple[str, str, str]]]:
+        from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
+        from src.state.db import get_trade_connection_read_only
+
+        conn_t = get_trade_connection_read_only()
+        try:
+            chain_states = tuple(sorted(CURRENT_MONEY_RISK_CHAIN_STATES))
+            placeholders = ",".join("?" for _ in chain_states)
+            rows = conn_t.execute(
+                f"""
+                SELECT position_id, city, target_date, temperature_metric
+                  FROM position_current
+                 WHERE phase IN ('active', 'day0_window', 'pending_exit')
+                   AND COALESCE(chain_state, '') IN ({placeholders})
+                   AND COALESCE(chain_shares, 0) > 0
+                   AND COALESCE(chain_cost_basis_usd, 0) > 0
+                """,
+                chain_states,
+            ).fetchall()
+        finally:
+            conn_t.close()
+        return frozenset(
+            (
+                str(row[0] or "").strip(),
+                (
+                    str(row[1] or "").strip(),
+                    str(row[2] or "").strip(),
+                    str(row[3] or "").strip().lower(),
+                ),
+            )
+            for row in rows
+            if str(row[0] or "").strip()
+            and str(row[1] or "").strip()
+            and str(row[2] or "").strip()
+            and str(row[3] or "").strip().lower() in {"high", "low"}
+        )
+
+    return _provider
+
+
 def _edli_current_held_position_family_keys() -> set[tuple[str, str, str]]:
     """Current held-position families for monitor and duplicate-entry suppression.
 
@@ -6987,13 +7048,17 @@ def run_edli_event_reactor_cycle(
     from src.engine.event_reactor_adapter import _entry_pause_blocks_live_submit
 
     held_family_provider = _edli_reactor_held_family_provider()
+    held_sell_request_exposure_provider = _edli_held_sell_request_exposure_provider()
     if _paused_entry_wake_should_park(
         pause_reason=_entry_pause_blocks_live_submit(None),
-        held_family_provider=held_family_provider,
+        held_sell_reauction_requests=(
+            producer_held_sell_reauction_requests if completion_wake else ()
+        ),
+        held_sell_request_exposure_provider=held_sell_request_exposure_provider,
     ):
         _log.info(
             "EDLI reactor parked paused new-entry wake before active-lock acquire: "
-            "canonical held families are empty; durable held-SELL debt remains queued"
+            "no exact canonical held-SELL request; pending entry work remains queued"
         )
         return False
     import sqlite3  # transient world-DB lock classification for fail-soft emit boundary
@@ -7610,7 +7675,12 @@ def run_edli_event_reactor_cycle(
             ),
             paused_entry_wake_gate=lambda: _paused_entry_wake_should_park(
                 pause_reason=_entry_pause_blocks_live_submit(conn),
-                held_family_provider=held_family_provider,
+                held_sell_reauction_requests=(
+                    producer_held_sell_reauction_requests if completion_wake else ()
+                ),
+                held_sell_request_exposure_provider=(
+                    held_sell_request_exposure_provider
+                ),
             ),
             final_intent_submit=submit_adapter,
             reject=lambda _event, _stage, _reason: None,

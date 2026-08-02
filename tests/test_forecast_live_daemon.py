@@ -1159,3 +1159,54 @@ def test_exact_fairness_keeps_price_and_forecast_batch_coalescing(
     assert reactor_wake.exact_held_sell_completion_wake_ids(path=wake_path) == {
         f"wake-batch-exact-{index}" for index in range(3)
     }
+
+
+def test_price_wake_dispatches_held_monitor_before_reactor(monkeypatch, tmp_path: Path) -> None:
+    wake_path = tmp_path / reactor_wake.REACTOR_WAKE_FILENAME
+    family = ("Paris", "2026-07-30", "low")
+    monkeypatch.setattr(
+        "src.config.state_path",
+        lambda filename: tmp_path / filename,
+    )
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(main, "_price_wake_target_families", lambda _event_ids: frozenset({family}))
+    monkeypatch.setattr(main, "_forecast_wake_held_families", lambda _families: frozenset({family}))
+    monkeypatch.setattr(
+        main,
+        "_reactor_wake_event_state",
+        lambda _event_ids: main._ReactorWakeEventState(ready=True, finished=False),
+    )
+    monkeypatch.setattr(main, "_reactor_wake_events_finished", lambda _event_ids: True)
+    main._edli_initialize_reactor_wake_cursor()
+    main._forecast_exit_monitor_attempts.clear()
+    monitored = []
+    dispatched = []
+
+    def _dispatch(wake_ids, target_families):
+        monitored.append((wake_ids, target_families))
+        with main._forecast_exit_monitor_attempts_lock:
+            for wake_id in wake_ids:
+                main._forecast_exit_monitor_attempts[wake_id] = True
+        return True
+
+    monkeypatch.setattr(main, "_dispatch_forecast_exit_monitor", _dispatch)
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **kwargs: dispatched.append(kwargs["producer_wake_reason"]) or True,
+    )
+    wake = reactor_wake.publish_reactor_wake(
+        source="price_channel",
+        reason="market_price_advanced",
+        path=wake_path,
+        wake_id="wake-price-held-monitor",
+        event_ids=("price-event",),
+    )
+
+    try:
+        assert main._edli_reactor_wake_poll_once() is True
+        assert monitored == [((wake.wake_id,), frozenset({family}))]
+        assert dispatched == ["market_price_advanced"]
+    finally:
+        main._forecast_exit_monitor_attempts.clear()

@@ -263,7 +263,8 @@ def test_paused_no_held_debt_wake_parks_before_claim_auction_or_receipt(tmp_path
         reject=lambda *_args: None,
         paused_entry_wake_gate=lambda: _paused_entry_wake_should_park(
             pause_reason="operator_pause",
-            held_family_provider=lambda: frozenset(),
+            held_sell_reauction_requests=(request,),
+            held_sell_request_exposure_provider=lambda: frozenset(),
         ),
         config=ReactorConfig(),
         regret_ledger=NoTradeRegretLedger(conn),
@@ -346,16 +347,35 @@ def test_paused_wake_resumes_same_pending_event_exactly_once():
     assert row[2] == decision_time.isoformat()
 
 
-def test_paused_entry_park_requires_canonical_held_work():
+def test_paused_entry_park_requires_exact_canonical_held_sell_work():
     from src.events.reactor import _paused_entry_wake_should_park
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
 
     assert _paused_entry_wake_should_park(
         pause_reason="operator",
-        held_family_provider=lambda: frozenset(),
+        held_sell_request_exposure_provider=lambda: frozenset(),
+    ) is True
+    request = make_held_sell_reauction_request(
+        position_id="held-position",
+        family=("Dallas", "2026-05-24", "high"),
+        probability_content_identity="q-held",
+        held_token_id="held-token",
+        held_best_bid=0.12,
+        bid_observed_at="2026-05-24T17:59:00+00:00",
+    )
+    assert _paused_entry_wake_should_park(
+        pause_reason="operator",
+        held_sell_reauction_requests=(request,),
+        held_sell_request_exposure_provider=lambda: frozenset(
+            {("other-position", request.family)}
+        ),
     ) is True
     assert _paused_entry_wake_should_park(
         pause_reason="operator",
-        held_family_provider=lambda: frozenset({("Dallas", "2026-05-24", "high")}),
+        held_sell_reauction_requests=(request,),
+        held_sell_request_exposure_provider=lambda: frozenset(
+            {(request.position_id, request.family)}
+        ),
     ) is False
 
 
@@ -383,17 +403,20 @@ def test_paused_debt_drains_once_after_canonical_family_materializes(tmp_path):
 
     assert reactor._paused_entry_wake_should_park(
         pause_reason="operator",
-        held_family_provider=lambda: frozenset(),
+        held_sell_reauction_requests=(request,),
+        held_sell_request_exposure_provider=lambda: frozenset(),
     ) is True
-    held_families = set()
+    held_positions = set()
     assert reactor._paused_entry_wake_should_park(
         pause_reason="operator",
-        held_family_provider=lambda: frozenset(held_families),
+        held_sell_reauction_requests=(request,),
+        held_sell_request_exposure_provider=lambda: frozenset(held_positions),
     ) is True
-    held_families.add(request.family)
+    held_positions.add((request.position_id, request.family))
     assert reactor._paused_entry_wake_should_park(
         pause_reason="operator",
-        held_family_provider=lambda: frozenset(held_families),
+        held_sell_reauction_requests=(request,),
+        held_sell_request_exposure_provider=lambda: frozenset(held_positions),
     ) is False
 
     cut_result = _held_sell_completion_result(
@@ -439,6 +462,11 @@ def test_paused_no_held_cycle_parks_before_active_lock(monkeypatch):
         lambda: (lambda: frozenset()),
     )
     monkeypatch.setattr(
+        reactor_module,
+        "_edli_held_sell_request_exposure_provider",
+        lambda: (lambda: frozenset()),
+    )
+    monkeypatch.setattr(
         adapter_module,
         "_entry_pause_blocks_live_submit",
         lambda _conn: "operator_pause",
@@ -448,6 +476,55 @@ def test_paused_no_held_cycle_parks_before_active_lock(monkeypatch):
     assert reactor_module.run_edli_event_reactor_cycle(active_lock=lock) is False
     assert lock.acquire(blocking=False) is True
     lock.release()
+
+
+def test_paused_exact_canonical_held_sell_request_reaches_reduce_only_cycle(monkeypatch):
+    import src.engine.event_reactor_adapter as adapter_module
+    import src.events.reactor as reactor_module
+    import src.main as main
+    import src.state.db as db
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
+
+    class AuctionReached(RuntimeError):
+        pass
+
+    request = make_held_sell_reauction_request(
+        position_id="paused-exact-held",
+        family=("Dallas", "2026-05-24", "high"),
+        probability_content_identity="q-paused-exact-held",
+        held_token_id="token-paused-exact-held",
+        held_best_bid=0.12,
+        bid_observed_at="2026-05-24T17:59:00+00:00",
+    )
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_held_sell_request_exposure_provider",
+        lambda: (lambda: frozenset({(request.position_id, request.family)})),
+    )
+    monkeypatch.setattr(
+        adapter_module,
+        "_entry_pause_blocks_live_submit",
+        lambda _conn: "operator_pause",
+    )
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: (_ for _ in ()).throw(AuctionReached()),
+    )
+
+    lock = threading.Lock()
+    with pytest.raises(AuctionReached):
+        reactor_module.run_edli_event_reactor_cycle(
+            active_lock=lock,
+            producer_wake_reason="held_sell_global_auction_completion_requested",
+            producer_held_sell_reauction_requests=(request,),
+        )
+    assert lock.locked() is False
 
 
 def test_no_submit_claim_debt_cannot_requeue_newer_aba_generation():

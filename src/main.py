@@ -3974,6 +3974,8 @@ def _edli_initialize_reactor_wake_cursor() -> None:
 
 def _day0_wake_target_families(
     event_ids: tuple[str, ...],
+    *,
+    expected_event_type: str | None = "DAY0_EXTREME_UPDATED",
 ) -> frozenset[tuple[str, str, str]] | None:
     clean_event_ids = tuple(
         dict.fromkeys(
@@ -4019,7 +4021,10 @@ def _day0_wake_target_families(
     families: set[tuple[str, str, str]] = set()
     try:
         for _event_id, event_type, payload_json in rows:
-            if str(event_type or "") != "DAY0_EXTREME_UPDATED":
+            if (
+                expected_event_type is not None
+                and str(event_type or "") != expected_event_type
+            ):
                 return None
             payload = json.loads(str(payload_json or ""))
             city = str(payload.get("city") or "").strip()
@@ -4037,6 +4042,14 @@ def _day0_wake_target_families(
         )
         return None
     return frozenset(families) or None
+
+
+def _price_wake_target_families(
+    event_ids: tuple[str, ...],
+) -> frozenset[tuple[str, str, str]] | None:
+    """Resolve price-channel redecision events to their held-monitor families."""
+
+    return _day0_wake_target_families(event_ids, expected_event_type=None)
 
 
 def _day0_wake_requires_exit_monitor(
@@ -4951,6 +4964,7 @@ def _edli_reactor_wake_poll_once() -> bool:
     )
     day0_wake = wake.reason == "day0_extreme_event_committed"
     forecast_wake = wake.reason == "forecast_posterior_advanced"
+    price_wake = wake.reason == "market_price_advanced"
     substrate_refresh_wake = wake.reason == "money_path_substrate_refreshed"
     wake_event_state = None
     if wake_event_ids:
@@ -5037,9 +5051,12 @@ def _edli_reactor_wake_poll_once() -> bool:
             day0_monitor_succeeded = result is True
             if not day0_monitor_succeeded:
                 return False
+    monitor_wake_families = wake_families
+    if price_wake and not monitor_wake_families:
+        monitor_wake_families = tuple(_price_wake_target_families(wake_event_ids) or ())
     forecast_monitor_families = (
-        _forecast_wake_held_families(wake_families)
-        if forecast_wake and wake_families
+        _forecast_wake_held_families(monitor_wake_families)
+        if (forecast_wake or price_wake) and monitor_wake_families
         else frozenset()
     )
     if forecast_monitor_families:
