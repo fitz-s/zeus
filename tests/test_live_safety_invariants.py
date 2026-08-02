@@ -9647,17 +9647,253 @@ def test_held_monitor_prefetch_clears_prior_cycle_when_batch_fetch_fails():
     )
 
     assert monitor_refresh.prefetched_monitor_orderbook(clob, "token-stale") is None
-    assert monitor_refresh.monitor_orderbook_prefetch_attempted(
+    assert not monitor_refresh.monitor_orderbook_prefetch_attempted(
         clob,
         "token-stale",
     )
-    assert cycle_runtime._closed_non_accepting_market_info(clob, pos) is None
-    assert monitor_refresh.monitor_quote_refresh(None, clob, pos) is None
-    assert clob.market_calls == 0
-    assert clob.orderbook_calls == 0
     assert summary["held_monitor_orderbooks_prefetched"] == 0
     assert summary["held_monitor_orderbook_prefetch_error"] == "current batch unavailable"
+    assert summary["held_monitor_orderbook_prefetch_transport_failed"] is True
     assert len(warnings) == 1
+
+
+@pytest.mark.parametrize("singular_failure", (False, True))
+def test_monitoring_batch_transport_retry_is_position_scoped(
+    monkeypatch,
+    singular_failure,
+):
+    """A failed batch gets one singular retry per position without fan-out defer."""
+    from src.engine import cycle_runtime, monitor_refresh
+
+    positions = [
+        _make_position(
+            trade_id=f"batch-transport-retry-{index}",
+            token_id=f"batch-transport-token-{index}",
+            direction="buy_yes",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(2)
+    ]
+    refreshes = []
+    canonical_refreshes = []
+    singular_calls = []
+
+    class BatchTransportClob:
+        def get_orderbook_snapshots(self, _token_ids):
+            raise RuntimeError("/books transport unavailable")
+
+        def get_orderbook(self, token_id):
+            singular_calls.append(token_id)
+            if singular_failure and token_id == positions[0].token_id:
+                raise RuntimeError("singular quote unavailable")
+            return {
+                "asset_id": token_id,
+                "bids": [{"price": "0.40", "size": "20"}],
+                "asks": [{"price": "0.42", "size": "20"}],
+            }
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def fake_refresh(_conn, clob, position):
+        quote = monitor_refresh.monitor_quote_refresh(None, clob, position)
+        if position is positions[0] and singular_failure:
+            assert quote is None
+        else:
+            assert quote is not None
+        refreshes.append(position.trade_id)
+        return _monitor_test_edge_context(position)
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", fake_refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    def emit_monitor_refreshed(_conn, position, **_kwargs):
+        canonical_refreshes.append(position.trade_id)
+        return True
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        emit_monitor_refreshed,
+    )
+
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        BatchTransportClob(),
+        _make_portfolio(*positions),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_monitor_batch_transport_retry"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=10.0,
+    )
+
+    assert singular_calls == [position.token_id for position in positions]
+    assert refreshes == [position.trade_id for position in positions]
+    assert canonical_refreshes == refreshes
+    assert summary["held_monitor_orderbook_prefetch_transport_failed"] is True
+    assert summary.get("held_monitor_positions_deferred_for_orderbook_gap", 0) == 0
+    assert summary["monitors"] == 2
+
+
+def test_monitoring_batch_transport_does_not_retry_after_deadline(
+    monkeypatch,
+):
+    """A batch that consumes the budget cannot start a singular retry."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(
+        trade_id="batch-transport-deadline",
+        token_id="batch-transport-deadline-token",
+        state="holding",
+        chain_state="synced",
+    )
+    clock = [0.0]
+    singular_calls = []
+    refreshes = []
+
+    class SlowBatchClob:
+        def get_orderbook_snapshots(self, _token_ids):
+            clock[0] = 11.0
+            raise RuntimeError("/books timed out")
+
+        def get_orderbook(self, token_id):
+            singular_calls.append(token_id)
+            raise AssertionError("deadline-exhausted batch must not retry singularly")
+
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *_args: refreshes.append(position.trade_id),
+    )
+
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        SlowBatchClob(),
+        _make_portfolio(position),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_monitor_batch_transport_deadline"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=10.0,
+    )
+
+    assert singular_calls == []
+    assert refreshes == []
+    assert summary["held_monitor_deadline_defer_reason"] == (
+        "MONITOR_DEADLINE_EXPIRED_BEFORE_TARGETED_RETRY"
+    )
+
+
+@pytest.mark.parametrize(
+    "batch_response",
+    (
+        {},
+        {
+            "successful-partial-token": {
+                "bids": [{"price": "0.40", "size": "20"}],
+                "asks": [{"price": "0.42", "size": "20"}],
+            }
+        },
+    ),
+)
+def test_monitoring_successful_empty_or_partial_batch_does_not_retry_singularly(
+    monkeypatch,
+    batch_response,
+):
+    """Successful gaps retain anti-storm attempted-token semantics."""
+    from src.engine import cycle_runtime, monitor_refresh
+
+    positions = [
+        _make_position(
+            trade_id=f"batch-success-gap-{index}",
+            token_id=(
+                "successful-partial-token"
+                if index == 0
+                else "successful-missing-token"
+            ),
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(2)
+    ]
+    refreshes = []
+    singular_calls = []
+    batch_calls = []
+
+    class SuccessfulGapClob:
+        def get_orderbook_snapshots(self, token_ids):
+            batch_calls.append(tuple(token_ids))
+            return batch_response
+
+        def get_orderbook(self, token_id):
+            singular_calls.append(token_id)
+            raise AssertionError("successful batch gaps must not trigger singular retry")
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def fake_refresh(_conn, clob, position):
+        quote = monitor_refresh.monitor_quote_refresh(None, clob, position)
+        if position.token_id in batch_response:
+            assert quote is not None
+        else:
+            assert quote is None
+        refreshes.append(position.trade_id)
+        return _monitor_test_edge_context(position)
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", fake_refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda _conn, position, **_kwargs: True,
+    )
+
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        SuccessfulGapClob(),
+        _make_portfolio(*positions),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_monitor_successful_batch_gap"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=10.0,
+    )
+
+    assert singular_calls == []
+    assert len(batch_calls) == 1
+    assert refreshes == [position.trade_id for position in positions]
+    assert (
+        summary.get("held_monitor_orderbook_prefetch_transport_failed", False)
+        is False
+    )
+    assert summary["monitors"] == 2
 
 
 # T5 (docs/rebuild/quarantine_excision_2026-07-11.md, REPLACEMENT PHASE LAW):

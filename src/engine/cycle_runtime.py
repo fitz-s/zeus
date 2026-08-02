@@ -4836,22 +4836,40 @@ def _prefetch_held_monitor_orderbooks(
             len(local_books) if installed else 0
         )
         return frozenset(missing_token_ids if installed else token_ids)
+    batch_transport_failed = False
     try:
         network_books = getter(missing_token_ids)
-        if not isinstance(network_books, dict):
-            raise TypeError("batch orderbook response must be a mapping")
     except Exception as exc:  # noqa: BLE001 - one failed batch must not fan out.
+        batch_transport_failed = True
         summary["held_monitor_orderbook_prefetch_error"] = str(exc)[:500]
         network_books = {}
         deps.logger.warning(
-            "held monitor batch orderbook prefetch failed; deferring ordinary quote reads: %s",
+            "held monitor batch orderbook prefetch failed; allowing one bounded "
+            "targeted quote retry per held position: %s",
             exc,
         )
+    else:
+        if not isinstance(network_books, dict):
+            exc = TypeError("batch orderbook response must be a mapping")
+            summary["held_monitor_orderbook_prefetch_error"] = str(exc)[:500]
+            network_books = {}
+            deps.logger.warning(
+                "held monitor batch orderbook prefetch returned an invalid response; "
+                "deferring ordinary quote reads: %s",
+                exc,
+            )
+    summary["held_monitor_orderbook_prefetch_transport_failed"] = (
+        batch_transport_failed
+    )
     books = {**local_books, **network_books}
     installed = install_monitor_orderbook_prefetch(
         clob,
         books,
-        attempted_token_ids=existing_attempted | set(missing_token_ids),
+        attempted_token_ids=(
+            existing_attempted
+            if batch_transport_failed
+            else existing_attempted | set(missing_token_ids)
+        ),
     )
     summary["held_monitor_orderbook_prefetch_installed"] = installed
     summary["held_monitor_orderbooks_prefetched"] = len(books) if installed else 0
@@ -6258,6 +6276,7 @@ def execute_monitoring_phase(
     )
     network_prefetch_started = False
     network_prefetch_unavailable = False
+    network_prefetch_batch_transport_failed = False
     durable_debt_network_attempted = False
     summary["held_monitor_budget_reservation_count"] = monitor_reservation_count
     summary["held_monitor_durable_debt_position"] = (
@@ -6480,6 +6499,7 @@ def execute_monitoring_phase(
 
         held_token_id = _position_held_token_id(pos)
         is_durable_debt_network_attempt = False
+        is_batch_transport_retry = False
         if held_token_id in network_book_tokens:
             if network_prefetch_unavailable:
                 summary["held_monitor_positions_deferred_for_orderbook_gap"] = (
@@ -6547,10 +6567,25 @@ def execute_monitoring_phase(
                 )
                 if error := network_prefetch.get("held_monitor_orderbook_prefetch_error"):
                     summary["held_monitor_orderbook_prefetch_error"] = error
-                    network_prefetch_unavailable = True
-                    summary["held_monitor_orderbook_prefetch_defer_reason"] = (
-                        "ORDERBOOK_BATCH_UNAVAILABLE"
+                    network_prefetch_batch_transport_failed = bool(
+                        network_prefetch.get(
+                            "held_monitor_orderbook_prefetch_transport_failed",
+                            False,
+                        )
                     )
+                    if network_prefetch_batch_transport_failed:
+                        summary[
+                            "held_monitor_orderbook_prefetch_transport_failed"
+                        ] = True
+                    if network_prefetch_batch_transport_failed:
+                        summary[
+                            "held_monitor_orderbook_prefetch_defer_reason"
+                        ] = "ORDERBOOK_BATCH_UNAVAILABLE_TARGETED_RETRY"
+                    else:
+                        network_prefetch_unavailable = True
+                        summary["held_monitor_orderbook_prefetch_defer_reason"] = (
+                            "ORDERBOOK_BATCH_UNAVAILABLE"
+                        )
                 if not network_prefetch.get(
                     "held_monitor_orderbook_prefetch_installed",
                     False,
@@ -6571,6 +6606,21 @@ def execute_monitoring_phase(
                         + 1
                     )
                     continue
+                if network_prefetch_batch_transport_failed:
+                    if time.monotonic() >= monitor_deadline:
+                        deferred_count = len(monitor_positions) - position_index
+                        summary["held_monitor_positions_deferred"] = deferred_count
+                        summary["held_monitor_defer_reason"] = (
+                            "cycle_budget_exhausted"
+                        )
+                        summary["held_monitor_deadline_deferred_positions"] = (
+                            deferred_count
+                        )
+                        summary["held_monitor_deadline_defer_reason"] = (
+                            "MONITOR_DEADLINE_EXPIRED_BEFORE_TARGETED_RETRY"
+                        )
+                        break
+                    is_batch_transport_retry = True
                 if urgent_preemption_requested():
                     # This position is already counted as scanned above; only
                     # the unvisited tail is deferred.
@@ -6921,7 +6971,10 @@ def execute_monitoring_phase(
                 try:
                     edge_ctx = refresh_position(conn, clob, pos)
                 finally:
-                    if is_durable_debt_network_attempt and held_token_id:
+                    if (
+                        (is_durable_debt_network_attempt or is_batch_transport_retry)
+                        and held_token_id
+                    ):
                         _mark_held_monitor_orderbook_attempted(
                             clob,
                             quote_positions,
