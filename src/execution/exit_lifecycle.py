@@ -488,8 +488,198 @@ def _is_global_sell_snapshot_reauction_error(error: object) -> bool:
         (
             "global_sell_exit_executable_snapshot_unavailable",
             "global_sell_exit_executable_snapshot_error:",
+            "global_sell_exit_post_only_cross_reauction:",
         )
     )
+
+
+def _is_post_only_cross_reauction_error(error: object) -> bool:
+    return str(error or "").lower().startswith(
+        "global_sell_exit_post_only_cross_reauction:"
+    )
+
+
+def _global_sell_post_only_cross_reauction_error(
+    conn: sqlite3.Connection | None,
+    sell_result: OrderResult,
+) -> str:
+    """Classify one proved no-side-effect maker race for immediate re-auction.
+
+    A post-only SELL can become marketable after its executable snapshot is
+    captured but before the venue validates it.  The synchronous 400 proves no
+    order was created, while the crossed book proves the old maker certificate
+    no longer describes executable truth.  Preserve every other 400 as the
+    generic retry path; only the exact durable command receipt can authorize
+    this zero-cooldown release.
+    """
+
+    command_id = str(getattr(sell_result, "command_id", "") or "").strip()
+    if (
+        conn is None
+        or not command_id
+        or str(getattr(sell_result, "status", "") or "").lower() != "rejected"
+        or str(getattr(sell_result, "command_state", "") or "").upper()
+        != "REJECTED"
+    ):
+        return ""
+    try:
+        command = conn.execute(
+            """
+            SELECT position_id, token_id, side, intent_kind, state
+              FROM venue_commands
+             WHERE command_id = ?
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        if command is None or str(command[4] or "").upper() != "REJECTED":
+            return ""
+        if str(getattr(sell_result, "trade_id", "") or "").strip() != str(
+            command[0] or ""
+        ).strip():
+            return ""
+        if (
+            str(command[2] or "").upper() != "SELL"
+            or str(command[3] or "").upper() != "EXIT"
+        ):
+            return ""
+
+        latest_event = conn.execute(
+            """
+            SELECT event_type, state_after, payload_json
+              FROM venue_command_events
+             WHERE command_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        if (
+            latest_event is None
+            or str(latest_event[0] or "") != "SUBMIT_REJECTED"
+            or str(latest_event[1] or "").upper() != "REJECTED"
+        ):
+            return ""
+        payload = json.loads(str(latest_event[2] or "{}"))
+        if not isinstance(payload, dict):
+            return ""
+
+        unknown_or_review_event_types = {
+            "SUBMIT_UNKNOWN",
+            "SUBMIT_TIMEOUT_UNKNOWN",
+            "CLOSED_MARKET_UNKNOWN",
+            "SUBMIT_UNKNOWN_SIDE_EFFECT",
+            "REVIEW_REQUIRED",
+        }
+        unknown_or_review_states = {
+            "UNKNOWN",
+            "SUBMIT_UNKNOWN_SIDE_EFFECT",
+            "REVIEW_REQUIRED",
+        }
+        history = conn.execute(
+            """
+            SELECT event_type, state_after
+              FROM venue_command_events
+             WHERE command_id = ?
+            """,
+            (command_id,),
+        ).fetchall()
+        if any(
+            str(row[0] or "") in unknown_or_review_event_types
+            or str(row[0] or "").startswith("REVIEW_")
+            or str(row[1] or "").upper() in unknown_or_review_states
+            for row in history
+        ):
+            return ""
+
+        active_sell = conn.execute(
+            """
+            SELECT 1
+              FROM venue_commands
+             WHERE position_id = ?
+               AND token_id = ?
+               AND side = 'SELL'
+               AND intent_kind = 'EXIT'
+               AND command_id <> ?
+               AND UPPER(COALESCE(state, '')) IN (
+                   'INTENT_CREATED', 'SNAPSHOT_BOUND', 'SIGNED_PERSISTED',
+                   'POSTING', 'POST_ACKED', 'SUBMITTING', 'ACKED', 'UNKNOWN',
+                   'SUBMIT_UNKNOWN_SIDE_EFFECT', 'PARTIAL', 'CANCEL_PENDING',
+                   'REVIEW_REQUIRED'
+               )
+             LIMIT 1
+            """,
+            (str(command[0] or ""), str(command[1] or ""), command_id),
+        ).fetchone()
+        if active_sell is not None:
+            return ""
+    except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+        return ""
+
+    reason = str(payload.get("reason") or "").strip()
+    detail = str(payload.get("detail") or "").strip().lower()
+    if (
+        reason != "venue_rejected_400"
+        or "invalid post-only order" not in detail
+        or "crosses book" not in detail
+    ):
+        return ""
+
+    # INV-47 SCOPE: only this global SELL command with an exact synchronous
+    # no-side-effect post-only-cross receipt is released.
+    # DRAIN: cooldown=0 publishes a fresh held-SELL global-auction obligation.
+    # RESET: the next command must carry a new q/book/wealth certificate; no
+    # latch survives the re-auction receipt.
+    return "global_sell_exit_post_only_cross_reauction:venue_rejected_400"
+
+
+def _post_only_cross_command_id_for_position(
+    conn: sqlite3.Connection | None,
+    position: Position,
+) -> str:
+    """Read the command binding persisted with a post-only-cross retry."""
+
+    if conn is None:
+        return ""
+    try:
+        row = conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_ORDER_REJECTED'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (str(getattr(position, "trade_id", "") or ""),),
+        ).fetchone()
+        payload = json.loads(str(row[0] or "{}")) if row is not None else {}
+    except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    if not _is_global_sell_snapshot_reauction_error(payload.get("error")):
+        return ""
+    return str(payload.get("post_only_cross_command_id") or "").strip()
+
+
+def _post_only_cross_reauction_proof_for_position(
+    conn: sqlite3.Connection | None,
+    position: Position,
+) -> bool:
+    """Revalidate the typed command proof at retry/recovery boundaries."""
+
+    command_id = _post_only_cross_command_id_for_position(conn, position)
+    if not command_id:
+        return False
+    result = OrderResult(
+        trade_id=str(getattr(position, "trade_id", "") or ""),
+        status="rejected",
+        reason="venue_rejected_400",
+        command_id=command_id,
+        command_state="REJECTED",
+    )
+    return bool(_global_sell_post_only_cross_reauction_error(conn, result))
 
 
 def _held_sell_reauction_obligation(
@@ -601,6 +791,8 @@ def has_global_sell_snapshot_reauction_retry(
     error = str(getattr(position, "last_exit_error", "") or "")
     if not error:
         error = _latest_exit_reject_error(conn, position)
+    if _is_post_only_cross_reauction_error(error):
+        return _post_only_cross_reauction_proof_for_position(conn, position)
     return _is_global_sell_snapshot_reauction_error(error)
 
 
@@ -614,6 +806,10 @@ def needs_global_sell_snapshot_reauction(
         getattr(position, "last_exit_error", "")
     )
     if conn is None:
+        if _is_post_only_cross_reauction_error(
+            getattr(position, "last_exit_error", "")
+        ):
+            return False
         return runtime_error
     trade_id = str(getattr(position, "trade_id", "") or "")
     if not trade_id:
@@ -648,6 +844,8 @@ def needs_global_sell_snapshot_reauction(
         == "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
         and _is_global_sell_snapshot_reauction_error(payload.get("error"))
     )
+    if canonical_debt and _is_post_only_cross_reauction_error(payload.get("error")):
+        return _post_only_cross_reauction_proof_for_position(conn, position)
     return canonical_debt or bool(_latest_held_sell_reauction_obligation(conn, position))
 
 
@@ -4631,6 +4829,15 @@ def _execute_live_exit(
 
         if sell_result.status == "rejected":
             sell_error = sell_result.reason or "sell_rejected"
+            if global_authorized:
+                post_only_cross_reauction = (
+                    _global_sell_post_only_cross_reauction_error(
+                        conn,
+                        sell_result,
+                    )
+                )
+                if post_only_cross_reauction:
+                    sell_error = post_only_cross_reauction
             if _is_exit_transient_lock_error(sell_error):
                 active_exit = _active_exit_sell_for_lock(
                     conn,
@@ -4670,6 +4877,11 @@ def _execute_live_exit(
                 position,
                 reason=retry_reason,
                 error=sell_error,
+                post_only_cross_command_id=(
+                    sell_result.command_id
+                    if _is_post_only_cross_reauction_error(sell_error)
+                    else ""
+                ),
                 conn=conn,
             )
             if conn is not None:
@@ -7203,6 +7415,14 @@ def check_pending_retries(
     previous_error = str(getattr(position, "last_exit_error", "") or "")
     if not previous_error:
         previous_error = _latest_exit_reject_error(conn, position)
+    post_only_cross_reauction = _is_post_only_cross_reauction_error(previous_error)
+    if post_only_cross_reauction and not _post_only_cross_reauction_proof_for_position(
+        conn, position
+    ):
+        # A persisted marker is not authority. Keep the retry pending until the
+        # command-bound proof can be re-established; never fall through to a
+        # local immediate redecision after proof loss.
+        return False
     global_snapshot_reauction = has_global_sell_snapshot_reauction_retry(
         position,
         conn,
@@ -8016,37 +8236,51 @@ def _mark_exit_retry(
     error: str = "",
     cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS,
     conn: sqlite3.Connection | None = None,
+    post_only_cross_command_id: str = "",
 ) -> None:
     """Transition position to retry_pending with exponential backoff."""
     _mark_pending_exit(position)
 
-    snapshot_reauction = str(error or "").lower().startswith(
-        (
-            "global_sell_exit_executable_snapshot_unavailable",
-            "global_sell_exit_executable_snapshot_error:",
+    snapshot_reauction = _is_global_sell_snapshot_reauction_error(error)
+    if _is_post_only_cross_reauction_error(error):
+        proof_result = OrderResult(
+            trade_id=str(getattr(position, "trade_id", "") or ""),
+            status="rejected",
+            reason="venue_rejected_400",
+            command_id=str(post_only_cross_command_id or "").strip(),
+            command_state="REJECTED",
         )
-    )
+        if not _global_sell_post_only_cross_reauction_error(conn, proof_result):
+            # The typed/durable proof disappeared or was never bound to this
+            # position. A prefix must not authorize immediate re-auction.
+            error = "venue_rejected_400"
+            snapshot_reauction = False
     if snapshot_reauction:
-        # The global auction owns this statistical SELL. Snapshot capture stopped
-        # before command persistence, so the old q/book/wealth certificate must
-        # not be replayed. Release only this position to a new complete auction.
+        # The global auction owns this statistical SELL. The old q/book/wealth
+        # certificate must not be replayed. Release only this position to a new
+        # complete auction after the typed proof has been revalidated.
         position.last_exit_error = error[:500]
         position.exit_state = "retry_pending"
         position.order_status = "retry_pending"
         position.next_exit_retry_at = _utcnow().isoformat()
+        extra_payload = {
+            "status": "global_sell_snapshot_reauction_pending",
+            "retry_count": int(
+                getattr(position, "exit_retry_count", 0) or 0
+            ),
+            "next_retry_at": position.next_exit_retry_at,
+        }
+        if _is_post_only_cross_reauction_error(error):
+            extra_payload["post_only_cross_command_id"] = str(
+                post_only_cross_command_id or ""
+            ).strip()
         _dual_write_canonical_pending_exit_if_available(
             conn,
             position,
             reason=reason,
             error=error,
             event_type="EXIT_ORDER_REJECTED",
-            extra_payload={
-                "status": "global_sell_snapshot_reauction_pending",
-                "retry_count": int(
-                    getattr(position, "exit_retry_count", 0) or 0
-                ),
-                "next_retry_at": position.next_exit_retry_at,
-            },
+            extra_payload=extra_payload,
         )
         logger.info(
             "GLOBAL SELL SNAPSHOT REAUCTION %s: %s "

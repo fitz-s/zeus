@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-01
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-01; last_reused=2026-08-01
+# Last reused/audited: 2026-08-02
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-02; last_reused=2026-08-02
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -7813,6 +7813,320 @@ def test_check_pending_retries_persists_day0_redecision_release(conn):
     assert payload["status"] == "ready"
     assert payload["previous_retry_count"] == 1
     assert payload["release_reason"] == "EXIT_RETRY_COOLDOWN_EXPIRED"
+
+
+@pytest.mark.parametrize(
+    ("reason", "detail", "expected"),
+    (
+        (
+            "venue_rejected_400",
+            "PolyApiException[status_code=400, error_message={'error': "
+            "'invalid post-only order: order crosses book'}]",
+            "global_sell_exit_post_only_cross_reauction:venue_rejected_400",
+        ),
+        (
+            "venue_rejected_400",
+            "not enough balance / allowance: sum of active orders",
+            "",
+        ),
+        ("venue_rejected_400", "other validation failure", ""),
+    ),
+)
+def test_global_sell_post_only_cross_rejection_reauctions_without_backoff(
+    conn,
+    monkeypatch,
+    reason,
+    detail,
+    expected,
+):
+    from src.execution import exit_lifecycle
+    from src.execution.executor import OrderResult
+    from src.state.portfolio import Position
+    from src.state.venue_command_repo import append_event
+
+    command_id = "cmd-post-only-cross"
+    _insert_exit_command(
+        conn,
+        command_id=command_id,
+        position_id="pos-post-only-cross",
+        token_id=YES_TOKEN,
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at="2026-08-02T07:04:45+00:00",
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_REJECTED",
+        occurred_at="2026-08-02T07:04:46+00:00",
+        payload={"reason": reason, "detail": detail},
+    )
+    sell_result = OrderResult(
+        trade_id="pos-post-only-cross",
+        status="rejected",
+        reason=reason,
+        command_id=command_id,
+        command_state="REJECTED",
+    )
+
+    classified = exit_lifecycle._global_sell_post_only_cross_reauction_error(
+        conn,
+        sell_result,
+    )
+    assert classified == expected
+    if not expected:
+        return
+
+    now = datetime(2026, 8, 2, 7, 4, 47, tzinfo=timezone.utc)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: now)
+    position = Position(
+        trade_id="pos-post-only-cross",
+        market_id="condition-post-only-cross",
+        city="Singapore",
+        cluster="Singapore",
+        target_date="2026-08-02",
+        temperature_metric="high",
+        bin_label="32C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-post-only-cross",
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        chain_state="synced",
+        shares=173.31,
+        chain_shares=173.31,
+        cost_basis_usd=81.50,
+        chain_cost_basis_usd=81.50,
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+        entered_at="2026-08-01T07:04:34+00:00",
+        order_status="exit_intent",
+        exit_state="exit_intent",
+        exit_retry_count=4,
+        exit_reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+    )
+
+    exit_lifecycle._mark_exit_retry(
+        position,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL [SELL_ERROR]",
+        error=classified,
+        post_only_cross_command_id=command_id,
+        conn=conn,
+    )
+
+    assert position.exit_state == "retry_pending"
+    assert position.order_status == "retry_pending"
+    assert position.exit_retry_count == 4
+    assert position.next_exit_retry_at == now.isoformat()
+    assert exit_lifecycle.has_global_sell_snapshot_reauction_retry(position, conn)
+    payload = json.loads(
+        conn.execute(
+            "SELECT payload_json FROM position_events WHERE position_id = ? "
+            "ORDER BY sequence_no DESC LIMIT 1",
+            (position.trade_id,),
+        ).fetchone()[0]
+    )
+    assert payload["status"] == "global_sell_snapshot_reauction_pending"
+    assert payload["retry_count"] == 4
+    assert payload["next_retry_at"] == now.isoformat()
+    assert exit_lifecycle.check_pending_retries(
+        position,
+        conn=conn,
+        global_sell_reauction_requester=lambda *_args: pytest.fail(
+            "check_pending_retries must not publish the requester"
+        ),
+    )
+    conn.commit()
+    assert exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
+    _insert_exit_command(
+        conn,
+        command_id="cmd-post-only-cross-active-before-recovery",
+        position_id=position.trade_id,
+        token_id=YES_TOKEN,
+    )
+    conn.commit()
+    blocked_requests = []
+    assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+        position,
+        conn=conn,
+        requester=lambda *_args: blocked_requests.append(True) or True,
+    )
+    assert blocked_requests == []
+    conn.execute(
+        "UPDATE venue_commands SET state = 'REJECTED' WHERE command_id = ?",
+        ("cmd-post-only-cross-active-before-recovery",),
+    )
+    conn.commit()
+    requests = []
+    requested_obligations = []
+
+    def request_reauction(released, force_new):
+        requests.append((released.trade_id, force_new))
+        requested_obligations.append(
+            dict(getattr(released, "_held_sell_reauction_obligation", {}))
+        )
+        return True
+
+    assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+        position,
+        conn=conn,
+        requester=request_reauction,
+    )
+    assert requests == [(position.trade_id, True)]
+    assert requested_obligations[0]["schema_version"] == 3
+    assert requested_obligations[0]["held_token_id"] == NO_TOKEN
+    assert requested_obligations[0]["book_state"] == "UNKNOWN"
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 2
+    assert not exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
+    assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+        position,
+        conn=conn,
+        requester=request_reauction,
+    )
+    assert requests == [(position.trade_id, True)]
+    assert len(requested_obligations) == 1
+
+
+@pytest.mark.parametrize(
+    "failure",
+    (
+        "no_receipt",
+        "unknown_side_effect",
+        "review_history",
+        "unknown_result_state",
+        "active_sell",
+    ),
+)
+def test_global_sell_post_only_cross_requires_complete_command_proof(conn, failure):
+    from src.execution import exit_lifecycle
+    from src.execution.executor import OrderResult
+    from src.state.venue_command_repo import append_event
+
+    command_id = f"cmd-post-only-cross-{failure}"
+    position_id = f"pos-post-only-cross-{failure}"
+    _insert_exit_command(
+        conn,
+        command_id=command_id,
+        position_id=position_id,
+        token_id=YES_TOKEN,
+    )
+    if failure != "no_receipt":
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="SUBMIT_REQUESTED",
+            occurred_at="2026-08-02T07:04:45+00:00",
+        )
+        if failure in {"unknown_side_effect", "review_history"}:
+            history_event_type = (
+                "SUBMIT_TIMEOUT_UNKNOWN"
+                if failure == "unknown_side_effect"
+                else "REVIEW_REQUIRED"
+            )
+            append_event(
+                conn,
+                command_id=command_id,
+                event_type=history_event_type,
+                occurred_at="2026-08-02T07:04:46+00:00",
+            )
+            conn.execute(
+                """
+                INSERT INTO venue_command_events (
+                    event_id, command_id, sequence_no, event_type,
+                    occurred_at, payload_json, state_after
+                ) VALUES (?, ?, 4, 'SUBMIT_REJECTED', ?, ?, 'REJECTED')
+                """,
+                (
+                    f"event-{command_id}-rejected",
+                    command_id,
+                    "2026-08-02T07:04:47+00:00",
+                    json.dumps(
+                        {
+                            "reason": "venue_rejected_400",
+                            "detail": "invalid post-only order: order crosses book",
+                        }
+                    ),
+                ),
+            )
+            conn.execute(
+                "UPDATE venue_commands SET state = 'REJECTED' WHERE command_id = ?",
+                (command_id,),
+            )
+        else:
+            append_event(
+                conn,
+                command_id=command_id,
+                event_type="SUBMIT_REJECTED",
+                occurred_at="2026-08-02T07:04:46+00:00",
+                payload={
+                    "reason": "venue_rejected_400",
+                    "detail": "invalid post-only order: order crosses book",
+                },
+            )
+    if failure == "active_sell":
+        _insert_exit_command(
+            conn,
+            command_id="cmd-post-only-cross-active",
+            position_id=position_id,
+            token_id=YES_TOKEN,
+        )
+
+    result_state = "UNKNOWN" if failure == "unknown_result_state" else "REJECTED"
+    result = OrderResult(
+        trade_id=position_id,
+        status="rejected",
+        reason="venue_rejected_400",
+        command_id=command_id,
+        command_state=result_state,
+    )
+    assert exit_lifecycle._global_sell_post_only_cross_reauction_error(conn, result) == ""
+
+
+def test_global_sell_post_only_cross_prefix_is_generic_at_retry_boundary(
+    conn,
+    monkeypatch,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    now = datetime(2026, 8, 2, 7, 4, 47, tzinfo=timezone.utc)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: now)
+    position = Position(
+        trade_id="pos-post-only-cross-unbound",
+        market_id="condition-post-only-cross-unbound",
+        city="Singapore",
+        cluster="Singapore",
+        target_date="2026-08-02",
+        temperature_metric="high",
+        bin_label="32C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-post-only-cross-unbound",
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        chain_state="synced",
+        shares=10.0,
+        chain_shares=10.0,
+        order_status="exit_intent",
+        exit_state="exit_intent",
+        exit_retry_count=4,
+    )
+
+    exit_lifecycle._mark_exit_retry(
+        position,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL [SELL_ERROR]",
+        error="global_sell_exit_post_only_cross_reauction:venue_rejected_400",
+        conn=conn,
+    )
+
+    assert position.exit_retry_count == 5
+    assert position.next_exit_retry_at != now.isoformat()
+    assert not exit_lifecycle.has_global_sell_snapshot_reauction_retry(position, conn)
 
 
 def test_global_sell_snapshot_failure_releases_to_new_global_auction(
