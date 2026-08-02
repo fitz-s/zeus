@@ -837,6 +837,34 @@ def read_reactor_wake(
     return None
 
 
+def exact_held_sell_completion_wake_ids(
+    *, path: Path | None = None
+) -> frozenset[str]:
+    """Snapshot queued exact held-SELL completion wake identities.
+
+    The snapshot is only a one-turn selection hint. It never acknowledges,
+    deletes, or changes the durable debt; a wake published after this read is
+    intentionally not excluded and retains exact-debt priority.
+    """
+
+    wake_ids = {
+        wake.wake_id
+        for _queue_file, wake in _queued_wakes(path)
+        if (
+            wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+            and wake.held_sell_reauction_requests
+        )
+    }
+    legacy = _read_reactor_wake_path(_wake_path(path))
+    if (
+        legacy is not None
+        and legacy.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+        and legacy.held_sell_reauction_requests
+    ):
+        wake_ids.add(legacy.wake_id)
+    return frozenset(wake_ids)
+
+
 def reactor_wakes_since(
     published_at: str | None,
     *,

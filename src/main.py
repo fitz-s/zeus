@@ -108,18 +108,25 @@ _edli_last_reactor_wake_id: str | None = None
 
 @dataclass
 class _OneTurnWakeExclusion:
-    wake_id: str | None = None
+    wake_ids: frozenset[str] = frozenset()
 
     def arm(self, wake_id: str) -> None:
-        self.wake_id = str(wake_id or "").strip() or None
+        self.arm_many((wake_id,))
+
+    def arm_many(self, wake_ids: Iterable[str]) -> None:
+        self.wake_ids = frozenset(
+            clean_id
+            for raw_wake_id in wake_ids
+            if (clean_id := str(raw_wake_id or "").strip())
+        )
 
     def consume(self) -> frozenset[str]:
-        wake_id = self.wake_id
-        self.wake_id = None
-        return frozenset({wake_id}) if wake_id else frozenset()
+        wake_ids = self.wake_ids
+        self.wake_ids = frozenset()
+        return wake_ids
 
     def reset(self) -> None:
-        self.wake_id = None
+        self.wake_ids = frozenset()
 
 
 _edli_global_completion_yield = _OneTurnWakeExclusion()
@@ -4702,25 +4709,41 @@ def _terminal_held_sell_reauction_receipts(
 def _yield_incomplete_global_completion_once(
     wake: object,
     pending_requests: tuple[object, ...],
+    *,
+    wake_ids: Iterable[str] = (),
 ) -> None:
     """Yield one selection turn after an incomplete held SELL exact cut.
 
-    SCOPE: only the selected global-completion wake_id; its durable file,
-    priority, and bytes are untouched. DRAIN: the next non-deferred listener
-    poll consumes the exclusion before selection, allowing one other queued
-    reason or one empty turn. RESET: consumption restores the wake on the
-    following turn, and listener initialization/restart clears process state.
+    SCOPE: the current snapshot of global-completion wake_ids carrying exact
+    requests; their durable files, priority, and bytes are untouched. DRAIN:
+    the next non-deferred listener poll consumes the snapshot before selection,
+    allowing one other queued reason or one empty turn. RESET: consumption
+    restores every still-pending exact wake on the following turn, and listener
+    initialization/restart clears process state.
     """
 
-    from src.runtime.reactor_wake import GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+    from src.runtime.reactor_wake import (
+        GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        exact_held_sell_completion_wake_ids,
+    )
 
     if (
         str(getattr(wake, "reason", "") or "")
         == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
         and pending_requests
     ):
-        _edli_global_completion_yield.arm(
-            str(getattr(wake, "wake_id", "") or "")
+        snapshot_ids = set(wake_ids)
+        snapshot_ids.add(str(getattr(wake, "wake_id", "") or ""))
+        try:
+            snapshot_ids.update(exact_held_sell_completion_wake_ids())
+        except Exception:  # noqa: BLE001 - retain exact debt on a read failure
+            logger.warning(
+                "exact held SELL fairness snapshot failed; retaining current "
+                "incomplete completion wake(s)",
+                exc_info=True,
+            )
+        _edli_global_completion_yield.arm_many(
+            snapshot_ids
         )
 
 
@@ -5042,6 +5065,7 @@ def _edli_reactor_wake_poll_once() -> bool:
         _yield_incomplete_global_completion_once(
             wake,
             pending_held_sell_reauction_requests,
+            wake_ids=(queued.wake_id for queued in wakes),
         )
         _yield_incomplete_day0_after_monitor_once(
             wake,
@@ -5060,6 +5084,7 @@ def _edli_reactor_wake_poll_once() -> bool:
         _yield_incomplete_global_completion_once(
             wake,
             pending_held_sell_reauction_requests,
+            wake_ids=(queued.wake_id for queued in wakes),
         )
         return False
     if day0_wake and day0_requires_exit_monitor:
