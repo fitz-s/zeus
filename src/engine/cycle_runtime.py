@@ -3240,12 +3240,17 @@ def _canonical_trade_write_lease(conn, *, owner: str, deadline_ms: int, max_hold
         return nullcontext()
 
     from src.state.db_writer_lock import WriteClass
-    from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WritePriority,
+        default_runtime_write_coordinator,
+    )
 
     return default_runtime_write_coordinator().lease(
         (DBIdentity.TRADE,),
         owner=owner,
         write_class=WriteClass.LIVE,
+        priority=WritePriority.MONITOR,
         deadline_ms=deadline_ms,
         max_hold_ms=max_hold_ms,
     )
@@ -3465,6 +3470,7 @@ def _record_monitor_hold_decision(
         summary["monitor_canonical_write_failed"] = (
             summary.get("monitor_canonical_write_failed", 0) + 1
         )
+        return False
     monitor_fresh_prob, monitor_fresh_edge = (
         _current_monitor_result_probability_and_edge(pos)
     )
@@ -6576,6 +6582,7 @@ def execute_monitoring_phase(
 
         hours_to_settlement = None
         monitor_result_written = False
+        monitor_canonical_failed = False
         try:
             city = deps.cities_by_name.get(pos.city)
             if city is not None:
@@ -6787,7 +6794,7 @@ def execute_monitoring_phase(
                         selected_method=pos.selected_method or pos.entry_method,
                         applied_validations=list(pos.applied_validations),
                     )
-                    _emit_monitor_refreshed_canonical_if_available(
+                    canonical_written = _emit_monitor_refreshed_canonical_if_available(
                         conn,
                         pos,
                         deps=deps,
@@ -6796,6 +6803,10 @@ def execute_monitoring_phase(
                         final_exit_reason=exit_decision.reason,
                         final_exit_trigger=exit_decision.trigger,
                     )
+                    if not canonical_written:
+                        summary["monitor_canonical_write_failed"] = (
+                            summary.get("monitor_canonical_write_failed", 0) + 1
+                        )
                     from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
 
                     mark_market_closed_hold_to_settlement(
@@ -6810,21 +6821,22 @@ def execute_monitoring_phase(
                     summary["day0_hard_fact_closed_market_hold_to_settlement"] = (
                         summary.get("day0_hard_fact_closed_market_hold_to_settlement", 0) + 1
                     )
-                    artifact.add_monitor_result(
-                        deps.MonitorResult(
-                            position_id=pos.trade_id,
-                            fresh_prob=pos.last_monitor_prob,
-                            fresh_edge=None,
-                            should_exit=False,
-                            exit_reason=exit_decision.reason,
-                            neg_edge_count=pos.neg_edge_count,
-                        )
-                    )
                     portfolio_dirty = True
-                    summary["day0_hard_fact_closed_market_monitors"] = (
-                        summary.get("day0_hard_fact_closed_market_monitors", 0) + 1
-                    )
-                    summary["monitors"] += 1
+                    if canonical_written:
+                        artifact.add_monitor_result(
+                            deps.MonitorResult(
+                                position_id=pos.trade_id,
+                                fresh_prob=pos.last_monitor_prob,
+                                fresh_edge=None,
+                                should_exit=False,
+                                exit_reason=exit_decision.reason,
+                                neg_edge_count=pos.neg_edge_count,
+                            )
+                        )
+                        summary["day0_hard_fact_closed_market_monitors"] = (
+                            summary.get("day0_hard_fact_closed_market_monitors", 0) + 1
+                        )
+                        summary["monitors"] += 1
                     continue
                 from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
 
@@ -7319,24 +7331,10 @@ def execute_monitoring_phase(
                 final_exit_trigger=exit_trigger,
             )
             if not monitor_canonical_written:
+                monitor_canonical_failed = True
                 summary["monitor_canonical_write_failed"] = (
                     summary.get("monitor_canonical_write_failed", 0) + 1
                 )
-                if exit_trigger != "RED_FORCE_EXIT" and not should_exit:
-                    monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos)
-                    artifact.add_monitor_result(
-                        deps.MonitorResult(
-                            position_id=pos.trade_id,
-                            fresh_prob=monitor_fresh_prob,
-                            fresh_edge=monitor_fresh_edge,
-                            should_exit=False,
-                            exit_reason="MONITOR_CANONICAL_WRITE_FAILED",
-                            neg_edge_count=pos.neg_edge_count,
-                        )
-                    )
-                    monitor_result_written = True
-                    summary["monitors"] += 1
-                    continue
                 if should_exit:
                     # The bounded writer lease is telemetry/backpressure, not a
                     # revocation of already-decided economic exit authority.
@@ -7345,20 +7343,23 @@ def execute_monitoring_phase(
                             "monitor_canonical_write_failed_exit_authority_preserved", 0)
                         + 1
                     )
+                else:
+                    continue
 
-            monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos)
-            artifact.add_monitor_result(
-                deps.MonitorResult(
-                    position_id=pos.trade_id,
-                    fresh_prob=monitor_fresh_prob,
-                    fresh_edge=monitor_fresh_edge,
-                    should_exit=should_exit,
-                    exit_reason=exit_reason,
-                    neg_edge_count=pos.neg_edge_count,
+            if monitor_canonical_written:
+                monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos)
+                artifact.add_monitor_result(
+                    deps.MonitorResult(
+                        position_id=pos.trade_id,
+                        fresh_prob=monitor_fresh_prob,
+                        fresh_edge=monitor_fresh_edge,
+                        should_exit=should_exit,
+                        exit_reason=exit_reason,
+                        neg_edge_count=pos.neg_edge_count,
+                    )
                 )
-            )
-            monitor_result_written = True
-            summary["monitors"] += 1
+                monitor_result_written = True
+                summary["monitors"] += 1
 
             if should_exit:
                 pos.exit_trigger = exit_trigger
@@ -7456,7 +7457,12 @@ def execute_monitoring_phase(
                 or hours_to_settlement <= 6.0
                 or _position_state_value(pos) in {"day0_window", "pending_exit"}
             )
-            if near_settlement and not monitor_result_written and "execution failed" not in str(e).lower():
+            if (
+                near_settlement
+                and not monitor_result_written
+                and not monitor_canonical_failed
+                and "execution failed" not in str(e).lower()
+            ):
                 summary["monitor_chain_missing"] = summary.get("monitor_chain_missing", 0) + 1
                 summary.setdefault("monitor_chain_missing_positions", []).append(pos.trade_id)
                 summary.setdefault("monitor_chain_missing_reasons", []).append(

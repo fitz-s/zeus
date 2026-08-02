@@ -16,7 +16,10 @@ import logging
 import base64
 import json
 import math
+import multiprocessing
 import sqlite3
+import threading
+import time
 import zlib
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
@@ -2876,8 +2879,7 @@ def test_monitor_writer_timeout_preserves_nonred_exit_authority(monkeypatch):
     )
 
     assert exits == [position.trade_id]
-    assert results[-1].should_exit is True
-    assert results[-1].exit_reason == "CI_WRITER_TIMEOUT_NONRED_EXIT"
+    assert results == []
     assert summary["monitor_canonical_write_failed_exit_authority_preserved"] == 1
 
 
@@ -13831,3 +13833,336 @@ class TestB041FillTrackerBoundaryErrors:
         clob.get_order_status.side_effect = IndexError("list index out of range")
         with pytest.raises(IndexError, match="out of range"):
             check_pending_entries(portfolio, clob)
+
+
+def _writer_process_once(db_path, index, barrier, result_queue, priority):
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WritePriority
+
+    try:
+        coordinator = WriteCoordinator({DBIdentity.TRADE: Path(db_path)})
+        barrier.wait(timeout=10)
+        with coordinator.transaction(
+            (DBIdentity.TRADE,),
+            owner=f"writer-{index}",
+            priority=WritePriority(priority),
+            connection_factory=lambda path: sqlite3.connect(path, timeout=5),
+        ) as tx:
+            tx.connection.execute("INSERT INTO writes(owner) VALUES (?)", (f"writer-{index}",))
+        result_queue.put((index, "ok"))
+    except BaseException as exc:  # pragma: no cover - child failure is asserted by parent.
+        result_queue.put((index, type(exc).__name__, str(exc)))
+
+
+def _writer_process_holder(db_path, ready, release):
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WritePriority
+
+    coordinator = WriteCoordinator({DBIdentity.TRADE: Path(db_path)})
+    conn = sqlite3.connect(db_path, timeout=5)
+    try:
+        with coordinator.lease(
+            (DBIdentity.TRADE,),
+            owner="crashed-holder",
+            priority=WritePriority.STANDARD,
+        ):
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("INSERT INTO writes(owner) VALUES ('holder')")
+            ready.set()
+            release.wait(timeout=30)
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def _writer_process_waiter(db_path, started, result_queue):
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WritePriority
+
+    try:
+        coordinator = WriteCoordinator({DBIdentity.TRADE: Path(db_path)})
+        started.set()
+        with coordinator.transaction(
+            (DBIdentity.TRADE,),
+            owner="monitor-waiter",
+            priority=WritePriority.MONITOR,
+            connection_factory=lambda path: sqlite3.connect(path, timeout=5),
+        ) as tx:
+            tx.connection.execute("INSERT INTO writes(owner) VALUES ('monitor')")
+        result_queue.put("ok")
+    except BaseException as exc:  # pragma: no cover - child failure is asserted by parent.
+        result_queue.put((type(exc).__name__, str(exc)))
+
+
+def test_process_shared_trade_turnstile_allows_seven_exactly_once_writes(tmp_path):
+    """Real WAL writers contend through one TRADE gate without duplicate rows."""
+    db_path = tmp_path / "turnstile-seven.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE writes(owner TEXT PRIMARY KEY)")
+
+    ctx = multiprocessing.get_context("spawn")
+    barrier = ctx.Barrier(7)
+    result_queue = ctx.Queue()
+    processes = [
+        ctx.Process(
+            target=_writer_process_once,
+            args=(str(db_path), index, barrier, result_queue, "monitor"),
+        )
+        for index in range(7)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=15)
+        assert process.exitcode == 0
+
+    results = [result_queue.get(timeout=2) for _ in processes]
+    assert all(result[1] == "ok" for result in results), results
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM writes").fetchone() == (7,)
+        assert conn.execute("SELECT COUNT(DISTINCT owner) FROM writes").fetchone() == (7,)
+
+
+def test_turnstile_blocks_background_while_monitor_waits(tmp_path):
+    """A queued MONITOR holds admission; BACKGROUND defers until the next call."""
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WriteCoordinator,
+        WriteLeaseTimeout,
+        WritePriority,
+    )
+
+    db_path = tmp_path / "turnstile-order.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE writes(seq INTEGER PRIMARY KEY AUTOINCREMENT, owner TEXT)")
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+    monitor_turnstile_acquired = threading.Event()
+    start = threading.Barrier(2)
+    original_acquire_turnstile = coordinator._acquire_turnstile
+
+    def observe_monitor_turnstile(*args, **kwargs):
+        fd = original_acquire_turnstile(*args, **kwargs)
+        monitor_turnstile_acquired.set()
+        return fd
+
+    coordinator._acquire_turnstile = observe_monitor_turnstile
+
+    def monitor_writer():
+        start.wait(timeout=2)
+        conn = sqlite3.connect(db_path, timeout=5)
+        with coordinator.lease(
+            (DBIdentity.TRADE,), owner="monitor", priority=WritePriority.MONITOR
+        ):
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("INSERT INTO writes(owner) VALUES ('monitor')")
+            conn.commit()
+        conn.close()
+
+    monitor = threading.Thread(target=monitor_writer)
+    monitor.start()
+    with coordinator.lease((DBIdentity.TRADE,), owner="holder"):
+        holder = sqlite3.connect(db_path, timeout=5)
+        holder.execute("BEGIN IMMEDIATE")
+        holder.execute("INSERT INTO writes(owner) VALUES ('holder')")
+        start.wait(timeout=2)
+        assert monitor_turnstile_acquired.wait(timeout=2)
+        with pytest.raises(WriteLeaseTimeout):
+            with coordinator.lease(
+                (DBIdentity.TRADE,),
+                owner="background-now",
+                priority=WritePriority.BACKGROUND_RECOVERY,
+                deadline_ms=0,
+            ):
+                raise AssertionError("background must defer behind queued monitor")
+        holder.commit()
+        holder.close()
+    monitor.join(timeout=3)
+    assert not monitor.is_alive()
+
+    with coordinator.transaction(
+        (DBIdentity.TRADE,),
+        owner="background-next-invocation",
+        priority=WritePriority.BACKGROUND_RECOVERY,
+        connection_factory=lambda path: sqlite3.connect(path, timeout=5),
+    ) as tx:
+        tx.connection.execute("INSERT INTO writes(owner) VALUES ('background')")
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT owner FROM writes ORDER BY seq").fetchall() == [
+            ("holder",),
+            ("monitor",),
+            ("background",),
+        ]
+
+
+def test_live_tick_priority_lease_defers_within_existing_db_budget(tmp_path, monkeypatch):
+    """Critical recovery cannot wait past the live tick budget before SQLite opens."""
+    from src.execution import command_recovery
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WriteLeaseTimeout
+    from src.state import write_coordinator as coordinator_module
+
+    db_path = tmp_path / "live-tick-priority-budget.db"
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+    opened = []
+
+    def factory(**_kwargs):
+        opened.append(True)
+        raise AssertionError("SQLite must not open after the lease budget expires")
+
+    factory.requires_writer_flocks = True
+    factory.supports_nonblocking_flocks = True
+    monkeypatch.setattr(
+        coordinator_module,
+        "default_runtime_write_coordinator",
+        lambda: coordinator,
+    )
+    with coordinator.lease((DBIdentity.TRADE,), owner="active-live-writer"):
+        priority_factory = command_recovery._recovery_priority_conn_factory(
+            factory,
+            scope="live_tick",
+            deadline_monotonic=time.monotonic() + 0.025,
+        )
+        with pytest.raises(WriteLeaseTimeout):
+            priority_factory(blocking=False, busy_timeout_ms=0)
+    assert opened == []
+
+
+def test_priority_recovery_connection_delegates_context_before_releasing_lease(monkeypatch):
+    """``with factory()`` commits/closes the DB before the writer lease ends."""
+    from src.execution import command_recovery
+    from src.state import write_coordinator as coordinator_module
+
+    events = []
+
+    class Conn:
+        def __enter__(self):
+            events.append("conn_enter")
+            return self
+
+        def __exit__(self, *_args):
+            events.append("conn_exit")
+            return False
+
+        def close(self):
+            events.append("conn_close")
+
+    class Lease:
+        def __enter__(self):
+            events.append("lease_enter")
+            return self
+
+        def __exit__(self, *_args):
+            events.append("lease_exit")
+            return False
+
+    class Coordinator:
+        def lease(self, *_args, **_kwargs):
+            return Lease()
+
+    def factory(**_kwargs):
+        return Conn()
+
+    factory.requires_writer_flocks = True
+    monkeypatch.setattr(coordinator_module, "default_runtime_write_coordinator", Coordinator)
+    wrapped = command_recovery._recovery_priority_conn_factory(
+        factory,
+        scope="full",
+    )
+    with wrapped() as conn:
+        assert isinstance(conn, command_recovery._PriorityRecoveryConnection)
+    assert events == ["lease_enter", "conn_enter", "conn_exit", "conn_close", "lease_exit"]
+
+
+def test_process_death_resets_holder_and_waiter_state(tmp_path):
+    """A dead holder releases the kernel gate to an already queued MONITOR."""
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WritePriority
+
+    db_path = tmp_path / "turnstile-process-death.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE writes(owner TEXT PRIMARY KEY)")
+    ctx = multiprocessing.get_context("spawn")
+    ready = ctx.Event()
+    release = ctx.Event()
+    holder = ctx.Process(target=_writer_process_holder, args=(str(db_path), ready, release))
+    holder.start()
+    assert ready.wait(timeout=5)
+    waiter_started = ctx.Event()
+    waiter_queue = ctx.Queue()
+    waiter = ctx.Process(
+        target=_writer_process_waiter,
+        args=(str(db_path), waiter_started, waiter_queue),
+    )
+    waiter.start()
+    assert waiter_started.wait(timeout=5)
+    holder.terminate()
+    holder.join(timeout=5)
+    assert holder.exitcode != 0
+    waiter.join(timeout=5)
+    assert waiter.exitcode == 0
+    assert waiter_queue.get(timeout=2) == "ok"
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT owner FROM writes").fetchall() == [("monitor",)]
+
+
+def test_full_recovery_quantum_is_one_row_and_specialized_debts_stay_in_full_lane(
+    monkeypatch,
+):
+    """Full inflight work is one row; specialized full debts remain scheduled."""
+    from src.execution import command_recovery
+
+    first = {"command_id": "a", "updated_at": "2026-08-01T00:00:00Z"}
+    second = {"command_id": "b", "updated_at": "2026-08-01T00:00:01Z"}
+    monkeypatch.setattr(
+        command_recovery,
+        "find_unresolved_commands",
+        lambda _conn: [second, first],
+    )
+    assert [row["command_id"] for row in command_recovery._full_quantum_candidates(None)] == ["a", "b"]
+
+    source = (ROOT / "src" / "execution" / "command_recovery.py").read_text(encoding="utf-8")
+    inflight_source = source[source.index("def _scan_inflight"): source.index("def _apply_inflight")]
+    assert "rows = all_rows[:1]" in inflight_source
+    assert "inflight_quantum_remaining" in inflight_source
+    assert all(name in source for name in (
+        "terminal_exit_partial_remainders",
+        "pending_exit_terminal_order_releases",
+        "terminal_entry_exposure_obligations",
+        "edli_post_submit_unknown_absence",
+        "partial_remainders",
+        "closed_shift_bin_exit_leases",
+        "stale_rebalance_entry_leases",
+    ))
+    assert "set_progress_handler" not in source[source.index("def _recovery_read_conn_factory"): source.index("def _run_recovery_pass_with_lock_policy")]
+
+
+def test_monitor_hold_append_failure_has_no_hold_artifact_or_monitor_count(monkeypatch):
+    """Canonical observation failure retains evidence but emits no synthetic HOLD."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(trade_id="monitor-hold-append-failure")
+    results = []
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, result: results.append(result)},
+    )()
+    summary = {"monitors": 0}
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: False,
+    )
+
+    assert cycle_runtime._record_monitor_hold_decision(
+        None,
+        position,
+        artifact=artifact,
+        deps=_monitor_test_deps("test_monitor_hold_append_failure"),
+        summary=summary,
+        reason="NO_EXIT",
+        trigger="NORMAL_MONITOR",
+        validation="replacement_posterior",
+        counter="monitor_hold",
+    ) is False
+    assert results == []
+    assert summary["monitors"] == 0
+    assert summary["monitor_canonical_write_failed"] == 1

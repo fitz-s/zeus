@@ -33,6 +33,21 @@ class DBIdentity(str, enum.Enum):
     WORLD = "world"
 
 
+class WritePriority(str, enum.Enum):
+    """Admission class for the process-shared writer turnstile.
+
+    MONITOR and RECOVERY_CRITICAL wait on the kernel turnstile; BACKGROUND
+    probes it nonblocking. The turnstile provides this admission boundary, not
+    a total order between the two waiting classes.
+    """
+
+    STANDARD = "standard"
+    MONITOR = "monitor"
+    RECOVERY_CRITICAL = "recovery_critical"
+    BACKGROUND_RECOVERY = "background_recovery"
+    MONITOR_CANONICAL = "monitor"
+
+
 class TransactionMode(str, enum.Enum):
     """SQLite transaction begin modes supported by the coordinator."""
 
@@ -56,6 +71,7 @@ class WriteLeaseTelemetry:
     db_set: tuple[str, ...]
     db_paths: tuple[str, ...]
     write_class: str
+    priority: str
     wait_ms: float
     hold_ms: float
     commit_ms: float
@@ -82,6 +98,7 @@ class WriteLease:
     db_set: tuple[DBIdentity, ...]
     db_paths: tuple[Path, ...]
     write_class: WriteClass
+    priority: WritePriority
     acquired_at: float
     _metrics: _LeaseMetrics = field(repr=False)
 
@@ -128,6 +145,15 @@ def _coerce_db_identity(db: DBIdentity | str) -> DBIdentity:
     return DBIdentity(str(db).lower())
 
 
+def _coerce_write_priority(priority: WritePriority | str) -> WritePriority:
+    if isinstance(priority, WritePriority):
+        return priority
+    value = str(priority).lower()
+    if value == "monitor_canonical":
+        value = WritePriority.MONITOR.value
+    return WritePriority(value)
+
+
 def _resolve_path(path: Path | str) -> Path:
     return Path(path).expanduser().resolve(strict=False)
 
@@ -141,6 +167,17 @@ def unified_writer_lock_path(db_path: Path | str) -> Path:
 
     resolved = _resolve_path(db_path)
     return resolved.with_name(resolved.name + ".writer-lock")
+
+
+def writer_turnstile_path(db_path: Path | str) -> Path:
+    """Return the lock-only turnstile path for one DB."""
+
+    resolved = _resolve_path(db_path)
+    return resolved.with_name(resolved.name + ".writer-turnstile")
+
+
+def _priority_uses_turnstile(priority: WritePriority) -> bool:
+    return priority is not WritePriority.STANDARD
 
 
 class WriteCoordinator:
@@ -190,6 +227,7 @@ class WriteCoordinator:
         *,
         owner: str,
         write_class: WriteClass | str = WriteClass.LIVE,
+        priority: WritePriority | str = WritePriority.STANDARD,
         deadline_ms: int | None = None,
         max_hold_ms: int | None = None,
     ) -> Iterator[WriteLease]:
@@ -198,6 +236,7 @@ class WriteCoordinator:
         if not owner:
             raise ValueError("owner is required for DB write leases")
         resolved_class = _coerce_write_class(write_class)
+        resolved_priority = _coerce_write_priority(priority)
         ordered = self.canonical_db_order(dbs)
         started = self._clock()
         deadline = (
@@ -208,13 +247,19 @@ class WriteCoordinator:
         acquired_at: float | None = None
         timeout_error: WriteLeaseTimeout | None = None
         try:
-            acquired = self._acquire_gates(ordered, deadline=deadline, owner=owner)
+            acquired = self._acquire_gates(
+                ordered,
+                deadline=deadline,
+                owner=owner,
+                priority=resolved_priority,
+            )
             acquired_at = self._clock()
             lease = WriteLease(
                 owner=owner,
                 db_set=ordered,
                 db_paths=tuple(self._db_paths[db] for db in ordered),
                 write_class=resolved_class,
+                priority=resolved_priority,
                 acquired_at=acquired_at,
                 _metrics=metrics,
             )
@@ -236,6 +281,7 @@ class WriteCoordinator:
                     owner=owner,
                     ordered=ordered,
                     write_class=resolved_class,
+                    priority=resolved_priority,
                     started=started,
                     acquired_at=acquired_at,
                     released_at=released_at,
@@ -252,6 +298,7 @@ class WriteCoordinator:
         *,
         owner: str,
         write_class: WriteClass | str = WriteClass.LIVE,
+        priority: WritePriority | str = WritePriority.STANDARD,
         deadline_ms: int | None = None,
         max_hold_ms: int | None = None,
         mode: TransactionMode | str = TransactionMode.IMMEDIATE,
@@ -279,6 +326,7 @@ class WriteCoordinator:
             (db,),
             owner=owner,
             write_class=write_class,
+            priority=priority,
             deadline_ms=deadline_ms,
             max_hold_ms=max_hold_ms,
         ) as lease:
@@ -310,28 +358,47 @@ class WriteCoordinator:
         *,
         deadline: float | None,
         owner: str,
+        priority: WritePriority,
     ) -> list[_AcquiredGate]:
         acquired: list[_AcquiredGate] = []
         try:
             for db in ordered:
                 db_path = self._db_paths[db]
                 process_lock = self._process_locks[db_path]
-                self._acquire_process_lock(
-                    process_lock,
-                    deadline=deadline,
-                    db=db,
-                    owner=owner,
-                )
+                turnstile_fd: int | None = None
+                process_acquired = False
                 try:
+                    if _priority_uses_turnstile(priority):
+                        turnstile_fd = self._acquire_turnstile(
+                            db_path,
+                            deadline=deadline,
+                            db=db,
+                            owner=owner,
+                            blocking=priority is not WritePriority.BACKGROUND_RECOVERY,
+                        )
+                    background = priority is WritePriority.BACKGROUND_RECOVERY
+                    self._acquire_process_lock(
+                        process_lock,
+                        deadline=deadline,
+                        db=db,
+                        owner=owner,
+                        blocking=not background,
+                    )
+                    process_acquired = True
                     fd = self._acquire_file_lock(
                         db_path,
                         deadline=deadline,
                         db=db,
                         owner=owner,
+                        blocking=not background,
                     )
                 except BaseException:
-                    process_lock.release()
+                    if process_acquired:
+                        process_lock.release()
                     raise
+                finally:
+                    if turnstile_fd is not None:
+                        self._release_turnstile(turnstile_fd)
                 acquired.append(
                     _AcquiredGate(
                         db=db,
@@ -353,7 +420,14 @@ class WriteCoordinator:
         deadline: float | None,
         db: DBIdentity,
         owner: str,
+        blocking: bool,
     ) -> None:
+        if not blocking:
+            if not lock.acquire(blocking=False):
+                raise WriteLeaseTimeout(
+                    f"DB write lease deferred for owner={owner} db={db.value}"
+                )
+            return
         if deadline is None:
             lock.acquire()
             return
@@ -370,6 +444,7 @@ class WriteCoordinator:
         deadline: float | None,
         db: DBIdentity,
         owner: str,
+        blocking: bool,
     ) -> int:
         lock_path = unified_writer_lock_path(db_path)
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -379,6 +454,11 @@ class WriteCoordinator:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 return fd
             except BlockingIOError as exc:
+                if not blocking:
+                    os.close(fd)
+                    raise WriteLeaseTimeout(
+                        f"DB write lease deferred for owner={owner} db={db.value}"
+                    ) from exc
                 if deadline is not None and self._clock() >= deadline:
                     os.close(fd)
                     raise WriteLeaseTimeout(
@@ -388,6 +468,45 @@ class WriteCoordinator:
                 if deadline is not None:
                     sleep_for = max(0.001, min(sleep_for, deadline - self._clock()))
                 self._sleep(sleep_for)
+
+    def _acquire_turnstile(
+        self,
+        db_path: Path,
+        *,
+        deadline: float | None,
+        db: DBIdentity,
+        owner: str,
+        blocking: bool,
+    ) -> int:
+        path = writer_turnstile_path(db_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except BlockingIOError as exc:
+                if not blocking:
+                    os.close(fd)
+                    raise WriteLeaseTimeout(
+                        f"DB writer turnstile deferred for owner={owner} db={db.value}"
+                    ) from exc
+                if deadline is not None and self._clock() >= deadline:
+                    os.close(fd)
+                    raise WriteLeaseTimeout(
+                        f"DB writer turnstile timed out for owner={owner} db={db.value}"
+                    ) from exc
+                sleep_for = 0.01
+                if deadline is not None:
+                    sleep_for = max(0.001, min(sleep_for, deadline - self._clock()))
+                self._sleep(sleep_for)
+
+    @staticmethod
+    def _release_turnstile(fd: int) -> None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
     def _release_gates(self, acquired: list[_AcquiredGate]) -> None:
         for gate in reversed(acquired):
@@ -405,6 +524,7 @@ class WriteCoordinator:
         owner: str,
         ordered: tuple[DBIdentity, ...],
         write_class: WriteClass,
+        priority: WritePriority,
         started: float,
         acquired_at: float | None,
         released_at: float,
@@ -420,6 +540,7 @@ class WriteCoordinator:
             db_set=tuple(db.value for db in ordered),
             db_paths=tuple(str(self._db_paths[db]) for db in ordered),
             write_class=write_class.value,
+            priority=priority.value,
             wait_ms=max(0.0, (wait_stop - started) * 1000.0),
             hold_ms=max(0.0, hold_ms),
             commit_ms=metrics.commit_ms,
@@ -477,6 +598,7 @@ def _counter_telemetry_sink(row: WriteLeaseTelemetry) -> None:
         "db_set": ",".join(row.db_set),
         "owner": row.owner,
         "write_class": row.write_class,
+        "priority": row.priority,
     }
     increment("db_write_lease_total", labels=labels)
     if row.deadline_exceeded:

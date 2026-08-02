@@ -73,6 +73,7 @@ from src.state.venue_command_repo import (
     append_trade_fact,
     UNRESOLVED_SIDE_EFFECT_STATES,
 )
+from src.state.write_coordinator import WriteLeaseTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -21567,7 +21568,7 @@ def _recovery_apply_conn_factory(
         try:
             if not getattr(conn_factory, "supports_nonblocking_flocks", False):
                 conn.execute("PRAGMA busy_timeout = 0")
-            if deadline_monotonic is not None:
+            if scope == "live_tick" and deadline_monotonic is not None:
                 conn.set_progress_handler(
                     lambda: int(time.monotonic() >= deadline_monotonic),
                     _LIVE_TICK_DB_PROGRESS_OPCODES,
@@ -21578,6 +21579,115 @@ def _recovery_apply_conn_factory(
         return conn
 
     return _nowait_conn
+
+
+class _PriorityRecoveryConnection:
+    """Close a recovery connection and its one process-shared writer lease."""
+
+    def __init__(self, conn, lease_context) -> None:
+        self._conn = conn
+        self._lease_context = lease_context
+        self._closed = False
+        self._lease_released = False
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __enter__(self):
+        if self._closed:
+            raise RuntimeError("recovery connection is already closed")
+        try:
+            enter = getattr(type(self._conn), "__enter__", None)
+            if enter is not None:
+                enter(self._conn)
+        except BaseException:
+            self.close()
+            raise
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._closed:
+            return False
+        result = False
+        try:
+            exit_method = getattr(type(self._conn), "__exit__", None)
+            if exit_method is not None:
+                result = bool(exit_method(self._conn, exc_type, exc, tb))
+        finally:
+            self.close()
+        return result
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._conn.close()
+        finally:
+            if not self._lease_released:
+                self._lease_released = True
+                self._lease_context.__exit__(None, None, None)
+
+
+def _recovery_priority_conn_factory(
+    conn_factory,
+    *,
+    scope: str,
+    deadline_monotonic: float | None = None,
+):
+    """Add the typed coordinator priority to the canonical recovery factory."""
+
+    if not getattr(conn_factory, "requires_writer_flocks", False):
+        return conn_factory
+
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WritePriority,
+        default_runtime_write_coordinator,
+    )
+
+    priority = (
+        WritePriority.BACKGROUND_RECOVERY
+        if scope == "full"
+        else WritePriority.RECOVERY_CRITICAL
+    )
+
+    def _factory(*, blocking: bool = True, busy_timeout_ms: int | None = None):
+        if priority is WritePriority.BACKGROUND_RECOVERY:
+            lease_deadline_ms = 0
+        elif scope == "restart_preflight":
+            lease_deadline_ms = None
+        elif deadline_monotonic is None:
+            lease_deadline_ms = int(_LIVE_TICK_DB_BUDGET_SECONDS * 1000)
+        else:
+            lease_deadline_ms = max(
+                0,
+                int((deadline_monotonic - time.monotonic()) * 1000),
+            )
+        lease_context = default_runtime_write_coordinator().lease(
+            (DBIdentity.TRADE,),
+            owner=f"command_recovery_{scope}_apply",
+            priority=priority,
+            deadline_ms=lease_deadline_ms,
+        )
+        lease_context.__enter__()
+        try:
+            conn = conn_factory(
+                blocking=blocking,
+                busy_timeout_ms=busy_timeout_ms,
+            )
+        except BaseException as exc:
+            lease_context.__exit__(type(exc), exc, exc.__traceback__)
+            raise
+        return _PriorityRecoveryConnection(conn, lease_context)
+
+    _factory.requires_writer_flocks = True  # type: ignore[attr-defined]
+    _factory.supports_nonblocking_flocks = getattr(  # type: ignore[attr-defined]
+        conn_factory,
+        "supports_nonblocking_flocks",
+        False,
+    )
+    return _factory
 
 
 def _recovery_read_conn_factory(
@@ -21594,10 +21704,6 @@ def _recovery_read_conn_factory(
         conn = conn_factory()
         try:
             conn.execute("PRAGMA busy_timeout = 0")
-            conn.set_progress_handler(
-                lambda: int(time.monotonic() >= deadline_monotonic),
-                _LIVE_TICK_DB_PROGRESS_OPCODES,
-            )
         except BaseException:
             conn.close()
             raise
@@ -21635,7 +21741,7 @@ def _run_recovery_pass_with_lock_policy(
                 label,
             )
             return None
-        except (BlockingIOError, sqlite3.OperationalError) as exc:
+        except (BlockingIOError, WriteLeaseTimeout, sqlite3.OperationalError) as exc:
             message = str(exc)
             is_budget = (
                 bounded_scope
@@ -21654,7 +21760,7 @@ def _run_recovery_pass_with_lock_policy(
                     label,
                 )
                 return None
-            is_lock = (
+            is_lock = isinstance(exc, WriteLeaseTimeout) or (
                 isinstance(exc, BlockingIOError)
                 and "db_writer_lock(" in message
                 and "contended on" in message
@@ -22187,6 +22293,13 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
         _harvest(_partial_remainder_candidates(conn, updated_before=None))
     except Exception:  # noqa: BLE001
         logger.debug("recovery: priming candidate _partial_remainder_candidates failed", exc_info=True)
+    try:
+        _harvest(_partial_remainder_candidates(conn, terminal_exit_only=True))
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "recovery: priming terminal EXIT partial remainder candidates failed",
+            exc_info=True,
+        )
 
     return {
         "order_ids": order_ids,
@@ -22401,6 +22514,19 @@ def reconcile_restart_no_venue_exit_retry_projections(conn: sqlite3.Connection) 
     return summary
 
 
+def _full_quantum_candidates(conn: sqlite3.Connection) -> list[dict]:
+    """Return durable full-sweep candidates in stable identity order."""
+
+    rows = find_unresolved_commands(conn)
+    return sorted(
+        rows,
+        key=lambda row: (
+            str(row.get("updated_at") or ""),
+            str(row.get("command_id") or ""),
+        ),
+    )
+
+
 def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scope: str = "full") -> None:
     """Scheduled-job lane: per-pass short connections, no connection across network.
 
@@ -22417,9 +22543,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
          venue SNAPSHOT (zero live network), so the write lock is held only for
          that pass's writes and released the instant the pass returns.
 
-    Each pass body is the SAME function the legacy lane calls — reconciliation
-    grammar, REVIEW_REQUIRED handoffs, INV-31 invariants and savepoint discipline
-    are byte-for-byte unchanged. Only the connection topology differs.
+    Full-sweep inflight command recovery is one stable row per invocation; the
+    specialized debt passes below remain part of the full lane. Each pass body
+    is the SAME function the legacy lane calls — reconciliation grammar,
+    REVIEW_REQUIRED handoffs, INV-31 invariants and savepoint discipline are
+    byte-for-byte unchanged. Only the connection topology differs.
     """
     from src.execution.venue_sync_contract import (
         assert_no_open_connection,
@@ -22460,6 +22588,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         summary["full_sweep_budget_seconds"] = full_budget
         full_deadline = time.monotonic() + full_budget
     apply_deadline = live_tick_deadline or full_deadline
+    conn_factory = _recovery_priority_conn_factory(
+        conn_factory,
+        scope=scope,
+        deadline_monotonic=apply_deadline,
+    )
     apply_conn_factory = _recovery_apply_conn_factory(
         conn_factory,
         scope=scope,
@@ -23499,11 +23632,20 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
     # In-flight per-row scan (find_unresolved_commands + _reconcile_row).
     def _scan_inflight(conn, snap_client):
         ps = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
-        rows = (
-            _restart_preflight_unresolved_commands(conn)
-            if scope == "restart_preflight"
-            else find_unresolved_commands(conn)
-        )
+        if scope == "restart_preflight":
+            rows = _restart_preflight_unresolved_commands(conn)
+        elif scope == "full":
+            rows = _full_quantum_candidates(conn)
+        else:
+            rows = find_unresolved_commands(conn)
+        if scope == "full":
+            all_rows = rows
+            rows = all_rows[:1]
+            if len(all_rows) > 1:
+                summary["inflight_quantum_remaining"] = True
+            summary["inflight_quantum"] = (
+                str(rows[0].get("command_id") or "") if rows else None
+            )
         ps["scanned"] = len(rows)
         for row in rows:
             try:
@@ -23783,6 +23925,12 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
     _db_pass("terminal_positive_entry_projection_repair",
              reconcile_terminal_positive_entry_projection_repairs,
              "terminal_positive_entry_projection_repair")
+    _client_pass(
+        "terminal_exit_partial_remainders",
+        reconcile_partial_remainders,
+        "terminal_exit_partial_remainders",
+        terminal_exit_only=True,
+    )
     _db_pass("edli_pre_venue_unknown_thresholds",
              _reconcile_edli_pre_venue_unknown_thresholds, "edli_pre_venue_unknown_thresholds")
     _db_pass("venue_command_absence_sync",
@@ -23834,6 +23982,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         reconcile_pending_exit_terminal_order_releases,
         "pending_exit_terminal_order_releases",
     )
+    _db_pass(
+        "restart_no_venue_exit_retry_projection",
+        reconcile_restart_no_venue_exit_retry_projections,
+        "restart_no_venue_exit_retry_projection",
+    )
 
     from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
 
@@ -23847,3 +24000,13 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
     _db_pass("stale_rebalance_entry_leases",
              release_stale_rebalance_entry_leases, "stale_rebalance_entry_leases",
              observed_at=started_at)
+    if scope == "full" and summary.pop("inflight_quantum_remaining", False):
+        summary["db_budget_deferred"] = True
+        summary["db_budget_deferred_at"] = "inflight_quantum"
+        summary["db_budget_deferred_count"] = 1
+        summary["deferred_full_sweep"] = True
+    if scope == "full" and (
+        summary.get("db_lock_deferred") or summary.get("db_budget_deferred")
+    ):
+        summary["deferred_full_sweep"] = True
+    summary["scope"] = scope
