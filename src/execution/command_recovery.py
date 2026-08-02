@@ -42,7 +42,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import replace
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -93,6 +93,11 @@ _LIVE_TICK_IDENTITY_BOUND_MAX_CANDIDATES = 4
 _LIVE_TICK_IDENTITY_BOUND_POINT_READ_BUDGET_SECONDS = 20.0
 _LIVE_TICK_IDENTITY_BOUND_ROTATION_SECONDS = 60
 _FULL_SWEEP_BUDGET_SECONDS = 45.0
+# Full recovery is deliberately background work.  Keep each matched-fact apply
+# lease to one command so a monitor that registers mid-sweep can take the next
+# writer turn instead of waiting for a historical debt scan to finish.
+_FULL_BACKGROUND_RECOVERY_QUANTUM_COMMANDS = 1
+_FULL_BACKGROUND_RECOVERY_QUANTUM_ROTATION_SECONDS = 60
 _RESTART_ACCOUNT_TRUTH_DEADLINE_ENV = (
     "ZEUS_RESTART_RECOVERY_ACCOUNT_TRUTH_DEADLINE_SECONDS"
 )
@@ -153,6 +158,44 @@ def _full_sweep_budget_seconds() -> float:
     if not value > 0.0:
         value = _FULL_SWEEP_BUDGET_SECONDS
     return min(value, 50.0)
+
+
+def _full_background_recovery_quantum_slot() -> int:
+    """Return a crash-stable slot for full-recovery apply quanta."""
+
+    return int(time.time() // _FULL_BACKGROUND_RECOVERY_QUANTUM_ROTATION_SECONDS)
+
+
+def _full_background_recovery_command_id_batches(
+    command_ids: Sequence[str],
+    *,
+    rotation_slot: int | None = None,
+) -> tuple[frozenset[str], ...]:
+    """Split stable matched-fact ids into resumable background writer turns.
+
+    A completed batch commits before its lease closes.  If a monitor registers
+    before the next batch, BACKGROUND_RECOVERY defers there; the untouched ids
+    remain canonical candidates.  The wall-clock rotation prevents a restart
+    from repeatedly beginning at the same stayed historical row.
+    """
+
+    ordered_ids = tuple(dict.fromkeys(
+        command_id for command_id in command_ids if command_id
+    ))
+    if not ordered_ids:
+        return ()
+    batch_size = _FULL_BACKGROUND_RECOVERY_QUANTUM_COMMANDS
+    slot = (
+        _full_background_recovery_quantum_slot()
+        if rotation_slot is None
+        else max(0, int(rotation_slot))
+    )
+    start = (slot * batch_size) % len(ordered_ids)
+    rotated_ids = ordered_ids[start:] + ordered_ids[:start]
+    return tuple(
+        frozenset(rotated_ids[index:index + batch_size])
+        for index in range(0, len(rotated_ids), batch_size)
+    )
 
 
 def _identity_bound_point_order_read_worker(
@@ -2062,6 +2105,7 @@ def _trade_fact_count(conn: sqlite3.Connection, command_id: str) -> int:
 def _latest_matched_order_fact_candidates(
     conn: sqlite3.Connection,
     *,
+    command_ids: Collection[str] | None = None,
     skip_stale_terminal_zero: bool = False,
     skip_projected_hard_terminal: bool = False,
     now: datetime | None = None,
@@ -2085,6 +2129,22 @@ def _latest_matched_order_fact_candidates(
     command_placeholders = ", ".join("?" for _ in command_states)
     fact_placeholders = ", ".join("?" for _ in fact_states)
     source_placeholders = ", ".join("?" for _ in sources)
+    target_command_ids = tuple(
+        sorted(
+            {
+                str(command_id).strip()
+                for command_id in (command_ids or ())
+                if str(command_id).strip()
+            }
+        )
+    )
+    target_command_filter = (
+        "AND command_id IN ("
+        + ", ".join("?" for _ in target_command_ids)
+        + ")"
+        if target_command_ids
+        else ""
+    )
     trade_fact_exists = (
         """EXISTS (
                 SELECT 1
@@ -2109,6 +2169,7 @@ def _latest_matched_order_fact_candidates(
              WHERE intent_kind IN ('ENTRY', 'EXIT')
                AND state IN ({command_placeholders})
                AND venue_order_id IS NOT NULL
+               {target_command_filter}
         ),
     """
     sql = (
@@ -2130,6 +2191,8 @@ def _latest_matched_order_fact_candidates(
             {trade_fact_exists} AS existing_fill_trade_fact,
             {position_phase} AS position_phase
           FROM venue_commands cmd
+          JOIN matched_candidate_commands candidate_command
+            ON candidate_command.command_id = cmd.command_id
           JOIN canonical_order_truth fact
             ON fact.command_id = cmd.command_id
           LEFT JOIN venue_submission_envelopes env
@@ -2140,11 +2203,18 @@ def _latest_matched_order_fact_candidates(
            AND fact.state IN ({fact_placeholders})
            AND fact.source IN ({source_placeholders})
            AND cmd.venue_order_id IS NOT NULL
+         ORDER BY cmd.updated_at, cmd.command_id
         """
     )
     rows = conn.execute(
         sql,
-        (*command_states, *command_states, *fact_states, *sources),
+        (
+            *command_states,
+            *target_command_ids,
+            *command_states,
+            *fact_states,
+            *sources,
+        ),
     ).fetchall()
     candidates: list[dict] = []
     terminal_no_fill_fact_states = {"CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"}
@@ -10260,6 +10330,7 @@ def reconcile_matched_order_facts(
     client,
     *,
     command_id: str | None = None,
+    command_ids: Collection[str] | None = None,
     skip_stale_terminal_zero: bool = False,
     skip_projected_hard_terminal: bool = False,
 ) -> dict:
@@ -10269,12 +10340,23 @@ def reconcile_matched_order_facts(
     get_order = getattr(client, "get_order", None)
     trade_payloads_cache: list[dict] | None = None
     target_command_id = str(command_id or "").strip()
+    target_command_ids = {
+        str(candidate_id).strip()
+        for candidate_id in (command_ids or ())
+        if str(candidate_id).strip()
+    }
+    if target_command_id:
+        target_command_ids.add(target_command_id)
     for row in _latest_matched_order_fact_candidates(
         conn,
+        command_ids=target_command_ids or None,
         skip_stale_terminal_zero=skip_stale_terminal_zero,
         skip_projected_hard_terminal=skip_projected_hard_terminal,
     ):
-        if target_command_id and str(row.get("command_id") or "") != target_command_id:
+        if (
+            target_command_ids
+            and str(row.get("command_id") or "") not in target_command_ids
+        ):
             continue
         summary["scanned"] += 1
         command_id = str(row.get("command_id") or "")
@@ -23908,7 +23990,31 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
                  reconcile_local_orphan_no_fill_findings, "local_orphan_no_fill_findings")
     _client_pass("terminal_point_orders",
                  reconcile_terminal_point_orders, "terminal_point_orders")
-    _client_pass("matched_order_facts", reconcile_matched_order_facts, "matched_order_facts")
+    if scope == "full":
+        with open_tracked(
+            read_conn_factory,
+            label="recovery.matched_order_facts:quantum_snapshot",
+        ) as conn:
+            matched_command_ids = [
+                str(row.get("command_id") or "")
+                for row in _latest_matched_order_fact_candidates(conn)
+            ]
+        for command_ids in _full_background_recovery_command_id_batches(
+            matched_command_ids,
+        ):
+            _client_pass(
+                "matched_order_facts",
+                reconcile_matched_order_facts,
+                "matched_order_facts",
+                command_ids=command_ids,
+            )
+            if (
+                summary.get("db_lock_deferred")
+                or summary.get("db_budget_deferred")
+            ):
+                break
+    else:
+        _client_pass("matched_order_facts", reconcile_matched_order_facts, "matched_order_facts")
     _db_pass(
         "filled_exit_trade_fact_tx_repair",
         reconcile_filled_exit_trade_fact_tx_repairs,

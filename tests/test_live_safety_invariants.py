@@ -14365,10 +14365,10 @@ def test_gate_cleanup_releases_file_and_process_after_turnstile_fault(
     assert coordinator._process_locks[path].released is True
 
 
-def test_full_recovery_quantum_is_one_row_and_specialized_debts_stay_in_full_lane(
+def test_full_recovery_quantum_yields_between_large_matched_fact_batches(
     monkeypatch,
 ):
-    """Full inflight work is one row; specialized full debts remain scheduled."""
+    """A full matched-fact sweep is crash-stable one-command writer turns."""
     from src.execution import command_recovery
 
     first = {"command_id": "a", "updated_at": "2026-08-01T00:00:00Z"}
@@ -14379,6 +14379,21 @@ def test_full_recovery_quantum_is_one_row_and_specialized_debts_stay_in_full_lan
         lambda _conn: [second, first],
     )
     assert [row["command_id"] for row in command_recovery._full_quantum_candidates(None)] == ["a", "b"]
+
+    command_ids = [f"command-{index:03d}" for index in range(849)]
+    first_batches = command_recovery._full_background_recovery_command_id_batches(
+        command_ids,
+        rotation_slot=0,
+    )
+    resumed_batches = command_recovery._full_background_recovery_command_id_batches(
+        command_ids,
+        rotation_slot=1,
+    )
+    assert len(first_batches) == len(command_ids)
+    assert all(len(batch) == 1 for batch in first_batches)
+    assert first_batches[0] == {"command-000"}
+    assert resumed_batches[0] == {"command-001"}
+    assert set().union(*first_batches) == set(command_ids)
 
     source = (ROOT / "src" / "execution" / "command_recovery.py").read_text(encoding="utf-8")
     inflight_source = source[source.index("def _scan_inflight"): source.index("def _apply_inflight")]
@@ -14393,7 +14408,208 @@ def test_full_recovery_quantum_is_one_row_and_specialized_debts_stay_in_full_lan
         "closed_shift_bin_exit_leases",
         "stale_rebalance_entry_leases",
     ))
+    full_matched_source = source[
+        source.index('if scope == "full":\n        with open_tracked(\n            read_conn_factory,\n            label="recovery.matched_order_facts:quantum_snapshot",'):
+        source.index(
+            '    _db_pass(\n        "filled_exit_trade_fact_tx_repair",',
+            source.index('if scope == "full":\n        with open_tracked(\n            read_conn_factory,\n            label="recovery.matched_order_facts:quantum_snapshot",'),
+        )
+    ]
+    assert "_full_background_recovery_command_id_batches" in full_matched_source
+    assert "command_ids=command_ids" in full_matched_source
     assert "set_progress_handler" not in source[source.index("def _recovery_read_conn_factory"): source.index("def _run_recovery_pass_with_lock_policy")]
+
+
+def test_full_recovery_quantum_releases_background_lease_to_registered_monitor(
+    tmp_path,
+    monkeypatch,
+):
+    """One real 849-row matched-fact quantum releases to a registered monitor."""
+    from src.execution import command_recovery
+    from src.state import write_coordinator as coordinator_module
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WritePriority
+
+    db_path = tmp_path / "full-recovery-quantum.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.executescript(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                envelope_id TEXT,
+                position_id TEXT,
+                intent_kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                venue_order_id TEXT,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE venue_submission_envelopes (
+                envelope_id TEXT PRIMARY KEY,
+                order_type TEXT
+            );
+            CREATE TABLE venue_order_facts (
+                fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                venue_order_id TEXT NOT NULL,
+                command_id TEXT NOT NULL,
+                state TEXT NOT NULL,
+                remaining_size TEXT,
+                matched_size TEXT,
+                source TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                local_sequence INTEGER NOT NULL,
+                raw_payload_json TEXT
+            );
+            CREATE INDEX idx_quantum_order_facts_command
+                ON venue_order_facts(command_id, local_sequence);
+            CREATE TABLE monitor_writes(owner TEXT PRIMARY KEY);
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO venue_commands (
+                command_id, envelope_id, position_id, intent_kind,
+                state, venue_order_id, updated_at
+            ) VALUES (?, NULL, ?, 'ENTRY', 'ACKED', ?, ?)
+            """,
+            [
+                (
+                    f"command-{index:03d}",
+                    f"position-{index:03d}",
+                    f"order-{index:03d}",
+                    f"2026-08-02T00:{index // 60:02d}:{index % 60:02d}+00:00",
+                )
+                for index in range(849)
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO venue_order_facts (
+                venue_order_id, command_id, state, remaining_size,
+                matched_size, source, observed_at, local_sequence,
+                raw_payload_json
+            ) VALUES (?, ?, 'MATCHED', '1', '1', 'REST', ?, 1, '{}')
+            """,
+            [
+                (
+                    f"order-{index:03d}",
+                    f"command-{index:03d}",
+                    f"2026-08-02T00:{index // 60:02d}:{index % 60:02d}+00:00",
+                )
+                for index in range(849)
+            ],
+        )
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+    monkeypatch.setattr(
+        coordinator_module,
+        "default_runtime_write_coordinator",
+        lambda: coordinator,
+    )
+
+    background_query_started = threading.Event()
+    monitor_registered = threading.Event()
+    traced_sql = []
+    progress_calls = []
+
+    def factory(**_kwargs):
+        conn = sqlite3.connect(db_path, timeout=5)
+        conn.row_factory = sqlite3.Row
+        conn.set_trace_callback(traced_sql.append)
+
+        def slow_full_scan_progress():
+            progress_calls.append(1)
+            background_query_started.set()
+            if not monitor_registered.wait(timeout=2):
+                return 1
+            time.sleep(0.00005)
+            return 0
+
+        conn.set_progress_handler(slow_full_scan_progress, 10)
+        return conn
+
+    factory.requires_writer_flocks = True
+    factory.supports_nonblocking_flocks = False
+    priority_factory = command_recovery._recovery_priority_conn_factory(
+        factory,
+        scope="full",
+    )
+    monitor_acquired = threading.Event()
+    acquired_after = []
+    registration_at = []
+    background_summary = []
+    thread_errors = []
+    original_register = coordinator._acquire_monitor_waiter_reservation
+
+    def register_monitor(*args, **kwargs):
+        fd = original_register(*args, **kwargs)
+        registration_at.append(time.monotonic())
+        monitor_registered.set()
+        return fd
+
+    monkeypatch.setattr(
+        coordinator,
+        "_acquire_monitor_waiter_reservation",
+        register_monitor,
+    )
+
+    def background_quantum():
+        try:
+            with priority_factory() as conn:
+                background_summary.append(
+                    command_recovery.reconcile_matched_order_facts(
+                        conn,
+                        SimpleNamespace(),
+                        command_ids={"command-848"},
+                    )
+                )
+        except BaseException as exc:  # pragma: no cover - asserted below.
+            thread_errors.append(exc)
+
+    def monitor_append():
+        try:
+            assert background_query_started.wait(timeout=2)
+            with coordinator.lease(
+                (DBIdentity.TRADE,),
+                owner="monitor-after-background-quantum",
+                priority=WritePriority.MONITOR,
+                deadline_ms=500,
+            ):
+                with sqlite3.connect(db_path, timeout=0.5) as conn:
+                    conn.execute(
+                        "INSERT INTO monitor_writes(owner) VALUES ('monitor')"
+                    )
+                acquired_after.append(time.monotonic())
+                monitor_acquired.set()
+        except BaseException as exc:  # pragma: no cover - asserted below.
+            thread_errors.append(exc)
+
+    background = threading.Thread(target=background_quantum)
+    monitor = threading.Thread(target=monitor_append)
+    background.start()
+    assert background_query_started.wait(timeout=2)
+    monitor.start()
+    assert monitor_registered.wait(timeout=2)
+    assert monitor_acquired.wait(timeout=0.15)
+    background.join(timeout=2)
+    monitor.join(timeout=2)
+    assert not background.is_alive()
+    assert not monitor.is_alive()
+    assert thread_errors == []
+    assert background_summary == [
+        {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+    ]
+    assert acquired_after[0] - registration_at[0] < 0.15
+    assert len(progress_calls) < 1_000
+    candidate_sql = [
+        statement
+        for statement in traced_sql
+        if "matched_candidate_commands AS" in statement
+    ]
+    assert len(candidate_sql) == 1
+    assert "command_id IN ('command-848')" in candidate_sql[0]
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT owner FROM monitor_writes").fetchall() == [
+            ("monitor",)
+        ]
 
 
 def test_monitor_hold_append_failure_has_no_hold_artifact_or_monitor_count(monkeypatch):
