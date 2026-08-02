@@ -478,9 +478,9 @@ class TestRCPV2RowCountSensor:
         self._patch_status_pulse_projection_only(status_summary_module, status_path, monkeypatch)
 
         incoming = {
-            "mode": "exit_monitor",
             "started_at": "2026-08-02T20:40:00+00:00",
             "completed_at": "2026-08-02T20:40:01+00:00",
+            "held_monitor_candidates": 2,
             "monitors": 2,
             "exits": 0,
         }
@@ -523,8 +523,8 @@ class TestRCPV2RowCountSensor:
         self._patch_status_pulse_projection_only(status_summary_module, status_path, monkeypatch)
 
         status_summary_module.write_cycle_pulse({
-            "mode": "exit_monitor",
             "targeted_exit_monitor": True,
+            "held_monitor_candidates": 1,
             "monitors": 1,
             "monitoring_error": "TARGETED_MONITOR_ONLY",
         })

@@ -141,17 +141,15 @@ _BUSINESS_CYCLE_KEYS = _BUSINESS_CYCLE_KEYS_PRESERVED_ON_AUX_PULSE - {
 
 
 def _is_full_book_exit_monitor_cycle(cycle: dict) -> bool:
-    return (
-        str(cycle.get("mode") or "") == "exit_monitor"
-        and not bool(cycle.get("targeted_exit_monitor"))
+    if bool(cycle.get("targeted_exit_monitor")):
+        return False
+    return str(cycle.get("mode") or "") == "exit_monitor" or (
+        "held_monitor_candidates" in cycle and "monitors" in cycle
     )
 
 
 def _is_targeted_exit_monitor_cycle(cycle: dict) -> bool:
-    return (
-        str(cycle.get("mode") or "") == "exit_monitor"
-        and bool(cycle.get("targeted_exit_monitor"))
-    )
+    return bool(cycle.get("targeted_exit_monitor"))
 
 
 def _merge_full_book_exit_monitor_cycle(prior_cycle: dict, incoming_cycle: dict) -> dict:
