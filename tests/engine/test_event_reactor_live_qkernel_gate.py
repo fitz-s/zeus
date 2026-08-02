@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-08-01
+# Last reused/audited: 2026-08-02
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -3803,6 +3803,89 @@ def test_live_entry_day0_gate_accepts_live_observation_authority_with_qkernel():
             min_entry_price=0.10,
             qkernel_execution_economics=_day0_qkernel_cert(),
         )
+    )
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+def test_live_entry_day0_remaining_day_v1_is_retired_for_both_sides(direction):
+    with pytest.raises(
+        ValueError,
+        match=(
+            "LIVE_ENTRY_DAY0_REMAINING_DAY_AUTHORITY_RETIRED:"
+            "authority=day0_remaining_day_global_probability_v1"
+        ),
+    ):
+        _assert_live_entry_submit_authority(
+            _day0_payload(
+                **_day0_probability_fields(),
+                probability_authority="day0_remaining_day_global_probability_v1",
+                selection_authority_applied="qkernel_spine",
+                direction=direction,
+                strategy_key="day0_nowcast_entry",
+                candidate_bin_id="bin-1",
+                qkernel_execution_economics=_day0_qkernel_cert(),
+            )
+        )
+
+
+def test_live_entry_day0_replacement_0_1_authority_remains_accepted():
+    _assert_live_entry_submit_authority(
+        _day0_payload(
+            probability_authority="replacement_0_1",
+            _edli_q_source="replacement_0_1",
+            selection_authority_applied="qkernel_spine",
+            direction="buy_yes",
+            strategy_key="day0_nowcast_entry",
+            candidate_bin_id="bin-1",
+            q_live=0.70,
+            q_lcb_5pct=0.60,
+            qkernel_execution_economics=_qkernel_cert(),
+        )
+    )
+
+
+def test_live_entry_day0_absorbing_hard_fact_authority_remains_accepted():
+    payload = _day0_payload(
+        **_day0_probability_fields(),
+        probability_authority="day0_absorbing_hard_fact",
+        selection_authority_applied="qkernel_spine",
+        direction="buy_yes",
+        strategy_key="day0_nowcast_entry",
+        candidate_bin_id="bin-1",
+        qkernel_execution_economics=_day0_qkernel_cert(),
+    )
+    payload["day0_probability_authority"][
+        "probability_authority"
+    ] = "day0_absorbing_hard_fact"
+
+    _assert_live_entry_submit_authority(payload)
+
+
+def test_retired_day0_entry_authority_does_not_gate_held_monitor_surface(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from src.engine import monitor_refresh
+
+    sentinel = (0.42, object(), True)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "_day0_absorbing_hard_fact_overlay",
+        lambda **_kwargs: sentinel,
+    )
+    monkeypatch.setattr(
+        era,
+        "_assert_live_entry_submit_authority",
+        lambda _payload: pytest.fail("held monitor called live entry authority"),
+    )
+
+    assert (
+        monitor_refresh.monitor_probability_refresh(
+            object(),
+            conn=None,
+            city=None,
+            target_d=None,
+        )
+        is sentinel
     )
 
 

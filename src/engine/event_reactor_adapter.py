@@ -2914,6 +2914,9 @@ _FORECAST_DECISION_EVENT_TYPES: frozenset[str] = frozenset(
 # running extreme). Module-level so qkernel can feed the observed boundary into the
 # same family optimizer while the live adapter still applies Day0 authority guards.
 _DAY0_LANE_EVENT_TYPES: frozenset[str] = frozenset({"DAY0_EXTREME_UPDATED"})
+_DAY0_REMAINING_DAY_GLOBAL_PROBABILITY_AUTHORITY = (
+    "day0_remaining_day_global_probability_v1"
+)
 _DAY0_MAKER_ONLY_REST_POLICY = "REST_DAY0_MAKER_ONLY"
 _DAY0_MAKER_ONLY_TAKER_FORBIDDEN_REASON = "DAY0_MAKER_ONLY"
 
@@ -18738,6 +18741,26 @@ def _assert_live_entry_submit_authority(actionable_payload: Mapping[str, object]
     """Fail closed unless the event's live entry lane has its own executable authority."""
 
     event_type = str(actionable_payload.get("event_type") or "").strip()
+    probability_authority = str(
+        actionable_payload.get("probability_authority") or ""
+    ).strip()
+    if (
+        event_type in _DAY0_LANE_EVENT_TYPES
+        and probability_authority
+        == _DAY0_REMAINING_DAY_GLOBAL_PROBABILITY_AUTHORITY
+    ):
+        # INV-47:
+        # SCOPE = new live entries whose exact probability_authority is
+        # day0_remaining_day_global_probability_v1.
+        # DRAIN = recompute under a separately versioned causal
+        # Day0JointPosterior with persisted input/scenario identity and
+        # preregistered walk-forward evidence; old v1 never drains itself.
+        # RESET = the payload certificate carries a different qualified
+        # authority/version; no flag/time/data-count auto-reset.
+        raise ValueError(
+            "LIVE_ENTRY_DAY0_REMAINING_DAY_AUTHORITY_RETIRED:"
+            f"authority={probability_authority}"
+        )
     if event_type in _FORECAST_DECISION_EVENT_TYPES or (
         event_type in _DAY0_LANE_EVENT_TYPES
         and _uses_replacement_probability_authority(actionable_payload)
