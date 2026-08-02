@@ -2534,6 +2534,236 @@ def test_harvester_partial_exit_debt_rolls_back_whole_settlement_event(
     ).fetchone()[0] == 0
 
 
+def test_resolver_partial_exit_debt_rolls_back_whole_settlement_row(
+    conn, monkeypatch, caplog
+):
+    """A later debt must not partially settle an earlier position in the row."""
+    from src.execution import harvester_pnl_resolver
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.portfolio import PortfolioState, Position
+    from src.state.projection import upsert_position_current
+
+    first = Position(
+        trade_id="resolver-row-first",
+        market_id="resolver-row-market",
+        city="Paris",
+        cluster="Paris",
+        target_date="2026-08-03",
+        bin_label="30C",
+        direction="buy_yes",
+        strategy_key="center_buy",
+        size_usd=5.0,
+        entry_price=0.50,
+        shares=10.0,
+        cost_basis_usd=5.0,
+        state="holding",
+        token_id="resolver-row-first-token",
+        no_token_id="resolver-row-first-no-token",
+        condition_id="resolver-row-first-condition",
+        env="live",
+        last_monitor_at=_NOW.isoformat(),
+    )
+    second = replace(
+        first,
+        trade_id="resolver-row-second",
+        market_id="resolver-row-market-2",
+        token_id="resolver-row-second-token",
+        no_token_id="resolver-row-second-no-token",
+        condition_id="resolver-row-second-condition",
+    )
+    portfolio = PortfolioState(positions=[first, second])
+    for position in portfolio.positions:
+        upsert_position_current(conn, build_position_current_projection(position))
+    conn.execute(
+        """INSERT INTO position_events (
+               event_id, position_id, event_version, sequence_no, event_type,
+               occurred_at, phase_before, phase_after, strategy_key,
+               source_module, payload_json, order_id, caused_by, env
+           ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, 'pending_exit', 'active',
+                         'center_buy', 'tests.test_exit_safety', ?, ?,
+                     'partial_exit_fill', 'live')""",
+        (
+            "resolver-row-second:legacy-partial",
+            second.trade_id,
+            _NOW.isoformat(),
+            json.dumps(
+                {
+                    "semantic_event": "CAPITAL_REDUCTION_FILLED",
+                    "economic_fill_identity": "resolver-row-debt-fill-1",
+                    "filled_shares": "1",
+                    "filled_notional_usd": "0.6",
+                    "allocated_cost_basis_usd": "0.5",
+                    "realized_pnl_delta_usd": "0.1",
+                    "remaining_shares": "9",
+                    "remaining_cost_basis_usd": "4.5",
+                    "fill_price": "0.6",
+                    "order_id": "resolver-row-debt-order",
+                },
+                sort_keys=True,
+            ),
+            "resolver-row-debt-order",
+        ),
+    )
+    conn.execute(
+        """INSERT INTO position_events (
+               event_id, position_id, event_version, sequence_no, event_type,
+               occurred_at, phase_before, phase_after, strategy_key,
+               source_module, payload_json, order_id, caused_by, env
+           ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, 'pending_exit', 'active',
+                     'center_buy', 'tests.test_exit_safety', '{}', NULL,
+                     'resolver-row-seed', 'live')""",
+        (
+            "resolver-row-first:seed",
+            first.trade_id,
+            _NOW.isoformat(),
+        ),
+    )
+    conn.commit()
+
+    forecasts_conn = sqlite3.connect(":memory:")
+    forecasts_conn.row_factory = sqlite3.Row
+    forecasts_conn.execute(
+        """CREATE TABLE settlement_outcomes (
+               city TEXT, target_date TEXT, market_slug TEXT, winning_bin TEXT,
+               temperature_metric TEXT, authority TEXT, settlement_source TEXT,
+               settlement_value REAL, settled_at TEXT
+           )"""
+    )
+    forecasts_conn.execute(
+        """INSERT INTO settlement_outcomes (
+               city, target_date, market_slug, winning_bin, temperature_metric,
+               authority, settlement_source, settlement_value, settled_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            "Paris", "2026-08-03", "paris-high-2026-08-03", "30C", "high",
+            "VERIFIED", "wu_icao", 30.0, "2026-08-03T18:00:00Z",
+        ),
+    )
+    forecasts_conn.commit()
+
+    class Tracker:
+        def __init__(self):
+            self.settlement_count = 0
+
+        def record_settlement(self, _position):
+            self.settlement_count += 1
+
+    tracker = Tracker()
+    monkeypatch.setattr("src.state.portfolio.load_portfolio", lambda: portfolio)
+    monkeypatch.setattr("src.state.portfolio.save_portfolio", lambda *a, **kw: None)
+    monkeypatch.setattr("src.state.strategy_tracker.get_tracker", lambda: tracker)
+    monkeypatch.setattr("src.state.strategy_tracker.save_tracker", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "src.state.canonical_write.commit_then_export",
+        lambda _conn, *, db_op, json_exports: db_op(),
+    )
+
+    try:
+        first_attempt = harvester_pnl_resolver.resolve_pnl_for_settled_markets(
+            conn, forecasts_conn
+        )
+
+        assert first_attempt["positions_settled"] == 0
+        assert first_attempt["decision_log_rows_written"] == 0
+        assert first_attempt["errors"] == 1
+        assert any(
+            "partial EXIT residual shares conflict" in record.getMessage()
+            for record in caplog.records
+        )
+        assert tracker.settlement_count == 0
+        assert [position.state for position in portfolio.positions] == [
+            "holding", "holding"
+        ]
+        assert portfolio.ignored_tokens == []
+        for trade_id in (first.trade_id, second.trade_id):
+            assert conn.execute(
+                "SELECT phase FROM position_current WHERE position_id = ?",
+                (trade_id,),
+            ).fetchone()[0] == "active"
+            assert conn.execute(
+                "SELECT COUNT(*) FROM position_events "
+                "WHERE position_id = ? AND event_type = 'SETTLED'",
+                (trade_id,),
+            ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM decision_log WHERE mode = 'settlement'"
+        ).fetchone()[0] == 0
+
+        conn.execute(
+            """INSERT INTO position_events (
+                   event_id, position_id, event_version, sequence_no, event_type,
+                   occurred_at, phase_before, phase_after, strategy_key,
+                   source_module, payload_json, order_id, caused_by, env
+               ) VALUES (?, ?, 1, 2, 'MONITOR_REFRESHED', ?, 'pending_exit', 'active',
+                             'center_buy', 'tests.test_exit_safety', ?, ?,
+                         'partial_exit_fill', 'live')""",
+            (
+                "resolver-row-second:canonical-correction",
+                second.trade_id,
+                _NOW.isoformat(),
+                json.dumps(
+                    {
+                        "semantic_event": "CAPITAL_REDUCTION_FILLED",
+                        "economic_fill_identity": "resolver-row-debt-fill-2",
+                        "filled_shares": "0.1",
+                        "filled_notional_usd": "0.06",
+                        "allocated_cost_basis_usd": "0.05",
+                        "realized_pnl_delta_usd": "0.01",
+                        "remaining_shares": "10",
+                        "remaining_cost_basis_usd": "5",
+                        "fill_price": "0.6",
+                        "order_id": "resolver-row-debt-order-2",
+                    },
+                    sort_keys=True,
+                ),
+                "resolver-row-debt-order-2",
+            ),
+        )
+        conn.commit()
+
+        retry = harvester_pnl_resolver.resolve_pnl_for_settled_markets(
+            conn, forecasts_conn
+        )
+        assert retry["positions_settled"] == 2
+        assert retry["decision_log_rows_written"] == 2
+        assert retry["errors"] == 0
+        assert tracker.settlement_count == 2
+        for trade_id in (first.trade_id, second.trade_id):
+            phase_row = conn.execute(
+                "SELECT phase FROM position_current WHERE position_id = ?",
+                (trade_id,),
+            ).fetchone()
+            assert phase_row[0] == "settled", (
+                trade_id,
+                phase_row,
+                conn.execute(
+                    "SELECT event_type, phase_before, phase_after FROM position_events "
+                    "WHERE position_id = ? ORDER BY sequence_no",
+                    (trade_id,),
+                ).fetchall(),
+            )
+            assert conn.execute(
+                "SELECT COUNT(*) FROM position_events "
+                "WHERE position_id = ? AND event_type = 'SETTLED'",
+                (trade_id,),
+            ).fetchone()[0] == 1
+        settlement_logs = conn.execute(
+            "SELECT artifact_json FROM decision_log WHERE mode = 'settlement'"
+        ).fetchall()
+        assert len(settlement_logs) == 1
+        assert len(json.loads(settlement_logs[0][0])["settlements"]) == 2
+
+        exactly_once = harvester_pnl_resolver.resolve_pnl_for_settled_markets(
+            conn, forecasts_conn
+        )
+        assert exactly_once["status"] == "awaiting_truth_writer"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM decision_log WHERE mode = 'settlement'"
+        ).fetchone()[0] == 1
+    finally:
+        forecasts_conn.close()
+
+
 def test_confirmed_partial_reduction_trade_fact_reopens_exact_remaining_claim(conn):
     from src.execution import exit_lifecycle
     from src.state.portfolio import PortfolioState, Position

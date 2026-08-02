@@ -22,6 +22,7 @@ Callers pass get_forecasts_connection() as the second argument.
 
 from __future__ import annotations
 
+import copy
 import logging
 
 logger = logging.getLogger(__name__)
@@ -363,7 +364,7 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
     positions_settled = 0
     errors = 0
 
-    for row in rows:
+    for row_index, row in enumerate(rows):
         city_name = _row_value(row, "city", 0, "")
         target_date = _row_value(row, "target_date", 1, "")
         market_slug = _row_value(row, "market_slug", 2, "")
@@ -410,6 +411,19 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
             )
             continue
 
+        # A settlement row is one economic unit even when it matches multiple
+        # positions.  _settle_positions() has a per-position savepoint for
+        # partial-exit economics, but that is too narrow: a later matching
+        # position can still fail after an earlier one has closed.  Keep the
+        # database and all mutable resolver state at the same row boundary.
+        portfolio_snapshot = copy.deepcopy(portfolio.__dict__)
+        tracker_snapshot = copy.deepcopy(getattr(tracker, "__dict__", {}))
+        settlement_records_start = len(settlement_records)
+        positions_settled_before_row = positions_settled
+        tracker_dirty_before_row = tracker_dirty
+        row_savepoint = f"harvester_pnl_settlement_row_{row_index}"
+        trade_conn.execute(f"SAVEPOINT {row_savepoint}")
+        row_failed = False
         try:
             n_settled = _settle_positions(
                 trade_conn,
@@ -440,11 +454,27 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
             if n_settled > 0:
                 tracker_dirty = True
         except Exception as exc:
+            row_failed = True
+            trade_conn.execute(f"ROLLBACK TO SAVEPOINT {row_savepoint}")
+            trade_conn.execute(f"RELEASE SAVEPOINT {row_savepoint}")
+            portfolio.__dict__.clear()
+            portfolio.__dict__.update(portfolio_snapshot)
+            tracker.__dict__.clear()
+            tracker.__dict__.update(tracker_snapshot)
+            del settlement_records[settlement_records_start:]
+            positions_settled = positions_settled_before_row
+            tracker_dirty = tracker_dirty_before_row
             logger.error(
-                "harvester_pnl_resolver: _settle_positions failed for %s %s: %s",
-                city_name, target_date, exc,
+                "harvester_pnl_resolver: rolled back settlement row %s for %s %s: %s",
+                row_index,
+                city_name,
+                target_date,
+                exc,
             )
             errors += 1
+        finally:
+            if not row_failed:
+                trade_conn.execute(f"RELEASE SAVEPOINT {row_savepoint}")
 
     # Write decision_log if we have settlement records.
     decision_log_rows_written = 0
