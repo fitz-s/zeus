@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-07-21; last_reused=2026-07-21
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-02; last_reused=2026-08-02
 # Purpose: Command recovery loop for unresolved venue command side effects.
 # Reuse: Run when command recovery, venue order payload normalization, or unknown side-effect resolution changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
@@ -13503,17 +13503,13 @@ def _release_exit_after_terminal_no_fill(
     if not position_id or not command_id:
         return False
     current = conn.execute(
-        """
-        SELECT phase, strategy_key, order_id
-          FROM position_current
-         WHERE position_id = ?
-         LIMIT 1
-        """,
+        "SELECT * FROM position_current WHERE position_id = ? LIMIT 1",
         (position_id,),
     ).fetchone()
     if current is None:
         return False
-    phase_before = str(current[0] or "")
+    current_row = _dict_row(current)
+    phase_before = str(current_row.get("phase") or "")
     if phase_before not in {"active", "day0_window", "pending_exit"}:
         return False
     phase_after = (
@@ -13523,6 +13519,34 @@ def _release_exit_after_terminal_no_fill(
     )
     if phase_after is None:
         return False
+    position_fields = dict(current_row)
+    position_fields["position_id"] = position_id
+    position_fields.setdefault("trade_id", position_id)
+    position = SimpleNamespace(**position_fields)
+    from src.execution.exit_lifecycle import (
+        _held_sell_reauction_obligation,
+        _is_canonical_global_maker_rest_exit,
+    )
+
+    global_maker_rest = _is_canonical_global_maker_rest_exit(
+        conn,
+        position,
+        order_id=venue_order_id,
+        command_id=command_id,
+    )
+    obligation: dict[str, object] = {}
+    if global_maker_rest:
+        obligation = _held_sell_reauction_obligation(
+            position,
+            generation_material={
+                "command_id": command_id,
+                "venue_order_id": venue_order_id,
+                "venue_order_fact_id": order_fact_id,
+                "release_reason": "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+            },
+        )
+        if not obligation:
+            return False
     event_key = f"{position_id}:exit_terminal_no_fill:{command_id}"
     existing = conn.execute(
         "SELECT 1 FROM position_events WHERE idempotency_key = ? LIMIT 1",
@@ -13541,6 +13565,19 @@ def _release_exit_after_terminal_no_fill(
             "phase_after": phase_after,
             "terminal_order_fact": dict(terminal_payload),
         }
+        event_type = "EXIT_ORDER_VOIDED"
+        if global_maker_rest:
+            event_type = "EXIT_RETRY_RELEASED"
+            payload.update(
+                {
+                    "release_reason": "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+                    "error": (
+                        "global_sell_exit_terminal_no_fill_reauction:"
+                        "venue_terminal_no_fill"
+                    ),
+                    "held_sell_reauction_obligation": obligation,
+                }
+            )
         conn.execute(
             """
             INSERT INTO position_events (
@@ -13548,16 +13585,21 @@ def _release_exit_after_terminal_no_fill(
                 occurred_at, phase_before, phase_after, strategy_key, decision_id,
                 snapshot_id, order_id, command_id, caused_by, idempotency_key,
                 venue_status, source_module, payload_json, env
-            ) VALUES (?, ?, 1, ?, 'EXIT_ORDER_VOIDED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 event_key,
                 position_id,
                 seq,
+                event_type,
                 observed_at,
                 phase_before,
                 phase_after,
-                str(command.get("position_strategy_key") or current[1] or "opening_inertia"),
+                str(
+                    command.get("position_strategy_key")
+                    or current_row.get("strategy_key")
+                    or "opening_inertia"
+                ),
                 str(command.get("decision_id") or ""),
                 str(command.get("snapshot_id") or ""),
                 venue_order_id,

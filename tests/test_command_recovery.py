@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-01; last_reused=2026-08-01
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-02; last_reused=2026-08-02
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-08-01
+# Last reused/audited: 2026-08-02
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -3517,6 +3517,10 @@ def _seed_full_exit_intent(
     position_id: str,
     shares: float,
     occurred_at: str = "2026-04-26T00:03:30Z",
+    reason: str = "",
+    capital_certificate: dict | None = None,
+    order_id: str = "",
+    command_id: str = "",
 ) -> None:
     sequence_no = conn.execute(
         "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
@@ -3541,10 +3545,153 @@ def _seed_full_exit_intent(
                 {
                     "exit_intent_close_position": True,
                     "exit_intent_shares": shares,
+                    **({"exit_intent_reason": reason} if reason else {}),
+                    **(
+                        {"exit_intent_capital_certificate": capital_certificate}
+                        if capital_certificate is not None
+                        else {}
+                    ),
                 },
                 sort_keys=True,
             ),
         ),
+    )
+    if order_id:
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key,
+                order_id, command_id, source_module, env, payload_json
+            ) VALUES (?, ?, 1, ?, 'EXIT_ORDER_POSTED', ?, 'active', 'pending_exit',
+                      'opening_inertia', ?, ?, 'tests.test_command_recovery',
+                      'live', '{}')
+            """,
+            (
+                f"{position_id}:exit_order_posted:{order_id}",
+                position_id,
+                sequence_no + 1,
+                "2026-04-26T00:04:30Z",
+                order_id,
+                command_id or None,
+            ),
+        )
+
+
+def test_terminal_no_fill_global_maker_rest_creates_one_v3_reauction_debt(conn):
+    from src.execution import command_recovery, exit_lifecycle
+
+    _insert(
+        conn,
+        command_id="cmd-entry-global-maker",
+        position_id="pos-global-maker",
+        token_id="tok-global-maker",
+    )
+    _advance_to_acked(
+        conn,
+        command_id="cmd-entry-global-maker",
+        venue_order_id="ord-entry-global-maker",
+    )
+    _seed_pending_entry_projection(
+        conn,
+        position_id="pos-global-maker",
+        command_id="cmd-entry-global-maker",
+        order_id="ord-entry-global-maker",
+        token_id="tok-global-maker",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit', shares = 17.0, chain_shares = 17.0,
+               chain_state = 'synced', order_id = 'ord-exit-global-maker',
+               order_status = 'sell_pending_confirmation'
+         WHERE position_id = 'pos-global-maker'
+        """
+    )
+    _insert(
+        conn,
+        command_id="cmd-exit-global-maker",
+        position_id="pos-global-maker",
+        intent_kind="EXIT",
+        token_id="tok-global-maker",
+        side="SELL",
+        order_type="GTC",
+        size=17.0,
+        price=0.06,
+    )
+    _advance_to_acked(
+        conn,
+        command_id="cmd-exit-global-maker",
+        venue_order_id="ord-exit-global-maker",
+    )
+    _seed_full_exit_intent(
+        conn,
+        position_id="pos-global-maker",
+        shares=17.0,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        capital_certificate={"execution_mode": "MAKER_REST"},
+        order_id="ord-exit-global-maker",
+        command_id="cmd-exit-global-maker",
+    )
+    command = dict(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = 'cmd-exit-global-maker'"
+        ).fetchone()
+    )
+    current = conn.execute(
+        "SELECT city, target_date, strategy_key FROM position_current "
+        "WHERE position_id = 'pos-global-maker'"
+    ).fetchone()
+    command.update(
+        position_city=current["city"],
+        position_target_date=current["target_date"],
+        position_strategy_key=current["strategy_key"],
+    )
+    terminal_payload = {
+        "state": "CANCEL_CONFIRMED",
+        "matched_size": "0",
+        "remaining_size": "17",
+        "matching_open_orders": [],
+        "matching_trades": [],
+    }
+
+    assert command_recovery._release_exit_after_terminal_no_fill(
+        conn,
+        command=command,
+        observed_at="2026-04-26T00:09:00+00:00",
+        order_fact_id=41,
+        terminal_payload=terminal_payload,
+    )
+    assert command_recovery._release_exit_after_terminal_no_fill(
+        conn,
+        command=command,
+        observed_at="2026-04-26T00:09:00+00:00",
+        order_fact_id=41,
+        terminal_payload=terminal_payload,
+    )
+
+    rows = conn.execute(
+        """
+        SELECT payload_json FROM position_events
+         WHERE position_id = 'pos-global-maker'
+           AND event_type = 'EXIT_RETRY_RELEASED'
+           AND idempotency_key = 'pos-global-maker:exit_terminal_no_fill:cmd-exit-global-maker'
+        """
+    ).fetchall()
+    assert len(rows) == 1
+    payload = json.loads(rows[0]["payload_json"])
+    obligation = payload["held_sell_reauction_obligation"]
+    assert payload["release_reason"] == "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
+    assert payload["error"].startswith(
+        "global_sell_exit_terminal_no_fill_reauction:"
+    )
+    assert obligation["schema_version"] == 3
+    assert obligation["position_id"] == "pos-global-maker"
+    assert obligation["held_token_id"] == "tok-global-maker"
+    assert obligation["family"] == ["Karachi", "2026-05-17", "high"]
+    assert exit_lifecycle.needs_global_sell_snapshot_reauction(
+        SimpleNamespace(trade_id="pos-global-maker", last_exit_error=""),
+        conn,
     )
 
 

@@ -489,6 +489,7 @@ def _is_global_sell_snapshot_reauction_error(error: object) -> bool:
             "global_sell_exit_executable_snapshot_unavailable",
             "global_sell_exit_executable_snapshot_error:",
             "global_sell_exit_post_only_cross_reauction:",
+            "global_sell_exit_terminal_no_fill_reauction:",
         )
     )
 
@@ -5976,6 +5977,75 @@ def _canonical_exit_intent_payload(
     return payload if isinstance(payload, dict) else None
 
 
+def _is_canonical_global_maker_rest_exit(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    order_id: str,
+    command_id: str = "",
+) -> bool:
+    """Bind one held-token SELL command to its global MAKER_REST intent."""
+
+    if conn is None or not order_id:
+        return False
+    position_id = str(
+        getattr(position, "position_id", "")
+        or getattr(position, "trade_id", "")
+        or ""
+    ).strip()
+    raw_direction = getattr(position, "direction", "")
+    direction = str(getattr(raw_direction, "value", raw_direction) or "").lower()
+    held_token_id = str(
+        getattr(position, "no_token_id", "")
+        if direction == "buy_no"
+        else getattr(position, "token_id", "")
+    ).strip()
+    if not position_id or not held_token_id:
+        return False
+    try:
+        rows = conn.execute(
+            """
+            SELECT cmd.command_id, cmd.token_id, cmd.side, cmd.intent_kind,
+                   envelope.order_type, envelope.post_only
+              FROM venue_commands AS cmd
+              JOIN venue_submission_envelopes AS envelope
+                ON envelope.envelope_id = cmd.envelope_id
+             WHERE cmd.position_id = ?
+               AND cmd.venue_order_id = ?
+               AND cmd.intent_kind = 'EXIT'
+             ORDER BY cmd.updated_at DESC, cmd.created_at DESC, cmd.command_id DESC
+             LIMIT 2
+            """,
+            (position_id, order_id),
+        ).fetchall()
+    except sqlite3.Error:
+        return False
+    if len(rows) != 1:
+        return False
+    row = rows[0]
+    if (
+        (command_id and str(row[0] or "") != command_id)
+        or str(row[1] or "") != held_token_id
+        or str(row[2] or "").upper() != "SELL"
+        or str(row[3] or "").upper() != "EXIT"
+        or str(row[4] or "").upper() != "GTC"
+        or int(row[5] or 0) != 1
+    ):
+        return False
+    intent = _canonical_exit_intent_payload(conn, position, order_id=order_id)
+    certificate = (
+        intent.get("exit_intent_capital_certificate")
+        if isinstance(intent, Mapping)
+        else None
+    )
+    return bool(
+        isinstance(intent, Mapping)
+        and intent.get("exit_intent_reason") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
+        and isinstance(certificate, Mapping)
+        and str(certificate.get("execution_mode") or "").upper() == "MAKER_REST"
+    )
+
+
 def _canonical_reduction_intent_shares(
     conn: sqlite3.Connection | None,
     position: Position,
@@ -7337,6 +7407,23 @@ def check_pending_exits(
                             order_id=exit_order_id,
                         )
             if status in VOID_STATUSES:
+                # INV-47 SCOPE: the exact position+command+held-token global
+                # MAKER_REST SELL. DRAIN: command recovery proves a durable,
+                # command-bound terminal zero-fill with no live/open side effect,
+                # then writes the V3 re-auction obligation. RESET: a fresh global
+                # auction reserves/acknowledges that obligation or exposure closes;
+                # unknown side effect never resets this single-flight gate.
+                if (
+                    partial is None
+                    and status in {"CANCELED", "CANCELLED", "EXPIRED"}
+                    and _is_canonical_global_maker_rest_exit(
+                        conn,
+                        pos,
+                        order_id=exit_order_id,
+                    )
+                ):
+                    stats["unchanged"] += 1
+                    continue
                 _mark_exit_retry(pos, reason=f"SELL_{status}", error=status, conn=conn)
                 if conn is not None:
                     log_pending_exit_recovery_event(

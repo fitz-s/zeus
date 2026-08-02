@@ -10196,3 +10196,104 @@ def test_review_required_recovery_releases_legacy_exit_mutex_only(conn):
     allowed, reason = can_submit_replacement_sell(conn, "pos-1", YES_TOKEN)
     assert allowed is False
     assert reason == "active_prior_exit_sell: state=REVIEW_REQUIRED command_id=cmd-legacy-review"
+
+
+@pytest.mark.parametrize("venue_status", ("CANCELED", "EXPIRED"))
+def test_global_maker_rest_void_without_proof_stays_single_flight(
+    conn,
+    venue_status,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-singapore-maker-void",
+        market_id="mkt-singapore-maker-void",
+        city="Singapore",
+        cluster="Asia",
+        target_date="2026-08-03",
+        bin_label="33C",
+        direction="buy_yes",
+        strategy_key="center_buy",
+        size_usd=3.6,
+        entry_price=0.60,
+        shares=6.0,
+        chain_shares=6.0,
+        cost_basis_usd=3.6,
+        state="holding",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-singapore-maker-void",
+        unit="C",
+        env="live",
+        order_status="filled",
+    )
+    intent = exit_lifecycle.ExitIntent(
+        trade_id=position.trade_id,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        token_id=YES_TOKEN,
+        shares=6.0,
+        current_market_price=0.06,
+        best_bid=0.05,
+        exact_limit_price=0.06,
+        submit_order_type="GTC",
+        capital_certificate={"execution_mode": "MAKER_REST"},
+    )
+    exit_lifecycle._record_exit_intent_before_execution_gates(conn, position, intent)
+    _insert_exit_command(
+        conn,
+        command_id="cmd-singapore-maker-void",
+        position_id=position.trade_id,
+        token_id=YES_TOKEN,
+        size=6.0,
+        price=0.06,
+        venue_order_id="ord-singapore-maker-void",
+    )
+    _ack_exit(
+        conn,
+        command_id="cmd-singapore-maker-void",
+        venue_order_id="ord-singapore-maker-void",
+    )
+    position.last_exit_order_id = "ord-singapore-maker-void"
+    position.exit_state = "sell_pending"
+    position.order_status = "sell_pending_confirmation"
+    assert exit_lifecycle._dual_write_canonical_pending_exit_if_available(
+        conn,
+        position,
+        reason=intent.reason,
+        error="",
+        event_type="EXIT_ORDER_POSTED",
+    )
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            assert order_id == "ord-singapore-maker-void"
+            return {"status": venue_status, "matched_size": "0"}
+
+    stats = exit_lifecycle.check_pending_exits(
+        PortfolioState(positions=[position]),
+        FakeClob(),
+        conn=conn,
+    )
+
+    assert stats["retried"] == 0
+    assert stats["unchanged"] == 1
+    assert position.state == "pending_exit"
+    assert position.exit_state == "sell_pending"
+    assert position.order_status == "sell_pending_confirmation"
+    assert position.exit_retry_count == 0
+    assert not position.next_exit_retry_at
+    assert position.last_exit_order_id == "ord-singapore-maker-void"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? AND side = 'SELL'",
+        (position.trade_id,),
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        """
+        SELECT COUNT(*) FROM position_events
+         WHERE position_id = ?
+           AND event_type IN ('EXIT_ORDER_VOIDED', 'EXIT_ORDER_REJECTED',
+                              'EXIT_RETRY_RELEASED')
+        """,
+        (position.trade_id,),
+    ).fetchone()[0] == 0
