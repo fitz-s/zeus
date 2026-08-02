@@ -379,6 +379,35 @@ def test_paused_entry_park_requires_exact_canonical_held_sell_work():
     ) is False
 
 
+def test_paused_exact_held_sell_parks_when_exposure_provider_is_unavailable(caplog):
+    from src.events.reactor import _paused_entry_wake_should_park
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
+
+    request = make_held_sell_reauction_request(
+        position_id="held-position-unavailable",
+        family=("Dallas", "2026-05-24", "high"),
+        probability_content_identity="q-held-unavailable",
+        held_token_id="held-token-unavailable",
+        held_best_bid=0.12,
+        bid_observed_at="2026-05-24T17:59:00+00:00",
+    )
+
+    def _raise():
+        raise RuntimeError("trade DB unavailable")
+
+    assert _paused_entry_wake_should_park(
+        pause_reason="operator",
+        held_sell_reauction_requests=(request,),
+        held_sell_request_exposure_provider=_raise,
+    ) is True
+    assert _paused_entry_wake_should_park(
+        pause_reason="operator",
+        held_sell_reauction_requests=(request,),
+        held_sell_request_exposure_provider=lambda: None,
+    ) is True
+    assert "exact exposure unavailable; parking debt" in caplog.text
+
+
 def test_paused_debt_drains_once_after_canonical_family_materializes(tmp_path):
     from src.events import reactor
     from src.runtime import reactor_wake

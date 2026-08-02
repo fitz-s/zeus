@@ -720,8 +720,8 @@ def _paused_entry_wake_should_park(
     # PENDING until the pause clears, or this producer carries one exact held-SELL
     # request whose canonical position/family still has money at risk. RESET: a
     # cleared pause or a matching current request leaves this gate without changing
-    # event identity. Unknown control or exposure must retain the exit path; BUY
-    # remains fail-closed at its independent final submit gate.
+    # event identity. Unknown control retains the exit path; unavailable exact
+    # exposure parks this global actuation while the local monitor keeps running.
     if (
         pause_reason is None
         or str(pause_reason).startswith("entries_pause_control_unreadable:")
@@ -730,13 +730,23 @@ def _paused_entry_wake_should_park(
     if not held_sell_reauction_requests:
         return True
     if held_sell_request_exposure_provider is None:
-        return False
+        logging.getLogger("zeus.events.reactor").warning(
+            "paused held-SELL admission: exact exposure unavailable; parking debt"
+        )
+        return True
     try:
         canonical_exposure = held_sell_request_exposure_provider()
-    except Exception:  # noqa: BLE001 - unknown exposure must keep exit work alive
-        return False
+    except Exception:  # noqa: BLE001 - global actuation needs exact exposure proof
+        logging.getLogger("zeus.events.reactor").warning(
+            "paused held-SELL admission: exact exposure unavailable; parking debt",
+            exc_info=True,
+        )
+        return True
     if canonical_exposure is None:
-        return False
+        logging.getLogger("zeus.events.reactor").warning(
+            "paused held-SELL admission: exact exposure unavailable; parking debt"
+        )
+        return True
     for request in held_sell_reauction_requests:
         position_id = str(getattr(request, "position_id", "") or "").strip()
         raw_family = getattr(request, "family", ())
