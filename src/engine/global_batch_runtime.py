@@ -1301,11 +1301,30 @@ _BUY_CANDIDATE_INDEX_KEY_FIELDS = (
     "token_id",
     "execution_mode",
 )
+_LEGACY_BUY_CANDIDATE_INDEX_KEY_FIELDS = (
+    "family_key",
+    "bin_id",
+    "condition_id",
+    "side",
+    "token_id",
+)
 
 
 def _buy_candidate_index_map(
     rows: object,
+    *,
+    key_fields: Sequence[str] | None = None,
 ) -> dict[tuple[str, ...], str]:
+    normalize_legacy = key_fields is None
+    fields = tuple(
+        str(field or "")
+        for field in (key_fields or _BUY_CANDIDATE_INDEX_KEY_FIELDS)
+    )
+    if fields not in {
+        _LEGACY_BUY_CANDIDATE_INDEX_KEY_FIELDS,
+        _BUY_CANDIDATE_INDEX_KEY_FIELDS,
+    }:
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
     if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
         raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
     mapped: dict[tuple[str, ...], str] = {}
@@ -1314,19 +1333,29 @@ def _buy_candidate_index_map(
         if (
             not isinstance(raw_row, Sequence)
             or isinstance(raw_row, (str, bytes))
-            or len(raw_row) not in {6, 7}
+            or (
+                len(raw_row) != len(fields) + 1
+                and not (
+                    normalize_legacy
+                    and len(raw_row)
+                    == len(_LEGACY_BUY_CANDIDATE_INDEX_KEY_FIELDS) + 1
+                )
+            )
         ):
             raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
         candidate_id = str(raw_row[0] or "")
         key = tuple(str(value or "") for value in raw_row[1:])
-        if len(raw_row) == 6:
+        if normalize_legacy and len(raw_row) == 6:
             key = (*key, "TAKER_LIMIT")
         if (
             not candidate_id
             or candidate_id in candidate_ids
             or not all(key)
             or key[3] not in {"YES", "NO"}
-            or key[5] not in {"TAKER_LIMIT", "MAKER_REST"}
+            or (
+                fields == _BUY_CANDIDATE_INDEX_KEY_FIELDS
+                and key[5] not in {"TAKER_LIMIT", "MAKER_REST"}
+            )
             or key in mapped
         ):
             raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
@@ -1442,11 +1471,22 @@ def _apply_candidate_evaluations_delta(
         top_level,
     )
     if indexed_v3:
-        if indexed_delta.get("key_fields") != list(
-            _BUY_CANDIDATE_INDEX_KEY_FIELDS
+        raw_index_fields = indexed_delta.get("key_fields")
+        if not isinstance(raw_index_fields, Sequence) or isinstance(
+            raw_index_fields,
+            (str, bytes),
         ):
             raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
-        buy_rows = _buy_candidate_index_map(base.get("buy_candidate_index"))
+        index_fields = tuple(str(field or "") for field in raw_index_fields)
+        if index_fields not in {
+            _LEGACY_BUY_CANDIDATE_INDEX_KEY_FIELDS,
+            _BUY_CANDIDATE_INDEX_KEY_FIELDS,
+        }:
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
+        buy_rows = _buy_candidate_index_map(
+            base.get("buy_candidate_index"),
+            key_fields=index_fields,
+        )
         removed_buy_keys: set[tuple[str, ...]] = set()
         removed_buy_values = indexed_delta.get("removed_keys", ())
         if not isinstance(removed_buy_values, Sequence) or isinstance(
@@ -1457,7 +1497,7 @@ def _apply_candidate_evaluations_delta(
         for raw_key in removed_buy_values:
             key = _delta_key(
                 raw_key,
-                size=len(_BUY_CANDIDATE_INDEX_KEY_FIELDS),
+                size=len(index_fields),
                 error="GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID",
             )
             if key in removed_buy_keys:
@@ -1477,7 +1517,7 @@ def _apply_candidate_evaluations_delta(
                 )
             key = _delta_key(
                 patch.get("key"),
-                size=len(_BUY_CANDIDATE_INDEX_KEY_FIELDS),
+                size=len(index_fields),
                 error="GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID",
             )
             candidate_id = str(patch.get("candidate_id") or "")
@@ -1490,7 +1530,10 @@ def _apply_candidate_evaluations_delta(
         reconstructed_buy_index = sorted(
             [[candidate_id, *key] for key, candidate_id in buy_rows.items()]
         )
-        _buy_candidate_index_map(reconstructed_buy_index)
+        _buy_candidate_index_map(
+            reconstructed_buy_index,
+            key_fields=index_fields,
+        )
         result["buy_candidate_index"] = reconstructed_buy_index
 
         condition_rows = _condition_side_mask_map(

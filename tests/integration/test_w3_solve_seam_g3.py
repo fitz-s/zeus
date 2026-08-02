@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-01
+# Last reused/audited: 2026-08-02
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -1225,6 +1225,54 @@ def test_candidate_delta_keys_high_cardinality_indexes_instead_of_rewriting():
             base,
             string_removed_candidates,
         )
+
+
+def test_candidate_delta_reader_replays_pre_execution_mode_v3_index():
+    fields = list(global_batch_runtime._LEGACY_BUY_CANDIDATE_INDEX_KEY_FIELDS)
+    base = {
+        "rejected_groups": [],
+        "detailed": [],
+        "buy_candidate_index_fields": ["candidate_id", *fields],
+        "buy_candidate_index": [
+            ["candidate-old", "family", "bin", "condition", "YES", "token"]
+        ],
+        "buy_condition_side_masks": [("condition", 1)],
+    }
+    current = {
+        **base,
+        "buy_candidate_index": [
+            ["candidate-new", "family", "bin", "condition", "YES", "token"]
+        ],
+    }
+    delta = {
+        "top_level": {"removed_keys": [], "replacements": {}},
+        "detailed": {
+            "semantic_key_fields": list(
+                global_batch_runtime._LEGACY_CANDIDATE_SEMANTIC_KEY_FIELDS
+            ),
+            "removed_keys": [],
+            "patches": [],
+        },
+        "buy_candidate_index": {
+            "key_fields": fields,
+            "removed_keys": [],
+            "patches": [
+                {
+                    "key": ["family", "bin", "condition", "YES", "token"],
+                    "candidate_id": "candidate-new",
+                }
+            ],
+        },
+        "buy_condition_side_masks": {
+            "removed_keys": [],
+            "patches": [],
+        },
+    }
+
+    assert (
+        global_batch_runtime._apply_candidate_evaluations_delta(base, delta)
+        == current
+    )
 
 
 def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
