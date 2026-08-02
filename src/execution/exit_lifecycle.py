@@ -8220,6 +8220,13 @@ def _cancel_stale_pending_exit_for_reprice(
     command_created_at = (
         row["created_at"] if isinstance(row, sqlite3.Row) else row[4]
     )
+    command_id = str(row["command_id"] if isinstance(row, sqlite3.Row) else row[0])
+    canonical_global_maker_rest = _is_canonical_global_maker_rest_exit(
+        conn,
+        position,
+        order_id=order_id,
+        command_id=command_id,
+    )
     reason = _global_sell_rest_deadline_reason(
         conn=conn,
         position=position,
@@ -8227,6 +8234,10 @@ def _cancel_stale_pending_exit_for_reprice(
         command_created_at=command_created_at,
         now=_utcnow(),
     )
+    if canonical_global_maker_rest and not reason:
+        # The accepted global certificate owns this passive order until its
+        # certified rest deadline; a one-tick bid gap is not supersession.
+        return False
     best_bid: float | None = None
     best_ask: float | None = None
     if not reason:
@@ -8259,7 +8270,6 @@ def _cancel_stale_pending_exit_for_reprice(
     try:
         from src.execution.exit_safety import request_cancel_for_command
 
-        command_id = str(row["command_id"] if isinstance(row, sqlite3.Row) else row[0])
         outcome = request_cancel_for_command(
             conn,
             command_id,

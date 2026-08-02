@@ -380,6 +380,274 @@ def _ack_exit(c, command_id: str = "cmd-exit-1", venue_order_id: str = "ord-1") 
     )
 
 
+def _seed_pending_exit_reprice_case(
+    c,
+    *,
+    trade_id: str,
+    command_id: str,
+    order_id: str,
+    reason: str,
+    capital_certificate: dict[str, object] | None,
+    created_at: datetime = _NOW,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id=trade_id,
+        market_id="condition-test",
+        city="Singapore",
+        cluster="Asia",
+        target_date="2026-08-03",
+        bin_label="33C",
+        direction="buy_yes",
+        strategy_key="center_buy",
+        size_usd=3.6,
+        entry_price=0.60,
+        shares=6.0,
+        chain_shares=6.0,
+        cost_basis_usd=3.6,
+        state="holding",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-test",
+        unit="C",
+        env="live",
+        order_status="filled",
+    )
+    intent = exit_lifecycle.ExitIntent(
+        trade_id=trade_id,
+        reason=reason,
+        token_id=YES_TOKEN,
+        shares=6.0,
+        current_market_price=0.31,
+        best_bid=0.30,
+        exact_limit_price=0.31,
+        submit_order_type="GTC",
+        capital_certificate=capital_certificate,
+    )
+    exit_lifecycle._record_exit_intent_before_execution_gates(c, position, intent)
+    _insert_exit_command(
+        c,
+        command_id=command_id,
+        position_id=trade_id,
+        token_id=YES_TOKEN,
+        size=6.0,
+        price=0.31,
+        venue_order_id=order_id,
+        created_at=created_at,
+    )
+    _ack_exit(c, command_id=command_id, venue_order_id=order_id)
+    position.last_exit_order_id = order_id
+    position.exit_state = "sell_pending"
+    position.order_status = "sell_pending_confirmation"
+    assert exit_lifecycle._dual_write_canonical_pending_exit_if_available(
+        c,
+        position,
+        reason=reason,
+        error="",
+        event_type="EXIT_ORDER_POSTED",
+    )
+    return position
+
+
+def test_global_maker_rest_pending_exit_ignores_bid_gap_before_deadline(
+    conn,
+    monkeypatch,
+):
+    from src.execution import exit_lifecycle
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_utcnow",
+        lambda: _NOW + timedelta(minutes=10),
+    )
+    position = _seed_pending_exit_reprice_case(
+        conn,
+        trade_id="pos-global-maker-reprice-before-deadline",
+        command_id="cmd-global-maker-reprice-before-deadline",
+        order_id="ord-global-maker-reprice-before-deadline",
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        capital_certificate={
+            "execution_mode": "MAKER_REST",
+            "fill_probability_source": "posterior_predictive_mean",
+            "rest_deadline_minutes": 20.0,
+        },
+    )
+
+    class FakeClob:
+        def get_orderbook(self, token_id):
+            assert token_id == YES_TOKEN
+            return {
+                "bids": [{"price": "0.30", "size": "6"}],
+                "asks": [{"price": "0.31", "size": "6"}],
+            }
+
+        def cancel_order(self, _order_id):
+            raise AssertionError("certified global maker rest must not cancel early")
+
+    assert exit_lifecycle._is_canonical_global_maker_rest_exit(
+        conn,
+        position,
+        order_id=position.last_exit_order_id,
+        command_id="cmd-global-maker-reprice-before-deadline",
+    )
+    assert exit_lifecycle._cancel_stale_pending_exit_for_reprice(
+        conn=conn,
+        position=position,
+        clob=FakeClob(),
+        token_id=YES_TOKEN,
+    ) is False
+    assert position.exit_state == "sell_pending"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()[0] == 1
+
+
+def test_global_maker_rest_pending_exit_releases_at_deadline(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+
+    position = _seed_pending_exit_reprice_case(
+        conn,
+        trade_id="pos-global-maker-reprice-at-deadline",
+        command_id="cmd-global-maker-reprice-at-deadline",
+        order_id="ord-global-maker-reprice-at-deadline",
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        capital_certificate={
+            "execution_mode": "MAKER_REST",
+            "fill_probability_source": "posterior_predictive_mean",
+            "rest_deadline_minutes": 20.0,
+        },
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_utcnow",
+        lambda: _NOW + timedelta(minutes=20),
+    )
+    canceled = []
+
+    class FakeClob:
+        def get_orderbook(self, _token_id):
+            return {
+                "bids": [{"price": "0.30", "size": "6"}],
+                "asks": [{"price": "0.31", "size": "6"}],
+            }
+
+        def cancel_order(self, order_id):
+            canceled.append(order_id)
+            return {"canceled": [order_id], "not_canceled": []}
+
+    assert exit_lifecycle._cancel_stale_pending_exit_for_reprice(
+        conn=conn,
+        position=position,
+        clob=FakeClob(),
+        token_id=YES_TOKEN,
+    ) is True
+    assert canceled == [position.last_exit_order_id]
+    assert position.exit_state == "retry_pending"
+    rejected = conn.execute(
+        """
+        SELECT payload_json
+          FROM position_events
+         WHERE position_id = ? AND event_type = 'EXIT_ORDER_REJECTED'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert "GLOBAL_SELL_REST_DEADLINE_ELAPSED" in rejected["payload_json"]
+
+
+def test_non_global_pending_exit_still_reprices_on_same_bid_gap(conn):
+    from src.execution import exit_lifecycle
+
+    position = _seed_pending_exit_reprice_case(
+        conn,
+        trade_id="pos-generic-reprice-bid-gap",
+        command_id="cmd-generic-reprice-bid-gap",
+        order_id="ord-generic-reprice-bid-gap",
+        reason="EXIT_PROBABILITY_DECAY",
+        capital_certificate=None,
+    )
+    canceled = []
+
+    class FakeClob:
+        def get_orderbook(self, _token_id):
+            return {
+                "bids": [{"price": "0.30", "size": "6"}],
+                "asks": [{"price": "0.31", "size": "6"}],
+            }
+
+        def cancel_order(self, order_id):
+            canceled.append(order_id)
+            return {"canceled": [order_id], "not_canceled": []}
+
+    assert exit_lifecycle._cancel_stale_pending_exit_for_reprice(
+        conn=conn,
+        position=position,
+        clob=FakeClob(),
+        token_id=YES_TOKEN,
+    ) is True
+    assert canceled == [position.last_exit_order_id]
+    rejected = conn.execute(
+        """
+        SELECT payload_json
+          FROM position_events
+         WHERE position_id = ? AND event_type = 'EXIT_ORDER_REJECTED'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position.trade_id,),
+    ).fetchone()
+    assert "SELL_REPRICE_BID_MOVED_AWAY" in rejected["payload_json"]
+
+
+def test_global_maker_rest_terminal_fill_keeps_existing_terminal_path(
+    conn,
+    monkeypatch,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState
+
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: _NOW)
+    position = _seed_pending_exit_reprice_case(
+        conn,
+        trade_id="pos-global-maker-terminal-fill",
+        command_id="cmd-global-maker-terminal-fill",
+        order_id="ord-global-maker-terminal-fill",
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        capital_certificate={
+            "execution_mode": "MAKER_REST",
+            "fill_probability_source": "posterior_predictive_mean",
+            "rest_deadline_minutes": 20.0,
+        },
+        created_at=datetime.now(timezone.utc) + timedelta(seconds=1),
+    )
+
+    class FakeClob:
+        def get_order_status(self, order_id):
+            assert order_id == position.last_exit_order_id
+            return {
+                "status": "CONFIRMED",
+                "matched_size": "6.0",
+                "remaining_size": "0",
+                "avgPrice": "0.31",
+            }
+
+        def cancel_order(self, _order_id):
+            raise AssertionError("terminal fill path must not cancel")
+
+    stats = exit_lifecycle.check_pending_exits(
+        PortfolioState(positions=[position]),
+        FakeClob(),
+        conn=conn,
+    )
+
+    assert stats["filled"] == 1
+    assert position.state == "economically_closed"
+
+
 def test_cancel_canceled_array_success_creates_CANCEL_CONFIRMED(conn):
     from src.execution.exit_safety import parse_cancel_response, request_cancel_for_command
     from src.state.venue_command_repo import get_command, list_events
