@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-18; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Lifecycle: created=2026-06-18; last_reviewed=2026-08-03; last_reused=2026-08-03
 # Purpose: Regression tests for read-only live restart preflight risk classification.
 # Reuse: pytest tests/test_check_live_restart_preflight.py
 # Authority basis: AGENTS.md live-money restart proof gates.
@@ -1089,14 +1089,63 @@ def test_live_input_posterior_cycle_alignment_ignores_closed_old_targets(
         """,
         (old_target_date,),
     )
+    forecasts.executemany(
+        """
+        INSERT INTO raw_model_forecasts (
+            model, city, target_date, metric, source_cycle_time, endpoint,
+            coverage_status, captured_at, source_available_at, source_id, product_id
+        ) VALUES ('icon_global', ?, ?, 'high', ?,
+                  'single_runs', 'COVERED', ?, ?,
+                  'icon_global_single_runs', 'icon_global::single_runs')
+        """,
+        (
+            (
+                f"Closed City {index}",
+                old_target_date,
+                raw_cycle.isoformat(),
+                (raw_cycle + timedelta(minutes=10)).isoformat(),
+                (raw_cycle + timedelta(minutes=5)).isoformat(),
+            )
+            for index in range(20_000)
+        ),
+    )
+    forecasts.execute(
+        """
+        CREATE INDEX idx_raw_alignment_family
+            ON raw_model_forecasts(city, target_date, metric, source_cycle_time)
+        """
+    )
+    forecasts.execute(
+        """
+        CREATE INDEX idx_market_alignment_target
+            ON market_events(target_date, city, temperature_metric)
+        """
+    )
     forecasts.commit()
     forecasts.close()
+
+    real_connect = sqlite3.connect
+    vm_callbacks = 0
+
+    def guarded_connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+
+        def stop_unbounded_history_scan():
+            nonlocal vm_callbacks
+            vm_callbacks += 1
+            return int(vm_callbacks > 100)
+
+        conn.set_progress_handler(stop_unbounded_history_scan, 100)
+        return conn
+
+    monkeypatch.setattr(preflight.sqlite3, "connect", guarded_connect)
 
     result = preflight._live_input_posterior_cycle_alignment_check()
 
     assert result.ok is True
     assert result.evidence["lagged_or_missing_count"] == 0
     assert result.evidence["active_target_floor_date"] == now.date().isoformat()
+    assert vm_callbacks <= 100
 
 
 def test_live_actionable_certificate_semantics_audits_unreferenced_qkernel_mismatch(
