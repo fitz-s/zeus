@@ -206,6 +206,7 @@ def test_allocator_refresh_fails_closed_when_bankroll_unavailable(monkeypatch):
     ``allocator_not_configured`` (never fail-open with a fake 0.0 drawdown)."""
     import src.main as main
     import src.runtime.bankroll_provider as bankroll_provider
+    import src.risk_allocator as risk_allocator
     from src.risk_allocator import select_global_order_type
     from src.risk_allocator.governor import AllocationDenied
 
@@ -218,11 +219,24 @@ def test_allocator_refresh_fails_closed_when_bankroll_unavailable(monkeypatch):
     )
     # Wallet unreachable -> cached() returns None.
     monkeypatch.setattr(bankroll_provider, "cached", lambda *a, **k: None)
+    configured = []
+    real_configure = risk_allocator.configure_global_allocator
+
+    def _track_configure(allocator, governor_state=None):
+        configured.append((allocator, governor_state))
+        return real_configure(allocator, governor_state)
+
+    monkeypatch.setattr(
+        risk_allocator,
+        "configure_global_allocator",
+        _track_configure,
+    )
 
     summary = main._edli_refresh_global_allocator(conn)
 
     assert summary.get("configured") is False
     assert summary.get("fail_closed") is True
+    assert configured[-1] == (None, None)
     with pytest.raises(AllocationDenied) as excinfo:
         select_global_order_type(_empty_snapshot())
     assert excinfo.value.decision.reason == "allocator_not_configured"

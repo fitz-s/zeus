@@ -826,7 +826,7 @@ def warm_from_collateral_snapshot(
     )
 
 
-def run_warm_cycle() -> None:
+def run_warm_cycle() -> bool:
     """Scheduler entrypoint (R4-b extraction from src/main.py::_edli_bankroll_warm_cycle).
 
     Dedicated frequent (~60s) bankroll-of-record cache warmer.
@@ -852,12 +852,11 @@ def run_warm_cycle() -> None:
     Called from the main daemon's ``edli_bankroll_warm`` scheduler job (60s
     cadence). Behavior-preserving relocation — was inline in src/main.py.
     """
-    from src.config import settings
-
-    source = settings._data if hasattr(settings, "_data") else settings
-    edli_cfg = source.get("edli", {}) if isinstance(source, dict) else {}
-    if not edli_cfg.get("enabled"):
-        return
+    # The one live topology registers this job unconditionally.  ``edli.enabled``
+    # is not a current runtime control and is absent from production config; an
+    # earlier retained check therefore made the registered 60-second job a
+    # permanent no-op. BUY admission belongs to the control plane, while wallet
+    # truth freshness is required by both allocation and reduce-only actuation.
     try:
         warm = warm_from_collateral_snapshot()
     except Exception as exc:  # noqa: BLE001 — fail-soft; consumers fail-closed on None
@@ -866,13 +865,15 @@ def run_warm_cycle() -> None:
             "did not advance this tick): %r",
             exc,
         )
-        return
+        return False
     if warm is None:
         logger.error(
             "EDLI bankroll warm: collateral snapshot warm returned None — cached() will "
             "fail closed (KELLY_PROOF_MISSING) until post-trade-capital publishes a fresh "
             "non-degraded collateral snapshot."
         )
+        return False
+    return True
 
 
 def reset_cache_for_tests() -> None:

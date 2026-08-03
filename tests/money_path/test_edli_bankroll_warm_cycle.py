@@ -44,6 +44,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 import src.main as main_module
 from src.events import reactor
 from src.runtime import bankroll_provider
@@ -74,6 +76,74 @@ def _enable_warm_cfg(monkeypatch) -> None:
             {"enabled": True} if name == "edli" else (default if default is not None else {})
         ),
     )
+    monkeypatch.setattr(
+        main_module,
+        "_refresh_global_execution_authority",
+        lambda: {"configured": True},
+    )
+
+
+def test_warm_cycle_refreshes_execution_authority_after_bankroll(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        main_module,
+        "_settings_section",
+        lambda name, default=None: (
+            {"enabled": True}
+            if name == "edli"
+            else (default if default is not None else {})
+        ),
+    )
+    monkeypatch.setattr(
+        bankroll_provider,
+        "run_warm_cycle",
+        lambda: calls.append("bankroll") or True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_refresh_global_execution_authority",
+        lambda: calls.append("authority") or {"configured": True},
+    )
+
+    main_module._edli_bankroll_warm_cycle()
+
+    assert calls == ["bankroll", "authority"]
+
+
+def test_execution_authority_refresh_uses_canonical_open_portfolio(monkeypatch):
+    calls = []
+    portfolio = object()
+
+    class _TradeConn:
+        def close(self):
+            calls.append("closed")
+
+    trade_conn = _TradeConn()
+    monkeypatch.setattr(
+        "src.state.db.get_trade_connection_read_only",
+        lambda: trade_conn,
+    )
+    monkeypatch.setattr(
+        "src.state.portfolio.load_runtime_open_portfolio",
+        lambda conn: calls.append(("portfolio", conn)) or portfolio,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_edli_refresh_global_allocator",
+        lambda conn, *, portfolio_snapshot: (
+            calls.append(("allocator", conn, portfolio_snapshot))
+            or {"configured": True}
+        ),
+    )
+
+    result = main_module._refresh_global_execution_authority()
+
+    assert result == {"configured": True}
+    assert calls == [
+        ("portfolio", trade_conn),
+        ("allocator", trade_conn, portfolio),
+        "closed",
+    ]
 
 
 def _install_collateral_snapshot(*, fresh_value_usd: float, age_seconds: float = 0.0) -> None:
@@ -184,26 +254,55 @@ def test_warm_cycle_failsoft_on_missing_collateral_snapshot(monkeypatch):
         configure_global_ledger(None)
 
 
-def test_warm_cycle_noop_when_edli_disabled(monkeypatch):
-    """Config gate: when edli is disabled the warm job does no fetch."""
+def test_missing_current_collateral_revokes_prior_execution_authority():
+    from src.risk_allocator import (
+        RiskAllocator,
+        assert_global_submit_allows,
+        configure_global_allocator,
+        snapshot_global_auction_capital_authority,
+    )
+    from src.risk_allocator.governor import AllocationDenied
+
+    try:
+        _set_cache(value_usd=199.40, fetched_age_seconds=300.0)
+        configure_global_ledger(None)
+        configure_global_allocator(RiskAllocator(), None)
+        snapshot_global_auction_capital_authority()
+
+        main_module._edli_bankroll_warm_cycle()
+
+        with pytest.raises(AllocationDenied):
+            snapshot_global_auction_capital_authority()
+        with pytest.raises(AllocationDenied):
+            assert_global_submit_allows(reduce_only=True)
+    finally:
+        configure_global_allocator(None, None)
+        bankroll_provider.reset_cache_for_tests()
+        configure_global_ledger(None)
+
+
+def test_warm_cycle_does_not_obey_retired_edli_enabled_gate(monkeypatch):
+    """The registered live job keeps truth fresh despite an obsolete flag."""
     try:
         _set_cache(value_usd=None, fetched_age_seconds=None)
-
-        call_log: list[int] = []
-
-        def _tracking_current(**_kwargs):
-            call_log.append(1)
-            return None
-
-        monkeypatch.setattr(bankroll_provider, "current", _tracking_current)
+        _install_collateral_snapshot(fresh_value_usd=177.25)
         monkeypatch.setattr(
             main_module,
             "_settings_section",
-            lambda name, default=None: ({"enabled": False} if name == "edli" else (default or {})),
+            lambda name, default=None: (
+                {"enabled": False} if name == "edli" else (default or {})
+            ),
+        )
+        monkeypatch.setattr(
+            main_module,
+            "_refresh_global_execution_authority",
+            lambda: {"configured": True},
         )
 
         main_module._edli_bankroll_warm_cycle()
-        assert call_log == []  # gated off → no current()/wallet side effect
+        record = bankroll_provider.cached()
+        assert record is not None
+        assert record.value_usd == 177.25
     finally:
         bankroll_provider.reset_cache_for_tests()
         configure_global_ledger(None)

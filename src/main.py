@@ -3843,6 +3843,12 @@ def _edli_refresh_global_allocator(conn, *, portfolio_snapshot=None) -> dict:
         # wallet unreachable / cache cold → drawdown untrustworthy → fail closed.
         _bk = bankroll_provider.cached()
         if _bk is None:
+            # A prior cycle may have configured the process singleton.  Missing
+            # current wallet truth must revoke that authority rather than leave
+            # stale entry/exit actuation state looking executable.
+            from src.risk_allocator import configure_global_allocator
+
+            configure_global_allocator(None, None)
             logger.error(
                 "EDLI live-path allocator refresh: on-chain bankroll cache is None "
                 "(wallet unreachable) — drawdown untrustworthy; FAIL-CLOSED, blocking "
@@ -5382,10 +5388,79 @@ def _start_edli_reactor_wake_listener() -> None:
 def _edli_bankroll_warm_cycle() -> None:
     """Scheduler hook — body owned by src.runtime.bankroll_provider (R4-b
     extraction, 2026-07-08). See that module's ``run_warm_cycle`` docstring
-    for the structural fix this job implements (#45 follow-up)."""
+    for the structural fix this job implements (#45 follow-up).
+
+    The same fixed-cadence tick also refreshes process-wide execution
+    authority. A durable BUY pause may park every reactor wake, and an empty
+    held book intentionally skips the heavier monitor handoff; neither state
+    may leave the allocator/governor pair cold for a future reduce-only SELL.
+    """
     from src.runtime.bankroll_provider import run_warm_cycle
 
-    run_warm_cycle()
+    if not run_warm_cycle():
+        from src.risk_allocator import configure_global_allocator
+
+        configure_global_allocator(None, None)
+        logger.error(
+            "global execution-authority refresh revoked: current collateral "
+            "snapshot unavailable"
+        )
+        return
+    _refresh_global_execution_authority()
+
+
+def _refresh_global_execution_authority() -> dict:
+    """Refresh real allocator truth without claiming work or touching venue.
+
+    SCOPE: process-wide allocation/actuation authority only; this helper cannot
+    create an intent, persist a command, or contact the venue. DRAIN: the
+    60-second bankroll-warm cadence retries from a fresh collateral snapshot and
+    canonical open portfolio. RESET: the next successful tick configures the
+    coherent allocator/governor pair; unavailable truth explicitly revokes it.
+    """
+    from src.risk_allocator import configure_global_allocator
+    from src.state.db import get_trade_connection_read_only
+    from src.state.portfolio import load_runtime_open_portfolio
+
+    trade_conn = None
+    try:
+        trade_conn = get_trade_connection_read_only()
+        portfolio = load_runtime_open_portfolio(trade_conn)
+        result = _edli_refresh_global_allocator(
+            trade_conn,
+            portfolio_snapshot=portfolio,
+        )
+        if not result.get("configured"):
+            logger.error(
+                "global execution-authority refresh unavailable: %s",
+                result,
+            )
+        return result
+    except Exception as exc:  # noqa: BLE001 - capability must fail closed
+        configure_global_allocator(None, None)
+        logger.error(
+            "global execution-authority refresh failed closed: %r",
+            exc,
+            exc_info=True,
+        )
+        return {
+            "configured": False,
+            "fail_closed": True,
+            "error": str(exc),
+            "entry": {
+                "allow_submit": False,
+                "reason": "allocator_not_configured",
+            },
+        }
+    finally:
+        if trade_conn is not None:
+            try:
+                trade_conn.close()
+            except Exception:  # noqa: BLE001 - authority result remains explicit
+                logger.warning(
+                    "global execution-authority read close failed",
+                    exc_info=True,
+                )
 
 
 def _command_recovery_summary_mutated_allocator_inputs(summary: object) -> bool:
