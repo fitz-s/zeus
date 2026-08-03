@@ -811,6 +811,7 @@ test_trust_policy:
     tests/test_raw_model_forecasts_does_not_ignore_changed_cell_selection.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 (operator-sharpened) RT: a changed cell_selection (-> changed request_url_hash/product_id) under the same logical key is surfaced (conflict + audit), not silently ignored; cross-module download->persist relationship test"}
     tests/test_bayes_precision_fusion_lead_days_uses_city_local_date_not_utc.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 6 RT: lead_days computed against city-local date, not UTC (off-by-one in cross-timezone cases)"}
     tests/test_bayes_precision_fusion_model_selection_gate.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 F4 RT: regional polygon gate + alias dedup; icon_d2 in-polygon enters; out-of-polygon absent; icon_seamless deduped"}
+    tests/test_bayes_precision_fusion_arrival_guard.py: {created: "2026-06-16", last_used: "2026-08-03", note: "Causal arrival guard requires availability only after a finite served candidate exists; absent/domain-inapplicable values do not fabricate missing-provenance failures, while finite candidates with missing, malformed, or future availability remain fail-closed."}
     tests/test_replacement_forecast_topology_settlement_identity.py: {created: "2026-06-07", last_used: "2026-06-07", note: "H4 antibody RT: settlement_unit/rounding_rule in topology-core equivalence; mismatched settlement semantics never share a market"}
     tests/test_no_computed_at_date_utc_lead_ast_guard.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 6 AST guard: no computed_at.date() (UTC) in lead_days computation — enforces city-local ZoneInfo date at the AST level"}
     tests/test_raw_model_forecasts_does_not_ignore_changed_cell_selection.py: {created: "2026-06-08", last_used: "2026-06-08", note: "PR#400 BLOCKER 4 (sharpened) RT: changed cell_selection on same logical key must not be silently discarded by INSERT OR IGNORE"}
@@ -832,6 +833,7 @@ categories:
     - tests/test_world_wal_checkpoint_starvation.py
     - tests/test_wal_busy_factory_fail_conservative.py
     - tests/test_bayes_precision_fusion_download.py
+    - tests/test_bayes_precision_fusion_arrival_guard.py
     - tests/test_finite_evidence_probability_symmetry.py
     - tests/test_replacement_forecast_extras_coverage_gate.py
     - tests/test_replacement_forecast_current_target_plan.py
@@ -3762,6 +3764,19 @@ test_metadata:
       dedup drops icon_seamless; lead>1 excludes regional. BAYES_PRECISION_FUSION_PROOF_RESULT.md proof.
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
+
+  tests/test_bayes_precision_fusion_arrival_guard.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+      - docs/authority/replacement_final_form_2026_06_09.md
+    notes: >
+      Causal arrival-guard antibody: absent, non-finite, domain-inapplicable,
+      or unserved candidates are dropped before availability is consulted;
+      every finite candidate still requires valid possession-time provenance
+      and rejects missing, malformed, or future availability.
+    created: 2026-06-16
+    last_reused_or_audited: 2026-08-03
 
   tests/test_replacement_forecast_topology_settlement_identity.py:
     cohort: law_antibody

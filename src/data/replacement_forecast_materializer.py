@@ -2967,10 +2967,11 @@ def _replacement_bayes_precision_fusion_override(
 
         # ARRIVAL GUARD inputs (C1-AVAIL-CLOCK, 2026-06-16): the honest per-model availability is
         # PROOF OF POSSESSION = the served row's captured_at, routed through the canonical producer
-        # (no nominal — captured_at is the real possession wall-clock). Models with no served row are
-        # absent from the map -> the capture's guard fail-OPENs (admits) them. decision_utc is the
-        # materialization decision instant (computed_at). Expected to exclude ~0 in
-        # production (extras' captured_at lands hours after the cycle, before any decision).
+        # (no nominal — captured_at is the real possession wall-clock). Models with no served row
+        # have no candidate value and are dropped before the guard. A finite served candidate with
+        # missing or malformed availability remains fail-closed. decision_utc is the materialization
+        # decision instant (computed_at). Expected to exclude ~0 in production (extras' captured_at
+        # lands hours after the cycle, before any decision).
         model_available_at: dict[str, str] = {}
         for _m, _served in served_current.items():
             _captured = getattr(_served, "captured_at", None)
@@ -2978,7 +2979,7 @@ def _replacement_bayes_precision_fusion_override(
                 try:
                     model_available_at[_m] = proof_of_possession_available_at(_captured)
                 except Exception:
-                    # Unparseable capture stamp -> omit (fail-OPEN: the guard admits the model).
+                    # Unparseable capture stamp -> omit; a finite candidate then fails closed.
                     pass
 
         consumed_ids: list[int] = []
