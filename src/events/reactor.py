@@ -6304,8 +6304,15 @@ def _reactor_wake_cancellation_probe(
     producer_wake_published_at: str | None,
     forecast_wake_families: set[tuple[str, str, str]],
     urgent_day0_pending: Callable[[], bool] | None,
+    allow_paused_forecast_snapshot_completion: bool = False,
 ) -> Callable[[], bool]:
-    """Cancel only when a newer wake invalidates the current work scope."""
+    """Cancel only when a newer wake invalidates the current work scope.
+
+    ``allow_paused_forecast_snapshot_completion`` is a main-boundary decision
+    for one already-selected, no-submit forecast carrier. It can absorb only
+    an overlapping forecast wake; every other capital-risk or unknown reason
+    retains the cancellation path.
+    """
 
     from src.runtime.reactor_wake import (
         reactor_urgent_wake_revision,
@@ -6348,27 +6355,31 @@ def _reactor_wake_cancellation_probe(
                 "market_price_advanced",
                 "money_path_substrate_refreshed",
             }:
+                if targeted_forecast and allow_paused_forecast_snapshot_completion:
+                    superseded = True
+                    return True
                 # Book producers do not invalidate probability work. The global
                 # auction independently rebinds current books at its JIT fence,
                 # so restarting the whole decision cannot make that evidence
-                # fresher and can starve a hot price stream.
+                # fresher and can starve a hot price stream. The paused snapshot
+                # exception is narrower: a newer executable-substrate input ends
+                # that cycle before its frozen no-submit decision.
                 continue
             if not targeted_forecast:
                 superseded = True
                 return True
-            if wake.reason in {
-                "day0_extreme_event_committed",
-                "market_price_advanced",
-            }:
+            if wake.reason == "day0_extreme_event_committed":
                 superseded = True
                 return True
             if wake.reason != "forecast_posterior_advanced":
                 superseded = True
                 return True
-            if (
-                not wake.forecast_families
-                or set(wake.forecast_families) & forecast_wake_families
-            ):
+            if not wake.forecast_families:
+                superseded = True
+                return True
+            if set(wake.forecast_families) & forecast_wake_families:
+                if allow_paused_forecast_snapshot_completion:
+                    continue
                 superseded = True
                 return True
 
@@ -6940,6 +6951,7 @@ def run_edli_event_reactor_cycle(
     producer_wake_event_ids: tuple[str, ...] = (),
     producer_wake_families: tuple[tuple[str, str, str], ...] = (),
     producer_held_sell_reauction_requests: tuple[object, ...] = (),
+    allow_paused_forecast_snapshot_completion: bool = False,
     urgent_day0_pending: Callable[[], bool] | None = None,
     held_position_monitor_pending: Callable[[], bool] | None = None,
     live_entry_block_reason: str | None = None,
@@ -6970,6 +6982,11 @@ def run_edli_event_reactor_cycle(
     completes, so neither lane can starve the other. Urgent forecast and Day0
     monitors do not consume this fairness token. Newly committed Day0 facts
     retain their independent urgent cancellation path inside the live adapter.
+
+    ``allow_paused_forecast_snapshot_completion`` is qualified once by
+    ``src.main`` from durable global entries-pause state. It applies only to
+    the selected no-submit forecast carrier's overlapping forecast wakes;
+    Day0, fills, held SELL completion, and unknown wakes still cancel it.
     """
     import logging as _logging
     from src.main import (
@@ -7041,6 +7058,9 @@ def run_edli_event_reactor_cycle(
         producer_wake_published_at=producer_wake_published_at,
         forecast_wake_families=forecast_wake_families,
         urgent_day0_pending=urgent_day0_pending,
+        allow_paused_forecast_snapshot_completion=(
+            allow_paused_forecast_snapshot_completion
+        ),
     )
 
     if _defer_for_held_position_monitor("edli_event_reactor"):

@@ -497,6 +497,69 @@ def test_targeted_forecast_wake_uses_carrier_exception_at_both_pause_gates():
     assert source.count("allow_forecast_carrier_progress=forecast_posterior_wake") == 2
     assert "forecast_posterior_wake and not targeted_event_ids" in source
     assert "forecast_posterior_wake or bool(targeted_event_ids)" in source
+    assert "allow_paused_forecast_snapshot_completion" in source
+
+
+def test_main_threads_pause_carrier_qualification_to_reactor(monkeypatch):
+    import src.events.reactor as reactor_module
+    import src.main as main
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(main, "_start_edli_reactor_wake_listener", lambda: None)
+    monkeypatch.setattr(
+        main,
+        "_edli_live_entry_readiness_block",
+        lambda _cfg: (None, {}),
+    )
+
+    def run_cycle(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(reactor_module, "run_edli_event_reactor_cycle", run_cycle)
+
+    assert main._edli_event_reactor_cycle(
+        producer_wake_reason="forecast_posterior_advanced",
+        allow_paused_forecast_snapshot_completion=True,
+    ) is True
+    assert captured["allow_paused_forecast_snapshot_completion"] is True
+    assert captured["live_entry_block_reason"] == (
+        "paused_forecast_snapshot_completion"
+    )
+
+
+def test_pause_clear_after_selection_keeps_selected_cycle_no_submit(monkeypatch):
+    """A later pause clear cannot reopen the selected snapshot's BUY lane."""
+
+    import src.events.reactor as reactor_module
+    import src.main as main
+
+    pause_cleared = [False]
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(main, "_start_edli_reactor_wake_listener", lambda: None)
+
+    def readiness(_cfg):
+        pause_cleared[0] = True
+        return (None, {})
+
+    monkeypatch.setattr(main, "_edli_live_entry_readiness_block", readiness)
+
+    def run_cycle(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(reactor_module, "run_edli_event_reactor_cycle", run_cycle)
+
+    assert main._edli_event_reactor_cycle(
+        producer_wake_reason="forecast_posterior_advanced",
+        allow_paused_forecast_snapshot_completion=True,
+    ) is True
+    assert pause_cleared[0] is True
+    assert captured["live_entry_block_reason"] == (
+        "paused_forecast_snapshot_completion"
+    )
 
 
 @pytest.mark.parametrize(
@@ -2597,6 +2660,16 @@ def test_paused_forecast_carrier_priority_requires_durable_global_pause(monkeypa
     pause_state[0] = {"status": "query_error", "entries_paused": True}
     assert main._paused_forecast_carrier_priority_allowed() is False
 
+    def unreadable_pause_state():
+        raise OSError("control-plane read failed")
+
+    monkeypatch.setattr(
+        control_plane,
+        "_refresh_entries_pause_from_durable_state",
+        unreadable_pause_state,
+    )
+    assert main._paused_forecast_carrier_priority_allowed() is False
+
 
 def test_exact_held_sell_debt_probe_rejects_malformed_queue_file(tmp_path):
     from src.runtime import reactor_wake
@@ -2891,6 +2964,46 @@ def test_targeted_forecast_wake_ignores_only_older_remaining_backlog(monkeypatch
     assert cancelled() is False
 
 
+def test_paused_targeted_forecast_wake_keeps_overlapping_new_wake_queued(monkeypatch):
+    """The selected no-submit carrier survives a same-family producer wake."""
+
+    from src.events.reactor import _reactor_wake_cancellation_probe
+    from src.runtime import reactor_wake
+
+    pending = reactor_wake.ReactorWake(
+        "wake-new-overlap",
+        "2026-07-19T12:00:01+00:00",
+        "forecast",
+        "forecast_posterior_advanced",
+        forecast_families=(("Paris", "2026-07-20", "high"),),
+    )
+    pending_wakes = [pending]
+    revisions = iter(("base", "new", "new"))
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_revision",
+        lambda: next(revisions),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_since",
+        lambda _published_at, *, exclude_wake_ids=(): tuple(pending_wakes),
+    )
+
+    cancelled = _reactor_wake_cancellation_probe(
+        producer_wake_reason="forecast_posterior_advanced",
+        producer_wake_ids=("wake-current",),
+        producer_wake_published_at="2026-07-19T12:00:00+00:00",
+        forecast_wake_families={("Paris", "2026-07-20", "high")},
+        urgent_day0_pending=None,
+        allow_paused_forecast_snapshot_completion=True,
+    )
+
+    assert cancelled() is False
+    assert cancelled() is False
+    assert pending_wakes == [pending]
+
+
 @pytest.mark.parametrize(
     "producer_reason,producer_families",
     [
@@ -2988,6 +3101,62 @@ def test_targeted_forecast_wake_stops_for_dependent_or_faster_revision(
         producer_wake_published_at="2026-07-19T12:00:00+00:00",
         forecast_wake_families={("Paris", "2026-07-20", "high")},
         urgent_day0_pending=None,
+    )
+
+    assert cancelled() is True
+
+
+@pytest.mark.parametrize(
+    "pending_reason,pending_event_ids,pending_held_sell_requests",
+    [
+        ("day0_extreme_event_committed", (), ()),
+        ("position_fill_projected", ("fill-event",), ()),
+        ("market_price_advanced", ("price-event",), ()),
+        ("money_path_substrate_refreshed", (), ()),
+        (
+            "held_sell_global_auction_completion_requested",
+            (),
+            (object(),),
+        ),
+        ("unknown_producer_reason", (), ()),
+    ],
+)
+def test_paused_targeted_forecast_wake_still_cancels_capital_risk_invalidators(
+    monkeypatch,
+    pending_reason,
+    pending_event_ids,
+    pending_held_sell_requests,
+):
+    from src.events.reactor import _reactor_wake_cancellation_probe
+    from src.runtime import reactor_wake
+
+    pending = reactor_wake.ReactorWake(
+        "wake-invalidator",
+        "2026-07-19T12:00:01+00:00",
+        "producer",
+        pending_reason,
+        event_ids=pending_event_ids,
+        held_sell_reauction_requests=pending_held_sell_requests,
+    )
+    revisions = iter(("base", "new"))
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_revision",
+        lambda: next(revisions),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_since",
+        lambda _published_at, *, exclude_wake_ids=(): (pending,),
+    )
+
+    cancelled = _reactor_wake_cancellation_probe(
+        producer_wake_reason="forecast_posterior_advanced",
+        producer_wake_ids=("wake-current",),
+        producer_wake_published_at="2026-07-19T12:00:00+00:00",
+        forecast_wake_families={("Paris", "2026-07-20", "high")},
+        urgent_day0_pending=None,
+        allow_paused_forecast_snapshot_completion=True,
     )
 
     assert cancelled() is True

@@ -3926,6 +3926,7 @@ def _edli_event_reactor_cycle(
     producer_wake_event_ids: tuple[str, ...] = (),
     producer_wake_families: tuple[tuple[str, str, str], ...] = (),
     producer_held_sell_reauction_requests: tuple[object, ...] = (),
+    allow_paused_forecast_snapshot_completion: bool = False,
 ) -> bool:
     """Scheduler hook -- body owned by src.events.reactor (R4-b3 reactor+prune
     cluster extraction, 2026-07-08) as ``run_edli_event_reactor_cycle``. See
@@ -3944,6 +3945,13 @@ def _edli_event_reactor_cycle(
     _global_block_reason, _family_block_reasons = _edli_live_entry_readiness_block(
         _settings_section("edli", {})
     )
+    if allow_paused_forecast_snapshot_completion:
+        # SCOPE: this already-selected targeted forecast cycle only; freeze its
+        # BUY/submit lane as no-submit even if the durable pause is cleared
+        # after selection. DRAIN: the immutable snapshot and bounded no-submit
+        # receipt may complete, while newer wakes stay durable for the next
+        # cycle. RESET: the next cycle re-qualifies from durable control state.
+        _global_block_reason = "paused_forecast_snapshot_completion"
     return run_edli_event_reactor_cycle(
         active_lock=_edli_reactor_active_lock,
         live_entry_block_reason=_global_block_reason,
@@ -3955,6 +3963,9 @@ def _edli_event_reactor_cycle(
         producer_wake_families=producer_wake_families,
         producer_held_sell_reauction_requests=(
             producer_held_sell_reauction_requests
+        ),
+        allow_paused_forecast_snapshot_completion=(
+            allow_paused_forecast_snapshot_completion
         ),
         urgent_day0_pending=_unowned_day0_urgent_wake_pending,
         held_position_monitor_pending=(
@@ -4882,6 +4893,7 @@ def _edli_reactor_wake_poll_once() -> bool:
     excluded_wake_ids = _exit_monitor_excluded_wake_ids()
     global_yield_ids = _edli_global_completion_yield.consume()
     day0_post_monitor_yield_ids = _edli_day0_post_monitor_yield.consume()
+    paused_forecast_carrier_priority_allowed = False
     try:
         if day0_post_monitor_yield_ids:
             excluded_wake_ids = frozenset(
@@ -4889,6 +4901,9 @@ def _edli_reactor_wake_poll_once() -> bool:
             )
             prefer_forecast_carrier_progress = (
                 _paused_forecast_carrier_priority_allowed()
+            )
+            paused_forecast_carrier_priority_allowed = (
+                prefer_forecast_carrier_progress
             )
             wake = read_reactor_wake(
                 exclude_wake_ids=excluded_wake_ids,
@@ -5012,6 +5027,19 @@ def _edli_reactor_wake_poll_once() -> bool:
         request
         for request in held_sell_reauction_requests
         if not held_sell_reauction_requests_completed((request,))
+    )
+    allow_paused_forecast_snapshot_completion = (
+        paused_forecast_carrier_priority_allowed
+        and wake.reason == "forecast_posterior_advanced"
+        and bool(wake_families)
+        and not wake_event_ids
+        and not held_sell_reauction_requests
+        and all(
+            queued.reason == "forecast_posterior_advanced"
+            and not queued.event_ids
+            and not queued.held_sell_reauction_requests
+            for queued in wakes
+        )
     )
     day0_wake = wake.reason == "day0_extreme_event_committed"
     forecast_wake = wake.reason == "forecast_posterior_advanced"
@@ -5176,6 +5204,9 @@ def _edli_reactor_wake_poll_once() -> bool:
             reactor_kwargs["producer_held_sell_reauction_requests"] = (
                 pending_held_sell_reauction_requests
             )
+        reactor_kwargs["allow_paused_forecast_snapshot_completion"] = (
+            allow_paused_forecast_snapshot_completion
+        )
         ran = _edli_event_reactor_cycle(
             **reactor_kwargs,
         )
