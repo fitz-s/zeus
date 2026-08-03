@@ -1,5 +1,5 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-08-01
+# Last reused or audited: 2026-08-03
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
 #
@@ -6483,8 +6483,170 @@ def _target_local_day_complete(
     return target < local_today
 
 
+def _target_local_day_active(city: str, target_date: str, now: datetime) -> bool:
+    """Return whether ``target_date`` is the city's current local day."""
+
+    try:
+        from src.config import runtime_cities_by_name
+
+        city_obj = runtime_cities_by_name().get(str(city))
+        if city_obj is None:
+            return False
+        target = datetime.fromisoformat(str(target_date)).date()
+        local_today = now.astimezone(ZoneInfo(str(city_obj.timezone))).date()
+    except (AttributeError, OSError, TypeError, ValueError, ZoneInfoNotFoundError):
+        return False
+    return target == local_today
+
+
+def _day0_remaining_authority_readiness(
+    state_dir: Path,
+    *,
+    city: str,
+    target_date: str,
+    event_payload: Mapping[str, object],
+    now: datetime,
+    forecast_conn: object | None = None,
+) -> tuple[bool, str, dict[str, object]]:
+    """Prove the same fresh complete hourly bundle consumed by live Day0 q."""
+
+    try:
+        from src.config import runtime_cities_by_name
+        from src.data.day0_hourly_vectors import (
+            DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+            day0_hourly_models_for_city,
+            read_freshest_day0_hourly_vectors,
+        )
+        from src.state.db import _connect_read_only
+
+        city_obj = runtime_cities_by_name().get(city)
+        if city_obj is None:
+            return False, "DAY0_CITY_CONFIG_MISSING", {}
+        raw_observation_time = event_payload.get("observation_time")
+        observation_time = datetime.fromisoformat(
+            str(raw_observation_time or "").replace("Z", "+00:00")
+        )
+        if observation_time.tzinfo is None:
+            return False, "DAY0_OBSERVATION_TIME_NAIVE", {}
+        observation_time = observation_time.astimezone(timezone.utc)
+        decision_time = now.astimezone(timezone.utc)
+        if observation_time > decision_time:
+            return False, "DAY0_OBSERVATION_TIME_AFTER_NOW", {}
+        expected_models = day0_hourly_models_for_city(city_obj)
+        if not expected_models:
+            return False, "DAY0_EXPECTED_MODEL_SET_EMPTY", {}
+        owns_connection = forecast_conn is None
+        conn = forecast_conn or _connect_read_only(state_dir / "zeus-forecasts.db")
+        try:
+            vectors = read_freshest_day0_hourly_vectors(
+                city=city,
+                target_date=target_date,
+                now=decision_time,
+                expected_models=expected_models,
+                require_expected=True,
+                max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+                remaining_window_start=observation_time,
+                require_complete_remaining_window=True,
+                conn=conn,
+            )
+        finally:
+            if owns_connection:
+                conn.close()
+        available_models = tuple(sorted(vector.model for vector in vectors))
+        detail = {
+            "expected_models": tuple(expected_models),
+            "available_models": available_models,
+            "observation_time": observation_time.isoformat(),
+        }
+        if len(vectors) != len(expected_models):
+            return False, "DAY0_COMPLETE_HOURLY_BUNDLE_UNAVAILABLE", detail
+        return True, "DAY0_REMAINING_AUTHORITY_READY", detail
+    except Exception as exc:  # noqa: BLE001 - health is fail-closed and observable.
+        return (
+            False,
+            f"DAY0_AUTHORITY_READ_FAILED:{type(exc).__name__}:{exc}",
+            {},
+        )
+
+
+def _authorized_day0_facts_for_health(
+    state_dir: Path,
+    *,
+    scopes: tuple[tuple[str, str, str], ...],
+    now: datetime,
+) -> tuple[
+    dict[tuple[str, str, str], dict[str, object]],
+    dict[tuple[str, str, str], str],
+]:
+    """Resolve bounded Day0 scopes through one canonical read connection."""
+
+    world_db = state_dir / "zeus-world.db"
+    if not world_db.exists():
+        return {}, {}
+    facts: dict[tuple[str, str, str], dict[str, object]] = {}
+    errors: dict[tuple[str, str, str], str] = {}
+    try:
+        from src.data.replacement_forecast_current_target_plan import (
+            _latest_authorized_day0_fact,
+        )
+        from src.state.db import _connect_read_only
+
+        conn = _connect_read_only(world_db)
+        try:
+            for scope in scopes:
+                city, target_date, metric = scope
+                try:
+                    fact = _latest_authorized_day0_fact(
+                        conn,
+                        city=city,
+                        target_date=target_date,
+                        temperature_metric=metric,
+                        decision_time=now.astimezone(timezone.utc),
+                    )
+                except Exception as exc:  # noqa: BLE001 - one family must not hide peers.
+                    errors[scope] = f"DAY0_FACT_READ_FAILED:{type(exc).__name__}:{exc}"
+                    continue
+                if fact is not None:
+                    facts[scope] = dict(fact)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - health remains observable on read failure.
+        reason = f"DAY0_FACT_READ_FAILED:{type(exc).__name__}:{exc}"
+        errors.update({scope: reason for scope in scopes})
+    return facts, errors
+
+
+def _day0_readiness_by_scope(
+    state_dir: Path,
+    *,
+    facts: Mapping[tuple[str, str, str], Mapping[str, object]],
+    now: datetime,
+) -> dict[tuple[str, str, str], tuple[bool, str, dict[str, object]]]:
+    """Evaluate all causal Day0 scopes through one forecast DB connection."""
+
+    if not facts:
+        return {}
+    from src.state.db import _connect_read_only
+
+    results: dict[tuple[str, str, str], tuple[bool, str, dict[str, object]]] = {}
+    conn = _connect_read_only(state_dir / "zeus-forecasts.db")
+    try:
+        for (city, target_date, metric), payload in facts.items():
+            results[(city, target_date, metric)] = _day0_remaining_authority_readiness(
+                state_dir,
+                city=city,
+                target_date=target_date,
+                event_payload=payload,
+                now=now,
+                forecast_conn=conn,
+            )
+    finally:
+        conn.close()
+    return results
+
+
 def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
-    """Alert (log-only) on a live-tradeable family with no fresh live posterior.
+    """Alert when a live family lacks its domain's current probability authority.
 
     Incident (2026-07-13/14): all CONUS live posteriors went dark 30-37h with
     NO operator signal. Existing watchdogs (heartbeat_supervisor, riskguard,
@@ -6493,8 +6655,12 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
     none covers "a family with a live market has no fresh live posterior".
     This surface closes that gap.
 
-    This is an operator alert, not an order gate. Current posterior freshness
-    is proved independently on the money path.
+    Forecast families require a fresh replacement posterior.  Once a causal
+    target-day observation exists, Day0 is a distinct nowcast domain: the
+    replacement posterior is no longer its probability authority, so this
+    surface instead proves the fresh complete hourly bundle consumed by the
+    remaining-day q.  This is an operator alert, not an order gate; the money
+    path independently reproduces the same evidence at decision time.
 
     Emits one structured ``ZEUS_POSTERIOR_STARVATION`` ERROR log line per
     starved (city, target_date, metric) scope per watchdog pass, in addition
@@ -6573,7 +6739,38 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
         }
 
     now_utc = now.astimezone(timezone.utc)
+    day0_scopes = tuple(
+        (
+            str(row.get("city") or ""),
+            str(row.get("target_date") or ""),
+            str(row.get("metric") or ""),
+        )
+        for row in family_rows
+        if _target_local_day_active(
+            str(row.get("city") or ""),
+            str(row.get("target_date") or ""),
+            now_utc,
+        )
+    )
+    day0_facts, day0_fact_errors = _authorized_day0_facts_for_health(
+        state_dir,
+        scopes=day0_scopes,
+        now=now_utc,
+    )
+    try:
+        day0_readiness = _day0_readiness_by_scope(
+            state_dir,
+            facts=day0_facts,
+            now=now_utc,
+        )
+    except Exception as exc:  # noqa: BLE001 - one typed failure covers every scope.
+        reason = f"DAY0_AUTHORITY_READ_FAILED:{type(exc).__name__}:{exc}"
+        day0_readiness = {
+            scope: (False, reason, {})
+            for scope in day0_facts
+        }
     starved: list[dict] = []
+    day0_authority_ready: list[dict] = []
     for row in family_rows:
         city = str(row.get("city") or "")
         target_date = str(row.get("target_date") or "")
@@ -6590,6 +6787,49 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
                 continue
             age_h = max(0.0, (now_utc - earliest_seen_at).total_seconds() / 3600.0)
             has_posterior = False
+        scope = (city, target_date, metric)
+        day0_fact = day0_facts.get(scope)
+        day0_fact_err = day0_fact_errors.get(scope)
+        if day0_fact_err:
+            starved.append(
+                {
+                    "city": city,
+                    "target_date": target_date,
+                    "metric": metric,
+                    "authority": "day0_remaining_day_global_probability_v1",
+                    "authority_reason": day0_fact_err,
+                    "age_h": age_h,
+                    "has_posterior": has_posterior,
+                    "newest_blocked_reason": day0_fact_err,
+                }
+            )
+            continue
+        if day0_fact is not None:
+            ready, readiness_reason, readiness_detail = day0_readiness.get(
+                scope,
+                (False, "DAY0_AUTHORITY_READINESS_MISSING", {}),
+            )
+            authority_item = {
+                "city": city,
+                "target_date": target_date,
+                "metric": metric,
+                "authority": "day0_remaining_day_global_probability_v1",
+                "authority_reason": readiness_reason,
+                "day0_projection_missing": True,
+                **readiness_detail,
+            }
+            if ready:
+                day0_authority_ready.append(authority_item)
+                continue
+            starved.append(
+                {
+                    **authority_item,
+                    "age_h": age_h,
+                    "has_posterior": has_posterior,
+                    "newest_blocked_reason": readiness_reason,
+                }
+            )
+            continue
         if age_h <= threshold_hours:
             continue
         starved.append(
@@ -6613,14 +6853,17 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
         city = item["city"]
         target_date = item["target_date"]
         metric = item["metric"]
-        reason = blocked_reasons.get((city, target_date, metric))
+        reason = str(item.get("newest_blocked_reason") or "") or blocked_reasons.get(
+            (city, target_date, metric)
+        )
         item["newest_blocked_reason"] = reason
         logger.error(
-            "ZEUS_POSTERIOR_STARVATION city=%s target=%s metric=%s age_h=%.2f "
-            "newest_blocked_reason=%s",
+            "ZEUS_POSTERIOR_STARVATION city=%s target=%s metric=%s authority=%s "
+            "age_h=%.2f newest_blocked_reason=%s",
             city,
             target_date,
             metric,
+            item.get("authority") or "replacement_forecast_posterior",
             item["age_h"],
             reason or "unknown",
         )
@@ -6631,6 +6874,8 @@ def _posterior_starvation_surface(state_dir: Path, now: datetime) -> dict:
         "checked_family_count": len(family_rows),
         "starved_count": len(starved),
         "starved_sample": starved,
+        "day0_authority_ready_count": len(day0_authority_ready),
+        "day0_authority_ready_sample": day0_authority_ready[:10],
     }
     if starved:
         return {"ok": False, "issue": f"POSTERIOR_STARVATION:n={len(starved)}", **detail}

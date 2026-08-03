@@ -1,4 +1,6 @@
-# Lifecycle: created=2026-07-17; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Created: 2026-07-17
+# Last reused/audited: 2026-08-03
+# Lifecycle: created=2026-07-17; last_reviewed=2026-08-03; last_reused=2026-08-03
 # Purpose: Lock the posterior-starvation alert's scope, visibility, and non-gating behavior.
 # Reuse: Run when live-health posterior freshness, city timezones, or alert wiring changes.
 # Authority basis: task instruction "P1 observability fix" (2026-07-17), incident
@@ -277,6 +279,172 @@ def test_missing_posterior_entirely_alerts_on_family_age(tmp_path, caplog):
     assert starved["has_posterior"] is False
     assert starved["city"] == "Shanghai"
     assert [r for r in caplog.records if "ZEUS_POSTERIOR_STARVATION" in r.message]
+
+
+def test_day0_family_requires_remaining_day_authority_not_replacement_posterior(
+    tmp_path,
+    monkeypatch,
+):
+    """A causal observation changes the probability domain; a ready Day0 q is healthy."""
+
+    sd = tmp_path / "state"
+    sd.mkdir()
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
+    target_date = "2026-07-17"
+    _write_market_events(
+        sd,
+        city="Shanghai",
+        target_date=target_date,
+        metric="low",
+        token_id="tok-shanghai-low",
+        created_at=_now_iso(now, -15.0),
+    )
+    _ensure_forecast_posteriors_table(sd)
+    _write_forecast_posterior(
+        sd,
+        city="Shanghai",
+        target_date=target_date,
+        metric="low",
+        runtime_layer="live",
+        computed_at=_now_iso(now, -1.0),
+    )
+    import src.control.live_health as live_health
+
+    monkeypatch.setattr(
+        live_health,
+        "_authorized_day0_facts_for_health",
+        lambda *args, **kwargs: (
+            {("Shanghai", target_date, "low"): {"observation_time": _now_iso(now, -1.0)}},
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        live_health,
+        "_day0_remaining_authority_readiness",
+        lambda *args, **kwargs: (
+            True,
+            "DAY0_REMAINING_AUTHORITY_READY",
+            {"available_models": ("ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km")},
+        ),
+    )
+
+    result = _posterior_starvation_surface(sd, now)
+
+    assert result["ok"] is True
+    assert result["starved_count"] == 0
+    assert result["day0_authority_ready_count"] == 1
+    assert result["day0_authority_ready_sample"][0]["authority"] == (
+        "day0_remaining_day_global_probability_v1"
+    )
+
+
+def test_missing_day0_remaining_authority_remains_typed_after_starvation_threshold(
+    tmp_path,
+    monkeypatch,
+):
+    """A stale forecast scope with a Day0 fact exposes the actual missing authority."""
+
+    sd = tmp_path / "state"
+    sd.mkdir()
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
+    target_date = "2026-07-17"
+    _write_market_events(
+        sd,
+        city="Shanghai",
+        target_date=target_date,
+        metric="low",
+        token_id="tok-shanghai-low",
+        created_at=_now_iso(now, -15.0),
+    )
+    _ensure_forecast_posteriors_table(sd)
+    _write_forecast_posterior(
+        sd,
+        city="Shanghai",
+        target_date=target_date,
+        metric="low",
+        runtime_layer="live",
+        computed_at=_now_iso(now, -1.0),
+    )
+
+    import src.control.live_health as live_health
+
+    monkeypatch.setattr(
+        live_health,
+        "_authorized_day0_facts_for_health",
+        lambda *args, **kwargs: (
+            {("Shanghai", target_date, "low"): {"observation_time": _now_iso(now, -0.5)}},
+            {},
+        ),
+    )
+    monkeypatch.setattr(
+        live_health,
+        "_day0_remaining_authority_readiness",
+        lambda *args, **kwargs: (
+            False,
+            "DAY0_COMPLETE_HOURLY_BUNDLE_UNAVAILABLE",
+            {"expected_models": ("ecmwf_ifs", "icon_global")},
+        ),
+    )
+
+    result = _posterior_starvation_surface(sd, now)
+
+    assert result["ok"] is False
+    assert result["starved_count"] == 1
+    item = result["starved_sample"][0]
+    assert item["authority"] == "day0_remaining_day_global_probability_v1"
+    assert item["newest_blocked_reason"] == "DAY0_COMPLETE_HOURLY_BUNDLE_UNAVAILABLE"
+    assert item["age_h"] == 1.0
+
+
+def test_day0_readiness_reproduces_model_skew_and_remaining_window_contract(
+    tmp_path,
+    monkeypatch,
+):
+    """Health uses the same exact bundle contract as the money-path Day0 reader."""
+
+    sd = tmp_path / "state"
+    sd.mkdir()
+    sqlite3.connect(sd / "zeus-forecasts.db").close()
+    now = datetime(2026, 7, 17, 12, 0, tzinfo=timezone.utc)
+    observed_at = _now_iso(now, -0.5)
+    captured: dict[str, object] = {}
+
+    import src.config
+    import src.data.day0_hourly_vectors as vectors
+    import src.control.live_health as live_health
+
+    city = type("City", (), {"timezone": "Asia/Shanghai"})()
+    monkeypatch.setattr(src.config, "runtime_cities_by_name", lambda: {"Shanghai": city})
+    monkeypatch.setattr(
+        vectors,
+        "day0_hourly_models_for_city",
+        lambda _city: ["ecmwf_ifs", "icon_global"],
+    )
+
+    def read_vectors(**kwargs):
+        captured.update(kwargs)
+        return [
+            type("Vector", (), {"model": "ecmwf_ifs"})(),
+            type("Vector", (), {"model": "icon_global"})(),
+        ]
+
+    monkeypatch.setattr(vectors, "read_freshest_day0_hourly_vectors", read_vectors)
+
+    ready, reason, detail = live_health._day0_remaining_authority_readiness(
+        sd,
+        city="Shanghai",
+        target_date="2026-07-17",
+        event_payload={"observation_time": observed_at},
+        now=now,
+    )
+
+    assert ready is True
+    assert reason == "DAY0_REMAINING_AUTHORITY_READY"
+    assert detail["available_models"] == ("ecmwf_ifs", "icon_global")
+    assert captured["require_expected"] is True
+    assert captured["max_bundle_skew_minutes"] == vectors.DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES
+    assert captured["remaining_window_start"].isoformat() == observed_at
+    assert captured["require_complete_remaining_window"] is True
 
 
 def test_empty_token_id_is_not_a_live_market(tmp_path):
