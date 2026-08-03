@@ -4854,6 +4854,12 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # epoch; recurring producers create the next event, so requeueing this one
     # only duplicates a completed comparison.
     "GLOBAL_PREFLIGHT_HOLD_CASH_OPTIMAL",
+    # SCOPE: this immutable global decision cut when BUY is disabled and no
+    # canonical held family exists. DRAIN: consume its carriers as a completed
+    # no-trade instead of retrying an action set that is provably empty. RESET:
+    # forecast, price, or control advancement emits a fresh event and reruns the
+    # complete auction under the then-current action set.
+    "GLOBAL_AUCTION_NO_REDUCE_ONLY_FAMILY",
 })
 
 

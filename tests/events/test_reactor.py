@@ -1632,6 +1632,16 @@ def test_global_not_selected_is_terminal_for_completed_epoch(caplog):
     assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
 
 
+def test_global_no_reduce_only_family_is_terminal_for_completed_cut(caplog):
+    reason = "GLOBAL_AUCTION_NO_REDUCE_ONLY_FAMILY"
+
+    with caplog.at_level(logging.ERROR, logger="zeus.events.reactor"):
+        assert reason in TERMINAL_MONEY_PATH_REASONS
+        assert _is_transient_money_path_reason(reason) is False
+
+    assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
+
+
 def test_global_preflight_cash_is_terminal_only_for_complete_action_set(caplog):
     complete_cash = (
         "GLOBAL_PREFLIGHT_HOLD_CASH_OPTIMAL:"
