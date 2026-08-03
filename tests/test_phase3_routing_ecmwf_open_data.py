@@ -16,9 +16,13 @@ Relationship invariants:
 
 from __future__ import annotations
 
+import pytest
+
 from src.data.forecast_source_registry import (
     ENSEMBLE_MODEL_SOURCE_MAP,
     SOURCES,
+    SourceNotEnabled,
+    gate_source_role,
     get_source,
 )
 
@@ -58,8 +62,12 @@ def test_gfs_routing_unchanged_by_phase3():
     assert ENSEMBLE_MODEL_SOURCE_MAP["gfs"] == "openmeteo_ensemble_gfs025"
 
 
-def test_tigge_routing_unchanged_by_phase3():
-    """TIGGE routes to itself; Phase 3 does not touch the archive path."""
+def test_tigge_archive_cannot_enter_live_money_roles():
+    """A newly ingested 48-hour archive row is still historical evidence."""
     assert ENSEMBLE_MODEL_SOURCE_MAP["tigge"] == "tigge"
     spec = SOURCES["tigge"]
-    assert "entry_primary" in spec.allowed_roles
+    assert spec.kind == "archive_ensemble"
+    assert spec.allowed_roles == ("historical_evidence",)
+    for role in ("entry_primary", "monitor_fallback"):
+        with pytest.raises(SourceNotEnabled):
+            gate_source_role(spec, role)
