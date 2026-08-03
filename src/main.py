@@ -4836,6 +4836,32 @@ def _yield_incomplete_day0_after_monitor_once(
         )
 
 
+def _paused_forecast_carrier_priority_allowed() -> bool:
+    """Read the durable global pause required for one post-monitor yield."""
+
+    # SCOPE: one already-monitored Day0 wake's one-turn yield, never a global
+    # inventory/exposure decision and never BUY submission. DRAIN: exact held-SELL
+    # and fill retain strict priority; the selected forecast must durably materialize
+    # before ack, then the yielded Day0 remains queued. RESET: consuming the yield,
+    # pause clear/unreadable control, monitor failure, or failed carrier selection
+    # restores ordinary Day0-first priority. ChainOnly/foreign inventory is outside
+    # this carrier-only no-submit turn and remains owned by the chain-mirror lane.
+    try:
+        from src.control.control_plane import _refresh_entries_pause_from_durable_state
+
+        pause_state = _refresh_entries_pause_from_durable_state()
+        return (
+            pause_state.get("status") == "ok"
+            and pause_state.get("entries_paused") is True
+        )
+    except Exception:
+        logger.warning(
+            "durable entries pause unavailable; retaining Day0 priority",
+            exc_info=True,
+        )
+        return False
+
+
 def _edli_reactor_wake_poll_once() -> bool:
     """Run the canonical reactor once for a new durable-producer wake hint."""
 
@@ -4856,23 +4882,47 @@ def _edli_reactor_wake_poll_once() -> bool:
     excluded_wake_ids = _exit_monitor_excluded_wake_ids()
     global_yield_ids = _edli_global_completion_yield.consume()
     day0_post_monitor_yield_ids = _edli_day0_post_monitor_yield.consume()
-    if day0_post_monitor_yield_ids:
-        excluded_wake_ids = frozenset(
-            excluded_wake_ids | day0_post_monitor_yield_ids
+    try:
+        if day0_post_monitor_yield_ids:
+            excluded_wake_ids = frozenset(
+                excluded_wake_ids | day0_post_monitor_yield_ids
+            )
+            prefer_forecast_carrier_progress = (
+                _paused_forecast_carrier_priority_allowed()
+            )
+            wake = read_reactor_wake(
+                exclude_wake_ids=excluded_wake_ids,
+                prefer_exact_held_sell=True,
+                prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
+                fail_on_error=prefer_forecast_carrier_progress,
+            )
+        else:
+            prefer_forecast_carrier_progress = False
+            wake = (
+                read_reactor_wake(
+                    exclude_wake_ids=excluded_wake_ids,
+                    prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
+                    fail_on_error=prefer_forecast_carrier_progress,
+                )
+                if excluded_wake_ids
+                else read_reactor_wake(
+                    prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
+                    fail_on_error=prefer_forecast_carrier_progress,
+                )
+            )
+        if wake is not None and wake.wake_id in global_yield_ids:
+            excluded_wake_ids = frozenset(excluded_wake_ids | global_yield_ids)
+            wake = read_reactor_wake(
+                exclude_wake_ids=excluded_wake_ids,
+                prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
+                fail_on_error=prefer_forecast_carrier_progress,
+            )
+    except (OSError, ValueError):
+        logger.warning(
+            "paused forecast carrier selection unavailable; retaining wake debt",
+            exc_info=True,
         )
-        wake = read_reactor_wake(
-            exclude_wake_ids=excluded_wake_ids,
-            prefer_exact_held_sell=True,
-        )
-    else:
-        wake = (
-            read_reactor_wake(exclude_wake_ids=excluded_wake_ids)
-            if excluded_wake_ids
-            else read_reactor_wake()
-        )
-    if wake is not None and wake.wake_id in global_yield_ids:
-        excluded_wake_ids = frozenset(excluded_wake_ids | global_yield_ids)
-        wake = read_reactor_wake(exclude_wake_ids=excluded_wake_ids)
+        return False
     if wake is None or wake.wake_id == _edli_last_reactor_wake_id:
         return False
     wakes = tuple(

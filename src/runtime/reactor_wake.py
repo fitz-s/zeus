@@ -8,6 +8,7 @@ import json
 import math
 import os
 import socket
+import stat
 import tempfile
 import threading
 import uuid
@@ -818,29 +819,52 @@ def _wake_queue_revision(
     queue_dir: Path,
     *,
     path: Path | None,
+    fail_on_error: bool = False,
 ) -> tuple[int, ...] | None:
     try:
-        stat = queue_dir.stat()
+        queue_stat = queue_dir.stat()
+    except FileNotFoundError:
+        return None
     except OSError:
+        if fail_on_error:
+            raise
+        return None
+    if not stat.S_ISDIR(queue_stat.st_mode):
+        if fail_on_error:
+            raise NotADirectoryError(
+                f"reactor wake queue path is not a directory: {queue_dir}"
+            )
         return None
     try:
         legacy = _wake_path(path).stat()
         legacy_revision = (legacy.st_ino, legacy.st_mtime_ns, legacy.st_size)
+    except FileNotFoundError:
+        legacy_revision = (0, 0, 0)
     except OSError:
+        if fail_on_error:
+            raise
         legacy_revision = (0, 0, 0)
     return (
-        stat.st_ino,
-        stat.st_mtime_ns,
-        stat.st_ctime_ns,
+        queue_stat.st_ino,
+        queue_stat.st_mtime_ns,
+        queue_stat.st_ctime_ns,
         *legacy_revision,
     )
 
 
-def _queued_wakes(path: Path | None) -> list[tuple[Path, ReactorWake]]:
+def _queued_wakes(
+    path: Path | None,
+    *,
+    fail_on_error: bool = False,
+) -> list[tuple[Path, ReactorWake]]:
     """Read immutable queue files once, then refresh only on durable revision change."""
 
     queue_dir = _wake_queue_dir(path)
-    revision = _wake_queue_revision(queue_dir, path=path)
+    revision = _wake_queue_revision(
+        queue_dir,
+        path=path,
+        fail_on_error=fail_on_error,
+    )
     if revision is None:
         return []
     cached_snapshot: dict[Path, ReactorWake | None] | None = None
@@ -848,6 +872,8 @@ def _queued_wakes(path: Path | None) -> list[tuple[Path, ReactorWake]]:
         if _WAKE_QUEUE_REVISIONS.get(queue_dir) == revision:
             cached_snapshot = _WAKE_QUEUE_CACHE.get(queue_dir, {})
     if cached_snapshot is not None:
+        if fail_on_error and any(wake is None for wake in cached_snapshot.values()):
+            raise ValueError("REACTOR_WAKE_INVALID")
         return [
             (queue_file, wake)
             for queue_file, wake in cached_snapshot.items()
@@ -856,6 +882,8 @@ def _queued_wakes(path: Path | None) -> list[tuple[Path, ReactorWake]]:
     try:
         queue_files = sorted(queue_dir.glob("*.json"))
     except OSError:
+        if fail_on_error:
+            raise
         return []
     with _WAKE_QUEUE_CACHE_LOCK:
         cached = dict(_WAKE_QUEUE_CACHE.get(queue_dir, {}))
@@ -864,9 +892,15 @@ def _queued_wakes(path: Path | None) -> list[tuple[Path, ReactorWake]]:
         fresh[queue_file] = (
             cached[queue_file]
             if queue_file in cached
-            else _read_reactor_wake_path(queue_file)
+            else _read_reactor_wake_path(queue_file, fail_on_error=fail_on_error)
         )
-    current_revision = _wake_queue_revision(queue_dir, path=path)
+        if fail_on_error and fresh[queue_file] is None:
+            raise ValueError("REACTOR_WAKE_INVALID")
+    current_revision = _wake_queue_revision(
+        queue_dir,
+        path=path,
+        fail_on_error=fail_on_error,
+    )
     with _WAKE_QUEUE_CACHE_LOCK:
         _WAKE_QUEUE_CACHE[queue_dir] = fresh
         if current_revision == revision:
@@ -881,10 +915,12 @@ def read_reactor_wake(
     path: Path | None = None,
     exclude_wake_ids: Collection[str] = (),
     prefer_exact_held_sell: bool = False,
+    prefer_forecast_carrier_progress: bool = False,
+    fail_on_error: bool = False,
 ) -> ReactorWake | None:
     """Read the queued fact with the shortest alpha clock first.
 
-    Day0 observations can reverse value in milliseconds and always preempt.
+    Day0 observations can reverse value in milliseconds and normally always preempt.
     A durable exact held-SELL completion debt is next: it survives process
     restart and ordinary fill, price, probability, or generic monitor-fairness
     streams cannot starve capital already at risk. A confirmed fill changes the
@@ -899,8 +935,15 @@ def read_reactor_wake(
     """
 
     excluded = {str(wake_id) for wake_id in exclude_wake_ids}
+    legacy = (
+        _read_reactor_wake_path(_wake_path(path), fail_on_error=True)
+        if fail_on_error
+        else None
+    )
     queued = [
-        item for item in _queued_wakes(path) if item[1].wake_id not in excluded
+        item
+        for item in _queued_wakes(path, fail_on_error=fail_on_error)
+        if item[1].wake_id not in excluded
     ]
     if prefer_exact_held_sell:
         for _queue_file, wake in queued:
@@ -908,6 +951,26 @@ def read_reactor_wake(
                 wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
                 and wake.held_sell_reauction_requests
             ):
+                return wake
+    if prefer_forecast_carrier_progress:
+        # SCOPE: this is only the paused-entry, proven-no-exposure carrier
+        # materialization turn selected by src.main. DRAIN: a selected forecast
+        # wake is acknowledged only after its existing durable carrier/no-submit
+        # path completes; an empty or failed build remains queued. RESET: clearing
+        # the pause or finding canonical exposure removes this preference and restores
+        # ordinary Day0 priority. Exact held-SELL and fill evidence stay
+        # ahead of the carrier because they can change capital already at risk.
+        for _queue_file, wake in queued:
+            if (
+                wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+                and wake.held_sell_reauction_requests
+            ):
+                return wake
+        for _queue_file, wake in queued:
+            if wake.reason == "position_fill_projected":
+                return wake
+        for _queue_file, wake in reversed(queued):
+            if wake.reason == "forecast_posterior_advanced":
                 return wake
     for _queue_file, wake in reversed(queued):
         if wake.reason == "day0_extreme_event_committed":
@@ -934,14 +997,15 @@ def read_reactor_wake(
             return wake
     for _queue_file, wake in queued:
         return wake
-    legacy = _read_reactor_wake_path(_wake_path(path))
+    if not fail_on_error:
+        legacy = _read_reactor_wake_path(_wake_path(path))
     if legacy is not None and legacy.wake_id not in excluded:
         return legacy
     return None
 
 
 def exact_held_sell_completion_wake_ids(
-    *, path: Path | None = None
+    *, path: Path | None = None, fail_on_error: bool = False
 ) -> frozenset[str]:
     """Snapshot queued exact held-SELL completion wake identities.
 
@@ -952,13 +1016,16 @@ def exact_held_sell_completion_wake_ids(
 
     wake_ids = {
         wake.wake_id
-        for _queue_file, wake in _queued_wakes(path)
+        for _queue_file, wake in _queued_wakes(path, fail_on_error=fail_on_error)
         if (
             wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
             and wake.held_sell_reauction_requests
         )
     }
-    legacy = _read_reactor_wake_path(_wake_path(path))
+    legacy = _read_reactor_wake_path(
+        _wake_path(path),
+        fail_on_error=fail_on_error,
+    )
     if (
         legacy is not None
         and legacy.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON

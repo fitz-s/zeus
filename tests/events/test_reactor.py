@@ -546,6 +546,16 @@ def test_published_paused_forecast_wake_without_durable_carrier_keeps_queue_unto
     )
     wake_queue_file = reactor_wake._wake_queue_target(wake, path=wake_path)
     wake_queue_bytes = wake_queue_file.read_bytes()
+    day0_wake = reactor_wake.publish_reactor_wake(
+        source="day0",
+        reason="day0_extreme_event_committed",
+        path=wake_path,
+        wake_id=f"pure-entry-day0-{failure_mode}",
+        published_at=first_decision_time + timedelta(seconds=1),
+        forecast_families=(family,),
+    )
+    day0_queue_file = reactor_wake._wake_queue_target(day0_wake, path=wake_path)
+    day0_queue_bytes = day0_queue_file.read_bytes()
     carrier = _forecast_event(
         f"latest-carrier-{failure_mode}",
         target_date=family[1],
@@ -643,6 +653,7 @@ def test_published_paused_forecast_wake_without_durable_carrier_keeps_queue_unto
     )
     monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(main, "_paused_forecast_carrier_priority_allowed", lambda: True)
     monkeypatch.setattr(main, "_forecast_wake_held_families", lambda _families: frozenset())
     monkeypatch.setattr(main, "_edli_next_redecision_source", lambda: "pause-antibody")
     monkeypatch.setattr(main, "_edli_build_forecast_snapshot_events", build_carrier)
@@ -753,6 +764,15 @@ def test_published_paused_forecast_wake_without_durable_carrier_keeps_queue_unto
         lambda *_args, **_kwargs: (),
     )
     main._edli_initialize_reactor_wake_cursor()
+    main._yield_incomplete_day0_after_monitor_once(
+        day0_wake,
+        monitor_succeeded=False,
+    )
+    assert reactor_wake.read_reactor_wake(path=wake_path) == day0_wake
+    main._yield_incomplete_day0_after_monitor_once(
+        day0_wake,
+        monitor_succeeded=True,
+    )
 
     assert main._edli_reactor_wake_poll_once() is False
 
@@ -765,9 +785,19 @@ def test_published_paused_forecast_wake_without_durable_carrier_keeps_queue_unto
     assert venue_buy_commands == []
     assert main._edli_last_reactor_wake_id is None
     assert wake_queue_file.read_bytes() == wake_queue_bytes
-    assert reactor_wake.read_reactor_wake(path=wake_path) == wake
+    assert day0_queue_file.read_bytes() == day0_queue_bytes
+    assert (
+        reactor_wake.read_reactor_wake(
+            path=wake_path,
+        )
+        == day0_wake
+    )
 
     failure[0] = None
+    main._yield_incomplete_day0_after_monitor_once(
+        day0_wake,
+        monitor_succeeded=True,
+    )
     recovered_poll = main._edli_reactor_wake_poll_once()
     check = sqlite3.connect(world_path)
     carrier_after_pause = check.execute(
@@ -788,7 +818,9 @@ def test_published_paused_forecast_wake_without_durable_carrier_keeps_queue_unto
     ).fetchone() == ("pending", 0)
     check.close()
     assert not wake_queue_file.exists()
-    assert reactor_wake.read_reactor_wake(path=wake_path) is None
+    assert day0_queue_file.exists()
+    assert reactor_wake.read_reactor_wake(path=wake_path) == day0_wake
+    assert reactor_wake.acknowledge_reactor_wake(day0_wake, path=wake_path)
     assert venue_buy_commands == []
 
     paused[0] = False
@@ -2473,6 +2505,210 @@ def test_reactor_wake_priority_quadrants_keep_fresh_material_ahead_of_generic(
 
     selected = reactor_wake.read_reactor_wake(path=path)
     assert selected == generic
+
+
+def test_paused_forecast_carrier_priority_preempts_only_pure_entry_day0(tmp_path):
+    """The explicit paused carrier preference keeps capital-at-risk wakes ahead."""
+
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    forecast = reactor_wake.publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="forecast-future",
+        published_at=datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc),
+        forecast_families=(("Paris", "2026-08-03", "high"),),
+    )
+    day0 = reactor_wake.publish_reactor_wake(
+        source="day0",
+        reason="day0_extreme_event_committed",
+        path=path,
+        wake_id="day0-pure-entry",
+        published_at=datetime(2026, 8, 2, 12, 0, 1, tzinfo=timezone.utc),
+    )
+
+    assert reactor_wake.read_reactor_wake(path=path) == day0
+    assert (
+        reactor_wake.read_reactor_wake(
+            path=path,
+            prefer_forecast_carrier_progress=True,
+        )
+        == forecast
+    )
+
+    fill = reactor_wake.publish_reactor_wake(
+        source="fill",
+        reason="position_fill_projected",
+        path=path,
+        wake_id="fill-urgent",
+        published_at=datetime(2026, 8, 2, 12, 0, 2, tzinfo=timezone.utc),
+        event_ids=("fill-event",),
+    )
+    assert (
+        reactor_wake.read_reactor_wake(
+            path=path,
+            prefer_forecast_carrier_progress=True,
+        )
+        == fill
+    )
+
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="held-position",
+        family=("Paris", "2026-08-02", "high"),
+        probability_content_identity="q-held",
+        held_token_id="held-token",
+        held_best_bid=0.12,
+        bid_observed_at="2026-08-02T12:00:03+00:00",
+    )
+    exact = reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        wake_id="exact-held-sell",
+        published_at=datetime(2026, 8, 2, 12, 0, 3, tzinfo=timezone.utc),
+        held_sell_reauction_requests=(request,),
+    )
+    assert (
+        reactor_wake.read_reactor_wake(
+            path=path,
+            prefer_forecast_carrier_progress=True,
+        )
+        == exact
+    )
+
+
+def test_paused_forecast_carrier_priority_requires_durable_global_pause(monkeypatch):
+    import src.control.control_plane as control_plane
+    import src.main as main
+
+    pause_state = [{"status": "ok", "entries_paused": True}]
+
+    monkeypatch.setattr(
+        control_plane,
+        "_refresh_entries_pause_from_durable_state",
+        lambda: pause_state[0],
+    )
+
+    assert main._paused_forecast_carrier_priority_allowed() is True
+    pause_state[0] = {"status": "ok", "entries_paused": False}
+    assert main._paused_forecast_carrier_priority_allowed() is False
+    pause_state[0] = {"status": "query_error", "entries_paused": True}
+    assert main._paused_forecast_carrier_priority_allowed() is False
+
+
+def test_exact_held_sell_debt_probe_rejects_malformed_queue_file(tmp_path):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    queue_dir = reactor_wake._wake_queue_dir(path)
+    queue_dir.mkdir(parents=True)
+    (queue_dir / "malformed.json").write_text("{", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="REACTOR_WAKE_INVALID"):
+        reactor_wake.exact_held_sell_completion_wake_ids(
+            path=path,
+            fail_on_error=True,
+        )
+
+
+def test_strict_wake_selection_rejects_unreadable_queue_dir(monkeypatch, tmp_path):
+    from src.runtime import reactor_wake
+
+    class UnreadableQueueDir:
+        def stat(self):
+            raise PermissionError("queue directory unreadable")
+
+    path = tmp_path / "wake.json"
+    monkeypatch.setattr(
+        reactor_wake,
+        "_wake_queue_dir",
+        lambda _path: UnreadableQueueDir(),
+    )
+
+    assert reactor_wake._queued_wakes(path) == []
+    with pytest.raises(PermissionError, match="queue directory unreadable"):
+        reactor_wake.read_reactor_wake(path=path, fail_on_error=True)
+
+
+def test_strict_wake_selection_validates_legacy_before_queued_forecast(tmp_path):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    forecast = reactor_wake.publish_reactor_wake(
+        source="forecast",
+        reason="forecast_posterior_advanced",
+        path=path,
+        wake_id="queued-forecast",
+        published_at=datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc),
+        forecast_families=(("Paris", "2026-08-03", "high"),),
+    )
+    assert reactor_wake._wake_queue_target(forecast, path=path).exists()
+    path.write_text("{", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="REACTOR_WAKE_INVALID"):
+        reactor_wake.read_reactor_wake(path=path, fail_on_error=True)
+
+
+def test_strict_wake_selection_rejects_regular_file_queue_path(tmp_path):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    reactor_wake._wake_queue_dir(path).write_text("not-a-directory", encoding="utf-8")
+
+    with pytest.raises(NotADirectoryError, match="not a directory"):
+        reactor_wake.read_reactor_wake(path=path, fail_on_error=True)
+
+
+def test_paused_forecast_selection_scans_large_queue_once(tmp_path, monkeypatch):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    queue_dir = reactor_wake._wake_queue_dir(path)
+    queue_dir.mkdir(parents=True)
+    for index in range(256):
+        wake = reactor_wake.ReactorWake(
+            wake_id=f"wake-{index:04d}",
+            published_at=(
+                datetime(2026, 8, 2, 12, 0, tzinfo=timezone.utc)
+                + timedelta(seconds=index)
+            ).isoformat(),
+            source="test",
+            reason="market_price_advanced",
+        )
+        reactor_wake._atomic_write_wake(
+            queue_dir / f"{index:04d}-{wake.wake_id}.json",
+            wake,
+        )
+    forecast = reactor_wake.ReactorWake(
+        wake_id="forecast-latest",
+        published_at="2026-08-02T12:05:00+00:00",
+        source="test",
+        reason="forecast_posterior_advanced",
+        forecast_families=(("Paris", "2026-08-03", "high"),),
+    )
+    reactor_wake._atomic_write_wake(queue_dir / "9999-forecast-latest.json", forecast)
+
+    original = reactor_wake._queued_wakes
+    calls = 0
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(reactor_wake, "_queued_wakes", counted)
+
+    assert (
+        reactor_wake.read_reactor_wake(
+            path=path,
+            prefer_forecast_carrier_progress=True,
+            fail_on_error=True,
+        )
+        == forecast
+    )
+    assert calls == 1
 
 
 def test_exact_held_sell_debt_preempts_older_generic_completion_marker(tmp_path):
