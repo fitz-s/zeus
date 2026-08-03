@@ -2526,6 +2526,7 @@ def _prepared_target_frontier(marker: object):
         metric="high",
         day0_ledger_frontier_identity=None,
         posterior=SimpleNamespace(
+            live_eligible=True,
             dependency_payload={
                 "baseline_b0": request.baseline_source_run_id,
                 "openmeteo_ifs9_anchor": request.openmeteo_source_run_id,
@@ -2549,6 +2550,102 @@ def _prepared_target_frontier(marker: object):
             },
         ),
     )
+
+
+@pytest.mark.parametrize(
+    "fusion",
+    (
+        None,
+        {},
+        {"current_value_serving": {}},
+        {"current_value_serving": {"ecmwf_ifs9": {}}},
+        {"current_value_serving": {"ecmwf_ifs9": {"raw_model_forecast_id": "bad"}}},
+        {"current_value_serving": {"ecmwf_ifs9": {"raw_model_forecast_id": 1.5}}},
+        {"current_value_serving": {"ecmwf_ifs9": {"raw_model_forecast_id": True}}},
+    ),
+)
+def test_target_witness_allows_live_ineligible_missing_serving_provenance(
+    fusion,
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    prepared = _prepared_target_frontier(101)
+    prepared.posterior.live_eligible = False
+    prepared.posterior.provenance_payload = (
+        {} if fusion is None else {"bayes_precision_fusion": fusion}
+    )
+
+    witness = cli._target_dependency_witness(conn, prepared)
+    conn.close()
+
+    assert witness.prepared_provider_row_ids == ()
+    assert witness.prepared_snapshot_id is None
+
+
+@pytest.mark.parametrize(
+    "fusion",
+    (
+        None,
+        {},
+        {"current_value_serving": {}},
+        {"current_value_serving": {"ecmwf_ifs9": {}}},
+        {"current_value_serving": {"ecmwf_ifs9": {"raw_model_forecast_id": "bad"}}},
+        {"current_value_serving": {"ecmwf_ifs9": {"raw_model_forecast_id": 1.5}}},
+        {"current_value_serving": {"ecmwf_ifs9": {"raw_model_forecast_id": True}}},
+    ),
+)
+def test_target_witness_rejects_live_eligible_missing_serving_provenance(
+    fusion,
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    prepared = _prepared_target_frontier(101)
+    prepared.posterior.provenance_payload = (
+        {} if fusion is None else {"bayes_precision_fusion": fusion}
+    )
+
+    with pytest.raises(
+        cli._TargetDependencyWitnessUnavailable,
+        match="current value serving witness unavailable",
+    ):
+        cli._target_dependency_witness(conn, prepared)
+    conn.close()
+
+
+def test_commit_returns_typed_blocked_for_ineligible_missing_serving(
+    monkeypatch,
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    _create_target_frontier_tables(conn)
+    prepared = _prepared_target_frontier(101)
+    prepared.posterior.live_eligible = False
+    prepared.posterior.provenance_payload = {}
+    blocked = materializer_mod.ReplacementForecastMaterializeResult(
+        status="BLOCKED",
+        reason_codes=("PREDICTIVE_SIGMA:MISSING",),
+        posterior_id=None,
+        anchor_id=17,
+        readiness_id=None,
+    )
+    monkeypatch.setattr(
+        cli, "prepare_replacement_forecast_live", lambda *_args: prepared
+    )
+    monkeypatch.setattr(
+        cli, "write_prepared_replacement_forecast_live", lambda *_args: blocked
+    )
+
+    result = cli._commit_from_read_snapshot(
+        conn, prepared.request, writer_lock=nullcontext
+    )
+    conn.close()
+
+    assert result == blocked
 
 
 def _ready_materialization_result():

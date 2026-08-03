@@ -371,7 +371,27 @@ def _build_target_dependency_witness(
         ids=(() if prepared_snapshot_id is None else (prepared_snapshot_id,)),
         columns=table_columns["ensemble_snapshots"],
     )
-    serving = fusion["current_value_serving"]
+    serving = fusion.get("current_value_serving")
+    serving_valid = isinstance(serving, Mapping) and bool(serving)
+    if serving_valid:
+        serving_valid = all(
+            isinstance(payload, Mapping)
+            and isinstance(payload.get("raw_model_forecast_id"), int)
+            and not isinstance(payload.get("raw_model_forecast_id"), bool)
+            and payload["raw_model_forecast_id"] > 0
+            for payload in serving.values()
+        )
+    if not serving_valid:
+        # A live-ineligible computation can legitimately have no fusion serving
+        # witness (for example, the current ENS shape is absent).  It still
+        # needs a stable dependency snapshot so the writer can return its typed
+        # BLOCKED reasons.  A live-eligible computation without this witness is
+        # malformed authority and must remain fail-closed.
+        if bool(getattr(prepared.posterior, "live_eligible", True)):
+            raise _TargetDependencyWitnessUnavailable(
+                "current value serving witness unavailable"
+            )
+        serving = {}
     prepared_provider_frontier = tuple(
         sorted(
             (
