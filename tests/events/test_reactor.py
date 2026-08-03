@@ -3507,6 +3507,166 @@ def test_main_reactor_injects_day0_and_monitor_preemption_signals(
         main._day0_exit_monitor_attempts.clear()
 
 
+def _stub_selected_day0_wake_poll(monkeypatch, main, reactor_wake, wake):
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_edli_event_reactor_cycle", lambda **_kwargs: False)
+    monkeypatch.setattr(
+        reactor_wake,
+        "read_reactor_wake",
+        lambda **_kwargs: wake,
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "coalescible_reactor_wakes",
+        lambda selected: (selected,),
+    )
+    main._day0_exit_monitor_attempts.clear()
+    main._forecast_exit_monitor_attempts.clear()
+    main._edli_initialize_reactor_wake_cursor()
+
+
+def test_pure_entry_day0_no_monitor_owns_sticky_urgent_identity(monkeypatch):
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    family = ("Paris", "2026-08-03", "high")
+    wake = reactor_wake.ReactorWake(
+        "day0-pure-entry",
+        "2026-08-02T12:00:00+00:00",
+        "day0",
+        "day0_extreme_event_committed",
+        forecast_families=(family,),
+    )
+    urgent_identity = ["forecast-next", "forecast_posterior_advanced"]
+    _stub_selected_day0_wake_poll(monkeypatch, main, reactor_wake, wake)
+    monkeypatch.setattr(
+        main,
+        "_day0_wake_requires_exit_monitor",
+        lambda _families: False,
+    )
+    monkeypatch.setattr(
+        main,
+        "_pending_held_day0_wake_families",
+        lambda: frozenset(),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_identity",
+        lambda: tuple(urgent_identity),
+    )
+
+    try:
+        assert main._edli_reactor_wake_poll_once() is False
+        assert main._day0_exit_monitor_attempt_state(wake.wake_id) == (True, True)
+        assert main._day0_urgent_wake_pending.is_set() is True
+        assert main._unowned_day0_urgent_wake_pending() is False
+        assert wake.wake_id not in main._exit_monitor_excluded_wake_ids()
+
+        urgent_identity[:] = ["day0-new", "day0_extreme_event_committed"]
+        assert main._unowned_day0_urgent_wake_pending() is True
+
+        urgent_identity[:] = ["forecast-next", "forecast_posterior_advanced"]
+        monkeypatch.setattr(
+            reactor_wake,
+            "acknowledge_reactor_wake",
+            lambda _wake: True,
+        )
+        assert main._acknowledge_edli_reactor_wake_batch(
+            wake,
+            (wake,),
+            day0_wake=True,
+        ) is True
+        assert main._day0_exit_monitor_attempt_state(wake.wake_id) == (False, None)
+    finally:
+        main._day0_exit_monitor_attempts.clear()
+        main._day0_urgent_wake_pending.clear()
+
+
+@pytest.mark.parametrize(
+    "requires_monitor,pending_held_families",
+    [
+        pytest.param(True, frozenset(), id="target-query-failure"),
+        pytest.param(False, None, id="pending-proof-unknown"),
+        pytest.param(
+            False,
+            frozenset({("Paris", "2026-08-03", "high")}),
+            id="pending-held-family",
+        ),
+    ],
+)
+def test_day0_uncertain_or_held_monitor_proof_never_marks_no_monitor_complete(
+    monkeypatch,
+    requires_monitor,
+    pending_held_families,
+):
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    family = ("Paris", "2026-08-03", "high")
+    wake = reactor_wake.ReactorWake(
+        "day0-monitor-required",
+        "2026-08-02T12:00:00+00:00",
+        "day0",
+        "day0_extreme_event_committed",
+        forecast_families=(family,),
+    )
+    dispatched: list[str] = []
+    _stub_selected_day0_wake_poll(monkeypatch, main, reactor_wake, wake)
+    monkeypatch.setattr(
+        main,
+        "_day0_wake_requires_exit_monitor",
+        lambda _families: requires_monitor,
+    )
+    monkeypatch.setattr(
+        main,
+        "_pending_held_day0_wake_families",
+        lambda: pending_held_families,
+    )
+
+    def dispatch_monitor(wake_id, _families):
+        dispatched.append(wake_id)
+        return False
+
+    monkeypatch.setattr(
+        main,
+        "_dispatch_day0_exit_monitor",
+        dispatch_monitor,
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_identity",
+        lambda: ("forecast-next", "forecast_posterior_advanced"),
+    )
+
+    try:
+        assert main._edli_reactor_wake_poll_once() is False
+        assert main._day0_exit_monitor_attempt_state(wake.wake_id) == (False, None)
+        assert dispatched == [wake.wake_id]
+        assert main._unowned_day0_urgent_wake_pending() is True
+    finally:
+        main._day0_exit_monitor_attempts.clear()
+        main._day0_urgent_wake_pending.clear()
+
+
+def test_day0_completed_ownership_marker_clears_on_listener_restart():
+    import src.main as main
+
+    main._day0_exit_monitor_attempts.clear()
+    try:
+        main._day0_exit_monitor_attempts["day0-served"] = True
+        main._day0_exit_monitor_attempts["day0-running"] = None
+
+        excluded = main._exit_monitor_excluded_wake_ids()
+        assert "day0-served" not in excluded
+        assert "day0-running" in excluded
+
+        main._edli_initialize_reactor_wake_cursor()
+        assert "day0-served" not in main._day0_exit_monitor_attempts
+        assert main._day0_exit_monitor_attempts["day0-running"] is None
+    finally:
+        main._day0_exit_monitor_attempts.clear()
+
+
 def test_monitor_preempts_once_then_next_auction_must_complete(monkeypatch):
     from types import SimpleNamespace
 

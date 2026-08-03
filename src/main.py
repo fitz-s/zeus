@@ -3982,6 +3982,14 @@ def _edli_initialize_reactor_wake_cursor() -> None:
     _edli_day0_post_monitor_yield.reset()
     _day0_urgent_wake_pending.clear()
     _day0_held_monitor_preempt_requested.clear()
+    with _day0_exit_monitor_attempts_lock:
+        completed_wake_ids = tuple(
+            wake_id
+            for wake_id, result in _day0_exit_monitor_attempts.items()
+            if result is True
+        )
+        for wake_id in completed_wake_ids:
+            _day0_exit_monitor_attempts.pop(wake_id, None)
 
 
 def _day0_wake_target_families(
@@ -4331,6 +4339,23 @@ def _complete_day0_exit_monitor_attempt(wake_id: str, *, succeeded: bool) -> Non
     with _day0_exit_monitor_attempts_lock:
         if wake_id in _day0_exit_monitor_attempts:
             _day0_exit_monitor_attempts[wake_id] = bool(succeeded)
+
+
+def _record_day0_no_monitor_completion(wake_id: str) -> bool:
+    """Own one selected Day0 wake whose exact probes require no monitor."""
+
+    # SCOPE: this exact selected Day0 wake_id only. DRAIN: its existing reactor
+    # work completes or stays durable without re-preempting itself; a different
+    # Day0 identity still preempts. RESET: Day0 ack uses the existing forget
+    # path, and listener restart removes completed True markers.
+    clean_wake_id = str(wake_id or "").strip()
+    if not clean_wake_id:
+        return False
+    with _day0_exit_monitor_attempts_lock:
+        if clean_wake_id in _day0_exit_monitor_attempts:
+            return _day0_exit_monitor_attempts[clean_wake_id] is True
+        _day0_exit_monitor_attempts[clean_wake_id] = True
+    return True
 
 
 def _forget_day0_exit_monitor_attempt(wake_id: str) -> None:
@@ -5121,6 +5146,10 @@ def _edli_reactor_wake_poll_once() -> bool:
                     "Day0 wake rescued %d queued held families behind an "
                     "entry-only selected wake",
                     len(pending_held_families),
+                )
+            else:
+                day0_requires_exit_monitor = not (
+                    _record_day0_no_monitor_completion(wake.wake_id)
                 )
         if day0_requires_exit_monitor:
             started, result = _day0_exit_monitor_attempt_state(wake.wake_id)
