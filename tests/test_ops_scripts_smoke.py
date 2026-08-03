@@ -2354,15 +2354,27 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     assert "applied['world'] = apply_migrations(" in calls[0][2]
     assert "world_ghost_cleanup" not in calls[0][2]
     assert "target='202608_edli_active_redecision_projection'" in calls[0][2]
+    assert "target='202608_edli_active_redecision_projection_receipt_notnull'" in calls[0][2]
     assert "get_world_connection_read_only" in calls[0][2]
+    assert "PRAGMA table_info(opportunity_event_processing_type_backfill)" in calls[0][2]
     assert "assert_active_projection_ready" in calls[0][2]
     assert "world_active_redecision_projection_receipt" in calls[0][2]
+    assert "world_active_redecision_backfill_notnull" in calls[0][2]
+    assert "EDLI_BACKFILL_RECEIPT_CONSUMER_NOTNULL_REQUIRED" in calls[0][2]
     assert "EDLI_ACTIVE_REDECISION_PROJECTION_UNSEEDED" in calls[0][2]
     assert "_ensure_restart_trade_schemas(trade_conn)" in calls[0][2]
     assert "get_trade_connection(write_class='live')" in calls[0][2]
     assert "get_world_connection_with_trades_required(write_class='live')" in calls[0][2]
     assert "get_trade_connection_with_world_required(write_class='live')" not in calls[0][2]
     assert "append_rest_filled_orphan_trade_facts_to_edli" in calls[0][2]
+    recovery_script = calls[0][2]
+    assert recovery_script.index("target='202608_edli_active_redecision_projection'") < (
+        recovery_script.index(
+            "target='202608_edli_active_redecision_projection_receipt_notnull'"
+        )
+    ) < recovery_script.index("world_conn.commit()") < recovery_script.index(
+        "PRAGMA table_info(opportunity_event_processing_type_backfill)"
+    )
 
 
 def test_deploy_restart_trade_schema_installs_auto_resolution_on_legacy_db(tmp_path):
@@ -3611,7 +3623,7 @@ def test_deploy_live_projection_recovery_failure_leaves_daemons_stopped(monkeypa
     monkeypatch.setattr(
         dl,
         "_run_restart_recovery_if_needed",
-        lambda labels: (False, "ACTIVE_PROJECTION_SEED_LIMIT_EXCEEDED"),
+        lambda labels: (False, "EDLI_BACKFILL_RECEIPT_COPY_COUNT_MISMATCH"),
     )
     monkeypatch.setattr(
         dl,

@@ -1075,7 +1075,7 @@ tables:
     db: world
     schema_class: world_class
     schema_version_owner: SCHEMA_VERSION
-    created_by: scripts/migrations/202608_edli_active_redecision_projection.py
+    created_by: scripts/migrations/202608_edli_active_redecision_projection_receipt_notnull.py
     pk_col: consumer_name
     required_columns:
       - {name: consumer_name, type: TEXT, nullable: false}
@@ -1083,7 +1083,9 @@ tables:
       - {name: seeded_active_count, type: INTEGER, nullable: true}
       - {name: seed_high_water_rowid, type: INTEGER, nullable: true}
     notes: >
-      Per-consumer active-set seed receipt. completed_at, seeded_active_count,
+      Per-consumer active-set seed receipt. The 202608 follow-up rebuild makes
+      its TEXT primary key explicitly NOT NULL for SQLite registry parity.
+      completed_at, seeded_active_count,
       and seed_high_water_rowid become authoritative only after one bounded,
       indexed migration seed commits; next_rowid is retained compatibility data,
       never a reader cursor. It never authorizes deletion or mutation of

@@ -85,7 +85,7 @@ CREATE INDEX IF NOT EXISTS idx_event_processing_type_stale_claim
 # is not an authority cursor and readers never drain historical rowids.
 CREATE_EVENT_TYPE_BACKFILL_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS opportunity_event_processing_type_backfill (
-    consumer_name TEXT PRIMARY KEY,
+    consumer_name TEXT NOT NULL PRIMARY KEY,
     next_rowid INTEGER NOT NULL DEFAULT 0,
     completed_at TEXT,
     seeded_active_count INTEGER,

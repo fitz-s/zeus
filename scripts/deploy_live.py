@@ -1080,6 +1080,11 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
                 target='202608_edli_active_redecision_projection',
                 db_identity='world',
             )
+            applied['world_active_redecision_backfill_notnull'] = apply_migrations(
+                world_conn,
+                target='202608_edli_active_redecision_projection_receipt_notnull',
+                db_identity='world',
+            )
             world_conn.commit()
         finally:
             world_conn.close()
@@ -1089,6 +1094,14 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         # from a read-only connection before any daemon is bootstrapped.
         world_ro = get_world_connection_read_only()
         try:
+            backfill_columns = {
+                str(row[1]): int(row[3])
+                for row in world_ro.execute(
+                    "PRAGMA table_info(opportunity_event_processing_type_backfill)"
+                )
+            }
+            if backfill_columns.get('consumer_name') != 1:
+                raise RuntimeError('EDLI_BACKFILL_RECEIPT_CONSUMER_NOTNULL_REQUIRED')
             seeded_active_count, seed_high_water_rowid = assert_active_projection_ready(
                 world_ro,
                 consumer_name='edli_reactor_v1',
@@ -1104,6 +1117,9 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
                 'seeded_active_count': seeded_active_count,
                 'seed_high_water_rowid': seed_high_water_rowid,
                 'completed_at': str(receipt[0]),
+            }
+            applied['world_active_redecision_backfill_notnull_receipt'] = {
+                'consumer_name_notnull': True,
             }
         finally:
             world_ro.close()

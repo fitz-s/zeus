@@ -2401,6 +2401,31 @@ scripts:
     required_tests:
       - tests/events/test_continuous_redecision_emit.py
 
+  202608_edli_active_redecision_projection_receipt_notnull.py:
+    class: migration
+    status: active
+    lifecycle: one_shot
+    authority_scope: schema_migration
+    dangerous_if_run: true
+    dry_run_default: false
+    apply_flag: "python3 -m scripts.migrations apply --target=202608_edli_active_redecision_projection_receipt_notnull"
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db]
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python3 -m scripts.migrations apply --target=202608_edli_active_redecision_projection_receipt_notnull --db-path /tmp/zeus-world.db --db-identity world"
+    external_inputs: []
+    delete_policy: retain_for_audit
+    reuse_when: "Repair the already-ledgered EDLI active-projection receipt's nullable SQLite TEXT PRIMARY KEY without touching projection, processing, or append-only events."
+    do_not_use_when: "Do not run against a canonical live DB from this worktree or while its world writer is unfenced; stopped-daemon restart recovery owns live application."
+    promotion_barrier: "Restart recovery must apply this target after 202608 and prove PRAGMA consumer_name notnull=1 plus the existing active-projection readiness receipt before starting code."
+    unguarded_write_rationale: "One savepoint rebuilds only the receipt table after NULL/duplicate/schema checks and verifies copy cardinality before swap; any failure restores the legacy table unchanged."
+    required_helpers:
+      - scripts/migrations/202608_edli_active_redecision_projection_receipt_notnull.py::up
+      - src.state.schema.opportunity_event_processing_schema.assert_active_projection_ready
+    required_tests:
+      - tests/events/test_continuous_redecision_emit.py
+      - tests/test_ops_scripts_smoke.py
+
   measure_wu_obs_latency.py:
     class: telemetry_read
     status: active

@@ -1766,6 +1766,162 @@ def test_active_projection_migration_is_idempotent_reversible_and_transactional(
     ).fetchone()[0] == 1
 
 
+def _recreate_legacy_backfill_receipt(
+    world: sqlite3.Connection,
+    rows: list[tuple[object, ...]],
+    *,
+    primary_key: bool = True,
+) -> None:
+    world.execute("DROP TABLE opportunity_event_processing_type_backfill")
+    consumer_column = "consumer_name TEXT PRIMARY KEY" if primary_key else "consumer_name TEXT"
+    world.execute(
+        f"""
+        CREATE TABLE opportunity_event_processing_type_backfill (
+            {consumer_column},
+            next_rowid INTEGER NOT NULL DEFAULT 0,
+            completed_at TEXT,
+            seeded_active_count INTEGER,
+            seed_high_water_rowid INTEGER
+        )
+        """
+    )
+    world.executemany(
+        """
+        INSERT INTO opportunity_event_processing_type_backfill (
+            consumer_name, next_rowid, completed_at,
+            seeded_active_count, seed_high_water_rowid
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+
+
+def _backfill_consumer_notnull(world: sqlite3.Connection) -> int:
+    return next(
+        int(row[3])
+        for row in world.execute(
+            "PRAGMA table_info(opportunity_event_processing_type_backfill)"
+        )
+        if row[1] == "consumer_name"
+    )
+
+
+def test_backfill_receipt_notnull_migration_preserves_receipt_and_boot_registry():
+    from scripts.migrations import apply_migrations
+    from src.state.table_registry import DBIdentity, assert_db_matches_registry
+
+    target = "202608_edli_active_redecision_projection_receipt_notnull"
+    world = sqlite3.connect(":memory:")
+    init_schema(world)
+    assert _backfill_consumer_notnull(world) == 1
+    receipt = (
+        "edli_reactor_v1",
+        18_375_434,
+        "2026-08-02T18:00:00+00:00",
+        149,
+        18_375_434,
+    )
+    _recreate_legacy_backfill_receipt(world, [receipt])
+    assert _backfill_consumer_notnull(world) == 0
+
+    assert apply_migrations(world, target=target, db_identity="world") == [target]
+    assert apply_migrations(world, target=target, db_identity="world") == []
+    assert _backfill_consumer_notnull(world) == 1
+    assert tuple(
+        world.execute(
+            "SELECT consumer_name, next_rowid, completed_at, seeded_active_count, "
+            "seed_high_water_rowid FROM opportunity_event_processing_type_backfill"
+        ).fetchone()
+    ) == receipt
+    assert_db_matches_registry(world, DBIdentity.WORLD)
+
+
+def test_backfill_receipt_notnull_migration_rejects_malformed_or_partial_copy(monkeypatch):
+    migration = importlib.import_module(
+        "scripts.migrations.202608_edli_active_redecision_projection_receipt_notnull"
+    )
+    world = sqlite3.connect(":memory:")
+    init_schema(world)
+    receipt = (
+        "edli_reactor_v1",
+        18_375_434,
+        "2026-08-02T18:00:00+00:00",
+        149,
+        18_375_434,
+    )
+
+    _recreate_legacy_backfill_receipt(world, [(None, 0, None, None, None)])
+    with pytest.raises(RuntimeError, match="EDLI_BACKFILL_RECEIPT_NULL_CONSUMER"):
+        migration.up(world)
+    assert _backfill_consumer_notnull(world) == 0
+
+    _recreate_legacy_backfill_receipt(world, [receipt, receipt], primary_key=False)
+    with pytest.raises(RuntimeError, match="EDLI_BACKFILL_RECEIPT_DUPLICATE_CONSUMER"):
+        migration.up(world)
+    assert _backfill_consumer_notnull(world) == 0
+
+    _recreate_legacy_backfill_receipt(world, [receipt])
+    original_copy = migration._copy_receipt_rows
+
+    def _partial_copy(conn):
+        original_copy(conn)
+        conn.execute(
+            "DELETE FROM opportunity_event_processing_type_backfill_notnull_new "
+            "WHERE consumer_name = 'edli_reactor_v1'"
+        )
+
+    monkeypatch.setattr(migration, "_copy_receipt_rows", _partial_copy)
+    with pytest.raises(RuntimeError, match="EDLI_BACKFILL_RECEIPT_COPY_COUNT_MISMATCH"):
+        migration.up(world)
+    assert _backfill_consumer_notnull(world) == 0
+    assert tuple(
+        world.execute(
+            "SELECT consumer_name, next_rowid, completed_at, seeded_active_count, "
+            "seed_high_water_rowid FROM opportunity_event_processing_type_backfill"
+        ).fetchone()
+    ) == receipt
+
+
+def test_backfill_receipt_notnull_migration_failure_rolls_back_legacy_table():
+    migration = importlib.import_module(
+        "scripts.migrations.202608_edli_active_redecision_projection_receipt_notnull"
+    )
+    world = sqlite3.connect(":memory:")
+    init_schema(world)
+    receipt = (
+        "edli_reactor_v1",
+        18_375_434,
+        "2026-08-02T18:00:00+00:00",
+        149,
+        18_375_434,
+    )
+    _recreate_legacy_backfill_receipt(world, [receipt])
+
+    def _deny_receipt_drop(action, arg1, _arg2, _db_name, _source):
+        if action == sqlite3.SQLITE_DROP_TABLE and arg1 == migration._TABLE:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    world.set_authorizer(_deny_receipt_drop)
+    try:
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            migration.up(world)
+    finally:
+        world.set_authorizer(None)
+
+    assert _backfill_consumer_notnull(world) == 0
+    assert tuple(
+        world.execute(
+            "SELECT consumer_name, next_rowid, completed_at, seeded_active_count, "
+            "seed_high_water_rowid FROM opportunity_event_processing_type_backfill"
+        ).fetchone()
+    ) == receipt
+    assert world.execute(
+        "SELECT COUNT(*) FROM sqlite_master "
+        "WHERE name = 'opportunity_event_processing_type_backfill_notnull_new'"
+    ).fetchone()[0] == 0
+
+
 def test_active_projection_seed_fence_and_orphan_roll_back_atomically():
     from src.state.schema.opportunity_event_processing_schema import (
         ActiveProjectionSeedError,
