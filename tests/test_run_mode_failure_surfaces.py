@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-08-02
+# Last reused or audited: 2026-08-03
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-08-02; last_reused=2026-08-02
+# Lifecycle: created=2026-05-19; last_reviewed=2026-08-03; last_reused=2026-08-03
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -8338,6 +8338,11 @@ def test_exit_monitor_handoff_timeout_releases_priority_claim(monkeypatch) -> No
             return False
 
     main_module._held_position_monitor_active.clear()
+    monkeypatch.setattr(
+        main_module,
+        "_current_periodic_monitor_obligation_count",
+        lambda: None,
+    )
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyReactorGate())
     monkeypatch.setattr(
         exit_module,
@@ -8348,8 +8353,10 @@ def test_exit_monitor_handoff_timeout_releases_priority_claim(monkeypatch) -> No
     assert main_module._exit_monitor_cycle() is False
 
     assert calls == []
+    assert main_module._periodic_held_position_monitor_fairness_debt.is_set()
     assert not main_module._held_position_monitor_active.is_set()
     assert not main_module._held_position_monitor_handoff_pending.is_set()
+    main_module._periodic_held_position_monitor_fairness_debt.clear()
 
 
 def test_periodic_full_book_timeout_fairness_debt_yields_reactor_until_coverage(
@@ -8377,6 +8384,11 @@ def test_periodic_full_book_timeout_fairness_debt_yields_reactor_until_coverage(
     main_module._day0_urgent_wake_pending.clear()
     main_module._day0_held_monitor_preempt_requested.clear()
     main_module._periodic_exit_monitor_day0_yielded.clear()
+    monkeypatch.setattr(
+        main_module,
+        "_current_periodic_monitor_obligation_count",
+        lambda: 1,
+    )
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyReactorGate())
     monkeypatch.setattr(
         exit_module,
@@ -8412,6 +8424,163 @@ def test_periodic_full_book_timeout_fairness_debt_yields_reactor_until_coverage(
         main_module._day0_urgent_wake_pending.clear()
         main_module._day0_held_monitor_preempt_requested.clear()
         main_module._periodic_exit_monitor_day0_yielded.clear()
+
+
+def test_zero_obligation_periodic_monitor_clears_debt_without_reactor_handoff(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    class ReactorHandoffMustNotRun:
+        def acquire(self, *, timeout: float) -> bool:
+            pytest.fail(f"zero exposure must not wait {timeout}s for reactor handoff")
+
+    was_bootstrap_complete = (
+        main_module._held_position_monitor_bootstrap_complete.is_set()
+    )
+    main_module._held_position_monitor_active.clear()
+    main_module._periodic_held_position_monitor_fairness_debt.set()
+    main_module._day0_held_monitor_preempt_requested.set()
+    monkeypatch.setattr(
+        main_module,
+        "_current_periodic_monitor_obligation_count",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_edli_reactor_active_lock",
+        ReactorHandoffMustNotRun(),
+    )
+    monkeypatch.setattr(
+        exit_module,
+        "run_exit_monitor_cycle",
+        lambda **_kwargs: pytest.fail("zero exposure has no monitor body obligation"),
+    )
+
+    try:
+        assert main_module._exit_monitor_cycle.__wrapped__() is True
+        assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
+        assert not main_module._held_position_monitor_active.is_set()
+        assert not main_module._held_position_monitor_handoff_pending.is_set()
+        assert not main_module._day0_held_monitor_preempt_requested.is_set()
+        assert main_module._held_position_monitor_claim.acquire(blocking=False)
+        main_module._held_position_monitor_claim.release()
+    finally:
+        main_module._periodic_held_position_monitor_fairness_debt.clear()
+        if not was_bootstrap_complete:
+            main_module._held_position_monitor_bootstrap_complete.clear()
+
+
+def test_periodic_monitor_timeout_rechecks_exposure_before_arming_debt(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    class BusyReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return False
+
+    obligation_counts = iter((1, 0))
+    was_bootstrap_complete = (
+        main_module._held_position_monitor_bootstrap_complete.is_set()
+    )
+    main_module._held_position_monitor_active.clear()
+    main_module._periodic_held_position_monitor_fairness_debt.set()
+    monkeypatch.setattr(
+        main_module,
+        "_current_periodic_monitor_obligation_count",
+        lambda: next(obligation_counts),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_edli_reactor_active_lock",
+        BusyReactorGate(),
+    )
+    monkeypatch.setattr(
+        exit_module,
+        "run_exit_monitor_cycle",
+        lambda **_kwargs: pytest.fail("timed-out monitor must not run coverage"),
+    )
+
+    try:
+        assert main_module._exit_monitor_cycle.__wrapped__() is True
+        assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
+        with pytest.raises(StopIteration):
+            next(obligation_counts)
+    finally:
+        main_module._periodic_held_position_monitor_fairness_debt.clear()
+        if not was_bootstrap_complete:
+            main_module._held_position_monitor_bootstrap_complete.clear()
+
+
+def test_current_monitor_obligation_count_uses_cadence_exposure_contract() -> None:
+    from src.ops.monitor_cadence import count_current_monitor_obligations
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL,
+            chain_state TEXT,
+            order_status TEXT,
+            exit_reason TEXT,
+            target_date TEXT
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, '', '', '', '2026-08-03')",
+        (
+            ("active-local", "active", 0.02, 0.0),
+            ("active-dust", "active", 0.005, 0.0),
+            ("active-chain", "active", 0.02, None),
+            ("pending-chain", "pending_exit", 0.0, 0.02),
+            ("closed", "settled", 100.0, 100.0),
+        ),
+    )
+
+    try:
+        assert count_current_monitor_obligations(
+            conn,
+            now=datetime(2026, 8, 3, tzinfo=timezone.utc),
+        ) == 3
+        conn.execute(
+            "INSERT INTO position_current VALUES "
+            "('unknown-exposure', 'active', NULL, 0, '', '', '', '2026-08-03')"
+        )
+        with pytest.raises(
+            RuntimeError,
+            match="MONITOR_OBLIGATION_EXPOSURE_UNKNOWN:unknown-exposure",
+        ):
+            count_current_monitor_obligations(
+                conn,
+                now=datetime(2026, 8, 3, tzinfo=timezone.utc),
+            )
+    finally:
+        conn.close()
+
+    incomplete = sqlite3.connect(":memory:")
+    incomplete.row_factory = sqlite3.Row
+    incomplete.execute(
+        "CREATE TABLE position_current (position_id TEXT, phase TEXT, shares REAL)"
+    )
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="MONITOR_OBLIGATION_SCHEMA_INCOMPLETE:chain_shares",
+        ):
+            count_current_monitor_obligations(
+                incomplete,
+                now=datetime(2026, 8, 3, tzinfo=timezone.utc),
+            )
+    finally:
+        incomplete.close()
 
 
 def test_durable_monitor_recovery_is_a_noop_with_fresh_canonical_coverage(
@@ -8527,6 +8696,11 @@ def test_durable_monitor_recovery_arms_fairness_debt_when_reactor_stays_busy(
         "future_monitor_event_count": 0,
     }
     main_module._periodic_held_position_monitor_fairness_debt.clear()
+    monkeypatch.setattr(
+        main_module,
+        "_current_periodic_monitor_obligation_count",
+        lambda: 1,
+    )
     monkeypatch.setattr(
         db_module,
         "get_trade_connection_read_only",

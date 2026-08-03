@@ -7,6 +7,7 @@ events; it does not use projection timestamps and never writes runtime state.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -246,6 +247,75 @@ def collect_monitor_cadence_evidence(
         "non_monitor_chain_risk_positions": non_monitor_chain_risk_rows[:sample_limit],
         "non_monitor_chain_risk_role": "chain_reconciliation_not_monitor_cadence",
     }
+
+
+def count_current_monitor_obligations(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+) -> int:
+    """Strictly count positive exposures governed by monitor cadence law.
+
+    Zero is authority only when the canonical schema and every exposure field
+    that could prove a monitored row are present and finite. Unknown data raises
+    so callers retain fail-closed monitor priority.
+    """
+
+    _ensure_utc(now)
+    columns = _table_columns(conn, "position_current")
+    required = {"position_id", "phase", "shares", "chain_shares"}
+    missing = sorted(required - columns)
+    if missing:
+        raise RuntimeError(
+            "MONITOR_OBLIGATION_SCHEMA_INCOMPLETE:" + ",".join(missing)
+        )
+    invalid_phase = conn.execute(
+        """
+        SELECT position_id
+          FROM position_current
+         WHERE phase IS NULL OR TRIM(phase) = ''
+         LIMIT 1
+        """
+    ).fetchone()
+    if invalid_phase is not None:
+        raise RuntimeError("MONITOR_OBLIGATION_PHASE_UNKNOWN")
+
+    phases = tuple(sorted(MONITOR_CADENCE_POSITION_PHASES))
+    placeholders = ",".join("?" for _ in phases)
+    rows = conn.execute(
+        f"""
+        SELECT position_id, shares, chain_shares
+          FROM position_current
+         WHERE phase IN ({placeholders})
+        """,
+        phases,
+    ).fetchall()
+    obligation_count = 0
+    for row in rows:
+        position_id = str(row["position_id"] or "").strip()
+        if not position_id:
+            raise RuntimeError("MONITOR_OBLIGATION_POSITION_ID_UNKNOWN")
+        exposures: list[float | None] = []
+        for field in ("shares", "chain_shares"):
+            raw = row[field]
+            try:
+                value = float(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                value = None
+            if value is not None and (not math.isfinite(value) or value < 0.0):
+                value = None
+            exposures.append(value)
+        if any(
+            value is not None and value > MONITOR_CADENCE_EXPOSURE_EPS
+            for value in exposures
+        ):
+            obligation_count += 1
+            continue
+        if any(value is None for value in exposures):
+            raise RuntimeError(
+                f"MONITOR_OBLIGATION_EXPOSURE_UNKNOWN:{position_id}"
+            )
+    return obligation_count
 
 
 def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:

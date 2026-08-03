@@ -370,6 +370,36 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     return False
 
 
+def _current_periodic_monitor_obligation_count() -> int | None:
+    """Return canonical positive exposure currently owned by the monitor lane."""
+
+    from src.ops.monitor_cadence import count_current_monitor_obligations
+    from src.state.db import get_trade_connection_read_only
+
+    conn = None
+    try:
+        conn = get_trade_connection_read_only()
+        return count_current_monitor_obligations(
+            conn,
+            now=datetime.now(timezone.utc),
+        )
+    except Exception as exc:  # noqa: BLE001 - unknown exposure stays fail-closed.
+        logger.warning(
+            "periodic exit_monitor obligation read failed closed: %s",
+            exc,
+        )
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as exc:  # noqa: BLE001 - read result remains authoritative.
+                logger.warning(
+                    "periodic exit_monitor obligation connection close failed: %s",
+                    exc,
+                )
+
+
 def _harvester_should_register() -> bool:
     """Whether the settlement P&L + redeem-intent resolver (_harvester_cycle) is
     scheduled for this live-execution mode.
@@ -7248,6 +7278,31 @@ def _exit_monitor_cycle(
         # to yield. A newer urgent wake has its own revision/claim attempt.
         _day0_held_monitor_preempt_requested.clear()
 
+    def _release_monitor_claim() -> None:
+        if not urgent_fact:
+            _day0_held_monitor_preempt_requested.clear()
+            _periodic_held_position_monitor_handoff_pending.clear()
+        _held_position_monitor_handoff_pending.clear()
+        _held_position_monitor_active.clear()
+        _held_position_monitor_claim.release()
+
+    if periodic_full_book:
+        obligation_count = _current_periodic_monitor_obligation_count()
+        if obligation_count == 0:
+            # SCOPE: fairness debt exists only for current positive exposure
+            # owned by the held-position monitor. DRAIN: a canonical zero-set
+            # proves there is no monitor writer obligation, so no reactor
+            # handoff is required. RESET: any later positive exposure is
+            # re-read on the next periodic pass and regains normal handoff law.
+            _periodic_held_position_monitor_fairness_debt.clear()
+            _held_position_monitor_bootstrap_complete.set()
+            _release_monitor_claim()
+            logger.info(
+                "periodic exit_monitor completed without reactor handoff: "
+                "canonical monitored exposure is empty"
+            )
+            return True
+
     # Claim exit priority before waiting. New reactor ticks defer only through
     # the handoff; monitor network work does not stop unrelated decisions.
     _held_position_monitor_handoff_pending.set()
@@ -7263,6 +7318,17 @@ def _exit_monitor_cycle(
         reactor_idle = _edli_reactor_active_lock.acquire(timeout=handoff_timeout)
         if not reactor_idle:
             if periodic_full_book:
+                current_obligation_count = (
+                    _current_periodic_monitor_obligation_count()
+                )
+                if current_obligation_count == 0:
+                    _periodic_held_position_monitor_fairness_debt.clear()
+                    _held_position_monitor_bootstrap_complete.set()
+                    logger.info(
+                        "periodic exit_monitor completed after handoff timeout: "
+                        "canonical monitored exposure became empty"
+                    )
+                    return True
                 _periodic_held_position_monitor_fairness_debt.set()
             logger.warning(
                 "exit_monitor deferred: active EDLI reactor did not finish within %.1fs",
@@ -7338,12 +7404,7 @@ def _exit_monitor_cycle(
             _periodic_exit_monitor_day0_yielded.clear()
         return True
     finally:
-        if not urgent_fact:
-            _day0_held_monitor_preempt_requested.clear()
-            _periodic_held_position_monitor_handoff_pending.clear()
-        _held_position_monitor_handoff_pending.clear()
-        _held_position_monitor_active.clear()
-        _held_position_monitor_claim.release()
+        _release_monitor_claim()
 
 
 @_scheduler_job("exit_monitor_recovery")
