@@ -4757,25 +4757,21 @@ def _load_high_yes_edges_python(
 
     trade_conn = _connect_read_only(trade_db)
     try:
-        quote_rows = trade_conn.execute(
-            """
-            SELECT condition_id,
-                   orderbook_top_ask,
-                   captured_at,
-                   freshness_deadline,
-                   active,
-                   closed,
-                   accepting_orders
-              FROM executable_market_snapshot_latest
-             WHERE UPPER(COALESCE(outcome_label, '')) = 'YES'
-               AND captured_at >= ?
-               AND freshness_deadline >= ?
-               AND COALESCE(active, 1) = 1
-               AND COALESCE(closed, 0) = 0
-               AND COALESCE(accepting_orders, 1) = 1
-            """,
-            (cutoff, now_iso),
-        ).fetchall()
+        quote_rows = _load_high_yes_quotes_for_conditions(
+            trade_conn,
+            condition_ids=tuple(
+                sorted(
+                    {
+                        condition_id
+                        for condition_ids in market_by_family_bin.values()
+                        for condition_id in condition_ids
+                        if condition_id
+                    }
+                )
+            ),
+            cutoff=cutoff,
+            now_iso=now_iso,
+        )
     finally:
         trade_conn.close()
 
@@ -4881,6 +4877,49 @@ def _load_high_yes_edges_python(
         ),
         reverse=True,
     )
+
+
+def _load_high_yes_quotes_for_conditions(
+    conn: object,
+    *,
+    condition_ids: tuple[str, ...],
+    cutoff: str,
+    now_iso: str,
+) -> list[object]:
+    """Read executable YES quotes only for posterior-linked conditions.
+
+    ``executable_market_snapshot_latest`` shares the live trade DB with the
+    order and exit path. A health pass must not scan that table globally when
+    the forecast join has already produced the exact condition scope.
+    """
+
+    rows: list[object] = []
+    for start in range(0, len(condition_ids), 250):
+        chunk = condition_ids[start : start + 250]
+        placeholders = ",".join("?" for _ in chunk)
+        rows.extend(
+            conn.execute(
+                f"""
+                SELECT condition_id,
+                       orderbook_top_ask,
+                       captured_at,
+                       freshness_deadline,
+                       active,
+                       closed,
+                       accepting_orders
+                  FROM executable_market_snapshot_latest
+                 WHERE condition_id IN ({placeholders})
+                   AND UPPER(COALESCE(outcome_label, '')) = 'YES'
+                   AND captured_at >= ?
+                   AND freshness_deadline >= ?
+                   AND COALESCE(active, 1) = 1
+                   AND COALESCE(closed, 0) = 0
+                   AND COALESCE(accepting_orders, 1) = 1
+                """,
+                (*chunk, cutoff, now_iso),
+            ).fetchall()
+        )
+    return rows
 
 
 def _forecast_snapshot_status_counts_for_edges(

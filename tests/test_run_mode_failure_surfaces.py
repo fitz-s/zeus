@@ -5627,6 +5627,53 @@ def test_high_yes_edge_ignores_stale_executable_quote(
     assert surface["missed_high_yes_edge_count"] == 0
 
 
+def test_high_yes_quote_read_is_bounded_to_posterior_conditions(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "trades.db"
+    raw_conn = sqlite3.connect(db_path)
+    raw_conn.row_factory = sqlite3.Row
+    raw_conn.execute(
+        "CREATE TABLE executable_market_snapshot_latest ("
+        "condition_id TEXT, outcome_label TEXT, orderbook_top_ask TEXT, "
+        "captured_at TEXT, freshness_deadline TEXT, active INTEGER, "
+        "closed INTEGER, accepting_orders INTEGER)"
+    )
+    raw_conn.execute(
+        "CREATE INDEX idx_snapshot_latest_condition_captured "
+        "ON executable_market_snapshot_latest(condition_id, captured_at DESC)"
+    )
+    raw_conn.executemany(
+        "INSERT INTO executable_market_snapshot_latest VALUES "
+        "(?, ?, '0.20', '2026-08-03T00:00:00+00:00', "
+        "'2026-08-04T00:00:00+00:00', 1, 0, 1)",
+        [
+            ("wanted", "YES"),
+            ("wanted-lower", "yes"),
+            ("irrelevant-a", "YES"),
+            ("irrelevant-b", "YES"),
+        ],
+    )
+
+    class ScopedConnection:
+        def execute(self, sql: str, params: tuple[object, ...]):
+            normalized = " ".join(sql.split()).lower()
+            assert "where condition_id in" in normalized
+            return raw_conn.execute(sql, params)
+
+    try:
+        rows = live_health._load_high_yes_quotes_for_conditions(
+            ScopedConnection(),
+            condition_ids=("wanted", "wanted-lower"),
+            cutoff="2026-08-02T00:00:00+00:00",
+            now_iso="2026-08-03T00:00:00+00:00",
+        )
+    finally:
+        raw_conn.close()
+
+    assert {row["condition_id"] for row in rows} == {"wanted", "wanted-lower"}
+
+
 def test_high_yes_edge_accepts_buy_yes_no_submit_evidence(
     tmp_path: Path,
 ) -> None:
