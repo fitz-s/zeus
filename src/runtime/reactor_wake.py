@@ -1077,6 +1077,47 @@ def reactor_wakes_since(
     return tuple(wakes)
 
 
+def reactor_wakes_for_reason(
+    reason: str,
+    *,
+    path: Path | None = None,
+    exclude_wake_ids: Collection[str] = (),
+    max_wakes: int = 100,
+    fail_on_error: bool = False,
+) -> tuple[ReactorWake, ...]:
+    """Return a newest-first bounded exact-reason drain, including fallback.
+
+    This is for control-plane hints whose service is orthogonal to alpha-wake
+    priority.  It never consumes or reorders a wake of another reason.
+    """
+
+    clean_reason = str(reason or "").strip()
+    limit = max(1, int(max_wakes))
+    excluded = {str(wake_id) for wake_id in exclude_wake_ids}
+    exact = [
+        wake
+        for _queue_file, wake in _queued_wakes(
+            path,
+            fail_on_error=fail_on_error,
+        )
+        if wake.wake_id not in excluded and wake.reason == clean_reason
+    ]
+    seen = {wake.wake_id for wake in exact}
+    legacy = _read_reactor_wake_path(
+        _wake_path(path),
+        fail_on_error=fail_on_error,
+    )
+    if (
+        legacy is not None
+        and legacy.wake_id not in excluded
+        and legacy.wake_id not in seen
+        and legacy.reason == clean_reason
+    ):
+        exact.append(legacy)
+    exact.sort(key=lambda wake: wake.published_at, reverse=True)
+    return tuple(exact[:limit])
+
+
 def coalescible_reactor_wakes(
     selected: ReactorWake,
     *,

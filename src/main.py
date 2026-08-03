@@ -107,7 +107,10 @@ _forecast_exit_monitor_attempts: dict[str, bool | None] = {}
 _edli_reactor_wake_thread: threading.Thread | None = None
 _edli_last_reactor_wake_id: str | None = None
 _COLLATERAL_AUTHORITY_WAKE_RETRY_SECONDS = 5.0
+_COLLATERAL_AUTHORITY_WAKE_BATCH_LIMIT = 100
 _edli_collateral_authority_wake_backoff_until: dict[str, float] = {}
+_edli_last_collateral_authority_captured_at: datetime | None = None
+_edli_collateral_authority_lock = threading.RLock()
 
 
 @dataclass
@@ -3800,6 +3803,56 @@ def _edli_refresh_global_allocator(
     portfolio_snapshot=None,
     bankroll_record=None,
 ) -> dict:
+    """Publish allocator state through one monotonic collateral identity fence."""
+
+    global _edli_last_collateral_authority_captured_at
+
+    with _edli_collateral_authority_lock:
+        record = bankroll_record or bankroll_provider.cached()
+        record_at = None
+        if record is not None:
+            try:
+                record_at = datetime.fromisoformat(
+                    str(record.fetched_at).replace("Z", "+00:00")
+                )
+                if record_at.tzinfo is None:
+                    record_at = record_at.replace(tzinfo=timezone.utc)
+                record_at = record_at.astimezone(timezone.utc)
+            except (AttributeError, TypeError, ValueError):
+                from src.risk_allocator import configure_global_allocator
+
+                configure_global_allocator(None, None)
+                return {
+                    "configured": False,
+                    "fail_closed": True,
+                    "error": "bankroll_record_captured_at_invalid",
+                    "entry": {
+                        "allow_submit": False,
+                        "reason": "allocator_not_configured",
+                    },
+                }
+        if (
+            record_at is not None
+            and _edli_last_collateral_authority_captured_at is not None
+            and record_at < _edli_last_collateral_authority_captured_at
+        ):
+            return {"configured": None, "superseded": True}
+        result = _edli_refresh_global_allocator_unfenced(
+            conn,
+            portfolio_snapshot=portfolio_snapshot,
+            bankroll_record=record,
+        )
+        if result.get("configured") and record_at is not None:
+            _edli_last_collateral_authority_captured_at = record_at
+        return result
+
+
+def _edli_refresh_global_allocator_unfenced(
+    conn,
+    *,
+    portfolio_snapshot=None,
+    bankroll_record=None,
+) -> dict:
     """Configure the process-wide risk allocator/governor for the EDLI live path.
 
     ROOT (see /tmp/edli_submit_gate_trace.md): the live ``_live_order`` submit path
@@ -4022,12 +4075,13 @@ def _edli_event_reactor_cycle(
 
 
 def _edli_initialize_reactor_wake_cursor() -> None:
-    global _edli_last_reactor_wake_id
+    global _edli_last_collateral_authority_captured_at, _edli_last_reactor_wake_id
 
     _edli_last_reactor_wake_id = None
     _edli_global_completion_yield.reset()
     _edli_day0_post_monitor_yield.reset()
     _edli_collateral_authority_wake_backoff_until.clear()
+    _edli_last_collateral_authority_captured_at = None
     _day0_urgent_wake_pending.clear()
     _day0_held_monitor_preempt_requested.clear()
     with _day0_exit_monitor_attempts_lock:
@@ -5372,49 +5426,64 @@ def _service_pending_collateral_authority_wake() -> bool | None:
 
     SCOPE: process-wide actuation authority only; this does not run the event
     reactor, create an entry intent, or contact the venue. DRAIN: the listener
-    attempts each selected wake once, then acknowledges stale/missing/mismatched
-    truth and relies on the 60-second canonical warm backstop; an ack failure gets
-    a five-second bounded retry while ordinary wakes continue. RESET: exact ack
-    consumes only these wakes; a later successful snapshot publishes a new wake.
+    selects the newest exact collateral identity independently of alpha-wake
+    priority, then acknowledges every superseded collateral hint in that drain;
+    an ack failure gets a five-second bounded retry while ordinary wakes continue.
+    RESET: exact ack consumes only collateral wakes; a later successful snapshot
+    publishes a new wake.
     """
-    global _edli_last_reactor_wake_id
+    global _edli_last_collateral_authority_captured_at
 
     from src.runtime.reactor_wake import (
         COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON,
-        coalescible_reactor_wakes,
-        read_reactor_wake,
+        reactor_wakes_for_reason,
     )
 
     try:
-        wake = read_reactor_wake(
+        wakes = reactor_wakes_for_reason(
+            COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON,
             exclude_wake_ids=_collateral_authority_wake_backoff_ids(),
+            max_wakes=_COLLATERAL_AUTHORITY_WAKE_BATCH_LIMIT,
         )
     except (OSError, ValueError):
         logger.warning("collateral authority wake selection failed; retaining wake debt", exc_info=True)
         return None
-    if (
-        wake is None
-        or wake.wake_id == _edli_last_reactor_wake_id
-        or wake.reason != COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON
-    ):
+    if not wakes:
         return None
-    wakes = coalescible_reactor_wakes(wake)
-    if not wakes or any(
-        queued.reason != COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON
-        for queued in wakes
-    ):
-        return None
-    latest = max(wakes, key=lambda queued: queued.published_at)
-    authority_refresh = _refresh_global_execution_authority_after_collateral_publish(
-        captured_at=latest.published_at,
-    )
+    latest = wakes[0]
+    latest_at = None
+    try:
+        latest_at = datetime.fromisoformat(latest.published_at.replace("Z", "+00:00"))
+        if latest_at.tzinfo is None:
+            latest_at = latest_at.replace(tzinfo=timezone.utc)
+        latest_at = latest_at.astimezone(timezone.utc)
+    except (AttributeError, TypeError, ValueError):
+        pass
+    with _edli_collateral_authority_lock:
+        superseded = (
+            latest_at is not None
+            and _edli_last_collateral_authority_captured_at is not None
+            and latest_at <= _edli_last_collateral_authority_captured_at
+        )
+        if superseded:
+            authority_refresh = {"configured": None, "superseded": True}
+        else:
+            authority_refresh = _refresh_global_execution_authority_after_collateral_publish(
+                captured_at=latest.published_at,
+            )
+            if authority_refresh.get("configured") and latest_at is not None:
+                if (
+                    _edli_last_collateral_authority_captured_at is None
+                    or latest_at > _edli_last_collateral_authority_captured_at
+                ):
+                    _edli_last_collateral_authority_captured_at = latest_at
     acknowledged = _acknowledge_edli_reactor_wake_batch(
         latest,
         wakes,
         day0_wake=False,
     )
     if acknowledged:
-        if not authority_refresh.get("configured"):
+        if not authority_refresh.get("configured") and not superseded:
             logger.warning(
                 "collateral authority wake failed closed and was acknowledged; "
                 "the 60-second canonical warm remains the recovery backstop: %s",
@@ -5495,13 +5564,12 @@ def _edli_bankroll_warm_cycle() -> None:
     from src.runtime.bankroll_provider import run_warm_cycle
 
     if not run_warm_cycle():
-        from src.risk_allocator import configure_global_allocator
-
-        configure_global_allocator(None, None)
-        logger.error(
-            "global execution-authority refresh revoked: current collateral "
-            "snapshot unavailable"
-        )
+        result = _refresh_global_execution_authority()
+        if not result.get("configured") and not result.get("superseded"):
+            logger.error(
+                "global execution-authority refresh revoked: current collateral "
+                "snapshot unavailable"
+            )
         return
     _refresh_global_execution_authority()
 
@@ -5560,10 +5628,12 @@ def _refresh_global_execution_authority_after_collateral_publish(
         actual = actual.astimezone(timezone.utc)
     except (TypeError, ValueError):
         return _fail_closed("collateral_snapshot_warm_captured_at_invalid")
-    if actual != expected:
+    if actual < expected:
         return _fail_closed("collateral_snapshot_identity_mismatch")
-
-    return _refresh_global_execution_authority(bankroll_record=warm)
+    result = _refresh_global_execution_authority(bankroll_record=warm)
+    if actual > expected:
+        result = {**result, "superseded_wake": True}
+    return result
 
 
 def _refresh_global_execution_authority(*, bankroll_record=None) -> dict:
@@ -5575,49 +5645,70 @@ def _refresh_global_execution_authority(*, bankroll_record=None) -> dict:
     canonical open portfolio. RESET: the next successful tick configures the
     coherent allocator/governor pair; unavailable truth explicitly revokes it.
     """
+    global _edli_last_collateral_authority_captured_at
+
     from src.risk_allocator import configure_global_allocator
+    from src.runtime import bankroll_provider
     from src.state.db import get_trade_connection_read_only
     from src.state.portfolio import load_runtime_open_portfolio
 
-    trade_conn = None
-    try:
-        trade_conn = get_trade_connection_read_only()
-        portfolio = load_runtime_open_portfolio(trade_conn)
-        refresh_kwargs = {"portfolio_snapshot": portfolio}
-        if bankroll_record is not None:
-            refresh_kwargs["bankroll_record"] = bankroll_record
-        result = _edli_refresh_global_allocator(trade_conn, **refresh_kwargs)
-        if not result.get("configured"):
-            logger.error(
-                "global execution-authority refresh unavailable: %s",
-                result,
-            )
-        return result
-    except Exception as exc:  # noqa: BLE001 - capability must fail closed
-        configure_global_allocator(None, None)
-        logger.error(
-            "global execution-authority refresh failed closed: %r",
-            exc,
-            exc_info=True,
-        )
-        return {
-            "configured": False,
-            "fail_closed": True,
-            "error": str(exc),
-            "entry": {
-                "allow_submit": False,
-                "reason": "allocator_not_configured",
-            },
-        }
-    finally:
-        if trade_conn is not None:
-            try:
-                trade_conn.close()
-            except Exception:  # noqa: BLE001 - authority result remains explicit
-                logger.warning(
-                    "global execution-authority read close failed",
-                    exc_info=True,
+    with _edli_collateral_authority_lock:
+        trade_conn = None
+        try:
+            record = bankroll_record or bankroll_provider.cached()
+            record_at = None
+            if record is not None:
+                record_at = datetime.fromisoformat(
+                    str(record.fetched_at).replace("Z", "+00:00")
                 )
+                if record_at.tzinfo is None:
+                    record_at = record_at.replace(tzinfo=timezone.utc)
+                record_at = record_at.astimezone(timezone.utc)
+            if (
+                record_at is not None
+                and _edli_last_collateral_authority_captured_at is not None
+                and record_at < _edli_last_collateral_authority_captured_at
+            ):
+                return {"configured": None, "superseded": True}
+            trade_conn = get_trade_connection_read_only()
+            portfolio = load_runtime_open_portfolio(trade_conn)
+            refresh_kwargs = {"portfolio_snapshot": portfolio}
+            if record is not None:
+                refresh_kwargs["bankroll_record"] = record
+            result = _edli_refresh_global_allocator(trade_conn, **refresh_kwargs)
+            if result.get("configured") and record_at is not None:
+                _edli_last_collateral_authority_captured_at = record_at
+            elif not result.get("configured"):
+                logger.error(
+                    "global execution-authority refresh unavailable: %s",
+                    result,
+                )
+            return result
+        except Exception as exc:  # noqa: BLE001 - capability must fail closed
+            configure_global_allocator(None, None)
+            logger.error(
+                "global execution-authority refresh failed closed: %r",
+                exc,
+                exc_info=True,
+            )
+            return {
+                "configured": False,
+                "fail_closed": True,
+                "error": str(exc),
+                "entry": {
+                    "allow_submit": False,
+                    "reason": "allocator_not_configured",
+                },
+            }
+        finally:
+            if trade_conn is not None:
+                try:
+                    trade_conn.close()
+                except Exception:  # noqa: BLE001 - authority result remains explicit
+                    logger.warning(
+                        "global execution-authority read close failed",
+                        exc_info=True,
+                    )
 
 
 def _command_recovery_summary_mutated_allocator_inputs(summary: object) -> bool:
