@@ -2836,6 +2836,7 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
         get_forecasts_connection_read_only,
         get_trade_connection_read_only,
         get_world_connection,
+        query_control_override_state,
     )
 
     conn = get_world_connection()
@@ -2924,7 +2925,50 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
             held_position_priority_condition_ids: list[str] = []
             claim_priority_read_failed = False
             claim_priority_families: list[tuple[str, str, str]] = []
+            control_authority_status = "unavailable"
+            control_authority_degraded = False
+            control_authority_reason: str | None = None
+            claim_order_priority_suppressed = False
+            claim_order_priority_suppression_reason: str | None = None
             exact_priority_condition_ids = list(marker_exact_condition_ids)
+            control_now_iso = datetime.now(timezone.utc).isoformat()
+            try:
+                control_state = query_control_override_state(conn, now=control_now_iso)
+                if not isinstance(control_state, dict):
+                    raise ValueError("control authority returned a non-dict state")
+                control_authority_status = control_state.get("status")
+                entries_paused = control_state.get("entries_paused")
+                if control_authority_status != "ok":
+                    control_authority_degraded = True
+                    control_authority_reason = (
+                        f"control_authority_non_ok:{control_authority_status or 'unknown'}"
+                    )
+                elif not isinstance(entries_paused, bool):
+                    control_authority_degraded = True
+                    control_authority_reason = "control_authority_malformed:entries_paused"
+                elif entries_paused is True:
+                    claim_order_priority_suppressed = True
+                    claim_order_priority_suppression_reason = "entries_paused"
+            except Exception as exc:  # noqa: BLE001 — refresh evidence fails open
+                control_authority_status = "unavailable"
+                control_authority_degraded = True
+                control_authority_reason = "control_authority_unavailable"
+                logger.warning(
+                    "EDLI money-path substrate priority: control authority unavailable; "
+                    "retaining claim-order refresh behavior: %s",
+                    exc,
+                )
+            if claim_order_priority_suppressed:
+                logger.info(
+                    "EDLI money-path substrate priority: claim-order family promotion "
+                    "suppressed while entries are paused"
+                )
+            elif control_authority_degraded:
+                logger.warning(
+                    "EDLI money-path substrate priority: control authority degraded (%s); "
+                    "retaining claim-order refresh behavior",
+                    control_authority_reason,
+                )
             # A forced FC-03 winner recapture owns this one short sidecar tick.
             # Broad held/rest/claim discovery resumes on the next tick; reading it
             # first can spend the whole deadline and make the elected order stale.
@@ -2955,7 +2999,7 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
                 forecasts_conn,
                 exact_priority_condition_ids,
             )
-            if not marker_force_refresh_condition_ids:
+            if not marker_force_refresh_condition_ids and not claim_order_priority_suppressed:
                 claim_priority_families = _claim_order_priority_families_for_refresh(
                     conn,
                     consumer_name="edli_reactor_v1",
@@ -2964,6 +3008,9 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
                 if claim_priority_families is None:
                     claim_priority_read_failed = True
                     claim_priority_families = []
+            # SCOPE: claim-derived family promotion only, under trusted global entry pause.
+            # DRAIN: the next 20s tick adds no new full claim rows while durable events remain.
+            # RESET: the next tick restores claim lookahead when the pause is false or expired.
         finally:
             _cancel_sqlite_deadline_interrupt(claim_deadline_timer)
             if claim_deadline_installed:
@@ -3007,6 +3054,13 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
                 "held_position_priority_condition_ids": len(held_position_priority_condition_ids),
                 "claim_order_priority_families": 0,
                 "claim_order_priority_read_failed": False,
+                "claim_order_priority_suppressed": claim_order_priority_suppressed,
+                "claim_order_priority_suppression_reason": (
+                    claim_order_priority_suppression_reason
+                ),
+                "control_authority_status": control_authority_status,
+                "control_authority_degraded": control_authority_degraded,
+                "control_authority_reason": control_authority_reason,
             }
             _substrate_priority_receipt(request=priority_marker_request, summary=summary)
             logger.info("EDLI money-path substrate priority: %r", summary)
@@ -3029,6 +3083,11 @@ def _edli_money_path_substrate_priority_cycle() -> dict | None:
             "held_position_priority_condition_ids": len(held_position_priority_condition_ids),
             "claim_order_priority_families": len(claim_priority_families),
             "claim_order_priority_read_failed": bool(claim_priority_read_failed),
+            "claim_order_priority_suppressed": claim_order_priority_suppressed,
+            "claim_order_priority_suppression_reason": claim_order_priority_suppression_reason,
+            "control_authority_status": control_authority_status,
+            "control_authority_degraded": control_authority_degraded,
+            "control_authority_reason": control_authority_reason,
             "marker_family_scope_suppressed_by_exact_conditions": int(
                 bool(marker_exact_condition_ids)
             ),

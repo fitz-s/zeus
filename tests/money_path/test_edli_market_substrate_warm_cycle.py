@@ -2081,6 +2081,462 @@ def test_money_path_priority_cycle_prioritizes_claim_order_families(monkeypatch)
     assert calls[0]["include_pending_families"] is False
 
 
+def _patch_priority_cycle_runtime(monkeypatch, control_query):
+    import src.state.db as state_db
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
+    monkeypatch.setattr(
+        state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
+    )
+    monkeypatch.setattr(
+        state_db, "get_trade_connection_read_only", lambda: _FakeConn(), raising=False
+    )
+    monkeypatch.setattr(state_db, "query_control_override_state", control_query)
+    monkeypatch.setattr(
+        "src.data.job_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
+    _enable_edli_cfg(monkeypatch, enabled=True)
+
+
+def test_money_path_priority_cycle_suppresses_claim_families_when_entries_paused(monkeypatch):
+    """Trusted global entry pause suppresses only claim-derived family promotion."""
+
+    calls: list[dict] = []
+    claim_reads: list[int] = []
+    claim_families = [("Tokyo", "2026-06-28", "high")]
+    control_reads: list[str] = []
+
+    def control_query(_conn, *, now):
+        control_reads.append(now)
+        return {"status": "ok", "entries_paused": True}
+
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: claim_reads.append(1) or claim_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k) or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_priority_cycle_runtime(monkeypatch, control_query)
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert control_reads and control_reads[0].endswith("+00:00")
+    assert claim_reads == []
+    assert calls == []
+    assert result["status"] == "no_money_path_priority_scope"
+    assert result["claim_order_priority_families"] == 0
+    assert result["claim_order_priority_suppressed"] is True
+    assert result["claim_order_priority_suppression_reason"] == "entries_paused"
+    assert result["control_authority_status"] == "ok"
+    assert result["control_authority_degraded"] is False
+
+
+def test_money_path_priority_cycle_paused_preserves_exact_open_rest_and_held_scope(monkeypatch):
+    """Entry pause must not suppress exact open-rest or held-position conditions."""
+
+    calls: list[dict] = []
+    claim_reads: list[int] = []
+    condition_families = [("Paris", "2026-06-30", "high")]
+
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_open_rest_condition_ids_for_refresh",
+        lambda *a, **k: ["cond-rest"],
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_edli_current_held_position_condition_ids",
+        lambda: ["cond-held"],
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_condition_priority_families_for_refresh",
+        lambda _conn, condition_ids: condition_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: claim_reads.append(1) or [("Tokyo", "2026-06-30", "low")],
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k) or {"status": "refreshed", "attempted": 2, "inserted": 2},
+    )
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: {"status": "ok", "entries_paused": True},
+    )
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert claim_reads == []
+    assert calls and calls[0]["priority_condition_ids"] == ["cond-rest", "cond-held"]
+    assert calls[0]["extra_priority_families"] == condition_families
+    assert result["open_rest_priority_condition_ids"] == 1
+    assert result["held_position_priority_condition_ids"] == 1
+    assert result["claim_order_priority_suppressed"] is True
+
+
+def test_money_path_priority_cycle_paused_fc03_preserves_exact_force_scope(monkeypatch):
+    """Entry pause must not broaden or alter an exact FC-03 recapture."""
+
+    calls: list[dict] = []
+    claim_reads: list[int] = []
+    marker_condition_ids = ["winner-condition"]
+    marker_families = [("Shanghai", "2026-06-28", "high")]
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_request",
+        lambda: {
+            "request_id": "req-paused-fc03",
+            "families": marker_families,
+            "condition_ids": marker_condition_ids,
+            "force_refresh_condition_ids": marker_condition_ids,
+        },
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_families",
+        lambda: marker_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_condition_ids",
+        lambda: marker_condition_ids,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_condition_priority_families_for_refresh",
+        lambda _conn, _condition_ids: marker_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: claim_reads.append(1) or [("Tokyo", "2026-06-28", "low")],
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k) or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: {"status": "ok", "entries_paused": True},
+    )
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert claim_reads == []
+    assert calls and calls[0]["extra_priority_families"] == marker_families
+    assert calls[0]["priority_condition_ids"] == marker_condition_ids
+    assert calls[0]["force_refresh_condition_ids"] == marker_condition_ids
+    assert calls[0]["include_money_risk_families"] is False
+    assert result["claim_order_priority_suppressed"] is True
+
+
+def test_money_path_priority_cycle_paused_marker_without_force_preserves_marker_scope(
+    monkeypatch,
+):
+    """Paused entries suppress claim-only lookahead, not an explicit non-forced marker."""
+
+    calls: list[dict] = []
+    claim_reads: list[int] = []
+    marker_condition_ids = ["marker-condition"]
+    marker_families = [("Paris", "2026-06-30", "low")]
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_request",
+        lambda: {
+            "request_id": "req-paused-marker",
+            "families": marker_families,
+            "condition_ids": marker_condition_ids,
+            "force_refresh_condition_ids": [],
+        },
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_families",
+        lambda: marker_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_condition_ids",
+        lambda: marker_condition_ids,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_condition_priority_families_for_refresh",
+        lambda _conn, _condition_ids: marker_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: claim_reads.append(1) or [("Tokyo", "2026-06-30", "high")],
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k) or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: {"status": "ok", "entries_paused": True},
+    )
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert claim_reads == []
+    assert calls and calls[0]["extra_priority_families"] == marker_families
+    assert calls[0]["priority_condition_ids"] == marker_condition_ids
+    assert calls[0]["force_refresh_condition_ids"] == []
+    assert calls[0]["include_money_risk_families"] is False
+    assert result["claim_order_priority_suppressed"] is True
+    assert result["claim_order_priority_suppression_reason"] == "entries_paused"
+
+
+def test_paused_priority_preserves_discovery_capture_policy_and_event_rows(monkeypatch):
+    """Pause changes neither ordinary discovery capture policy nor durable event state."""
+
+    import src.state.db as state_db
+
+    marker_condition_ids = ["marker-condition"]
+    marker_families = [("Paris", "2026-06-30", "low")]
+    event_conn = _pending_family_conn("event-1", "Tokyo", "2026-06-30", "high")
+    before_events = event_conn.execute(
+        """
+        SELECT event_id, processing_status, attempt_count, claimed_at, last_error
+          FROM opportunity_event_processing
+         ORDER BY event_id
+        """
+    ).fetchall()
+    before_event_rows = event_conn.execute(
+        """
+        SELECT event_id, event_type, entity_key, payload_json, created_at
+          FROM opportunity_events
+         ORDER BY event_id
+        """
+    ).fetchall()
+
+    class _WorldConn:
+        def execute(self, sql, params=()):
+            if str(sql).lstrip().upper().startswith("ATTACH DATABASE"):
+                class _Cur:
+                    def fetchall(self_inner):
+                        return []
+
+                return _Cur()
+            return event_conn.execute(sql, params)
+
+        def close(self):
+            pass
+
+    calls: list[dict] = []
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: True)
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_request",
+        lambda: {
+            "request_id": "req-paused-preservation",
+            "families": marker_families,
+            "condition_ids": marker_condition_ids,
+            "force_refresh_condition_ids": [],
+        },
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_families",
+        lambda: marker_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "money_path_substrate_priority_condition_ids",
+        lambda: marker_condition_ids,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_condition_priority_families_for_refresh",
+        lambda _conn, _condition_ids: marker_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("paused marker cycle must not read claim-only families")
+        ),
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k) or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: {"status": "ok", "entries_paused": True},
+    )
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _WorldConn())
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    after_events = event_conn.execute(
+        """
+        SELECT event_id, processing_status, attempt_count, claimed_at, last_error
+          FROM opportunity_event_processing
+         ORDER BY event_id
+        """
+    ).fetchall()
+    after_event_rows = event_conn.execute(
+        """
+        SELECT event_id, event_type, entity_key, payload_json, created_at
+          FROM opportunity_events
+         ORDER BY event_id
+        """
+    ).fetchall()
+    assert result["claim_order_priority_suppressed"] is True
+    assert calls and calls[0]["extra_priority_families"] == marker_families
+    assert before_events == after_events
+    assert before_event_rows == after_event_rows
+
+    class _PolicyConn:
+        def __init__(self, has_full):
+            self.has_full = has_full
+
+        def execute(self, _sql, _params=()):
+            class _Cur:
+                def __init__(self, has_full):
+                    self.has_full = has_full
+
+                def fetchone(self_inner):
+                    return (1,) if self_inner.has_full else None
+
+            return _Cur(self.has_full)
+
+    policy_key = "policy-condition|policy-token"
+    policy_counts = {policy_key: 0}
+    monkeypatch.setattr(
+        market_scanner,
+        "_discovery_captures_since_keyframe",
+        policy_counts,
+    )
+    monkeypatch.setenv("ZEUS_SUBSTRATE_CAPTURE_KEYFRAME_INTERVAL_CYCLES", "2")
+    assert market_scanner._capture_policy_trigger(
+        _PolicyConn(False),
+        requested_trigger="DISCOVERY_SWEEP",
+        condition_id="policy-condition",
+        selected_token="policy-token",
+    ) == "KEYFRAME"
+    assert market_scanner._capture_policy_trigger(
+        _PolicyConn(True),
+        requested_trigger="DISCOVERY_SWEEP",
+        condition_id="policy-condition",
+        selected_token="policy-token",
+    ) == "DISCOVERY_SWEEP"
+    policy_counts[policy_key] = 1
+    assert market_scanner._capture_policy_trigger(
+        _PolicyConn(True),
+        requested_trigger="DISCOVERY_SWEEP",
+        condition_id="policy-condition",
+        selected_token="policy-token",
+    ) == "KEYFRAME"
+
+
+@pytest.mark.parametrize("control_mode", ["exception", "non_ok", "malformed"])
+def test_money_path_priority_cycle_control_authority_degraded_fails_open(
+    monkeypatch, control_mode
+):
+    """Unavailable control authority retains evidence refresh and never suppresses claims."""
+
+    calls: list[dict] = []
+    claim_reads: list[int] = []
+    claim_families = [("Tokyo", "2026-06-28", "low")]
+
+    def control_query(_conn, *, now):
+        if control_mode == "exception":
+            raise RuntimeError("control read failed")
+        if control_mode == "non_ok":
+            return {"status": "degraded", "entries_paused": True}
+        return {"status": "ok", "entries_paused": "true"}
+
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: claim_reads.append(1) or claim_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k) or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_priority_cycle_runtime(monkeypatch, control_query)
+
+    result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert claim_reads == [1]
+    assert calls and calls[0]["extra_priority_families"] == claim_families
+    assert result["claim_order_priority_suppressed"] is False
+    assert result["control_authority_degraded"] is True
+    if control_mode == "exception":
+        assert result["control_authority_status"] == "unavailable"
+        assert result["control_authority_reason"] == "control_authority_unavailable"
+    elif control_mode == "non_ok":
+        assert result["control_authority_status"] == "degraded"
+        assert result["control_authority_reason"] == "control_authority_non_ok:degraded"
+    else:
+        assert result["control_authority_status"] == "ok"
+        assert result["control_authority_reason"] == "control_authority_malformed:entries_paused"
+
+
+def test_money_path_priority_cycle_claim_suppression_resets_next_tick(monkeypatch):
+    """Paused claim suppression is per-cycle and resets when the pause expires."""
+
+    calls: list[dict] = []
+    claim_reads: list[int] = []
+    control_states = iter(
+        (
+            {"status": "ok", "entries_paused": True},
+            {"status": "ok", "entries_paused": False},
+        )
+    )
+    claim_families = [("Tokyo", "2026-06-28", "high")]
+
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_claim_order_priority_families_for_refresh",
+        lambda *a, **k: claim_reads.append(1) or claim_families,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k) or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_priority_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: next(control_states),
+    )
+
+    paused_result = substrate_observer._edli_money_path_substrate_priority_cycle()
+    resumed_result = substrate_observer._edli_money_path_substrate_priority_cycle()
+
+    assert paused_result["status"] == "no_money_path_priority_scope"
+    assert len(calls) == 1
+    assert calls[0]["extra_priority_families"] == claim_families
+    assert claim_reads == [1]
+    assert paused_result["claim_order_priority_suppressed"] is True
+    assert resumed_result["claim_order_priority_suppressed"] is False
+    assert resumed_result["claim_order_priority_suppression_reason"] is None
+
+
 def test_money_path_priority_cycle_resolves_condition_marker_without_pending_backlog(
     monkeypatch,
 ):
