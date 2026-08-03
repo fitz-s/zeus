@@ -11338,7 +11338,9 @@ def _edli_plan_unadmitted_redecision_expiry(
     row seconds before the next reactor claim cycle. Pending rows must survive a
     claim grace window; processing rows are eligible only after the EventStore
     claim lease has expired. An in-flight reactor event must not be terminalized
-    by the screen job that emitted it.
+    by the screen job that emitted it. The typed projection is usable only after
+    migration has atomically seeded every active row and persisted its receipt;
+    absent, unseeded, or damaged authority raises a fail-closed cycle error.
     """
 
     from src.events.continuous_redecision import REDECISION_EVENT_TYPE as _REDECISION_EVENT_TYPE
@@ -11371,86 +11373,109 @@ def _edli_plan_unadmitted_redecision_expiry(
         stale_processing_cutoff = ""
         pending_admission_cutoff = ""
 
+    from src.state.schema.opportunity_event_processing_schema import (
+        assert_active_projection_ready,
+    )
+
+    try:
+        assert_active_projection_ready(
+            world_conn,
+            consumer_name="edli_reactor_v1",
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"EDLI_ACTIVE_REDECISION_PROJECTION_READINESS_FAILED:{exc}"
+        ) from exc
+
     try:
         candidate_generations: dict[str, tuple[str, str, int, str | None, str]] = {}
-        if pending_admission_cutoff:
-            for row in world_conn.execute(
-                """
-                    SELECT p.event_id, p.processing_status, p.attempt_count,
-                           p.claimed_at, p.updated_at
-                     FROM opportunity_event_processing p
-                           INDEXED BY idx_opportunity_event_processing_status
-                     WHERE p.consumer_name = 'edli_reactor_v1'
-                       AND p.processing_status = 'pending'
-                     ORDER BY p.updated_at ASC
-                     LIMIT 5000
-                """,
-            ).fetchall():
-                event_id = str(row[0] or "")
-                if event_id:
-                    candidate_generations[event_id] = (
-                        event_id,
-                        str(row[1] or ""),
-                        int(row[2] or 0),
-                        None if row[3] is None else str(row[3]),
-                        str(row[4] or ""),
-                    )
-        if stale_processing_cutoff:
-            for row in world_conn.execute(
-                """
-                    SELECT p.event_id, p.processing_status, p.attempt_count,
-                           p.claimed_at, p.updated_at
-                      FROM opportunity_event_processing p
-                           INDEXED BY idx_opportunity_event_processing_pending_retry_floor
-                     WHERE p.consumer_name = 'edli_reactor_v1'
-                       AND p.processing_status = 'processing'
-                       AND p.claimed_at IS NOT NULL
-                       AND p.claimed_at <= ?
-                     ORDER BY p.claimed_at ASC
-                     LIMIT 5000
-                """,
-                (stale_processing_cutoff,),
-            ).fetchall():
-                event_id = str(row[0] or "")
-                if event_id:
-                    candidate_generations[event_id] = (
-                        event_id,
-                        str(row[1] or ""),
-                        int(row[2] or 0),
-                        None if row[3] is None else str(row[3]),
-                        str(row[4] or ""),
-                    )
-        candidate_ids = list(candidate_generations)
         rows = []
-        for start in range(0, len(candidate_ids), 250):
-            chunk = candidate_ids[start : start + 250]
-            placeholders = ",".join("?" for _ in chunk)
+        if pending_admission_cutoff:
             rows.extend(
                 world_conn.execute(
-                    f"""
-                    SELECT e.event_id, e.payload_json, e.created_at
-                      FROM opportunity_events e
-                     WHERE e.event_type = ?
+                    """
+                    SELECT p.event_id, p.processing_status, p.attempt_count,
+                           p.claimed_at, p.updated_at, e.payload_json, e.created_at
+                      FROM opportunity_event_processing_type_projection AS t
+                           INDEXED BY idx_event_processing_type_pending
+                      JOIN opportunity_event_processing AS p
+                           INDEXED BY sqlite_autoindex_opportunity_event_processing_1
+                        ON p.consumer_name = t.consumer_name
+                       AND p.event_id = t.event_id
+                      JOIN opportunity_events AS e
+                           INDEXED BY sqlite_autoindex_opportunity_events_1
+                        ON e.event_id = t.event_id
+                     WHERE t.consumer_name = 'edli_reactor_v1'
+                       AND t.event_type = ?
+                       AND t.processing_status = 'pending'
+                       AND p.processing_status = 'pending'
                        AND e.created_at <= ?
                        AND e.received_at <= ?
-                       AND e.event_id IN ({placeholders})
+                     ORDER BY t.updated_at ASC, t.event_id ASC
+                     LIMIT 5000
                     """,
                     (
                         _REDECISION_EVENT_TYPE,
                         pending_admission_cutoff,
                         pending_admission_cutoff,
-                        *chunk,
                     ),
                 ).fetchall()
             )
-    except Exception:  # noqa: BLE001
-        return {}
+        if stale_processing_cutoff:
+            rows.extend(
+                world_conn.execute(
+                    """
+                    SELECT p.event_id, p.processing_status, p.attempt_count,
+                           p.claimed_at, p.updated_at, e.payload_json, e.created_at
+                      FROM opportunity_event_processing_type_projection AS t
+                           INDEXED BY idx_event_processing_type_stale_claim
+                      JOIN opportunity_event_processing AS p
+                           INDEXED BY sqlite_autoindex_opportunity_event_processing_1
+                        ON p.consumer_name = t.consumer_name
+                       AND p.event_id = t.event_id
+                      JOIN opportunity_events AS e
+                           INDEXED BY sqlite_autoindex_opportunity_events_1
+                        ON e.event_id = t.event_id
+                     WHERE t.consumer_name = 'edli_reactor_v1'
+                       AND t.event_type = ?
+                       AND t.processing_status = 'processing'
+                       AND t.claimed_at IS NOT NULL
+                       AND t.claimed_at <= ?
+                       AND p.processing_status = 'processing'
+                       AND p.claimed_at IS NOT NULL
+                       AND e.created_at <= ?
+                       AND e.received_at <= ?
+                     ORDER BY t.claimed_at ASC, t.event_id ASC
+                     LIMIT 5000
+                    """,
+                    (
+                        _REDECISION_EVENT_TYPE,
+                        stale_processing_cutoff,
+                        pending_admission_cutoff,
+                        pending_admission_cutoff,
+                    ),
+                ).fetchall()
+            )
+        for row in rows:
+            event_id = str(row[0] or "")
+            if event_id:
+                candidate_generations[event_id] = (
+                    event_id,
+                    str(row[1] or ""),
+                    int(row[2] or 0),
+                    None if row[3] is None else str(row[3]),
+                    str(row[4] or ""),
+                )
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            f"EDLI_ACTIVE_REDECISION_PROJECTION_QUERY_FAILED:{type(exc).__name__}"
+        ) from exc
     expire_by_reason: dict[str, list[tuple[str, str, int, str | None, str]]] = {}
     for row in rows:
         try:
             event_id = str(row[0] or "")
-            payload = json.loads(str(row[1] or "{}"))
-            event_created_at = str(row[2] or "")
+            payload = json.loads(str(row[5] or "{}"))
+            event_created_at = str(row[6] or "")
             family = (
                 str(payload.get("city") or "").strip(),
                 str(payload.get("target_date") or "").strip(),
@@ -11482,15 +11507,14 @@ def _edli_apply_unadmitted_redecision_expiry(
     *,
     decision_time: str,
 ) -> int:
-    """Apply a precomputed expiry plan with claim-state CAS predicates."""
+    """Apply a precomputed expiry plan with exact claim-state CAS predicates."""
 
     if not expire_by_reason:
         return 0
     now = str(decision_time)
     changed = 0
     for reason, generations in expire_by_reason.items():
-        before = world_conn.total_changes
-        world_conn.executemany(
+        cur = world_conn.executemany(
             """
                 UPDATE opportunity_event_processing
                    SET processing_status = 'expired',
@@ -11509,7 +11533,10 @@ def _edli_apply_unadmitted_redecision_expiry(
                 for generation in generations
             ),
         )
-        changed += int(world_conn.total_changes - before)
+        # Projection triggers add their own DELETE/INSERT changes. The expiry
+        # result is the number of processing rows whose exact CAS generation
+        # terminalized, not SQLite's aggregate trigger side effects.
+        changed += int(cur.rowcount or 0)
     return changed
 
 

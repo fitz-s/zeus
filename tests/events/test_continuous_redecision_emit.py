@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import dataclasses
+import importlib
 import inspect
 import json
 import sqlite3
@@ -37,14 +38,22 @@ ENTITY_KEY = "Chicago|2026-05-24|high|run-1"
 
 @pytest.fixture(autouse=True)
 def _replacement_authority_disabled_by_default(monkeypatch):
-    monkeypatch.setattr(
-        "src.events.triggers.forecast_snapshot_ready._replacement_live_enabled",
-        lambda: False,
-    )
+    from src.events.triggers import forecast_snapshot_ready
+
+    legacy_gate = getattr(forecast_snapshot_ready, "_replacement_live_enabled", None)
+    if callable(legacy_gate):
+        monkeypatch.setattr(forecast_snapshot_ready, "_replacement_live_enabled", lambda: False)
 
 
 def _decision_time() -> datetime:
     return datetime(2026, 5, 24, 4, 30, tzinfo=timezone.utc)
+
+
+def _install_active_redecision_projection(world: sqlite3.Connection) -> None:
+    migration = importlib.import_module(
+        "scripts.migrations.202608_edli_active_redecision_projection"
+    )
+    migration.up(world)
 
 
 def _seed_forecasts() -> sqlite3.Connection:
@@ -204,6 +213,7 @@ def test_prune_working_set_expires_stale_fsr_before_skip_snapshot(monkeypatch):
     world = sqlite3.connect(":memory:")
     world.row_factory = sqlite3.Row
     init_schema(world)
+    _install_active_redecision_projection(world)
     store = EventStore(world)
     stale = make_opportunity_event(
         event_type="FORECAST_SNAPSHOT_READY",
@@ -645,6 +655,7 @@ def test_unadmitted_redecision_pending_is_expired():
     world = sqlite3.connect(":memory:")
     world.row_factory = sqlite3.Row
     init_schema(world)
+    _install_active_redecision_projection(world)
     store = EventStore(world)
     stale = make_opportunity_event(
         event_type="EDLI_REDECISION_PENDING",
@@ -729,6 +740,7 @@ def test_fresh_unclaimed_redecision_pending_survives_admission_grace():
     world = sqlite3.connect(":memory:")
     world.row_factory = sqlite3.Row
     init_schema(world)
+    _install_active_redecision_projection(world)
     store = EventStore(world)
     fresh = make_opportunity_event(
         event_type="EDLI_REDECISION_PENDING",
@@ -779,6 +791,7 @@ def test_stale_admitted_redecision_pending_is_superseded_for_fresh_screen():
     world = sqlite3.connect(":memory:")
     world.row_factory = sqlite3.Row
     init_schema(world)
+    _install_active_redecision_projection(world)
     store = EventStore(world)
     stale = make_opportunity_event(
         event_type="EDLI_REDECISION_PENDING",
@@ -837,6 +850,7 @@ def test_fresh_screen_supersedes_admitted_redecision_after_short_grace():
     world = sqlite3.connect(":memory:")
     world.row_factory = sqlite3.Row
     init_schema(world)
+    _install_active_redecision_projection(world)
     store = EventStore(world)
     stale = make_opportunity_event(
         event_type="EDLI_REDECISION_PENDING",
@@ -896,6 +910,7 @@ def test_fresh_screen_preserves_processing_until_full_claim_lease_expires():
     world = sqlite3.connect(":memory:")
     world.row_factory = sqlite3.Row
     init_schema(world)
+    _install_active_redecision_projection(world)
     store = EventStore(world, consumer_name="edli_reactor_v1")
     decision_time = datetime(2026, 6, 28, 10, 2, tzinfo=timezone.utc)
     processing = make_opportunity_event(
@@ -974,6 +989,7 @@ def test_recent_rest_pull_redecision_survives_generic_no_edge_expiry():
     world = sqlite3.connect(":memory:")
     world.row_factory = sqlite3.Row
     init_schema(world)
+    _install_active_redecision_projection(world)
     store = EventStore(world, consumer_name="edli_reactor_v1")
     payload = dataclasses.asdict(
         _ready_payload(
@@ -1155,6 +1171,7 @@ def test_old_rest_pull_redecision_still_expires_without_current_edge():
     world = sqlite3.connect(":memory:")
     world.row_factory = sqlite3.Row
     init_schema(world)
+    _install_active_redecision_projection(world)
     store = EventStore(world, consumer_name="edli_reactor_v1")
     payload = dataclasses.asdict(
         _ready_payload(
@@ -1208,6 +1225,7 @@ def test_unadmitted_stale_processing_redecision_is_expired_after_claim_lease():
     world = sqlite3.connect(":memory:")
     world.row_factory = sqlite3.Row
     init_schema(world)
+    _install_active_redecision_projection(world)
     store = EventStore(world, consumer_name="edli_reactor_v1")
     decision_time = datetime(2026, 6, 18, 10, 15, tzinfo=timezone.utc)
     stale_processing = make_opportunity_event(
@@ -1283,6 +1301,7 @@ def test_expiry_plan_cannot_terminalize_work_requeued_after_discovery():
     world = sqlite3.connect(":memory:")
     world.row_factory = sqlite3.Row
     init_schema(world)
+    _install_active_redecision_projection(world)
     store = EventStore(world, consumer_name="edli_reactor_v1")
     event = make_opportunity_event(
         event_type="EDLI_REDECISION_PENDING",
@@ -1336,6 +1355,550 @@ def test_expiry_plan_cannot_terminalize_work_requeued_after_discovery():
     ).fetchone()
     assert expired == 0
     assert tuple(row) == ("pending", retry_at)
+
+
+def test_typed_redecision_expiry_stays_bounded_under_high_misleading_history():
+    """The typed path is independent of append-only non-redecision history.
+
+    Twenty thousand ordinary pending rows stand in for the multi-million-row
+    processing table: a strict VM-step guard makes the same O(redecision IDs)
+    property deterministic, while EXPLAIN proves no event_type scan or sort is
+    reintroduced on the typed path.
+    """
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    _install_active_redecision_projection(world)
+    old = "2026-06-17T15:00:00+00:00"
+    payload = json.dumps({"city": "Noise", "target_date": "2026-06-17", "metric": "high"})
+    history = [
+        (
+            f"noise-{number}",
+            "FORECAST_SNAPSHOT_READY",
+            f"Noise|2026-06-17|high|{number}",
+            "history",
+            old,
+            old,
+            old,
+            f"noise-snapshot-{number}",
+            f"noise-payload-{number}",
+            f"noise-idempotency-{number}",
+            0,
+            None,
+            payload,
+            1,
+            old,
+        )
+        for number in range(20_000)
+    ]
+    world.executemany(
+        """
+        INSERT INTO opportunity_events (
+            event_id, event_type, entity_key, source, observed_at, available_at,
+            received_at, causal_snapshot_id, payload_hash, idempotency_key,
+            priority, expires_at, payload_json, schema_version, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        history,
+    )
+    world.executemany(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, attempt_count, claimed_at,
+            processed_at, last_error, updated_at
+        ) VALUES ('edli_reactor_v1', ?, 'processed', 1, NULL, ?, NULL, ?)
+        """,
+        ((f"noise-{number}", old, old) for number in range(20_000)),
+    )
+    target_payload = json.dumps(
+        {"city": "Target", "target_date": "2026-06-18", "metric": "low"}
+    )
+    world.execute(
+        """
+        INSERT INTO opportunity_events (
+            event_id, event_type, entity_key, source, observed_at, available_at,
+            received_at, causal_snapshot_id, payload_hash, idempotency_key,
+            priority, expires_at, payload_json, schema_version, created_at
+        ) VALUES (?, 'EDLI_REDECISION_PENDING', ?, 'target', ?, ?, ?, ?, ?, ?, 0, NULL, ?, 1, ?)
+        """,
+        (
+            "target-redecision",
+            "Target|2026-06-18|low|target",
+            old,
+            old,
+            old,
+            "target-snapshot",
+            "target-payload",
+            "target-idempotency",
+            target_payload,
+            old,
+        ),
+    )
+    world.execute(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, attempt_count, claimed_at,
+            processed_at, last_error, updated_at
+        ) VALUES ('edli_reactor_v1', 'target-redecision', 'pending', 0, NULL, NULL, NULL, ?)
+        """,
+        (old,),
+    )
+    world.execute("ANALYZE")
+
+    statements: list[str] = []
+    progress_steps = 0
+
+    def _progress_guard() -> int:
+        nonlocal progress_steps
+        progress_steps += 1
+        return int(progress_steps > 6_000)
+
+    world.set_trace_callback(statements.append)
+    world.set_progress_handler(_progress_guard, 1)
+    try:
+        plan = reactor._edli_plan_unadmitted_redecision_expiry(
+            world,
+            set(),
+            decision_time="2026-06-17T16:00:00+00:00",
+        )
+    finally:
+        world.set_progress_handler(None, 0)
+        world.set_trace_callback(None)
+
+    assert any(
+        generation[0] == "target-redecision"
+        for generations in plan.values()
+        for generation in generations
+    )
+    assert progress_steps < 6_000
+    typed_statements = [
+        statement
+        for statement in statements
+        if "FROM opportunity_event_processing_type_projection AS t" in statement
+    ]
+    assert len(typed_statements) == 2
+    for statement in typed_statements:
+        detail = " ".join(
+            row[3]
+            for row in world.execute(f"EXPLAIN QUERY PLAN {statement}").fetchall()
+        ).upper()
+        assert "IDX_EVENT_PROCESSING_TYPE_" in detail
+        assert "IDX_OPPORTUNITY_EVENTS_TYPE_AVAILABLE" not in detail
+        assert "USE TEMP B-TREE" not in detail
+
+
+def test_migration_seeds_tail_active_debt_before_projection_becomes_ready():
+    """149 active rows near production's 18.3m rowid tail seed in one install."""
+    migration = importlib.import_module(
+        "scripts.migrations.202608_edli_active_redecision_projection"
+    )
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    migration.down(world)
+    old = "2026-06-17T15:00:00+00:00"
+    payload = json.dumps({"city": "Tail", "target_date": "2026-06-18", "metric": "high"})
+    events = [
+        (
+            f"tail-{number}", "EDLI_REDECISION_PENDING", f"Tail|2026-06-18|high|{number}",
+            "legacy", old, old, old, f"snap-{number}", f"hash-{number}",
+            f"idem-{number}", 0, None, payload, 1, old,
+        )
+        for number in range(149)
+    ]
+    world.executemany(
+        """
+        INSERT INTO opportunity_events (
+            event_id, event_type, entity_key, source, observed_at, available_at,
+            received_at, causal_snapshot_id, payload_hash, idempotency_key,
+            priority, expires_at, payload_json, schema_version, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        events,
+    )
+    world.executemany(
+        """
+        INSERT INTO opportunity_event_processing (
+            rowid, consumer_name, event_id, processing_status, attempt_count,
+            claimed_at, processed_at, last_error, updated_at
+        ) VALUES (?, 'edli_reactor_v1', ?, 'pending', 0, NULL, NULL, NULL, ?)
+        """,
+        (
+            (
+                18_375_392 if number == 148 else 18_367_196 + number,
+                f"tail-{number}",
+                old,
+            )
+            for number in range(149)
+        ),
+    )
+    world.executemany(
+        """
+        INSERT INTO opportunity_event_processing (
+            rowid, consumer_name, event_id, processing_status, attempt_count,
+            claimed_at, processed_at, last_error, updated_at
+        ) VALUES (?, 'edli_reactor_v1', ?, 'processed', 1, NULL, ?, NULL, ?)
+        """,
+        (
+            (number + 1, f"terminal-{number}", old, old)
+            for number in range(10_000)
+        ),
+    )
+    statements: list[str] = []
+    steps = 0
+
+    def _progress_guard() -> int:
+        nonlocal steps
+        steps += 1
+        return int(steps > 20_000)
+
+    world.set_trace_callback(statements.append)
+    world.set_progress_handler(_progress_guard, 1)
+    try:
+        migration.up(world)
+    finally:
+        world.set_progress_handler(None, 0)
+        world.set_trace_callback(None)
+
+    assert steps < 20_000
+    assert world.execute(
+        "SELECT COUNT(*) FROM opportunity_event_processing_type_projection WHERE consumer_name = 'edli_reactor_v1'"
+    ).fetchone()[0] == 149
+    assert tuple(world.execute(
+        """
+        SELECT seeded_active_count, seed_high_water_rowid, completed_at IS NOT NULL
+          FROM opportunity_event_processing_type_backfill
+         WHERE consumer_name = 'edli_reactor_v1'
+        """
+    ).fetchone()) == (149, 18_375_392, 1)
+    seed_statements = [
+        statement for statement in statements
+        if "FROM opportunity_event_processing AS p" in statement
+        and "IDX_OPPORTUNITY_EVENT_PROCESSING_STATUS" in statement.upper()
+    ]
+    assert seed_statements
+    for statement in seed_statements:
+        detail = " ".join(
+            row[3] for row in world.execute(f"EXPLAIN QUERY PLAN {statement}").fetchall()
+        ).upper()
+        assert "IDX_OPPORTUNITY_EVENT_PROCESSING_STATUS" in detail
+        assert "SQLITE_AUTOINDEX_OPPORTUNITY_EVENTS_1" in detail
+
+    from src.state.schema.opportunity_event_processing_schema import (
+        assert_active_projection_ready,
+    )
+
+    readiness_statements: list[str] = []
+    readiness_steps = 0
+
+    def _readiness_progress_guard() -> int:
+        nonlocal readiness_steps
+        readiness_steps += 1
+        return int(readiness_steps > 5_000)
+
+    world.set_trace_callback(readiness_statements.append)
+    world.set_progress_handler(_readiness_progress_guard, 1)
+    try:
+        assert assert_active_projection_ready(
+            world,
+            consumer_name="edli_reactor_v1",
+        ) == (149, 18_375_392)
+    finally:
+        world.set_progress_handler(None, 0)
+        world.set_trace_callback(None)
+
+    assert readiness_steps < 5_000
+    for statement in readiness_statements:
+        normalized_statement = " ".join(statement.upper().split())
+        detail = " ".join(
+            row[3] for row in world.execute(f"EXPLAIN QUERY PLAN {statement}").fetchall()
+        ).upper()
+        if "OPPORTUNITY_EVENT_PROCESSING_TYPE_PROJECTION" in normalized_statement:
+            assert "IDX_EVENT_PROCESSING_TYPE_" in detail
+        if "FROM OPPORTUNITY_EVENT_PROCESSING INDEXED BY" in normalized_statement:
+            assert "IDX_OPPORTUNITY_EVENT_PROCESSING_STATUS" in detail
+        assert "USE TEMP B-TREE" not in detail
+
+
+def test_active_type_projection_tracks_processing_create_update_and_fsr():
+    """Projection triggers are atomic with the mutable processing row only."""
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    store = EventStore(world)
+    fsr = make_opportunity_event(
+        event_type="FORECAST_SNAPSHOT_READY",
+        entity_key="FSR|2026-06-18|high|fsr",
+        source="fsr",
+        observed_at="2026-06-17T15:00:00+00:00",
+        available_at="2026-06-17T15:00:00+00:00",
+        received_at="2026-06-17T15:00:00+00:00",
+        causal_snapshot_id="fsr-snapshot",
+        payload={"city": "FSR", "target_date": "2026-06-18", "metric": "high"},
+        created_at="2026-06-17T15:00:00+00:00",
+    )
+    redecision = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Typed|2026-06-18|low|typed",
+        source="typed",
+        observed_at="2026-06-17T15:00:00+00:00",
+        available_at="2026-06-17T15:00:00+00:00",
+        received_at="2026-06-17T15:00:00+00:00",
+        causal_snapshot_id="typed-snapshot",
+        payload={"city": "Typed", "target_date": "2026-06-18", "metric": "low"},
+        created_at="2026-06-17T15:00:00+00:00",
+    )
+    assert store.insert_or_ignore(fsr)
+    assert store.insert_or_ignore(redecision)
+    assert tuple(world.execute(
+        """
+        SELECT event_type, processing_status
+          FROM opportunity_event_processing_type_projection
+         WHERE consumer_name = ? AND event_id = ?
+        """,
+        (store.consumer_name, fsr.event_id),
+    ).fetchone()) == ("FORECAST_SNAPSHOT_READY", "pending")
+
+    claimed_at = "2026-06-17T16:00:00+00:00"
+    world.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'processing', claimed_at = ?, updated_at = ?
+         WHERE consumer_name = ? AND event_id = ?
+        """,
+        (claimed_at, claimed_at, store.consumer_name, redecision.event_id),
+    )
+    assert tuple(world.execute(
+        """
+        SELECT event_type, processing_status, claimed_at
+          FROM opportunity_event_processing_type_projection
+         WHERE consumer_name = ? AND event_id = ?
+        """,
+        (store.consumer_name, redecision.event_id),
+    ).fetchone()) == ("EDLI_REDECISION_PENDING", "processing", claimed_at)
+    world.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'expired', updated_at = ?
+         WHERE consumer_name = ? AND event_id = ?
+        """,
+        ("2026-06-17T16:01:00+00:00", store.consumer_name, redecision.event_id),
+    )
+    assert world.execute(
+        "SELECT COUNT(*) FROM opportunity_event_processing_type_projection WHERE event_id = ?",
+        (redecision.event_id,),
+    ).fetchone()[0] == 0
+    world.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET processing_status = 'pending', claimed_at = NULL, updated_at = ?
+         WHERE consumer_name = ? AND event_id = ?
+        """,
+        ("2026-06-17T16:02:00+00:00", store.consumer_name, redecision.event_id),
+    )
+    assert tuple(world.execute(
+        "SELECT event_type, processing_status FROM opportunity_event_processing_type_projection WHERE event_id = ?",
+        (redecision.event_id,),
+    ).fetchone()) == ("EDLI_REDECISION_PENDING", "pending")
+    with pytest.raises(sqlite3.IntegrityError, match="ACTIVE_PROCESSING_REQUIRES_APPEND_ONLY_EVENT"):
+        world.execute(
+            """
+            INSERT INTO opportunity_event_processing (
+                consumer_name, event_id, processing_status, updated_at
+            ) VALUES ('edli_reactor_v1', 'missing-event', 'pending', ?)
+            """,
+            ("2026-06-17T16:03:00+00:00",),
+        )
+
+
+def test_active_projection_migration_is_idempotent_reversible_and_transactional():
+    from scripts.migrations import apply_migrations
+
+    migration = importlib.import_module(
+        "scripts.migrations.202608_edli_active_redecision_projection"
+    )
+    world = sqlite3.connect(":memory:")
+    init_schema(world)
+    migration.down(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    event = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Rollback|2026-06-18|high|seed",
+        source="migration-rollback",
+        observed_at="2026-06-17T15:00:00+00:00",
+        available_at="2026-06-17T15:00:00+00:00",
+        received_at="2026-06-17T15:00:00+00:00",
+        causal_snapshot_id="rollback-snapshot",
+        payload={"city": "Rollback", "target_date": "2026-06-18", "metric": "high"},
+        created_at="2026-06-17T15:00:00+00:00",
+    )
+    assert store.insert_or_ignore(event)
+    world.commit()
+
+    world.execute("BEGIN")
+    migration.up(world)
+    assert world.execute(
+        "SELECT seeded_active_count FROM opportunity_event_processing_type_backfill "
+        "WHERE consumer_name = 'edli_reactor_v1'"
+    ).fetchone()[0] == 1
+    world.rollback()
+    assert world.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'opportunity_event_processing_type_projection'"
+    ).fetchone()[0] == 0
+
+    assert apply_migrations(
+        world,
+        target="202608_edli_active_redecision_projection",
+        db_identity="world",
+    ) == ["202608_edli_active_redecision_projection"]
+    assert apply_migrations(
+        world,
+        target="202608_edli_active_redecision_projection",
+        db_identity="world",
+    ) == []
+    migration.up(world)
+    assert world.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'opportunity_event_processing_type_projection'"
+    ).fetchone()[0] == 1
+    migration.down(world)
+    assert world.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'opportunity_event_processing'"
+    ).fetchone()[0] == 1
+
+
+def test_active_projection_seed_fence_and_orphan_roll_back_atomically():
+    from src.state.schema.opportunity_event_processing_schema import (
+        ActiveProjectionSeedError,
+        install_active_event_type_projection,
+    )
+
+    world = sqlite3.connect(":memory:")
+    init_schema(world)
+    migration = importlib.import_module(
+        "scripts.migrations.202608_edli_active_redecision_projection"
+    )
+    migration.down(world)
+    old = "2026-06-17T15:00:00+00:00"
+    payload = json.dumps(
+        {"city": "Fence", "target_date": "2026-06-18", "metric": "high"}
+    )
+    world.executemany(
+        """
+        INSERT INTO opportunity_events (
+            event_id, event_type, entity_key, source, observed_at, available_at,
+            received_at, causal_snapshot_id, payload_hash, idempotency_key,
+            priority, expires_at, payload_json, schema_version, created_at
+        ) VALUES (?, 'EDLI_REDECISION_PENDING', ?, 'seed', ?, ?, ?, ?, ?, ?, 0, NULL, ?, 1, ?)
+        """,
+        [
+            (
+                f"fence-{number}",
+                f"Fence|2026-06-18|high|{number}",
+                old,
+                old,
+                old,
+                f"fence-snapshot-{number}",
+                f"fence-hash-{number}",
+                f"fence-idempotency-{number}",
+                payload,
+                old,
+            )
+            for number in range(2)
+        ],
+    )
+    world.executemany(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, attempt_count, claimed_at,
+            processed_at, last_error, updated_at
+        ) VALUES ('edli_reactor_v1', ?, 'pending', 0, NULL, NULL, NULL, ?)
+        """,
+        [(f"fence-{number}", old) for number in range(2)],
+    )
+    with pytest.raises(ActiveProjectionSeedError, match="SEED_LIMIT_EXCEEDED"):
+        install_active_event_type_projection(
+            world,
+            consumer_name="edli_reactor_v1",
+            max_active_rows=1,
+        )
+    assert world.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'opportunity_event_processing_type_projection'"
+    ).fetchone()[0] == 0
+
+    world.execute(
+        "INSERT INTO opportunity_event_processing (consumer_name, event_id, processing_status, updated_at) "
+        "VALUES ('edli_reactor_v1', 'orphan-active', 'pending', ?)",
+        (old,),
+    )
+    with pytest.raises(ActiveProjectionSeedError, match="MISSING_APPEND_ONLY_EVENT"):
+        install_active_event_type_projection(
+            world,
+            consumer_name="edli_reactor_v1",
+            max_active_rows=10,
+        )
+    assert world.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE name = 'opportunity_event_processing_type_backfill'"
+    ).fetchone()[0] == 0
+
+
+def test_expiry_projection_absent_or_unseeded_fails_closed_not_empty_truth():
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    with pytest.raises(
+        RuntimeError,
+        match="EDLI_ACTIVE_REDECISION_PROJECTION_READINESS_FAILED:ACTIVE_PROJECTION_UNSEEDED",
+    ):
+        reactor._edli_plan_unadmitted_redecision_expiry(
+            world,
+            set(),
+            decision_time="2026-06-17T16:00:00+00:00",
+        )
+    world.execute("DROP TABLE opportunity_event_processing_type_backfill")
+    with pytest.raises(
+        RuntimeError,
+        match="EDLI_ACTIVE_REDECISION_PROJECTION_READINESS_FAILED:no such table",
+    ):
+        reactor._edli_plan_unadmitted_redecision_expiry(
+            world,
+            set(),
+            decision_time="2026-06-17T16:00:00+00:00",
+        )
+
+
+def test_expiry_projection_receipt_cannot_mask_deleted_active_projection_row():
+    world = sqlite3.connect(":memory:")
+    world.row_factory = sqlite3.Row
+    init_schema(world)
+    _install_active_redecision_projection(world)
+    store = EventStore(world, consumer_name="edli_reactor_v1")
+    event = make_opportunity_event(
+        event_type="EDLI_REDECISION_PENDING",
+        entity_key="Drift|2026-06-18|low|deleted-projection",
+        source="projection-drift",
+        observed_at="2026-06-17T15:00:00+00:00",
+        available_at="2026-06-17T15:00:00+00:00",
+        received_at="2026-06-17T15:00:00+00:00",
+        causal_snapshot_id="drift-snapshot",
+        payload={"city": "Drift", "target_date": "2026-06-18", "metric": "low"},
+        created_at="2026-06-17T15:00:00+00:00",
+    )
+    assert store.insert_or_ignore(event)
+    world.execute(
+        "DELETE FROM opportunity_event_processing_type_projection "
+        "WHERE consumer_name = ? AND event_id = ?",
+        (store.consumer_name, event.event_id),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="ACTIVE_PROJECTION_COUNT_MISMATCH:edli_reactor_v1:0!=1",
+    ):
+        reactor._edli_plan_unadmitted_redecision_expiry(
+            world,
+            set(),
+            decision_time="2026-06-17T16:00:00+00:00",
+        )
 
 
 def test_redecision_world_write_yields_immediately_to_active_sqlite_writer(tmp_path):
@@ -1585,6 +2148,7 @@ def test_unvalued_pending_redecision_is_kept_for_admitted_held_reemit_family():
 
     world = sqlite3.connect(":memory:")
     init_schema(world)
+    _install_active_redecision_projection(world)
     store = EventStore(world, consumer_name="edli_reactor_v1")
     held_only = make_opportunity_event(
         event_type="EDLI_REDECISION_PENDING",

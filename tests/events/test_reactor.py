@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import inspect
 import json
 import logging
@@ -7407,6 +7408,13 @@ def test_boot_backfills_legacy_winner_pointer_before_backlog_claim():
 
 def test_boot_empty_winner_pointer_prevents_repeated_legacy_scan():
     conn, store = _store()
+    from src.state.schema.opportunity_event_processing_schema import (
+        assert_active_projection_ready,
+    )
+
+    importlib.import_module(
+        "scripts.migrations.202608_edli_active_redecision_projection"
+    ).up(conn)
     statements: list[str] = []
     conn.set_trace_callback(statements.append)
     try:
@@ -7426,6 +7434,21 @@ def test_boot_empty_winner_pointer_prevents_repeated_legacy_scan():
         "FROM opportunity_event_processing WHERE consumer_name = ?",
         (store._winner_pointer_consumer_name,),
     ).fetchone() == ("pending", "GLOBAL_WINNER_POINTER_BOOTSTRAPPED_EMPTY")
+    assert store._winner_pointer_consumer_name != "edli_reactor_v1"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM opportunity_event_processing_type_projection"
+    ).fetchone()[0] == 0
+    assert assert_active_projection_ready(
+        conn,
+        consumer_name="edli_reactor_v1",
+    ) == (0, 0)
+    with pytest.raises(sqlite3.IntegrityError, match="ACTIVE_PROCESSING_REQUIRES_APPEND_ONLY_EVENT"):
+        conn.execute(
+            "INSERT INTO opportunity_event_processing "
+            "(consumer_name, event_id, processing_status, updated_at) "
+            "VALUES ('edli_reactor_v1', 'orphan-active', 'pending', ?)",
+            (_DT_VENUE_OPEN.isoformat(),),
+        )
 
 
 def test_global_target_allows_only_current_batch_processing_lease():

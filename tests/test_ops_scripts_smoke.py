@@ -2351,6 +2351,13 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     assert "restart recovery passed" in detail
     assert calls
     assert "_ensure_restart_world_schemas(world_conn)" in calls[0][2]
+    assert "applied['world'] = apply_migrations(" in calls[0][2]
+    assert "world_ghost_cleanup" not in calls[0][2]
+    assert "target='202608_edli_active_redecision_projection'" in calls[0][2]
+    assert "get_world_connection_read_only" in calls[0][2]
+    assert "assert_active_projection_ready" in calls[0][2]
+    assert "world_active_redecision_projection_receipt" in calls[0][2]
+    assert "EDLI_ACTIVE_REDECISION_PROJECTION_UNSEEDED" in calls[0][2]
     assert "_ensure_restart_trade_schemas(trade_conn)" in calls[0][2]
     assert "get_trade_connection(write_class='live')" in calls[0][2]
     assert "get_world_connection_with_trades_required(write_class='live')" in calls[0][2]
@@ -3581,6 +3588,41 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         ("resume_entries", tuple(expanded_labels)),
     ]
     assert "live restart preflight passed" in capsys.readouterr().out
+
+
+def test_deploy_live_projection_recovery_failure_leaves_daemons_stopped(monkeypatch):
+    dl = _load("deploy_live_projection_recovery_failure", "deploy_live.py")
+    stops: list[str] = []
+    launches: list[str] = []
+
+    monkeypatch.setattr(dl, "_gate", lambda allow_dirty, allow_unpushed=False: (True, []))
+    monkeypatch.setattr(dl, "head_sha", lambda short=True: "d" * 40)
+    monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
+    monkeypatch.setattr(
+        dl,
+        "_pause_entries_for_live_restart_if_needed",
+        lambda labels: (True, "pause armed"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_stop_label",
+        lambda label: (stops.append(label) or (True, f"stopped {label}")),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_run_restart_recovery_if_needed",
+        lambda labels: (False, "ACTIVE_PROJECTION_SEED_LIMIT_EXCEEDED"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_launch_or_restart_label",
+        lambda label: (launches.append(label) or (True, f"launched {label}")),
+    )
+    monkeypatch.setattr(dl, "_live_restart_exclusive_lock", contextlib.nullcontext)
+
+    assert dl.main(["restart", "live-trading"]) == 1
+    assert stops == [dl.LIVE_TRADING_LABEL, *dl.LIVE_TRADING_PREREQUISITE_LABELS]
+    assert launches == []
 
 
 def test_deploy_live_starts_heartbeat_before_monitor_and_stops_after_failure(

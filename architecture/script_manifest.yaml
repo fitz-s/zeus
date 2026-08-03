@@ -2377,6 +2377,30 @@ scripts:
     required_tests:
       - tests/test_position_events_identity_supersession_check_migration.py
 
+  202608_edli_active_redecision_projection.py:
+    class: migration
+    status: active
+    lifecycle: one_shot
+    authority_scope: schema_migration
+    dangerous_if_run: true
+    dry_run_default: false
+    apply_flag: "python3 -m scripts.migrations apply --target=202608_edli_active_redecision_projection"
+    target_db: state/zeus-world.db
+    read_targets: [state/zeus-world.db]
+    write_targets: [state/zeus-world.db]
+    canonical_command: "python3 -m scripts.migrations apply --target=202608_edli_active_redecision_projection --db-path /tmp/zeus-world.db --db-identity world"
+    external_inputs: []
+    delete_policy: retain_for_audit
+    reuse_when: "Install the additive active EDLI event-type projection and its bounded active-set seed receipt on a world DB whose processing table predates Hotfix B."
+    do_not_use_when: "Do not run against a canonical live DB from this worktree or while its world writer is unfenced; use an isolated DB for verification."
+    promotion_barrier: "Stopped-daemon restart recovery must apply the migration transactionally, seed the complete <=10k active consumer set, then prove the read-only receipt and exact active/projection count parity before starting new code."
+    unguarded_write_rationale: "Additive, idempotent world-only DDL plus one fenced, indexed active-set seed; rollback drops only the new triggers and projection/receipt tables, preserving canonical events and processing rows."
+    required_helpers:
+      - src.state.schema.opportunity_event_processing_schema.install_active_event_type_projection
+      - src.state.schema.opportunity_event_processing_schema.assert_active_projection_ready
+    required_tests:
+      - tests/events/test_continuous_redecision_emit.py
+
   measure_wu_obs_latency.py:
     class: telemetry_read
     status: active

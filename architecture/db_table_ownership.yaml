@@ -1053,6 +1053,42 @@ tables:
     notes: >
       EDLI v1 mutable per-consumer processing state for immutable opportunity_events.
 
+  - name: opportunity_event_processing_type_projection
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: scripts/migrations/202608_edli_active_redecision_projection.py
+    pk_col: "[consumer_name, event_id]"
+    required_columns:
+      - {name: consumer_name, type: TEXT, nullable: false}
+      - {name: event_id, type: TEXT, nullable: false}
+      - {name: event_type, type: TEXT, nullable: false}
+      - {name: processing_status, type: TEXT, nullable: false}
+      - {name: updated_at, type: TEXT, nullable: false}
+    notes: >
+      Active-only mutable projection of immutable opportunity_events.event_type
+      onto pending/processing consumer rows. Insert/update triggers maintain it
+      atomically with processing mutations; terminal rows are removed without
+      changing append-only opportunity_events retention.
+
+  - name: opportunity_event_processing_type_backfill
+    db: world
+    schema_class: world_class
+    schema_version_owner: SCHEMA_VERSION
+    created_by: scripts/migrations/202608_edli_active_redecision_projection.py
+    pk_col: consumer_name
+    required_columns:
+      - {name: consumer_name, type: TEXT, nullable: false}
+      - {name: next_rowid, type: INTEGER, nullable: false}
+      - {name: seeded_active_count, type: INTEGER, nullable: true}
+      - {name: seed_high_water_rowid, type: INTEGER, nullable: true}
+    notes: >
+      Per-consumer active-set seed receipt. completed_at, seeded_active_count,
+      and seed_high_water_rowid become authoritative only after one bounded,
+      indexed migration seed commits; next_rowid is retained compatibility data,
+      never a reader cursor. It never authorizes deletion or mutation of
+      append-only opportunity_events.
+
   - name: event_dead_letters
     db: world
     schema_class: world_class

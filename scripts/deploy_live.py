@@ -1059,7 +1059,11 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         from src.state.db import (
             get_trade_connection,
             get_world_connection,
+            get_world_connection_read_only,
             get_world_connection_with_trades_required,
+        )
+        from src.state.schema.opportunity_event_processing_schema import (
+            assert_active_projection_ready,
         )
         applied = {}
 
@@ -1071,9 +1075,38 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
                 target='202607_drop_world_collateral_unsettled_ghost',
                 db_identity='world',
             )
+            applied['world_active_redecision_projection'] = apply_migrations(
+                world_conn,
+                target='202608_edli_active_redecision_projection',
+                db_identity='world',
+            )
             world_conn.commit()
         finally:
             world_conn.close()
+
+        # The projection reader is never allowed to start on merely-created
+        # objects: prove the migration committed its complete active-set receipt
+        # from a read-only connection before any daemon is bootstrapped.
+        world_ro = get_world_connection_read_only()
+        try:
+            seeded_active_count, seed_high_water_rowid = assert_active_projection_ready(
+                world_ro,
+                consumer_name='edli_reactor_v1',
+            )
+            receipt = world_ro.execute(
+                "SELECT completed_at "
+                "FROM opportunity_event_processing_type_backfill "
+                "WHERE consumer_name = 'edli_reactor_v1'"
+            ).fetchone()
+            if receipt is None:
+                raise RuntimeError('EDLI_ACTIVE_REDECISION_PROJECTION_UNSEEDED')
+            applied['world_active_redecision_projection_receipt'] = {
+                'seeded_active_count': seeded_active_count,
+                'seed_high_water_rowid': seed_high_water_rowid,
+                'completed_at': str(receipt[0]),
+            }
+        finally:
+            world_ro.close()
 
         trade_conn = get_trade_connection(write_class='live')
         try:
