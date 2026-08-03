@@ -6405,11 +6405,6 @@ def event_bound_live_adapter_from_trade_conn(
     adapter instance (== per reactor cycle).
     """
 
-    if auction_capital_authority is None:
-        from src.risk_allocator import snapshot_global_auction_capital_authority
-
-        auction_capital_authority = snapshot_global_auction_capital_authority()
-
     # Live production scope is forecast_plus_day0 only. Forecast and Day0 events
     # both use this same execution adapter; unknown events fail closed before the
     # candidate pipeline. There is no non-live/no-submit scope inside production.
@@ -7257,7 +7252,15 @@ def event_bound_live_adapter_from_trade_conn(
         projected_book_refresh_tokens = _global_projected_book_refresh_tokens(
             events
         )
-        entry_submit_suppression_reason = _entry_global_submit_suppression_reason()
+        # SCOPE: BUY candidates in this adapter cycle only; SELL/HOLD/CASH stay
+        # comparable. DRAIN: the blocked global batch reaches its existing
+        # transient-retention result without touching BUY capital authority.
+        # RESET: the next cycle re-reads durable control and receives a fresh
+        # cycle-local block reason, so clearing both restores BUY re-decision.
+        entry_submit_suppression_reason = (
+            _entry_global_submit_suppression_reason()
+            or entry_submit_block_reason
+        )
         entry_pause_reason = _entry_pause_blocks_live_submit(
             live_cap_conn or trade_conn
         )
@@ -9295,6 +9298,21 @@ def event_bound_live_adapter_from_trade_conn(
             market_event_id,
             _owner_event_id,
         ):
+            nonlocal auction_capital_authority
+            # Capital authority constrains risk-increasing BUYs only.  The
+            # solver evaluates SELL before this resolver and policy-rejected
+            # BUYs never call it, so resolve lazily: entry containment must not
+            # disable SELL/HOLD/CASH or forecast-carrier bookkeeping.  An
+            # entry-capable cycle still reaches the canonical snapshot here
+            # and fails closed unchanged when the allocator is unavailable.
+            if auction_capital_authority is None:
+                from src.risk_allocator import (
+                    snapshot_global_auction_capital_authority,
+                )
+
+                auction_capital_authority = (
+                    snapshot_global_auction_capital_authority()
+                )
             return auction_capital_authority.capacity_usd(
                 market_id=str(gamma_market_id),
                 event_id=str(market_event_id),

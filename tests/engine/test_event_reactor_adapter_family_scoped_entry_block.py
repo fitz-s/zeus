@@ -293,6 +293,67 @@ def test_paused_zero_held_batch_uses_unrestricted_reduce_only_no_trade(monkeypat
     assert captured["restrict_to_family_keys"] is None
 
 
+def test_blocked_carrier_does_not_require_buy_allocator_authority(monkeypatch):
+    from src.engine import global_batch_runtime
+    import src.risk_allocator as risk_allocator
+
+    captured = {}
+    snapshot_calls = []
+
+    def fake_process(events, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(events=tuple(events), winner_event_id=None, receipts={})
+
+    class CapacityAuthority:
+        def capacity_usd(self, **_kwargs):
+            return 17
+
+    def snapshot_authority():
+        snapshot_calls.append(True)
+        return CapacityAuthority()
+
+    monkeypatch.setattr(global_batch_runtime, "process_current_global_batch", fake_process)
+    monkeypatch.setattr(
+        era,
+        "_entry_pause_blocks_live_submit",
+        lambda _conn: None,
+    )
+    monkeypatch.setattr(
+        risk_allocator,
+        "snapshot_global_auction_capital_authority",
+        snapshot_authority,
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        sqlite3.connect(":memory:"),
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=sqlite3.connect(":memory:"),
+        topology_conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
+        held_family_provider=lambda: frozenset(),
+        entry_submit_block_reason="paused_forecast_snapshot_completion",
+    )
+
+    adapter.process_global_batch(
+        (_make_event(city="Dallas", target_date="2026-07-25", metric="high"),),
+        NOW,
+    )
+
+    assert snapshot_calls == []
+    assert captured["buy_candidates_enabled"] is False
+    policy = captured["candidate_policy_rejection_resolver"]
+    assert policy(SimpleNamespace(action="SELL")) is None
+    assert policy(SimpleNamespace(action="BUY", family_key=FAMILY_A)) == (
+        "paused_forecast_snapshot_completion"
+    )
+    assert captured["current_capital_limit_resolver"](
+        SimpleNamespace(family_key=FAMILY_A),
+        "gamma-market",
+        "market-event",
+        "owner-event",
+    ) == 17
+    assert snapshot_calls == [True]
+
+
 def test_pause_race_final_submit_gate_has_zero_venue_side_effect(monkeypatch):
     called = []
     monkeypatch.setattr(
