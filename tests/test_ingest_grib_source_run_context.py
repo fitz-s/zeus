@@ -1,10 +1,11 @@
 # Created: 2026-05-03
-# Last reused/audited: 2026-07-30
-# Authority basis: current/finite_evidence_probability_symmetry plus the original SourceRunContext contract.
+# Last reused/audited: 2026-08-03
+# Authority basis: LOW local-day-min interval provenance contract plus the original SourceRunContext contract.
 """GRIB ingester source-run context linkage tests."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import sys
@@ -29,7 +30,13 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from ingest_grib_to_snapshots import SourceRunContext, ingest_json_file, ingest_track  # type: ignore  # noqa: E402
+from ingest_grib_to_snapshots import (  # type: ignore  # noqa: E402
+    LOW_LOCAL_DAY_MIN_INTERVAL_EVIDENCE_REVISION,
+    SourceRunContext,
+    _low_local_day_min_interval_evidence,
+    ingest_json_file,
+    ingest_track,
+)
 
 
 def _conn() -> sqlite3.Connection:
@@ -140,6 +147,9 @@ def test_source_run_context_writes_executable_v2_linkage(tmp_path: Path) -> None
     assert row["source_release_time"] == "2026-05-03T08:05:00+00:00"
     assert row["source_available_at"] == "2026-05-03T08:10:00+00:00"
     assert row["available_at"] == "2026-05-03T08:10:00+00:00"
+    assert "low_local_day_min_interval_evidence" not in json.loads(
+        row["provenance_json"]
+    )
 
 
 def test_missing_source_run_context_leaves_v2_row_non_executable(tmp_path: Path) -> None:
@@ -408,6 +418,32 @@ def test_minority_low_boundary_normalizes_into_current_evidence_shape(tmp_path: 
         "decision": "quarantined",
         "reason": "quarantined_boundary_strictly_lower",
     }
+    interval_evidence = provenance["low_local_day_min_interval_evidence"]
+    assert interval_evidence["semantics_revision"] == (
+        LOW_LOCAL_DAY_MIN_INTERVAL_EVIDENCE_REVISION
+    )
+    assert interval_evidence["members_unit"] == "C"
+    assert interval_evidence["native_unit"] == "C"
+    assert interval_evidence["selected_step_ranges_inner"] == ["30-33", "33-36"]
+    assert interval_evidence["selected_step_ranges_boundary"] == ["27-30", "123-126"]
+    assert interval_evidence["member_count"] == 51
+    assert len(interval_evidence["member_records"]) == 51
+    assert interval_evidence["member_records"][0] == {
+        "member": 0,
+        "raw_endpoints": {
+            "inner_min_native_unit": 28.0,
+            "boundary_min_native_unit": 27.0,
+        },
+        "lower_native_unit": 27.0,
+        "upper_native_unit": 28.0,
+        "exact": False,
+        "status": "INTERVAL",
+        "reason": "quarantined_boundary_strictly_lower",
+    }
+    assert interval_evidence["member_records"][2]["exact"] is True
+    assert interval_evidence["member_records"][2]["lower_native_unit"] == 28.02
+    assert interval_evidence["member_records"][2]["upper_native_unit"] == 28.02
+    assert len(interval_evidence["identity_sha256"]) == 64
 
     from src.data.replacement_forecast_materializer import _read_current_evidence_shape
 
@@ -554,6 +590,24 @@ def test_invalid_low_boundary_member_fails_closed_end_to_end(tmp_path: Path) -> 
         "decision": "invalid",
         "reason": "invalid_nonfinite_inner_min",
     }
+    interval_evidence = json.loads(row["provenance_json"])[
+        "low_local_day_min_interval_evidence"
+    ]
+    for member_id in (48, 49, 50):
+        record = interval_evidence["member_records"][member_id]
+        assert record["lower_native_unit"] is None
+        assert record["upper_native_unit"] is None
+        assert record["exact"] is None
+        assert record["status"] == "INVALID"
+    assert interval_evidence["member_records"][48]["reason"] == (
+        "invalid_missing_boundary_extrema"
+    )
+    assert interval_evidence["member_records"][49]["reason"] == (
+        "invalid_nonfinite_boundary_min"
+    )
+    assert interval_evidence["member_records"][50]["reason"] == (
+        "invalid_nonfinite_inner_min"
+    )
 
     from src.data.replacement_forecast_materializer import _read_current_evidence_shape
 
@@ -605,6 +659,15 @@ def test_exact_low_boundary_majority_fails_closed_end_to_end(tmp_path: Path) -> 
         "AMBIGUOUS_CROSSES_LOCAL_DAY_BOUNDARY"
     )
     assert row["contributes_to_target_extrema"] == 0
+    persisted_members = json.loads(row["members_json"])
+    assert sum(value is None for value in persisted_members) == 26
+    interval_evidence = json.loads(row["provenance_json"])[
+        "low_local_day_min_interval_evidence"
+    ]
+    assert len(interval_evidence["member_records"]) == 51
+    assert sum(record["status"] == "INTERVAL" for record in interval_evidence["member_records"]) == 26
+    assert row["training_allowed"] == 0
+    assert row["causality_status"] == "REJECTED_BOUNDARY_AMBIGUOUS"
 
     from src.data.replacement_forecast_materializer import _read_current_evidence_shape
 
@@ -625,3 +688,145 @@ def test_exact_low_boundary_majority_fails_closed_end_to_end(tmp_path: Path) -> 
         )
         is None
     )
+
+
+def test_low_no_boundary_window_persists_exact_inner_interval() -> None:
+    payload = normalize_low_boundary_evidence(
+        {
+            "temperature_metric": "low",
+            "unit": "C",
+            "members_unit": "C",
+            "selected_step_ranges_inner": ["12-18"],
+            "selected_step_ranges_boundary": [],
+            "members": [
+                {
+                    "member": member_id,
+                    "inner_min_native_unit": 28.0 + member_id / 100.0,
+                    "boundary_min_native_unit": None,
+                }
+                for member_id in range(51)
+            ],
+        }
+    )
+    evidence = _low_local_day_min_interval_evidence(payload)
+    assert evidence is not None
+    assert all(record["exact"] is True for record in evidence["member_records"])
+    assert all(
+        record["lower_native_unit"] == record["upper_native_unit"]
+        for record in evidence["member_records"]
+    )
+    assert {
+        record["reason"] for record in evidence["member_records"]
+    } == {"accepted_no_boundary_window"}
+
+
+def test_low_ingest_uses_metric_and_selected_range_fallback_for_interval_evidence(
+    tmp_path: Path,
+) -> None:
+    payload = _low_boundary_payload(ambiguous_count=2)
+    payload.pop("temperature_metric")
+    payload["selected_step_ranges_inner"] = ["not-a-range"]
+    payload["selected_step_ranges"] = ["54-60"]
+    path = tmp_path / "low_metric_and_range_fallback.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    conn = _conn()
+
+    status = ingest_json_file(
+        conn,
+        path,
+        metric=LOW_LOCALDAY_MIN,
+        model_version="ecmwf_ens",
+        overwrite=True,
+        source_run_context=_low_source_context(),
+    )
+
+    assert status == "written"
+    row = conn.execute("SELECT provenance_json FROM ensemble_snapshots").fetchone()
+    evidence = json.loads(row["provenance_json"])[
+        "low_local_day_min_interval_evidence"
+    ]
+    assert evidence["selected_step_ranges_inner"] == ["54-60"]
+    assert evidence["member_count"] == 51
+
+
+def test_low_ingest_canonicalizes_missing_metric_before_no_boundary_normalization(
+    tmp_path: Path,
+) -> None:
+    payload = _low_boundary_payload(ambiguous_count=0)
+    payload.pop("temperature_metric")
+    payload["selected_step_ranges_boundary"] = []
+    payload["boundary_ambiguous"] = False
+    payload["boundary_policy"] = {
+        "boundary_ambiguous": False,
+        "ambiguous_member_count": 0,
+        "training_rule": "drop_ambiguous_members",
+    }
+    for member in payload["members"]:
+        member["boundary_min_native_unit"] = None
+        member["boundary_ambiguous"] = False
+    path = tmp_path / "low_missing_metric_no_boundary.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    conn = _conn()
+
+    status = ingest_json_file(
+        conn,
+        path,
+        metric=LOW_LOCALDAY_MIN,
+        model_version="ecmwf_ens",
+        overwrite=True,
+        source_run_context=_low_source_context(),
+    )
+
+    assert status == "written"
+    row = conn.execute("SELECT provenance_json FROM ensemble_snapshots").fetchone()
+    records = json.loads(row["provenance_json"])[
+        "low_local_day_min_interval_evidence"
+    ]["member_records"]
+    assert len(records) == 51
+    assert {record["status"] for record in records} == {"EXACT"}
+    assert {record["reason"] for record in records} == {
+        "accepted_no_boundary_window"
+    }
+
+
+def test_low_interval_provenance_identity_is_json_deterministic() -> None:
+    normalized = normalize_low_boundary_evidence(_low_boundary_payload(ambiguous_count=2))
+    reordered = {
+        **normalized,
+        "members": [
+            {key: member[key] for key in reversed(list(member))}
+            for member in normalized["members"]
+        ],
+    }
+    first = _low_local_day_min_interval_evidence(normalized)
+    second = _low_local_day_min_interval_evidence(reordered)
+    assert first == second
+    assert json.dumps(first, sort_keys=True, separators=(",", ":")) == json.dumps(
+        second, sort_keys=True, separators=(",", ":")
+    )
+    assert first is not None
+    identity_keys = {
+        "semantics_revision",
+        "members_unit",
+        "native_unit",
+        "selected_step_ranges_inner",
+        "selected_step_ranges_boundary",
+        "member_records",
+    }
+    identity_material = {key: first[key] for key in identity_keys}
+    expected_hash = hashlib.sha256(
+        json.dumps(
+            identity_material,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert first["identity_sha256"] == expected_hash
+
+    mutated = json.loads(json.dumps(normalized))
+    mutated["members"][0]["inner_min_native_unit"] += 0.25
+    changed = _low_local_day_min_interval_evidence(mutated)
+    assert changed is not None
+    assert changed["identity_sha256"] != first["identity_sha256"]
