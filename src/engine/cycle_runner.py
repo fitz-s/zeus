@@ -596,6 +596,12 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         freshness_allows_entries = False
         _freshness_verdict = None
     if _freshness_verdict is not None:
+        # Visibility and authority are separate axes.  Every degraded source
+        # remains explicit in the cycle receipt even when its role does not
+        # authorize a capital-path veto for this mode.
+        if _freshness_verdict.degraded_data:
+            summary["degraded_data"] = True
+            summary["stale_sources"] = list(_freshness_verdict.stale_sources)
         # P3 cycle-axis freshness short-circuit (PLAN_v3 §6.P3 — explicitly
         # NOT migrated to phase-axis; this gate fires before any candidate
         # is constructed). Routed through helper for grep-symmetry per
@@ -608,12 +614,9 @@ def run_cycle(mode: DiscoveryMode, *, edli_event_context: dict | None = None) ->
         if _freshness_verdict.day0_capture_disabled and _is_fail_closed_mode:
             summary["skipped"] = True
             summary["skip_reason"] = "cycle_skipped_freshness_degraded"
-            summary["stale_sources"] = list(_freshness_verdict.stale_sources)
             return summary
         if _freshness_verdict.ensemble_disabled and mode == DiscoveryMode.OPENING_HUNT:
-            summary["degraded_data"] = True
             summary["freshness_entry_blocked"] = True
-            summary["stale_sources"] = list(_freshness_verdict.stale_sources)
             freshness_allows_entries = False
 
     artifact = CycleArtifact(mode=mode.value, started_at=summary["started_at"], summary=summary)

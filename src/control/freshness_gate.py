@@ -58,8 +58,12 @@ FRESHNESS_BUDGETS: dict[str, int] = {
     "tigge_mars": 24 * 3600,          # TIGGE direct: 24h
 }
 
-# Sources whose staleness disables DAY0_CAPTURE
-DAY0_CAPTURE_GATED_SOURCES = frozenset({"open_meteo_archive", "wu_pws", "hko", "ogimet", "noaa"})
+# Sources whose staleness disables DAY0_CAPTURE.  Open-Meteo archive supplies
+# lagged historical/hourly observation ingest, but it is not authoritative
+# real-time Day0 or settlement truth.  Keep its degradation visible in
+# ``stale_sources``/``degraded_data``, but do not let exhausted historical
+# quota veto current city-specific Day0 evidence.
+DAY0_CAPTURE_GATED_SOURCES = frozenset({"wu_pws", "hko", "ogimet", "noaa"})
 # Sources whose staleness disables ensemble-only nowcasts
 ENSEMBLE_GATED_SOURCES = frozenset({"ecmwf_open_data", "tigge_mars"})
 

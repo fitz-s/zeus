@@ -29,6 +29,7 @@ test_trust_policy:
   # Tests not in this list require audit before running.
   trusted_tests:
     tests/test_healthcheck.py: {created: "2026-04-30", last_used: "2026-07-31", note: "Live health relationships including terminal command versus venue-fact conflicts classified by canonical lifecycle and order-truth reducer proof."}
+    tests/test_data_freshness_gate.py: {created: "2026-04-30", last_used: "2026-08-03", note: "Source freshness three-branch behavior, source-role-scoped Day0 veto, and operator override."}
     tests/test_status_summary_single_writer.py: {created: "2026-06-10", last_used: "2026-07-31", note: "Daemon-only status writer ownership, freshness, and canonical command-recommendation projection contract across pulse and result writes."}
     tests/test_world_wal_checkpoint_starvation.py: {created: "2026-06-04", last_used: "2026-07-27", note: "SQLite WAL checkpoint-starvation mechanism and recovery: pinned reader blocks truncation; canonical PASSIVE helper exposes backlog; release plus TRUNCATE restores bounded WAL."}
     tests/test_wal_busy_factory_fail_conservative.py: {created: "2026-06-08", last_used: "2026-07-27", note: "Canonical connection busy_timeout/WAL behavior and RiskGuard fail-conservative single-authority relationships under transient SQLite lock contention."}

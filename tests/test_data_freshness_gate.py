@@ -1,4 +1,6 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-05-01; last_reused=2026-05-01
+# Created: 2026-04-30
+# Last reused/audited: 2026-08-03
+# Lifecycle: created=2026-04-30; last_reviewed=2026-08-03; last_reused=2026-08-03
 # Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §3.1
 #   (original three-branch shape) + operator directive 2026-05-01 — "不再采用过往的设计，
 #   我们现在是live全新阶段，serve 获取live alpha收益目标的才是重点". The mid-run gate now
@@ -10,7 +12,8 @@
 Tests:
 - FRESH: all sources within budget → FRESH verdict, no degradation flags
 - STALE: ≥1 source exceeds budget → STALE verdict, per-source degradation flags
-  (DAY0_CAPTURE disabled for hourly_obs sources; ensemble disabled for TIGGE sources)
+  (DAY0_CAPTURE disabled only for current observation sources; historical
+  archive degradation stays visible; ensemble disabled for TIGGE sources)
 - ABSENT at boot: file missing → retry loop then SystemExit
 - ABSENT mid-run: file missing/unparseable → STALE-all degraded verdict (no exit)
 - Stale written_at mid-run: file parseable + per-source data fresh → FRESH (was
@@ -116,8 +119,8 @@ class TestFreshBranch:
 # ---------------------------------------------------------------------------
 
 class TestStaleBranch:
-    def test_stale_hourly_obs_disables_day0(self, tmp_path):
-        """Stale open_meteo_archive → day0_capture_disabled=True."""
+    def test_stale_historical_archive_is_visible_without_vetoing_day0(self, tmp_path):
+        """Historical grid degradation is not current Day0-source authority."""
         from src.control.freshness_gate import evaluate_freshness
         sources = _all_fresh_sources()
         sources["open_meteo_archive"] = _stale_source(8 * 3600)  # 8h > 6h budget
@@ -125,6 +128,19 @@ class TestStaleBranch:
         verdict = evaluate_freshness(state_dir=tmp_path)
         assert verdict.branch == "STALE"
         assert "open_meteo_archive" in verdict.stale_sources
+        assert not verdict.day0_capture_disabled
+        assert not verdict.ensemble_disabled
+        assert verdict.degraded_data
+
+    def test_stale_current_observation_source_still_disables_day0(self, tmp_path):
+        """Removing the archive veto does not weaken current-source gating."""
+        from src.control.freshness_gate import evaluate_freshness
+        sources = _all_fresh_sources()
+        sources["wu_pws"] = _stale_source(8 * 3600)
+        _write_health(tmp_path, sources)
+        verdict = evaluate_freshness(state_dir=tmp_path)
+        assert verdict.branch == "STALE"
+        assert "wu_pws" in verdict.stale_sources
         assert verdict.day0_capture_disabled
         assert not verdict.ensemble_disabled
         assert verdict.degraded_data
@@ -360,6 +376,28 @@ class TestRunCycleFreshnessIntegration:
         assert result.get("skip_reason") == "cycle_skipped_freshness_degraded", (
             f"Expected skip_reason=cycle_skipped_freshness_degraded, got: {result}"
         )
+
+    def test_archive_stale_remains_visible_without_entry_veto(self, monkeypatch):
+        """A non-authoritative archive fault stays visible on a continuing cycle."""
+        import src.engine.cycle_runner as cr_module
+        from src.engine.discovery_mode import DiscoveryMode
+        from src.riskguard.risk_level import RiskLevel
+
+        verdict = self._make_stale_verdict(
+            day0_disabled=False,
+            ensemble_disabled=False,
+        )
+        monkeypatch.setattr(cr_module, "evaluate_freshness_mid_run", lambda state_dir: verdict)
+        monkeypatch.setattr("src.data.ensemble_client._clear_cache", lambda: None)
+        monkeypatch.setattr("src.control.control_plane.process_commands", lambda: [])
+        monkeypatch.setattr(cr_module, "get_current_level", lambda: RiskLevel.GREEN)
+        monkeypatch.setattr(cr_module, "get_connection", lambda: None)
+
+        result = cr_module.run_cycle(DiscoveryMode.UPDATE_REACTION)
+
+        assert result["degraded_data"] is True
+        assert result["stale_sources"] == ["open_meteo_archive"]
+        assert "freshness_entry_blocked" not in result
 
     def test_run_cycle_blocks_opening_hunt_entries_when_ensemble_degraded(self, monkeypatch):
         """OPENING_HUNT monitor path continues, but entries block when ensemble is stale."""
