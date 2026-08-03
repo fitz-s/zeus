@@ -48,7 +48,6 @@ import os
 import signal
 import subprocess
 import sys
-import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -178,6 +177,63 @@ def _write_substrate_observer_heartbeat() -> None:
         logger.error("substrate-observer heartbeat write failed (%d): %s", _heartbeat_fails, exc)
 
 
+def _register_substrate_observer_jobs(
+    scheduler: Any,
+    *,
+    money_path_priority_cycle: Any,
+    market_substrate_warm_cycle: Any,
+    market_discovery_cycle: Any,
+    priority_refresh_interval_seconds: float,
+    heartbeat: Any = _write_substrate_observer_heartbeat,
+) -> None:
+    """Register broad and priority triggers without weakening writer serialization.
+
+    Warm and discovery share the single-worker ``default`` executor. Priority gets a
+    dedicated worker so live-money scope discovery cannot misfire behind broad work;
+    actual writes still serialize through the shared in-process and cross-process
+    locks. The heartbeat remains on its dedicated file-only executor.
+    """
+    scheduler.add_job(
+        _scheduler_job("money_path_substrate_priority")(money_path_priority_cycle),
+        "interval",
+        seconds=priority_refresh_interval_seconds,
+        id="money_path_substrate_priority",
+        executor="priority",
+        max_instances=1,
+        coalesce=True,
+        next_run_time=datetime.now(timezone.utc),
+    )
+    scheduler.add_job(
+        _scheduler_job("edli_market_substrate_warm")(market_substrate_warm_cycle),
+        "interval",
+        seconds=_EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS,
+        id="edli_market_substrate_warm",
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        _scheduler_job("market_discovery")(market_discovery_cycle),
+        "interval",
+        minutes=5,
+        id="market_discovery",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # File-only liveness evidence stays independent of the snapshot-writer worker.
+    scheduler.add_job(
+        heartbeat,
+        "interval",
+        seconds=60,
+        id="substrate_observer_heartbeat",
+        executor="heartbeat",
+        max_instances=1,
+        misfire_grace_time=30,
+        coalesce=True,
+        next_run_time=datetime.now(timezone.utc),
+    )
+
+
 def main() -> None:
     global _scheduler
     from apscheduler.executors.pool import ThreadPoolExecutor as _APSchedulerThreadPoolExecutor
@@ -257,12 +313,12 @@ def main() -> None:
     # SIGTERM → graceful shutdown.
     signal.signal(signal.SIGTERM, _graceful_shutdown)
 
-    # Single-writer executor: BOTH producers write executable_market_snapshots and share the
-    # in-process _market_substrate_refresh_lock; max_workers=1 + per-job max_instances=1
-    # serializes them so neither overlaps itself nor the other (system_decomposition_plan §4.1).
+    # Broad warm/discovery share one worker. Priority scope discovery has its own worker so
+    # a long broad run cannot consume its 1s misfire grace; only confirmed priority service
+    # enters the same in-process + file writer locks as the broad jobs.
     _scheduler = BlockingScheduler(
         executors={
-            # Snapshot writers stay serialized on the default worker. The heartbeat is
+            # Broad writers stay serialized on the default worker. The heartbeat is
             # file-only liveness evidence and must not be starved by CLOB/Gamma work.
             "default": _APSchedulerThreadPoolExecutor(max_workers=1),
             "priority": _APSchedulerThreadPoolExecutor(max_workers=1),
@@ -291,46 +347,12 @@ def main() -> None:
     # The daemon applies its OWN observability wrapper (the lifted functions are not
     # decorated in the trading-lane-free module). Job ids are byte-identical to the order
     # daemon's so dashboards / scheduler_health keying carry over unchanged.
-    _scheduler.add_job(
-        _scheduler_job("money_path_substrate_priority")(_edli_money_path_substrate_priority_cycle),
-        "interval",
-        seconds=_priority_refresh_interval_seconds(),
-        id="money_path_substrate_priority",
-        executor="priority",
-        max_instances=1,
-        coalesce=True,
-        next_run_time=datetime.now(timezone.utc),
-    )
-    _scheduler.add_job(
-        _scheduler_job("edli_market_substrate_warm")(_edli_market_substrate_warm_cycle),
-        "interval",
-        seconds=_EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS,
-        id="edli_market_substrate_warm",
-        max_instances=1,
-        coalesce=True,
-    )
-    _scheduler.add_job(
-        _scheduler_job("market_discovery")(_market_discovery_cycle),
-        "interval",
-        minutes=5,
-        id="market_discovery",
-        max_instances=1,
-        coalesce=True,
-    )
-
-    # 60s liveness heartbeat (file-only; it does not write any DB). Run it on a dedicated
-    # executor so the preflight heartbeat cannot go stale while the single writer handles
-    # warm CLOB/Gamma work.
-    _scheduler.add_job(
-        _write_substrate_observer_heartbeat,
-        "interval",
-        seconds=60,
-        id="substrate_observer_heartbeat",
-        executor="heartbeat",
-        max_instances=1,
-        misfire_grace_time=30,
-        coalesce=True,
-        next_run_time=datetime.now(timezone.utc),
+    _register_substrate_observer_jobs(
+        _scheduler,
+        money_path_priority_cycle=_edli_money_path_substrate_priority_cycle,
+        market_substrate_warm_cycle=_edli_market_substrate_warm_cycle,
+        market_discovery_cycle=_market_discovery_cycle,
+        priority_refresh_interval_seconds=_priority_refresh_interval_seconds(),
     )
 
     jobs = [j.id for j in _scheduler.get_jobs()]

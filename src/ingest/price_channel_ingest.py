@@ -128,6 +128,14 @@ _edli_market_channel_thread: "threading.Thread | None" = None
 # process — the two processes write the snapshot table via the same single-writer
 # discipline, and the lock is per-process by construction.)
 _market_substrate_refresh_lock = threading.Lock()
+
+
+def _market_substrate_broad_turnstile():
+    from src.data.job_lock import acquire_market_substrate_turnstile
+
+    return acquire_market_substrate_turnstile(priority=False)
+
+
 _held_quote_seed_refresh_lock = threading.Lock()
 _candidate_quote_seed_refresh_lock = threading.Lock()
 
@@ -3819,8 +3827,24 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                 from src.data.job_lock import acquire_lock
                 from src.state.db import get_trade_connection
 
+                turnstile_ctx = _market_substrate_broad_turnstile()
+                turnstile_entered = False
+                try:
+                    turnstile_admission = turnstile_ctx.__enter__()
+                    turnstile_entered = True
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("EDLI market-channel turnstile failed: %s", exc)
+                    return "deferred"
+                if not turnstile_admission.acquired:
+                    turnstile_ctx.__exit__(None, None, None)
+                    logger.info(
+                        "EDLI market-channel refresh deferred: %s",
+                        turnstile_admission.status,
+                    )
+                    return "deferred"
                 substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
                 if not substrate_acquired:
+                    turnstile_ctx.__exit__(None, None, None)
                     logger.info(
                         "EDLI market-channel refresh deferred: executable substrate refresh already running"
                     )
@@ -3837,6 +3861,8 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                             "EDLI market-channel refresh deferred: cross-process executable substrate refresh already running"
                         )
                         return "deferred"
+                    turnstile_ctx.__exit__(None, None, None)
+                    turnstile_entered = False
                     try:
                         markets = find_weather_markets_or_raise(
                             min_hours_to_resolution=0.0,
@@ -3876,7 +3902,11 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                             if process_entered:
                                 process_lock_ctx.__exit__(None, None, None)
                         finally:
-                            _market_substrate_refresh_lock.release()
+                            try:
+                                if turnstile_entered:
+                                    turnstile_ctx.__exit__(None, None, None)
+                            finally:
+                                _market_substrate_refresh_lock.release()
                 logger.info(
                     "EDLI market-channel refreshed executable snapshots: reason=%s token_id=%s condition_id=%s summary=%s",
                     action.reason,

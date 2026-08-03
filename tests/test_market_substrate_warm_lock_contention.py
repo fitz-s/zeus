@@ -10,6 +10,9 @@
 #   CollateralLedger heartbeat all open independent trade connections), a 250 ms wait
 #   fails fast and the universe-wide executable substrate is never refreshed —
 #   starving the armed daemon of executable candidates so it cannot trade.
+# Lifecycle: created=2026-06-08; last_reviewed=2026-08-03; last_reused=2026-08-03
+# Purpose: Protect bounded substrate-writer contention and priority-turnstile relationships.
+# Reuse: Inspect current snapshot-writer callers, flock semantics, and contention budgets first.
 """Relationship antibody: only broad warm substrate capture fast-yields contention.
 
 CROSS-MODULE INVARIANT (the relationship, not a function):
@@ -30,6 +33,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -45,6 +50,111 @@ from src.data.market_scanner import (
 )
 
 _NOW = datetime(2026, 6, 8, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def test_priority_turnstile_started_first_yields_later_broad_process(tmp_path):
+    """An earlier priority intent deterministically prevents cross-process overtaking."""
+
+    from src.data.job_lock import acquire_market_substrate_turnstile
+
+    probe = """
+from pathlib import Path
+import sys
+from src.data.job_lock import acquire_market_substrate_turnstile
+with acquire_market_substrate_turnstile(priority=False, _locks_dir_override=Path(sys.argv[1])) as admission:
+    print(admission.status, flush=True)
+    raise SystemExit(0 if not admission.acquired else 9)
+"""
+    with acquire_market_substrate_turnstile(
+        priority=True,
+        _locks_dir_override=tmp_path,
+    ) as priority:
+        assert priority.acquired and priority.status == "priority_intent_acquired"
+        completed = subprocess.run(
+            [sys.executable, "-c", probe, str(tmp_path)],
+            cwd=os.getcwd(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    assert completed.returncode == 0
+    assert completed.stdout.strip() == "priority_intent_active"
+
+
+def test_priority_turnstile_exception_releases_without_reset_debt(tmp_path):
+    """Context exit releases intent even when scope discovery raises."""
+
+    from src.data.job_lock import acquire_market_substrate_turnstile
+
+    with pytest.raises(RuntimeError, match="scope exploded"):
+        with acquire_market_substrate_turnstile(
+            priority=True,
+            _locks_dir_override=tmp_path,
+        ) as priority:
+            assert priority.acquired
+            raise RuntimeError("scope exploded")
+
+    with acquire_market_substrate_turnstile(
+        priority=False,
+        _locks_dir_override=tmp_path,
+    ) as broad:
+        assert broad.acquired and broad.status == "broad_turn_admitted"
+
+
+def test_priority_turnstile_crash_is_released_by_os(tmp_path):
+    """Process death drops flock intent; the lock file itself is never a ratchet."""
+
+    from src.data.job_lock import acquire_market_substrate_turnstile
+
+    crash = """
+from pathlib import Path
+import os
+import sys
+from src.data.job_lock import acquire_market_substrate_turnstile
+with acquire_market_substrate_turnstile(priority=True, _locks_dir_override=Path(sys.argv[1])) as admission:
+    print('READY' if admission.acquired else admission.status, flush=True)
+    os._exit(17)
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", crash, str(tmp_path)],
+        cwd=os.getcwd(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout is not None
+    assert process.stdout.readline().strip() == "READY"
+    assert process.wait(timeout=3.0) == 17
+
+    with acquire_market_substrate_turnstile(
+        priority=False,
+        _locks_dir_override=tmp_path,
+    ) as broad:
+        assert broad.acquired and broad.status == "broad_turn_admitted"
+
+
+def test_price_channel_snapshot_writer_uses_same_broad_turnstile(monkeypatch, tmp_path):
+    """The cross-process price-channel snapshot caller cannot bypass priority intent."""
+
+    import inspect
+
+    import src.data.job_lock as job_lock
+    from src.data.job_lock import acquire_market_substrate_turnstile
+    import src.ingest.price_channel_ingest as price_channel
+
+    monkeypatch.setattr(job_lock, "_LOCKS_DIR", tmp_path)
+    with acquire_market_substrate_turnstile(priority=True) as priority:
+        assert priority.acquired
+        with price_channel._market_substrate_broad_turnstile() as broad:
+            assert broad.acquired is False
+            assert broad.status == "priority_intent_active"
+
+    source = inspect.getsource(price_channel._edli_market_channel_ingestor_cycle)
+    refresh_action = source[source.index("def _refresh_snapshot_action") :]
+    assert refresh_action.index("_market_substrate_broad_turnstile()") < refresh_action.index(
+        "_market_substrate_refresh_lock.acquire"
+    )
 
 
 # ---------------------------------------------------------------------------
