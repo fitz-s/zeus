@@ -7104,6 +7104,7 @@ def run_edli_event_reactor_cycle(
         held_sell_request_exposure_provider=held_sell_request_exposure_provider,
         allow_forecast_carrier_progress=forecast_posterior_wake,
     ):
+        _edli_prune_paused_mutable_working_set()
         _log.info(
             "EDLI reactor parked paused new-entry wake before active-lock acquire: "
             "no exact canonical held-SELL request; pending entry work remains queued"
@@ -8247,9 +8248,104 @@ def _edli_active_rmf_forecast_snapshot_pending_count(world_conn, *, limit: int) 
     return int(row[0] or 0) if row is not None else 0
 
 _EDLI_LAST_PRUNE_MONOTONIC: float | None = None
+_EDLI_LAST_PAUSED_PRUNE_MONOTONIC: float | None = None
+_EDLI_PAUSED_PRUNE_LOCK = threading.Lock()
 _EDLI_DAY0_PAUSE_RECOVERY_PENDING: bool | None = None
 _EDLI_STATIC_CLOSE_RECOVERY_PENDING = True
 _EDLI_SNAPSHOT_DEADLINE_RECOVERY_PENDING = True
+
+
+def _edli_prune_paused_mutable_working_set() -> dict[str, int]:
+    """Bound paused BUY debt without claiming work or touching immutable facts.
+
+    SCOPE: only superseded ``edli_reactor_v1`` FSR/redecision and Day0 mutable
+    processing rows. Immutable opportunity events, global-winner fenced rows,
+    held-SELL debt, intents, commands, and venue state are untouched. DRAIN:
+    parked reactor wakes run this at the configured prune cadence with the
+    existing bounded canonical archive helpers. RESET: clearing the pause lets
+    the retained latest family keepers resume normal claim/redecision; a lock,
+    budget, or DB failure retries on the next cadence.
+    """
+    import logging as _logging
+    from src.main import _settings_section
+    from src.state.db import get_world_connection
+
+    global _EDLI_LAST_PAUSED_PRUNE_MONOTONIC
+    _log = _logging.getLogger("zeus.events.reactor")
+    edli_cfg = _settings_section("edli", {})
+    interval_s = _edli_prune_interval_seconds(edli_cfg)
+    now_mono = time.monotonic()
+    if (
+        interval_s > 0
+        and _EDLI_LAST_PAUSED_PRUNE_MONOTONIC is not None
+        and now_mono - _EDLI_LAST_PAUSED_PRUNE_MONOTONIC < interval_s
+    ):
+        return {"forecast_snapshot": 0, "day0": 0}
+    if not _EDLI_PAUSED_PRUNE_LOCK.acquire(blocking=False):
+        return {"forecast_snapshot": 0, "day0": 0}
+
+    write_lock = None
+    write_lock_acquired = False
+    conn = None
+    try:
+        now_mono = time.monotonic()
+        if (
+            interval_s > 0
+            and _EDLI_LAST_PAUSED_PRUNE_MONOTONIC is not None
+            and now_mono - _EDLI_LAST_PAUSED_PRUNE_MONOTONIC < interval_s
+        ):
+            return {"forecast_snapshot": 0, "day0": 0}
+        _EDLI_LAST_PAUSED_PRUNE_MONOTONIC = now_mono
+        write_lock = world_write_mutex()
+        write_lock_acquired = write_lock.acquire(
+            timeout=_edli_prune_lock_timeout_seconds(edli_cfg)
+        )
+        if not write_lock_acquired:
+            return {"forecast_snapshot": 0, "day0": 0}
+        conn = get_world_connection()
+        deadline = time.monotonic() + min(
+            max(_edli_prune_budget_seconds(edli_cfg), 0.1),
+            2.0,
+        )
+        conn.set_progress_handler(
+            lambda: int(time.monotonic() >= deadline),
+            1_000,
+        )
+        store = EventStore(conn)
+        batch_limit = _edli_prune_batch_limit(edli_cfg)
+        forecast_snapshot = store.archive_superseded_forecast_snapshot_events(
+            batch_limit=batch_limit,
+        )
+        day0 = store.archive_superseded_day0_events(batch_limit=batch_limit)
+        conn.commit()
+        result = {
+            "forecast_snapshot": int(forecast_snapshot or 0),
+            "day0": int(day0 or 0),
+        }
+        if any(result.values()):
+            _log.info("EDLI paused mutable working-set drain: %s", result)
+        return result
+    except Exception as exc:  # noqa: BLE001 - pause remains fail-closed
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+        _log.warning(
+            "EDLI paused mutable working-set drain deferred: %r",
+            exc,
+        )
+        return {"forecast_snapshot": 0, "day0": 0}
+    finally:
+        if conn is not None:
+            try:
+                conn.set_progress_handler(None, 0)
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if write_lock is not None and write_lock_acquired:
+            write_lock.release()
+        _EDLI_PAUSED_PRUNE_LOCK.release()
 
 
 def _edli_note_day0_pause_rejection(event_type: str, reason: str) -> None:

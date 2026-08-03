@@ -1053,11 +1053,90 @@ def test_paused_no_held_cycle_parks_before_active_lock(monkeypatch):
         "_entry_pause_blocks_live_submit",
         lambda _conn: "operator_pause",
     )
+    drains = []
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_prune_paused_mutable_working_set",
+        lambda: drains.append(True) or {"forecast_snapshot": 0, "day0": 0},
+    )
 
     lock = threading.Lock()
     assert reactor_module.run_edli_event_reactor_cycle(active_lock=lock) is False
+    assert drains == [True]
     assert lock.acquire(blocking=False) is True
     lock.release()
+
+
+def test_paused_mutable_drain_is_bounded_and_cadence_limited(monkeypatch):
+    import src.events.reactor as reactor_module
+    import src.main as main
+
+    calls = []
+
+    class _WriteLock:
+        def acquire(self, *, timeout):
+            calls.append(("lock", timeout))
+            return True
+
+        def release(self):
+            calls.append("unlock")
+
+    class _Conn:
+        def set_progress_handler(self, callback, steps):
+            calls.append(("progress", callback is not None, steps))
+
+        def commit(self):
+            calls.append("commit")
+
+        def rollback(self):
+            calls.append("rollback")
+
+        def close(self):
+            calls.append("close")
+
+    class _Store:
+        def __init__(self, conn):
+            calls.append(("store", conn))
+
+        def archive_superseded_forecast_snapshot_events(self, *, batch_limit):
+            calls.append(("fsr", batch_limit))
+            return 12
+
+        def archive_superseded_day0_events(self, *, batch_limit):
+            calls.append(("day0", batch_limit))
+            return 3
+
+    conn = _Conn()
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda *_args, **_kwargs: {
+            "reactor_prune_interval_seconds": 60,
+            "reactor_prune_batch_limit": 5000,
+            "reactor_prune_budget_seconds": 6,
+            "reactor_prune_lock_timeout_seconds": 0.5,
+        },
+    )
+    monkeypatch.setattr(reactor_module, "world_write_mutex", lambda: _WriteLock())
+    monkeypatch.setattr("src.state.db.get_world_connection", lambda: conn)
+    monkeypatch.setattr(reactor_module, "EventStore", _Store)
+    monkeypatch.setattr(reactor_module, "_EDLI_LAST_PAUSED_PRUNE_MONOTONIC", None)
+
+    assert reactor_module._edli_prune_paused_mutable_working_set() == {
+        "forecast_snapshot": 12,
+        "day0": 3,
+    }
+    first_calls = list(calls)
+    assert reactor_module._edli_prune_paused_mutable_working_set() == {
+        "forecast_snapshot": 0,
+        "day0": 0,
+    }
+
+    assert calls == first_calls
+    assert ("fsr", 5000) in calls
+    assert ("day0", 5000) in calls
+    assert "commit" in calls
+    assert "rollback" not in calls
 
 
 def test_paused_exact_canonical_held_sell_request_reaches_reduce_only_cycle(monkeypatch):
