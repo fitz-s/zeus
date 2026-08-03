@@ -1,5 +1,5 @@
 # Created: 2026-07-25
-# Last reused or audited: 2026-07-25
+# Last reused or audited: 2026-08-02
 # Authority basis: 7-day production block-event audit (32,763 blocking
 #   instances, 20.97h/7d global entry admission blocked, worst episode
 #   7h17m) -- the composite live-block string
@@ -20,6 +20,7 @@ still fails closed to a global block (never fails open).
 """
 from __future__ import annotations
 
+import inspect
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -146,6 +147,134 @@ def _insert_cap_reservation(
             FIXED_NOW.isoformat(),
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# _edli_stage_latest_submit_plan_family_ids
+# ---------------------------------------------------------------------------
+
+
+def test_latest_submit_plan_lookup_is_bounded_by_candidate_aggregates(tmp_path):
+    """A high append-only history must not turn the readiness gate into a scan.
+
+    The real schema carries a tempting ``event_type`` index.  This fixture
+    makes that index highly misleading: 12,000 unrelated SubmitPlanBuilt rows
+    but just two requested aggregate identities.  The progress budget and
+    query-plan assertions make a future event-type window/sort rewrite fail
+    deterministically while preserving the exact latest SubmitPlanBuilt result.
+    """
+    world_db = _make_world_db(tmp_path)
+    conn = sqlite3.connect(world_db)
+    conn.row_factory = sqlite3.Row
+    try:
+        for sequence in range(12_000):
+            _insert_submit_plan(
+                conn,
+                aggregate_id=f"history-{sequence}",
+                event_id=f"history-event-{sequence}",
+                final_intent_id=f"history-intent-{sequence}",
+                family_id="history-family",
+            )
+        _insert_submit_plan(
+            conn,
+            aggregate_id="candidate-a",
+            event_id="candidate-a-old",
+            final_intent_id="candidate-a-old-intent",
+            family_id="family-old",
+            sequence=1,
+        )
+        _insert_submit_plan(
+            conn,
+            aggregate_id="candidate-a",
+            event_id="candidate-a-new",
+            final_intent_id="candidate-a-new-intent",
+            family_id="family-new",
+            sequence=2,
+        )
+        _insert_submit_plan(
+            conn,
+            aggregate_id="candidate-b",
+            event_id="candidate-b",
+            final_intent_id="candidate-b-intent",
+            family_id="family-b",
+        )
+        _insert_submit_plan(
+            conn,
+            aggregate_id="candidate-unresolved",
+            event_id="candidate-unresolved",
+            final_intent_id="candidate-unresolved-intent",
+            family_id=None,
+        )
+        conn.execute("ANALYZE")
+        conn.commit()
+
+        statements: list[str] = []
+        progress_steps = 0
+
+        def _progress_guard() -> int:
+            nonlocal progress_steps
+            progress_steps += 1
+            return int(progress_steps > 2_000)
+
+        conn.set_trace_callback(statements.append)
+        conn.set_progress_handler(_progress_guard, 1)
+        try:
+            resolved = main_mod._edli_stage_latest_submit_plan_family_ids(
+                conn,
+                [
+                    "candidate-a",
+                    "candidate-b",
+                    "candidate-unresolved",
+                    "candidate-missing",
+                    "candidate-a",
+                ],
+            )
+        finally:
+            conn.set_progress_handler(None, 0)
+            conn.set_trace_callback(None)
+    finally:
+        conn.close()
+
+    assert resolved == {"candidate-a": "family-new", "candidate-b": "family-b"}
+    assert progress_steps < 2_000
+
+    lookup_statements = [
+        statement
+        for statement in statements
+        if "FROM edli_live_order_events" in statement
+    ]
+    assert len(lookup_statements) == 4  # duplicate candidate-a is de-duplicated.
+    for statement in lookup_statements:
+        plan = sqlite3.connect(world_db)
+        try:
+            detail = " ".join(
+                row[3]
+                for row in plan.execute(f"EXPLAIN QUERY PLAN {statement}").fetchall()
+            ).upper()
+        finally:
+            plan.close()
+        assert "IDX_EDLI_LIVE_ORDER_EVENTS_AGGREGATE" in detail
+        assert "IDX_EDLI_LIVE_ORDER_EVENTS_TYPE" not in detail
+        assert "USE TEMP B-TREE" not in detail
+
+
+def test_latest_submit_plan_lookup_accepts_no_candidates_without_query(tmp_path):
+    world_db = _make_world_db(tmp_path)
+    conn = sqlite3.connect(world_db)
+    try:
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        assert main_mod._edli_stage_latest_submit_plan_family_ids(conn, []) == {}
+    finally:
+        conn.set_trace_callback(None)
+        conn.close()
+
+    assert statements == []
+
+
+def test_sigusr1_stack_dump_does_not_chain_default_termination_handler():
+    source = inspect.getsource(main_mod)
+    assert "faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)" in source
 
 
 # ---------------------------------------------------------------------------

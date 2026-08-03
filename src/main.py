@@ -55,10 +55,12 @@ _bind_canonical_main_module(__name__, sys.modules[__name__])
 # Live-hang telemetry (2026-05-31): SIGUSR1 dumps ALL thread stacks to stderr
 # (logs/zeus-live.err) so a frozen reactor cycle (indefinite _PyMutex/lock
 # deadlock — same class as the 5h market-channel hang) can be pinned WITHOUT
-# root-level py-spy. faulthandler.enable() also dumps on fatal signals. Additive.
+# root-level py-spy. The diagnostic must remain stack-only: chaining SIGUSR1 to
+# its default handler terminates the live process after it writes the dump.
+# faulthandler.enable() also dumps on fatal signals. Additive.
 faulthandler.enable()
 try:
-    faulthandler.register(signal.SIGUSR1, all_threads=True, chain=True)
+    faulthandler.register(signal.SIGUSR1, all_threads=True, chain=False)
 except (AttributeError, ValueError, OSError):
     pass
 
@@ -1193,34 +1195,33 @@ def _edli_stage_latest_submit_plan_family_ids(
 ) -> dict[str, str]:
     """Resolve aggregate_id -> family_id via each aggregate's latest SubmitPlanBuilt.
 
-    Reuses the latest-payload-per-aggregate join shape from
-    ``edli_trade_fact_bridge._consume_absorbed_confirmed_fills`` (a window
-    function over ``edli_live_order_events`` partitioned by aggregate_id,
-    filtered to ``event_type = 'SubmitPlanBuilt'``). An aggregate_id absent
-    from the returned mapping (no persisted plan, invalid JSON, or a missing
-    ``family_id`` field) is UNRESOLVED -- callers must fail closed for it
-    rather than silently dropping it from any block.
+    Each caller supplies the current, bounded set of blocked aggregate
+    identities. Resolve them one identity at a time through the aggregate
+    sequence index: the append-only event log must not be scanned by
+    ``event_type`` before the reactor can begin its cycle. An aggregate_id
+    absent from the returned mapping (no persisted plan, invalid JSON, or a
+    missing ``family_id`` field) is UNRESOLVED -- callers must fail closed for
+    it rather than silently dropping it from any block.
     """
     if not aggregate_ids:
         return {}
-    placeholders = ",".join("?" for _ in aggregate_ids)
     try:
-        rows = conn.execute(
-            f"""
-            SELECT aggregate_id, payload_json
-              FROM (
-                    SELECT aggregate_id, payload_json,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY aggregate_id ORDER BY event_sequence DESC
-                           ) AS rank
-                      FROM edli_live_order_events
-                     WHERE event_type = 'SubmitPlanBuilt'
-                       AND aggregate_id IN ({placeholders})
-                   )
-             WHERE rank = 1
-            """,
-            tuple(aggregate_ids),
-        ).fetchall()
+        rows = []
+        for aggregate_id in dict.fromkeys(aggregate_ids):
+            row = conn.execute(
+                """
+                SELECT aggregate_id, payload_json
+                  FROM edli_live_order_events
+                       INDEXED BY idx_edli_live_order_events_aggregate
+                 WHERE aggregate_id = ?
+                   AND event_type = 'SubmitPlanBuilt'
+                 ORDER BY event_sequence DESC
+                 LIMIT 1
+                """,
+                (aggregate_id,),
+            ).fetchone()
+            if row is not None:
+                rows.append(row)
     except Exception as exc:
         raise RuntimeError(
             f"EDLI_STAGE_FAMILY_RESOLUTION_QUERY_FAILED:{type(exc).__name__}"
