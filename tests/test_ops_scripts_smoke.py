@@ -13,6 +13,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import plistlib
 import sqlite3
 import sys
 import types
@@ -23,6 +24,55 @@ import pytest
 
 _REPO = Path(__file__).resolve().parent.parent
 _SCRIPTS = _REPO / "scripts"
+
+
+def test_log_rotation_launchd_plist_contract(tmp_path):
+    """The independent launchd backstop stays portable and non-recursive."""
+    template = _REPO / "deploy" / "launchd" / "com.zeus.log-rotation.plist"
+    raw = template.read_bytes()
+    plist = plistlib.loads(raw)
+    env = plist["EnvironmentVariables"]
+
+    assert plist["Label"] == "com.zeus.log-rotation"
+    assert plist["ProgramArguments"] == [
+        "/bin/bash",
+        "ZEUS_REPO_PLACEHOLDER/scripts/ops/rotate_zeus_logs.sh",
+        "--apply",
+    ]
+    assert plist["StartInterval"] == 900
+    assert plist["RunAtLoad"] is True
+    assert plist["ThrottleInterval"] >= 60
+    assert env["ZEUS_LOG_ROTATE_MB"] == "50"
+    assert env["ZEUS_LOG_ROTATE_KEEP"] == "5"
+    assert env["ZEUS_PRIMARY_ROOT"] == "ZEUS_REPO_PLACEHOLDER"
+    assert env["PATH"] == "/usr/local/bin:/usr/bin:/bin"
+    assert plist["WorkingDirectory"] == "ZEUS_REPO_PLACEHOLDER"
+
+    for key in ("StandardOutPath", "StandardErrorPath"):
+        output_path = plist[key]
+        assert output_path == "/dev/null"
+        assert "ZEUS_REPO_PLACEHOLDER/logs/" not in output_path
+    assert not any(
+        secret_marker in raw
+        for secret_marker in (
+            b"POLYMARKET_API_KEY",
+            b"POLYMARKET_API_SECRET",
+            b"POLYMARKET_API_PASSPHRASE",
+            b"secrets.env",
+        )
+    )
+
+    install = _load("install_launchd_plist_log_rotation", "install_launchd_plist.py")
+    repo_root = tmp_path / "portable repo"
+    home = tmp_path / "portable home"
+    rendered = install.render(template, repo_root, home)
+    assert b"PLACEHOLDER" not in rendered
+    rendered_plist = plistlib.loads(rendered)
+    assert rendered_plist["WorkingDirectory"] == str(repo_root)
+    assert rendered_plist["EnvironmentVariables"]["ZEUS_PRIMARY_ROOT"] == str(repo_root)
+    assert rendered_plist["ProgramArguments"][1] == str(
+        repo_root / "scripts" / "ops" / "rotate_zeus_logs.sh"
+    )
 
 
 def _load(modname: str, filename: str):
