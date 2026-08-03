@@ -5420,7 +5420,10 @@ def _edli_day0_hourly_missing_authority_families(
     from src.data.replacement_forecast_current_target_plan import (
         _latest_authorized_day0_fact,
     )
-    from src.state.db import get_forecasts_connection_read_only
+    from src.state.db import (
+        get_forecasts_connection_read_only,
+        get_world_connection_read_only,
+    )
 
     now = decision_time.astimezone(timezone.utc)
     try:
@@ -5432,13 +5435,33 @@ def _edli_day0_hourly_missing_authority_families(
         return _Day0HourlyPriorityProbe()
     missing: set[tuple[str, str, str]] = set()
     window_starts: dict[tuple[str, str], datetime] = {}
+    fact_conn = None
+    vector_conn = None
+
+    def close_connections() -> list[str]:
+        errors: list[str] = []
+        for role, conn in (("world", fact_conn), ("forecasts", vector_conn)):
+            if conn is None:
+                continue
+            try:
+                conn.close()
+            except Exception as exc:  # noqa: BLE001 -- both handles still need a close attempt.
+                errors.append(f"{role}:{type(exc).__name__}:{exc}")
+        return errors
+
     try:
-        conn = get_forecasts_connection_read_only()
+        fact_conn = get_world_connection_read_only()
+        vector_conn = get_forecasts_connection_read_only()
     except Exception as exc:  # noqa: BLE001 -- no authority proof means no priority borrow.
+        close_errors = close_connections()
         logging.getLogger("zeus.events.reactor").warning(
-            "edli_day0_hourly_refresh: strict readiness connection failed: %s", exc
+            "edli_day0_hourly_refresh: strict readiness connection failed: %s; "
+            "close_errors=%s",
+            exc,
+            close_errors,
         )
         return _Day0HourlyPriorityProbe()
+    read_error = None
     try:
         for city in cities:
             city_name = str(getattr(city, "name", "") or "").strip()
@@ -5455,7 +5478,7 @@ def _edli_day0_hourly_missing_authority_families(
                 continue
             for metric in ("high", "low"):
                 fact = _latest_authorized_day0_fact(
-                    conn,
+                    fact_conn,
                     city=city_name,
                     target_date=target_date,
                     temperature_metric=metric,
@@ -5487,17 +5510,22 @@ def _edli_day0_hourly_missing_authority_families(
                     max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
                     remaining_window_start=observation_time,
                     require_complete_remaining_window=True,
-                    conn=conn,
+                    raise_on_db_error=True,
+                    conn=vector_conn,
                 )
                 if not vectors:
                     missing.add((city_name, target_date, metric))
     except Exception as exc:  # noqa: BLE001 -- priority is fail-closed, maintenance remains safe.
+        read_error = exc
+    close_errors = close_connections()
+    if read_error is not None or close_errors:
         logging.getLogger("zeus.events.reactor").warning(
-            "edli_day0_hourly_refresh: strict readiness check failed: %s", exc
+            "edli_day0_hourly_refresh: strict readiness check failed: %s; "
+            "close_errors=%s",
+            read_error,
+            close_errors,
         )
         return _Day0HourlyPriorityProbe()
-    finally:
-        conn.close()
     return _Day0HourlyPriorityProbe(
         missing_families=frozenset(missing),
         window_starts=tuple(

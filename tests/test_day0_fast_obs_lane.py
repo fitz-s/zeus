@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-07-28
-# Lifecycle: created=2026-06-10; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Last reused/audited: 2026-08-03
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-03; last_reused=2026-08-03
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -660,6 +660,7 @@ def _install_scheduler_forecast_db(monkeypatch, tmp_path, city, *, authorized_fa
     monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", db_path)
     monkeypatch.setattr(db_module, "get_forecasts_connection", connect)
     monkeypatch.setattr(db_module, "get_forecasts_connection_read_only", connect)
+    monkeypatch.setattr(db_module, "get_world_connection_read_only", connect)
     monkeypatch.setattr(vectors_module, "in_domain_models_for_city", lambda _city, **_kw: [])
     vectors_module._LAST_REFRESH_MONOTONIC.clear()
     vectors_module._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
@@ -3167,6 +3168,11 @@ class TestMutexNoHttpSplit:
         db_path, target_date = _install_scheduler_forecast_db(
             monkeypatch, tmp_path, tokyo, authorized_fact=True
         )
+        conn = sqlite3.connect(db_path)
+        conn.execute(vectors_module._TABLE_DDL)
+        conn.execute(vectors_module._INDEX_DDL)
+        conn.commit()
+        conn.close()
         tracker = OpenMeteoQuotaTracker()
         tracker._count = MAINTENANCE_DAILY_LIMIT
         clock = {"now": 60.0}
@@ -3201,10 +3207,7 @@ class TestMutexNoHttpSplit:
 
         reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
         conn = sqlite3.connect(db_path)
-        table_exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='day0_hourly_vectors'"
-        ).fetchone()
-        assert table_exists is None
+        assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0] == 0
         conn.close()
         refresh_key = f"Tokyo|{target_date}"
         assert vectors_module._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[refresh_key] == (

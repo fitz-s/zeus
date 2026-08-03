@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-29
-# Lifecycle: created=2026-06-10; last_reviewed=2026-07-29; last_reused=2026-07-29
+# Last reused or audited: 2026-08-03
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-03; last_reused=2026-08-03
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -419,6 +419,25 @@ class TestParsePayload:
 # ===========================================================================
 
 class TestPersistence:
+    def test_read_error_is_distinct_when_producer_requires_proof(self):
+        class BrokenConnection:
+            def execute(self, *_args, **_kwargs):
+                raise sqlite3.OperationalError("forecast store unavailable")
+
+        conn = BrokenConnection()
+        assert read_freshest_day0_hourly_vectors(
+            city="Paris",
+            target_date="2026-06-10",
+            conn=conn,
+        ) == []
+        with pytest.raises(sqlite3.OperationalError, match="forecast store unavailable"):
+            read_freshest_day0_hourly_vectors(
+                city="Paris",
+                target_date="2026-06-10",
+                conn=conn,
+                raise_on_db_error=True,
+            )
+
     def test_roundtrip_and_idempotency(self):
         conn = _conn()
         v = _vector()
@@ -2972,26 +2991,49 @@ class TestRequestHashProvenance:
         target_date = "2026-06-10"
 
         class _Conn:
+            def __init__(self, role):
+                self.role = role
+
             def close(self):
                 pass
 
+        world_conn = _Conn("world")
+        forecast_conn = _Conn("forecasts")
         persisted = {"ready": False}
         monkeypatch.setattr(config_module, "runtime_cities_by_name", lambda: {"Paris": city})
-        monkeypatch.setattr(db_module, "get_forecasts_connection_read_only", _Conn)
+        monkeypatch.setattr(
+            db_module,
+            "get_world_connection_read_only",
+            lambda: world_conn,
+        )
+        monkeypatch.setattr(
+            db_module,
+            "get_forecasts_connection_read_only",
+            lambda: forecast_conn,
+        )
+
+        def latest_fact(conn, *, temperature_metric, **_kw):
+            assert conn is world_conn, "Day0 facts must come from the world DB"
+            if temperature_metric == "high":
+                return {"observation_time": (now - timedelta(minutes=5)).isoformat()}
+            return None
+
+        def read_vectors(**kwargs):
+            assert kwargs.get("conn") is forecast_conn, (
+                "Day0 vectors must come from the forecasts DB"
+            )
+            return [object()] if persisted["ready"] else []
+
         monkeypatch.setattr(
             target_plan,
             "_latest_authorized_day0_fact",
-            lambda _conn, *, temperature_metric, **_kw: (
-                {"observation_time": (now - timedelta(minutes=5)).isoformat()}
-                if temperature_metric == "high"
-                else None
-            ),
+            latest_fact,
         )
         monkeypatch.setattr(vectors_module, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"])
         monkeypatch.setattr(
             vectors_module,
             "read_freshest_day0_hourly_vectors",
-            lambda **_kw: [object()] if persisted["ready"] else [],
+            read_vectors,
         )
 
         missing = reactor._edli_day0_hourly_missing_authority_families(
@@ -3006,6 +3048,66 @@ class TestRequestHashProvenance:
         )
         assert ready.proved is True
         assert ready.missing_families == frozenset()
+
+    @pytest.mark.parametrize("failure", ["read", "close"])
+    def test_priority_probe_db_failure_is_unproved_and_closes_both(
+        self, monkeypatch, failure
+    ):
+        import src.config as config_module
+        import src.data.day0_hourly_vectors as vectors_module
+        import src.data.replacement_forecast_current_target_plan as target_plan
+        import src.events.reactor as reactor
+        import src.state.db as db_module
+
+        city = _paris()
+        now = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
+        closed = []
+
+        class Connection:
+            def __init__(self, role):
+                self.role = role
+
+            def close(self):
+                closed.append(self.role)
+                if failure == "close" and self.role == "world":
+                    raise sqlite3.OperationalError("world close failed")
+
+        world_conn = Connection("world")
+        forecast_conn = Connection("forecasts")
+        monkeypatch.setattr(config_module, "runtime_cities_by_name", lambda: {"Paris": city})
+        monkeypatch.setattr(db_module, "get_world_connection_read_only", lambda: world_conn)
+        monkeypatch.setattr(
+            db_module,
+            "get_forecasts_connection_read_only",
+            lambda: forecast_conn,
+        )
+        monkeypatch.setattr(
+            target_plan,
+            "_latest_authorized_day0_fact",
+            lambda *_args, **_kwargs: {
+                "observation_time": (now - timedelta(minutes=5)).isoformat()
+            },
+        )
+        monkeypatch.setattr(vectors_module, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"])
+
+        def read_vectors(**kwargs):
+            assert kwargs["raise_on_db_error"] is True
+            if failure == "read":
+                raise sqlite3.OperationalError("forecast read failed")
+            return []
+
+        monkeypatch.setattr(
+            vectors_module,
+            "read_freshest_day0_hourly_vectors",
+            read_vectors,
+        )
+
+        probe = reactor._edli_day0_hourly_missing_authority_families(
+            cities=[city], decision_time=now
+        )
+
+        assert probe.proved is False
+        assert closed == ["world", "forecasts"]
 
     def test_scheduler_rotates_priority_segment_without_demoting_priority(self):
         # R4-b2: moved to src.events.reactor with the day0-hourly-refresh cluster.

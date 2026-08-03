@@ -598,6 +598,7 @@ def read_freshest_day0_hourly_vectors(
     max_bundle_skew_minutes: Optional[float] = None,
     remaining_window_start: datetime | None = None,
     require_complete_remaining_window: bool = False,
+    raise_on_db_error: bool = False,
 ) -> list[Day0HourlyVector]:
     """Freshest persisted vector per model for (city, target_date).
 
@@ -614,6 +615,8 @@ def read_freshest_day0_hourly_vectors(
     ``require_complete_remaining_window`` and provide their causal boundary;
     every model must then contain each hourly grid point from that boundary to
     local-day end. A partial future path is not probability authority.
+    Producer readiness probes set ``raise_on_db_error`` so an unreadable store
+    cannot be misclassified as a proved, normally missing bundle.
     """
     own_conn = conn is None
     if own_conn:
@@ -633,6 +636,8 @@ def read_freshest_day0_hourly_vectors(
                 (str(city), str(target_date)),
             ).fetchall()
         except sqlite3.Error:
+            if raise_on_db_error:
+                raise
             return []
         candidates: list[Day0HourlyVector] = []
         for row in rows:
