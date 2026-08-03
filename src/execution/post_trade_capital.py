@@ -282,6 +282,27 @@ def collateral_snapshot_refresh_cycle() -> None:
         snapshot.available_pusd_micro,
         len(snapshot.ctf_token_balances),
     )
+    # This is a delivery hint, never collateral authority.  The order daemon
+    # reloads the same durable ``captured_at`` snapshot before restoring its
+    # process-local allocator. CHAIN/VENUE are accepted by bankroll_provider;
+    # DEGRADED wakes immediately revoke authority and are then acknowledged.
+    if snapshot.authority_tier in {"CHAIN", "VENUE", "DEGRADED"}:
+        try:
+            from src.runtime.reactor_wake import (
+                COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON,
+                publish_reactor_wake,
+            )
+
+            publish_reactor_wake(
+                source="post_trade_capital",
+                reason=COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON,
+                published_at=snapshot.captured_at,
+            )
+        except Exception:  # noqa: BLE001 - the periodic warm remains a recovery backstop
+            logger.exception(
+                "collateral_snapshot_refresh: canonical snapshot committed but allocator "
+                "refresh wake publish failed"
+            )
     if wallet_address:
         try:
             _upsert_pusd_wallet_balance_head(snapshot, wallet_address)

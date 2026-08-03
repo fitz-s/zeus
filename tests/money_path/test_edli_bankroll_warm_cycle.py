@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused/audited: 2026-06-19
+# Last reused/audited: 2026-08-03
 # Authority basis: src/runtime/bankroll_provider.py (cached() RESILIENT bound, KILLER 1
 #   2026-05-31: default 1800s, supersedes the prior 300s fail-closed window that blanked
 #   last-good across transient wallet-RPC blip clusters) + src/main.py:_edli_event_reactor_cycle
@@ -42,7 +42,13 @@ the ``cached()`` window or weaken any fail-closed semantics. These tests lock:
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import textwrap
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -110,6 +116,242 @@ def test_warm_cycle_refreshes_execution_authority_after_bankroll(monkeypatch):
     assert calls == ["bankroll", "authority"]
 
 
+def test_chain_collateral_publish_refreshes_allocator_with_same_snapshot_identity(monkeypatch):
+    """A committed CHAIN snapshot restores reduce-only authority before the next warm tick."""
+    captured_at = datetime.now(timezone.utc).isoformat()
+    record = bankroll_provider.BankrollOfRecord(
+        value_usd=10.0,
+        spendable_cash_usd=10.0,
+        fetched_at=captured_at,
+        source="collateral_ledger_snapshot",
+    )
+    calls = []
+    monkeypatch.setattr(
+        bankroll_provider,
+        "warm_from_collateral_snapshot",
+        lambda: record,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_refresh_global_execution_authority",
+        lambda *, bankroll_record: (
+            calls.append(bankroll_record) or {"configured": True}
+        ),
+    )
+
+    result = main_module._refresh_global_execution_authority_after_collateral_publish(
+        captured_at=captured_at,
+    )
+
+    assert result == {"configured": True}
+    assert calls == [record]
+
+
+def test_identity_bound_allocator_publish_does_not_reread_bankroll_cache(monkeypatch):
+    """The verified record remains the drawdown input through allocator publication."""
+    captured_at = datetime.now(timezone.utc).isoformat()
+    record = bankroll_provider.BankrollOfRecord(
+        value_usd=10.0,
+        spendable_cash_usd=10.0,
+        fetched_at=captured_at,
+        source="collateral_ledger_snapshot",
+    )
+    published = []
+    monkeypatch.setattr(
+        bankroll_provider,
+        "cached",
+        lambda: pytest.fail("identity-bound publish must not re-read mutable cache"),
+    )
+    monkeypatch.setattr(
+        "src.risk_allocator.refresh_global_allocator",
+        lambda conn, **kwargs: (
+            published.append((conn, kwargs)) or {"configured": True}
+        ),
+    )
+    monkeypatch.setattr("src.control.heartbeat_supervisor.summary", lambda: {})
+    monkeypatch.setattr("src.control.ws_gap_guard.summary", lambda: {})
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: SimpleNamespace(value="GREEN"),
+    )
+    conn = object()
+
+    result = main_module._edli_refresh_global_allocator(
+        conn,
+        portfolio_snapshot=SimpleNamespace(daily_baseline_total=20.0),
+        bankroll_record=record,
+    )
+
+    assert result == {"configured": True}
+    assert published[0][0] is conn
+    assert published[0][1]["ledger"]["current_drawdown_pct"] == 50.0
+
+
+def test_chain_collateral_publish_emits_identity_bound_authority_wake(monkeypatch, tmp_path):
+    """The sidecar wakes the order daemon only after its CHAIN snapshot is durable."""
+    from src.execution import post_trade_capital
+    from src.runtime.reactor_wake import COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON
+
+    captured_at = datetime.now(timezone.utc)
+    snapshot = CollateralSnapshot(
+        pusd_balance_micro=10_000_000,
+        pusd_allowance_micro=10_000_000,
+        usdc_e_legacy_balance_micro=0,
+        ctf_token_balances={},
+        ctf_token_allowances={},
+        reserved_pusd_for_buys_micro=0,
+        reserved_tokens_for_sells={},
+        captured_at=captured_at,
+        authority_tier="CHAIN",
+    )
+    emitted = []
+    monkeypatch.setattr("src.state.db._zeus_trade_db_path", lambda: tmp_path / "trades.db")
+    monkeypatch.setattr(
+        "src.runtime.timeout_guard.run_with_timeout",
+        lambda *_args, **_kwargs: ({}, None, ""),
+    )
+    monkeypatch.setattr(CollateralLedger, "refresh", lambda _self, _adapter: snapshot)
+    monkeypatch.setattr(
+        "src.runtime.reactor_wake.publish_reactor_wake",
+        lambda **kwargs: emitted.append(kwargs),
+    )
+
+    post_trade_capital.collateral_snapshot_refresh_cycle()
+
+    assert emitted == [
+        {
+            "source": "post_trade_capital",
+            "reason": COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON,
+            "published_at": captured_at,
+        }
+    ]
+
+
+@pytest.mark.parametrize("configured", [True, False])
+def test_collateral_authority_wake_services_only_allocator(monkeypatch, configured):
+    """The dedicated wake path refreshes and acknowledges without entering the reactor."""
+    from src.runtime.reactor_wake import COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON
+
+    captured_at = datetime.now(timezone.utc).isoformat()
+    wake = SimpleNamespace(
+        wake_id="collateral-wake",
+        reason=COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON,
+        published_at=captured_at,
+    )
+    calls = []
+    monkeypatch.setattr(
+        "src.runtime.reactor_wake.read_reactor_wake",
+        lambda **_kwargs: wake,
+    )
+    monkeypatch.setattr(
+        "src.runtime.reactor_wake.coalescible_reactor_wakes",
+        lambda _wake: (wake,),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_refresh_global_execution_authority_after_collateral_publish",
+        lambda *, captured_at: (
+            calls.append(("refresh", captured_at))
+            or {
+                "configured": configured,
+                "error": None if configured else "collateral_snapshot_unavailable",
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_acknowledge_edli_reactor_wake_batch",
+        lambda selected, wakes, *, day0_wake: (
+            calls.append(("ack", selected, wakes, day0_wake)) or True
+        ),
+    )
+    main_module._edli_last_reactor_wake_id = None
+
+    assert main_module._service_pending_collateral_authority_wake() is True
+    assert calls[0] == ("refresh", captured_at)
+    assert calls[1] == ("ack", wake, (wake,), False)
+
+
+def test_collateral_authority_wake_ack_failure_backs_off_and_yields(monkeypatch):
+    """An unacknowledged failure cannot monopolize the listener every second."""
+    from src.runtime.reactor_wake import COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON
+
+    collateral = SimpleNamespace(
+        wake_id="collateral-wake",
+        reason=COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON,
+        published_at=datetime.now(timezone.utc).isoformat(),
+    )
+    ordinary = SimpleNamespace(
+        wake_id="ordinary-wake",
+        reason="market_price_advanced",
+        published_at=datetime.now(timezone.utc).isoformat(),
+    )
+    excluded_reads = []
+
+    def _read(*, exclude_wake_ids=(), **_kwargs):
+        excluded = frozenset(exclude_wake_ids)
+        excluded_reads.append(excluded)
+        return ordinary if collateral.wake_id in excluded else collateral
+
+    monkeypatch.setattr("src.runtime.reactor_wake.read_reactor_wake", _read)
+    monkeypatch.setattr(
+        "src.runtime.reactor_wake.coalescible_reactor_wakes",
+        lambda wake: (wake,),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_refresh_global_execution_authority_after_collateral_publish",
+        lambda **_kwargs: {"configured": False, "error": "stale"},
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_acknowledge_edli_reactor_wake_batch",
+        lambda *_args, **_kwargs: False,
+    )
+    main_module._edli_collateral_authority_wake_backoff_until.clear()
+
+    assert main_module._service_pending_collateral_authority_wake() is None
+    assert collateral.wake_id in main_module._collateral_authority_wake_backoff_ids()
+    assert main_module._service_pending_collateral_authority_wake() is None
+    assert excluded_reads[-1] == frozenset({collateral.wake_id})
+
+    main_module._edli_collateral_authority_wake_backoff_until.clear()
+
+
+def test_collateral_publish_identity_mismatch_revokes_reduce_only_authority(monkeypatch):
+    """A wake may never restore the allocator from a different collateral snapshot."""
+    from src.control.heartbeat_supervisor import HeartbeatHealth
+    from src.risk_allocator import RiskAllocator, assert_global_submit_allows, configure_global_allocator
+    from src.risk_allocator.governor import AllocationDenied, GovernorState
+
+    captured_at = datetime.now(timezone.utc)
+    configure_global_allocator(
+        RiskAllocator(),
+        GovernorState(0.0, HeartbeatHealth.HEALTHY, False, 0, 0),
+    )
+    try:
+        assert_global_submit_allows(reduce_only=True)
+        monkeypatch.setattr(
+            bankroll_provider,
+            "warm_from_collateral_snapshot",
+            lambda: SimpleNamespace(
+                fetched_at=(captured_at - timedelta(seconds=1)).isoformat()
+            ),
+        )
+
+        result = main_module._refresh_global_execution_authority_after_collateral_publish(
+            captured_at=captured_at.isoformat(),
+        )
+
+        assert result["configured"] is False
+        assert result["error"] == "collateral_snapshot_identity_mismatch"
+        with pytest.raises(AllocationDenied) as excinfo:
+            assert_global_submit_allows(reduce_only=True)
+        assert excinfo.value.decision.reason == "allocator_not_configured"
+    finally:
+        configure_global_allocator(None, None)
+
+
 def test_execution_authority_refresh_uses_canonical_open_portfolio(monkeypatch):
     calls = []
     portfolio = object()
@@ -146,7 +388,12 @@ def test_execution_authority_refresh_uses_canonical_open_portfolio(monkeypatch):
     ]
 
 
-def _install_collateral_snapshot(*, fresh_value_usd: float, age_seconds: float = 0.0) -> None:
+def _install_collateral_snapshot(
+    *,
+    fresh_value_usd: float,
+    age_seconds: float = 0.0,
+    authority_tier: str = "CHAIN",
+) -> None:
     captured_at = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
     ledger = CollateralLedger()
     ledger.set_snapshot(
@@ -159,10 +406,414 @@ def _install_collateral_snapshot(*, fresh_value_usd: float, age_seconds: float =
             reserved_pusd_for_buys_micro=0,
             reserved_tokens_for_sells={},
             captured_at=captured_at,
-            authority_tier="CHAIN",
+            authority_tier=authority_tier,
         )
     )
     configure_global_ledger(ledger)
+
+
+@pytest.mark.parametrize("authority_tier", ["CHAIN", "VENUE"])
+def test_collateral_snapshot_warm_accepts_real_authority_tiers(authority_tier):
+    try:
+        _install_collateral_snapshot(
+            fresh_value_usd=12.5,
+            authority_tier=authority_tier,
+        )
+
+        record = bankroll_provider.warm_from_collateral_snapshot()
+
+        assert isinstance(record, bankroll_provider.BankrollOfRecord)
+        assert record.value_usd == 12.5
+        assert record.source == "collateral_ledger_snapshot"
+    finally:
+        configure_global_ledger(None)
+        bankroll_provider.reset_cache_for_tests()
+
+
+def test_collateral_snapshot_warm_rejects_real_degraded_authority():
+    try:
+        _install_collateral_snapshot(
+            fresh_value_usd=12.5,
+            authority_tier="DEGRADED",
+        )
+
+        assert bankroll_provider.warm_from_collateral_snapshot() is None
+    finally:
+        configure_global_ledger(None)
+        bankroll_provider.reset_cache_for_tests()
+
+
+def test_post_trade_durable_snapshot_wake_refreshes_allocator_without_entry_reactor(
+    monkeypatch,
+    tmp_path,
+):
+    """Exercise the isolated durable sidecar-to-listener allocator handoff."""
+    from src.control.heartbeat_supervisor import HeartbeatHealth
+    from src.execution import post_trade_capital
+    from src.risk_allocator import (
+        RiskAllocator,
+        assert_global_submit_allows,
+        configure_global_allocator,
+    )
+    from src.risk_allocator.governor import GovernorState
+    from src.runtime import reactor_wake
+
+    trade_db = tmp_path / "trades.db"
+    wake_path = tmp_path / "edli-reactor-wake.json"
+    payload = {
+        "pusd_balance_micro": 17_000_000,
+        "pusd_allowance_micro": 17_000_000,
+        "authority_tier": "CHAIN",
+    }
+    published_records = []
+
+    monkeypatch.setattr("src.state.db._zeus_trade_db_path", lambda: trade_db)
+    monkeypatch.setattr(
+        "src.runtime.timeout_guard.run_with_timeout",
+        lambda *_args, **_kwargs: (payload, None, ""),
+    )
+    monkeypatch.setattr("src.config.state_path", lambda _name: wake_path)
+    monkeypatch.setattr(
+        main_module,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: pytest.fail("collateral listener must not run entry reactor"),
+    )
+
+    class _TradeConn:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        "src.state.db.get_trade_connection_read_only",
+        lambda: _TradeConn(),
+    )
+    monkeypatch.setattr(
+        "src.state.portfolio.load_runtime_open_portfolio",
+        lambda _conn: SimpleNamespace(daily_baseline_total=0.0),
+    )
+
+    def _publish_allocator(
+        _conn,
+        *,
+        portfolio_snapshot,
+        bankroll_record,
+    ):
+        published_records.append((portfolio_snapshot, bankroll_record))
+        configure_global_allocator(
+            RiskAllocator(),
+            GovernorState(0.0, HeartbeatHealth.HEALTHY, False, 0, 0),
+        )
+        return {"configured": True}
+
+    monkeypatch.setattr(main_module, "_edli_refresh_global_allocator", _publish_allocator)
+
+    try:
+        post_trade_capital.collateral_snapshot_refresh_cycle()
+        configure_global_ledger(CollateralLedger(db_path=trade_db))
+        main_module._edli_last_reactor_wake_id = None
+
+        assert main_module._service_pending_collateral_authority_wake() is True
+        assert len(published_records) == 1
+        record = published_records[0][1]
+        assert isinstance(record, bankroll_provider.BankrollOfRecord)
+        assert record.value_usd == 17.0
+        assert assert_global_submit_allows(reduce_only=True).allowed is True
+        assert reactor_wake.read_reactor_wake(path=wake_path) is None
+    finally:
+        configure_global_allocator(None, None)
+        configure_global_ledger(None)
+        bankroll_provider.reset_cache_for_tests()
+
+
+_SUBPROCESS_PYTHON = Path("/Users/leofitz/zeus/.venv/bin/python")
+
+
+def _run_relationship_subprocess(
+    source: str,
+    *args: object,
+    state_root: Path,
+) -> dict:
+    env = dict(os.environ)
+    env["ZEUS_TEST_STATE_ROOT"] = str(state_root)
+    completed = subprocess.run(
+        [_SUBPROCESS_PYTHON, "-c", textwrap.dedent(source), *(str(arg) for arg in args)],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return json.loads(completed.stdout.strip().splitlines()[-1])
+
+
+_COLLATERAL_PRODUCER_SOURCE = r"""
+import json
+import os
+import sys
+from contextlib import ExitStack
+from datetime import datetime, timedelta
+from pathlib import Path
+from unittest.mock import patch
+
+from src.execution import post_trade_capital
+from src.runtime.reactor_wake import read_reactor_wake
+from src.state.collateral_ledger import CollateralLedger
+
+trade_db = Path(sys.argv[1])
+wake_path = Path(sys.argv[2])
+authority_tier = sys.argv[3]
+stale_seconds = float(sys.argv[4])
+payload = {
+    "pusd_balance_micro": 23_000_000,
+    "pusd_allowance_micro": 23_000_000,
+    "authority_tier": authority_tier,
+}
+
+class _CapturedAt(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return datetime.now(tz) - timedelta(seconds=stale_seconds)
+
+degraded = False
+with ExitStack() as stack:
+    stack.enter_context(patch("src.state.db._zeus_trade_db_path", return_value=trade_db))
+    stack.enter_context(
+        patch(
+            "src.runtime.timeout_guard.run_with_timeout",
+            return_value=(payload, None, ""),
+        )
+    )
+    stack.enter_context(patch("src.config.state_path", return_value=wake_path))
+    if stale_seconds:
+        stack.enter_context(patch("src.state.collateral_ledger.datetime", _CapturedAt))
+    try:
+        post_trade_capital.collateral_snapshot_refresh_cycle()
+    except post_trade_capital.CollateralSnapshotDegraded:
+        degraded = True
+
+snapshot = CollateralLedger(db_path=trade_db).snapshot()
+wake = read_reactor_wake(path=wake_path)
+assert wake is not None
+assert wake.published_at == snapshot.captured_at.isoformat()
+assert snapshot.authority_tier == authority_tier
+assert degraded is (authority_tier == "DEGRADED")
+print(
+    json.dumps(
+        {
+            "pid": os.getpid(),
+            "authority_tier": snapshot.authority_tier,
+            "snapshot_identity": snapshot.captured_at.isoformat(),
+            "wake_identity": wake.published_at,
+            "wake_id": wake.wake_id,
+            "degraded_exception": degraded,
+        },
+        sort_keys=True,
+    )
+)
+"""
+
+
+_COLLATERAL_CONSUMER_SOURCE = r"""
+import json
+import os
+import sys
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import src.main as main_module
+from src.control.heartbeat_supervisor import HeartbeatHealth
+from src.risk_allocator import (
+    RiskAllocator,
+    assert_global_submit_allows,
+    configure_global_allocator,
+    summary,
+)
+from src.risk_allocator.governor import AllocationDenied, GovernorState
+from src.runtime import bankroll_provider
+from src.runtime.reactor_wake import read_reactor_wake
+from src.state.collateral_ledger import CollateralLedger, configure_global_ledger
+
+trade_db = Path(sys.argv[1])
+wake_path = Path(sys.argv[2])
+expected_identity = sys.argv[3]
+should_restore = sys.argv[4] == "restore"
+published_identities = []
+entry_reactor_calls = []
+
+class _TradeConn:
+    def close(self):
+        return None
+
+def _publish_allocator(conn, *, ledger, heartbeat, ws_status, cap_policy=None):
+    configure_global_allocator(
+        RiskAllocator(),
+        GovernorState(0.0, HeartbeatHealth.HEALTHY, False, 0, 0),
+    )
+    return summary()
+
+_original_allocator_refresh = main_module._edli_refresh_global_allocator
+
+def _identity_bound_allocator_refresh(
+    conn,
+    *,
+    portfolio_snapshot,
+    bankroll_record,
+):
+    published_identities.append(bankroll_record.fetched_at)
+    return _original_allocator_refresh(
+        conn,
+        portfolio_snapshot=portfolio_snapshot,
+        bankroll_record=bankroll_record,
+    )
+
+def _entry_reactor_forbidden(**kwargs):
+    entry_reactor_calls.append(kwargs)
+    raise AssertionError("collateral listener must not run entry reactor")
+
+configure_global_allocator(None, None)
+configure_global_ledger(CollateralLedger(db_path=trade_db))
+main_module._edli_last_reactor_wake_id = None
+main_module._edli_collateral_authority_wake_backoff_until.clear()
+try:
+    with patch("src.config.state_path", return_value=wake_path), patch(
+        "src.state.db.get_trade_connection_read_only", return_value=_TradeConn()
+    ), patch(
+        "src.state.portfolio.load_runtime_open_portfolio",
+        return_value=SimpleNamespace(daily_baseline_total=0.0),
+    ), patch(
+        "src.risk_allocator.refresh_global_allocator",
+        side_effect=_publish_allocator,
+    ), patch.object(
+        main_module,
+        "_edli_refresh_global_allocator",
+        side_effect=_identity_bound_allocator_refresh,
+    ), patch.object(
+        main_module,
+        "_edli_event_reactor_cycle",
+        side_effect=_entry_reactor_forbidden,
+    ):
+        stop_event = threading.Event()
+        listener = threading.Thread(
+            target=main_module._run_edli_reactor_wake_listener,
+            kwargs={"stop_event": stop_event, "poll_seconds": 0.01},
+            name="relationship-order-daemon-listener",
+        )
+        listener.start()
+        deadline = time.monotonic() + 5.0
+        while read_reactor_wake(path=wake_path) is not None:
+            assert listener.is_alive()
+            if time.monotonic() >= deadline:
+                raise AssertionError("production listener did not drain collateral wake")
+            time.sleep(0.01)
+        stop_event.set()
+        listener.join(timeout=2.0)
+        assert not listener.is_alive()
+
+    allocator_state = summary()
+    try:
+        reduce_only_allowed = assert_global_submit_allows(reduce_only=True).allowed
+        denial_reason = None
+    except AllocationDenied as exc:
+        reduce_only_allowed = False
+        denial_reason = exc.decision.reason
+    wake_remaining = read_reactor_wake(path=wake_path) is not None
+
+    assert not entry_reactor_calls
+    assert not wake_remaining
+    if should_restore:
+        assert allocator_state["configured"] is True
+        assert reduce_only_allowed is True
+        assert published_identities == [expected_identity]
+        assert denial_reason is None
+    else:
+        assert allocator_state["configured"] is False
+        assert reduce_only_allowed is False
+        assert published_identities == []
+        assert denial_reason == "allocator_not_configured"
+
+    print(
+        json.dumps(
+            {
+                "pid": os.getpid(),
+                "listener_entrypoint": "_run_edli_reactor_wake_listener",
+                "listener_stopped": not listener.is_alive(),
+                "configured": allocator_state["configured"],
+                "reduce_only_allowed": reduce_only_allowed,
+                "denial_reason": denial_reason,
+                "published_identities": published_identities,
+                "expected_identity": expected_identity,
+                "wake_remaining": wake_remaining,
+                "entry_reactor_calls": len(entry_reactor_calls),
+            },
+            sort_keys=True,
+        )
+    )
+finally:
+    configure_global_allocator(None, None)
+    configure_global_ledger(None)
+    bankroll_provider.reset_cache_for_tests()
+"""
+
+
+@pytest.mark.parametrize(
+    ("authority_tier", "stale_seconds", "should_restore"),
+    [
+        ("CHAIN", 0.0, True),
+        ("DEGRADED", 0.0, False),
+        ("CHAIN", 3600.0, False),
+    ],
+    ids=("fresh-chain", "degraded", "stale-chain"),
+)
+def test_post_trade_collateral_wake_cross_process_relationship(
+    tmp_path,
+    authority_tier,
+    stale_seconds,
+    should_restore,
+):
+    """Prove durable producer-to-order-daemon authority transfer across PIDs."""
+    assert _SUBPROCESS_PYTHON.is_file()
+    case_root = tmp_path / f"{authority_tier.lower()}-{int(stale_seconds)}"
+    case_root.mkdir()
+    trade_db = case_root / "trades.db"
+    wake_path = case_root / "edli-reactor-wake.json"
+
+    producer = _run_relationship_subprocess(
+        _COLLATERAL_PRODUCER_SOURCE,
+        trade_db,
+        wake_path,
+        authority_tier,
+        stale_seconds,
+        state_root=case_root,
+    )
+    consumer = _run_relationship_subprocess(
+        _COLLATERAL_CONSUMER_SOURCE,
+        trade_db,
+        wake_path,
+        producer["snapshot_identity"],
+        "restore" if should_restore else "reject",
+        state_root=case_root,
+    )
+
+    assert producer["pid"] != consumer["pid"]
+    assert producer["snapshot_identity"] == producer["wake_identity"]
+    assert consumer == {
+        "configured": should_restore,
+        "denial_reason": None if should_restore else "allocator_not_configured",
+        "entry_reactor_calls": 0,
+        "expected_identity": producer["snapshot_identity"],
+        "listener_entrypoint": "_run_edli_reactor_wake_listener",
+        "listener_stopped": True,
+        "pid": consumer["pid"],
+        "published_identities": (
+            [producer["snapshot_identity"]] if should_restore else []
+        ),
+        "reduce_only_allowed": should_restore,
+        "wake_remaining": False,
+    }
 
 
 def test_cached_resilient_within_bound_failclosed_beyond(monkeypatch):

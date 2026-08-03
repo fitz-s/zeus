@@ -106,6 +106,8 @@ _forecast_exit_monitor_attempts_lock = threading.Lock()
 _forecast_exit_monitor_attempts: dict[str, bool | None] = {}
 _edli_reactor_wake_thread: threading.Thread | None = None
 _edli_last_reactor_wake_id: str | None = None
+_COLLATERAL_AUTHORITY_WAKE_RETRY_SECONDS = 5.0
+_edli_collateral_authority_wake_backoff_until: dict[str, float] = {}
 
 
 @dataclass
@@ -3792,7 +3794,12 @@ def _assert_live_safe_strategies_or_exit(*, refresh_state: bool = True) -> None:
     assert_live_safe_strategies_under_live_mode(enabled_strategies)
 
 
-def _edli_refresh_global_allocator(conn, *, portfolio_snapshot=None) -> dict:
+def _edli_refresh_global_allocator(
+    conn,
+    *,
+    portfolio_snapshot=None,
+    bankroll_record=None,
+) -> dict:
     """Configure the process-wide risk allocator/governor for the EDLI live path.
 
     ROOT (see /tmp/edli_submit_gate_trace.md): the live ``_live_order`` submit path
@@ -3841,7 +3848,11 @@ def _edli_refresh_global_allocator(conn, *, portfolio_snapshot=None) -> dict:
         # On-chain wallet is the only bankroll truth. cached() never re-fetches; the
         # EDLI cycle warms it via current(max_age_seconds=0.0) at cycle start. None →
         # wallet unreachable / cache cold → drawdown untrustworthy → fail closed.
-        _bk = bankroll_provider.cached()
+        # An identity-bound collateral wake passes the exact BankrollOfRecord it
+        # validated.  Ordinary cycles retain the canonical cache read.  Never
+        # re-read the cache between wake identity verification and allocator
+        # publication: a concurrent warm could otherwise swap the bankroll.
+        _bk = bankroll_record if bankroll_record is not None else bankroll_provider.cached()
         if _bk is None:
             # A prior cycle may have configured the process singleton.  Missing
             # current wallet truth must revoke that authority rather than leave
@@ -4016,6 +4027,7 @@ def _edli_initialize_reactor_wake_cursor() -> None:
     _edli_last_reactor_wake_id = None
     _edli_global_completion_yield.reset()
     _edli_day0_post_monitor_yield.reset()
+    _edli_collateral_authority_wake_backoff_until.clear()
     _day0_urgent_wake_pending.clear()
     _day0_held_monitor_preempt_requested.clear()
     with _day0_exit_monitor_attempts_lock:
@@ -4951,7 +4963,10 @@ def _edli_reactor_wake_poll_once() -> bool:
         read_reactor_wake,
     )
 
-    excluded_wake_ids = _exit_monitor_excluded_wake_ids()
+    excluded_wake_ids = frozenset(
+        _exit_monitor_excluded_wake_ids()
+        | _collateral_authority_wake_backoff_ids()
+    )
     global_yield_ids = _edli_global_completion_yield.consume()
     day0_post_monitor_yield_ids = _edli_day0_post_monitor_yield.consume()
     paused_forecast_carrier_priority_allowed = False
@@ -5338,6 +5353,86 @@ def _dispatch_edli_redecision_screen_from_wake() -> None:
     ).start()
 
 
+def _collateral_authority_wake_backoff_ids() -> frozenset[str]:
+    """Return collateral wakes temporarily yielded to ordinary queue work."""
+
+    now = time.monotonic()
+    expired = tuple(
+        wake_id
+        for wake_id, retry_at in _edli_collateral_authority_wake_backoff_until.items()
+        if retry_at <= now
+    )
+    for wake_id in expired:
+        _edli_collateral_authority_wake_backoff_until.pop(wake_id, None)
+    return frozenset(_edli_collateral_authority_wake_backoff_until)
+
+
+def _service_pending_collateral_authority_wake() -> bool | None:
+    """Refresh only allocator authority for a durable collateral wake.
+
+    SCOPE: process-wide actuation authority only; this does not run the event
+    reactor, create an entry intent, or contact the venue. DRAIN: the listener
+    attempts each selected wake once, then acknowledges stale/missing/mismatched
+    truth and relies on the 60-second canonical warm backstop; an ack failure gets
+    a five-second bounded retry while ordinary wakes continue. RESET: exact ack
+    consumes only these wakes; a later successful snapshot publishes a new wake.
+    """
+    global _edli_last_reactor_wake_id
+
+    from src.runtime.reactor_wake import (
+        COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON,
+        coalescible_reactor_wakes,
+        read_reactor_wake,
+    )
+
+    try:
+        wake = read_reactor_wake(
+            exclude_wake_ids=_collateral_authority_wake_backoff_ids(),
+        )
+    except (OSError, ValueError):
+        logger.warning("collateral authority wake selection failed; retaining wake debt", exc_info=True)
+        return None
+    if (
+        wake is None
+        or wake.wake_id == _edli_last_reactor_wake_id
+        or wake.reason != COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON
+    ):
+        return None
+    wakes = coalescible_reactor_wakes(wake)
+    if not wakes or any(
+        queued.reason != COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON
+        for queued in wakes
+    ):
+        return None
+    latest = max(wakes, key=lambda queued: queued.published_at)
+    authority_refresh = _refresh_global_execution_authority_after_collateral_publish(
+        captured_at=latest.published_at,
+    )
+    acknowledged = _acknowledge_edli_reactor_wake_batch(
+        latest,
+        wakes,
+        day0_wake=False,
+    )
+    if acknowledged:
+        if not authority_refresh.get("configured"):
+            logger.warning(
+                "collateral authority wake failed closed and was acknowledged; "
+                "the 60-second canonical warm remains the recovery backstop: %s",
+                authority_refresh.get("error"),
+            )
+        return True
+    retry_at = time.monotonic() + _COLLATERAL_AUTHORITY_WAKE_RETRY_SECONDS
+    for queued in wakes:
+        _edli_collateral_authority_wake_backoff_until[queued.wake_id] = retry_at
+    logger.warning(
+        "collateral authority wake acknowledgement failed; yielding %d wake(s) "
+        "for %.1fs so ordinary queue work can continue",
+        len(wakes),
+        _COLLATERAL_AUTHORITY_WAKE_RETRY_SECONDS,
+    )
+    return None
+
+
 def _run_edli_reactor_wake_listener(
     *,
     stop_event: threading.Event,
@@ -5363,7 +5458,9 @@ def _run_edli_reactor_wake_listener(
                     if stop_event.wait(fallback_seconds):
                         break
             try:
-                _edli_reactor_wake_poll_once()
+                collateral_serviced = _service_pending_collateral_authority_wake()
+                if collateral_serviced is None:
+                    _edli_reactor_wake_poll_once()
             except Exception:
                 logger.exception("EDLI reactor wake listener poll failed")
 
@@ -5409,7 +5506,67 @@ def _edli_bankroll_warm_cycle() -> None:
     _refresh_global_execution_authority()
 
 
-def _refresh_global_execution_authority() -> dict:
+def _refresh_global_execution_authority_after_collateral_publish(
+    *,
+    captured_at: str,
+) -> dict:
+    """Restore actuation only from the exact canonical snapshot that woke us.
+
+    SCOPE: process-wide allocator/governor actuation authority only; this helper
+    neither creates an entry intent nor reaches the venue. DRAIN: a durable
+    collateral-publish wake retries this exact snapshot identity, while the
+    60-second warm job remains a recovery backstop. RESET: only a fresh
+    canonical snapshot whose ``captured_at`` equals the wake can configure the
+    coherent allocator/governor pair; missing, stale, degraded, malformed, or
+    mismatched truth explicitly revokes it.
+    """
+    from src.risk_allocator import configure_global_allocator
+    from src.runtime.bankroll_provider import warm_from_collateral_snapshot
+
+    def _fail_closed(reason: str) -> dict:
+        configure_global_allocator(None, None)
+        logger.error(
+            "global execution-authority collateral-publish refresh revoked: %s",
+            reason,
+        )
+        return {
+            "configured": False,
+            "fail_closed": True,
+            "error": reason,
+            "entry": {
+                "allow_submit": False,
+                "reason": "allocator_not_configured",
+            },
+        }
+
+    try:
+        expected = datetime.fromisoformat(str(captured_at).replace("Z", "+00:00"))
+        if expected.tzinfo is None:
+            expected = expected.replace(tzinfo=timezone.utc)
+        expected = expected.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return _fail_closed("collateral_snapshot_captured_at_invalid")
+
+    try:
+        warm = warm_from_collateral_snapshot()
+    except Exception as exc:  # noqa: BLE001 - missing truth is an authority revoke
+        return _fail_closed(f"collateral_snapshot_warm_failed:{type(exc).__name__}")
+    if warm is None:
+        return _fail_closed("collateral_snapshot_unavailable")
+    try:
+        actual = datetime.fromisoformat(str(warm.fetched_at).replace("Z", "+00:00"))
+        if actual.tzinfo is None:
+            actual = actual.replace(tzinfo=timezone.utc)
+        actual = actual.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return _fail_closed("collateral_snapshot_warm_captured_at_invalid")
+    if actual != expected:
+        return _fail_closed("collateral_snapshot_identity_mismatch")
+
+    return _refresh_global_execution_authority(bankroll_record=warm)
+
+
+def _refresh_global_execution_authority(*, bankroll_record=None) -> dict:
     """Refresh real allocator truth without claiming work or touching venue.
 
     SCOPE: process-wide allocation/actuation authority only; this helper cannot
@@ -5426,10 +5583,10 @@ def _refresh_global_execution_authority() -> dict:
     try:
         trade_conn = get_trade_connection_read_only()
         portfolio = load_runtime_open_portfolio(trade_conn)
-        result = _edli_refresh_global_allocator(
-            trade_conn,
-            portfolio_snapshot=portfolio,
-        )
+        refresh_kwargs = {"portfolio_snapshot": portfolio}
+        if bankroll_record is not None:
+            refresh_kwargs["bankroll_record"] = bankroll_record
+        result = _edli_refresh_global_allocator(trade_conn, **refresh_kwargs)
         if not result.get("configured"):
             logger.error(
                 "global execution-authority refresh unavailable: %s",

@@ -67,6 +67,7 @@ _HELD_SELL_BOOK_STATES = frozenset(
 GLOBAL_AUCTION_COMPLETION_WAKE_REASON = (
     "held_sell_global_auction_completion_requested"
 )
+COLLATERAL_AUTHORITY_REFRESHED_WAKE_REASON = "collateral_authority_refreshed"
 GLOBAL_AUCTION_COMPLETION_COALESCE_LIMIT = 16
 URGENT_WAKE_REASONS = frozenset(
     {
