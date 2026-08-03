@@ -196,6 +196,7 @@ class PreparedReplacementForecastMaterialization:
     request: ReplacementForecastMaterializeRequest
     metric: str
     posterior: "_PosteriorComputeResult"
+    day0_ledger_frontier_identity: tuple[int, str, str] | None
     anchor_id: int | None = None
 
 
@@ -487,6 +488,122 @@ def _ensure_replacement_identity_columns(conn: sqlite3.Connection) -> None:
         )
 
 
+def _ensure_replacement_frontier_indexes(conn: sqlite3.Connection) -> None:
+    """Install target-frontier indexes before entering any final writer lock."""
+
+    if conn.in_transaction:
+        raise RuntimeError(
+            "REPLACEMENT_FRONTIER_INDEX_BOOTSTRAP_REQUIRES_AUTOCOMMIT"
+        )
+    posterior_columns = _table_columns(conn, "forecast_posteriors")
+    if {
+        "source_id",
+        "city",
+        "target_date",
+        "temperature_metric",
+        "posterior_id",
+    }.issubset(posterior_columns):
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_forecast_posteriors_source_family_frontier
+                ON forecast_posteriors(
+                    source_id, city, target_date, temperature_metric, posterior_id DESC
+                )
+            """
+        )
+    provider_columns = _table_columns(conn, "raw_model_forecasts")
+    if {
+        "city",
+        "target_date",
+        "metric",
+        "model",
+        "source_cycle_time",
+        "endpoint",
+        "lead_days",
+        "captured_at",
+        "raw_model_forecast_id",
+    }.issubset(provider_columns):
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_target_model_frontier
+                ON raw_model_forecasts(
+                    city,
+                    target_date,
+                    metric,
+                    model,
+                    datetime(source_cycle_time) DESC,
+                    CASE endpoint WHEN 'single_runs' THEN 0 ELSE 1 END,
+                    lead_days,
+                    captured_at DESC,
+                    raw_model_forecast_id DESC
+                )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_raw_model_forecasts_target_frontier
+                ON raw_model_forecasts(
+                    city, target_date, metric, raw_model_forecast_id DESC
+                )
+            """
+        )
+    ensemble_columns = _table_columns(conn, "ensemble_snapshots")
+    if {
+        "snapshot_id",
+        "city",
+        "target_date",
+        "temperature_metric",
+        "source_id",
+        "model_version",
+        "authority",
+        "causality_status",
+        "boundary_ambiguous",
+        "forecast_window_attribution_status",
+        "contributes_to_target_extrema",
+        "source_cycle_time",
+        "issue_time",
+        "source_available_at",
+        "available_at",
+    }.issubset(ensemble_columns):
+        eligibility = """
+            WHERE source_id = 'ecmwf_open_data'
+              AND model_version = 'ecmwf_ens'
+              AND authority = 'VERIFIED'
+              AND causality_status = 'OK'
+              AND boundary_ambiguous = 0
+              AND forecast_window_attribution_status = 'FULLY_INSIDE_TARGET_LOCAL_DAY'
+              AND contributes_to_target_extrema = 1
+        """
+        conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_ensemble_snapshots_replacement_exact_frontier
+                ON ensemble_snapshots(
+                    city,
+                    target_date,
+                    temperature_metric,
+                    COALESCE(source_cycle_time, issue_time) DESC,
+                    COALESCE(source_available_at, available_at) DESC,
+                    snapshot_id DESC
+                )
+                {eligibility}
+            """
+        )
+        conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_ensemble_snapshots_replacement_casefold_frontier
+                ON ensemble_snapshots(
+                    lower(city),
+                    target_date,
+                    temperature_metric,
+                    COALESCE(source_cycle_time, issue_time) DESC,
+                    COALESCE(source_available_at, available_at) DESC,
+                    snapshot_id DESC
+                )
+                {eligibility}
+            """
+        )
+
+
 def _bin_topology_payload(bins: Sequence[object], *, settlement_step_c: float) -> list[dict[str, object]]:
     return [
         {
@@ -646,8 +763,14 @@ def _request_with_day0_physical_frontier(
                AND city = ?
                AND target_date = ?
                AND temperature_metric = ?
+             ORDER BY computed_at DESC
             """,
-            (SOURCE_ID, request.city, _date_text(request.target_date), metric),
+            (
+                SOURCE_ID,
+                request.city,
+                _date_text(request.target_date),
+                metric,
+            ),
         ).fetchall()
     except sqlite3.DatabaseError:
         return blocked("REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_READ_FAILED")
@@ -856,6 +979,34 @@ def _request_with_day0_physical_frontier(
         ),
         day0_observed_extreme_sample_count=clock_owner[3],
         day0_observed_extreme_unit=clock_owner[4],
+    )
+
+
+def _day0_ledger_frontier_identity(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+) -> tuple[int, str, str] | None:
+    """Read the append-only family high-water row and its mutable fingerprint."""
+
+    row = conn.execute(
+        """
+        SELECT posterior_id, provenance_json, computed_at
+          FROM forecast_posteriors
+         WHERE source_id = ?
+           AND city = ?
+           AND target_date = ?
+           AND temperature_metric = ?
+         ORDER BY posterior_id DESC
+         LIMIT 1
+        """,
+        (SOURCE_ID, request.city, _date_text(request.target_date), metric),
+    ).fetchone()
+    return (
+        None
+        if row is None
+        else (int(row[0]), str(row[1]), str(row[2]))
     )
 
 
@@ -2365,6 +2516,128 @@ def _current_evidence_shape_from_values(
     )
 
 
+@dataclass(frozen=True)
+class CurrentEvidenceSnapshotIdentity:
+    """The exact ENS row selected by the live current-evidence authority."""
+
+    snapshot_id: int
+    city: str
+    members_json: str
+    source_cycle_time: str
+    source_available_at: str
+    members_unit: str
+
+
+def _current_evidence_snapshot_row(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+    select_sql: str,
+    allow_casefold_fallback: bool = True,
+) -> sqlite3.Row | tuple[object, ...] | None:
+    """Run the one canonical causal target ENS selector."""
+
+    decision_at = _to_utc(
+        request.computed_at, field_name="computed_at"
+    ).isoformat()
+    carrier_cycle_dt = _to_utc(
+        request.source_cycle_time, field_name="source_cycle_time"
+    )
+    carrier_cycle = carrier_cycle_dt.isoformat()
+    min_evidence_cycle = (
+        carrier_cycle_dt
+        - timedelta(hours=replacement_source_cycle_max_age_hours())
+    ).isoformat()
+    params = (
+        request.city,
+        _date_text(request.target_date),
+        metric,
+        carrier_cycle,
+        min_evidence_cycle,
+        decision_at,
+    )
+    query = """
+        SELECT {select_sql}
+          FROM ensemble_snapshots
+         WHERE {city_predicate}
+           AND target_date = ?
+           AND temperature_metric = ?
+           AND source_id = 'ecmwf_open_data'
+           AND model_version = 'ecmwf_ens'
+           AND authority = 'VERIFIED'
+           AND causality_status = 'OK'
+           AND boundary_ambiguous = 0
+           AND forecast_window_attribution_status = 'FULLY_INSIDE_TARGET_LOCAL_DAY'
+           AND contributes_to_target_extrema = 1
+           AND COALESCE(source_cycle_time, issue_time) <= ?
+           AND COALESCE(source_cycle_time, issue_time) >= ?
+           AND COALESCE(source_available_at, available_at) <= ?
+         ORDER BY COALESCE(source_cycle_time, issue_time) DESC,
+                  COALESCE(source_available_at, available_at) DESC,
+                  snapshot_id DESC
+         LIMIT 1
+    """
+    row = conn.execute(
+        query.format(city_predicate="city = ?", select_sql=select_sql), params
+    ).fetchone()
+    if row is None and allow_casefold_fallback:
+        # Exact city preserves the live composite-index seek. The compatibility
+        # fallback is still bounded to one row and runs only after an exact miss.
+        row = conn.execute(
+            query.format(
+                city_predicate="lower(city) = lower(?)", select_sql=select_sql
+            ),
+            params,
+        ).fetchone()
+    return row
+
+
+def read_current_evidence_snapshot_identity(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+) -> CurrentEvidenceSnapshotIdentity | None:
+    """Select the one causal target ENS row used by current-evidence q."""
+
+    row = _current_evidence_snapshot_row(
+        conn,
+        request,
+        metric=metric,
+        select_sql="""snapshot_id, city, members_json,
+                      COALESCE(source_cycle_time, issue_time),
+                      COALESCE(source_available_at, available_at), members_unit""",
+    )
+    if row is None:
+        return None
+    return CurrentEvidenceSnapshotIdentity(
+        snapshot_id=int(row[0]),
+        city=str(row[1]),
+        members_json=str(row[2]),
+        source_cycle_time=str(row[3]),
+        source_available_at=str(row[4]),
+        members_unit=str(row[5]),
+    )
+
+
+def read_current_evidence_snapshot_id(
+    conn: sqlite3.Connection,
+    request: ReplacementForecastMaterializeRequest,
+    *,
+    metric: str,
+) -> int | None:
+    """Return the production-equivalent bounded frontier identity."""
+
+    row = _current_evidence_snapshot_row(
+        conn,
+        request,
+        metric=metric,
+        select_sql="snapshot_id",
+    )
+    return None if row is None else int(row[0])
+
+
 def _read_current_evidence_shape(
     conn: sqlite3.Connection,
     request: ReplacementForecastMaterializeRequest,
@@ -2383,64 +2656,13 @@ def _read_current_evidence_shape(
     """
 
     try:
-        decision_at = _to_utc(request.computed_at, field_name="computed_at").isoformat()
-        carrier_cycle_dt = _to_utc(
+        carrier_cycle = _to_utc(
             request.source_cycle_time, field_name="source_cycle_time"
-        )
-        carrier_cycle = carrier_cycle_dt.isoformat()
-        # Same one-clock staleness law that governs posterior readiness
-        # (replacement_source_cycle_max_age_hours) also bounds how old the ENS carrier row
-        # may be to still call itself "current evidence" — an unbounded walk-back silently
-        # launders a stale ENS cycle into decision-time current evidence.
-        min_evidence_cycle = (
-            carrier_cycle_dt
-            - timedelta(hours=replacement_source_cycle_max_age_hours())
         ).isoformat()
-        params = (
-            request.city,
-            _date_text(request.target_date),
-            metric,
-            carrier_cycle,
-            min_evidence_cycle,
-            decision_at,
+        snapshot = read_current_evidence_snapshot_identity(
+            conn, request, metric=metric
         )
-        query = """
-            SELECT snapshot_id, members_json,
-                   COALESCE(source_cycle_time, issue_time) AS evidence_cycle,
-                   COALESCE(source_available_at, available_at) AS evidence_available_at,
-                   members_unit
-            FROM ensemble_snapshots
-            WHERE {city_predicate}
-              AND target_date = ?
-              AND temperature_metric = ?
-              AND source_id = 'ecmwf_open_data'
-              AND model_version = 'ecmwf_ens'
-              AND authority = 'VERIFIED'
-              AND causality_status = 'OK'
-              AND boundary_ambiguous = 0
-              AND forecast_window_attribution_status = 'FULLY_INSIDE_TARGET_LOCAL_DAY'
-              AND contributes_to_target_extrema = 1
-              AND COALESCE(source_cycle_time, issue_time) <= ?
-              AND COALESCE(source_cycle_time, issue_time) >= ?
-              AND COALESCE(source_available_at, available_at) <= ?
-            ORDER BY COALESCE(source_cycle_time, issue_time) DESC,
-                     COALESCE(source_available_at, available_at) DESC,
-                     snapshot_id DESC
-            LIMIT 1
-            """
-        row = conn.execute(
-            query.format(city_predicate="city = ?"),
-            params,
-        ).fetchone()
-        if row is None:
-            # ``lower(city)`` disables the live composite city index on the
-            # multi-million-row snapshot table. Canonical identity uses the exact
-            # seek; retain case-insensitive compatibility only after a miss.
-            row = conn.execute(
-                query.format(city_predicate="lower(city) = lower(?)"),
-                params,
-            ).fetchone()
-        if row is None:
+        if snapshot is None:
             return None
         # Boundary-quarantined members are persisted as null (leakage law: their boundary
         # value must never enter extrema) even on snapshots where the majority rule already
@@ -2449,9 +2671,11 @@ def _read_current_evidence_shape(
         # _current_evidence_shape_from_values is the correct fail-closed gate on the
         # resulting (possibly reduced) member count, not a blanket exception swallow.
         values = tuple(
-            float(value) for value in json.loads(row[1]) if value is not None
+            float(value)
+            for value in json.loads(snapshot.members_json)
+            if value is not None
         )
-        members_unit = str(row[4] or "").strip().lower()
+        members_unit = str(snapshot.members_unit or "").strip().lower()
         if members_unit in {"degf", "f", "°f"}:
             values = tuple((value - 32.0) * 5.0 / 9.0 for value in values)
         elif members_unit not in {"degc", "c", "°c"}:
@@ -2466,9 +2690,9 @@ def _read_current_evidence_shape(
         except Exception:
             shape_age_gamma = 0.0
         return _current_evidence_shape_from_values(
-            snapshot_id=int(row[0]),
-            source_cycle_time=str(row[2]),
-            source_available_at=str(row[3]),
+            snapshot_id=snapshot.snapshot_id,
+            source_cycle_time=snapshot.source_cycle_time,
+            source_available_at=snapshot.source_available_at,
             members_c=values,
             provider_values_c=provider_values_c,
             provider_weights=provider_weights,
@@ -5984,6 +6208,7 @@ def _write_posterior_row(
             """
             SELECT posterior_id FROM forecast_posteriors
             WHERE posterior_identity_hash = ?
+            LIMIT 1
             """,
             (posterior_identity_hash,),
         ).fetchone()
@@ -5994,6 +6219,7 @@ def _write_posterior_row(
         """
         SELECT posterior_id FROM forecast_posteriors
         WHERE posterior_identity_hash = ?
+        LIMIT 1
         """,
         (posterior_identity_hash,),
     ).fetchone()
@@ -6289,11 +6515,26 @@ def prepare_replacement_forecast_live(
     if isinstance(validated, ReplacementForecastMaterializeResult):
         return validated
     request, metric = validated
+    try:
+        day0_ledger_frontier_identity = _day0_ledger_frontier_identity(
+            conn, request, metric=metric
+        )
+    except sqlite3.DatabaseError:
+        return ReplacementForecastMaterializeResult(
+            status="BLOCKED",
+            reason_codes=(
+                "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_READ_FAILED",
+            ),
+            posterior_id=None,
+            anchor_id=None,
+            readiness_id=None,
+        )
     posterior = _compute_posterior_payload(conn, request, metric=metric, anchor_id=-1)
     return PreparedReplacementForecastMaterialization(
         request=request,
         metric=metric,
         posterior=posterior,
+        day0_ledger_frontier_identity=day0_ledger_frontier_identity,
     )
 
 
@@ -6341,20 +6582,6 @@ def _day0_enqueue_owner_witness_is_current(
     ):
         return False
     try:
-        columns = {
-            str(row[1])
-            for row in conn.execute("PRAGMA table_info(cycle_advance_enqueues)").fetchall()
-        }
-        required = {
-            "city",
-            "target_date",
-            "metric",
-            "target_cycle_time",
-            "seed_file",
-            "day0_conditioning_identity_json",
-        }
-        if not required.issubset(columns):
-            return False
         row = conn.execute(
             """
             SELECT seed_file, day0_conditioning_identity_json
@@ -6388,10 +6615,27 @@ def write_prepared_replacement_forecast_live(
 ) -> ReplacementForecastMaterializeResult:
     """Persist a prepared family after the caller revalidates its DB snapshot."""
 
-    validated = _validated_replacement_forecast_request(conn, prepared.request)
-    if isinstance(validated, ReplacementForecastMaterializeResult):
-        return validated
-    request, metric = validated
+    # The caller has already run the complete read-only validation and the
+    # script has revalidated the bounded dependency witness under its final
+    # transaction. Re-running validation here would widen the writer lock into
+    # a second materialization computation and could observe a different q.
+    request = prepared.request
+    metric = prepared.metric
+    try:
+        current_day0_frontier_identity = _day0_ledger_frontier_identity(
+            conn, request, metric=metric
+        )
+    except sqlite3.DatabaseError as exc:
+        raise PreparedReplacementForecastSnapshotStale(
+            "replacement forecast Day0 frontier unavailable"
+        ) from exc
+    if (
+        current_day0_frontier_identity
+        != prepared.day0_ledger_frontier_identity
+    ):
+        raise PreparedReplacementForecastSnapshotStale(
+            "replacement forecast Day0 frontier changed"
+        )
     anchor_id = prepared.anchor_id
     posterior = prepared.posterior
     if request != prepared.request:
@@ -6490,6 +6734,9 @@ def materialize_replacement_forecast_live(
     if isinstance(validated, ReplacementForecastMaterializeResult):
         return validated
     request, metric = validated
+    day0_ledger_frontier_identity = _day0_ledger_frontier_identity(
+        conn, request, metric=metric
+    )
     anchor_id = _insert_anchor(conn, request, metric=metric)
     posterior = _compute_posterior_payload(
         conn,
@@ -6503,6 +6750,7 @@ def materialize_replacement_forecast_live(
             request=request,
             metric=metric,
             posterior=posterior,
+            day0_ledger_frontier_identity=day0_ledger_frontier_identity,
             anchor_id=anchor_id,
         ),
     )
