@@ -7309,6 +7309,7 @@ def run_edli_event_reactor_cycle(
             )
             return False
         _fsr_events = []
+        forecast_carrier_completion_proved = False
         if not committed_event_wake:
             try:
                 _fair_source = _edli_next_redecision_source()
@@ -7394,6 +7395,11 @@ def run_edli_event_reactor_cycle(
                         _fsr_events,
                         forecast_wake_family_order,
                     )
+                    # A successful empty build is a completed no-op for this
+                    # immutable posterior wake, not a materialization failure.
+                    # Actual build faults and supersession leave this false via
+                    # their exception/early-return paths.
+                    forecast_carrier_completion_proved = not _fsr_events
                 _log_stage("forecast_snapshot_build")
             except sqlite3.OperationalError as _emit_lock_exc:
                 if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
@@ -7445,6 +7451,10 @@ def run_edli_event_reactor_cycle(
                                 result.event_id
                                 for result in _fsr_write_results[:proof_limit]
                             )
+                            # INSERT and idempotent-existing outcomes both prove
+                            # durable materialization. EventWriter failures never
+                            # reach this assignment.
+                            forecast_carrier_completion_proved = True
                         _log_stage("forecast_snapshot_emit")
                     except sqlite3.OperationalError as _emit_lock_exc:
                         if "locked" in str(_emit_lock_exc).lower() or "busy" in str(_emit_lock_exc).lower():
@@ -7516,16 +7526,19 @@ def run_edli_event_reactor_cycle(
         if _edli_publish_committed_day0_catchup(catchup_day0_event_ids):
             return False
         if forecast_posterior_wake and not targeted_event_ids:
-            # SCOPE: this exact forecast-posterior publisher wake. DRAIN: retry
-            # the wake until its builder+writer produces at least one durable
-            # carrier ID; never fall through to the ordinary paused backlog.
-            # RESET: a durable carrier ID restores bounded targeted processing,
-            # while dependent-wake supersession keeps its existing return-False
-            # path above.
+            # SCOPE: this exact forecast-posterior publisher wake. DRAIN: a
+            # successful builder no-op is complete for this immutable posterior;
+            # a write success is complete even when idempotency inserts no new
+            # row. Build/write faults retain the wake. RESET: the next posterior,
+            # price, or control fact emits a fresh wake and reruns the full cut.
+            if not forecast_carrier_completion_proved:
+                _log.info(
+                    "EDLI targeted forecast wake retained: carrier materialization incomplete"
+                )
+                return False
             _log.info(
-                "EDLI targeted forecast wake retained: no durable carrier IDs"
+                "EDLI targeted forecast wake completed without a new carrier"
             )
-            return False
         if not producer_fast_path and _urgent_wake_pending():
             _log.info(
                 "EDLI reactor maintenance preempted after emit by urgent producer wake"

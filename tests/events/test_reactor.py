@@ -566,7 +566,7 @@ def test_pause_clear_after_selection_keeps_selected_cycle_no_submit(monkeypatch)
     "failure_mode",
     ("empty", "interrupted", "build_locked", "emit_locked"),
 )
-def test_published_paused_forecast_wake_without_durable_carrier_keeps_queue_untouched(
+def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     monkeypatch,
     tmp_path,
     failure_mode,
@@ -837,7 +837,7 @@ def test_published_paused_forecast_wake_without_durable_carrier_keeps_queue_unto
         monitor_succeeded=True,
     )
 
-    assert main._edli_reactor_wake_poll_once() is False
+    first_poll = main._edli_reactor_wake_poll_once()
 
     check = sqlite3.connect(world_path)
     assert check.execute(
@@ -846,6 +846,15 @@ def test_published_paused_forecast_wake_without_durable_carrier_keeps_queue_unto
     ).fetchone() == ("pending", 0)
     check.close()
     assert venue_buy_commands == []
+    if failure_mode == "empty":
+        assert first_poll is True
+        assert not wake_queue_file.exists()
+        assert day0_queue_file.exists()
+        assert reactor_wake.read_reactor_wake(path=wake_path) == day0_wake
+        assert batch_identities == []
+        return
+
+    assert first_poll is False
     assert main._edli_last_reactor_wake_id is None
     assert wake_queue_file.read_bytes() == wake_queue_bytes
     assert day0_queue_file.read_bytes() == day0_queue_bytes
