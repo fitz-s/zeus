@@ -7104,7 +7104,11 @@ def run_edli_event_reactor_cycle(
         held_sell_request_exposure_provider=held_sell_request_exposure_provider,
         allow_forecast_carrier_progress=forecast_posterior_wake,
     ):
-        _edli_prune_paused_mutable_working_set()
+        if active_lock.acquire(blocking=False):
+            try:
+                _edli_prune_paused_mutable_working_set()
+            finally:
+                active_lock.release()
         _log.info(
             "EDLI reactor parked paused new-entry wake before active-lock acquire: "
             "no exact canonical held-SELL request; pending entry work remains queued"
@@ -8249,6 +8253,7 @@ def _edli_active_rmf_forecast_snapshot_pending_count(world_conn, *, limit: int) 
 
 _EDLI_LAST_PRUNE_MONOTONIC: float | None = None
 _EDLI_LAST_PAUSED_PRUNE_MONOTONIC: float | None = None
+_EDLI_LAST_PAUSED_PRUNE_ATTEMPT_MONOTONIC: float | None = None
 _EDLI_PAUSED_PRUNE_LOCK = threading.Lock()
 _EDLI_DAY0_PAUSE_RECOVERY_PENDING: bool | None = None
 _EDLI_STATIC_CLOSE_RECOVERY_PENDING = True
@@ -8271,6 +8276,7 @@ def _edli_prune_paused_mutable_working_set() -> dict[str, int]:
     from src.state.db import get_world_connection
 
     global _EDLI_LAST_PAUSED_PRUNE_MONOTONIC
+    global _EDLI_LAST_PAUSED_PRUNE_ATTEMPT_MONOTONIC
     _log = _logging.getLogger("zeus.events.reactor")
     edli_cfg = _settings_section("edli", {})
     interval_s = _edli_prune_interval_seconds(edli_cfg)
@@ -8281,12 +8287,31 @@ def _edli_prune_paused_mutable_working_set() -> dict[str, int]:
         and now_mono - _EDLI_LAST_PAUSED_PRUNE_MONOTONIC < interval_s
     ):
         return {"forecast_snapshot": 0, "day0": 0}
+    retry_s = min(interval_s, 5.0) if interval_s > 0 else 1.0
+    if (
+        _EDLI_LAST_PAUSED_PRUNE_ATTEMPT_MONOTONIC is not None
+        and now_mono - _EDLI_LAST_PAUSED_PRUNE_ATTEMPT_MONOTONIC < retry_s
+    ):
+        return {"forecast_snapshot": 0, "day0": 0}
     if not _EDLI_PAUSED_PRUNE_LOCK.acquire(blocking=False):
         return {"forecast_snapshot": 0, "day0": 0}
 
     write_lock = None
     write_lock_acquired = False
     conn = None
+    started = time.monotonic()
+    deadline = started + min(
+        max(_edli_prune_budget_seconds(edli_cfg), 0.1),
+        2.0,
+    )
+
+    def _remaining_seconds() -> float:
+        return max(0.0, deadline - time.monotonic())
+
+    def _require_budget(stage: str) -> None:
+        if _remaining_seconds() <= 0:
+            raise TimeoutError(f"EDLI_PAUSED_PRUNE_BUDGET_EXHAUSTED:{stage}")
+
     try:
         now_mono = time.monotonic()
         if (
@@ -8295,29 +8320,45 @@ def _edli_prune_paused_mutable_working_set() -> dict[str, int]:
             and now_mono - _EDLI_LAST_PAUSED_PRUNE_MONOTONIC < interval_s
         ):
             return {"forecast_snapshot": 0, "day0": 0}
-        _EDLI_LAST_PAUSED_PRUNE_MONOTONIC = now_mono
+        _EDLI_LAST_PAUSED_PRUNE_ATTEMPT_MONOTONIC = now_mono
         write_lock = world_write_mutex()
         write_lock_acquired = write_lock.acquire(
-            timeout=_edli_prune_lock_timeout_seconds(edli_cfg)
+            timeout=min(
+                _edli_prune_lock_timeout_seconds(edli_cfg),
+                _remaining_seconds(),
+            )
         )
         if not write_lock_acquired:
+            _log.warning("EDLI paused mutable working-set drain deferred: world writer busy")
             return {"forecast_snapshot": 0, "day0": 0}
-        conn = get_world_connection()
-        deadline = time.monotonic() + min(
-            max(_edli_prune_budget_seconds(edli_cfg), 0.1),
-            2.0,
+        _require_budget("connect")
+        conn = get_world_connection(
+            busy_timeout_ms=max(
+                1,
+                min(int(_remaining_seconds() * 1_000), 500),
+            )
         )
+        _require_budget("connected")
         conn.set_progress_handler(
             lambda: int(time.monotonic() >= deadline),
             1_000,
         )
         store = EventStore(conn)
         batch_limit = _edli_prune_batch_limit(edli_cfg)
+        _require_budget("forecast_snapshot")
         forecast_snapshot = store.archive_superseded_forecast_snapshot_events(
             batch_limit=batch_limit,
         )
+        _require_budget("day0")
         day0 = store.archive_superseded_day0_events(batch_limit=batch_limit)
+        _require_budget("commit")
+        conn.execute(
+            "PRAGMA busy_timeout = %d"
+            % max(1, min(int(_remaining_seconds() * 1_000), 500))
+        )
         conn.commit()
+        _require_budget("committed")
+        _EDLI_LAST_PAUSED_PRUNE_MONOTONIC = time.monotonic()
         result = {
             "forecast_snapshot": int(forecast_snapshot or 0),
             "day0": int(day0 or 0),

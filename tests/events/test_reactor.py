@@ -1082,6 +1082,9 @@ def test_paused_mutable_drain_is_bounded_and_cadence_limited(monkeypatch):
             calls.append("unlock")
 
     class _Conn:
+        def execute(self, sql):
+            calls.append(("execute", sql))
+
         def set_progress_handler(self, callback, steps):
             calls.append(("progress", callback is not None, steps))
 
@@ -1118,9 +1121,17 @@ def test_paused_mutable_drain_is_bounded_and_cadence_limited(monkeypatch):
         },
     )
     monkeypatch.setattr(reactor_module, "world_write_mutex", lambda: _WriteLock())
-    monkeypatch.setattr("src.state.db.get_world_connection", lambda: conn)
+    monkeypatch.setattr(
+        "src.state.db.get_world_connection",
+        lambda **_kwargs: conn,
+    )
     monkeypatch.setattr(reactor_module, "EventStore", _Store)
     monkeypatch.setattr(reactor_module, "_EDLI_LAST_PAUSED_PRUNE_MONOTONIC", None)
+    monkeypatch.setattr(
+        reactor_module,
+        "_EDLI_LAST_PAUSED_PRUNE_ATTEMPT_MONOTONIC",
+        None,
+    )
 
     assert reactor_module._edli_prune_paused_mutable_working_set() == {
         "forecast_snapshot": 12,
@@ -1137,6 +1148,48 @@ def test_paused_mutable_drain_is_bounded_and_cadence_limited(monkeypatch):
     assert ("day0", 5000) in calls
     assert "commit" in calls
     assert "rollback" not in calls
+
+
+def test_paused_drain_does_not_race_an_active_reactor(monkeypatch):
+    import src.engine.event_reactor_adapter as adapter_module
+    import src.events.reactor as reactor_module
+    import src.main as main
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    drains = []
+
+    class _RacedLock:
+        def locked(self):
+            return False
+
+        def acquire(self, *, blocking=False):
+            return False
+
+        def release(self):
+            raise AssertionError("unowned reactor lock must not be released")
+
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_held_sell_request_exposure_provider",
+        lambda: (lambda: frozenset()),
+    )
+    monkeypatch.setattr(
+        adapter_module,
+        "_entry_pause_blocks_live_submit",
+        lambda _conn: "operator_pause",
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_prune_paused_mutable_working_set",
+        lambda: drains.append(True),
+    )
+
+    assert reactor_module.run_edli_event_reactor_cycle(active_lock=_RacedLock()) is False
+    assert drains == []
 
 
 def test_paused_exact_canonical_held_sell_request_reaches_reduce_only_cycle(monkeypatch):
