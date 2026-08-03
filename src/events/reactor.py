@@ -5391,17 +5391,129 @@ def _edli_latest_day0_hourly_blocked_families(
         return set()
 
 
+@dataclass(frozen=True)
+class _Day0HourlyPriorityProbe:
+    missing_families: frozenset[tuple[str, str, str]] = frozenset()
+    window_starts: tuple[tuple[str, str, datetime], ...] = ()
+    proved: bool = False
+
+
+def _edli_day0_hourly_missing_authority_families(
+    *,
+    cities: Iterable[Any],
+    decision_time: datetime,
+) -> _Day0HourlyPriorityProbe:
+    """Current authorized Day0 facts whose strict hourly authority is empty.
+
+    This is a producer scheduling predicate, not a health gate: it reads the
+    same authorized fact and strict persisted bundle contract that health and
+    the money path consume.  A completed local day is excluded before any
+    fact/readiness work, and one city/date remains one fetch target even when
+    HIGH and LOW both expose a missing family.
+    """
+    from src.config import runtime_cities_by_name
+    from src.data.day0_hourly_vectors import (
+        DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        day0_hourly_models_for_city,
+        read_freshest_day0_hourly_vectors,
+    )
+    from src.data.replacement_forecast_current_target_plan import (
+        _latest_authorized_day0_fact,
+    )
+    from src.state.db import get_forecasts_connection_read_only
+
+    now = decision_time.astimezone(timezone.utc)
+    try:
+        city_map = runtime_cities_by_name()
+    except Exception as exc:  # noqa: BLE001 -- no city authority means no priority borrow.
+        logging.getLogger("zeus.events.reactor").warning(
+            "edli_day0_hourly_refresh: runtime city map failed: %s", exc
+        )
+        return _Day0HourlyPriorityProbe()
+    missing: set[tuple[str, str, str]] = set()
+    window_starts: dict[tuple[str, str], datetime] = {}
+    try:
+        conn = get_forecasts_connection_read_only()
+    except Exception as exc:  # noqa: BLE001 -- no authority proof means no priority borrow.
+        logging.getLogger("zeus.events.reactor").warning(
+            "edli_day0_hourly_refresh: strict readiness connection failed: %s", exc
+        )
+        return _Day0HourlyPriorityProbe()
+    try:
+        for city in cities:
+            city_name = str(getattr(city, "name", "") or "").strip()
+            timezone_name = str(getattr(city, "timezone", "") or "").strip()
+            city_obj = city_map.get(city_name)
+            if not city_name or not timezone_name or city_obj is None:
+                continue
+            try:
+                target_date = now.astimezone(ZoneInfo(timezone_name)).date().isoformat()
+            except (ValueError, ZoneInfoNotFoundError):
+                continue
+            expected_models = day0_hourly_models_for_city(city_obj)
+            if not expected_models:
+                continue
+            for metric in ("high", "low"):
+                fact = _latest_authorized_day0_fact(
+                    conn,
+                    city=city_name,
+                    target_date=target_date,
+                    temperature_metric=metric,
+                    decision_time=now,
+                )
+                if fact is None:
+                    continue
+                try:
+                    observation_time = datetime.fromisoformat(
+                        str(fact.get("observation_time") or "").replace("Z", "+00:00")
+                    )
+                    if observation_time.tzinfo is None:
+                        continue
+                    observation_time = observation_time.astimezone(timezone.utc)
+                except (TypeError, ValueError):
+                    continue
+                if observation_time > now:
+                    continue
+                city_date = (city_name, target_date)
+                prior_window_start = window_starts.get(city_date)
+                if prior_window_start is None or observation_time < prior_window_start:
+                    window_starts[city_date] = observation_time
+                vectors = read_freshest_day0_hourly_vectors(
+                    city=city_name,
+                    target_date=target_date,
+                    now=now,
+                    expected_models=expected_models,
+                    require_expected=True,
+                    max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+                    remaining_window_start=observation_time,
+                    require_complete_remaining_window=True,
+                    conn=conn,
+                )
+                if not vectors:
+                    missing.add((city_name, target_date, metric))
+    except Exception as exc:  # noqa: BLE001 -- priority is fail-closed, maintenance remains safe.
+        logging.getLogger("zeus.events.reactor").warning(
+            "edli_day0_hourly_refresh: strict readiness check failed: %s", exc
+        )
+        return _Day0HourlyPriorityProbe()
+    finally:
+        conn.close()
+    return _Day0HourlyPriorityProbe(
+        missing_families=frozenset(missing),
+        window_starts=tuple(
+            (city_name, target_date, window_start)
+            for (city_name, target_date), window_start in sorted(window_starts.items())
+        ),
+        proved=True,
+    )
+
+
 def _edli_day0_hourly_priority_families(
     *,
     held_families: Iterable[tuple[str, str, str]] | None = None,
-    blocked_families: Iterable[tuple[str, str, str]] = (),
+    missing_authority_families: Iterable[tuple[str, str, str]] = (),
 ) -> list[tuple[str, str, str]]:
-    """Money-path families that should drive Day0 hourly-vector refresh order."""
-    import logging as _logging
-
-    from src.main import _pending_family_rows_for_refresh
-
-    _log = _logging.getLogger("zeus.events.reactor")
+    """Held Day0 first, then authorized current-day strict-bundle gaps."""
 
     families: list[tuple[str, str, str]] = []
     seen: set[tuple[str, str, str]] = set()
@@ -5413,46 +5525,14 @@ def _edli_day0_hourly_priority_families(
                 seen.add(key)
                 families.append(key)
 
-    # Held money is the first refresh consumer. Pending event queues can grow
-    # large when the reactor is behind; putting them first lets stale candidates
-    # delay fresh held-position Day0 probabilities.
+    # Held money is the only consumer allowed to use the critical reserve.
     held = (
         _edli_current_held_position_family_keys()
         if held_families is None
         else held_families
     )
     add(sorted(held))
-    add(sorted(blocked_families))
-
-    try:
-        world_ro = get_world_connection_read_only()
-        try:
-            rows = _pending_family_rows_for_refresh(
-                world_ro,
-                consumer_name="edli_reactor_v1",
-                event_window_limit=int(os.environ.get("ZEUS_DAY0_HOURLY_PRIORITY_EVENT_WINDOW_LIMIT", "2000")),
-            )
-        finally:
-            world_ro.close()
-        add(
-            (
-                row[0],
-                row[1],
-                row[2],
-            )
-            for row in rows
-        )
-    except Exception as exc:  # noqa: BLE001
-        _log.warning("edli_day0_hourly_refresh: pending-family priority read failed: %s", exc)
-
-    try:
-        trade_ro = get_trade_connection_read_only()
-        try:
-            add(_open_rest_family_rows_for_refresh(trade_ro))
-        finally:
-            trade_ro.close()
-    except Exception as exc:  # noqa: BLE001
-        _log.warning("edli_day0_hourly_refresh: open-rest priority read failed: %s", exc)
+    add(sorted(missing_authority_families))
 
     return families
 
@@ -5591,14 +5671,21 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         decision_time = datetime.now(timezone.utc)
         cities = _rc()
         held_families = sorted(_edli_current_held_position_family_keys())
-        blocked_families = _edli_latest_day0_hourly_blocked_families(
+        priority_probe = _edli_day0_hourly_missing_authority_families(
             cities=cities,
             decision_time=decision_time,
         )
-        priority_families = _edli_day0_hourly_priority_families(
-            held_families=held_families,
-            blocked_families=blocked_families,
-        )
+        try:
+            priority_families = _edli_day0_hourly_priority_families(
+                held_families=held_families,
+                missing_authority_families=priority_probe.missing_families,
+            )
+        except Exception as exc:  # noqa: BLE001 -- priority fails closed; held remains critical.
+            _log.warning(
+                "edli_day0_hourly_refresh: priority family probe failed: %s", exc
+            )
+            priority_probe = _Day0HourlyPriorityProbe()
+            priority_families = list(held_families)
         ordered_cities, priority_city_count = _edli_order_day0_hourly_refresh_cities(
             cities,
             decision_time=decision_time,
@@ -5620,32 +5707,45 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         max_cities = _day0_hourly_refresh_max_cities(
             priority_city_count=priority_city_count,
         )
-        quota_priority_cities = held_city_count
+        quota_critical_cities = 0
+        quota_priority_cities = 0
         if trading_lane_active:
             held = ordered_cities[:held_city_count]
-            pending = ordered_cities[held_city_count:priority_city_count]
-            if not held and not pending:
-                _log.info(
-                    "edli_day0_hourly_refresh deferred: trading lane active; "
-                    "no same-day held or pending cities"
-                )
-                return
-            if held and pending and max_cities >= 2:
+            priority = ordered_cities[held_city_count:priority_city_count]
+            if not held and not priority:
+                if priority_probe.proved:
+                    _log.info(
+                        "edli_day0_hourly_refresh deferred: trading lane active; "
+                        "no same-day held or strict-bundle priority cities"
+                    )
+                    return
+                # Priority proof failed locally. Do not promote an unproved city,
+                # but preserve the ordinary maintenance universe sweep.
+                ordered_cities = ordered_cities[:max_cities]
+                cursor_advance = min(max_cities, cursor_span)
+            elif held and priority and max_cities >= 2:
                 # First protect one money-at-risk city, then make discovery
                 # progress before a slow held fetch can exhaust the whole
                 # budget.  Any remaining slots return to held capital.
-                ordered_cities = [held[0], pending[0]] + held[1:max_cities - 1]
+                ordered_cities = [held[0], priority[0]] + held[1:max_cities - 1]
+                quota_critical_cities = 1
                 quota_priority_cities = 1
                 cursor_advance = 1 + len(held[1:max_cities - 1])
             elif held:
                 ordered_cities = held[:max_cities]
-                quota_priority_cities = len(ordered_cities)
+                quota_critical_cities = len(ordered_cities)
                 cursor_advance = len(ordered_cities)
             else:
-                ordered_cities = pending[:max_cities]
-                quota_priority_cities = 0
+                ordered_cities = priority[:max_cities]
+                quota_priority_cities = len(ordered_cities)
                 cursor_advance = len(ordered_cities)
         else:
+            selected_count = min(len(ordered_cities), max_cities)
+            quota_critical_cities = min(held_city_count, selected_count)
+            quota_priority_cities = min(
+                max(0, priority_city_count - held_city_count),
+                max(0, selected_count - quota_critical_cities),
+            )
             cursor_advance = min(max_cities, cursor_span)
         stats = maybe_refresh_day0_hourly_vectors(
             ordered_cities,
@@ -5653,7 +5753,12 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             budget_s=_day0_hourly_refresh_budget_seconds(),
             max_cities=max_cities,
             timeout_s=_day0_hourly_fetch_timeout_seconds(),
+            quota_critical_cities=quota_critical_cities,
             quota_priority_cities=quota_priority_cities,
+            remaining_window_starts={
+                (city_name, target_date): window_start
+                for city_name, target_date, window_start in priority_probe.window_starts
+            },
             persist_lock_blocking=False,
             return_stats=True,
         )
@@ -5670,19 +5775,24 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         if vectors_written or priority_city_count:
             _log.info(
                 "edli_day0_hourly_refresh: vectors_written=%d priority_cities=%d "
-                "held_cities=%d trading_lane_active=%s "
+                "held_cities=%d critical_cities=%d priority_lane_cities=%d "
+                "trading_lane_active=%s "
                 "max_cities=%d cities_attempted=%d skipped_throttle=%d "
                 "skipped_quota=%d incomplete_expected_bundles=%d "
-                "budget_exhausted=%s cursor=%d cursor_span=%d cursor_advance=%d",
+                "priority_reserve_exhausted=%s budget_exhausted=%s "
+                "cursor=%d cursor_span=%d cursor_advance=%d",
                 vectors_written,
                 priority_city_count,
                 held_city_count,
+                quota_critical_cities,
+                quota_priority_cities,
                 trading_lane_active,
                 max_cities,
                 cities_attempted,
                 int(getattr(stats, "cities_skipped_throttle", 0) or 0),
                 int(getattr(stats, "cities_skipped_quota", 0) or 0),
                 int(getattr(stats, "incomplete_expected_bundles", 0) or 0),
+                bool(getattr(stats, "priority_reserve_exhausted", False)),
                 bool(getattr(stats, "budget_exhausted", False)),
                 _DAY0_HOURLY_REFRESH_CURSOR,
                 cursor_span,

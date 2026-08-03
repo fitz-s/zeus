@@ -579,6 +579,93 @@ def _london():
     )
 
 
+def _scheduler_hourly_vector(city, model, decision_time, *, omit_local_time=None):
+    from src.data.day0_hourly_vectors import Day0HourlyVector
+
+    local_day = decision_time.astimezone(ZoneInfo(city.timezone)).date()
+    times = [
+        f"{(local_day + timedelta(days=offset)).isoformat()}T{hour:02d}:00"
+        for offset in (0, 1)
+        for hour in range(24)
+    ]
+    if omit_local_time in times:
+        times.remove(omit_local_time)
+    return Day0HourlyVector(
+        model=model,
+        city=city.name,
+        target_date=local_day.isoformat(),
+        timezone_name=city.timezone,
+        captured_at=decision_time.isoformat(),
+        times=tuple(times),
+        temps_c=tuple(18.0 + index * 0.1 for index in range(len(times))),
+    )
+
+
+def _install_scheduler_forecast_db(monkeypatch, tmp_path, city, *, authorized_fact):
+    import src.config as config_module
+    import src.data.day0_hourly_vectors as vectors_module
+    import src.state.db as db_module
+
+    db_path = tmp_path / "scheduler-forecasts.db"
+    now = datetime.now(UTC)
+    observation_time = now - timedelta(minutes=5)
+    target_date = now.astimezone(ZoneInfo(city.timezone)).date().isoformat()
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, source TEXT, station_id TEXT,
+            local_timestamp TEXT, utc_timestamp TEXT, imported_at TEXT,
+            temp_unit TEXT, running_max REAL, running_min REAL,
+            authority TEXT, training_allowed INTEGER, causality_status TEXT,
+            source_role TEXT, raw_response TEXT
+        )
+        """
+    )
+    if authorized_fact:
+        conn.execute(
+            """
+            INSERT INTO observation_instants (
+                city, target_date, source, station_id, local_timestamp,
+                utc_timestamp, imported_at, temp_unit, running_max, running_min,
+                authority, training_allowed, causality_status, source_role,
+                raw_response
+            ) VALUES (?, ?, 'wu_icao_history', ?, ?, ?, ?, ?, 25.0, 12.0,
+                      'VERIFIED', 1, 'OK', 'historical_hourly', '{}')
+            """,
+            (
+                city.name,
+                target_date,
+                city.wu_station,
+                observation_time.astimezone(ZoneInfo(city.timezone)).isoformat(),
+                observation_time.isoformat(),
+                observation_time.isoformat(),
+                city.settlement_unit,
+            ),
+        )
+    conn.commit()
+    conn.close()
+
+    def connect(*_args, **_kwargs):
+        opened = sqlite3.connect(db_path)
+        opened.row_factory = sqlite3.Row
+        return opened
+
+    monkeypatch.setattr(config_module, "runtime_cities", lambda: [city])
+    monkeypatch.setattr(
+        config_module,
+        "runtime_cities_by_name",
+        lambda: {city.name: city},
+    )
+    monkeypatch.setattr(db_module, "ZEUS_FORECASTS_DB_PATH", db_path)
+    monkeypatch.setattr(db_module, "get_forecasts_connection", connect)
+    monkeypatch.setattr(db_module, "get_forecasts_connection_read_only", connect)
+    monkeypatch.setattr(vectors_module, "in_domain_models_for_city", lambda _city, **_kw: [])
+    vectors_module._LAST_REFRESH_MONOTONIC.clear()
+    vectors_module._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+    return db_path, target_date
+
+
 def _istanbul():
     return SimpleNamespace(
         name="Istanbul", timezone="Europe/Istanbul", settlement_unit="C",
@@ -3032,129 +3119,167 @@ class TestMutexNoHttpSplit:
             decision_time=decision_time,
         ) == {("London", target_date, "high")}
 
-    def test_hourly_refresh_keeps_held_day0_truth_fresh_while_trading(self, monkeypatch):
-        import src.config as config_module
-        import src.main  # load settings consumers before replacing the config singleton
+    def test_hourly_refresh_keeps_held_day0_truth_fresh_while_trading(
+        self, monkeypatch, tmp_path
+    ):
+        import src.data.day0_hourly_vectors as vectors_module
+        from src.data.openmeteo_quota import OpenMeteoQuotaTracker, PRIORITY_DAILY_LIMIT
         from src.events import reactor as reactor_module
 
         tokyo = _tokyo()
-        target_date = (datetime.now(UTC) + timedelta(hours=9)).date().isoformat()
-        calls = []
-
-        monkeypatch.setattr(
-            config_module,
-            "settings",
-            SimpleNamespace(_data={"edli": {"enabled": True}}),
+        db_path, target_date = _install_scheduler_forecast_db(
+            monkeypatch, tmp_path, tokyo, authorized_fact=False
         )
-        monkeypatch.setattr(config_module, "runtime_cities", lambda: [tokyo, _london()])
+        tracker = OpenMeteoQuotaTracker()
+        tracker._count = PRIORITY_DAILY_LIMIT
+        fetches = []
+        monkeypatch.setattr(vectors_module, "quota_tracker", tracker)
         monkeypatch.setattr(
             reactor_module,
             "_edli_current_held_position_family_keys",
             lambda: {("Tokyo", target_date, "high")},
         )
         monkeypatch.setattr(
-            reactor_module,
-            "_edli_latest_day0_hourly_blocked_families",
-            lambda **_: set(),
-        )
-        monkeypatch.setattr(
-            reactor_module,
-            "_edli_day0_hourly_priority_families",
-            lambda **_: [("Tokyo", target_date, "high")],
-        )
-        monkeypatch.setattr(
-            "src.data.day0_hourly_vectors.maybe_refresh_day0_hourly_vectors",
-            lambda cities, **kwargs: calls.append((cities, kwargs))
-            or SimpleNamespace(
-                vectors_written=3,
-                cities_attempted=1,
-                cities_skipped_throttle=0,
-                cities_skipped_quota=0,
-                incomplete_expected_bundles=0,
-                budget_exhausted=False,
+            vectors_module,
+            "fetch_day0_hourly_vectors",
+            lambda city, *, models, now, **_kw: (
+                fetches.append((city.name, tuple(models)))
+                or [_scheduler_hourly_vector(city, model, now) for model in models],
+                "sha256:held-critical",
             ),
         )
 
-        reactor_module.run_edli_day0_hourly_refresh_cycle(
-            trading_lane_active=True,
-        )
+        reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
 
-        assert len(calls) == 1
-        cities, kwargs = calls[0]
-        assert [city.name for city in cities] == ["Tokyo"]
-        assert kwargs["max_cities"] == 1
-        assert kwargs["quota_priority_cities"] == 1
-        assert kwargs["persist_lock_blocking"] is False
+        assert [name for name, _models in fetches] == ["Tokyo"]
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0] == 6
+        conn.close()
 
-    def test_hourly_refresh_reserves_pending_slot_while_trading(self, monkeypatch):
-        import src.config as config_module
-        import src.main  # load settings consumers before replacing the config singleton
+    def test_hourly_refresh_reserves_strict_bundle_priority_slot_while_trading(
+        self, monkeypatch, tmp_path
+    ):
+        import src.data.day0_hourly_vectors as vectors_module
+        from src.data.openmeteo_quota import MAINTENANCE_DAILY_LIMIT, OpenMeteoQuotaTracker
         from src.events import reactor as reactor_module
 
         tokyo = _tokyo()
-        seoul = _seoul()
-        london = _london()
-        now = datetime.now(UTC)
-        tokyo_date = now.astimezone(ZoneInfo(tokyo.timezone)).date().isoformat()
-        seoul_date = now.astimezone(ZoneInfo(seoul.timezone)).date().isoformat()
-        london_date = now.astimezone(ZoneInfo(london.timezone)).date().isoformat()
-        calls = []
-
-        monkeypatch.setattr(
-            config_module,
-            "settings",
-            SimpleNamespace(_data={"edli": {"enabled": True}}),
+        db_path, target_date = _install_scheduler_forecast_db(
+            monkeypatch, tmp_path, tokyo, authorized_fact=True
         )
-        monkeypatch.setattr(
-            config_module,
-            "runtime_cities",
-            lambda: [tokyo, seoul, london],
-        )
+        tracker = OpenMeteoQuotaTracker()
+        tracker._count = MAINTENANCE_DAILY_LIMIT
+        clock = {"now": 60.0}
+        fetches = {"count": 0, "complete": False}
+        monkeypatch.setattr(vectors_module, "quota_tracker", tracker)
+        monkeypatch.setattr(vectors_module.time, "monotonic", lambda: clock["now"])
         monkeypatch.setattr(
             reactor_module,
             "_edli_current_held_position_family_keys",
-            lambda: {
-                ("Tokyo", tokyo_date, "high"),
-                ("Seoul", seoul_date, "high"),
-            },
+            lambda: set(),
         )
+
+        def fetch(city, *, models, now, **_kw):
+            fetches["count"] += 1
+            omitted = None
+            if not fetches["complete"]:
+                omitted = f"{target_date}T23:00"
+            return (
+                [
+                    _scheduler_hourly_vector(
+                        city,
+                        model,
+                        now,
+                        omit_local_time=omitted if index == 0 else None,
+                    )
+                    for index, model in enumerate(models)
+                ],
+                "sha256:scheduler-priority",
+            )
+
+        monkeypatch.setattr(vectors_module, "fetch_day0_hourly_vectors", fetch)
+
+        reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+        conn = sqlite3.connect(db_path)
+        table_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='day0_hourly_vectors'"
+        ).fetchone()
+        assert table_exists is None
+        conn.close()
+        refresh_key = f"Tokyo|{target_date}"
+        assert vectors_module._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[refresh_key] == (
+            clock["now"] + vectors_module.INCOMPLETE_BUNDLE_RETRY_INTERVAL_S
+        )
+
+        fetches["complete"] = True
+        clock["now"] += vectors_module.INCOMPLETE_BUNDLE_RETRY_INTERVAL_S
+        reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0] == 6
+        conn.close()
+        probe = reactor_module._edli_day0_hourly_missing_authority_families(
+            cities=[tokyo], decision_time=datetime.now(UTC)
+        )
+        assert probe.proved is True
+        assert probe.missing_families == frozenset()
+        assert refresh_key not in vectors_module._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC
+
+        reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+        assert fetches["count"] == 2
+
+    @pytest.mark.parametrize("failure", ["runtime_cities_by_name", "priority_families"])
+    def test_hourly_refresh_priority_probe_failure_preserves_maintenance_sweep(
+        self, monkeypatch, tmp_path, failure
+    ):
+        import src.config as config_module
+        import src.data.day0_hourly_vectors as vectors_module
+        from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+        from src.events import reactor as reactor_module
+
+        tokyo = _tokyo()
+        db_path, _target_date = _install_scheduler_forecast_db(
+            monkeypatch, tmp_path, tokyo, authorized_fact=False
+        )
+        if failure == "runtime_cities_by_name":
+            monkeypatch.setattr(
+                config_module,
+                "runtime_cities_by_name",
+                lambda: (_ for _ in ()).throw(
+                    RuntimeError("runtime city map unavailable")
+                ),
+            )
+        else:
+            monkeypatch.setattr(
+                reactor_module,
+                "_edli_day0_hourly_priority_families",
+                lambda **_kw: (_ for _ in ()).throw(
+                    RuntimeError("priority family probe unavailable")
+                ),
+            )
+        monkeypatch.setattr(vectors_module, "quota_tracker", OpenMeteoQuotaTracker())
         monkeypatch.setattr(
             reactor_module,
-            "_edli_latest_day0_hourly_blocked_families",
-            lambda **_: {("London", london_date, "high")},
+            "_edli_current_held_position_family_keys",
+            lambda: set(),
         )
+        fetches = []
         monkeypatch.setattr(
-            reactor_module,
-            "_edli_day0_hourly_priority_families",
-            lambda **_: [
-                ("Tokyo", tokyo_date, "high"),
-                ("Seoul", seoul_date, "high"),
-                ("London", london_date, "high"),
-            ],
-        )
-        monkeypatch.setattr(
-            "src.data.day0_hourly_vectors.maybe_refresh_day0_hourly_vectors",
-            lambda cities, **kwargs: calls.append((cities, kwargs))
-            or SimpleNamespace(
-                vectors_written=9,
-                cities_attempted=3,
-                cities_skipped_throttle=0,
-                cities_skipped_quota=0,
-                incomplete_expected_bundles=0,
-                budget_exhausted=False,
+            vectors_module,
+            "fetch_day0_hourly_vectors",
+            lambda city, *, models, now, **_kw: (
+                fetches.append(city.name)
+                or [_scheduler_hourly_vector(city, model, now) for model in models],
+                "sha256:maintenance-fallback",
             ),
         )
 
-        reactor_module.run_edli_day0_hourly_refresh_cycle(
-            trading_lane_active=True,
-        )
+        reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
 
-        assert len(calls) == 1
-        cities, kwargs = calls[0]
-        assert [city.name for city in cities] == ["Tokyo", "London", "Seoul"]
-        assert kwargs["max_cities"] == 3
-        assert kwargs["quota_priority_cities"] == 1
-        assert kwargs["persist_lock_blocking"] is False
+        assert fetches == ["Tokyo"]
+        conn = sqlite3.connect(db_path)
+        assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0] == 6
+        conn.close()
 
     def test_hourly_refresh_cursor_advances_across_full_held_segment_when_throttled(
         self, monkeypatch
@@ -3185,11 +3310,6 @@ class TestMutexNoHttpSplit:
         )
         monkeypatch.setattr(
             reactor_module,
-            "_edli_latest_day0_hourly_blocked_families",
-            lambda **_: set(),
-        )
-        monkeypatch.setattr(
-            reactor_module,
             "_edli_day0_hourly_priority_families",
             lambda **_: sorted(held),
         )
@@ -3217,31 +3337,19 @@ class TestMutexNoHttpSplit:
         assert calls == [["A", "B", "C"], ["D", "E", "A"]]
         assert reactor_module._DAY0_HOURLY_REFRESH_CURSOR == 1
 
-    def test_hourly_refresh_defers_unprioritized_universe_while_trading(self, monkeypatch):
-        import src.config as config_module
-        import src.main  # load settings consumers before replacing the config singleton
+    def test_hourly_refresh_defers_unprioritized_universe_while_trading(
+        self, monkeypatch, tmp_path
+    ):
         from src.events import reactor as reactor_module
 
-        monkeypatch.setattr(
-            config_module,
-            "settings",
-            SimpleNamespace(_data={"edli": {"enabled": True}}),
+        tokyo = _tokyo()
+        _install_scheduler_forecast_db(
+            monkeypatch, tmp_path, tokyo, authorized_fact=False
         )
-        monkeypatch.setattr(config_module, "runtime_cities", lambda: [_tokyo()])
         monkeypatch.setattr(
             reactor_module,
             "_edli_current_held_position_family_keys",
             lambda: set(),
-        )
-        monkeypatch.setattr(
-            reactor_module,
-            "_edli_latest_day0_hourly_blocked_families",
-            lambda **_: set(),
-        )
-        monkeypatch.setattr(
-            reactor_module,
-            "_edli_day0_hourly_priority_families",
-            lambda **_: [],
         )
         monkeypatch.setattr(
             "src.data.day0_hourly_vectors.maybe_refresh_day0_hourly_vectors",

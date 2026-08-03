@@ -32,6 +32,7 @@ import sqlite3
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pytest
@@ -43,6 +44,7 @@ from src.data.day0_hourly_vectors import (
     persist_day0_hourly_vectors,
     read_freshest_day0_hourly_vectors,
     remaining_day_extremes_c,
+    select_ready_day0_hourly_vectors,
 )
 from src.types.market import Bin
 
@@ -95,6 +97,25 @@ def _vector(model="icon_d2", captured_at=None, temps=None, start_hour=0):
         timezone_name="Europe/Paris",
         captured_at=(captured_at or datetime(2026, 6, 10, 9, 0, tzinfo=UTC)).isoformat(),
         times=tuple(times), temps_c=tuple(temps[: len(times)]),
+    )
+
+
+def _refresh_vector(city, model: str, decision_time: datetime) -> Day0HourlyVector:
+    """Two complete local days, matching the production forecast_days=2 shape."""
+    local_day = decision_time.astimezone(ZoneInfo(city.timezone)).date()
+    times = tuple(
+        f"{(local_day + timedelta(days=offset)).isoformat()}T{hour:02d}:00"
+        for offset in (0, 1)
+        for hour in range(24)
+    )
+    return Day0HourlyVector(
+        model=model,
+        city=city.name,
+        target_date=local_day.isoformat(),
+        timezone_name=city.timezone,
+        captured_at=decision_time.isoformat(),
+        times=times,
+        temps_c=tuple(15.0 + 0.1 * index for index in range(len(times))),
     )
 
 
@@ -2414,7 +2435,9 @@ class TestRequestHashProvenance:
         captured = {"target_dates": []}
 
         def fake_fetch(city, *, models=None, now=None):
-            return [_vector(model=model) for model in models], "sha256:realhash"
+            return [
+                _refresh_vector(city, model, now) for model in models
+            ], "sha256:realhash"
 
         def fake_persist(vectors, *, target_date, request_hash, **kw):
             captured["request_hash"] = request_hash
@@ -2423,6 +2446,7 @@ class TestRequestHashProvenance:
 
         monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fake_fetch)
         monkeypatch.setattr(hv, "persist_day0_hourly_vectors", fake_persist)
+        monkeypatch.setattr(hv, "read_freshest_day0_hourly_vectors", lambda **_kw: [object()])
         monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: ["icon_d2"])
         monkeypatch.setattr(hv.time, "monotonic", lambda: 60.0)
         hv._LAST_REFRESH_MONOTONIC.clear()
@@ -2441,7 +2465,9 @@ class TestRequestHashProvenance:
 
         def fake_fetch(city, *, models=None, now=None, timeout_s=None):
             attempts["fetch"] += 1
-            return [_vector(model=model) for model in models], "sha256:realhash"
+            return [
+                _refresh_vector(city, model, now) for model in models
+            ], "sha256:realhash"
 
         def fake_persist(vectors, *, target_date, request_hash, **kw):
             attempts["persist"] += 1
@@ -2543,7 +2569,9 @@ class TestRequestHashProvenance:
             ]
             if attempts["fetch"] == 1:
                 return [_vector(model="ecmwf_ifs")], "sha256:partial"
-            return [_vector(model=model) for model in models], "sha256:complete"
+            return [
+                _refresh_vector(city, model, now) for model in models
+            ], "sha256:complete"
 
         def fake_persist(vectors, *, target_date, request_hash, **kw):
             attempts["persist"] += 1
@@ -2552,6 +2580,7 @@ class TestRequestHashProvenance:
         monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
         monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fake_fetch)
         monkeypatch.setattr(hv, "persist_day0_hourly_vectors", fake_persist)
+        monkeypatch.setattr(hv, "read_freshest_day0_hourly_vectors", lambda **_kw: [object()])
         monkeypatch.setattr(hv.time, "monotonic", lambda: clock["now"])
         hv._LAST_REFRESH_MONOTONIC.clear()
         hv._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
@@ -2607,6 +2636,54 @@ class TestRequestHashProvenance:
         assert attempts == {"fetch": 2, "persist": 2}
         assert refresh_key not in hv._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC
 
+    def test_strict_bundle_predicate_rejects_every_incomplete_shape_then_resets_after_persist(self):
+        """Producer priority and authority readers share the exact strict predicate."""
+        now = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
+        window_start = datetime(2026, 6, 10, 8, 0, tzinfo=UTC)
+        expected = ("icon_d2", "ecmwf_ifs")
+        strict = dict(
+            target_date="2026-06-10",
+            now=now,
+            expected_models=expected,
+            require_expected=True,
+            max_bundle_skew_minutes=60.0,
+            remaining_window_start=window_start,
+            require_complete_remaining_window=True,
+        )
+        complete = [
+            _vector(model="icon_d2", captured_at=now),
+            _vector(model="ecmwf_ifs", captured_at=now),
+        ]
+
+        assert select_ready_day0_hourly_vectors(complete[:1], **strict) == []
+        assert select_ready_day0_hourly_vectors(
+            [_vector(model=model, captured_at=now - timedelta(hours=4)) for model in expected],
+            **strict,
+        ) == []
+        assert select_ready_day0_hourly_vectors(
+            [
+                _vector(model="icon_d2", captured_at=now),
+                _vector(model="ecmwf_ifs", captured_at=now - timedelta(hours=2)),
+            ],
+            **strict,
+        ) == []
+        assert select_ready_day0_hourly_vectors(
+            [_vector(model="icon_d2", captured_at=now, start_hour=20), complete[1]],
+            **strict,
+        ) == []
+
+        conn = _conn()
+        assert read_freshest_day0_hourly_vectors(city="Paris", conn=conn, **strict) == []
+        assert persist_day0_hourly_vectors(
+            complete,
+            target_date="2026-06-10",
+            request_hash="sha256:strict-reset",
+            conn=conn,
+            now=now,
+        ) == 2
+        ready = read_freshest_day0_hourly_vectors(city="Paris", conn=conn, **strict)
+        assert [vector.model for vector in ready] == list(expected)
+
     def test_quota_block_stops_batch_without_fetch_or_throttle(self, monkeypatch):
         import src.data.day0_hourly_vectors as hv
 
@@ -2633,7 +2710,7 @@ class TestRequestHashProvenance:
         assert attempts == {"fetch": 0}
         assert hv._LAST_REFRESH_MONOTONIC == {}
 
-    def test_held_prefix_can_use_reserved_quota_before_batch_stops(self, monkeypatch):
+    def test_held_prefix_can_use_critical_quota_before_batch_stops(self, monkeypatch):
         import src.data.day0_hourly_vectors as hv
         from src.data.openmeteo_quota import (
             MAINTENANCE_DAILY_LIMIT,
@@ -2656,13 +2733,95 @@ class TestRequestHashProvenance:
         stats = hv.maybe_refresh_day0_hourly_vectors(
             [_paris(), _wellington()],
             decision_time=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
-            quota_priority_cities=1,
+            quota_critical_cities=1,
             return_stats=True,
         )
 
         assert attempts == ["Paris"]
         assert stats.cities_attempted == 1
         assert stats.cities_skipped_quota == 1
+
+    def test_priority_prefix_drains_strict_bundle_at_maintenance_cap(self, monkeypatch):
+        import src.data.day0_hourly_vectors as hv
+        from src.data.openmeteo_quota import (
+            MAINTENANCE_DAILY_LIMIT,
+            OpenMeteoQuotaTracker,
+        )
+
+        tracker = OpenMeteoQuotaTracker()
+        tracker._count = MAINTENANCE_DAILY_LIMIT
+        persisted: list[tuple[str, tuple[str, ...]]] = []
+
+        monkeypatch.setattr(hv, "quota_tracker", tracker)
+        monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
+        monkeypatch.setattr(
+            hv,
+            "fetch_day0_hourly_vectors",
+            lambda city, *, models=None, **_kw: (
+                [
+                    _refresh_vector(
+                        city,
+                        model,
+                        datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+                    )
+                    for model in models
+                ],
+                "sha256:priority-complete",
+            ),
+        )
+        monkeypatch.setattr(
+            hv,
+            "persist_day0_hourly_vectors",
+            lambda vectors, *, target_date, **_kw: persisted.append(
+                (target_date, tuple(vector.model for vector in vectors))
+            )
+            or len(vectors),
+        )
+        monkeypatch.setattr(hv, "read_freshest_day0_hourly_vectors", lambda **_kw: [object()])
+        hv._LAST_REFRESH_MONOTONIC.clear()
+
+        stats = hv.maybe_refresh_day0_hourly_vectors(
+            [_paris()],
+            decision_time=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+            quota_priority_cities=1,
+            return_stats=True,
+        )
+
+        assert stats.vectors_written == 6
+        assert stats.priority_reserve_exhausted is False
+        assert persisted == [
+            ("2026-06-10", ("ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km")),
+            ("2026-06-11", ("ecmwf_ifs", "icon_global", "ukmo_global_deterministic_10km")),
+        ]
+
+    def test_priority_reserve_exhaustion_is_visible_and_never_borrows_critical(self, monkeypatch):
+        import src.data.day0_hourly_vectors as hv
+        from src.data.openmeteo_quota import (
+            PRIORITY_DAILY_LIMIT,
+            OpenMeteoQuotaTracker,
+        )
+
+        tracker = OpenMeteoQuotaTracker()
+        tracker._count = PRIORITY_DAILY_LIMIT
+        monkeypatch.setattr(hv, "quota_tracker", tracker)
+        monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
+        monkeypatch.setattr(
+            hv,
+            "fetch_day0_hourly_vectors",
+            lambda *_args, **_kw: pytest.fail("priority exhaustion must fail closed"),
+        )
+        hv._LAST_REFRESH_MONOTONIC.clear()
+
+        stats = hv.maybe_refresh_day0_hourly_vectors(
+            [_paris()],
+            decision_time=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+            quota_priority_cities=1,
+            return_stats=True,
+        )
+
+        assert stats.priority_reserve_exhausted is True
+        assert stats.cities_skipped_quota == 1
+        assert tracker._count == PRIORITY_DAILY_LIMIT
 
     def test_no_regional_model_uses_global_multimodel_bundle(self, monkeypatch):
         import src.data.day0_hourly_vectors as hv
@@ -2697,9 +2856,7 @@ class TestRequestHashProvenance:
         def fake_fetch(city, *, models=None, now=None):
             captured["models"] = list(models or [])
             return [
-                _vector(model="ecmwf_ifs"),
-                _vector(model="icon_global"),
-                _vector(model="ukmo_global_deterministic_10km"),
+                _refresh_vector(city, model, now) for model in models
             ], "sha256:globalhash"
 
         def fake_persist(vectors, *, target_date, request_hash, **kw):
@@ -2711,6 +2868,7 @@ class TestRequestHashProvenance:
         monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
         monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fake_fetch)
         monkeypatch.setattr(hv, "persist_day0_hourly_vectors", fake_persist)
+        monkeypatch.setattr(hv, "read_freshest_day0_hourly_vectors", lambda **_kw: [object()])
         hv._LAST_REFRESH_MONOTONIC.clear()
 
         n = hv.maybe_refresh_day0_hourly_vectors(
@@ -2737,7 +2895,9 @@ class TestRequestHashProvenance:
         captured_dates = []
 
         def fake_fetch(city, *, models=None, now=None, timeout_s=None):
-            return [_vector(model=model) for model in models], "sha256:datehash"
+            return [
+                _refresh_vector(city, model, now) for model in models
+            ], "sha256:datehash"
 
         def fake_persist(vectors, *, target_date, request_hash, **kw):
             captured_dates.append(target_date)
@@ -2746,6 +2906,7 @@ class TestRequestHashProvenance:
         monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
         monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fake_fetch)
         monkeypatch.setattr(hv, "persist_day0_hourly_vectors", fake_persist)
+        monkeypatch.setattr(hv, "read_freshest_day0_hourly_vectors", lambda **_kw: [object()])
         hv._LAST_REFRESH_MONOTONIC.clear()
 
         before_midnight_utc = datetime(2026, 6, 25, 11, 59, tzinfo=UTC)
@@ -2783,6 +2944,68 @@ class TestRequestHashProvenance:
 
         assert priority_count == 1
         assert [c.name for c in ordered] == ["Wellington", "Paris"]
+
+    def test_scheduler_excludes_completed_local_day_from_priority_lane(self):
+        from src.events import reactor
+
+        ordered, priority_count = reactor._edli_order_day0_hourly_refresh_cities(
+            [_paris(), _wellington()],
+            decision_time=datetime(2026, 6, 25, 12, 47, tzinfo=UTC),
+            priority_families=[("Wellington", "2026-06-25", "high")],
+        )
+
+        assert priority_count == 0
+        assert [city.name for city in ordered] == ["Paris", "Wellington"]
+
+    def test_authorized_current_day_missing_bundle_enters_priority_then_clears_after_persist(
+        self, monkeypatch
+    ):
+        """No health gate: the producer reuses the strict authority reader directly."""
+        import src.config as config_module
+        import src.data.day0_hourly_vectors as vectors_module
+        import src.data.replacement_forecast_current_target_plan as target_plan
+        import src.events.reactor as reactor
+        import src.state.db as db_module
+
+        city = _paris()
+        now = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
+        target_date = "2026-06-10"
+
+        class _Conn:
+            def close(self):
+                pass
+
+        persisted = {"ready": False}
+        monkeypatch.setattr(config_module, "runtime_cities_by_name", lambda: {"Paris": city})
+        monkeypatch.setattr(db_module, "get_forecasts_connection_read_only", _Conn)
+        monkeypatch.setattr(
+            target_plan,
+            "_latest_authorized_day0_fact",
+            lambda _conn, *, temperature_metric, **_kw: (
+                {"observation_time": (now - timedelta(minutes=5)).isoformat()}
+                if temperature_metric == "high"
+                else None
+            ),
+        )
+        monkeypatch.setattr(vectors_module, "day0_hourly_models_for_city", lambda _city: ["ecmwf_ifs"])
+        monkeypatch.setattr(
+            vectors_module,
+            "read_freshest_day0_hourly_vectors",
+            lambda **_kw: [object()] if persisted["ready"] else [],
+        )
+
+        missing = reactor._edli_day0_hourly_missing_authority_families(
+            cities=[city], decision_time=now
+        )
+        assert missing.proved is True
+        assert missing.missing_families == frozenset({("Paris", target_date, "high")})
+
+        persisted["ready"] = True
+        ready = reactor._edli_day0_hourly_missing_authority_families(
+            cities=[city], decision_time=now
+        )
+        assert ready.proved is True
+        assert ready.missing_families == frozenset()
 
     def test_scheduler_rotates_priority_segment_without_demoting_priority(self):
         # R4-b2: moved to src.events.reactor with the day0-hourly-refresh cluster.
@@ -2861,45 +3084,23 @@ class TestRequestHashProvenance:
         assert captured["max_cities"] == 1
         assert captured["persist_lock_blocking"] is False
 
-    def test_day0_hourly_priority_source_puts_held_families_before_backlog(
+    def test_day0_hourly_priority_source_puts_held_families_before_missing_authority(
         self, monkeypatch
     ):
         # R4-b2 (2026-07-08 main.py slimming): the priority-families builder
         # moved to src.events.reactor with the day0-hourly-refresh cluster.
-        # R4-b3 (2026-07-08): _open_rest_family_rows_for_refresh's only
-        # remaining caller (_edli_day0_live_family_admission, in the
-        # reactor+prune cluster) also moved to src.events.reactor, so it
-        # followed too; _pending_family_rows_for_refresh is still used
-        # broadly outside any EDLI cluster and stays in main.py.
-        import src.main as main
         from src.events import reactor
 
-        class _Conn:
-            def close(self):
-                pass
-
-        monkeypatch.setattr(
-            reactor,
-            "_edli_current_held_position_family_keys",
-            lambda: frozenset({("Paris", "2026-06-25", "low")}),
-        )
-        monkeypatch.setattr(reactor, "get_world_connection_read_only", lambda: _Conn())
-        monkeypatch.setattr(
-            main,
-            "_pending_family_rows_for_refresh",
-            lambda *a, **kw: [("Wellington", "2026-06-26", "high")],
-        )
-        monkeypatch.setattr(reactor, "get_trade_connection_read_only", lambda: _Conn())
-        monkeypatch.setattr(
-            reactor,
-            "_open_rest_family_rows_for_refresh",
-            lambda _conn: [("London", "2026-06-25", "high")],
-        )
-
-        assert reactor._edli_day0_hourly_priority_families() == [
+        assert reactor._edli_day0_hourly_priority_families(
+            held_families={("Paris", "2026-06-25", "low")},
+            missing_authority_families={
+                ("Wellington", "2026-06-26", "high"),
+                ("London", "2026-06-25", "high"),
+            },
+        ) == [
             ("paris", "2026-06-25", "low"),
-            ("wellington", "2026-06-26", "high"),
             ("london", "2026-06-25", "high"),
+            ("wellington", "2026-06-26", "high"),
         ]
 
 

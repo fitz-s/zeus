@@ -46,7 +46,7 @@ from collections import Counter
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.data.openmeteo_quota import quota_tracker
@@ -79,7 +79,7 @@ DEFAULT_FETCH_TIMEOUT_S = 4.0
 DEFAULT_REFRESH_BUDGET_S = 6.0
 DEFAULT_REFRESH_MAX_CITIES = 3
 DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES = 60.0
-INCOMPLETE_BUNDLE_RETRY_INTERVAL_S = 60.0
+INCOMPLETE_BUNDLE_RETRY_INTERVAL_S = 45.0
 
 _TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS day0_hourly_vectors (
@@ -143,6 +143,7 @@ class Day0HourlyRefreshStats:
     cities_skipped_quota: int = 0
     incomplete_expected_bundles: int = 0
     unavailable_bundles: tuple["Day0HourlyBundleUnavailable", ...] = ()
+    priority_reserve_exhausted: bool = False
     budget_exhausted: bool = False
 
 
@@ -483,6 +484,108 @@ def _vector_covers_target_from_capture(
     )
 
 
+def select_ready_day0_hourly_vectors(
+    vectors: Iterable[Day0HourlyVector],
+    *,
+    target_date: str,
+    max_age_hours: float = 3.0,
+    now: Optional[datetime] = None,
+    expected_models: Optional[Iterable[str]] = None,
+    require_expected: bool = False,
+    max_bundle_skew_minutes: Optional[float] = None,
+    remaining_window_start: datetime | None = None,
+    require_complete_remaining_window: bool = False,
+) -> list[Day0HourlyVector]:
+    """Pure strict-bundle predicate shared by producer and live readers.
+
+    It is intentionally the one place that decides freshness, expected-model
+    completeness, capture skew, and remaining-window coverage.  The producer
+    probes persisted readiness through ``read_freshest_day0_hourly_vectors``;
+    health and money-path readers do the same, so a city cannot be prioritized
+    by a weaker interpretation than the authority consumer accepts.
+    """
+    moment = (now or datetime.now(UTC)).astimezone(UTC)
+    expected: list[str] = []
+    for model in expected_models or ():
+        normalized = str(model or "").strip()
+        if normalized and normalized not in expected:
+            expected.append(normalized)
+    expected_set = set(expected)
+
+    parsed: list[tuple[datetime, Day0HourlyVector]] = []
+    for vector in vectors:
+        model = str(vector.model or "").strip()
+        if not model or (expected_set and model not in expected_set):
+            continue
+        try:
+            captured = datetime.fromisoformat(
+                str(vector.captured_at).replace("Z", "+00:00")
+            )
+            if captured.tzinfo is None:
+                continue
+            captured = captured.astimezone(UTC)
+            age_hours = (moment - captured).total_seconds() / 3600.0
+        except (TypeError, ValueError):
+            continue
+        if age_hours > float(max_age_hours) or age_hours < 0.0:
+            continue
+        if (
+            require_complete_remaining_window
+            and (
+                remaining_window_start is None
+                or not day0_hourly_vectors_cover_remaining_window(
+                    [vector],
+                    target_date=target_date,
+                    window_start=remaining_window_start,
+                )
+            )
+        ):
+            continue
+        parsed.append((captured, vector))
+
+    freshest: dict[str, Day0HourlyVector] = {}
+    for _captured, vector in sorted(parsed, key=lambda item: item[0], reverse=True):
+        freshest.setdefault(str(vector.model), vector)
+    if require_expected and expected and any(model not in freshest for model in expected):
+        return []
+    if (
+        require_expected
+        and expected
+        and max_bundle_skew_minutes is not None
+        and all(model in freshest for model in expected)
+    ):
+        captured_times: list[datetime] = []
+        try:
+            for model in expected:
+                captured = datetime.fromisoformat(
+                    str(freshest[model].captured_at).replace("Z", "+00:00")
+                )
+                if captured.tzinfo is None:
+                    return []
+                captured_times.append(captured.astimezone(UTC))
+        except (TypeError, ValueError):
+            return []
+        if (
+            max(captured_times) - min(captured_times)
+        ).total_seconds() / 60.0 > float(max_bundle_skew_minutes):
+            return []
+    selected = (
+        [freshest[model] for model in expected if model in freshest]
+        if expected
+        else list(freshest.values())
+    )
+    if require_complete_remaining_window and (
+        remaining_window_start is None
+        or not day0_hourly_vectors_cover_remaining_window(
+            selected,
+            target_date=target_date,
+            window_start=remaining_window_start,
+        )
+    ):
+        return []
+    return selected
+
+
 def read_freshest_day0_hourly_vectors(
     *,
     city: str,
@@ -512,13 +615,6 @@ def read_freshest_day0_hourly_vectors(
     every model must then contain each hourly grid point from that boundary to
     local-day end. A partial future path is not probability authority.
     """
-    moment = (now or datetime.now(UTC)).astimezone(UTC)
-    expected: list[str] = []
-    for model in expected_models or ():
-        normalized = str(model or "").strip()
-        if normalized and normalized not in expected:
-            expected.append(normalized)
-    expected_set = set(expected)
     own_conn = conn is None
     if own_conn:
         from src.state.db import get_forecasts_connection_read_only
@@ -538,20 +634,10 @@ def read_freshest_day0_hourly_vectors(
             ).fetchall()
         except sqlite3.Error:
             return []
-        freshest: dict[str, Day0HourlyVector] = {}
+        candidates: list[Day0HourlyVector] = []
         for row in rows:
             model = str(row[0])
-            if expected_set and model not in expected_set:
-                continue
-            if model in freshest:
-                continue
             try:
-                captured = datetime.fromisoformat(str(row[4]).replace("Z", "+00:00"))
-                if captured.tzinfo is None:
-                    continue
-                age_hours = (moment - captured.astimezone(UTC)).total_seconds() / 3600.0
-                if age_hours > float(max_age_hours) or age_hours < 0.0:
-                    continue
                 times = tuple(str(t) for t in json.loads(row[5]))
                 temps = tuple(float(v) for v in json.loads(row[6]))
                 if not times or len(times) != len(temps):
@@ -563,54 +649,18 @@ def read_freshest_day0_hourly_vectors(
                 timezone_name=str(row[3]), captured_at=str(row[4]),
                 times=times, temps_c=temps,
             )
-            if (
-                require_complete_remaining_window
-                and (
-                    remaining_window_start is None
-                    or not day0_hourly_vectors_cover_remaining_window(
-                        [candidate],
-                        target_date=target_date,
-                        window_start=remaining_window_start,
-                    )
-                )
-            ):
-                continue
-            freshest[model] = candidate
-        if require_expected and expected and any(model not in freshest for model in expected):
-            return []
-        if (
-            require_expected
-            and expected
-            and max_bundle_skew_minutes is not None
-            and all(model in freshest for model in expected)
-        ):
-            captured_times: list[datetime] = []
-            for model in expected:
-                captured = datetime.fromisoformat(
-                    str(freshest[model].captured_at).replace("Z", "+00:00")
-                )
-                if captured.tzinfo is None:
-                    return []
-                captured_times.append(captured.astimezone(UTC))
-            if captured_times:
-                skew_minutes = (
-                    max(captured_times) - min(captured_times)
-                ).total_seconds() / 60.0
-                if skew_minutes > float(max_bundle_skew_minutes):
-                    return []
-        selected = (
-            [freshest[model] for model in expected if model in freshest]
-            if expected
-            else list(freshest.values())
+            candidates.append(candidate)
+        return select_ready_day0_hourly_vectors(
+            candidates,
+            target_date=target_date,
+            max_age_hours=max_age_hours,
+            now=now,
+            expected_models=expected_models,
+            require_expected=require_expected,
+            max_bundle_skew_minutes=max_bundle_skew_minutes,
+            remaining_window_start=remaining_window_start,
+            require_complete_remaining_window=require_complete_remaining_window,
         )
-        if require_complete_remaining_window:
-            if remaining_window_start is None or not day0_hourly_vectors_cover_remaining_window(
-                selected,
-                target_date=target_date,
-                window_start=remaining_window_start,
-            ):
-                return []
-        return selected
     finally:
         if own_conn:
             conn.close()
@@ -858,7 +908,9 @@ def maybe_refresh_day0_hourly_vectors(
     budget_s: float = DEFAULT_REFRESH_BUDGET_S,
     max_cities: int = DEFAULT_REFRESH_MAX_CITIES,
     timeout_s: float = DEFAULT_FETCH_TIMEOUT_S,
+    quota_critical_cities: int = 0,
     quota_priority_cities: int = 0,
+    remaining_window_starts: Mapping[tuple[str, str], datetime] | None = None,
     persist_lock_blocking: bool = True,
     return_stats: bool = False,
 ) -> int | Day0HourlyRefreshStats:
@@ -872,15 +924,68 @@ def maybe_refresh_day0_hourly_vectors(
     retry storm. An incomplete fetch is never persisted as a partial live
     bundle; it returns a typed unavailable result and retries within
     ``INCOMPLETE_BUNDLE_RETRY_INTERVAL_S`` (well inside the three-hour reader
-    freshness law). The ordered prefix named by ``quota_priority_cities`` may
-    consume the Open-Meteo reserve; callers must use that prefix only for
-    current held-position exposure.
+    freshness law). The ordered critical prefix may consume only the final
+    held-position reserve; the following priority prefix may consume the
+    source-clock reserve but never the critical reserve.  All remaining cities
+    stay in maintenance quota.
     """
+    if decision_time.tzinfo is None:
+        raise ValueError("decision_time must be timezone-aware")
+
+    def strict_window_start(city: Any, target_date: str) -> datetime | None:
+        explicit = (remaining_window_starts or {}).get(
+            (str(getattr(city, "name", "") or ""), target_date)
+        )
+        if explicit is not None:
+            if explicit.tzinfo is None or explicit > decision_time:
+                return None
+            return explicit.astimezone(UTC)
+        try:
+            tz = ZoneInfo(str(getattr(city, "timezone")))
+            target = date.fromisoformat(target_date)
+        except (TypeError, ValueError, ZoneInfoNotFoundError):
+            return None
+        local_day = decision_time.astimezone(tz).date()
+        if target < local_day:
+            return None
+        if target == local_day:
+            return decision_time.astimezone(UTC)
+        return datetime.combine(target, datetime_time.min, tzinfo=tz).astimezone(UTC)
+
+    def mark_incomplete(
+        *,
+        refresh_key: str,
+        name: str,
+        target_dates: tuple[str, ...],
+        expected_models: tuple[str, ...],
+        available_models: tuple[str, ...],
+        missing_models: tuple[str, ...],
+        reason: str,
+    ) -> None:
+        nonlocal incomplete_expected_bundles
+        incomplete_expected_bundles += 1
+        unavailable_bundles.append(
+            Day0HourlyBundleUnavailable(
+                city=name,
+                target_dates=target_dates,
+                expected_models=expected_models,
+                available_models=available_models,
+                missing_models=missing_models,
+                reason=reason,
+            )
+        )
+        with _REFRESH_LOCK:
+            _LAST_REFRESH_MONOTONIC.pop(refresh_key, None)
+            _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[refresh_key] = (
+                time.monotonic() + INCOMPLETE_BUNDLE_RETRY_INTERVAL_S
+            )
+
     written = 0
     skipped_throttle = 0
     skipped_quota = 0
     incomplete_expected_bundles = 0
     unavailable_bundles: list[Day0HourlyBundleUnavailable] = []
+    priority_reserve_exhausted = False
     budget_exhausted = False
     now_monotonic = time.monotonic()
     started_monotonic = now_monotonic
@@ -915,14 +1020,28 @@ def maybe_refresh_day0_hourly_vectors(
                 ):
                     skipped_throttle += 1
                     continue
-            quota_context = (
-                quota_tracker.critical_lane()
-                if city_index < max(0, int(quota_priority_cities))
-                else nullcontext()
-            )
+            critical_city_count = max(0, int(quota_critical_cities))
+            priority_city_count = max(0, int(quota_priority_cities))
+            if city_index < critical_city_count:
+                quota_lane = "critical"
+                quota_context = quota_tracker.critical_lane()
+            elif city_index < critical_city_count + priority_city_count:
+                quota_lane = "priority"
+                quota_context = quota_tracker.priority_lane()
+            else:
+                quota_lane = "maintenance"
+                quota_context = nullcontext()
             with quota_context:
                 if not quota_tracker.can_call():
                     skipped_quota += 1
+                    if quota_lane == "priority":
+                        priority_reserve_exhausted = True
+                        logger.error(
+                            "DAY0_HOURLY_PRIORITY_RESERVE_EXHAUSTED "
+                            "city=%s checked=%d; refusing critical-reserve borrow",
+                            name,
+                            checked,
+                        )
                     break
                 with _REFRESH_LOCK:
                     if _refresh_throttled_locked(
@@ -962,30 +1081,81 @@ def maybe_refresh_day0_hourly_vectors(
                 )
                 continue
             if missing_models:
-                incomplete_expected_bundles += 1
-                unavailable_bundles.append(
-                    Day0HourlyBundleUnavailable(
-                        city=name,
+                mark_incomplete(
+                    refresh_key=refresh_key,
+                    name=name,
+                    target_dates=target_dates,
+                    expected_models=expected_models,
+                    available_models=vector_models,
+                    missing_models=missing_models,
+                    reason="DAY0_HOURLY_BUNDLE_INCOMPLETE",
+                )
+                continue
+
+            strict_bundles: dict[str, tuple[datetime, list[Day0HourlyVector]]] = {}
+            for target_date in target_dates:
+                window_start = strict_window_start(city, target_date)
+                selected = select_ready_day0_hourly_vectors(
+                    vectors,
+                    target_date=target_date,
+                    now=decision_time,
+                    expected_models=expected_models,
+                    require_expected=True,
+                    max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+                    remaining_window_start=window_start,
+                    require_complete_remaining_window=True,
+                )
+                if window_start is None or not selected:
+                    mark_incomplete(
+                        refresh_key=refresh_key,
+                        name=name,
                         target_dates=target_dates,
                         expected_models=expected_models,
                         available_models=vector_models,
-                        missing_models=missing_models,
-                        reason="DAY0_HOURLY_BUNDLE_INCOMPLETE",
+                        missing_models=(),
+                        reason="DAY0_HOURLY_BUNDLE_REMAINING_WINDOW_INCOMPLETE",
                     )
-                )
-                with _REFRESH_LOCK:
-                    _LAST_REFRESH_MONOTONIC.pop(refresh_key, None)
-                    _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[refresh_key] = (
-                        time.monotonic() + INCOMPLETE_BUNDLE_RETRY_INTERVAL_S
-                    )
+                    strict_bundles.clear()
+                    break
+                strict_bundles[target_date] = (window_start, selected)
+            if not strict_bundles:
                 continue
+
+            persisted = 0
             for target_date in target_dates:
-                written += persist_day0_hourly_vectors(
-                    vectors,
+                persisted += persist_day0_hourly_vectors(
+                    strict_bundles[target_date][1],
                     target_date=target_date,
                     request_hash=request_hash,
                     lock_blocking=persist_lock_blocking,
                 )
+            drained = all(
+                read_freshest_day0_hourly_vectors(
+                    city=name,
+                    target_date=target_date,
+                    now=decision_time,
+                    expected_models=expected_models,
+                    require_expected=True,
+                    max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+                    remaining_window_start=window_start,
+                    require_complete_remaining_window=True,
+                )
+                for target_date, (window_start, _selected) in strict_bundles.items()
+            )
+            if not drained:
+                mark_incomplete(
+                    refresh_key=refresh_key,
+                    name=name,
+                    target_dates=target_dates,
+                    expected_models=expected_models,
+                    available_models=vector_models,
+                    missing_models=(),
+                    reason="DAY0_HOURLY_BUNDLE_PERSIST_READBACK_INCOMPLETE",
+                )
+                continue
+            written += persisted
+            with _REFRESH_LOCK:
+                _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.pop(refresh_key, None)
         except Exception as exc:  # noqa: BLE001 — one city must not kill the pass
             if isinstance(exc, BlockingIOError):
                 with _REFRESH_LOCK:
@@ -1001,6 +1171,7 @@ def maybe_refresh_day0_hourly_vectors(
         cities_skipped_quota=skipped_quota,
         incomplete_expected_bundles=incomplete_expected_bundles,
         unavailable_bundles=tuple(unavailable_bundles),
+        priority_reserve_exhausted=priority_reserve_exhausted,
         budget_exhausted=budget_exhausted,
     )
     return stats if return_stats else stats.vectors_written
