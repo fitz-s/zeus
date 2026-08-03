@@ -3317,6 +3317,507 @@ def _init_edli_queue_db(path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _init_paused_entry_park_authority(
+    state: Path,
+    *,
+    paused: bool = True,
+) -> tuple[sqlite3.Connection, sqlite3.Connection]:
+    """Create only the canonical pause/exposure/command surfaces this gate reads."""
+
+    world = _init_edli_queue_db(state / "zeus-world.db")
+    world.execute(
+        """
+        CREATE TABLE control_overrides (
+            override_id TEXT PRIMARY KEY,
+            target_type TEXT NOT NULL,
+            target_key TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            value TEXT NOT NULL,
+            issued_by TEXT NOT NULL,
+            issued_at TEXT NOT NULL,
+            effective_until TEXT,
+            reason TEXT NOT NULL,
+            precedence INTEGER NOT NULL
+        )
+        """
+    )
+    world.execute(
+        """
+        INSERT INTO control_overrides VALUES (
+            'control_plane:global:entries_paused', 'global', 'entries', 'gate',
+            ?, 'control_plane', ?, NULL, 'deploy_test_pause', 100
+        )
+        """,
+        ("true" if paused else "false", datetime.now(timezone.utc).isoformat()),
+    )
+    trade = sqlite3.connect(state / "zeus_trades.db")
+    trade.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            chain_shares REAL,
+            chain_state TEXT NOT NULL
+        );
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            side TEXT NOT NULL,
+            state TEXT NOT NULL
+        );
+        """
+    )
+    return world, trade
+
+
+def _insert_claimable_edli_entry_backlog(
+    conn: sqlite3.Connection,
+    *,
+    event_id: str = "evt-paused-entry",
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, attempt_count,
+            claimed_at, processed_at, last_error, updated_at
+        ) VALUES ('edli_reactor_v1', ?, 'pending', 0, NULL, NULL, NULL, ?)
+        """,
+        (event_id, datetime.now(timezone.utc).isoformat()),
+    )
+
+
+def _publish_exact_held_sell_wake(state: Path, *, position_id: str):
+    from src.runtime import reactor_wake
+
+    wake_path = state / reactor_wake.REACTOR_WAKE_FILENAME
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id=position_id,
+        family=("Paris", "2026-08-02", "low"),
+        probability_content_identity=f"q-{position_id}",
+        held_token_id=f"token-{position_id}",
+        held_best_bid=0.22,
+        bid_observed_at="2026-08-02T19:00:00+00:00",
+    )
+    wake = reactor_wake.publish_reactor_wake(
+        source="test",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=wake_path,
+        held_sell_reauction_requests=(request,),
+    )
+    return wake_path, wake, request
+
+
+def test_deploy_live_paused_entry_backlog_is_explicitly_expected_parked(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_paused_entry_backlog", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "post-start EDLI queue expected parked" in detail
+    assert "durable_entries_paused=true" in detail
+    assert "canonical_open_exposure=0" in detail
+    assert "nonterminal_sell_commands=0" in detail
+    assert "held_sell_global_auction_debt=0" in detail
+
+
+def test_deploy_live_unpaused_entry_backlog_does_not_get_parked(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_unpaused_entry_backlog", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state, paused=False)
+    _insert_claimable_edli_entry_backlog(world)
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "expected_parked=durable_entries_paused=false" in detail
+
+
+def test_deploy_live_paused_entry_backlog_requires_post_start_freshness(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_paused_entry_unfresh", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=False,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "expected_parked=post_start_freshness=unverified" in detail
+
+
+def test_deploy_live_paused_entry_backlog_rejects_canonical_open_exposure(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_paused_entry_open_exposure", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    trade.executescript(
+        """
+        ALTER TABLE position_current ADD COLUMN shares REAL;
+        ALTER TABLE position_current ADD COLUMN cost_basis_usd REAL;
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, chain_shares, chain_state, shares, cost_basis_usd
+        ) VALUES ('pos-open', 'active', 7, 'synced', 7, 42)
+        """
+    )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "expected_parked=canonical_open_exposure=1" in detail
+
+
+def test_deploy_live_paused_entry_backlog_ignores_terminal_historical_exposure(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_paused_entry_terminal_economics", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    trade.executescript(
+        """
+        ALTER TABLE position_current ADD COLUMN shares REAL;
+        ALTER TABLE position_current ADD COLUMN cost_basis_usd REAL;
+        """
+    )
+    trade.executemany(
+        """
+        INSERT INTO position_current (
+            position_id, phase, chain_shares, chain_state, shares, cost_basis_usd
+        ) VALUES (?, ?, 7, 'synced', 7, 42)
+        """,
+        (
+            (f"terminal-{index}", phase)
+            for index, phase in enumerate(
+                ("settled",) * 1_587 + ("voided", "admin_closed", "economically_closed")
+            )
+        ),
+    )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "canonical_open_exposure=0" in detail
+
+
+def test_deploy_live_paused_entry_backlog_rejects_pending_fill_unknown_exposure(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_paused_entry_pending_unknown", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    trade.execute(
+        "INSERT INTO position_current VALUES ('pos-pending', 'pending_entry', 0, 'unknown')"
+    )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "expected_parked=canonical_open_exposure=1" in detail
+
+
+@pytest.mark.parametrize("phase", (None, "", "unknown", "unrecognized_phase"))
+def test_deploy_live_paused_entry_backlog_rejects_ungoverned_lifecycle_phase(
+    monkeypatch, tmp_path, phase
+):
+    dl = _load("deploy_live_paused_entry_ungoverned_phase", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    trade.execute(
+        "INSERT INTO position_current VALUES ('pos-ungoverned', ?, 0, 'closed_redeemed')",
+        (phase,),
+    )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "expected_parked=canonical_open_exposure=1" in detail
+
+
+def test_deploy_live_paused_entry_backlog_rejects_nonterminal_sell_debt(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_paused_entry_sell_debt", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    trade.execute("INSERT INTO venue_commands VALUES ('sell-open', 'SELL', 'POSTING')")
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "expected_parked=nonterminal_sell_commands=1" in detail
+
+
+def test_deploy_live_paused_entry_backlog_ignores_generic_global_auction_marker(
+    monkeypatch, tmp_path
+):
+    from src.runtime.reactor_wake import (
+        GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        REACTOR_WAKE_FILENAME,
+        publish_reactor_wake,
+    )
+
+    dl = _load("deploy_live_paused_entry_auction_debt", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    publish_reactor_wake(
+        source="test",
+        reason=GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=state / REACTOR_WAKE_FILENAME,
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "held_sell_global_auction_debt=0" in detail
+
+
+def test_deploy_live_paused_entry_backlog_rejects_any_queued_exact_held_sell_debt(
+    monkeypatch, tmp_path
+):
+    from src.runtime import reactor_wake
+
+    dl = _load("deploy_live_paused_entry_exact_held_debt", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    wake_path, completed_wake, completed_request = _publish_exact_held_sell_wake(
+        state, position_id="pos-completed"
+    )
+    _wake_path, outstanding_wake, outstanding_request = _publish_exact_held_sell_wake(
+        state, position_id="pos-outstanding"
+    )
+    completed_receipt = reactor_wake.HeldSellReauctionReceipt(
+        request_id=completed_request.request_id,
+        material_identity=completed_request.material_identity,
+        generation=completed_request.generation,
+        status=reactor_wake.POSITION_NO_LONGER_EXPOSED,
+        reason=reactor_wake.SELL_OBLIGATION_ENDED_BY_CANONICAL_CHAIN_ZERO,
+        lifecycle_phase="economically_closed",
+        chain_state="chain_confirmed_zero",
+        chain_shares=0.0,
+        schema_version=completed_request.schema_version,
+    )
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (completed_receipt,), path=wake_path
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        (completed_request,), path=wake_path)
+    assert not reactor_wake.held_sell_reauction_requests_completed(
+        (outstanding_request,), path=wake_path)
+    assert reactor_wake.exact_held_sell_completion_wake_ids(path=wake_path) == {
+        completed_wake.wake_id,
+        outstanding_wake.wake_id,
+    }
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "expected_parked=held_sell_global_auction_debt=2" in detail
+
+
+@pytest.mark.parametrize(
+    ("surface", "expected"),
+    (("malformed_legacy", "EDLI_EXPECTED_PARKED_WAKE_SURFACE_INVALID"),
+     ("malformed_queue", "EDLI_EXPECTED_PARKED_WAKE_SURFACE_INVALID"),
+     ("unreadable", "EDLI_EXPECTED_PARKED_WAKE_SURFACE_UNREADABLE")),
+)
+def test_deploy_live_paused_entry_backlog_rejects_invalid_wake_surface(
+    monkeypatch, tmp_path, surface, expected
+):
+    dl = _load("deploy_live_paused_entry_invalid_wake", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    wake_path = state / "edli-reactor-wake.json"
+    if surface == "malformed_legacy":
+        wake_path.write_text("{not-json", encoding="utf-8")
+    elif surface == "malformed_queue":
+        queue_dir = state / "edli-reactor-wake.json.d"
+        queue_dir.mkdir()
+        (queue_dir / "malformed.json").write_text("{not-json", encoding="utf-8")
+    else:
+        from src.runtime import reactor_wake
+
+        reactor_wake.publish_reactor_wake(
+            source="test",
+            reason="forecast_posterior_advanced",
+            path=wake_path,
+        )
+
+        def unreadable_wake(*_args, **_kwargs):
+            raise OSError("test unreadable wake")
+
+        monkeypatch.setattr(
+            reactor_wake, "_read_reactor_wake_path", unreadable_wake
+        )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert expected in detail
+
+
+def test_deploy_live_paused_entry_backlog_rejects_unknown_pause_authority(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_paused_entry_unknown_pause", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world = _init_edli_queue_db(state / "zeus-world.db")
+    _insert_claimable_edli_entry_backlog(world)
+    world.commit()
+    world.close()
+    trade = sqlite3.connect(state / "zeus_trades.db")
+    trade.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY, phase TEXT,
+            chain_shares REAL, chain_state TEXT
+        );
+        CREATE TABLE venue_commands (command_id TEXT PRIMARY KEY, side TEXT, state TEXT);
+        """
+    )
+    trade.commit()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "EDLI_EXPECTED_PARKED_PAUSE_UNREADABLE:missing_table" in detail
+
+
 def test_deploy_live_monitor_wait_budget_covers_runtime_coverage_contract(
     monkeypatch,
 ):
@@ -3363,6 +3864,7 @@ def test_deploy_live_post_start_edli_queue_wait_rejects_stale_processing_claim(
 
     ok, detail = dl._wait_for_post_start_edli_queue_progress(
         launched_after=launched,
+        post_start_freshness_verified=True,
         timeout_seconds=0,
     )
 
@@ -3398,6 +3900,7 @@ def test_deploy_live_post_start_edli_queue_wait_accepts_reclaimed_claim(
 
     ok, detail = dl._wait_for_post_start_edli_queue_progress(
         launched_after=launched,
+        post_start_freshness_verified=True,
         timeout_seconds=0,
     )
 
@@ -3463,6 +3966,7 @@ def test_deploy_live_post_start_edli_queue_wait_accepts_complete_auction_receipt
 
     ok, detail = dl._wait_for_post_start_edli_queue_progress(
         launched_after=launched,
+        post_start_freshness_verified=True,
         timeout_seconds=0,
     )
 
@@ -3499,6 +4003,7 @@ def test_deploy_live_post_start_edli_queue_wait_skips_future_retry_floor(
 
     ok, detail = dl._wait_for_post_start_edli_queue_progress(
         launched_after=launched,
+        post_start_freshness_verified=True,
         timeout_seconds=0,
     )
 
@@ -3547,7 +4052,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         return True, "post-start monitor cadence verified"
 
     def _queue(**kwargs):
-        calls.append(("queue", "post-start"))
+        calls.append(("queue", kwargs["post_start_freshness_verified"]))
         return True, "post-start EDLI queue progress verified"
 
     def _resume(labels):
@@ -3596,7 +4101,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         ("verify", "cccccccc"),
         ("launch", heartbeat_supervisor),
         ("monitor", "post-start"),
-        ("queue", "post-start"),
+        ("queue", True),
         ("resume_entries", tuple(expanded_labels)),
     ]
     assert "live restart preflight passed" in capsys.readouterr().out
@@ -4049,7 +4554,10 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     monkeypatch.setattr(
         dl,
         "_wait_for_post_start_edli_queue_progress",
-        lambda **kwargs: (calls.append(("queue", "post-start")) or (True, "queue verified")),
+        lambda **kwargs: (
+            calls.append(("queue", kwargs["post_start_freshness_verified"]))
+            or (True, "queue verified")
+        ),
     )
     monkeypatch.setattr(
         dl,
@@ -4060,6 +4568,11 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
         dl,
         "_live_restart_exclusive_lock",
         contextlib.nullcontext,
+    )
+    monkeypatch.setattr(
+        dl,
+        "_resume_entries_after_verified_live_restart_if_needed",
+        lambda labels: (calls.append(("resume_entries", tuple(labels))) or (True, "resumed")),
     )
 
     rc = dl.main(["restart", "all"])
@@ -4087,9 +4600,9 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     assert calls.index(("verify", "dddddddd")) < heartbeat_launch_index
     assert heartbeat_launch_index < calls.index(("monitor", "post-start"))
     assert calls.index(("verify", "dddddddd")) > live_launch_index
-    assert calls.index(("queue", "post-start")) > calls.index(("verify", "dddddddd"))
+    assert calls.index(("queue", True)) > calls.index(("verify", "dddddddd"))
     assert calls.index(("monitor", "post-start")) > calls.index(("verify", "dddddddd"))
-    assert calls.index(("monitor", "post-start")) < calls.index(("queue", "post-start"))
+    assert calls.index(("monitor", "post-start")) < calls.index(("queue", True))
     preflight_launches = [
         call for call in calls[recovery_index:preflight_index]
         if call[0] == "launch"

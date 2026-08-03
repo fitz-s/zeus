@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-02; last_reused=2026-08-02
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
@@ -54,6 +54,7 @@ import json
 import os
 import plistlib
 import sqlite3
+import stat
 import subprocess
 import sys
 import textwrap
@@ -71,6 +72,7 @@ from src.ops.edli_queue import (
     collect_edli_queue_evidence,
 )
 from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+from src.state.db import query_control_override_state
 from src.control.runtime_code_plane import is_runtime_code_path
 
 LIVE_TRADING_PLIST = (
@@ -623,9 +625,17 @@ def _wait_for_post_start_monitor_cadence(
 def _wait_for_post_start_edli_queue_progress(
     *,
     launched_after: datetime,
+    post_start_freshness_verified: bool,
     timeout_seconds: float = LIVE_EDLI_QUEUE_VERIFY_TIMEOUT_SECONDS,
 ) -> tuple[bool, str]:
-    """Wait until the EDLI reactor proves it can move claimable queue work."""
+    """Wait for EDLI queue progress, or prove paused entry work is intentionally parked.
+
+    SCOPE: only an EDLI entry backlog while the durable global entries gate is
+    active. DRAIN: resume entries, or let the reactor claim/terminalize work.
+    RESET: a canonical held exposure, non-terminal SELL command, held-SELL
+    global-auction debt, stale claim, unreadable pause state, or missing
+    post-start freshness proof immediately restores the ordinary progress gate.
+    """
 
     state_dir = Path(_require_live_repo()) / "state"
     world_db = state_dir / "zeus-world.db"
@@ -678,6 +688,16 @@ def _wait_for_post_start_edli_queue_progress(
                         f"scope_families={scope_count} "
                         f"claimable_pending={claimable_pending_count}",
                     )
+                if claimable_work_count > 0:
+                    parked_ok, parked_detail = _paused_entry_backlog_is_expected_parked(
+                        world_db=world_db,
+                        trade_db=trade_db,
+                        state_dir=state_dir,
+                        queue=queue,
+                        post_start_freshness_verified=post_start_freshness_verified,
+                    )
+                    if parked_ok:
+                        return True, parked_detail
                 if claimable_work_count == 0:
                     if progressed_count > 0:
                         return (
@@ -704,6 +724,8 @@ def _wait_for_post_start_edli_queue_progress(
                     f"progressed_after_launch={progressed_count} "
                     f"launched_floor={launched_floor.isoformat()}"
                 )
+                if claimable_work_count > 0:
+                    last_detail += f" expected_parked={parked_detail}"
         except Exception as exc:  # noqa: BLE001
             last_detail = f"EDLI queue read failed: {type(exc).__name__}: {exc}"
 
@@ -714,6 +736,260 @@ def _wait_for_post_start_edli_queue_progress(
                 + last_detail,
             )
         time.sleep(LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS)
+
+
+def _paused_entry_backlog_is_expected_parked(
+    *,
+    world_db: Path,
+    trade_db: Path,
+    state_dir: Path,
+    queue: dict[str, object],
+    post_start_freshness_verified: bool,
+) -> tuple[bool, str]:
+    """Return whether a claimable EDLI entry backlog is safe to leave parked.
+
+    This is deliberately an acceptance exception, not a queue mutation or an
+    event-type filter. Every authority input is canonical: the WORLD durable
+    pause projection, TRADE position/command projections, and the durable
+    held-SELL wake queue. Any unreadable required surface raises so the caller
+    remains fail-closed rather than treating it as empty debt.
+    """
+
+    stale_processing_count = int(queue.get("stale_processing_count") or 0)
+    if stale_processing_count:
+        return False, f"stale_processing={stale_processing_count}"
+    if not post_start_freshness_verified:
+        return False, "post_start_freshness=unverified"
+
+    pause = _durable_entries_pause_state(world_db)
+    pause_status = str(pause.get("status") or "unknown")
+    if pause_status != "ok":
+        raise RuntimeError(f"EDLI_EXPECTED_PARKED_PAUSE_UNREADABLE:{pause_status}")
+    if not bool(pause.get("entries_paused")):
+        return False, "durable_entries_paused=false"
+
+    exposure_count = _canonical_open_exposure_count(trade_db)
+    if exposure_count:
+        return False, f"canonical_open_exposure={exposure_count}"
+
+    nonterminal_sell_count = _nonterminal_sell_command_count(trade_db)
+    if nonterminal_sell_count:
+        return False, f"nonterminal_sell_commands={nonterminal_sell_count}"
+
+    held_sell_debt_count = _held_sell_global_auction_debt_count(state_dir)
+    if held_sell_debt_count:
+        return False, f"held_sell_global_auction_debt={held_sell_debt_count}"
+
+    return (
+        True,
+        "post-start EDLI queue expected parked: "
+        "durable_entries_paused=true canonical_open_exposure=0 "
+        "nonterminal_sell_commands=0 held_sell_global_auction_debt=0 "
+        "stale_processing=0 post_start_freshness=verified "
+        f"claimable_pending={int(queue.get('claimable_pending_count') or 0)}",
+    )
+
+
+def _durable_entries_pause_state(world_db: Path) -> dict[str, object]:
+    """Read the current WORLD pause authority from a separate read-only handle."""
+
+    try:
+        conn = sqlite3.connect(f"file:{world_db}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        required_columns = {
+            "override_id", "target_type", "target_key", "action_type", "value",
+            "issued_by", "issued_at", "effective_until", "reason", "precedence",
+        }
+        try:
+            columns = _sqlite_table_columns(conn, "control_overrides")
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "EDLI_EXPECTED_PARKED_PAUSE_UNREADABLE:missing_table"
+            ) from exc
+        if not required_columns.issubset(columns):
+            raise RuntimeError(
+                "EDLI_EXPECTED_PARKED_PAUSE_UNREADABLE:projection_columns"
+            )
+        return dict(query_control_override_state(conn))
+    except sqlite3.Error as exc:
+        raise RuntimeError("EDLI_EXPECTED_PARKED_PAUSE_UNREADABLE:sqlite_error") from exc
+    finally:
+        try:
+            conn.close()
+        except UnboundLocalError:
+            pass
+
+
+def _canonical_open_exposure_count(trade_db: Path) -> int:
+    """Count only open-lifecycle positions that can still require a SELL lane."""
+
+    from src.contracts.position_truth import NO_CURRENT_MONEY_RISK_CHAIN_STATES
+
+    if not trade_db.exists():
+        raise RuntimeError("EDLI_EXPECTED_PARKED_TRADE_DB_MISSING")
+    try:
+        conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
+        columns = _sqlite_table_columns(conn, "position_current")
+        required = {"phase", "chain_state", "chain_shares"}
+        if not required.issubset(columns):
+            raise RuntimeError("EDLI_EXPECTED_PARKED_POSITION_PROJECTION_UNREADABLE")
+        no_risk_states = sorted(NO_CURRENT_MONEY_RISK_CHAIN_STATES)
+        no_risk_placeholders = ", ".join("?" for _ in no_risk_states)
+        governed_phases = (
+            "pending_entry",
+            "active",
+            "day0_window",
+            "pending_exit",
+            "economically_closed",
+            "settled",
+            "voided",
+            "admin_closed",
+        )
+        governed_phase_placeholders = ", ".join("?" for _ in governed_phases)
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*)
+             FROM position_current
+             WHERE LOWER(TRIM(COALESCE(phase, ''))) NOT IN ({governed_phase_placeholders})
+                OR LOWER(TRIM(COALESCE(phase, ''))) IN (
+                    'active', 'day0_window', 'pending_exit'
+                )
+                OR (
+                    LOWER(TRIM(COALESCE(phase, ''))) = 'pending_entry'
+                    AND (
+                        COALESCE(chain_shares, 0) > 0.000001
+                        OR LOWER(COALESCE(chain_state, 'unknown')) NOT IN ({no_risk_placeholders})
+                    )
+                )
+            """,
+            (*governed_phases, *no_risk_states),
+        ).fetchone()
+        return int(row[0] or 0)
+    except sqlite3.Error as exc:
+        raise RuntimeError("EDLI_EXPECTED_PARKED_POSITION_PROJECTION_UNREADABLE") from exc
+    finally:
+        try:
+            conn.close()
+        except UnboundLocalError:
+            pass
+
+
+def _nonterminal_sell_command_count(trade_db: Path) -> int:
+    """Count canonical SELL commands still able to require venue recovery."""
+
+    from src.execution.command_bus import TERMINAL_STATES
+
+    try:
+        conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
+        columns = _sqlite_table_columns(conn, "venue_commands")
+        if not {"side", "state"}.issubset(columns):
+            raise RuntimeError("EDLI_EXPECTED_PARKED_COMMAND_PROJECTION_UNREADABLE")
+        terminal_states = sorted(
+            {state.value for state in TERMINAL_STATES} | {"CANCELED", "FAILED"}
+        )
+        placeholders = ", ".join("?" for _ in terminal_states)
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*)
+              FROM venue_commands
+             WHERE UPPER(COALESCE(side, '')) = 'SELL'
+               AND UPPER(COALESCE(state, '')) NOT IN ({placeholders})
+            """,
+            tuple(terminal_states),
+        ).fetchone()
+        return int(row[0] or 0)
+    except sqlite3.Error as exc:
+        raise RuntimeError("EDLI_EXPECTED_PARKED_COMMAND_PROJECTION_UNREADABLE") from exc
+    finally:
+        try:
+            conn.close()
+        except UnboundLocalError:
+            pass
+
+
+def _held_sell_global_auction_debt_count(state_dir: Path) -> int:
+    """Return exact held-SELL debt using the reactor's public queue semantics."""
+
+    from src.runtime.reactor_wake import (
+        GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        REACTOR_WAKE_FILENAME,
+        REACTOR_WAKE_QUEUE_SUFFIX,
+        _read_reactor_wake_path,
+    )
+
+    wake_path = state_dir / REACTOR_WAKE_FILENAME
+    queue_dir = wake_path.with_name(f"{wake_path.name}{REACTOR_WAKE_QUEUE_SUFFIX}")
+    wakes = _strict_reactor_wake_snapshot(
+        wake_path=wake_path,
+        queue_dir=queue_dir,
+        read_wake=_read_reactor_wake_path,
+    )
+    return len(
+        {
+            wake.wake_id
+            for wake in wakes
+            if (
+                wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+                and wake.held_sell_reauction_requests
+            )
+        }
+    )
+
+
+def _strict_reactor_wake_snapshot(
+    *,
+    wake_path: Path,
+    queue_dir: Path,
+    read_wake,
+):
+    """Read each present wake file once; missing surfaces are a valid empty queue."""
+
+    def validate(wake_file: Path):
+        try:
+            if not stat.S_ISREG(wake_file.stat().st_mode):
+                raise RuntimeError("EDLI_EXPECTED_PARKED_WAKE_SURFACE_INVALID")
+            # Public snapshots intentionally suppress parse failures.  Reuse the
+            # reactor's strict parser so acceptance cannot turn corruption into zero debt.
+            wake = read_wake(wake_file, fail_on_error=True)
+        except OSError as exc:
+            raise RuntimeError("EDLI_EXPECTED_PARKED_WAKE_SURFACE_UNREADABLE") from exc
+        except ValueError as exc:
+            raise RuntimeError("EDLI_EXPECTED_PARKED_WAKE_SURFACE_INVALID") from exc
+        if wake is None:
+            raise RuntimeError("EDLI_EXPECTED_PARKED_WAKE_SURFACE_UNREADABLE")
+        return wake
+
+    wakes = []
+    try:
+        wake_path.stat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise RuntimeError("EDLI_EXPECTED_PARKED_WAKE_SURFACE_UNREADABLE") from exc
+    else:
+        wakes.append(validate(wake_path))
+
+    try:
+        if not stat.S_ISDIR(queue_dir.stat().st_mode):
+            raise RuntimeError("EDLI_EXPECTED_PARKED_WAKE_SURFACE_INVALID")
+        queue_files = tuple(
+            path for path in queue_dir.iterdir() if path.suffix == ".json"
+        )
+    except FileNotFoundError:
+        return tuple(wakes)
+    except OSError as exc:
+        raise RuntimeError("EDLI_EXPECTED_PARKED_WAKE_SURFACE_UNREADABLE") from exc
+    for queue_file in queue_files:
+        wakes.append(validate(queue_file))
+    return tuple(wakes)
+
+
+def _sqlite_table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    columns = {str(row[1]) for row in rows}
+    if not columns:
+        raise RuntimeError(f"EDLI_EXPECTED_PARKED_TABLE_MISSING:{table}")
+    return columns
 
 
 def _latest_complete_global_auction_receipt(
@@ -1617,6 +1893,7 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
                 else:
                     queue_ok, queue_detail = _wait_for_post_start_edli_queue_progress(
                         launched_after=launched_after,
+                        post_start_freshness_verified=(runtime_ok and monitor_ok),
                     )
                     print(queue_detail)
                     if not queue_ok:
