@@ -1511,7 +1511,8 @@ def test_madrid_partial_exit_realized_pnl_is_canonical_and_settlement_adds_resid
     reduction_payload = json.loads(reduction["payload_json"])
     assert reduction_payload["semantic_event"] == "CAPITAL_REDUCTION_FILLED"
     assert reduction_payload["fill_identity"] == (
-        "economic-fill:v1:cmd-capital-reduction:trade-capital-reduction"
+        "economic-fill:v2:cmd-capital-reduction:ord-capital-reduction:"
+        "trade-capital-reduction"
     )
     assert reduction_payload["economic_fill_identity"] == reduction_payload["fill_identity"]
     assert reduction_payload["economic_fill_cumulative_shares"] == "2.5"
@@ -1671,6 +1672,52 @@ def test_partial_exit_economic_fill_fold_dedups_tx_and_edli_aliases(conn):
     assert [(fill.trade_id, fill.quantity, fill.unit_price) for fill in fills] == [
         ("child-trade", Decimal("3"), Decimal("0.61"))
     ]
+
+
+def test_partial_exit_economic_fill_requires_command_order_binding(conn):
+    from src.state.fill_dedup import economic_exit_fills_for_position
+    from src.state.venue_command_repo import append_trade_fact
+
+    command_id = "cmd-partial-exit-order-binding"
+    order_id = "ord-partial-exit-order-binding"
+    position_id = "pos-partial-exit-order-binding"
+    _insert_exit_command(
+        conn,
+        command_id=command_id,
+        position_id=position_id,
+        token_id=NO_TOKEN,
+        size=3.0,
+        price=0.61,
+        venue_order_id=order_id,
+    )
+    for trade_id, observed_order_id in (
+        ("trade-wrong-order", "ord-other"),
+        ("trade-canonical-order", order_id),
+    ):
+        append_trade_fact(
+            conn,
+            trade_id=trade_id,
+            venue_order_id=observed_order_id,
+            command_id=command_id,
+            state="CONFIRMED",
+            filled_size="1",
+            fill_price="0.61",
+            source="REST",
+            observed_at=_NOW.isoformat(),
+            raw_payload_hash=("1" if observed_order_id == order_id else "2") * 64,
+            raw_payload_json={"trade_id": trade_id},
+            tx_hash=f"0x{trade_id}",
+        )
+
+    fills = economic_exit_fills_for_position(conn, position_id)
+
+    assert [(fill.trade_id, fill.venue_order_id) for fill in fills] == [
+        ("trade-canonical-order", order_id)
+    ]
+    assert fills[0].identity == (
+        "economic-fill:v2:cmd-partial-exit-order-binding:"
+        "ord-partial-exit-order-binding:trade-canonical-order"
+    )
 
 
 def test_partial_exit_fold_keeps_legacy_connection_settlement_compatible():
@@ -2539,6 +2586,7 @@ def test_resolver_partial_exit_debt_rolls_back_whole_settlement_row(
 ):
     """A later debt must not partially settle an earlier position in the row."""
     from src.execution import harvester_pnl_resolver
+    from src.state import decision_chain
     from src.engine.lifecycle_events import build_position_current_projection
     from src.state.portfolio import PortfolioState, Position
     from src.state.projection import upsert_position_current
@@ -2721,6 +2769,42 @@ def test_resolver_partial_exit_debt_rolls_back_whole_settlement_row(
         )
         conn.commit()
 
+        real_store_settlement_records = decision_chain.store_settlement_records
+
+        def write_then_fail(conn_arg, records, *, source):
+            real_store_settlement_records(conn_arg, records, source=source)
+            raise RuntimeError("forced settlement record failure")
+
+        monkeypatch.setattr(
+            decision_chain, "store_settlement_records", write_then_fail
+        )
+        failed_record_write = harvester_pnl_resolver.resolve_pnl_for_settled_markets(
+            conn, forecasts_conn
+        )
+        assert failed_record_write["positions_settled"] == 0
+        assert failed_record_write["decision_log_rows_written"] == 0
+        assert failed_record_write["errors"] == 1
+        assert tracker.settlement_count == 0
+        assert [position.state for position in portfolio.positions] == [
+            "holding", "holding"
+        ]
+        for trade_id in (first.trade_id, second.trade_id):
+            assert conn.execute(
+                "SELECT phase FROM position_current WHERE position_id = ?",
+                (trade_id,),
+            ).fetchone()[0] == "active"
+            assert conn.execute(
+                "SELECT COUNT(*) FROM position_events "
+                "WHERE position_id = ? AND event_type = 'SETTLED'",
+                (trade_id,),
+            ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM decision_log WHERE mode = 'settlement'"
+        ).fetchone()[0] == 0
+
+        monkeypatch.setattr(
+            decision_chain, "store_settlement_records", real_store_settlement_records
+        )
         retry = harvester_pnl_resolver.resolve_pnl_for_settled_markets(
             conn, forecasts_conn
         )

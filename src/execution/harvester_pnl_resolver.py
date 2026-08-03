@@ -363,6 +363,10 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
 
     positions_settled = 0
     errors = 0
+    batch_portfolio_snapshot = copy.deepcopy(portfolio.__dict__)
+    batch_tracker_snapshot = copy.deepcopy(getattr(tracker, "__dict__", {}))
+    batch_savepoint = "harvester_pnl_resolver_batch"
+    trade_conn.execute(f"SAVEPOINT {batch_savepoint}")
 
     for row_index, row in enumerate(rows):
         city_name = _row_value(row, "city", 0, "")
@@ -484,7 +488,20 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
             decision_log_rows_written = len(settlement_records)
         except Exception as exc:
             logger.error("harvester_pnl_resolver: store_settlement_records failed: %s", exc)
+            trade_conn.execute(f"ROLLBACK TO SAVEPOINT {batch_savepoint}")
+            trade_conn.execute(f"RELEASE SAVEPOINT {batch_savepoint}")
+            portfolio.__dict__.clear()
+            portfolio.__dict__.update(batch_portfolio_snapshot)
+            tracker.__dict__.clear()
+            tracker.__dict__.update(batch_tracker_snapshot)
+            settlement_records.clear()
+            positions_settled = 0
+            tracker_dirty = False
             errors += 1
+        else:
+            trade_conn.execute(f"RELEASE SAVEPOINT {batch_savepoint}")
+    else:
+        trade_conn.execute(f"RELEASE SAVEPOINT {batch_savepoint}")
 
     # DT#1 / INV-17: DB commits first, then JSON exports.
     _portfolio_settled = positions_settled > 0

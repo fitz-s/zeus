@@ -376,6 +376,9 @@ def economic_exit_fills_for_position(
               JOIN venue_commands cmd ON cmd.command_id = fact.command_id
              WHERE cmd.position_id = ?
                AND UPPER(COALESCE(cmd.intent_kind, '')) = 'EXIT'
+               AND LOWER(COALESCE(fact.venue_order_id, '')) =
+                   LOWER(COALESCE(cmd.venue_order_id, ''))
+               AND COALESCE(cmd.venue_order_id, '') <> ''
                AND UPPER(COALESCE(fact.state, '')) IN ('MATCHED', 'MINED', 'CONFIRMED')
                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
                AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
@@ -398,16 +401,20 @@ def economic_exit_fills_for_position(
                 f"partial EXIT canonical fill has invalid economics: position_id={position_id}"
             )
         command_id = str(row["command_id"] or "")
+        canonical_order_id = str(row["venue_order_id"] or "")
         trade_id = str(row["trade_id"] or "")
-        if not command_id or not trade_id:
+        if not command_id or not canonical_order_id or not trade_id:
             raise PartialExitEconomicDebtError(
                 f"partial EXIT canonical fill identity missing: position_id={position_id}"
             )
         fills.append(
             EconomicExitFill(
-                identity=f"economic-fill:v1:{command_id}:{trade_id.lower()}",
+                identity=(
+                    f"economic-fill:v2:{command_id}:"
+                    f"{canonical_order_id.lower()}:{trade_id.lower()}"
+                ),
                 command_id=command_id,
-                venue_order_id=str(row["venue_order_id"] or ""),
+                venue_order_id=canonical_order_id,
                 trade_id=trade_id,
                 quantity=quantity,
                 unit_price=unit_price,
