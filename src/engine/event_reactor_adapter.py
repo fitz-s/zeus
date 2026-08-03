@@ -7276,7 +7276,12 @@ def event_bound_live_adapter_from_trade_conn(
                             metric=str(metric).lower(),
                         )
                     )
-                paused_held_family_keys = frozenset(held_family_keys)
+                # ``None`` means the global batch is unrestricted by an exact
+                # held-family carrier.  An empty set is not a valid restricted
+                # scope: under entry pause, zero held families must reach the
+                # ordinary reduce-only no-trade result instead of raising and
+                # requeueing every forecast event forever.
+                paused_held_family_keys = frozenset(held_family_keys) or None
             except Exception:  # noqa: BLE001 - global runtime retains its own fail-closed read
                 logging.getLogger(__name__).warning(
                     "paused held-family restriction read failed; retaining runtime held-only gate",

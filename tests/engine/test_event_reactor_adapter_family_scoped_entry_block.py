@@ -1,6 +1,6 @@
 # Created: 2026-07-25
-# Last reused or audited: 2026-07-29
-# Lifecycle: created=2026-07-25; last_reviewed=2026-07-29; last_reused=2026-07-29
+# Last reused or audited: 2026-08-02
+# Lifecycle: created=2026-07-25; last_reviewed=2026-08-02; last_reused=2026-08-02
 # Authority basis: 7-day production block-event audit -- one stuck EDLI order
 #   was blocking new-entry BUY admission for every family (32,763 blocking
 #   instances, 20.97h/7d). This narrows the adapter-level gate
@@ -231,7 +231,11 @@ def test_paused_held_batch_wires_exact_held_family_restriction(monkeypatch):
         captured.update(kwargs)
         return SimpleNamespace(events=tuple(events), winner_event_id=None, receipts={})
 
-    monkeypatch.setattr(global_batch_runtime, "process_current_global_batch", fake_process)
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        fake_process,
+    )
     monkeypatch.setattr(
         era,
         "_entry_pause_blocks_live_submit",
@@ -253,6 +257,40 @@ def test_paused_held_batch_wires_exact_held_family_restriction(monkeypatch):
     assert captured["buy_candidates_enabled"] is False
     assert captured["restrict_to_family_keys"] == frozenset({FAMILY_A})
     assert captured["restrict_to_family_keys"].isdisjoint({FAMILY_B})
+
+
+def test_paused_zero_held_batch_uses_unrestricted_reduce_only_no_trade(monkeypatch):
+    from src.engine import global_batch_runtime
+
+    captured = {}
+
+    def fake_process(events, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(events=tuple(events), winner_event_id=None, receipts={})
+
+    monkeypatch.setattr(global_batch_runtime, "process_current_global_batch", fake_process)
+    monkeypatch.setattr(
+        era,
+        "_entry_pause_blocks_live_submit",
+        lambda _conn: "operator_pause",
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        sqlite3.connect(":memory:"),
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=sqlite3.connect(":memory:"),
+        topology_conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
+        auction_capital_authority=SimpleNamespace(),
+        held_family_provider=lambda: frozenset(),
+    )
+
+    adapter.process_global_batch(
+        (_make_event(city="Dallas", target_date="2026-07-25", metric="high"),),
+        NOW,
+    )
+
+    assert captured["buy_candidates_enabled"] is False
+    assert captured["restrict_to_family_keys"] is None
 
 
 def test_pause_race_final_submit_gate_has_zero_venue_side_effect(monkeypatch):
