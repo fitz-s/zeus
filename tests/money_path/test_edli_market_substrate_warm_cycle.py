@@ -2099,6 +2099,144 @@ def _patch_priority_cycle_runtime(monkeypatch, control_query):
     _enable_edli_cfg(monkeypatch, enabled=True)
 
 
+def _patch_warm_cycle_runtime(monkeypatch, control_query):
+    import src.state.db as state_db
+
+    monkeypatch.setattr(state_db, "get_world_connection", lambda: _FakeConn())
+    monkeypatch.setattr(
+        state_db, "get_forecasts_connection_read_only", lambda: _FakeConn(), raising=False
+    )
+    monkeypatch.setattr(state_db, "query_control_override_state", control_query)
+    monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    monkeypatch.setattr(
+        "src.data.job_lock.acquire_lock",
+        lambda _name: contextlib.nullcontext(True),
+    )
+    _enable_edli_cfg(monkeypatch, enabled=True)
+
+
+def test_market_substrate_warm_cycle_pause_suppression_resets_next_tick(monkeypatch):
+    """Trusted pause suppresses pending urgency promotion for only the current tick."""
+
+    calls: list[dict] = []
+    control_reads: list[str] = []
+    control_states = iter(
+        (
+            {"status": "ok", "entries_paused": True},
+            {"status": "ok", "entries_paused": False},
+        )
+    )
+
+    def control_query(_conn, *, now):
+        control_reads.append(now)
+        return next(control_states)
+
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k)
+        or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_warm_cycle_runtime(monkeypatch, control_query)
+
+    paused_result = substrate_observer._edli_market_substrate_warm_cycle()
+    resumed_result = substrate_observer._edli_market_substrate_warm_cycle()
+
+    assert len(control_reads) == 2
+    assert all(now.endswith("+00:00") for now in control_reads)
+    assert [call["promote_pending_urgency"] for call in calls] == [False, True]
+    assert all(call["include_pending_families"] is True for call in calls)
+    assert all(call["include_money_risk_families"] is False for call in calls)
+    assert paused_result["pending_urgency_promotion_suppressed"] is True
+    assert paused_result["pending_urgency_promotion_suppression_reason"] == "entries_paused"
+    assert paused_result["control_authority_status"] == "ok"
+    assert paused_result["control_authority_degraded"] is False
+    assert resumed_result["pending_urgency_promotion_suppressed"] is False
+    assert resumed_result["pending_urgency_promotion_suppression_reason"] is None
+    assert resumed_result["control_authority_status"] == "ok"
+    assert resumed_result["control_authority_degraded"] is False
+
+
+@pytest.mark.parametrize("control_mode", ["exception", "non_ok"])
+def test_market_substrate_warm_cycle_control_degraded_promotes_pending_urgency(
+    monkeypatch, control_mode
+):
+    """Unavailable control authority fails open for pending evidence priority."""
+
+    calls: list[dict] = []
+
+    def control_query(_conn, *, now):
+        if control_mode == "exception":
+            raise RuntimeError("control read failed")
+        return {"status": "degraded", "entries_paused": True}
+
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k)
+        or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_warm_cycle_runtime(monkeypatch, control_query)
+
+    result = substrate_observer._edli_market_substrate_warm_cycle()
+
+    assert calls and calls[0]["promote_pending_urgency"] is True
+    assert result["pending_urgency_promotion_suppressed"] is False
+    assert result["control_authority_degraded"] is True
+    if control_mode == "exception":
+        assert result["control_authority_status"] == "unavailable"
+        assert result["control_authority_reason"] == "control_authority_unavailable"
+    else:
+        assert result["control_authority_status"] == "degraded"
+        assert result["control_authority_reason"] == "control_authority_non_ok:degraded"
+
+
+@pytest.mark.parametrize(
+    ("control_state", "expected_status", "expected_reason"),
+    [
+        (None, "unavailable", "control_authority_unavailable"),
+        ({"status": "ok"}, "ok", "control_authority_malformed:entries_paused"),
+        (
+            {"status": "ok", "entries_paused": "true"},
+            "ok",
+            "control_authority_malformed:entries_paused",
+        ),
+        (
+            {"status": "missing_table", "entries_paused": False},
+            "missing_table",
+            "control_authority_non_ok:missing_table",
+        ),
+    ],
+    ids=("non-dict", "missing-entries-paused", "string-true", "missing-table"),
+)
+def test_market_substrate_warm_cycle_malformed_control_fails_open_exactly(
+    monkeypatch, control_state, expected_status, expected_reason
+):
+    """Malformed or missing control authority cannot suppress evidence refresh."""
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *a, **k: calls.append(k)
+        or {"status": "refreshed", "attempted": 1, "inserted": 1},
+    )
+    _patch_warm_cycle_runtime(
+        monkeypatch,
+        lambda _conn, *, now: control_state,
+    )
+
+    result = substrate_observer._edli_market_substrate_warm_cycle()
+
+    assert calls and calls[0]["promote_pending_urgency"] is True
+    assert result["promote_pending_urgency"] is True
+    assert result["pending_urgency_promotion_suppressed"] is False
+    assert result["pending_urgency_promotion_suppression_reason"] is None
+    assert result["control_authority_degraded"] is True
+    assert result["control_authority_status"] == expected_status
+    assert result["control_authority_reason"] == expected_reason
+
+
 def test_money_path_priority_cycle_suppresses_claim_families_when_entries_paused(monkeypatch):
     """Trusted global entry pause suppresses only claim-derived family promotion."""
 
@@ -3098,6 +3236,395 @@ def test_priority_family_expands_to_condition_priority_for_captured_books(monkey
     assert result["status"] == "refreshed"
     assert result["priority_condition_ids_requested"] == 2
     assert set(captured_kwargs[0]["priority_condition_ids"]) == {"cond-30", "cond-31"}
+
+
+def test_paused_pending_urgency_stays_discoverable_without_priority_marker(monkeypatch):
+    """Urgent pending work falls back to ordinary capture and resumes priority next tick."""
+
+    family = ("Tokyo", "2026-08-04", "high")
+    world_conn = _pending_family_conn("event-urgent", *family)
+    world_conn.execute(
+        "UPDATE opportunity_events SET event_type = 'EDLI_REDECISION_PENDING'"
+    )
+    before_event_rows = world_conn.execute(
+        """
+        SELECT event_id, event_type, payload_json, created_at
+          FROM opportunity_events
+         ORDER BY event_id
+        """
+    ).fetchall()
+    before_attempt_rows = world_conn.execute(
+        """
+        SELECT event_id, processing_status, attempt_count, claimed_at, last_error
+          FROM opportunity_event_processing
+         ORDER BY event_id
+        """
+    ).fetchall()
+    forecasts_conn = _FakeConn()
+    write_conn = _FakeConn()
+    topology_rows = [
+        {
+            "market_slug": "highest-temperature-in-tokyo-on-august-4-2026",
+            "city": "Tokyo",
+            "target_date": "2026-08-04",
+            "temperature_metric": "high",
+            "condition_id": "cond-tokyo-34",
+            "token_id": "yes-tokyo-34",
+            "range_label": "34C",
+        }
+    ]
+    cached_market = {
+        "slug": "highest-temperature-in-tokyo-on-august-4-2026",
+        "city": SimpleNamespace(name="Tokyo"),
+        "target_date": "2026-08-04",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "condition_id": "cond-tokyo-34",
+                "market_id": "cond-tokyo-34",
+                "token_id": "yes-tokyo-34",
+                "no_token_id": "no-tokyo-34",
+                "question_id": "q-tokyo-34",
+            }
+        ],
+    }
+
+    import src.data.market_topology_rows as topology_rows_module
+    import src.data.polymarket_client as polymarket_client
+    import src.state.db as state_db
+
+    monkeypatch.setattr(
+        topology_rows_module,
+        "_event_family_market_topology_rows",
+        lambda *a, **k: topology_rows,
+    )
+    monkeypatch.setattr(
+        market_scanner,
+        "reconstruct_weather_market_from_static_topology",
+        lambda *a, **k: cached_market,
+    )
+    monkeypatch.setattr(state_db, "get_trade_connection", lambda **k: write_conn)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", lambda **k: _FakeConn())
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
+    monkeypatch.setattr(substrate_observer, "_NEW_FAMILY_CONDITION_IDS", set())
+
+    captures: list[dict] = []
+
+    def _refresh(_conn, *, markets, **kwargs):
+        priority_conditions = set(kwargs.get("priority_condition_ids") or ())
+        capture_triggers = [
+            "PRIORITY_MARKER"
+            if str(outcome.get("condition_id") or "") in priority_conditions
+            else "DISCOVERY_SWEEP"
+            for market in markets
+            for outcome in market.get("outcomes", [])
+        ]
+        captures.append(
+            {
+                "markets": markets,
+                "priority_condition_ids": priority_conditions,
+                "capture_triggers": capture_triggers,
+            }
+        )
+        return {
+            "attempted": len(capture_triggers),
+            "inserted": len(capture_triggers),
+            "capture_triggers": capture_triggers,
+            "direct_clob_prefetch_selected_priority_condition_count": len(
+                priority_conditions
+            ),
+        }
+
+    monkeypatch.setattr(
+        market_scanner,
+        "refresh_executable_market_substrate_snapshots",
+        _refresh,
+    )
+
+    paused_result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        forecasts_conn,
+        now_utc=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+        include_money_risk_families=False,
+        promote_pending_urgency=False,
+    )
+    resumed_result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        forecasts_conn,
+        now_utc=datetime(2026, 8, 3, 12, 0, 20, tzinfo=timezone.utc),
+        include_money_risk_families=False,
+    )
+
+    assert paused_result["status"] == "refreshed"
+    assert paused_result["families_checked"] == 1
+    assert paused_result["pending_urgent_families"] == 1
+    assert paused_result["pending_urgent_priority_families"] == 0
+    assert paused_result["priority_family_count"] == 0
+    assert paused_result["priority_condition_ids_requested"] == 0
+    assert len(captures[0]["markets"]) == 1
+    assert captures[0]["markets"][0]["slug"] == cached_market["slug"]
+    assert captures[0]["priority_condition_ids"] == set()
+    assert captures[0]["capture_triggers"] == ["DISCOVERY_SWEEP"]
+
+    assert resumed_result["status"] == "refreshed"
+    assert resumed_result["promote_pending_urgency"] is True
+    assert resumed_result["pending_urgent_priority_families"] == 1
+    assert resumed_result["priority_family_count"] == 1
+    assert resumed_result["priority_condition_ids_requested"] == 1
+    assert captures[1]["priority_condition_ids"] == {"cond-tokyo-34"}
+    assert captures[1]["capture_triggers"] == ["PRIORITY_MARKER"]
+
+    after_event_rows = world_conn.execute(
+        """
+        SELECT event_id, event_type, payload_json, created_at
+          FROM opportunity_events
+         ORDER BY event_id
+        """
+    ).fetchall()
+    after_attempt_rows = world_conn.execute(
+        """
+        SELECT event_id, processing_status, attempt_count, claimed_at, last_error
+          FROM opportunity_event_processing
+         ORDER BY event_id
+        """
+    ).fetchall()
+    assert after_event_rows == before_event_rows
+    assert after_attempt_rows == before_attempt_rows
+
+
+def test_paused_pending_urgency_preserves_mixed_exact_priority_scopes(monkeypatch):
+    """Pause removes only urgent-pending promotion from a mixed refresh scope."""
+
+    urgent_family = ("Tokyo", "2026-08-05", "high")
+    explicit_family = ("Paris", "2026-08-05", "high")
+    fc03_family = ("Shanghai", "2026-08-05", "low")
+    open_rest_family = ("London", "2026-08-05", "high")
+    held_family = ("Munich", "2026-08-05", "low")
+    new_family = ("Seoul", "2026-08-05", "high")
+    family_conditions = {
+        explicit_family: "cond-explicit",
+        fc03_family: "cond-fc03",
+        open_rest_family: "cond-open-rest",
+        held_family: "cond-held",
+        new_family: "cond-new-family",
+        urgent_family: "cond-urgent-pending",
+    }
+    exact_priority_conditions = [
+        family_conditions[explicit_family],
+        family_conditions[fc03_family],
+        family_conditions[open_rest_family],
+        family_conditions[held_family],
+    ]
+
+    world_conn = _pending_family_conn("event-mixed-urgent", *urgent_family)
+    world_conn.execute(
+        "UPDATE opportunity_events SET event_type = 'EDLI_REDECISION_PENDING'"
+    )
+    world_conn.execute(
+        """
+        CREATE TABLE market_events (
+            condition_id TEXT PRIMARY KEY,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT
+        )
+        """
+    )
+    world_conn.execute(
+        "INSERT INTO market_events VALUES (?, ?, ?, ?)",
+        (family_conditions[new_family], *new_family),
+    )
+
+    import src.data.market_topology_rows as topology_rows_module
+    import src.data.polymarket_client as polymarket_client
+    import src.state.db as state_db
+
+    topology_visits: list[tuple[str, str, str]] = []
+
+    def _topology_rows(_conn, payload):
+        family = (payload["city"], payload["target_date"], payload["metric"])
+        topology_visits.append(family)
+        condition_id = family_conditions[family]
+        return [
+            {
+                "market_slug": "-".join((*family, condition_id)).lower(),
+                "city": family[0],
+                "target_date": family[1],
+                "temperature_metric": family[2],
+                "condition_id": condition_id,
+                "token_id": f"yes-{condition_id}",
+                "range_label": "test-bin",
+            }
+        ]
+
+    def _reconstruct(_conn, *, topology_rows, now_utc):
+        del now_utc
+        row = topology_rows[0]
+        condition_id = row["condition_id"]
+        return {
+            "slug": row["market_slug"],
+            "city": SimpleNamespace(name=row["city"]),
+            "target_date": row["target_date"],
+            "temperature_metric": row["temperature_metric"],
+            "condition_ids": [condition_id],
+            "outcomes": [
+                {
+                    "condition_id": condition_id,
+                    "market_id": condition_id,
+                    "token_id": f"yes-{condition_id}",
+                    "no_token_id": f"no-{condition_id}",
+                    "question_id": f"q-{condition_id}",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        topology_rows_module,
+        "_event_family_market_topology_rows",
+        _topology_rows,
+    )
+    monkeypatch.setattr(
+        market_scanner,
+        "reconstruct_weather_market_from_static_topology",
+        _reconstruct,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_open_rest_family_rows_for_refresh",
+        lambda *a, **k: [open_rest_family],
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_edli_current_held_position_family_keys",
+        lambda: {held_family},
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_condition_buy_sides_fresh",
+        lambda _conn, condition_id, _now: condition_id == family_conditions[fc03_family],
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_NEW_FAMILY_CONDITION_IDS",
+        {family_conditions[new_family]},
+    )
+    monkeypatch.setattr(substrate_observer, "_SUBSTRATE_PRIORITY_REFRESH_CURSOR", 0)
+    monkeypatch.setattr(substrate_observer, "_SUBSTRATE_REFRESH_CURSOR", 0)
+    monkeypatch.setattr(market_scanner, "_discovery_captures_since_keyframe", {})
+    monkeypatch.setenv("ZEUS_SUBSTRATE_CAPTURE_KEYFRAME_INTERVAL_CYCLES", "20")
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_read_only",
+        lambda **k: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection",
+        lambda **k: sqlite3.connect(":memory:"),
+    )
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _FakePolymarketClient)
+
+    captures: list[tuple[str, str, str, str]] = []
+
+    class _ExistingFullSnapshot:
+        def execute(self, _sql, _params=()):
+            return SimpleNamespace(fetchone=lambda: (1,))
+
+    def _capture_boundary(_conn, *, decision, capture_trigger, **kwargs):
+        del kwargs
+        selected_token = (
+            decision.tokens["no_token_id"]
+            if decision.edge.direction == "buy_no"
+            else decision.tokens["token_id"]
+        )
+        resolved_trigger = market_scanner._capture_policy_trigger(
+            _ExistingFullSnapshot(),
+            requested_trigger=capture_trigger,
+            condition_id=decision.tokens["market_id"],
+            selected_token=selected_token,
+        )
+        captures.append(
+            (
+                decision.tokens["market_id"],
+                decision.edge.direction,
+                capture_trigger,
+                resolved_trigger,
+            )
+        )
+        return {"persisted": True}
+
+    monkeypatch.setattr(
+        market_scanner,
+        "capture_executable_market_snapshot",
+        _capture_boundary,
+    )
+
+    result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        _FakeConn(),
+        now_utc=datetime(2026, 8, 3, 12, 0, tzinfo=timezone.utc),
+        extra_priority_families=[explicit_family, fc03_family],
+        priority_condition_ids=exact_priority_conditions,
+        force_refresh_condition_ids=[family_conditions[fc03_family]],
+        promote_pending_urgency=False,
+    )
+
+    assert result["status"] == "refreshed"
+    assert result["families_checked"] == 6
+    assert result["explicit_priority_families"] == 2
+    assert result["open_rest_priority_families"] == 1
+    assert result["held_position_priority_families"] == 1
+    assert result["pending_urgent_families"] == 1
+    assert result["pending_urgent_priority_families"] == 0
+    assert result["priority_family_count"] == 4
+    expected_priority_conditions = {
+        *exact_priority_conditions,
+        family_conditions[new_family],
+    }
+    assert result["priority_condition_ids_requested"] == len(expected_priority_conditions)
+    assert topology_visits == [
+        explicit_family,
+        fc03_family,
+        open_rest_family,
+        held_family,
+        new_family,
+        urgent_family,
+    ]
+
+    captured_conditions = {
+        condition_id
+        for condition_id, _direction, _requested_trigger, _resolved_trigger in captures
+    }
+    assert captured_conditions == {
+        *expected_priority_conditions,
+        family_conditions[urgent_family],
+    }
+    requested_capture_triggers = {
+        condition_id: trigger
+        for condition_id, _direction, trigger, _resolved_trigger in captures
+    }
+    assert requested_capture_triggers[family_conditions[urgent_family]] == "DISCOVERY_SWEEP"
+    assert {
+        condition_id
+        for condition_id, trigger in requested_capture_triggers.items()
+        if trigger == "PRIORITY_MARKER"
+    } == expected_priority_conditions
+    resolved_capture_triggers = {
+        condition_id: trigger
+        for condition_id, _direction, _requested_trigger, trigger in captures
+    }
+    assert resolved_capture_triggers[family_conditions[urgent_family]] == "DISCOVERY_SWEEP"
+    assert {
+        condition_id
+        for condition_id, trigger in resolved_capture_triggers.items()
+        if trigger == "PRIORITY_MARKER"
+    } == expected_priority_conditions
+    assert {
+        direction
+        for condition_id, direction, _requested_trigger, _resolved_trigger in captures
+        if condition_id == family_conditions[fc03_family]
+    } == {"buy_yes", "buy_no"}
+    assert substrate_observer._NEW_FAMILY_CONDITION_IDS == set()
 
 
 def test_priority_condition_scope_does_not_expand_to_family_siblings(monkeypatch):

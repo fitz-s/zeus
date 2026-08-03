@@ -1368,6 +1368,7 @@ def _refresh_pending_family_snapshots(
     refresh_budget_seconds: float | None = None,
     snapshot_reserve_seconds: float | None = None,
     include_money_risk_families: bool = True,
+    promote_pending_urgency: bool = True,
 ) -> dict:
     """Targeted, cache-aware snapshot refresh for pending opportunity event families.
 
@@ -1478,6 +1479,7 @@ def _refresh_pending_family_snapshots(
 
     pending_families: list[tuple[str, str, str]] = []
     pending_urgent_families: list[tuple[str, str, str]] = []
+    all_pending_families: list[tuple[str, str, str]] = []
     for row in pending_rows:
         city = _canonical_refresh_city_name(row[0])
         target_date = str(row[1] or "").strip()
@@ -1488,6 +1490,7 @@ def _refresh_pending_family_snapshots(
             refresh_urgency = 0
         if city and target_date and metric:
             family = (city, target_date, metric)
+            all_pending_families.append(family)
             if refresh_urgency >= 3:
                 pending_urgent_families.append(family)
             else:
@@ -1517,19 +1520,25 @@ def _refresh_pending_family_snapshots(
     priority_families: list[tuple[str, str, str]] = []
     priority_keys: set[tuple[str, str, str]] = set()
     explicit_priority_families = list(extra_priority_families or ())
+    promoted_pending_families = pending_urgent_families if promote_pending_urgency else []
     for family in (
         explicit_priority_families
         + list(open_rest_priority_families)
         + list(held_position_priority_families)
-        + pending_urgent_families
+        + promoted_pending_families
     ):
         key = _refresh_family_key(*family)
         if key and key not in priority_keys:
             priority_families.append(family)
             priority_keys.add(key)
 
+    ordinary_pending_families = (
+        pending_families if promote_pending_urgency else all_pending_families
+    )
     families = priority_families + [
-        family for family in pending_families if _refresh_family_key(*family) not in priority_keys
+        family
+        for family in ordinary_pending_families
+        if _refresh_family_key(*family) not in priority_keys
     ]
 
     if not families:
@@ -1540,6 +1549,9 @@ def _refresh_pending_family_snapshots(
             "explicit_priority_families": 0,
             "include_pending_families": bool(include_pending_families),
             "include_money_risk_families": bool(include_money_risk_families),
+            "promote_pending_urgency": bool(promote_pending_urgency),
+            "pending_urgent_families": len(pending_urgent_families),
+            "pending_urgent_priority_families": len(promoted_pending_families),
         }
 
     global _SUBSTRATE_REFRESH_CURSOR, _SUBSTRATE_PRIORITY_REFRESH_CURSOR, _SUBSTRATE_GAMMA_REFRESH_CURSOR, _NEW_FAMILY_CONDITION_IDS, _GAMMA_EMPTY_BACKOFF_UNTIL
@@ -1555,6 +1567,7 @@ def _refresh_pending_family_snapshots(
                         (cid,),
                     ).fetchone()
                     if row_q is not None:
+                        priority_conditions.add(str(cid or "").strip())
                         city_v, td_v, metric_v = (
                             _canonical_refresh_city_name(row_q[0]),
                             str(row_q[1] or "").strip(),
@@ -2438,6 +2451,9 @@ def _refresh_pending_family_snapshots(
         "explicit_priority_families": len(explicit_priority_families),
         "include_pending_families": bool(include_pending_families),
         "include_money_risk_families": bool(include_money_risk_families),
+        "promote_pending_urgency": bool(promote_pending_urgency),
+        "pending_urgent_families": len(pending_urgent_families),
+        "pending_urgent_priority_families": len(promoted_pending_families),
         "open_rest_priority_families": len(open_rest_priority_families),
         "held_position_priority_families": len(held_position_priority_families),
         "priority_family_count": len(priority_families),
@@ -2713,6 +2729,7 @@ def _edli_market_substrate_warm_cycle() -> None:
         ZEUS_FORECASTS_DB_PATH,
         get_forecasts_connection_read_only,
         get_world_connection,
+        query_control_override_state,
     )
 
     conn = get_world_connection()
@@ -2749,6 +2766,57 @@ def _edli_market_substrate_warm_cycle() -> None:
             return summary
         background_budget_s = _background_warm_refresh_budget_seconds()
         background_snapshot_reserve_s = _background_warm_snapshot_reserve_seconds(background_budget_s)
+        control_authority_status = "unavailable"
+        control_authority_degraded = False
+        control_authority_reason: str | None = None
+        pending_urgency_promotion_suppressed = False
+        pending_urgency_promotion_suppression_reason: str | None = None
+        control_now_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            control_state = query_control_override_state(conn, now=control_now_iso)
+            if not isinstance(control_state, dict):
+                raise ValueError("control authority returned a non-dict state")
+            control_authority_status = control_state.get("status")
+            entries_paused = control_state.get("entries_paused")
+            if control_authority_status != "ok":
+                control_authority_degraded = True
+                control_authority_reason = (
+                    f"control_authority_non_ok:{control_authority_status or 'unknown'}"
+                )
+            elif not isinstance(entries_paused, bool):
+                control_authority_degraded = True
+                control_authority_reason = "control_authority_malformed:entries_paused"
+            elif entries_paused is True:
+                # SCOPE: only pending-event urgency -> priority-family promotion in this
+                # ordinary warm tick; discovery, explicit/held/rest/FC-03/money-risk and
+                # new-family exact priority remain unchanged.
+                # DRAIN: the next 20s tick still discovers durable pending families and
+                # captures them through ordinary DISCOVERY_SWEEP compact/keyframes, with
+                # no new claim-like full PRIORITY_MARKER expansion from pending urgency.
+                # RESET: the next tick whose trusted pause is false/expired restores
+                # urgency promotion; no cached or sticky state survives this call.
+                pending_urgency_promotion_suppressed = True
+                pending_urgency_promotion_suppression_reason = "entries_paused"
+        except Exception as exc:  # noqa: BLE001 — refresh evidence fails open
+            control_authority_status = "unavailable"
+            control_authority_degraded = True
+            control_authority_reason = "control_authority_unavailable"
+            logger.warning(
+                "EDLI market-substrate warm: control authority unavailable; retaining "
+                "pending urgency promotion: %s",
+                exc,
+            )
+        if pending_urgency_promotion_suppressed:
+            logger.info(
+                "EDLI market-substrate warm: pending urgency promotion suppressed while "
+                "entries are paused"
+            )
+        elif control_authority_degraded:
+            logger.warning(
+                "EDLI market-substrate warm: control authority degraded (%s); retaining "
+                "pending urgency promotion",
+                control_authority_reason,
+            )
         summary = _refresh_pending_family_snapshots(
             conn,
             forecasts_conn,
@@ -2758,6 +2826,7 @@ def _edli_market_substrate_warm_cycle() -> None:
             refresh_budget_seconds=background_budget_s,
             snapshot_reserve_seconds=background_snapshot_reserve_s,
             include_money_risk_families=False,
+            promote_pending_urgency=not pending_urgency_promotion_suppressed,
         )
         summary = {
             **dict(summary or {}),
@@ -2766,6 +2835,14 @@ def _edli_market_substrate_warm_cycle() -> None:
             "held_position_priority_condition_ids": 0,
             "claim_order_priority_families": 0,
             "claim_order_priority_read_failed": False,
+            "promote_pending_urgency": not pending_urgency_promotion_suppressed,
+            "pending_urgency_promotion_suppressed": pending_urgency_promotion_suppressed,
+            "pending_urgency_promotion_suppression_reason": (
+                pending_urgency_promotion_suppression_reason
+            ),
+            "control_authority_status": control_authority_status,
+            "control_authority_degraded": control_authority_degraded,
+            "control_authority_reason": control_authority_reason,
         }
         summary = _substrate_warm_business_summary(
             summary,
