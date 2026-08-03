@@ -18,6 +18,10 @@ Result schema per source:
     "degraded_since": ISO8601 | null,
     "latency_ms": int | null,
     "error": str | null,
+    "disposition": "SUCCESS" | "FAILURE" | "DEFERRED",
+    "deferred_at": ISO8601 | null,
+    "deferred_count": int,
+    "defer_reason": str | null,
   }
 
 Top-level file schema also includes "written_at" so consumers can detect
@@ -30,10 +34,16 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from src.data.openmeteo_client import ARCHIVE_URL, fetch as _fetch_openmeteo
+from src.data.openmeteo_client import (
+    ARCHIVE_URL,
+    OpenMeteoLocalPreflightQuotaDenied,
+    OpenMeteoPreflightDenialReason,
+    fetch as _fetch_openmeteo,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +71,17 @@ SOURCE_PROBE_TIMEOUT_MINIMUMS: dict[str, float] = {
 _MANUAL_OPERATOR_SOURCES: set[str] = set()
 
 
+class SourceProbeDisposition(str, Enum):
+    """The outcome of one source-health probe attempt."""
+
+    SUCCESS = "SUCCESS"
+    FAILURE = "FAILURE"
+    DEFERRED = "DEFERRED"
+
+
+RESERVE_PROTECTED = OpenMeteoPreflightDenialReason.RESERVE_PROTECTED.value
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -73,7 +94,28 @@ def _empty_result(error: str | None = None) -> dict[str, Any]:
         "degraded_since": None,
         "latency_ms": None,
         "error": error,
+        "disposition": SourceProbeDisposition.SUCCESS.value,
+        "deferred_at": None,
+        "deferred_count": 0,
+        "defer_reason": None,
     }
+
+
+def _with_probe_schema(result: dict[str, Any]) -> dict[str, Any]:
+    """Fill additive disposition fields for direct probe callers."""
+
+    result.setdefault(
+        "disposition",
+        (
+            SourceProbeDisposition.FAILURE.value
+            if result.get("error") and result.get("last_success_at") is None
+            else SourceProbeDisposition.SUCCESS.value
+        ),
+    )
+    result.setdefault("deferred_at", None)
+    result.setdefault("deferred_count", 0)
+    result.setdefault("defer_reason", None)
+    return result
 
 
 def _probe_open_meteo_archive(timeout: float) -> dict[str, Any]:
@@ -111,6 +153,30 @@ def _probe_open_meteo_archive(timeout: float) -> dict[str, Any]:
             "degraded_since": None,
             "latency_ms": latency_ms,
             "error": None,
+        }
+    except OpenMeteoLocalPreflightQuotaDenied as exc:
+        latency_ms = int((time.monotonic() - start) * 1000)
+        if exc.reason is OpenMeteoPreflightDenialReason.RESERVE_PROTECTED:
+            return {
+                "last_success_at": None,
+                "last_failure_at": None,
+                "consecutive_failures": 0,
+                "degraded_since": None,
+                "latency_ms": latency_ms,
+                "error": None,
+                "disposition": SourceProbeDisposition.DEFERRED.value,
+                "deferred_at": _now_iso(),
+                "deferred_count": 1,
+                "defer_reason": RESERVE_PROTECTED,
+            }
+        now = _now_iso()
+        return {
+            "last_success_at": None,
+            "last_failure_at": now,
+            "consecutive_failures": 1,
+            "degraded_since": now,
+            "latency_ms": latency_ms,
+            "error": str(exc)[:200],
         }
     except Exception as exc:
         latency_ms = int((time.monotonic() - start) * 1000)
@@ -434,14 +500,7 @@ def _probe_tigge_mars(timeout: float) -> dict[str, Any]:
 def _probe_source(source: str, timeout: float) -> dict[str, Any]:
     """Dispatch probe for one source. Returns result dict."""
     if source in _MANUAL_OPERATOR_SOURCES:
-        return {
-            "last_success_at": None,
-            "last_failure_at": None,
-            "consecutive_failures": 0,
-            "degraded_since": None,
-            "latency_ms": None,
-            "error": "MANUAL_OPERATOR — no automated probe",
-        }
+        return _empty_result("MANUAL_OPERATOR — no automated probe")
     dispatch = {
         "open_meteo_archive": _probe_open_meteo_archive,
         "wu_pws": _probe_wu_pws,
@@ -453,20 +512,13 @@ def _probe_source(source: str, timeout: float) -> dict[str, Any]:
     }
     fn = dispatch.get(source)
     if fn is None:
-        return {
-            "last_success_at": None,
-            "last_failure_at": None,
-            "consecutive_failures": 0,
-            "degraded_since": None,
-            "latency_ms": None,
-            "error": f"ABSENT — no probe registered for source={source!r}",
-        }
+        return _empty_result(f"ABSENT — no probe registered for source={source!r}")
     requested_timeout = float(timeout)
     effective_timeout = max(
         requested_timeout,
         SOURCE_PROBE_TIMEOUT_MINIMUMS.get(source, requested_timeout),
     )
-    return fn(effective_timeout)
+    return _with_probe_schema(fn(effective_timeout))
 
 
 def _apply_prior_failure_state(
@@ -476,24 +528,38 @@ def _apply_prior_failure_state(
     prior: dict[str, Any],
 ) -> dict[str, Any]:
     prev = prior.get(source, {})
-    if result.get("error") and result.get("last_success_at") is None and source not in _MANUAL_OPERATOR_SOURCES:
-        prev_consec = prev.get("consecutive_failures", 0) or 0
-        error = str(result.get("error") or "").lower()
-        quota_blocked = source == "open_meteo_archive" and (
-            "open-meteo quota exhausted" in error
-            or "open-meteo request embargoed" in error
-            or ("429" in error and "too many requests" in error)
+    disposition = SourceProbeDisposition(
+        result.get("disposition")
+        or (
+            SourceProbeDisposition.FAILURE.value
+            if result.get("error") and result.get("last_success_at") is None
+            else SourceProbeDisposition.SUCCESS.value
         )
-        # An Open-Meteo quota denial/429 embargo proves this probe did not
-        # execute. Do not retain a formerly-successful timestamp that a
-        # freshness consumer could mistake for a current healthy probe.
-        if prev.get("last_success_at") and not quota_blocked:
+    )
+
+    if disposition is SourceProbeDisposition.DEFERRED:
+        result["last_success_at"] = prev.get("last_success_at")
+        result["last_failure_at"] = prev.get("last_failure_at")
+        result["consecutive_failures"] = prev.get("consecutive_failures", 0) or 0
+        result["degraded_since"] = prev.get("degraded_since")
+        result["error"] = None
+        result["deferred_at"] = result.get("deferred_at") or _now_iso()
+        result["deferred_count"] = (prev.get("deferred_count", 0) or 0) + 1
+        result["defer_reason"] = result.get("defer_reason") or RESERVE_PROTECTED
+    elif result.get("error") and result.get("last_success_at") is None and source not in _MANUAL_OPERATOR_SOURCES:
+        prev_consec = prev.get("consecutive_failures", 0) or 0
+        if prev.get("last_success_at"):
             result["last_success_at"] = prev.get("last_success_at")
         result["consecutive_failures"] = prev_consec + 1
         result["degraded_since"] = prev.get("degraded_since") or result.get("last_failure_at")
     else:
         result["consecutive_failures"] = 0
         result["degraded_since"] = None
+    if disposition is not SourceProbeDisposition.DEFERRED:
+        result["deferred_at"] = None
+        result["deferred_count"] = 0
+        result["defer_reason"] = None
+    result["disposition"] = disposition.value
     return result
 
 

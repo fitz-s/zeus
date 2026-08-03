@@ -19,7 +19,13 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from src.data.openmeteo_quota import OpenMeteoQuotaTracker, quota_tracker
+from src.data.openmeteo_quota import (
+    DAILY_HARD_CAP,
+    MAINTENANCE_DAILY_LIMIT,
+    PRIORITY_DAILY_LIMIT,
+    OpenMeteoQuotaTracker,
+    quota_tracker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +109,95 @@ class OpenMeteoRequestSuppressed(RuntimeError):
             f"(status={outcome.status_code} class={outcome.retry_class.value})"
         )
         self.outcome = outcome
+
+
+class OpenMeteoPreflightDenialReason(str, Enum):
+    """Typed reason for a request rejected before any HTTP attempt."""
+
+    RESERVE_PROTECTED = "RESERVE_PROTECTED"
+    GLOBAL_COOLDOWN = "GLOBAL_COOLDOWN"
+    PRIORITY_DAILY_LIMIT = "PRIORITY_DAILY_LIMIT"
+    CRITICAL_HARD_DAILY_LIMIT = "CRITICAL_HARD_DAILY_LIMIT"
+    DAILY_LIMIT = "DAILY_LIMIT"
+    HOURLY_LIMIT = "HOURLY_LIMIT"
+    MINUTE_LIMIT = "MINUTE_LIMIT"
+    REQUEST_EMBARGO = "REQUEST_EMBARGO"
+    REQUEST_IN_FLIGHT = "REQUEST_IN_FLIGHT"
+    REQUEST_STATE_CAPACITY = "REQUEST_STATE_CAPACITY"
+    REQUEST_TERMINAL = "REQUEST_TERMINAL"
+    SHARED_QUOTA_UNAVAILABLE = "SHARED_QUOTA_UNAVAILABLE"
+    UNKNOWN = "UNKNOWN"
+
+
+class OpenMeteoLocalPreflightQuotaDenied(RuntimeError):
+    """A local quota/request lease was denied before provider I/O."""
+
+    def __init__(
+        self,
+        reason: OpenMeteoPreflightDenialReason,
+        *,
+        detail: str | None,
+    ) -> None:
+        self.reason = reason
+        self.detail = detail
+        if reason in {
+            OpenMeteoPreflightDenialReason.REQUEST_EMBARGO,
+            OpenMeteoPreflightDenialReason.REQUEST_IN_FLIGHT,
+        }:
+            message = f"Open-Meteo request embargoed ({detail or reason.value})"
+        else:
+            message = (
+                "Open-Meteo quota exhausted "
+                f"(preflight_reason={reason.value}; detail={detail or 'missing'})"
+            )
+        super().__init__(message)
+
+
+def _quota_limit_detail(detail: str) -> tuple[str, int] | None:
+    label, separator, counts = detail.partition("=")
+    if not separator or label not in {"day_limit", "hour_limit", "minute_limit"}:
+        return None
+    _, slash, limit = counts.partition("/")
+    if not slash:
+        return None
+    try:
+        return label, int(limit)
+    except ValueError:
+        return None
+
+
+def _preflight_denial_reason(detail: str | None) -> OpenMeteoPreflightDenialReason:
+    """Type the quota authority's structured denial detail exactly once."""
+
+    if not detail:
+        return OpenMeteoPreflightDenialReason.UNKNOWN
+    if detail.startswith("request_retry_until="):
+        return OpenMeteoPreflightDenialReason.REQUEST_EMBARGO
+    if detail.startswith("request_in_flight_until="):
+        return OpenMeteoPreflightDenialReason.REQUEST_IN_FLIGHT
+    if detail.startswith("request_state_capacity="):
+        return OpenMeteoPreflightDenialReason.REQUEST_STATE_CAPACITY
+    if detail.startswith("request_terminal="):
+        return OpenMeteoPreflightDenialReason.REQUEST_TERMINAL
+    if detail == "shared_quota_unavailable":
+        return OpenMeteoPreflightDenialReason.SHARED_QUOTA_UNAVAILABLE
+    if detail.startswith("cooldown_until="):
+        return OpenMeteoPreflightDenialReason.GLOBAL_COOLDOWN
+    limit_detail = _quota_limit_detail(detail)
+    if limit_detail is None:
+        return OpenMeteoPreflightDenialReason.UNKNOWN
+    label, limit = limit_detail
+    if label == "hour_limit":
+        return OpenMeteoPreflightDenialReason.HOURLY_LIMIT
+    if label == "minute_limit":
+        return OpenMeteoPreflightDenialReason.MINUTE_LIMIT
+    if limit == MAINTENANCE_DAILY_LIMIT:
+        return OpenMeteoPreflightDenialReason.RESERVE_PROTECTED
+    if limit == PRIORITY_DAILY_LIMIT:
+        return OpenMeteoPreflightDenialReason.PRIORITY_DAILY_LIMIT
+    if limit == DAILY_HARD_CAP:
+        return OpenMeteoPreflightDenialReason.CRITICAL_HARD_DAILY_LIMIT
+    return OpenMeteoPreflightDenialReason.DAILY_LIMIT
 
 
 def request_identity(url: str, params: dict) -> str:
@@ -199,7 +294,7 @@ def fetch(
 
     Raises:
         httpx.HTTPError: after all retries exhausted on transport errors.
-        RuntimeError: if quota is exhausted.
+        OpenMeteoLocalPreflightQuotaDenied: if no request lease is granted.
 
     ``fast_fail_429`` is for callers with an independent transport fallback. They still mark
     the quota cooldown, but they receive the 429 immediately instead of sleeping inside this
@@ -224,12 +319,9 @@ def fetch(
                     raise OpenMeteoRequestSuppressed(
                         OpenMeteoHTTPOutcome.from_persisted(persisted)
                     )
-            if reason and reason.startswith(
-                ("request_retry_until=", "request_in_flight_until=")
-            ):
-                raise RuntimeError(f"Open-Meteo request embargoed ({reason})")
-            raise RuntimeError(
-                f"Open-Meteo quota exhausted ({tracker.calls_today()} calls today)"
+            raise OpenMeteoLocalPreflightQuotaDenied(
+                _preflight_denial_reason(reason),
+                detail=reason,
             )
         try:
             get = client.get if client is not None else httpx.get

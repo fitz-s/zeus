@@ -1665,6 +1665,11 @@ def _source_health_status() -> dict:
         written_at_age is not None
         and written_at_age <= SOURCE_HEALTH_WRITER_STALE_SECONDS
     )
+    try:
+        source_payload = json.loads(path.read_text()).get("sources") or {}
+    except (OSError, json.JSONDecodeError):
+        source_payload = {}
+    deferred_sources = []
     source_statuses = [
         {
             "source": status.source,
@@ -1674,20 +1679,57 @@ def _source_health_status() -> dict:
             "age_seconds": None if status.age_seconds is None else round(status.age_seconds, 1),
             "budget_seconds": status.budget_seconds,
             "degradation_flags": list(status.degradation_flags),
+            "disposition": (source_payload.get(status.source) or {}).get(
+                "disposition", "SUCCESS"
+            ),
+            "deferred_at": (source_payload.get(status.source) or {}).get(
+                "deferred_at"
+            ),
+            "deferred_count": (source_payload.get(status.source) or {}).get(
+                "deferred_count", 0
+            ),
+            "defer_reason": (source_payload.get(status.source) or {}).get(
+                "defer_reason"
+            ),
         }
         for status in verdict.source_statuses
     ]
-    all_sources_fresh = bool(source_statuses) and all(status["fresh"] for status in source_statuses)
+    for status in source_statuses:
+        if status["disposition"] == "DEFERRED":
+            deferred_sources.append(
+                {
+                    key: status[key]
+                    for key in (
+                        "source",
+                        "deferred_at",
+                        "deferred_count",
+                        "defer_reason",
+                    )
+                }
+            )
+    blocking_stale_sources = [
+        status["source"]
+        for status in source_statuses
+        if status["stale"]
+        and not (
+            status["source"] == "open_meteo_archive"
+            and status["disposition"] == "DEFERRED"
+            and status["defer_reason"] == "RESERVE_PROTECTED"
+        )
+    ]
+    all_sources_fresh = bool(source_statuses) and all(
+        status["fresh"] for status in source_statuses
+    )
+    capital_sources_fresh = bool(source_statuses) and not blocking_stale_sources
     ok = (
-        verdict.branch == "FRESH"
-        and writer_fresh
-        and all_sources_fresh
+        writer_fresh
+        and capital_sources_fresh
         and not verdict.operator_overrides
     )
     issue = None
     if verdict.branch == "ABSENT":
         issue = "SOURCE_HEALTH_ABSENT"
-    elif verdict.branch == "STALE":
+    elif blocking_stale_sources:
         issue = "SOURCE_HEALTH_SOURCE_STALE"
     elif not writer_fresh:
         issue = "SOURCE_HEALTH_WRITER_STALE"
@@ -1705,7 +1747,10 @@ def _source_health_status() -> dict:
         "writer_fresh": writer_fresh,
         "writer_budget_seconds": SOURCE_HEALTH_WRITER_STALE_SECONDS,
         "all_sources_fresh": all_sources_fresh,
+        "capital_sources_fresh": capital_sources_fresh,
         "stale_sources": list(verdict.stale_sources),
+        "blocking_stale_sources": blocking_stale_sources,
+        "deferred_sources": deferred_sources,
         "day0_capture_disabled": bool(verdict.day0_capture_disabled),
         "ensemble_disabled": bool(verdict.ensemble_disabled),
         "degraded_data": bool(verdict.degraded_data),
