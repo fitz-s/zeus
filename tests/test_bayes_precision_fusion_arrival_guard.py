@@ -1,5 +1,5 @@
 # Created: 2026-06-16
-# Last reused or audited: 2026-06-16
+# Last reused or audited: 2026-08-03
 # Authority basis: timing-semantics fix — fusion pre-arrival guard (M-ledger);
 #   docs/evidence/timing_audit/shadow_validation_method_2026-06-16.md
 """Unit invariants for the T2 precision-fusion pre-arrival guard.
@@ -15,8 +15,10 @@ WARNING (LOUD, never silent) so the caller is observable in logs.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import patch
+
+import pytest
 
 from src.data.bayes_precision_fusion_capture import _available_after_decision
 
@@ -148,3 +150,72 @@ def test_missing_availability_drops_models_not_admit_counter():
     assert result.admitted_on_missing_availability == 0
     assert result.likelihood == ()
     assert result.dropped_models
+
+
+# ---------------------------------------------------------------------------
+# Capture ordering: candidate value before arrival authority (Paris, lead 1)
+# ---------------------------------------------------------------------------
+
+_PARIS = (48.8566, 2.3522)
+_CAPTURE_RUN = datetime(2026, 6, 1, 0, 0, 0, tzinfo=timezone.utc)
+_CAPTURE_TARGET = date(2026, 6, 2)
+
+
+def _capture_paris(*, candidate_value, model_available_at):
+    calls: list[str] = []
+
+    def _live_fetch(*, model, **_kwargs):
+        calls.append(model)
+        return candidate_value if model == "icon_d2" else None
+
+    from src.data.bayes_precision_fusion_capture import capture_bayes_precision_instruments
+
+    result = capture_bayes_precision_instruments(
+        city="Paris",
+        metric="high",
+        latitude=_PARIS[0],
+        longitude=_PARIS[1],
+        timezone_name="Europe/Paris",
+        run=_CAPTURE_RUN,
+        target_local_date=_CAPTURE_TARGET,
+        lead_days=1,
+        anchor_z_corrected=20.0,
+        live_fetch=_live_fetch,
+        decision_utc=_DECISION,
+        model_available_at=model_available_at,
+    )
+    return result, calls
+
+
+@pytest.mark.parametrize("candidate_value", [None, float("nan"), float("inf"), float("-inf")])
+def test_missing_or_nonfinite_value_does_not_trigger_missing_availability_guard(
+    candidate_value, caplog
+):
+    with caplog.at_level(logging.WARNING, logger="zeus.bayes_precision_fusion_capture"):
+        result, calls = _capture_paris(candidate_value=candidate_value, model_available_at={})
+
+    assert "icon_d2" in calls, "value must be fetched before availability is checked"
+    assert result.likelihood == ()
+    assert "icon_d2" in result.dropped_models
+    assert not any("MISSING available_at" in record.message for record in caplog.records)
+
+
+def test_present_value_with_missing_availability_is_still_rejected(caplog):
+    with caplog.at_level(logging.WARNING, logger="zeus.bayes_precision_fusion_capture"):
+        result, calls = _capture_paris(candidate_value=20.5, model_available_at={})
+
+    assert "icon_d2" in calls
+    assert result.likelihood == ()
+    assert "icon_d2" in result.dropped_models
+    assert any("MISSING available_at" in record.message for record in caplog.records)
+
+
+def test_present_value_with_valid_availability_enters_capture():
+    result, calls = _capture_paris(
+        candidate_value=20.5,
+        model_available_at={"icon_d2": "2026-06-01T10:00:00+00:00"},
+    )
+
+    assert "icon_d2" in calls
+    assert [instrument.model for instrument in result.likelihood] == ["icon_d2"]
+    assert result.likelihood[0].z == pytest.approx(20.5)
