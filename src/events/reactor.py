@@ -7315,6 +7315,7 @@ def run_edli_event_reactor_cycle(
             return False
         _fsr_events = []
         forecast_carrier_completion_proved = False
+        paused_forecast_carrier_materialized = False
         if not committed_event_wake:
             try:
                 _fair_source = _edli_next_redecision_source()
@@ -7456,6 +7457,10 @@ def run_edli_event_reactor_cycle(
                                 result.event_id
                                 for result in _fsr_write_results[:proof_limit]
                             )
+                            paused_forecast_carrier_materialized = any(
+                                result.inserted or result.duplicate
+                                for result in _fsr_write_results
+                            )
                             # INSERT and idempotent-existing outcomes both prove
                             # durable materialization. EventWriter failures never
                             # reach this assignment.
@@ -7530,6 +7535,25 @@ def run_edli_event_reactor_cycle(
         # this helper independently treats an empty set as a strict no-op.
         if _edli_publish_committed_day0_catchup(catchup_day0_event_ids):
             return False
+        paused_forecast_carrier_completion = (
+            allow_paused_forecast_snapshot_completion
+            and forecast_posterior_wake
+            and not producer_wake_event_ids
+            and not producer_held_sell_reauction_requests
+        )
+        if paused_forecast_carrier_completion:
+            # SCOPE: only no-held paused forecast-carrier completion. DRAIN:
+            # normal reactor redecision after the entry pause resets. RESET:
+            # entry pause false or exact held work/event IDs.
+            if not paused_forecast_carrier_materialized:
+                _log.info(
+                    "EDLI paused forecast wake retained: carrier materialization incomplete"
+                )
+                return False
+            _log.info(
+                "EDLI paused forecast wake materialized carriers without auction"
+            )
+            return True
         if forecast_posterior_wake and not targeted_event_ids:
             # SCOPE: this exact forecast-posterior publisher wake. DRAIN: a
             # successful builder no-op is complete for this immutable posterior;

@@ -566,10 +566,12 @@ def test_pause_clear_after_selection_keeps_selected_cycle_no_submit(monkeypatch)
     "failure_mode",
     ("empty", "interrupted", "build_locked", "emit_locked"),
 )
+@pytest.mark.parametrize("carrier_branch", ("forecast", "day0"))
 def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     monkeypatch,
     tmp_path,
     failure_mode,
+    carrier_branch,
 ):
     import src.engine.event_reactor_adapter as adapter_module
     import src.events.event_writer as event_writer_module
@@ -584,21 +586,55 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     from src.riskguard.risk_level import RiskLevel
     from src.runtime import reactor_wake
 
-    world_path = tmp_path / f"world-{failure_mode}.db"
-    forecasts_path = tmp_path / f"forecasts-{failure_mode}.db"
-    trade_path = tmp_path / f"trades-{failure_mode}.db"
+    family = ("Chicago", "2026-05-25", "high")
+    first_decision_time = (
+        datetime(2026, 5, 25, 6, 3, tzinfo=timezone.utc)
+        if carrier_branch == "day0"
+        else datetime(2026, 5, 24, 18, 3, tzinfo=timezone.utc)
+    )
+    carrier = _forecast_event(
+        f"latest-carrier-{carrier_branch}-{failure_mode}",
+        target_date=family[1],
+    )
+    if carrier_branch == "day0":
+        carrier = replace(
+            carrier,
+            observed_at="2026-05-25T06:00:00+00:00",
+            available_at="2026-05-25T06:01:00+00:00",
+            received_at="2026-05-25T06:02:00+00:00",
+        )
+
+    world_path = tmp_path / f"world-{carrier_branch}-{failure_mode}.db"
+    forecasts_path = tmp_path / f"forecasts-{carrier_branch}-{failure_mode}.db"
+    trade_path = tmp_path / f"trades-{carrier_branch}-{failure_mode}.db"
     wake_path = tmp_path / reactor_wake.REACTOR_WAKE_FILENAME
     world = sqlite3.connect(world_path)
     init_schema(world)
     ordinary = _forecast_event(f"paused-ordinary-{failure_mode}")
     EventStore(world).insert_or_ignore(ordinary)
+    materialized_carrier = carrier
+    if carrier_branch == "day0":
+        EventStore(world).insert_or_ignore(
+            _day0_event_for_target(
+                f"paused-carrier-prior-{failure_mode}",
+                family[1],
+                "2026-05-25T05:59:00+00:00",
+            )
+        )
+        day0_carriers = _build_day0_posterior_redecision_events(
+            world,
+            (carrier,),
+            day0_families={family},
+            received_at=first_decision_time.isoformat(),
+        )
+        assert len(day0_carriers) == 1
+        materialized_carrier = day0_carriers[0]
+        assert materialized_carrier.event_type == "DAY0_EXTREME_UPDATED"
     world.commit()
     world.close()
     sqlite3.connect(forecasts_path).close()
     sqlite3.connect(trade_path).close()
 
-    family = ("Chicago", "2026-05-25", "high")
-    first_decision_time = datetime(2026, 5, 24, 18, 3, tzinfo=timezone.utc)
     wake = reactor_wake.publish_reactor_wake(
         source="replacement_forecast_materializer",
         reason="forecast_posterior_advanced",
@@ -619,12 +655,10 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     )
     day0_queue_file = reactor_wake._wake_queue_target(day0_wake, path=wake_path)
     day0_queue_bytes = day0_queue_file.read_bytes()
-    carrier = _forecast_event(
-        f"latest-carrier-{failure_mode}",
-        target_date=family[1],
-    )
     venue_buy_commands: list[str] = []
     batch_identities: list[tuple[str, str]] = []
+    write_outcomes: list[tuple[tuple[bool, bool], ...]] = []
+    calls = {"auction": 0, "claim": 0, "requeue": 0, "adapter": 0, "trade_conn": 0}
     failure = [failure_mode]
     paused = [True]
 
@@ -637,7 +671,10 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
                 return cls.current.replace(tzinfo=None)
             return cls.current.astimezone(tz)
 
-    def build_carrier(*_args, **_kwargs):
+    def build_carrier(*_args, **kwargs):
+        day0_call = bool(kwargs.get("phase_filter_exempt_families"))
+        if day0_call != (carrier_branch == "day0"):
+            return []
         if failure[0] == "empty":
             return []
         if failure[0] == "interrupted":
@@ -651,7 +688,11 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     def write_many(self, events):
         if failure[0] == "emit_locked":
             raise sqlite3.OperationalError("database is locked")
-        return original_write_many(self, events)
+        results = original_write_many(self, events)
+        write_outcomes.append(
+            tuple((result.inserted, result.duplicate) for result in results)
+        )
+        return results
 
     class SubmitAdapter:
         _live_submit_count = [0]
@@ -668,6 +709,7 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
             *,
             claim_unpaged_winner=None,
         ):
+            calls["auction"] += 1
             assert claim_unpaged_winner is not None
             batch_identities.extend(
                 (event.event_id, event.causal_snapshot_id) for event in events
@@ -696,7 +738,23 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     submit_adapter = SubmitAdapter()
 
     def venue_adapter(*_args, **_kwargs):
+        calls["adapter"] += 1
         return submit_adapter
+
+    def trade_connection(**_kwargs):
+        calls["trade_conn"] += 1
+        return sqlite3.connect(trade_path)
+
+    original_claim = EventStore.claim
+    original_requeue = EventStore.requeue_pending
+
+    def claim(self, *args, **kwargs):
+        calls["claim"] += 1
+        return original_claim(self, *args, **kwargs)
+
+    def requeue(self, *args, **kwargs):
+        calls["requeue"] += 1
+        return original_requeue(self, *args, **kwargs)
 
     def world_connection():
         conn = sqlite3.connect(world_path)
@@ -716,7 +774,7 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     )
     monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
-    monkeypatch.setattr(main, "_paused_forecast_carrier_priority_allowed", lambda: True)
+    monkeypatch.setattr(main, "_paused_forecast_carrier_priority_allowed", lambda: paused[0])
     monkeypatch.setattr(main, "_forecast_wake_held_families", lambda _families: frozenset())
     monkeypatch.setattr(main, "_edli_next_redecision_source", lambda: "pause-antibody")
     monkeypatch.setattr(main, "_edli_build_forecast_snapshot_events", build_carrier)
@@ -775,7 +833,7 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     monkeypatch.setattr(
         db,
         "get_trade_connection_with_world_required",
-        lambda **_kwargs: sqlite3.connect(trade_path),
+        trade_connection,
     )
     monkeypatch.setattr(db, "world_write_mutex", lambda: threading.Lock())
     monkeypatch.setattr("src.config.state_path", lambda filename: tmp_path / filename)
@@ -793,7 +851,7 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     monkeypatch.setattr(
         reactor_module,
         "_current_local_day_families",
-        lambda *_args, **_kwargs: set(),
+        lambda *_args, **_kwargs: ({family} if carrier_branch == "day0" else set()),
     )
     monkeypatch.setattr(
         reactor_module,
@@ -820,6 +878,8 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
         "_edli_pre_submit_authority_provider_from_book_evidence_conn",
         lambda *_args, **_kwargs: None,
     )
+    monkeypatch.setattr(EventStore, "claim", claim)
+    monkeypatch.setattr(EventStore, "requeue_pending", requeue)
     monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: "stable")
     monkeypatch.setattr(
         reactor_wake,
@@ -844,20 +904,43 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
         "SELECT processing_status, attempt_count FROM opportunity_event_processing WHERE event_id = ?",
         (ordinary.event_id,),
     ).fetchone() == ("pending", 0)
+    carrier_after_wake = check.execute(
+        "SELECT processing_status, attempt_count, claimed_at "
+        "FROM opportunity_event_processing WHERE event_id = ?",
+        (materialized_carrier.event_id,),
+    ).fetchone()
     check.close()
     assert venue_buy_commands == []
     if failure_mode == "empty":
-        assert first_poll is True
-        assert not wake_queue_file.exists()
-        assert day0_queue_file.exists()
+        assert first_poll is False
+        assert main._edli_last_reactor_wake_id is None
+        assert carrier_after_wake is None
+        assert wake_queue_file.read_bytes() == wake_queue_bytes
+        assert day0_queue_file.read_bytes() == day0_queue_bytes
         assert reactor_wake.read_reactor_wake(path=wake_path) == day0_wake
         assert batch_identities == []
+        assert write_outcomes == []
+        assert calls == {
+            "auction": 0,
+            "claim": 0,
+            "requeue": 0,
+            "adapter": 0,
+            "trade_conn": 0,
+        }
         return
 
     assert first_poll is False
     assert main._edli_last_reactor_wake_id is None
+    assert carrier_after_wake is None
     assert wake_queue_file.read_bytes() == wake_queue_bytes
     assert day0_queue_file.read_bytes() == day0_queue_bytes
+    assert calls == {
+        "auction": 0,
+        "claim": 0,
+        "requeue": 0,
+        "adapter": 0,
+        "trade_conn": 0,
+    }
     assert (
         reactor_wake.read_reactor_wake(
             path=wake_path,
@@ -870,35 +953,57 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
         day0_wake,
         monitor_succeeded=True,
     )
-    recovered_poll = main._edli_reactor_wake_poll_once()
+    assert main._edli_reactor_wake_poll_once() is True
     check = sqlite3.connect(world_path)
-    carrier_after_pause = check.execute(
+    assert check.execute(
         "SELECT processing_status, attempt_count, claimed_at "
         "FROM opportunity_event_processing WHERE event_id = ?",
-        (carrier.event_id,),
-    ).fetchone()
-    assert recovered_poll is True, (
-        carrier_after_pause,
-        tuple(batch_identities),
-        main._edli_last_reactor_wake_id,
-        reactor_wake.read_reactor_wake(path=wake_path),
-    )
-    assert tuple(carrier_after_pause[:2]) == ("pending", 1)
-    assert check.execute(
-        "SELECT processing_status, attempt_count FROM opportunity_event_processing WHERE event_id = ?",
-        (ordinary.event_id,),
-    ).fetchone() == ("pending", 0)
+        (materialized_carrier.event_id,),
+    ).fetchone() == ("pending", 0, None)
     check.close()
     assert not wake_queue_file.exists()
-    assert day0_queue_file.exists()
-    assert reactor_wake.read_reactor_wake(path=wake_path) == day0_wake
+    assert calls == {
+        "auction": 0,
+        "claim": 0,
+        "requeue": 0,
+        "adapter": 0,
+        "trade_conn": 0,
+    }
+    assert write_outcomes[-1] == ((True, False),)
     assert reactor_wake.acknowledge_reactor_wake(day0_wake, path=wake_path)
-    assert venue_buy_commands == []
+
+    # Replaying the same wake reuses the durable carrier identity and still
+    # bypasses auction, claim, and requeue.
+    assert reactor_module.run_edli_event_reactor_cycle(
+        active_lock=main._edli_reactor_active_lock,
+        producer_wake_reason=wake.reason,
+        producer_wake_ids=(wake.wake_id,),
+        producer_wake_published_at=wake.published_at,
+        producer_wake_families=wake.forecast_families,
+        allow_paused_forecast_snapshot_completion=True,
+    ) is True
+    check = sqlite3.connect(world_path)
+    assert check.execute(
+        "SELECT COUNT(*) FROM opportunity_event_processing WHERE event_id = ?",
+        (materialized_carrier.event_id,),
+    ).fetchone() == (1,)
+    assert check.execute(
+        "SELECT processing_status, attempt_count, claimed_at "
+        "FROM opportunity_event_processing WHERE event_id = ?",
+        (materialized_carrier.event_id,),
+    ).fetchone() == ("pending", 0, None)
+    check.close()
+    assert calls == {
+        "auction": 0,
+        "claim": 0,
+        "requeue": 0,
+        "adapter": 0,
+        "trade_conn": 0,
+    }
+    assert write_outcomes[-1] == ((False, True),)
 
     paused[0] = False
-    TestClock.current = datetime.fromisoformat(carrier_after_pause[2]) + timedelta(
-        microseconds=1
-    )
+    TestClock.current = first_decision_time + timedelta(seconds=2)
     resumed_wake = reactor_wake.publish_reactor_wake(
         source="replacement_forecast_materializer",
         reason="forecast_posterior_advanced",
@@ -911,24 +1016,31 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
         resumed_wake,
         path=wake_path,
     )
-
-    assert main._edli_reactor_wake_poll_once() is True
-    assert not resumed_queue_file.exists()
-    assert reactor_wake.read_reactor_wake(path=wake_path) is None
+    recovered_poll = main._edli_reactor_wake_poll_once()
     check = sqlite3.connect(world_path)
-    assert check.execute(
-        "SELECT processing_status, attempt_count FROM opportunity_event_processing WHERE event_id = ?",
-        (carrier.event_id,),
-    ).fetchone() == ("processed", 2)
+    carrier_after_pause = check.execute(
+        "SELECT processing_status, attempt_count, claimed_at "
+        "FROM opportunity_event_processing WHERE event_id = ?",
+        (materialized_carrier.event_id,),
+    ).fetchone()
+    assert recovered_poll is True, (
+        carrier_after_pause,
+        tuple(batch_identities),
+        main._edli_last_reactor_wake_id,
+        reactor_wake.read_reactor_wake(path=wake_path),
+    )
+    assert tuple(carrier_after_pause[:2]) == ("processed", 1)
     assert check.execute(
         "SELECT processing_status, attempt_count FROM opportunity_event_processing WHERE event_id = ?",
         (ordinary.event_id,),
     ).fetchone() == ("pending", 0)
     check.close()
-    assert batch_identities == [
-        (carrier.event_id, carrier.causal_snapshot_id),
-        (carrier.event_id, carrier.causal_snapshot_id),
-    ]
+    assert not resumed_queue_file.exists()
+
+    assert calls["auction"] == 1
+    assert calls["claim"] > 0
+    assert calls["trade_conn"] > 0
+    assert calls["adapter"] > 0
     assert venue_buy_commands == []
 
 
