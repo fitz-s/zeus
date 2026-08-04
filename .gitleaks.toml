@@ -15,31 +15,67 @@
 #
 # HOW TO SCOPE AN ENTRY — read before adding one.
 #
-# In gitleaks 8.30.1 an allowlist's `regexes` and `paths` combine as OR, not
-# AND. An entry that lists both does not mean "this literal, in this file"; it
-# means "this literal ANYWHERE, or ANYTHING in this file". The path arm exempts
-# the entire file, so a real credential committed there later passes silently.
-# `condition = "AND"` does not fix this: the key parses without error and
-# changes nothing.
+# An allowlist's `regexes` and `paths` combine as OR by default. An entry that
+# lists both does NOT mean "this literal, in this file"; it means "this literal
+# ANYWHERE, or ANYTHING in this file". The path arm exempts the entire file, so
+# a real credential committed there later passes the gate in silence. Five
+# entries here were written that way and were whole-file exemptions until
+# 2026-08-02.
 #
-# Verified 2026-08-02 by fixture, per entry shape:
-#   regexes + paths : an unrelated 40-char high-entropy secret placed in a
-#                     listed file was NOT reported.
-#   regexes only    : the same secret in the same file WAS reported; only the
-#                     named literal was suppressed.
+# `condition = "AND"` fixes this, but ONLY together with `targetRules`. On its
+# own it parses without error and changes nothing — which is why it looked
+# inert on first measurement. Verified 2026-08-02 at gitleaks 8.30.1, by
+# fixture, holding everything else constant:
 #
-# So: prefer regex-only, and choose literals specific enough that clearing them
-# repo-wide is harmless. Use `paths` alone only for a deliberate whole-subtree
-# ruling (the tests/ entry below), never as a narrowing qualifier — it widens.
+#   targetRules + condition + paths + regexes -> true AND
+#   condition   +             paths + regexes -> silently OR (condition ignored)
+#   paths + regexes                           -> OR
+#   regexes only                              -> literal cleared repo-wide
+#
+# True AND behaves exactly as a clearance should, verified per case:
+#   cleared literal inside the listed path      -> suppressed
+#   the SAME literal in any other path          -> still reported
+#   a DIFFERENT credential in the listed path   -> still reported
+#
+# So: scope every clearance with targetRules + condition = "AND" + paths +
+# regexes. `targetRules` takes the rule IDs the finding fires under — for the
+# entries below that is `generic-api-key`, confirmed by scanning each literal
+# and reading the reported RuleID.
+#
+# Use `paths` without regexes only for a deliberate whole-subtree ruling (the
+# tests/ entry below), never as a narrowing qualifier — alone it widens.
+#
+# tests/ci/test_gitleaks_allowlist_scope.py pins all of this.
 #
 # Use the gitleaks default rules as a base; allowlist below is additive.
 [extend]
 useDefault = true
 
 [[allowlists]]
-description = "WU PUBLIC WEB KEY — wunderground.com browser-embedded public key. Cleared everywhere: the value is published by wunderground.com itself, so it is not a credential in any file. Operator ruling 2026-04-21, re-confirmed 2026-05-01. See docs/reference/security_false_positives.md [REVIEW-SAFE: WU_PUBLIC_KEY]."
+description = "WU PUBLIC WEB KEY — wunderground.com browser-embedded public key. Operator ruling 2026-04-21, re-confirmed 2026-05-01. See docs/reference/security_false_positives.md [REVIEW-SAFE: WU_PUBLIC_KEY]. The path list is longer than the three src/data/ sites the ruling names: the push lane scans full history, and precise AND scoping surfaced 8 further carriers (backfill/onboard/probe scripts and two audit docs) that the previous OR-scoped entry had been hiding along with their whole files. Every one was inspected and carries this same published key."
+targetRules = ["generic-api-key"]
+condition = "AND"
 regexes = [
     '''e1f10a1e78da46f5b10a1e78da96f525''',
+]
+paths = [
+    '''src/data/observation_client\.py''',
+    '''src/data/daily_obs_append\.py''',
+    '''src/data/wu_hourly_client\.py''',
+    '''docs/reference/security_false_positives\.md''',
+    '''SECURITY-FALSE-POSITIVES\.md''',
+    '''docs/operations/repo_review_.*/security\.md''',
+    '''docs/operations/repo_review_.*/SYNTHESIS\.md''',
+    '''docs/operations/repo_review_.*/architecture\.md''',
+    '''docs/operations/task_2026-04-14_session_backlog\.md''',
+    # Reachable only in history / still-tracked backfill + onboarding scripts.
+    '''docs/operations/task_2026-05-16_deep_alignment_audit/RUN_3_findings\.md''',
+    '''docs/operations/task_2026-05-16_post_pr126_audit/RUN_15_track1_f90_cron_diff\.md''',
+    '''scripts/backfill_wu_daily_all\.py''',
+    '''scripts/onboard_cities\.py''',
+    '''scripts/post_sequential_fillback\.sh''',
+    '''scripts/resume_backfills_sequential\.sh''',
+    '''scripts/probes/probe_lagos_.*\.py''',
 ]
 
 # Deliberate whole-subtree ruling, not a narrowing qualifier: `tests/**` files
@@ -55,44 +91,80 @@ paths = [
 ]
 
 [[allowlists]]
-description = "DOC_EXAMPLE_FIXTURE_TOKEN — the [REVIEW-SAFE: TEST_FIXTURE_TOKENS] entry quotes its own example token inline, so the false-positive index itself trips generic-api-key on full-history scans. The literal is the documented example, not a credential. See docs/reference/security_false_positives.md [REVIEW-SAFE: TEST_FIXTURE_TOKENS]."
+description = "DOC_EXAMPLE_FIXTURE_TOKEN — the [REVIEW-SAFE: TEST_FIXTURE_TOKENS] entry quotes its own example token inline, so the false-positive index itself trips generic-api-key on full-history scans. The literal is the documented example, not a credential. Both paths are listed because the file moved from the repo root to docs/reference/ and the push lane scans full history. See docs/reference/security_false_positives.md [REVIEW-SAFE: TEST_FIXTURE_TOKENS]."
+targetRules = ["generic-api-key"]
+condition = "AND"
 regexes = [
     '''abc123def456''',
+]
+paths = [
+    '''SECURITY-FALSE-POSITIVES\.md''',
+    '''docs/reference/security_false_positives\.md''',
 ]
 
 [[allowlists]]
 description = "DAY0_SEMANTIC_SURFACE_KEY — day0_daily_extrema_unconditioned_count is a run-mode failure-surface field name, not a credential. generic-api-key matches it because the assigned name ends in _key (semantic_key = \"...\"). Historical site src/engine/event_reactor_adapter.py; live site src/control/live_health.py. See docs/reference/security_false_positives.md [REVIEW-SAFE: DAY0_SEMANTIC_SURFACE_KEY]."
+targetRules = ["generic-api-key"]
+condition = "AND"
 regexes = [
     '''day0_daily_extrema_unconditioned_count''',
 ]
+paths = [
+    '''src/engine/event_reactor_adapter\.py''',
+    '''src/control/live_health\.py''',
+]
 
 [[allowlists]]
-description = "STRATEGY_KEY_CONSTANTS — _STRATEGY_KEY = 'c1_*' / 'c2_*' module-level constants in candidate strategy files. The variable name _STRATEGY_KEY triggers gitleaks generic-api-key because of '_KEY'; the value is a human-readable strategy identifier, not a credential, in any file. See docs/reference/security_false_positives.md [REVIEW-SAFE: STRATEGY_KEY_CONSTANTS]."
+description = "STRATEGY_KEY_CONSTANTS — _STRATEGY_KEY = 'c1_*' / 'c2_*' module-level constants in candidate strategy files. The variable name _STRATEGY_KEY triggers gitleaks generic-api-key because of '_KEY'; the value is a human-readable strategy identifier, not a credential. See docs/reference/security_false_positives.md [REVIEW-SAFE: STRATEGY_KEY_CONSTANTS]."
+targetRules = ["generic-api-key"]
+condition = "AND"
 regexes = [
     '''c1_joint_tail_bayes''',
     '''c2_opening_stale_fok''',
 ]
+paths = [
+    '''src/strategy/candidates/c1_joint_tail_bayes\.py''',
+    '''src/strategy/candidates/c2_opening_stale_fok\.py''',
+    # The false-positive index quotes both constants inline.
+    '''SECURITY-FALSE-POSITIVES\.md''',
+    '''docs/reference/security_false_positives\.md''',
+]
 
 [[allowlists]]
-description = "DOCS_OUTCOME_LABEL — inline code examples showing outcome_label=NO and outcome_label=YES (Polymarket token outcome labels). These are domain vocabulary, not credentials, in any file. Operator ruling 2026-06-01. See docs/reference/security_false_positives.md [REVIEW-SAFE: DOCS_OUTCOME_LABEL]."
+description = "DOCS_OUTCOME_LABEL — docs markdown carries inline code examples showing outcome_label=NO and outcome_label=YES (Polymarket token outcome labels). These are domain vocabulary in prose, not credentials. Operator ruling 2026-06-01. See docs/reference/security_false_positives.md [REVIEW-SAFE: DOCS_OUTCOME_LABEL]."
+targetRules = ["generic-api-key"]
+condition = "AND"
 regexes = [
     '''outcome_label=NO''',
     '''outcome_label=YES''',
 ]
+paths = [
+    '''docs/operations/.*\.md''',
+    '''docs/archive/.*\.md''',
+    # The false-positive index quotes both labels inline.
+    '''SECURITY-FALSE-POSITIVES\.md''',
+    '''docs/reference/security_false_positives\.md''',
+]
 
 [[allowlists]]
 description = "DECISION_GUARD_CELL_KEYS — q_lcb_guard_cell_key / selection_guard_cell_key are settlement-bin provenance identifiers inside CandidateDecision diagnostics, not credentials. regexTarget=\"match\" because the clearance is the assignment shape, not the value: the extracted secret is a bare bin name that must stay reportable elsewhere. See docs/reference/security_false_positives.md [REVIEW-SAFE: DECISION_GUARD_CELL_KEYS]."
+targetRules = ["generic-api-key"]
+condition = "AND"
 regexTarget = "match"
 regexes = [
     '''q_lcb_guard_cell_key="[^"]+"''',
     '''selection_guard_cell_key="[^"]+"''',
+]
+paths = [
+    '''src/decision/family_decision_engine\.py''',
 ]
 
 # NOTE — SCHEMA_PINNED_HASH has no entry here, deliberately.
 # tests/state/_schema_pinned_hash.txt holds a bare 64-char SHA256 digest with no
 # `key = ` assignment context, so no default rule fires on it; verified
 # 2026-08-02 against a fixture copy of the real file. The entry it previously
-# carried allowlisted the regex `[0-9a-f]{64}`, which (per the OR semantics
-# above) cleared every 64-hex string repo-wide — any sha256-shaped credential
-# anywhere would have passed. The clearance was unnecessary and the blast radius
-# was the whole repository, so the entry is removed rather than narrowed.
+# carried allowlisted the regex `[0-9a-f]{64}` with no targetRules, which under
+# the OR semantics above cleared every 64-hex string repo-wide — any
+# sha256-shaped credential anywhere would have passed. The clearance was
+# unnecessary and the blast radius was the whole repository, so the entry is
+# removed rather than narrowed.

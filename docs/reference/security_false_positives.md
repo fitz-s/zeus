@@ -16,13 +16,24 @@ Measured blast radius before the fix (2026-08-02, fixture probes at gitleaks 8.3
 
 The rules that follow from this:
 
-1. **Clear a literal with `regexes` and nothing else.** A regex-only entry suppresses exactly its literal and still reports unrelated secrets in the same file — verified by fixture.
-2. **Therefore choose literals that are safe to clear repo-wide**, since that is what a regex-only entry does. Every entry below meets that bar: each value is public, deterministic, or domain vocabulary that is harmless in any file.
-3. **When the clearance is an assignment shape rather than a value, set `regexTarget = "match"`** so the pattern is tested against the whole matched construct instead of the extracted secret. `DECISION_GUARD_CELL_KEYS` needs this: the extracted secret is a bare bin name that must stay reportable elsewhere.
+1. **Scope every clearance with `targetRules` + `condition = "AND"` + `paths` + `regexes`.** That combination is the only one that means what "path-scoped" always claimed. Verified by fixture, holding everything else constant:
+
+   | entry shape | behaviour |
+   |---|---|
+   | `targetRules` + `condition` + `paths` + `regexes` | true AND |
+   | `condition` + `paths` + `regexes` (no `targetRules`) | silently OR — `condition` ignored |
+   | `paths` + `regexes` | OR |
+   | `regexes` only | literal cleared repo-wide |
+
+   `targetRules` takes the rule IDs the finding fires under. For every entry here that is `generic-api-key`, confirmed by scanning each literal and reading the reported `RuleID`.
+
+2. **True AND gives all three properties a clearance should have**, each verified: the cleared literal inside its listed path is suppressed; the *same* literal in any other path is still reported; a *different* credential in the listed path is still reported.
+3. **When the clearance is an assignment shape rather than a value, also set `regexTarget = "match"`** so the pattern is tested against the whole matched construct instead of the extracted secret. `DECISION_GUARD_CELL_KEYS` needs this: the extracted secret is a bare bin name that must stay reportable elsewhere.
 4. **Use `paths` alone only for a deliberate whole-subtree ruling**, never as a qualifier. `tests/**` is the one such ruling, and it accepts its consequence explicitly.
 5. **Do not add an allowlist before checking the finding still occurs.** The schema pin needed none: a bare digest has no `key =` assignment context and triggers no default rule. It was cleared anyway, and the clearance cost repo-wide coverage.
+6. **Expect precise scoping to surface carriers the loose entry was hiding.** Tightening `WU_PUBLIC_KEY` revealed the key in 8 further files — backfill/onboarding/probe scripts and two audit docs — that the old whole-file exemption had covered silently. Each was inspected before being listed. A newly visible finding after a scoping fix is the fix working, not a regression.
 
-`tests/ci/test_gitleaks_allowlist_scope.py` pins both halves of this contract — an unrelated credential in every named file must still be reported, and every cleared literal must stay suppressed. Re-adding a `paths` qualifier fails it.
+`tests/ci/test_gitleaks_allowlist_scope.py` pins this contract — an unrelated credential in every named file must still be reported, each cleared literal must stay suppressed at its own site, and no clearance may travel outside its listed paths. Degrading any entry to regex-only fails 12 of its 23 cases.
 
 ---
 
@@ -51,7 +62,7 @@ The rules that follow from this:
 - `task_2026-04-14_session_backlog.md` #62 — initial false-positive raise.
 - 2026-04-21 operator chat (re-archived in workspace memory).
 - `docs/operations/repo_review_2026-05-01/SYNTHESIS.md` (P0-1 WITHDRAWN section) — synthesis-level reclassification.
-- `.gitleaks.toml` allowlist entry, regex-only since 2026-08-02: the key is published by wunderground.com, so clearing it in any file is correct.
+- `.gitleaks.toml` allowlist entry, AND-scoped since 2026-08-02 (`targetRules` + `condition` + `paths` + `regexes`). Its path list is longer than the three sites above: precise scoping surfaced 8 further carriers — backfill/onboarding/probe scripts and two audit docs — that the previous whole-file exemption had been hiding. Each was inspected and carries this same published key.
 
 **If this entry should ever be reopened**: only if (a) WU rotates the public web key (unlikely; it's been stable for years), (b) WU's TOS changes to forbid programmatic re-use of the embedded key, or (c) Zeus migrates to a paid WU plan and the public fallback is no longer wanted. None apply today.
 
@@ -135,7 +146,7 @@ The rules that follow from this:
 **Operator ruling 2026-06-01**: "outcome_label=YES/NO are Polymarket domain vocabulary in a code example, not credentials — docs/operations path-scoped allowlist."
 
 **Durable references**:
-- `.gitleaks.toml` allowlist entry (regex-only since 2026-08-02: `outcome_label=NO` / `outcome_label=YES`, cleared in any file — see the scoping law above).
+- `.gitleaks.toml` allowlist entry, AND-scoped to `docs/operations/**`, `docs/archive/**`, and this index (which quotes both labels inline).
 
 ---
 
@@ -153,7 +164,7 @@ The rules that follow from this:
 **Operator ruling 2026-07-02**: guard cell keys are domain provenance identifiers, not secrets; allowlist them path-scoped to `src/decision/family_decision_engine.py`.
 
 **Durable references**:
-- `.gitleaks.toml` allowlist entry (regex-only with `regexTarget = "match"` since 2026-08-02, so the clearance is the assignment shape, not the bin name it carries).
+- `.gitleaks.toml` allowlist entry, AND-scoped to `src/decision/family_decision_engine.py` with `regexTarget = "match"`, so the clearance is the assignment shape, not the bin name it carries.
 
 ---
 
@@ -164,7 +175,7 @@ When the operator clears another false-positive:
 1. Add a `# [REVIEW-SAFE: <TAG>]` banner at every use site (full at the canonical site, short-form callout at duplicates).
 2. Add an entry here following the format above. Include all the locations and the operator ruling quote / date.
 3. **First check the finding still occurs.** If it does not, add no allowlist — an unnecessary entry costs real coverage (see `SCHEMA_PINNED_HASH`).
-4. If a scanner is in scope (gitleaks, semgrep, trufflehog, etc.), encode the clearance per the scoping law above: `regexes` only, no `paths` qualifier, `regexTarget = "match"` when clearing an assignment shape, and the tag in the description. Do **not** add a broad `[REVIEW-SAFE: ...]` regex: the pre-commit hook validates staged tags against this registry before scanners run.
+4. If a scanner is in scope (gitleaks, semgrep, trufflehog, etc.), encode the clearance per the scoping law above: `targetRules` + `condition = "AND"` + `paths` + `regexes`, plus `regexTarget = "match"` when clearing an assignment shape, and the tag in the description. Do **not** add a broad `[REVIEW-SAFE: ...]` regex: the pre-commit hook validates staged tags against this registry before scanners run.
 5. Add the literal to `tests/ci/test_gitleaks_allowlist_scope.py` — to `CLEARED_LITERALS` so it stays suppressed, and its file to `PREVIOUSLY_EXEMPT_PATHS` so the file never becomes whole-file exempt.
 6. Confirm this file is still listed in `docs/reference/AGENTS.md` — that registry is how an agent finds this index without grepping for it.
 

@@ -5,24 +5,32 @@
 #                  .github/workflows/secrets-scan.yml (the gate this config arms)
 """Blast-radius contract for the gitleaks allowlist.
 
-In gitleaks 8.30.1 an allowlist entry's ``regexes`` and ``paths`` combine as OR,
-not AND. An entry carrying both does not mean "this literal, in this file"; it
-means "this literal anywhere, OR anything in this file". The path arm exempts
-the whole file, so a credential committed there later is never reported. This
-was live for five entries until 2026-08-02 and silently cleared, among others,
-every 64-hex string in the repository.
+An allowlist entry's ``regexes`` and ``paths`` combine as OR by default. An
+entry carrying both does not mean "this literal, in this file"; it means "this
+literal anywhere, OR anything in this file". The path arm exempts the whole
+file, so a credential committed there later is never reported. Five entries
+were written that way and were whole-file exemptions until 2026-08-02.
 
-These tests pin the two halves of the contract that a config edit can break:
+``condition = "AND"`` fixes this, but only alongside ``targetRules``. On its
+own it parses without error and changes nothing, which is why it first measured
+as inert. Verified at gitleaks 8.30.1 by fixture:
 
-  - PERMISSIVE regression: an unrelated, real-shaped credential placed in a file
-    a REVIEW-SAFE ruling names must still be reported. Re-adding a ``paths``
-    narrowing qualifier fails here.
-  - SUPPRESSION regression: each cleared literal must stay suppressed, so
-    hardening the config does not re-open the false-positive loop the
-    REVIEW-SAFE index exists to end.
+    targetRules + condition + paths + regexes -> true AND
+    condition   +             paths + regexes -> silently OR
+    paths + regexes                           -> OR
+    regexes only                              -> literal cleared repo-wide
 
-The scan is intentionally run against fixture files, not the repository: the
-question is what the CONFIG permits, not what the tree happens to contain today.
+These tests pin the three properties true AND is supposed to give:
+
+  - a DIFFERENT credential in a cleared file must still be reported
+    (dropping ``targetRules``/``condition`` fails here);
+  - the SAME literal OUTSIDE its cleared paths must still be reported
+    (degrading an entry to regex-only fails here);
+  - each cleared literal must stay suppressed at its own site, so hardening
+    does not re-open the false-positive loop the REVIEW-SAFE index exists to end.
+
+The scan runs against fixture files, not the repository: the question is what
+the CONFIG permits, not what the tree happens to contain today.
 """
 
 from __future__ import annotations
@@ -92,6 +100,29 @@ def test_cleared_file_does_not_exempt_unrelated_credentials(tmp_path, rel):
         f"{rel} is whole-file exempt: a real credential committed there would "
         "pass the secrets-scan gate silently. An allowlist entry naming this "
         "file must clear a literal via `regexes`, never via `paths`."
+    )
+
+
+# A cleared literal, paired with a path NOT in that entry's `paths`. True AND
+# means the clearance does not travel: the same value elsewhere is still a
+# finding. A regex-only entry — the shape this config had before AND scoping
+# was proven to work — clears the literal repo-wide and fails every case here.
+LITERALS_OUTSIDE_THEIR_CLEARED_PATHS = [
+    ("src/engine/unrelated_module.py",
+     '_WU_PUBLIC_WEB_KEY = "e1f10a1e78da46f5b10a1e78da96f525"'),
+    ("src/engine/unrelated_module.py",
+     'semantic_key = "day0_daily_extrema_unconditioned_count"'),
+    ("src/engine/unrelated_module.py",
+     '_STRATEGY_KEY = "c1_joint_tail_bayes"'),
+]
+
+
+@pytest.mark.parametrize("rel,content", LITERALS_OUTSIDE_THEIR_CLEARED_PATHS)
+def test_clearance_does_not_travel_outside_its_paths(tmp_path, rel, content):
+    assert _scan(tmp_path, rel, content) == 1, (
+        f"a cleared literal is suppressed in {rel}, which its allowlist entry "
+        "does not list. The entry has lost its `targetRules` + "
+        '`condition = "AND"` scoping and now clears the value repo-wide.'
     )
 
 
