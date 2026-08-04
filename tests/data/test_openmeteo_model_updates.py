@@ -1,5 +1,5 @@
 # Created: 2026-06-25
-# Last reused/audited: 2026-07-18
+# Last reused/audited: 2026-08-04
 
 import json
 from datetime import UTC, datetime
@@ -472,6 +472,8 @@ def test_fetch_model_updates_uses_static_metadata_urls() -> None:
     class _Response:
         def __init__(self, payload):
             self._payload = payload
+            self.status_code = 200
+            self.content = b"{}"
 
         def raise_for_status(self) -> None:
             return None
@@ -483,7 +485,8 @@ def test_fetch_model_updates_uses_static_metadata_urls() -> None:
         def __init__(self) -> None:
             self.urls: list[str] = []
 
-        def get(self, url, timeout):
+        def get(self, url, params, timeout):
+            assert params == {}
             self.urls.append(url)
             return _Response(
                 {
@@ -508,3 +511,156 @@ def test_fetch_model_updates_uses_static_metadata_urls() -> None:
     ]
     assert [update.model for update in updates] == ["icon_global", "met_nordic"]
     assert metadata_model_id("gem_hrdps_continental") == "cmc_gem_hrdps"
+
+
+def test_fetch_model_updates_uses_shared_quota_client_in_production(monkeypatch) -> None:
+    import src.data.openmeteo_model_updates as model_updates
+
+    calls = []
+
+    def tracked_fetch(url, params, **kwargs):
+        calls.append((url, params, kwargs, model_updates.quota_tracker._is_priority()))
+        return {
+            "last_run_initialisation_time": 1782367200,
+            "last_run_availability_time": 1782381600,
+            "update_interval_seconds": 21600,
+        }
+
+    monkeypatch.setattr(model_updates, "_fetch_openmeteo", tracked_fetch)
+    updates = fetch_model_updates(["icon_global"], max_workers=1, priority=True)
+
+    assert [update.model for update in updates] == ["icon_global"]
+    assert calls[0][0].endswith("/data/dwd_icon/static/meta.json")
+    assert calls[0][1] == {}
+    assert calls[0][2]["endpoint_label"] == "source_clock_model_meta_icon_global"
+    assert calls[0][3] is True
+
+
+def test_fetch_model_updates_aggregate_endpoint_is_quota_tracked(monkeypatch) -> None:
+    import src.data.openmeteo_model_updates as model_updates
+
+    calls = []
+
+    def tracked_fetch(url, params, **kwargs):
+        calls.append((url, params, kwargs, model_updates.quota_tracker._is_priority()))
+        return {
+            "models": [
+                {
+                    "model": "icon_global",
+                    "last_run_initialisation_time": 1782367200,
+                    "last_run_availability_time": 1782381600,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(model_updates, "_fetch_openmeteo", tracked_fetch)
+    updates = fetch_model_updates(
+        ["icon_global"],
+        endpoint_url="https://metadata.example.test/updates",
+        priority=True,
+    )
+
+    assert [update.model for update in updates] == ["icon_global"]
+    assert calls == [
+        (
+            "https://metadata.example.test/updates?models=icon_global",
+            {},
+            {
+                "timeout": 30.0,
+                "max_retries": 1,
+                "endpoint_label": "source_clock_model_meta_batch",
+                "client": None,
+            },
+            True,
+        )
+    ]
+
+
+def test_source_clock_metadata_poll_backs_off_without_missing_off_cycle_update(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.source_clock_update_probe as probe
+
+    updates_path = tmp_path / "updates.jsonl"
+    cursor_path = tmp_path / "cursor.json"
+    cached = (
+        OpenMeteoModelUpdate(
+            model="ecmwf_ifs",
+            last_run_initialisation_time=datetime(2026, 8, 4, 12, 0, tzinfo=UTC),
+            last_run_availability_time=datetime(2026, 8, 4, 12, 30, tzinfo=UTC),
+            update_interval_seconds=3600,
+        ),
+        OpenMeteoModelUpdate(
+            model="icon_global",
+            last_run_initialisation_time=datetime(2026, 8, 4, 12, 0, tzinfo=UTC),
+            last_run_availability_time=datetime(2026, 8, 4, 12, 30, tzinfo=UTC),
+            update_interval_seconds=3600,
+        ),
+    )
+    write_model_updates_jsonl(updates_path, cached)
+    monkeypatch.setattr(
+        probe,
+        "all_configured_source_ids",
+        lambda: ("ecmwf_ifs", "icon_global"),
+    )
+    calls = []
+
+    changed = {"value": False}
+
+    def fetch(models, **_kwargs):
+        calls.append(tuple(models))
+        if changed["value"]:
+            return tuple(
+                OpenMeteoModelUpdate(
+                    model=update.model,
+                    last_run_initialisation_time=datetime(
+                        2026, 8, 4, 12, 30, tzinfo=UTC
+                    ),
+                    last_run_availability_time=datetime(
+                        2026, 8, 4, 12, 44, tzinfo=UTC
+                    ),
+                    update_interval_seconds=3600,
+                )
+                for update in cached
+                if update.model in models
+            )
+        return tuple(update for update in cached if update.model in models)
+
+    monkeypatch.setattr(probe, "fetch_model_updates", fetch)
+    namespace = str(updates_path.resolve())
+    for model in ("ecmwf_ifs", "icon_global"):
+        probe._MODEL_UPDATE_NEXT_POLL_MONOTONIC.pop((namespace, model), None)
+        probe._MODEL_UPDATE_UNCHANGED_STREAK.pop((namespace, model), None)
+
+    probe_openmeteo_source_clock_updates(
+        model_updates_path=updates_path,
+        cursor_path=cursor_path,
+        advance_cursor=False,
+        decision_time=datetime(2026, 8, 4, 12, 30, tzinfo=UTC),
+        now_monotonic=100.0,
+    )
+    assert calls == [("ecmwf_ifs", "icon_global")]
+
+    deferred = probe_openmeteo_source_clock_updates(
+        model_updates_path=updates_path,
+        cursor_path=cursor_path,
+        advance_cursor=False,
+        decision_time=datetime(2026, 8, 4, 12, 30, 14, tzinfo=UTC),
+        now_monotonic=114.0,
+    )
+    assert len(calls) == 1
+    assert deferred.status == "SOURCE_CLOCK_POLL_DEFERRED_BACKOFF"
+
+    changed["value"] = True
+    probe_openmeteo_source_clock_updates(
+        model_updates_path=updates_path,
+        cursor_path=cursor_path,
+        advance_cursor=False,
+        decision_time=datetime(2026, 8, 4, 12, 30, 15, tzinfo=UTC),
+        now_monotonic=115.0,
+    )
+    assert len(calls) == 2
+    assert {
+        update.last_run_initialisation_time
+        for update in probe.read_model_updates_jsonl(updates_path)
+    } == {datetime(2026, 8, 4, 12, 30, tzinfo=UTC)}

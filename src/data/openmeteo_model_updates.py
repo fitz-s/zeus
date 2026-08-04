@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +22,8 @@ from urllib.parse import urlencode
 
 import requests
 
+from src.data.openmeteo_client import fetch as _fetch_openmeteo
+from src.data.openmeteo_quota import quota_tracker
 from src.strategy.live_inference.source_clock_vnext import (
     SourceRunClock,
     provider_family_for_source,
@@ -220,16 +223,25 @@ def fetch_model_updates(
     timeout_seconds: float = 30.0,
     session: requests.Session | None = None,
     max_workers: int | None = None,
+    priority: bool = False,
 ) -> tuple[OpenMeteoModelUpdate, ...]:
     base = endpoint_url or os.environ.get(ENV_MODEL_UPDATES_ENDPOINT) or DEFAULT_MODEL_UPDATES_ENDPOINT
-    client = session or requests
     if "{model}" in base:
         clean_models = tuple(str(model).strip() for model in models if str(model).strip())
 
         def _fetch_one(clean_model: str) -> OpenMeteoModelUpdate:
-            response = client.get(_metadata_url(base, clean_model), timeout=timeout_seconds)
-            response.raise_for_status()
-            return parse_model_update(clean_model, response.json())
+            url = _metadata_url(base, clean_model)
+            quota_lane = quota_tracker.priority_lane() if priority else nullcontext()
+            with quota_lane:
+                payload = _fetch_openmeteo(
+                    url,
+                    {},
+                    timeout=timeout_seconds,
+                    max_retries=1,
+                    endpoint_label=f"source_clock_model_meta_{clean_model}",
+                    client=session,
+                )
+            return parse_model_update(clean_model, payload)
 
         workers = _model_update_worker_count(
             clean_models,
@@ -242,9 +254,17 @@ def fetch_model_updates(
             return tuple(executor.map(_fetch_one, clean_models))
 
     url = _endpoint_url(base, models)
-    response = client.get(url, timeout=timeout_seconds)
-    response.raise_for_status()
-    return parse_model_updates_payload(response.json())
+    quota_lane = quota_tracker.priority_lane() if priority else nullcontext()
+    with quota_lane:
+        payload = _fetch_openmeteo(
+            url,
+            {},
+            timeout=timeout_seconds,
+            max_retries=1,
+            endpoint_label="source_clock_model_meta_batch",
+            client=session,
+        )
+    return parse_model_updates_payload(payload)
 
 
 def write_model_updates_jsonl(path: str | Path, updates: Sequence[OpenMeteoModelUpdate]) -> None:

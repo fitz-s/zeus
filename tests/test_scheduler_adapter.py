@@ -156,7 +156,26 @@ def test_replacement_current_target_maintenance_stays_minute_bounded(
     assert ingest_main._replacement_maintenance_due(now_monotonic=160.0)
 
 
-def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_current(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("source_status", "source_error", "expected_status", "expected_failed"),
+    (
+        (
+            "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE",
+            None,
+            "SOURCE_CLOCK_POLL_CURRENT",
+            False,
+        ),
+        (
+            "SOURCE_CLOCK_MODEL_UPDATES_DEGRADED_CACHE",
+            "metadata transport unavailable",
+            "SOURCE_CLOCK_MODEL_UPDATES_DEGRADED_CACHE",
+            True,
+        ),
+    ),
+)
+def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_current(
+    monkeypatch, source_status, source_error, expected_status, expected_failed
+) -> None:
     """The source-clock poll must stay lightweight when no public run changed."""
     import src.ingest_main as ingest_main
     import src.data.replacement_forecast_production as prod
@@ -167,10 +186,10 @@ def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_c
 
         def as_dict(self):
             return {
-                "status": "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE",
+                "status": source_status,
                 "updated_sources": [],
                 "affected_cities": [],
-                "error": None,
+                "error": source_error,
             }
 
     def _scoped_path(*_args, **_kwargs):
@@ -225,8 +244,9 @@ def test_replacement_availability_fast_poll_skips_heavy_path_when_source_clock_c
 
     result = ingest_main._replacement_availability_poll_tick.__wrapped__()
 
-    assert result["status"] == "SOURCE_CLOCK_POLL_CURRENT"
-    assert result["source_clock_status"] == "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE"
+    assert result["status"] == expected_status
+    assert result["source_clock_status"] == source_status
+    assert ingest_main._classify_result(result)[0] is expected_failed
     assert result["source_clock_updated_sources"] == []
     assert result["maintenance_status"] == "REPLACEMENT_MAINTENANCE_DECOUPLED"
     assert current_target_calls == []

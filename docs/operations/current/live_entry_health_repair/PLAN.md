@@ -1497,3 +1497,48 @@ test and registry row, and this plan. Acceptance: query-plan evidence proves no
 full `decision_log` scan, payload lookup uses the integer primary key, current
 candidate evidence semantics remain green, and a live health cycle completes
 inside one cadence after landing.
+
+### 2026-08-04 Follow-up -- Bound no-information Day0 bundle retries
+
+An incomplete expected-model Day0 bundle cleared the ordinary 30-minute
+refresh throttle and retried every 45 seconds indefinitely. Across the active
+city universe this can spend thousands of provider calls per day without a
+new source run or a valid probability witness, exhausting the quota needed to
+refresh held capital and materialize complete posteriors.
+
+SCOPE is one `(city, local_date)` incomplete-bundle retry identity. DRAIN is a
+complete strict bundle that persists and passes canonical readback; it clears
+both retry deadline and streak. RESET is successful readback or process
+restart. Consecutive incomplete responses back off exponentially from the
+existing fast retry; ordinary/entry-priority work is capped by the normal
+30-minute refresh interval, while held-capital critical work remains capped at
+10 minutes. No partial or stale bundle becomes probability authority.
+
+Authorized files are `src/data/day0_hourly_vectors.py`, its existing remaining-
+day relationship test, the source-clock metadata client/probe, ingest scheduler
+truth propagation, their existing tests, registry timestamps, and this plan. Forbidden: source
+fallback, stale-as-fresh admission, probability changes, entry-pause changes,
+or reducing held-monitor cadence. Acceptance: the first transient retry stays
+fast; repeated no-information responses reach a finite lane-specific cap;
+successful strict persistence clears debt; quota, strict-bundle, and Day0
+remaining-window tests remain green.
+
+The same audit found a wider quota-closure defect: the 15-second source-clock
+poll issued one direct, untracked metadata GET per configured model. Its
+default ten-model fanout can generate 57,600 provider calls per day even though
+the shared tracker reports a lower total. Metadata reads must therefore use the
+shared quota lease and poll each model under an independent no-change backoff.
+An unchanged model backs off from 15 seconds to five minutes; a changed run
+resets the debt to the fast cadence. Provider interval metadata is evidence,
+not a hard skip boundary, so an early or off-cycle publication remains visible.
+A tick that performs no network read is typed as deferred backoff rather than
+provider-confirmed no-change; cached metadata never becomes synthetic freshness.
+If a due network read fails and cache is retained, that typed degraded-cache
+status remains the top-level scheduler result and is classified unhealthy.
+
+SCOPE is one `(metadata_path, model)` source-clock poll identity. DRAIN is a
+provider response declaring a newer run. RESET is that changed response or a
+process restart.
+Acceptance additionally requires that production metadata GETs acquire shared
+quota leases, unchanged polls cannot fan out every 15 seconds, and newly due
+models retain the first 15-second detection attempt.

@@ -80,6 +80,8 @@ DEFAULT_REFRESH_BUDGET_S = 6.0
 DEFAULT_REFRESH_MAX_CITIES = 3
 DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES = 60.0
 INCOMPLETE_BUNDLE_RETRY_INTERVAL_S = 45.0
+INCOMPLETE_BUNDLE_RETRY_MAX_INTERVAL_S = DEFAULT_REFRESH_INTERVAL_S
+INCOMPLETE_BUNDLE_CRITICAL_RETRY_MAX_INTERVAL_S = 600.0
 
 _TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS day0_hourly_vectors (
@@ -886,6 +888,7 @@ def remaining_day_extremes_c(
 _REFRESH_LOCK = threading.Lock()
 _LAST_REFRESH_MONOTONIC: dict[str, float] = {}
 _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC: dict[str, float] = {}
+_INCOMPLETE_RETRY_STREAK: dict[str, int] = {}
 
 
 def _refresh_throttled_locked(
@@ -960,6 +963,7 @@ def maybe_refresh_day0_hourly_vectors(
     def mark_incomplete(
         *,
         refresh_key: str,
+        quota_lane: str,
         name: str,
         target_dates: tuple[str, ...],
         expected_models: tuple[str, ...],
@@ -981,8 +985,30 @@ def maybe_refresh_day0_hourly_vectors(
         )
         with _REFRESH_LOCK:
             _LAST_REFRESH_MONOTONIC.pop(refresh_key, None)
+            streak = _INCOMPLETE_RETRY_STREAK.get(refresh_key, 0) + 1
+            _INCOMPLETE_RETRY_STREAK[refresh_key] = streak
+            retry_cap_s = (
+                INCOMPLETE_BUNDLE_CRITICAL_RETRY_MAX_INTERVAL_S
+                if quota_lane == "critical"
+                else INCOMPLETE_BUNDLE_RETRY_MAX_INTERVAL_S
+            )
+            max_exponent = max(
+                0,
+                int(
+                    math.ceil(
+                        math.log2(
+                            retry_cap_s / INCOMPLETE_BUNDLE_RETRY_INTERVAL_S
+                        )
+                    )
+                ),
+            )
+            retry_delay_s = min(
+                retry_cap_s,
+                INCOMPLETE_BUNDLE_RETRY_INTERVAL_S
+                * (2 ** min(streak - 1, max_exponent)),
+            )
             _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[refresh_key] = (
-                time.monotonic() + INCOMPLETE_BUNDLE_RETRY_INTERVAL_S
+                time.monotonic() + retry_delay_s
             )
 
     written = 0
@@ -1017,14 +1043,6 @@ def maybe_refresh_day0_hourly_vectors(
             models = day0_hourly_models_for_city(city)
             if not models:
                 continue
-            with _REFRESH_LOCK:
-                if _refresh_throttled_locked(
-                    refresh_key,
-                    now_monotonic=now_monotonic,
-                    interval_s=interval_s,
-                ):
-                    skipped_throttle += 1
-                    continue
             critical_city_count = max(0, int(quota_critical_cities))
             priority_city_count = max(0, int(quota_priority_cities))
             if city_index < critical_city_count:
@@ -1036,6 +1054,23 @@ def maybe_refresh_day0_hourly_vectors(
             else:
                 quota_lane = "maintenance"
                 quota_context = nullcontext()
+            with _REFRESH_LOCK:
+                retry_not_before = _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.get(
+                    refresh_key
+                )
+                if quota_lane == "critical" and retry_not_before is not None:
+                    _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[refresh_key] = min(
+                        retry_not_before,
+                        now_monotonic
+                        + INCOMPLETE_BUNDLE_CRITICAL_RETRY_MAX_INTERVAL_S,
+                    )
+                if _refresh_throttled_locked(
+                    refresh_key,
+                    now_monotonic=now_monotonic,
+                    interval_s=interval_s,
+                ):
+                    skipped_throttle += 1
+                    continue
             with quota_context:
                 if not quota_tracker.can_call():
                     skipped_quota += 1
@@ -1088,6 +1123,7 @@ def maybe_refresh_day0_hourly_vectors(
             if missing_models:
                 mark_incomplete(
                     refresh_key=refresh_key,
+                    quota_lane=quota_lane,
                     name=name,
                     target_dates=target_dates,
                     expected_models=expected_models,
@@ -1113,6 +1149,7 @@ def maybe_refresh_day0_hourly_vectors(
                 if window_start is None or not selected:
                     mark_incomplete(
                         refresh_key=refresh_key,
+                        quota_lane=quota_lane,
                         name=name,
                         target_dates=target_dates,
                         expected_models=expected_models,
@@ -1150,6 +1187,7 @@ def maybe_refresh_day0_hourly_vectors(
             if not drained:
                 mark_incomplete(
                     refresh_key=refresh_key,
+                    quota_lane=quota_lane,
                     name=name,
                     target_dates=target_dates,
                     expected_models=expected_models,
@@ -1161,6 +1199,7 @@ def maybe_refresh_day0_hourly_vectors(
             written += persisted
             with _REFRESH_LOCK:
                 _INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.pop(refresh_key, None)
+                _INCOMPLETE_RETRY_STREAK.pop(refresh_key, None)
         except Exception as exc:  # noqa: BLE001 — one city must not kill the pass
             if isinstance(exc, BlockingIOError):
                 with _REFRESH_LOCK:

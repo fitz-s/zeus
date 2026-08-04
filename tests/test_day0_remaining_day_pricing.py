@@ -2603,6 +2603,7 @@ class TestRequestHashProvenance:
         monkeypatch.setattr(hv.time, "monotonic", lambda: clock["now"])
         hv._LAST_REFRESH_MONOTONIC.clear()
         hv._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+        hv._INCOMPLETE_RETRY_STREAK.clear()
 
         decision_time = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
         first = hv.maybe_refresh_day0_hourly_vectors(
@@ -2654,6 +2655,104 @@ class TestRequestHashProvenance:
         assert second.unavailable_bundles == ()
         assert attempts == {"fetch": 2, "persist": 2}
         assert refresh_key not in hv._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC
+        assert refresh_key not in hv._INCOMPLETE_RETRY_STREAK
+
+    @pytest.mark.parametrize(
+        ("critical_count", "expected_cap"),
+        (
+            (1, 600.0),
+            (0, 1800.0),
+        ),
+        ids=("held-capital", "ordinary-authority"),
+    )
+    def test_repeated_incomplete_bundle_backs_off_without_quota_storm(
+        self, monkeypatch, critical_count, expected_cap
+    ):
+        """No-change partial bundles cannot consume the Day0 quota every 45 seconds."""
+        import src.data.day0_hourly_vectors as hv
+
+        city = SimpleNamespace(name="Tokyo", timezone="Asia/Tokyo", lat=0.0, lon=0.0)
+        clock = {"now": 60.0}
+        monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
+        monkeypatch.setattr(
+            hv,
+            "fetch_day0_hourly_vectors",
+            lambda city, *, models, now, **kw: ([_vector(model="ecmwf_ifs")], "partial"),
+        )
+        monkeypatch.setattr(hv.time, "monotonic", lambda: clock["now"])
+        hv._LAST_REFRESH_MONOTONIC.clear()
+        hv._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+        hv._INCOMPLETE_RETRY_STREAK.clear()
+        decision_time = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
+
+        for expected_streak in range(1, 8):
+            stats = hv.maybe_refresh_day0_hourly_vectors(
+                [city],
+                decision_time=decision_time,
+                quota_critical_cities=critical_count,
+                return_stats=True,
+            )
+            key = "Tokyo|2026-06-10"
+            expected_delay = min(
+                expected_cap,
+                hv.INCOMPLETE_BUNDLE_RETRY_INTERVAL_S * (2 ** (expected_streak - 1)),
+            )
+            assert stats.incomplete_expected_bundles == 1
+            assert hv._INCOMPLETE_RETRY_STREAK[key] == expected_streak
+            assert hv._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[key] == (
+                clock["now"] + expected_delay
+            )
+            clock["now"] += expected_delay
+
+        assert expected_delay == expected_cap
+
+    def test_held_promotion_clamps_ordinary_incomplete_retry_debt(
+        self, monkeypatch
+    ):
+        import src.data.day0_hourly_vectors as hv
+
+        city = SimpleNamespace(name="Tokyo", timezone="Asia/Tokyo", lat=0.0, lon=0.0)
+        clock = {"now": 100.0}
+        fetches = {"count": 0}
+
+        def fetch(city, *, models, now, **_kwargs):
+            fetches["count"] += 1
+            return [_refresh_vector(city, model, now) for model in models], "complete"
+
+        monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
+        monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fetch)
+        monkeypatch.setattr(hv, "persist_day0_hourly_vectors", lambda vectors, **kw: len(vectors))
+        monkeypatch.setattr(hv, "read_freshest_day0_hourly_vectors", lambda **kw: [object()])
+        monkeypatch.setattr(hv.time, "monotonic", lambda: clock["now"])
+        hv._LAST_REFRESH_MONOTONIC.clear()
+        hv._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC.clear()
+        hv._INCOMPLETE_RETRY_STREAK.clear()
+        key = "Tokyo|2026-06-10"
+        hv._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[key] = 1900.0
+        hv._INCOMPLETE_RETRY_STREAK[key] = 7
+        decision_time = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
+
+        deferred = hv.maybe_refresh_day0_hourly_vectors(
+            [city],
+            decision_time=decision_time,
+            quota_critical_cities=1,
+            return_stats=True,
+        )
+        assert deferred.cities_skipped_throttle == 1
+        assert fetches["count"] == 0
+        assert hv._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[key] == 700.0
+
+        clock["now"] = 700.0
+        completed = hv.maybe_refresh_day0_hourly_vectors(
+            [city],
+            decision_time=decision_time,
+            quota_critical_cities=1,
+            return_stats=True,
+        )
+        assert completed.vectors_written == 6
+        assert fetches["count"] == 1
+        assert key not in hv._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC
+        assert key not in hv._INCOMPLETE_RETRY_STREAK
 
     def test_strict_bundle_predicate_rejects_every_incomplete_shape_then_resets_after_persist(self):
         """Producer priority and authority readers share the exact strict predicate."""

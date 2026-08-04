@@ -7,6 +7,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -57,6 +58,11 @@ _SOURCE_CURSOR_COMMIT_STATUSES = frozenset(
         "SOURCE_CLOCK_SOURCE_NO_TARGETS",
     }
 )
+
+MODEL_UPDATE_UNCHANGED_RETRY_INITIAL_SECONDS = 15.0
+MODEL_UPDATE_UNCHANGED_RETRY_MAX_SECONDS = 300.0
+_MODEL_UPDATE_NEXT_POLL_MONOTONIC: dict[tuple[str, str], float] = {}
+_MODEL_UPDATE_UNCHANGED_STREAK: dict[tuple[str, str], int] = {}
 
 
 @dataclass(frozen=True)
@@ -130,6 +136,61 @@ def _write_cursor(path: Path, cursor: Mapping[str, str]) -> None:
             os.unlink(temp_path)
         except FileNotFoundError:
             pass
+
+
+def _model_update_identity(update: OpenMeteoModelUpdate) -> tuple[datetime, datetime]:
+    return (
+        update.last_run_initialisation_time.astimezone(UTC),
+        update.last_run_availability_time.astimezone(UTC),
+    )
+
+
+def _model_update_due_models(
+    models: tuple[str, ...],
+    *,
+    updates_path: Path,
+    now_monotonic: float,
+) -> tuple[str, ...]:
+    due: list[str] = []
+    namespace = str(updates_path.resolve())
+    for model in models:
+        key = (namespace, model)
+        if now_monotonic >= _MODEL_UPDATE_NEXT_POLL_MONOTONIC.get(key, 0.0):
+            due.append(model)
+    return tuple(due)
+
+
+def _record_model_update_poll(
+    models: tuple[str, ...],
+    *,
+    cached: Mapping[str, OpenMeteoModelUpdate],
+    fetched: Mapping[str, OpenMeteoModelUpdate],
+    updates_path: Path,
+    now_monotonic: float,
+) -> None:
+    namespace = str(updates_path.resolve())
+    for model in models:
+        key = (namespace, model)
+        previous = cached.get(model)
+        current = fetched.get(model)
+        changed = current is not None and (
+            previous is None
+            or _model_update_identity(current) != _model_update_identity(previous)
+        )
+        if changed:
+            _MODEL_UPDATE_UNCHANGED_STREAK[key] = 0
+            _MODEL_UPDATE_NEXT_POLL_MONOTONIC[key] = (
+                now_monotonic + MODEL_UPDATE_UNCHANGED_RETRY_INITIAL_SECONDS
+            )
+            continue
+        streak = _MODEL_UPDATE_UNCHANGED_STREAK.get(key, 0) + 1
+        _MODEL_UPDATE_UNCHANGED_STREAK[key] = streak
+        exponent = min(streak - 1, 5)
+        delay = min(
+            MODEL_UPDATE_UNCHANGED_RETRY_MAX_SECONDS,
+            MODEL_UPDATE_UNCHANGED_RETRY_INITIAL_SECONDS * (2**exponent),
+        )
+        _MODEL_UPDATE_NEXT_POLL_MONOTONIC[key] = now_monotonic + delay
 
 
 @contextmanager
@@ -214,19 +275,59 @@ def probe_openmeteo_source_clock_updates(
     use_network: bool = True,
     advance_cursor: bool = True,
     event_writer: EventWriter | None = None,
+    decision_time: datetime | None = None,
+    now_monotonic: float | None = None,
 ) -> SourceClockUpdateProbeReport:
-    models = all_configured_source_ids()
+    models = tuple(all_configured_source_ids())
     updates_path = Path(model_updates_path)
     cursor = Path(cursor_path)
+    now = (decision_time or datetime.now(tz=UTC)).astimezone(UTC)
+    monotonic_now = time.monotonic() if now_monotonic is None else float(now_monotonic)
+    cached = read_model_updates_jsonl(updates_path)
+    cached_by_model = {update.model: update for update in cached}
     updates: tuple[OpenMeteoModelUpdate, ...]
+    due_models: tuple[str, ...] = ()
+    network_error: str | None = None
     try:
         if use_network:
-            updates = fetch_model_updates(models, endpoint_url=endpoint_url)
-            write_model_updates_jsonl(updates_path, updates)
+            due_models = _model_update_due_models(
+                models,
+                updates_path=updates_path,
+                now_monotonic=monotonic_now,
+            )
+            if due_models:
+                fetched = fetch_model_updates(
+                    due_models,
+                    endpoint_url=endpoint_url,
+                    priority=True,
+                )
+                fetched_by_model = {update.model: update for update in fetched}
+                _record_model_update_poll(
+                    due_models,
+                    cached=cached_by_model,
+                    fetched=fetched_by_model,
+                    updates_path=updates_path,
+                    now_monotonic=monotonic_now,
+                )
+                merged = {**cached_by_model, **fetched_by_model}
+                updates = tuple(merged[model] for model in models if model in merged)
+                write_model_updates_jsonl(updates_path, updates)
+            else:
+                updates = tuple(
+                    cached_by_model[model] for model in models if model in cached_by_model
+                )
         else:
-            updates = read_model_updates_jsonl(updates_path)
+            updates = cached
     except Exception as exc:  # fail-soft: cached metadata may still be usable
-        cached = read_model_updates_jsonl(updates_path)
+        network_error = str(exc)
+        if due_models:
+            _record_model_update_poll(
+                tuple(due_models),
+                cached=cached_by_model,
+                fetched={},
+                updates_path=updates_path,
+                now_monotonic=monotonic_now,
+            )
         if not cached:
             return SourceClockUpdateProbeReport(
                 status="SOURCE_CLOCK_MODEL_UPDATES_UNAVAILABLE",
@@ -241,7 +342,6 @@ def probe_openmeteo_source_clock_updates(
     old = _read_cursor(cursor)
     new = _cursor_for_updates(updates)
     changed = tuple(sorted(model for model, ts in new.items() if old.get(model) != ts))
-    now = datetime.now(tz=UTC)
     usable_changed: list[str] = []
     update_by_model = {u.model: u for u in updates}
     for model in changed:
@@ -269,14 +369,22 @@ def probe_openmeteo_source_clock_updates(
         status=(
             "SOURCE_CLOCK_UPDATES_CHANGED"
             if usable_changed
-            else "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE"
+            else (
+                "SOURCE_CLOCK_MODEL_UPDATES_DEGRADED_CACHE"
+                if network_error is not None
+                else (
+                    "SOURCE_CLOCK_POLL_DEFERRED_BACKOFF"
+                    if use_network and not due_models
+                    else "SOURCE_CLOCK_NO_PUBLICLY_USABLE_CHANGE"
+                )
+            )
         ),
         model_count=len(models),
         updated_sources=tuple(sorted(usable_changed)),
         affected_cities=affected_cities_for_source_updates(usable_changed),
         model_updates_path=str(updates_path),
         cursor_path=str(cursor),
-        error=None,
+        error=network_error,
         emitted_event_ids=emitted_event_ids,
         cursor_values=tuple((model, new[model]) for model in usable_changed),
         cursor_preimage=tuple((model, old.get(model)) for model in usable_changed),

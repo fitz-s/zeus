@@ -1051,6 +1051,7 @@ _TRUTHFUL_FAIL_STATUSES = frozenset({
     "source_clock_bpf_scoped_cycle_unresolved_partial",
     "source_clock_bpf_scoped_capture_failsoft_skipped",
     "source_clock_bpf_scoped_run_identity_mismatch",
+    "source_clock_model_updates_degraded_cache",
 })
 
 
@@ -2831,9 +2832,14 @@ def _replacement_availability_poll_tick():
     source_clock_report = probe_openmeteo_source_clock_updates(advance_cursor=False)
     source_clock_payload = source_clock_report.as_dict()
     if not source_clock_report.updated_sources:
+        source_clock_status = str(source_clock_payload.get("status") or "")
         report: dict[str, object] = {
-            "status": "SOURCE_CLOCK_POLL_CURRENT",
-            "source_clock_status": source_clock_payload.get("status"),
+            "status": (
+                "SOURCE_CLOCK_MODEL_UPDATES_DEGRADED_CACHE"
+                if source_clock_status == "SOURCE_CLOCK_MODEL_UPDATES_DEGRADED_CACHE"
+                else "SOURCE_CLOCK_POLL_CURRENT"
+            ),
+            "source_clock_status": source_clock_status,
             "source_clock_updated_sources": source_clock_payload.get("updated_sources", []),
             "source_clock_affected_cities": source_clock_payload.get("affected_cities", []),
             "source_clock_error": source_clock_payload.get("error"),
