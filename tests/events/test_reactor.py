@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-02
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-02; last_reused=2026-08-02
+# Last reused/audited: 2026-08-04
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-04; last_reused=2026-08-04
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -4990,7 +4990,11 @@ def test_v4_publish_fence_prevents_legacy_fallback_regression(
     def observed_lineage_locks(scope_identities, *, path=None):
         if threading.current_thread().name == "v4-publisher-b":
             b_attempted_fence.set()
-        with real_lineage_locks(scope_identities, path=path):
+        with real_lineage_locks(
+            scope_identities,
+            path=path,
+            timeout_seconds=2.0,
+        ):
             yield
 
     def ordered_atomic_write(target, wake):
@@ -5066,6 +5070,163 @@ def test_v4_publish_fence_prevents_legacy_fallback_regression(
     assert reactor_wake.acknowledge_reactor_wake(queued[0], path=path)
     assert reactor_wake.exact_held_sell_completion_wake_ids(path=path) == frozenset()
     assert reactor_wake.read_reactor_wake(path=path) is None
+
+
+def test_held_sell_completion_fails_bounded_when_lineage_fence_is_stalled(
+    tmp_path,
+):
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    _path, _old, fresh = _v4_stable_debt_attempts(
+        tmp_path,
+        publish_old=False,
+        publish_fresh=False,
+    )
+    path = tmp_path / "stalled-lineage-wake.json"
+    assert reactor_wake._HELD_SELL_REAUCTION_RECEIPT_LINEAGE_LOCK.acquire(
+        timeout=1.0
+    )
+    started = time.monotonic()
+    try:
+        accepted = reactor.request_global_auction_completion(
+            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+            position_id=fresh.position_id,
+            family=fresh.family,
+            probability_content_identity=fresh.probability_content_identity,
+            held_token_id=fresh.held_token_id,
+            held_best_bid=fresh.held_best_bid,
+            bid_observed_at=fresh.bid_observed_at,
+            book_state=fresh.book_state,
+            probability_observed_at=fresh.probability_observed_at,
+            generation=fresh.generation,
+            scope_identity=fresh.scope_identity,
+            schema_version=fresh.schema_version,
+            wake_path=path,
+            force_new_generation=True,
+        )
+    finally:
+        reactor_wake._HELD_SELL_REAUCTION_RECEIPT_LINEAGE_LOCK.release()
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+    assert accepted is False
+    assert time.monotonic() - started < 0.75
+    assert reactor_wake.reactor_wakes_since(None, path=path) == ()
+
+
+def test_held_sell_lineage_flock_contention_has_one_total_deadline(
+    monkeypatch,
+    tmp_path,
+):
+    from src.runtime import reactor_wake
+
+    real_flock = reactor_wake.fcntl.flock
+
+    def contended_flock(descriptor, operation):
+        if operation & reactor_wake.fcntl.LOCK_NB:
+            raise BlockingIOError("held by another process")
+        return real_flock(descriptor, operation)
+
+    monkeypatch.setattr(reactor_wake.fcntl, "flock", contended_flock)
+    started = time.monotonic()
+    with pytest.raises(
+        TimeoutError,
+        match="HELD_SELL_REAUCTION_LINEAGE_LOCK_TIMEOUT",
+    ):
+        with reactor_wake._held_sell_reauction_lineage_lock(
+            "stalled-cross-process-scope",
+            path=tmp_path / "wake.json",
+            timeout_seconds=0.03,
+        ):
+            pytest.fail("contended lineage fence must not admit the writer")
+
+    assert time.monotonic() - started < 0.5
+    assert not reactor_wake._HELD_SELL_REAUCTION_RECEIPT_LINEAGE_LOCK.locked()
+
+
+def test_v4_completion_lock_timeout_keeps_exact_wake_pending(tmp_path):
+    from src.runtime import reactor_wake
+
+    path, _old, fresh = _v4_stable_debt_attempts(tmp_path)
+    assert reactor_wake._HELD_SELL_REAUCTION_RECEIPT_LINEAGE_LOCK.acquire(
+        timeout=1.0
+    )
+    started = time.monotonic()
+    try:
+        assert not reactor_wake.held_sell_reauction_requests_completed(
+            (fresh,),
+            path=path,
+        )
+    finally:
+        reactor_wake._HELD_SELL_REAUCTION_RECEIPT_LINEAGE_LOCK.release()
+
+    assert time.monotonic() - started < 0.75
+    queued = reactor_wake.reactor_wakes_since(None, path=path)
+    assert len(queued) == 1
+    assert queued[0].held_sell_reauction_requests == (fresh,)
+
+
+def test_v4_queued_lookup_default_preserves_lineage_lock_call_shape(
+    monkeypatch,
+    tmp_path,
+):
+    from src.runtime import reactor_wake
+
+    path, _old, fresh = _v4_stable_debt_attempts(tmp_path)
+    real_lock = reactor_wake._held_sell_reauction_lineage_lock
+
+    @contextmanager
+    def legacy_lineage_lock(scope_identity, *, path=None):
+        with real_lock(scope_identity, path=path):
+            yield
+
+    monkeypatch.setattr(
+        reactor_wake,
+        "_held_sell_reauction_lineage_lock",
+        legacy_lineage_lock,
+    )
+
+    assert reactor_wake.v4_held_sell_reauction_request_is_queued(
+        fresh,
+        path=path,
+    )
+
+
+def test_v4_lineage_cleanup_closes_every_descriptor_after_unlock_error(
+    monkeypatch,
+    tmp_path,
+):
+    from src.runtime import reactor_wake
+
+    real_flock = reactor_wake.fcntl.flock
+    real_close = reactor_wake.os.close
+    unlocked = 0
+    closed = []
+
+    def flaky_unlock(descriptor, operation):
+        nonlocal unlocked
+        if operation == reactor_wake.fcntl.LOCK_UN:
+            unlocked += 1
+            if unlocked == 1:
+                raise OSError("first unlock failed")
+        return real_flock(descriptor, operation)
+
+    def observed_close(descriptor):
+        closed.append(descriptor)
+        return real_close(descriptor)
+
+    monkeypatch.setattr(reactor_wake.fcntl, "flock", flaky_unlock)
+    monkeypatch.setattr(reactor_wake.os, "close", observed_close)
+    with pytest.raises(OSError, match="first unlock failed"):
+        with reactor_wake._held_sell_reauction_lineage_locks(
+            ("scope-a", "scope-b"),
+            path=tmp_path / "wake.json",
+        ):
+            pass
+
+    assert len(closed) == 2
+    assert len(set(closed)) == 2
+    assert not reactor_wake._HELD_SELL_REAUCTION_RECEIPT_LINEAGE_LOCK.locked()
 
 
 def test_v4_lineage_read_error_fails_closed(tmp_path):

@@ -1446,3 +1446,32 @@ no DB/BUY/SELL method is reachable in the worker; batch failure still cannot fan
 out; shared deadline and next-cycle recovery antibodies remain green; planning,
 compile, lint differential, and diff checks pass. Deployment remains exact-SHA
 hot-fix only after independent review.
+
+### 2026-08-04 Follow-up -- Bound held-SELL lineage fences inside monitor time
+
+Current code still allowed a statistical held-SELL completion request to wait
+without limit on the process-local lineage mutex and cross-process
+`flock(LOCK_EX)`. That request runs inside the single held-monitor claim and
+outside the quote/probability deadline, so one stalled publisher could again
+silence the whole held book while the independent recovery lane repeatedly met
+the same occupied claim.
+
+SCOPE is every V4 held-SELL lineage lookup, publication, receipt, completion,
+and acknowledgement fence.
+DRAIN is acquisition of the lineage mutex and every sorted scope flock inside
+one 250ms total deadline, followed by the existing atomic lineage, deterministic
+queue-slot, and fallback writes. RESET is lock release on success or timeout;
+the monitor records the completion request failure and the existing canonical
+SELL debt or wake remains pending for a later fresh cycle. Ordinary non-V4
+reactor wakes never enter this fence.
+
+Authorized files are `src/runtime/reactor_wake.py`,
+`src/events/reactor.py`, the focused existing reactor test and registry rows,
+and this plan. Forbidden: local statistical SELL authority, swallowing or
+acknowledging an unserved debt, weakening V4 ordering, changing q/economics,
+extending the held-monitor budget, changing entry posture, or venue/DB action.
+Acceptance: both mutex and flock contention fail closed within the same finite
+deadline with no descriptor or lock leak; the V4 fallback-ordering race remains
+green; monitor recovery, hard-book deadline, bounded debt fairness, and global
+auction delegation antibodies pass; independent review finds no P0/P1 before
+landing.

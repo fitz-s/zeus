@@ -9,8 +9,10 @@ import math
 import os
 import socket
 import stat
+import sys
 import tempfile
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -81,6 +83,7 @@ _WAKE_QUEUE_CACHE_LOCK = threading.Lock()
 _WAKE_QUEUE_CACHE: dict[Path, dict[Path, ReactorWake | None]] = {}
 _WAKE_QUEUE_REVISIONS: dict[Path, tuple[int, ...]] = {}
 _HELD_SELL_REAUCTION_RECEIPT_LINEAGE_LOCK = threading.Lock()
+HELD_SELL_REAUCTION_LINEAGE_LOCK_TIMEOUT_SECONDS = 0.25
 
 
 @dataclass(frozen=True)
@@ -656,6 +659,7 @@ def publish_reactor_wake(
     event_ids: tuple[str, ...] = (),
     forecast_families: tuple[tuple[str, str, str], ...] = (),
     held_sell_reauction_requests: tuple[HeldSellReauctionRequest, ...] = (),
+    lineage_lock_timeout_seconds: float | None = None,
 ) -> ReactorWake:
     """Atomically publish a non-authoritative wake hint after durable truth commits."""
 
@@ -696,10 +700,19 @@ def publish_reactor_wake(
         if request.schema_version == HELD_SELL_REAUCTION_V4
     )
     if v4_requests:
-        with _held_sell_reauction_lineage_locks(
-            tuple(request.scope_identity for request in v4_requests),
-            path=path,
-        ):
+        lineage_lock = (
+            _held_sell_reauction_lineage_locks(
+                tuple(request.scope_identity for request in v4_requests),
+                path=path,
+            )
+            if lineage_lock_timeout_seconds is None
+            else _held_sell_reauction_lineage_locks(
+                tuple(request.scope_identity for request in v4_requests),
+                path=path,
+                timeout_seconds=lineage_lock_timeout_seconds,
+            )
+        )
+        with lineage_lock:
             for request in v4_requests:
                 _read_v4_held_sell_reauction_lineage(
                     request.scope_identity,
@@ -1286,15 +1299,35 @@ def _held_sell_reauction_lineage_locks(
     scope_identities: tuple[str, ...],
     *,
     path: Path | None = None,
+    timeout_seconds: float | None = (
+        HELD_SELL_REAUCTION_LINEAGE_LOCK_TIMEOUT_SECONDS
+    ),
 ) -> Iterator[None]:
     """Serialize V4 publish, receipt, completion fence, and acknowledgement."""
 
     scopes = tuple(sorted(set(scope_identities)))
     if not scopes or any(not scope for scope in scopes):
         raise ValueError("HELD_SELL_REAUCTION_SCOPE_IDENTITY_INVALID")
+    timeout = None if timeout_seconds is None else float(timeout_seconds)
+    if timeout is not None and (not math.isfinite(timeout) or timeout <= 0.0):
+        raise ValueError("HELD_SELL_REAUCTION_LINEAGE_LOCK_TIMEOUT_INVALID")
+    deadline = None if timeout is None else time.monotonic() + timeout
+
+    def _remaining() -> float:
+        assert deadline is not None
+        return max(0.0, deadline - time.monotonic())
+
     directory = _held_sell_reauction_receipt_dir(path)
     directory.mkdir(parents=True, exist_ok=True)
-    with _HELD_SELL_REAUCTION_RECEIPT_LINEAGE_LOCK:
+    if deadline is None:
+        acquired = _HELD_SELL_REAUCTION_RECEIPT_LINEAGE_LOCK.acquire()
+    else:
+        acquired = _HELD_SELL_REAUCTION_RECEIPT_LINEAGE_LOCK.acquire(
+            timeout=_remaining()
+        )
+    if not acquired:
+        raise TimeoutError("HELD_SELL_REAUCTION_LINEAGE_LOCK_TIMEOUT")
+    try:
         descriptors = []
         try:
             for scope_identity in scopes:
@@ -1306,13 +1339,42 @@ def _held_sell_reauction_lineage_locks(
                     os.O_CREAT | os.O_RDWR,
                     0o600,
                 )
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
                 descriptors.append(descriptor)
+                if deadline is None:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                else:
+                    while True:
+                        try:
+                            fcntl.flock(
+                                descriptor,
+                                fcntl.LOCK_EX | fcntl.LOCK_NB,
+                            )
+                            break
+                        except BlockingIOError as exc:
+                            remaining = _remaining()
+                            if remaining <= 0.0:
+                                raise TimeoutError(
+                                    "HELD_SELL_REAUCTION_LINEAGE_LOCK_TIMEOUT"
+                                ) from exc
+                            time.sleep(min(0.01, remaining))
             yield
         finally:
+            active_error = sys.exc_info()[1]
+            release_errors: list[OSError] = []
             for descriptor in reversed(descriptors):
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-                os.close(descriptor)
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                except OSError as exc:
+                    release_errors.append(exc)
+                finally:
+                    try:
+                        os.close(descriptor)
+                    except OSError as exc:
+                        release_errors.append(exc)
+            if release_errors and active_error is None:
+                raise release_errors[0]
+    finally:
+        _HELD_SELL_REAUCTION_RECEIPT_LINEAGE_LOCK.release()
 
 
 @contextmanager
@@ -1320,8 +1382,21 @@ def _held_sell_reauction_lineage_lock(
     scope_identity: str,
     *,
     path: Path | None = None,
+    timeout_seconds: float | None = (
+        HELD_SELL_REAUCTION_LINEAGE_LOCK_TIMEOUT_SECONDS
+    ),
 ) -> Iterator[None]:
-    with _held_sell_reauction_lineage_locks((scope_identity,), path=path):
+    lineage_lock = (
+        _held_sell_reauction_lineage_locks((scope_identity,), path=path)
+        if timeout_seconds
+        in (None, HELD_SELL_REAUCTION_LINEAGE_LOCK_TIMEOUT_SECONDS)
+        else _held_sell_reauction_lineage_locks(
+            (scope_identity,),
+            path=path,
+            timeout_seconds=timeout_seconds,
+        )
+    )
+    with lineage_lock:
         yield
 
 
@@ -1521,12 +1596,25 @@ def v4_held_sell_reauction_request_is_queued(
     request: HeldSellReauctionRequest,
     *,
     path: Path | None = None,
+    lineage_lock_timeout_seconds: float | None = None,
 ) -> bool:
     """Check one V4 deterministic queue slot without scanning the backlog."""
 
     if request.schema_version != HELD_SELL_REAUCTION_V4:
         return False
-    with _held_sell_reauction_lineage_lock(request.scope_identity, path=path):
+    lineage_lock = (
+        _held_sell_reauction_lineage_lock(
+            request.scope_identity,
+            path=path,
+        )
+        if lineage_lock_timeout_seconds is None
+        else _held_sell_reauction_lineage_lock(
+            request.scope_identity,
+            path=path,
+            timeout_seconds=lineage_lock_timeout_seconds,
+        )
+    )
+    with lineage_lock:
         lineage = _read_v4_held_sell_reauction_lineage(
             request.scope_identity,
             path=path,
