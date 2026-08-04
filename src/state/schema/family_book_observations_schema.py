@@ -64,8 +64,12 @@ CREATE TABLE IF NOT EXISTS family_book_observations (
     market_center_status     TEXT NOT NULL,
     market_center_version    TEXT NOT NULL,
     complete_book            INTEGER NOT NULL CHECK (complete_book IN (0, 1)),
+    -- Exactly the three reasons _sampling_decision can emit. 'WORKER_BOOTSTRAP'
+    -- was permitted here but no code path ever wrote it: a declared value that
+    -- can never hold a real observation is HOLLOW, and a future reader would
+    -- reasonably infer a bootstrap sampling mode that does not exist.
     sampling_reason          TEXT NOT NULL CHECK (
-        sampling_reason IN ('STATE_CHANGE', 'HEARTBEAT', 'PRE_VETO_SELECTED', 'WORKER_BOOTSTRAP')
+        sampling_reason IN ('STATE_CHANGE', 'HEARTBEAT', 'PRE_VETO_SELECTED')
     ),
     state_changed            INTEGER NOT NULL CHECK (state_changed IN (0, 1)),
     heartbeat_due            INTEGER NOT NULL CHECK (heartbeat_due IN (0, 1)),

@@ -2816,7 +2816,7 @@ tables:
       OK/INCOMPLETE_BOOK/INSUFFICIENT_COVERAGE -- NULL/non-OK unless every
       EXECUTABLE bin has a two-sided quote, since a subset-quoted "complete"
       book is not an identified family-wide expectation). Sampling policy v1
-      (sampling_reason STATE_CHANGE/HEARTBEAT/DECISION,
+      (sampling_reason STATE_CHANGE/HEARTBEAT/PRE_VETO_SELECTED,
       sampling_policy_version) is the ACTUAL row-volume control -- see
       src/events/family_book_telemetry_writer.py; family_book_states'
       content-hash dedup controls STATE row volume only, this policy
