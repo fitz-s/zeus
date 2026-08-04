@@ -49,7 +49,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -193,6 +193,10 @@ def _register_substrate_observer_jobs(
     actual writes still serialize through the shared in-process and cross-process
     locks. The heartbeat remains on its dedicated file-only executor.
     """
+    base_now = datetime.now(timezone.utc)
+    warm_phase_offset_seconds = priority_refresh_interval_seconds / 2.0
+    discovery_phase_offset_seconds = priority_refresh_interval_seconds * 3.0 / 4.0
+
     scheduler.add_job(
         _scheduler_job("money_path_substrate_priority")(money_path_priority_cycle),
         "interval",
@@ -201,7 +205,7 @@ def _register_substrate_observer_jobs(
         executor="priority",
         max_instances=1,
         coalesce=True,
-        next_run_time=datetime.now(timezone.utc),
+        next_run_time=base_now,
     )
     scheduler.add_job(
         _scheduler_job("edli_market_substrate_warm")(market_substrate_warm_cycle),
@@ -210,6 +214,7 @@ def _register_substrate_observer_jobs(
         id="edli_market_substrate_warm",
         max_instances=1,
         coalesce=True,
+        next_run_time=base_now + timedelta(seconds=warm_phase_offset_seconds),
     )
     scheduler.add_job(
         _scheduler_job("market_discovery")(market_discovery_cycle),
@@ -218,6 +223,7 @@ def _register_substrate_observer_jobs(
         id="market_discovery",
         max_instances=1,
         coalesce=True,
+        next_run_time=base_now + timedelta(seconds=discovery_phase_offset_seconds),
     )
 
     # File-only liveness evidence stays independent of the snapshot-writer worker.

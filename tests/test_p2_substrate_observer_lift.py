@@ -1,9 +1,9 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-08-03
+# Last reused or audited: 2026-08-04
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.1 (Executable-Substrate Observer), §6 (P2 row), §7 (I1 no-back-coupling),
 #   §8 Step 1 (lift + delete outer pending gates), §9 (regression-unconstructable proof).
-# Lifecycle: created=2026-06-08; last_reviewed=2026-08-03; last_reused=2026-08-03
+# Lifecycle: created=2026-06-08; last_reviewed=2026-08-04; last_reused=2026-08-04
 # Purpose: RELATIONSHIP TESTS for process-topology refactor STEP P2 — lift the
 #   executable-substrate observer (the zero-trade regression site) out of the order
 #   daemon into its own process.
@@ -162,7 +162,8 @@ def test_substrate_observer_money_path_priority_has_dedicated_executor():
     assert 'id="money_path_substrate_priority"' in src
     assert 'executor="priority"' in src
     assert "_priority_refresh_interval_seconds()" in src
-    assert "next_run_time=datetime.now(timezone.utc)" in src
+    assert "base_now = datetime.now(timezone.utc)" in src
+    assert "next_run_time=base_now" in src
 
 
 def test_substrate_observer_broad_jobs_share_default_but_priority_is_independent():
@@ -193,6 +194,7 @@ def test_substrate_observer_broad_jobs_share_default_but_priority_is_independent
                     executor_name=executor_name,
                     executor=self.executors[executor_name],
                     kwargs=kwargs,
+                    next_run_time=kwargs.get("next_run_time"),
                     func=func,
                 )
             )
@@ -219,6 +221,22 @@ def test_substrate_observer_broad_jobs_share_default_but_priority_is_independent
     assert priority_job.executor is not broad_jobs[0].executor
     assert jobs["substrate_observer_heartbeat"].executor_name == "heartbeat"
     assert jobs["substrate_observer_heartbeat"].executor is not broad_jobs[0].executor
+
+    priority_time = priority_job.next_run_time
+    warm_time = jobs["edli_market_substrate_warm"].next_run_time
+    discovery_time = jobs["market_discovery"].next_run_time
+    assert priority_time is not None
+    assert warm_time is not None
+    assert discovery_time is not None
+    assert priority_time < warm_time < discovery_time
+    assert warm_time - priority_time == timedelta(seconds=10)
+    assert discovery_time - priority_time == timedelta(seconds=15)
+    assert priority_job.kwargs["seconds"] == 20.0
+    assert (
+        jobs["edli_market_substrate_warm"].kwargs["seconds"]
+        == daemon._EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS
+    )
+    assert jobs["market_discovery"].kwargs["minutes"] == 5
 
 
 def test_actual_priority_executor_starts_while_default_worker_is_blocked():
