@@ -7021,6 +7021,19 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         "_entry_global_submit_suppression_reason",
         lambda: entry_suppression_reason[0],
     )
+    # a99c94042 (2026-08-02) added an entry_pause_reason conjunct to
+    # buy_candidates_enabled, read via _entry_pause_blocks_live_submit(conn),
+    # which unconditionally opens get_world_connection() as its authoritative
+    # source. In this in-memory-DB test there is no real world DB, so the
+    # control-override read fails closed to a non-None pause reason regardless
+    # of entry_suppression_reason/selection_completion_reserved, making every
+    # buy_candidates_enabled assertion below False. This test exercises the
+    # OTHER two conjuncts (suppression, completion reservation); the pause
+    # conjunct has its own coverage (test_paused_held_batch_wires_exact_held_
+    # family_restriction, test_pause_race_final_submit_gate_has_zero_venue_
+    # side_effect in tests/engine/test_event_reactor_adapter_family_scoped_
+    # entry_block.py), so pin it to "not paused" here.
+    monkeypatch.setattr(era, "_entry_pause_blocks_live_submit", lambda _conn: None)
     def make_adapter(*, completion_reserved=False, fairness_reserved=False):
         return era.event_bound_live_adapter_from_trade_conn(
             trade,
