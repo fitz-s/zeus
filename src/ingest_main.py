@@ -935,8 +935,16 @@ def _record_replacement_bpf_maintenance_progress(
         _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC = now + delay
         return
     if status:
-        _REPLACEMENT_BPF_NO_PROGRESS_FAILURES = 0
-        _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC = 0.0
+        _reset_replacement_bpf_no_progress_backoff()
+
+
+def _reset_replacement_bpf_no_progress_backoff() -> None:
+    """Clear ordinary-cycle debt when progress or a new source cycle supersedes it."""
+
+    global _REPLACEMENT_BPF_NO_PROGRESS_FAILURES
+    global _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC
+    _REPLACEMENT_BPF_NO_PROGRESS_FAILURES = 0
+    _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC = 0.0
 
 
 def _compact_replacement_current_target_report(download_report):
@@ -2835,6 +2843,11 @@ def _replacement_availability_poll_tick():
         report["maintenance_status"] = "REPLACEMENT_MAINTENANCE_DECOUPLED"
         logger.info("replacement source-clock poll current: %s", report)
         return report
+    # RESET: a provider-proved source-clock transition supersedes any ordinary
+    # unchanged-cycle no-progress debt. The scoped source-clock capture below
+    # already bypasses that debt; clearing it also makes the next maintenance
+    # tick immediately eligible to heal residual scopes for the new cycle.
+    _reset_replacement_bpf_no_progress_backoff()
     logger.info("replacement source-clock update detected; running download path: %s", source_clock_payload)
     source_clock_anchor_report = None
     anchor_reseed_published = False

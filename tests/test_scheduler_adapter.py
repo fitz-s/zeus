@@ -1264,6 +1264,12 @@ def test_replacement_availability_notification_error_keeps_global_reseed(
         "_replacement_forecast_live_materialization_queue_config",
         lambda: {"download_current_targets_enabled": True},
     )
+    monkeypatch.setattr(ingest_main, "_REPLACEMENT_BPF_NO_PROGRESS_FAILURES", 3)
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC",
+        999.0,
+    )
     monkeypatch.setattr(
         source_clock_probe,
         "probe_openmeteo_source_clock_updates",
@@ -1307,6 +1313,8 @@ def test_replacement_availability_notification_error_keeps_global_reseed(
     assert result.get("reseed_maintenance_status") != (
         "SOURCE_COMMIT_RESEEDS_PUBLISHED"
     )
+    assert ingest_main._REPLACEMENT_BPF_NO_PROGRESS_FAILURES == 0
+    assert ingest_main._REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC == 0.0
 
 
 def test_replacement_availability_cooldown_suppresses_repeated_reseed_scans(
