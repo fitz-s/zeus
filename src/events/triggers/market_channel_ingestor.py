@@ -2283,23 +2283,12 @@ class MarketChannelOnlineService:
                 prepared = self.ingestor.prepare_coalesced_quote_flush(
                     market_budget=self.quote_flush_batch_size,
                 )
-                with self.ingestor.defer_market_event_sink():
-                    try:
-                        with write_gate:
-                            committed_quotes = self.ingestor.write_prepared_quote_events(
-                                prepared.quotes
-                            )
-                            if commit is not None:
-                                commit()
-                    except BaseException:
-                        try:
-                            if rollback is not None:
-                                rollback()
-                        finally:
-                            self.ingestor.requeue_prepared_coalesced_quotes(prepared)
-                        raise
-                    self.ingestor.finalize_prepared_quote_events(committed_quotes)
-                    self.ingestor.flush_deferred_market_event_sink()
+                await self._persist_prepared_quote_batch_fairly(
+                    prepared,
+                    write_gate=write_gate,
+                    commit=commit,
+                    rollback=rollback,
+                )
             except (TimeoutError, sqlite3.OperationalError) as exc:
                 if not _is_sqlite_write_contention(exc):
                     raise
@@ -2342,6 +2331,52 @@ class MarketChannelOnlineService:
                 wake.set()
             elif connection_done.is_set() and initial_seed_done.is_set():
                 return
+
+    async def _persist_prepared_quote_batch_fairly(
+        self,
+        prepared: _PreparedCoalescedQuotes,
+        *,
+        write_gate: Any,
+        commit: Callable[[], None] | None,
+        rollback: Callable[[], None] | None,
+    ) -> None:
+        """Commit each logical quote as one short TRADE writer unit.
+
+        A quote's direction rows stay together, while the coalesced batch does
+        not keep the TRADE lease across unrelated quotes. Only the unfinished
+        tail is requeued after a failed quote; committed quotes are finalized
+        before yielding to another writer.
+        """
+
+        for index, quote in enumerate(prepared.quotes):
+            with self.ingestor.defer_market_event_sink():
+                try:
+                    with write_gate:
+                        committed_quotes = self.ingestor.write_prepared_quote_events(
+                            (quote,)
+                        )
+                        if commit is not None:
+                            commit()
+                except BaseException:
+                    try:
+                        if rollback is not None:
+                            rollback()
+                    finally:
+                        tail = prepared.quotes[index:]
+                        self.ingestor.requeue_prepared_coalesced_quotes(
+                            _PreparedCoalescedQuotes(
+                                events=tuple(item.event for item in tail),
+                                quotes=tail,
+                                results=(),
+                            )
+                        )
+                    raise
+                self.ingestor.finalize_prepared_quote_events(committed_quotes)
+                self.ingestor.flush_deferred_market_event_sink()
+
+            queued = self.ingestor._coalescer.pending_counts()
+            if index + 1 < len(prepared.quotes) or queued["lossless"] or queued["market"]:
+                await asyncio.sleep(0)
 
     async def _repair_missing_depth_once(
         self,

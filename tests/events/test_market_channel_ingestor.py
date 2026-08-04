@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-30
-# Authority basis: EDLI v1 implementation prompt §10 online MarketChannelIngestor contract; background TRADE writer fast-yield hotfix.
+# Last reused/audited: 2026-08-04
+# Authority basis: EDLI v1 implementation prompt §10 online MarketChannelIngestor contract; background TRADE writer per-quote fairness hotfix.
 from __future__ import annotations
 
 import asyncio
@@ -1158,7 +1158,7 @@ def test_rest_seed_preserves_partial_batch_before_single_fetch_embargo():
     assert single_fetches == ["token-2"]
 
 
-def test_quote_projection_pump_commits_one_available_stream_batch():
+def test_quote_projection_pump_commits_each_available_stream_quote():
     conn, writer = _conn_writer()
     metadata = {
         f"token-{idx}": _metadata(f"token-{idx}")[f"token-{idx}"]
@@ -1208,7 +1208,7 @@ def test_quote_projection_pump_commits_one_available_stream_batch():
         )
     )
 
-    assert commits == [200]
+    assert commits == list(range(2, 201, 2))
     assert ingestor._coalescer.pending_counts() == {"lossless": 0, "market": 0}
 
 
@@ -1285,13 +1285,189 @@ def test_quote_projection_pump_rate_limits_only_burst_commits(monkeypatch):
 
     assert commits == 2
     assert sleeps == pytest.approx(
-        [market_channel.MARKET_CHANNEL_QUOTE_MIN_COMMIT_INTERVAL_SECONDS]
+        [0, market_channel.MARKET_CHANNEL_QUOTE_MIN_COMMIT_INTERVAL_SECONDS]
     )
     assert conn.execute(
         "SELECT best_bid_before, best_ask_before "
         "FROM execution_feasibility_latest "
         "WHERE token_id='token-1' AND direction='buy_yes'"
     ).fetchone() == (0.49, 0.53)
+
+
+def test_quote_projection_pump_yields_trade_gate_between_logical_quotes():
+    total_quotes = 16
+    token_ids = {f"token-{index}" for index in range(total_quotes)}
+    metadata = {
+        token_id: _metadata(token_id)[token_id]
+        for token_id in token_ids
+    }
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=token_ids,
+        token_metadata=metadata,
+        coalescer=EventCoalescer(max_market_keys=total_quotes),
+    )
+    for token_id in sorted(token_ids):
+        ingestor.handle_message(
+            {
+                "event_type": "best_bid_ask",
+                "asset_id": token_id,
+                "market": "0xcondition",
+                "best_bid": "0.48",
+                "best_ask": "0.52",
+            },
+            received_at="2026-08-04T12:00:00+00:00",
+        )
+
+    gate_events: list[str] = []
+    background_windows: list[int] = []
+    completed = 0
+    gate_held = False
+
+    class Gate:
+        def __enter__(self):
+            nonlocal gate_held
+            assert not gate_held
+            gate_held = True
+            gate_events.append("enter")
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            nonlocal gate_held
+            gate_held = False
+            gate_events.append("exit")
+            return False
+
+    async def background_lease_probe() -> None:
+        while completed < total_quotes:
+            await asyncio.sleep(0)
+            if not gate_held and completed < total_quotes:
+                background_windows.append(completed)
+                return
+
+    def commit() -> None:
+        nonlocal completed
+        conn.commit()
+        completed += 1
+
+    service = MarketChannelOnlineService(ingestor, quote_flush_batch_size=total_quotes)
+    wake = asyncio.Event()
+    wake.set()
+    connection_done = asyncio.Event()
+    connection_done.set()
+    initial_seed_done = asyncio.Event()
+    initial_seed_done.set()
+
+    async def run() -> None:
+        probe = asyncio.create_task(background_lease_probe())
+        await service._flush_quote_projection_forever(
+            wake=wake,
+            connection_done=connection_done,
+            initial_seed_done=initial_seed_done,
+            active_token_ids=token_ids,
+            write_gate=Gate(),
+            commit=commit,
+            rollback=conn.rollback,
+            logger=None,
+        )
+        await probe
+
+    asyncio.run(run())
+
+    assert completed == total_quotes
+    assert gate_events == [event for _ in range(total_quotes) for event in ("enter", "exit")]
+    assert background_windows and 0 < background_windows[0] < total_quotes
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0] == 32
+
+
+def test_quote_projection_failure_requeues_unfinished_quotes_atomically(monkeypatch):
+    token_ids = {"token-1", "token-2", "token-3"}
+    metadata = {
+        token_id: _metadata(token_id)[token_id]
+        for token_id in token_ids
+    }
+    conn, writer = _conn_writer()
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=token_ids,
+        token_metadata=metadata,
+        coalescer=EventCoalescer(max_market_keys=3),
+    )
+    for token_id in sorted(token_ids):
+        ingestor.handle_message(
+            {
+                "event_type": "best_bid_ask",
+                "asset_id": token_id,
+                "market": "0xcondition",
+                "best_bid": "0.48",
+                "best_ask": "0.52",
+            },
+            received_at="2026-08-04T12:00:00+00:00",
+        )
+
+    sleep_calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    commit_calls = 0
+
+    def flaky_commit() -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+        if commit_calls in {2, 3}:
+            raise sqlite3.OperationalError("database is locked")
+        conn.commit()
+
+    service = MarketChannelOnlineService(ingestor, quote_flush_batch_size=3)
+    wake = asyncio.Event()
+    wake.set()
+    connection_done = asyncio.Event()
+    connection_done.set()
+    initial_seed_done = asyncio.Event()
+    initial_seed_done.set()
+
+    async def flush() -> None:
+        await service._flush_quote_projection_forever(
+            wake=wake,
+            connection_done=connection_done,
+            initial_seed_done=initial_seed_done,
+            active_token_ids=token_ids,
+            write_gate=nullcontext(),
+            commit=flaky_commit,
+            rollback=conn.rollback,
+            logger=None,
+        )
+
+    asyncio.run(flush())
+
+    assert sleep_calls == [0, pytest.approx(0.05)]
+    assert ingestor._coalescer.pending_counts() == {"lossless": 0, "market": 2}
+    assert len(ingestor._seen_quote_event_ids) == 1
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0] == 2
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_latest WHERE token_id='token-2'"
+    ).fetchone()[0] == 0
+
+    wake.set()
+    asyncio.run(
+        service._flush_quote_projection_forever(
+            wake=wake,
+            connection_done=connection_done,
+            initial_seed_done=initial_seed_done,
+            active_token_ids=token_ids,
+            write_gate=nullcontext(),
+            commit=conn.commit,
+            rollback=conn.rollback,
+            logger=None,
+        )
+    )
+
+    assert ingestor._coalescer.pending_counts() == {"lossless": 0, "market": 0}
+    assert len(ingestor._seen_quote_event_ids) == 3
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0] == 6
 
 
 def test_websocket_subscribes_before_rest_seed(monkeypatch):
