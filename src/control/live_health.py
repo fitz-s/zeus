@@ -5492,13 +5492,18 @@ _GLOBAL_AUCTION_RECEIPT_MODES = (
 )
 _GLOBAL_AUCTION_COMPONENT_MAX_DELTA_DEPTH = 8
 _GLOBAL_AUCTION_REFERENCE_MAX_HOPS = 9
-_LATEST_GLOBAL_AUCTION_RECEIPT_SQL = """
-    SELECT id, mode, artifact_json, timestamp
-      FROM decision_log NOT INDEXED
+_LATEST_GLOBAL_AUCTION_RECEIPT_ID_SQL = """
+    SELECT id
+      FROM decision_log INDEXED BY idx_decision_log_ts
      WHERE mode IN (?, ?, ?)
        AND timestamp >= ?
      ORDER BY id DESC
      LIMIT 1
+"""
+_GLOBAL_AUCTION_RECEIPT_BY_ID_SQL = """
+    SELECT id, mode, artifact_json, timestamp
+      FROM decision_log
+     WHERE id = ?
 """
 
 
@@ -5993,18 +5998,20 @@ def _latest_global_auction_candidate_counts(
             "issue": None,
             "skip_reason": "GLOBAL_AUCTION_DECISION_LOG_UNAVAILABLE",
         }
-    row = conn.execute(
-        _LATEST_GLOBAL_AUCTION_RECEIPT_SQL,
+    # Keep large artifact_json overflow pages out of the candidate search. The
+    # timestamp index bounds the lookback; only the winning id fetches payload.
+    id_row = conn.execute(
+        _LATEST_GLOBAL_AUCTION_RECEIPT_ID_SQL,
         (*_GLOBAL_AUCTION_RECEIPT_MODES, cutoff),
     ).fetchone()
-    if row is None:
+    if id_row is None:
         return {}, {}, {
             "evaluated": True,
             "issue": None,
             "skip_reason": "GLOBAL_AUCTION_RECEIPT_MISSING",
         }
 
-    receipt_id = row["id"]
+    receipt_id = id_row["id"]
 
     def invalid(reason: str) -> tuple[dict[str, int], dict[str, int], dict[str, object]]:
         return {}, {}, {
@@ -6012,6 +6019,13 @@ def _latest_global_auction_candidate_counts(
             "issue": f"GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:{reason}",
             "receipt_id": receipt_id,
         }
+
+    row = conn.execute(
+        _GLOBAL_AUCTION_RECEIPT_BY_ID_SQL,
+        (receipt_id,),
+    ).fetchone()
+    if row is None:
+        return invalid("RECEIPT_ROW_MISSING")
 
     try:
         artifact = json.loads(str(row["artifact_json"] or ""))

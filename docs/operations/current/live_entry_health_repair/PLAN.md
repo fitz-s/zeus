@@ -1475,3 +1475,25 @@ deadline with no descriptor or lock leak; the V4 fallback-ordering race remains
 green; monitor recovery, hard-book deadline, bounded debt fairness, and global
 auction delegation antibodies pass; independent review finds no P0/P1 before
 landing.
+
+### 2026-08-04 Follow-up -- Bound live-health receipt payload reads
+
+The live-health high-YES audit forced a primary-key tail scan over the 162GB
+`decision_log` table to locate a sparse recent global-auction receipt. Because
+the table carries large `artifact_json` overflow payloads, one observability
+cycle occupied its sole executor for tens of minutes and left the composite
+health projection stale.
+
+SCOPE is only the read-only latest global-auction receipt lookup used by
+`high_yes_edge`; trading, auction selection, receipts, and canonical DB writes
+are unchanged. DRAIN uses `idx_decision_log_ts` to select only the latest
+eligible row id inside the lookback, then reads exactly that row's artifact by
+integer primary key. RESET is completion or a typed read failure on each
+60-second health cadence; no long-running cursor or payload scan survives the
+call.
+
+Authorized files are `src/control/live_health.py`, its existing failure-surface
+test and registry row, and this plan. Acceptance: query-plan evidence proves no
+full `decision_log` scan, payload lookup uses the integer primary key, current
+candidate evidence semantics remain green, and a live health cycle completes
+inside one cadence after landing.

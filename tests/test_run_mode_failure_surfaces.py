@@ -516,6 +516,9 @@ def _write_high_yes_edge_dbs(
             "CREATE TABLE decision_log ("
             "id INTEGER PRIMARY KEY, mode TEXT, artifact_json TEXT, timestamp TEXT)"
         )
+        trade_conn.execute(
+            "CREATE INDEX idx_decision_log_ts ON decision_log(timestamp)"
+        )
         if with_global_auction_candidate:
             v12 = global_auction_encoding == (
                 "zlib+base64+canonical-json-v12"
@@ -5915,7 +5918,7 @@ def test_high_yes_reason_groups_filter_recent_rows_before_grouping() -> None:
         )
 
 
-def test_high_yes_latest_auction_reads_primary_key_tail_without_temp_sort() -> None:
+def test_high_yes_latest_auction_reads_timestamp_index_before_one_payload() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
@@ -5928,16 +5931,110 @@ def test_high_yes_latest_auction_reads_primary_key_tail_without_temp_sort() -> N
         _now_iso(-48 * 3600),
     )
 
-    plan = conn.execute(
-        "EXPLAIN QUERY PLAN " + live_health._LATEST_GLOBAL_AUCTION_RECEIPT_SQL,
+    id_plan = conn.execute(
+        "EXPLAIN QUERY PLAN "
+        + live_health._LATEST_GLOBAL_AUCTION_RECEIPT_ID_SQL,
         params,
+    ).fetchall()
+    payload_plan = conn.execute(
+        "EXPLAIN QUERY PLAN " + live_health._GLOBAL_AUCTION_RECEIPT_BY_ID_SQL,
+        (1,),
     ).fetchall()
     conn.close()
 
-    details = [str(row["detail"]) for row in plan]
-    assert any("SCAN decision_log" in detail for detail in details)
-    assert all("idx_decision_log_ts" not in detail for detail in details)
-    assert all("USE TEMP B-TREE" not in detail for detail in details)
+    id_details = [str(row["detail"]) for row in id_plan]
+    assert any("idx_decision_log_ts" in detail for detail in id_details)
+    assert all("SCAN decision_log" not in detail for detail in id_details)
+    assert any("USE TEMP B-TREE" in detail for detail in id_details)
+    payload_details = [str(row["detail"]) for row in payload_plan]
+    assert any("INTEGER PRIMARY KEY" in detail for detail in payload_details)
+
+
+def test_high_yes_latest_auction_id_search_ignores_ineligible_newer_rows() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE decision_log ("
+        "id INTEGER PRIMARY KEY, mode TEXT, artifact_json TEXT, timestamp TEXT)"
+    )
+    conn.execute("CREATE INDEX idx_decision_log_ts ON decision_log(timestamp)")
+    cutoff = _now_iso(-48 * 3600)
+    conn.executemany(
+        "INSERT INTO decision_log(id, mode, artifact_json, timestamp) VALUES (?, ?, ?, ?)",
+        [
+            (10, live_health._GLOBAL_AUCTION_RECEIPT_MODES[0], "{}", _now_iso(-1)),
+            (11, "unrelated_mode", "{}", _now_iso(0)),
+            (12, live_health._GLOBAL_AUCTION_RECEIPT_MODES[1], "{}", _now_iso(-72 * 3600)),
+        ],
+    )
+
+    row = conn.execute(
+        live_health._LATEST_GLOBAL_AUCTION_RECEIPT_ID_SQL,
+        (*live_health._GLOBAL_AUCTION_RECEIPT_MODES, cutoff),
+    ).fetchone()
+    conn.close()
+
+    assert row is not None
+    assert row["id"] == 10
+
+
+def test_high_yes_latest_auction_payload_disappearing_fails_closed() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE decision_log ("
+        "id INTEGER PRIMARY KEY, mode TEXT, artifact_json TEXT, timestamp TEXT)"
+    )
+    conn.execute("CREATE INDEX idx_decision_log_ts ON decision_log(timestamp)")
+    conn.execute(
+        "INSERT INTO decision_log(id, mode, artifact_json, timestamp) VALUES (?, ?, ?, ?)",
+        (7, live_health._GLOBAL_AUCTION_RECEIPT_MODES[0], "{}", _now_iso(0)),
+    )
+
+    class DisappearingReceiptConnection:
+        def execute(self, sql: str, params: object = ()) -> object:
+            if sql == live_health._GLOBAL_AUCTION_RECEIPT_BY_ID_SQL:
+                conn.execute("DELETE FROM decision_log WHERE id = ?", params)
+            return conn.execute(sql, params)
+
+    yes_counts, no_counts, evidence = live_health._latest_global_auction_candidate_counts(
+        DisappearingReceiptConnection(),
+        cutoff=_now_iso(-48 * 3600),
+    )
+    conn.close()
+
+    assert yes_counts == {}
+    assert no_counts == {}
+    assert evidence == {
+        "evaluated": True,
+        "issue": "GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:RECEIPT_ROW_MISSING",
+        "receipt_id": 7,
+    }
+
+
+def test_high_yes_latest_auction_missing_timestamp_index_fails_closed(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(sd, with_global_auction_candidate=True)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute("DROP INDEX idx_decision_log_ts")
+        conn.commit()
+    finally:
+        conn.close()
+
+    surface = live_health._high_yes_edge_missed_surface(
+        sd,
+        datetime.now(timezone.utc),
+        main_daemon_surface={"attested": True},
+    )
+
+    assert surface["ok"] is False
+    assert surface["issue"].startswith(
+        "HIGH_YES_EDGE_READ_UNAVAILABLE:OperationalError:no such index:"
+    )
 
 
 def test_high_yes_edge_degrades_when_quality_yes_no_trade_has_no_order_chain(

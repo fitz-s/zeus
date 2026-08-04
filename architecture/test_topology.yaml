@@ -2850,13 +2850,16 @@ test_metadata:
       canonical authorization for a subsequent held monitor projection.
       Also proves that the control reader reconstructs the engine's keyed
       candidate-index delta before validating the canonical receipt hash.
+      The latest global-auction receipt lookup uses the timestamp index for an
+      id-only search, then fetches exactly one artifact by integer primary key;
+      it must never scan the payload-bearing decision_log table.
       Asserts compute_composite_live_health() returns DEGRADED when run_mode has
       failed (scheduler_jobs_health.json status=FAILED) or status_summary.json is
       stale (>5 min), even when daemon heartbeat is fresh. T4 asserts WARNING log
       is emitted with the failing surface name. Call site in _write_heartbeat() in
       src/main.py surfaces composite to state/live_health_composite.json each cycle.
     created: 2026-05-19
-    last_reused_or_audited: 2026-07-28
+    last_reused_or_audited: 2026-08-04
 
   tests/test_posterior_starvation_alert.py:
     modules: [control]
