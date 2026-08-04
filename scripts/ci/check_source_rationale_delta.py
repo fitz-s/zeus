@@ -149,6 +149,17 @@ def main(argv: list[str] | None = None) -> int:
     except yaml.YAMLError as exc:
         print(f"ERROR: {sr_path} is not parseable YAML: {exc}", file=sys.stderr)
         return 2
+    if not isinstance(sr, dict):
+        # Valid YAML of the wrong shape is the same class of failure as a
+        # syntax error: the registry is unusable. Reaching _known_sources with
+        # a list would raise AttributeError and exit 1 — indistinguishable from
+        # "undeclared source found".
+        print(
+            f"ERROR: {sr_path} must be a mapping at the top level, got "
+            f"{type(sr).__name__}",
+            file=sys.stderr,
+        )
+        return 2
     known = _known_sources(sr)
 
     files = args.changed_files

@@ -99,8 +99,12 @@ def test_source_rationale_registry_is_parseable_yaml():
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as exc:  # pragma: no cover - the failure IS the message
         pytest.fail(f"architecture/source_rationale.yaml does not parse: {exc}")
-    assert isinstance(loaded, dict) and loaded.get("files"), (
-        "source_rationale.yaml parsed but carries no `files` mapping"
+    assert isinstance(loaded, dict), (
+        f"source_rationale.yaml must be a mapping at the top level, got "
+        f"{type(loaded).__name__}"
+    )
+    assert isinstance(loaded.get("files"), dict) and loaded["files"], (
+        "source_rationale.yaml parsed but carries no non-empty `files` mapping"
     )
 
 
@@ -124,6 +128,26 @@ def test_source_rationale_unparseable_registry_exits_2_not_1(tmp_path: Path):
     )
     assert r.returncode == 2, f"expected exit 2, got {r.returncode}: {r.stderr[:300]}"
     assert "not parseable YAML" in r.stderr
+
+
+def test_source_rationale_wrong_top_level_type_exits_2_not_1(tmp_path: Path):
+    """Valid YAML of the wrong shape is also exit 2, not exit 1.
+
+    A top-level list parses cleanly, so the YAMLError guard does not catch it;
+    `_known_sources` would then raise AttributeError and exit 1 — the same
+    crash-reads-as-violation confusion, one layer down.
+    """
+    (tmp_path / "architecture").mkdir()
+    (tmp_path / "architecture" / "source_rationale.yaml").write_text(
+        "- just\n- a\n- list\n"
+    )
+    r = _run(
+        "check_source_rationale_delta.py",
+        "--repo-root", str(tmp_path),
+        "--changed-files", "src/x.py",
+    )
+    assert r.returncode == 2, f"expected exit 2, got {r.returncode}: {r.stderr[:300]}"
+    assert "must be a mapping" in r.stderr
 
 
 def test_source_rationale_delta_detects_new_provider_file(tmp_path: Path):
