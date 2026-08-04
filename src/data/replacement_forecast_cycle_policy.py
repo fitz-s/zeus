@@ -90,20 +90,23 @@ _INTERMEDIATE_CYCLE_HOURS = frozenset()
 #   (event_reactor_adapter._FUSED_BOOTSTRAP_QLCB_BASIS). Defining it ONCE here (the module both the
 #   materializer and the readers already import, no cycle) makes all four sites share one definition.
 TRADEABLE_GRADE_QLCB_BASIS = "fused_center_bootstrap_p05"
-# v3 re-keys probability identity after station single-runs residual weighting was
-# removed from the live center. Some v2 rows were built with that transient center
-# law, so v2 can no longer prove current semantics even though the implementation is
-# again previous-runs-only. Advancing both identities makes the existing coverage and
-# reseed paths rematerialize every ambiguous certificate instead of serving a mixed law.
-CURRENT_EVIDENCE_SEMANTICS_REVISION = "ensemble_center_scenarios_v3"
+# v4 re-keys probability identity after simultaneous provider-cycle provenance became
+# mandatory for the live between-provider spread. Older rows can no longer prove current
+# semantics, so the existing coverage and reseed paths rematerialize every certificate
+# instead of serving a mixed law.
+CURRENT_EVIDENCE_SEMANTICS_REVISION = "ensemble_center_scenarios_v4"
 
 # A bounded older ENS shape retains its raw absolute members and the full
 # ENS/provider-center disagreement. This identity supersedes every anomaly-
 # transport revision, which synthesized translated members from the fresh
 # center and then reused those members as finite evidence.
 STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION = (
-    "stale_ensemble_absolute_disagreement_v1"
+    "stale_ensemble_absolute_disagreement_v2"
 )
+
+# Between-provider spread is live-authoritative only when its source clocks prove
+# one simultaneous cohort. This marker is persisted and included in shape identity.
+BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN = "SIMULTANEOUS_PROVEN"
 
 
 def _current_evidence_shape(provenance: object) -> Mapping[str, object] | None:

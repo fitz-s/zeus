@@ -31,6 +31,7 @@ from zoneinfo import ZoneInfo
 from src.data.forecast_target_contract import compute_target_local_day_window_utc
 from src.data.latency_metrics import emit_materialization_latency
 from src.data.replacement_forecast_cycle_policy import (
+    BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN,
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     TRADEABLE_GRADE_QLCB_BASIS,
@@ -2221,12 +2222,10 @@ class _CurrentEvidenceShape:
     translation_applied: bool
     stale_shape_reused: bool
     ens_center_delta_raw_c: float
+    between_cohort_status: str
     # Between-spread freshest-coherent-cohort provenance (consult v2 (b), 2026-07-17):
-    # populated ONLY when the ±3h cohort filter actually excluded a provider from the
-    # between term (None otherwise). None fields are DROPPED from as_payload so every
-    # pre-existing row's provenance payload stays byte-identical; they are NEVER part of
-    # the shape_hash identity dict (the cohort-filtered between value itself already
-    # distinguishes the shape).
+    # populated only when the ±3h cohort filter excludes a provider from the between term.
+    # The status is always persisted and is part of the shape_hash identity.
     between_cohort_models: tuple[str, ...] | None = None
     between_cohort_excluded: tuple[str, ...] | None = None
     # Shape-age sigma term: the fitted variance gamma_g * shape_lag_hours/6 is
@@ -2311,15 +2310,14 @@ def _current_evidence_shape_from_values(
     ``source_cycle_time`` leaves today's same-cycle semantics untouched.
 
     ``provider_cycles`` (freshest-coherent-cohort, consult v2 (b), 2026-07-17):
-    optional model -> served cycle ISO stamp. When supplied, the BETWEEN term is
+    required model -> served cycle ISO stamp. The BETWEEN term is
     computed only over providers whose cycle is within ``BETWEEN_COHORT_WINDOW_HOURS``
     of the freshest provider cycle — cross-cycle displacement is staleness error
     (already priced as v_m(lag) variance in the center weights), not simultaneous
     model disagreement, and folding it into between would double-count it. The
     CENTER and its weights are untouched (stale providers still enter the center,
-    downweighted, never excluded). FAIL-OPEN: ``provider_cycles`` absent, a
-    provider's cycle missing/unparseable, or a coherent cohort of fewer than 2
-    providers -> between over ALL providers, byte-identical to today.
+    downweighted, never excluded). Missing or unparseable cycle provenance, or a
+    coherent cohort with fewer than 2 distinct provider families, fails closed.
 
     ``shape_age_gamma_c2_per_6h`` (consult P2-B full form, 2026-07-17): the fitted
     excess-variance slope from ``src.forecast.shape_age_sigma.gamma_for`` (degC² per 6h
@@ -2376,50 +2374,60 @@ def _current_evidence_shape_from_values(
     within = math.sqrt(
         sum((value - member_mean) ** 2 for value in members) / len(members)
     )
-    # Freshest-coherent-cohort between (consult v2 (b)): simultaneous disagreement is
-    # only measurable among providers speaking from (near-)the-same cycle; a stale
-    # provider's displacement is issuance-lag error, already priced as v_m(lag) in the
-    # center weights. Cohort = providers within BETWEEN_COHORT_WINDOW_HOURS of the
-    # freshest parseable provider cycle; a provider with a missing/unparseable cycle is
-    # INCLUDED (fail-open: absent provenance never shrinks the evidence basis). Weights
-    # renormalized within the cohort so between stays a proper weighted spread. Fail-open
-    # to ALL providers when no cycle parses or the coherent cohort is < 2.
-    cohort = normalized
+    # FAIL-CLOSED GATE CONTRACT
+    # SCOPE: only the affected posterior materialization.
+    # DRAIN: fresh complete simultaneous provider cycles, then rematerialization.
+    # RESET: a newly materialized current-revision certificate.
+    if provider_cycles is None:
+        raise ValueError(
+            "current shape requires complete provider cycle provenance"
+        )
+    cycle_by_model: dict[str, datetime] = {}
+    for model, _value, _weight in normalized:
+        raw_cycle = provider_cycles.get(model)
+        if raw_cycle is None:
+            raise ValueError(f"current shape provider cycle missing: {model}")
+        try:
+            cycle_by_model[model] = _to_utc(
+                str(raw_cycle), field_name=f"provider_cycles[{model}]"
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                f"current shape provider cycle unparseable: {model}"
+            ) from exc
+
+    from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
+        provider_family_for_source,
+    )
+
+    freshest = max(cycle_by_model.values())
+    cohort = tuple(
+        (model, value, weight)
+        for model, value, weight in normalized
+        if (freshest - cycle_by_model[model]).total_seconds() / 3600.0
+        <= BETWEEN_COHORT_WINDOW_HOURS
+    )
+    cohort_families = {
+        provider_family_for_source(model) for model, _, _ in cohort
+    }
+    if len(cohort_families) < 2:
+        raise ValueError(
+            "current shape requires at least two simultaneous provider families"
+        )
     between_cohort_models: tuple[str, ...] | None = None
     between_cohort_excluded: tuple[str, ...] | None = None
-    if provider_cycles is not None:
-        cycle_by_model: dict[str, datetime] = {}
-        for model, _value, _weight in normalized:
-            raw_cycle = provider_cycles.get(model)
-            if raw_cycle is None:
-                continue
-            try:
-                cycle_by_model[model] = _to_utc(
-                    str(raw_cycle), field_name="provider_cycle"
-                )
-            except Exception:
-                continue
-        if cycle_by_model:
-            freshest = max(cycle_by_model.values())
-            coherent = tuple(
-                (model, value, weight)
-                for model, value, weight in normalized
-                if model not in cycle_by_model
-                or (freshest - cycle_by_model[model]).total_seconds() / 3600.0
-                <= BETWEEN_COHORT_WINDOW_HOURS
-            )
-            if len(coherent) >= 2 and len(coherent) < len(normalized):
-                cohort_total = sum(weight for _, _, weight in coherent)
-                cohort = tuple(
-                    (model, value, weight / cohort_total)
-                    for model, value, weight in coherent
-                )
-                between_cohort_models = tuple(model for model, _, _ in coherent)
-                between_cohort_excluded = tuple(
-                    model
-                    for model, _, _ in normalized
-                    if model not in between_cohort_models
-                )
+    if len(cohort) < len(normalized):
+        cohort_total = sum(weight for _, _, weight in cohort)
+        cohort = tuple(
+            (model, value, weight / cohort_total)
+            for model, value, weight in cohort
+        )
+        between_cohort_models = tuple(model for model, _, _ in cohort)
+        between_cohort_excluded = tuple(
+            model
+            for model, _, _ in normalized
+            if model not in between_cohort_models
+        )
     between = math.sqrt(
         sum(weight * (value - center) ** 2 for _, value, weight in cohort)
     )
@@ -2477,6 +2485,7 @@ def _current_evidence_shape_from_values(
         "shape_lag_hours": shape_lag_hours,
         "translation_applied": translation_applied,
         "ens_center_delta_raw_c": ens_center_delta_raw,
+        "between_cohort_status": BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN,
     }
     if stale_shape_reused:
         identity["stale_shape_reused"] = True
@@ -2502,11 +2511,9 @@ def _current_evidence_shape_from_values(
         translation_applied=translation_applied,
         stale_shape_reused=stale_shape_reused,
         ens_center_delta_raw_c=ens_center_delta_raw,
-        # Cohort provenance intentionally OUTSIDE the `identity` dict above: when the
-        # filter is inactive these are None (payload-dropped, shape_hash byte-identical
-        # for every existing row); when active, the filtered `between` value inside
-        # `identity` already changes the hash — stamping the model lists there too would
-        # be redundant identity churn.
+        between_cohort_status=BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN,
+        # Cohort membership is diagnostic provenance; the status and filtered between
+        # value above are the identity-bearing proof.
         between_cohort_models=between_cohort_models,
         between_cohort_excluded=between_cohort_excluded,
         # Same discipline: outside `identity` — a positive term already widens the
@@ -2650,9 +2657,10 @@ def _read_current_evidence_shape(
 ) -> _CurrentEvidenceShape | None:
     """Read the latest causal target-specific ECMWF ENS available at decision time.
 
-    ``provider_cycles`` (optional, fail-open): model -> served cycle ISO stamp,
-    threaded into the between-term freshest-coherent-cohort filter of
-    ``_current_evidence_shape_from_values``. Omitting it is byte-identical to today.
+    ``provider_cycles``: model -> served cycle ISO stamp, threaded into the
+    between-term freshest-coherent-cohort filter of
+    ``_current_evidence_shape_from_values``. Missing or incomplete provenance
+    blocks this current-evidence shape.
     """
 
     try:
@@ -3415,8 +3423,8 @@ def _replacement_bayes_precision_fusion_override(
                         },
                         center_c=float(_mu_diagonal),
                         # Freshest-coherent-cohort between (consult v2 (b)): served
-                        # cycle stamps for the cohort filter. A model without a served
-                        # row (e.g. the anchor) is simply absent — fail-open included.
+                        # cycle stamps for the cohort filter. Every normalized provider
+                        # must carry one; missing provenance fails closed.
                         provider_cycles={
                             str(_m): str(served_current[_m].served_cycle)  # type: ignore[union-attr]
                             for _m in _source_clock_used_models
@@ -3515,8 +3523,8 @@ def _replacement_bayes_precision_fusion_override(
                         for model, weight in _weights.items()
                     },
                     center_c=float(_mu_diagonal),
-                    # Freshest-coherent-cohort between (consult v2 (b)); same fail-open
-                    # threading as the one-scheme branch above.
+                    # Freshest-coherent-cohort between (consult v2 (b)); the same
+                    # complete cycle provenance is required as above.
                     provider_cycles={
                         str(_m): str(served_current[_m].served_cycle)  # type: ignore[union-attr]
                         for _m in _source_clock_used_models
