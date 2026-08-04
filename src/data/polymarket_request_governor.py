@@ -54,6 +54,7 @@ class RequestPriority(IntEnum):
 
 
 _LOW_TIER_CEILING = int(RequestPriority.ACCOUNT_RECOVERY)
+_CLOB_SCAN_LEASE_HOSTS = frozenset({"clob.polymarket.com"})
 
 
 def _is_low_tier(priority: "RequestPriority | int") -> bool:
@@ -235,6 +236,11 @@ def _endpoint(url: str) -> str:
     return str(parsed.host)[:180]
 
 
+def _scan_lock_key(host: str) -> str:
+    digest = hashlib.sha256(host.encode("utf-8")).hexdigest()[:16]
+    return f"polymarket_scan_{digest}"
+
+
 def _routes(url: str) -> tuple[tuple[str, int], ...]:
     parsed = httpx.URL(url)
     host = str(parsed.host)
@@ -360,6 +366,7 @@ class PolymarketRequestGovernor:
         state_file: Path | None = None,
         active: bool | None = None,
         clock: Callable[[], datetime] | None = None,
+        scan_lock_dir: Path | None = None,
     ) -> None:
         explicit = state_file is not None
         self._path = Path(state_file) if state_file is not None else state_path("polymarket-request-governor.json")
@@ -367,6 +374,11 @@ class PolymarketRequestGovernor:
         self._lock = threading.Lock()
         self._local: dict[str, object] | None = None
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._scan_lock_dir = (
+            Path(scan_lock_dir)
+            if scan_lock_dir is not None
+            else (self._path.parent / "locks" if explicit else None)
+        )
 
     @staticmethod
     def _default_state() -> dict[str, object]:
@@ -478,6 +490,45 @@ class PolymarketRequestGovernor:
                 return result
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @contextlib.contextmanager
+    def _scan_host_lease(
+        self,
+        url: str,
+        priority: RequestPriority,
+    ) -> Iterator[None]:
+        """Hold one cross-process SCAN request per governed CLOB host."""
+
+        host = _endpoint(url)
+        if int(priority) != int(RequestPriority.SCAN) or host not in _CLOB_SCAN_LEASE_HOSTS:
+            yield
+            return
+
+        from src.data.job_lock import acquire_lock
+
+        # SCOPE: SCAN requests for this exact CLOB host; HEARTBEAT and P0-P2
+        # never enter this gate, and all existing request/route embargoes remain.
+        # DRAIN: a busy caller is rejected immediately with status=scan_in_flight;
+        # its existing bounded scan loop or next scheduled scan retries normally.
+        # RESET: context exit releases flock; OS process death releases it too.
+        with acquire_lock(
+            _scan_lock_key(host),
+            _locks_dir_override=self._scan_lock_dir,
+        ) as acquired:
+            if not acquired:
+                _emit_governor_telemetry(
+                    {
+                        "event": "scan_lease_denied",
+                        "status": "scan_in_flight",
+                        "priority": int(priority),
+                        "endpoint": host,
+                        "wait_seconds": 0.0,
+                    }
+                )
+                raise RequestAdmissionDenied(
+                    f"POLYMARKET_SCAN_LEASE_BUSY:{host}:status=scan_in_flight"
+                )
+            yield
 
     def acquire(
         self,
@@ -860,37 +911,38 @@ class PolymarketRequestGovernor:
 
         if not self._active:
             return send()
-        lease = self.acquire(
-            method,
-            url,
-            params=params,
-            json_body=json_body,
-            priority=priority,
-            lease_seconds=lease_seconds,
-            endpoint_class_override=endpoint_class_override,
-        )
-        transport_error: httpx.HTTPError | None = None
-        try:
-            response = send()
-        except httpx.HTTPError as exc:
-            transport_error = exc
-        if transport_error is not None:
-            self.record_failure(lease)
-            raise transport_error
-        # Some compatibility tests inject minimal response stand-ins.  A real
-        # httpx.Response always has status_code; absent means no failure signal.
-        status_code = int(getattr(response, "status_code", 200))
-        if status_code == 429:
-            headers = getattr(response, "headers", {})
-            self.record_rate_limited(lease, retry_after=retry_after_seconds(headers.get("Retry-After")))
-        elif status_code >= 500:
-            self.record_failure(lease)
-        elif 200 <= status_code < 300:
-            if not self.record_success(lease) and not self.record_neutral(lease):
+        with self._scan_host_lease(url, priority):
+            lease = self.acquire(
+                method,
+                url,
+                params=params,
+                json_body=json_body,
+                priority=priority,
+                lease_seconds=lease_seconds,
+                endpoint_class_override=endpoint_class_override,
+            )
+            transport_error: httpx.HTTPError | None = None
+            try:
+                response = send()
+            except httpx.HTTPError as exc:
+                transport_error = exc
+            if transport_error is not None:
+                self.record_failure(lease)
+                raise transport_error
+            # Some compatibility tests inject minimal response stand-ins.  A real
+            # httpx.Response always has status_code; absent means no failure signal.
+            status_code = int(getattr(response, "status_code", 200))
+            if status_code == 429:
+                headers = getattr(response, "headers", {})
+                self.record_rate_limited(lease, retry_after=retry_after_seconds(headers.get("Retry-After")))
+            elif status_code >= 500:
+                self.record_failure(lease)
+            elif 200 <= status_code < 300:
+                if not self.record_success(lease) and not self.record_neutral(lease):
+                    raise RequestAdmissionDenied("POLYMARKET_REQUEST_LEASE_LOST")
+            elif not self.record_neutral(lease):
                 raise RequestAdmissionDenied("POLYMARKET_REQUEST_LEASE_LOST")
-        elif not self.record_neutral(lease):
-            raise RequestAdmissionDenied("POLYMARKET_REQUEST_LEASE_LOST")
-        return response
+            return response
 
     @contextlib.contextmanager
     def fc03_span(self, label: str) -> Iterator[None]:

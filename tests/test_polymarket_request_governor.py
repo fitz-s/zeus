@@ -1,6 +1,6 @@
-# Lifecycle: created=2026-07-18; last_reviewed=2026-07-29; last_reused=2026-07-29
+# Lifecycle: created=2026-07-18; last_reviewed=2026-08-04; last_reused=2026-08-04
 # Created: 2026-07-18
-# Last reused/audited: 2026-07-29
+# Last reused/audited: 2026-08-04
 # Authority basis: live Polymarket HTTP attempt governance and first-principles capital-preservation task
 
 from __future__ import annotations
@@ -8,7 +8,10 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import subprocess
+import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -40,6 +43,157 @@ class _Clock:
 
     def advance(self, seconds: float) -> None:
         self.now += timedelta(seconds=seconds)
+
+
+def _start_cross_process_scan_holder(tmp_path: Path) -> subprocess.Popen[str]:
+    script = r"""
+import os
+import sys
+import httpx
+from pathlib import Path
+from src.data.polymarket_request_governor import PolymarketRequestGovernor, RequestPriority
+
+state_file = Path(sys.argv[1])
+lock_dir = Path(sys.argv[2])
+governor = PolymarketRequestGovernor(state_file=state_file, scan_lock_dir=lock_dir)
+
+def send():
+    print("READY", flush=True)
+    command = sys.stdin.readline().strip()
+    if command == "CRASH":
+        os._exit(17)
+    return httpx.Response(
+        200,
+        request=httpx.Request("GET", "https://clob.polymarket.com/book"),
+    )
+
+governor.request(
+    send,
+    "GET",
+    "https://clob.polymarket.com/book",
+    params={"token_id": "child-scan"},
+    priority=RequestPriority.SCAN,
+)
+print("DONE", flush=True)
+"""
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(tmp_path / "governor.json"),
+            str(tmp_path / "locks"),
+        ],
+        cwd=Path.cwd(),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout is not None
+    assert process.stdout.readline().strip() == "READY"
+    return process
+
+
+def _finish_scan_holder(process: subprocess.Popen[str], command: str) -> None:
+    if process.poll() is not None:
+        return
+    assert process.stdin is not None
+    process.stdin.write(command + "\n")
+    process.stdin.flush()
+
+
+def test_clob_scan_lease_is_cross_process_singleflight_and_bounded(tmp_path: Path) -> None:
+    process = _start_cross_process_scan_holder(tmp_path)
+    governor = PolymarketRequestGovernor(
+        state_file=tmp_path / "governor.json",
+        scan_lock_dir=tmp_path / "locks",
+    )
+    sent = False
+    started = time.monotonic()
+
+    def send() -> httpx.Response:
+        nonlocal sent
+        sent = True
+        return _response(200)
+
+    try:
+        with pytest.raises(
+            RequestAdmissionDenied,
+            match=r"POLYMARKET_SCAN_LEASE_BUSY:clob\.polymarket\.com:status=scan_in_flight",
+        ):
+            governor.request(
+                send,
+                "GET",
+                "https://clob.polymarket.com/book",
+                params={"token_id": "other-scan"},
+                priority=RequestPriority.SCAN,
+            )
+        denied_elapsed = time.monotonic() - started
+    finally:
+        _finish_scan_holder(process, "RELEASE")
+        process.wait(timeout=3.0)
+
+    assert sent is False
+    assert denied_elapsed < 2.0
+    assert process.returncode == 0
+    routes = json.loads((tmp_path / "governor.json").read_text())["routes"]
+    assert len(routes["clob.polymarket.com:/book"]["attempts"]) == 1
+    assert len(routes["clob.polymarket.com:*"]["attempts"]) == 1
+
+
+def test_clob_scan_lease_does_not_block_priority_or_other_host_routes(tmp_path: Path) -> None:
+    process = _start_cross_process_scan_holder(tmp_path)
+    governor = PolymarketRequestGovernor(
+        state_file=tmp_path / "governor.json",
+        scan_lock_dir=tmp_path / "locks",
+    )
+    try:
+        for priority in (
+            RequestPriority.HEARTBEAT,
+            RequestPriority.HELD_REDUCE_ONLY,
+            RequestPriority.SUBMIT_JIT,
+        ):
+            response = governor.request(
+                lambda: _response(200),
+                "GET",
+                "https://clob.polymarket.com/book",
+                params={"token_id": priority.name},
+                priority=priority,
+            )
+            assert response.status_code == 200
+        gamma = governor.request(
+            lambda: _response(200),
+            "GET",
+            "https://gamma-api.polymarket.com/markets",
+            params={"offset": 0},
+            priority=RequestPriority.SCAN,
+        )
+        assert gamma.status_code == 200
+    finally:
+        _finish_scan_holder(process, "RELEASE")
+        process.wait(timeout=3.0)
+
+    assert process.returncode == 0
+
+
+def test_clob_scan_lease_recovers_after_holder_crash(tmp_path: Path) -> None:
+    process = _start_cross_process_scan_holder(tmp_path)
+    _finish_scan_holder(process, "CRASH")
+    assert process.wait(timeout=3.0) == 17
+
+    governor = PolymarketRequestGovernor(
+        state_file=tmp_path / "governor.json",
+        scan_lock_dir=tmp_path / "locks",
+    )
+    response = governor.request(
+        lambda: _response(200),
+        "GET",
+        "https://clob.polymarket.com/book",
+        params={"token_id": "post-crash-scan"},
+        priority=RequestPriority.SCAN,
+    )
+    assert response.status_code == 200
 
 
 def test_governor_telemetry_rotates_at_configured_size_without_blocking_admission(
