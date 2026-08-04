@@ -2833,8 +2833,8 @@ def test_reactor_wake_priority_quadrants_keep_fresh_material_ahead_of_generic(
     assert selected == generic
 
 
-def test_paused_forecast_carrier_priority_preempts_only_pure_entry_day0(tmp_path):
-    """The explicit paused carrier preference keeps capital-at-risk wakes ahead."""
+def test_paused_forecast_carrier_priority_preserves_fill_and_exact_held_priority(tmp_path):
+    """The paused carrier preference cannot outrank capital-at-risk wakes."""
 
     from src.runtime import reactor_wake
 
@@ -2905,19 +2905,40 @@ def test_paused_forecast_carrier_priority_preempts_only_pure_entry_day0(tmp_path
     )
 
 
-def test_paused_forecast_carrier_priority_requires_durable_global_pause(monkeypatch):
+def test_paused_forecast_carrier_priority_requires_pause_and_empty_exposure(monkeypatch):
     import src.control.control_plane as control_plane
     import src.main as main
 
     pause_state = [{"status": "ok", "entries_paused": True}]
+    exposure = [0]
 
     monkeypatch.setattr(
         control_plane,
         "_refresh_entries_pause_from_durable_state",
         lambda: pause_state[0],
     )
+    monkeypatch.setattr(
+        main,
+        "_current_periodic_monitor_obligation_count",
+        lambda: exposure[0],
+    )
 
     assert main._paused_forecast_carrier_priority_allowed() is True
+    exposure[0] = 1
+    assert main._paused_forecast_carrier_priority_allowed() is False
+    exposure[0] = None
+    assert main._paused_forecast_carrier_priority_allowed() is False
+
+    def unreadable_exposure():
+        raise OSError("canonical exposure read failed")
+
+    monkeypatch.setattr(
+        main,
+        "_current_periodic_monitor_obligation_count",
+        unreadable_exposure,
+    )
+    assert main._paused_forecast_carrier_priority_allowed() is False
+
     pause_state[0] = {"status": "ok", "entries_paused": False}
     assert main._paused_forecast_carrier_priority_allowed() is False
     pause_state[0] = {"status": "query_error", "entries_paused": True}
@@ -2932,6 +2953,180 @@ def test_paused_forecast_carrier_priority_requires_durable_global_pause(monkeypa
         unreadable_pause_state,
     )
     assert main._paused_forecast_carrier_priority_allowed() is False
+
+
+def test_paused_empty_exposure_selects_forecast_carrier_without_day0_yield(
+    monkeypatch,
+):
+    """An empty canonical monitor set permits one paused no-submit carrier turn."""
+
+    import src.control.control_plane as control_plane
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    family = ("Paris", "2026-08-03", "high")
+    forecast = reactor_wake.ReactorWake(
+        "forecast-carrier",
+        "2026-08-02T12:00:00+00:00",
+        "forecast",
+        "forecast_posterior_advanced",
+        forecast_families=(family,),
+    )
+    day0 = reactor_wake.ReactorWake(
+        "day0-entry",
+        "2026-08-02T12:00:01+00:00",
+        "day0",
+        "day0_extreme_event_committed",
+        forecast_families=(family,),
+    )
+    selections: list[dict[str, object]] = []
+    cycle_kwargs: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        control_plane,
+        "_refresh_entries_pause_from_durable_state",
+        lambda: {"status": "ok", "entries_paused": True},
+    )
+    monkeypatch.setattr(main, "_current_periodic_monitor_obligation_count", lambda: 0)
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        main,
+        "_collateral_authority_wake_backoff_ids",
+        lambda: frozenset(),
+    )
+    monkeypatch.setattr(main, "_forecast_wake_held_families", lambda _families: frozenset())
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", threading.Lock())
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **kwargs: cycle_kwargs.update(kwargs) is None,
+    )
+    monkeypatch.setattr(
+        main,
+        "_acknowledge_edli_reactor_wake_batch",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def read_wake(**kwargs):
+        selections.append(kwargs)
+        return forecast if kwargs["prefer_forecast_carrier_progress"] else day0
+
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", read_wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "coalescible_reactor_wakes",
+        lambda selected: (selected,),
+    )
+    main._edli_initialize_reactor_wake_cursor()
+    try:
+        assert main._edli_day0_post_monitor_yield.wake_ids == frozenset()
+        assert main._edli_reactor_wake_poll_once() is True
+        assert selections == [
+            {
+                "prefer_forecast_carrier_progress": True,
+                "fail_on_error": True,
+            }
+        ]
+        assert cycle_kwargs["producer_wake_ids"] == (forecast.wake_id,)
+        assert cycle_kwargs["allow_paused_forecast_snapshot_completion"] is True
+    finally:
+        main._edli_initialize_reactor_wake_cursor()
+
+
+@pytest.mark.parametrize("exposure", (1, None), ids=("nonempty", "unknown"))
+@pytest.mark.parametrize(
+    "pause_state",
+    (
+        {"status": "ok", "entries_paused": True},
+        {"status": "ok", "entries_paused": False},
+        {"status": "query_error", "entries_paused": True},
+    ),
+    ids=("paused", "pause-clear", "pause-unreadable"),
+)
+def test_wake_poll_retains_day0_priority_without_paused_empty_exposure_proof(
+    monkeypatch,
+    exposure,
+    pause_state,
+):
+    import src.control.control_plane as control_plane
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    family = ("Paris", "2026-08-03", "high")
+    forecast = reactor_wake.ReactorWake(
+        "forecast-carrier",
+        "2026-08-02T12:00:00+00:00",
+        "forecast",
+        "forecast_posterior_advanced",
+        forecast_families=(family,),
+    )
+    day0 = reactor_wake.ReactorWake(
+        "day0-entry",
+        "2026-08-02T12:00:01+00:00",
+        "day0",
+        "day0_extreme_event_committed",
+        forecast_families=(family,),
+    )
+    selections: list[dict[str, object]] = []
+    cycle_kwargs: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        control_plane,
+        "_refresh_entries_pause_from_durable_state",
+        lambda: pause_state,
+    )
+    monkeypatch.setattr(
+        main,
+        "_current_periodic_monitor_obligation_count",
+        lambda: exposure,
+    )
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        main,
+        "_collateral_authority_wake_backoff_ids",
+        lambda: frozenset(),
+    )
+    monkeypatch.setattr(main, "_day0_wake_requires_exit_monitor", lambda _families: False)
+    monkeypatch.setattr(main, "_pending_held_day0_wake_families", lambda: frozenset())
+    monkeypatch.setattr(main, "_record_day0_no_monitor_completion", lambda _wake_id: True)
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", threading.Lock())
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **kwargs: cycle_kwargs.update(kwargs) is None,
+    )
+    monkeypatch.setattr(
+        main,
+        "_acknowledge_edli_reactor_wake_batch",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def read_wake(**kwargs):
+        selections.append(kwargs)
+        return forecast if kwargs["prefer_forecast_carrier_progress"] else day0
+
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", read_wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "coalescible_reactor_wakes",
+        lambda selected: (selected,),
+    )
+    main._edli_initialize_reactor_wake_cursor()
+    try:
+        assert main._edli_reactor_wake_poll_once() is True
+        assert selections == [
+            {
+                "prefer_forecast_carrier_progress": False,
+                "fail_on_error": False,
+            }
+        ]
+        assert cycle_kwargs["producer_wake_ids"] == (day0.wake_id,)
+        assert cycle_kwargs["allow_paused_forecast_snapshot_completion"] is False
+    finally:
+        main._day0_urgent_wake_pending.clear()
+        main._edli_initialize_reactor_wake_cursor()
 
 
 def test_exact_held_sell_debt_probe_rejects_malformed_queue_file(tmp_path):

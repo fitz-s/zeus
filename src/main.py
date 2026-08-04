@@ -4975,26 +4975,28 @@ def _yield_incomplete_day0_after_monitor_once(
 
 
 def _paused_forecast_carrier_priority_allowed() -> bool:
-    """Read the durable global pause required for one post-monitor yield."""
+    """Prove a paused no-submit carrier turn cannot defer open exposure."""
 
-    # SCOPE: one already-monitored Day0 wake's one-turn yield, never a global
-    # inventory/exposure decision and never BUY submission. DRAIN: exact held-SELL
-    # and fill retain strict priority; the selected forecast must durably materialize
-    # before ack, then the yielded Day0 remains queued. RESET: consuming the yield,
-    # pause clear/unreadable control, monitor failure, or failed carrier selection
-    # restores ordinary Day0-first priority. ChainOnly/foreign inventory is outside
-    # this carrier-only no-submit turn and remains owned by the chain-mirror lane.
+    # SCOPE: one wake selection may advance a forecast carrier only while the
+    # durable global entry pause is active and canonical monitor exposure is empty;
+    # it never resumes entries or permits BUY submission. DRAIN: exact held-SELL
+    # and fill retain strict priority, while a selected forecast materializes through
+    # the no-submit carrier path before acknowledgement. RESET: pause clear/unreadable
+    # control, nonempty/unknown exposure, or failed selection restores ordinary
+    # Day0-first priority. ChainOnly/foreign inventory remains owned by chain-mirror.
     try:
         from src.control.control_plane import _refresh_entries_pause_from_durable_state
 
         pause_state = _refresh_entries_pause_from_durable_state()
-        return (
+        if not (
             pause_state.get("status") == "ok"
             and pause_state.get("entries_paused") is True
-        )
+        ):
+            return False
+        return _current_periodic_monitor_obligation_count() == 0
     except Exception:
         logger.warning(
-            "durable entries pause unavailable; retaining Day0 priority",
+            "paused forecast carrier authority unavailable; retaining Day0 priority",
             exc_info=True,
         )
         return False
@@ -5023,18 +5025,15 @@ def _edli_reactor_wake_poll_once() -> bool:
     )
     global_yield_ids = _edli_global_completion_yield.consume()
     day0_post_monitor_yield_ids = _edli_day0_post_monitor_yield.consume()
-    paused_forecast_carrier_priority_allowed = False
+    paused_forecast_carrier_priority_allowed = (
+        _paused_forecast_carrier_priority_allowed()
+    )
     try:
         if day0_post_monitor_yield_ids:
             excluded_wake_ids = frozenset(
                 excluded_wake_ids | day0_post_monitor_yield_ids
             )
-            prefer_forecast_carrier_progress = (
-                _paused_forecast_carrier_priority_allowed()
-            )
-            paused_forecast_carrier_priority_allowed = (
-                prefer_forecast_carrier_progress
-            )
+            prefer_forecast_carrier_progress = paused_forecast_carrier_priority_allowed
             wake = read_reactor_wake(
                 exclude_wake_ids=excluded_wake_ids,
                 prefer_exact_held_sell=True,
@@ -5042,7 +5041,7 @@ def _edli_reactor_wake_poll_once() -> bool:
                 fail_on_error=prefer_forecast_carrier_progress,
             )
         else:
-            prefer_forecast_carrier_progress = False
+            prefer_forecast_carrier_progress = paused_forecast_carrier_priority_allowed
             wake = (
                 read_reactor_wake(
                     exclude_wake_ids=excluded_wake_ids,
