@@ -20,6 +20,12 @@ from types import SimpleNamespace
 import pytest
 
 from src.decision_kernel import claims
+from src.decision_kernel.canonicalization import stable_hash
+from src.decision_kernel.compiler import (
+    AuthorityEvidence,
+    EvidenceClock,
+    PreSubmitProofBundle,
+)
 from src.events.event_store import (
     EventStore,
     GLOBAL_WINNER_SUBMIT_FENCED,
@@ -39,6 +45,7 @@ from src.events.reactor import (
     OpportunityEventReactor,
     ReactorConfig,
     ReactorResult,
+    SUBMIT_LANE_LIVE_PRE_VENUE_ABORT,
     TERMINAL_MONEY_PATH_REASONS,
     TRANSIENT_MONEY_PATH_REASONS,
     _EXECUTABLE_SNAPSHOT_RETRY,
@@ -2078,6 +2085,271 @@ def test_forecast_wake_events_follow_posterior_reversal_order():
     ]
 
 
+def _verified_pre_submit_proof_bundle(
+    event,
+    *,
+    decision_time,
+    final_intent_id="intent-1",
+    condition_id="condition-1",
+    token_id="yes-1",
+    direction="buy_yes",
+    family_id="family-1",
+    executable_snapshot_id="snapshot-exec-1",
+    cost_basis_id="cost-1",
+) -> PreSubmitProofBundle:
+    """Build a PreSubmitProofBundle that satisfies DecisionCompiler.compile_pre_submit.
+
+    Mirrors the field shape production builds in
+    ``_build_pre_submit_proof_bundle_from_adapter_evidence``
+    (src/engine/event_reactor_adapter.py) closely enough to pass
+    ``_validate_pre_submit_parent_consistency`` and
+    ``verify_pre_submit_decision``, without the DB/family/snapshot plumbing
+    those production inputs require — this fixture only needs a VERIFIED
+    certificate graph, not a realistic proof of any specific market state.
+    """
+    clock = EvidenceClock(decision_time, decision_time, decision_time)
+
+    def ev(cert_type, suffix, payload):
+        return AuthorityEvidence(
+            certificate_type=cert_type,
+            claim_type=suffix,
+            semantic_suffix=suffix,
+            payload=payload,
+            clock=clock,
+            authority_id="test.authority",
+            authority_version="v1",
+            algorithm_id="test.algorithm",
+            algorithm_version="v1",
+        )
+
+    bin_labels_hash = "binlabels-hash-1"
+    members_json_hash = "members-hash-1"
+    calibrator_model_key = "calib-key-1"
+    calibrator_model_hash = "calib-hash-1"
+    p_cal_vector_hash = "pcal-vec-hash-1"
+    p_live_vector_hash = "plive-vec-hash-1"
+    execution_price_type = "ExecutionPrice"
+    unit = "F"
+    unit_authority_source = "ensemble_snapshots.settlement_unit"
+
+    source_truth = ev(
+        claims.SOURCE_TRUTH,
+        "source_truth",
+        {
+            "event_id": event.event_id,
+            "causal_snapshot_id": event.causal_snapshot_id,
+            "snapshot_id": event.causal_snapshot_id,
+            "completeness_status": "COMPLETE",
+            "required_fields_present": True,
+            "required_steps_present": True,
+            "source_run_id": "run-1",
+            "source_id": "opendata",
+            "payload_hash": event.payload_hash,
+            "event_source": event.source,
+            "derived_from_certificate_type": claims.FORECAST_AUTHORITY,
+            "derived_from_snapshot_id": "snap-1",
+            "derived_from_reader_status": "LIVE_ELIGIBLE",
+            "source_status": "LIVE_ELIGIBLE",
+            "source_reason_code": "",
+            "source_authority_id": "read_executable_forecast",
+        },
+    )
+    forecast_authority = ev(
+        claims.FORECAST_AUTHORITY,
+        "forecast_authority",
+        {
+            "forecast_source_id": "opendata",
+            "reader_status": "LIVE_ELIGIBLE",
+            "reader_reason_code": "",
+            "reader_authority": "read_executable_forecast",
+            "coverage_readiness_status": "LIVE_ELIGIBLE",
+            "coverage_completeness_status": "COMPLETE",
+            "source_run_completeness_status": "COMPLETE",
+            "source_run_status": "SUCCESS",
+            "source_run_id": "run-1",
+            "required_steps": [0],
+            "observed_steps": [0],
+            "expected_members": 51,
+            "observed_members": 51,
+            "applied_validations": [
+                "source_run_completeness_status",
+                "coverage_completeness_status",
+                "coverage_readiness_status",
+                "required_steps_observed",
+                "expected_members_observed",
+                "causality_status_ok",
+                "authority_verified",
+                "available_at_not_future",
+            ],
+            "members_extrema_metric_identity": "high",
+            "temperature_metric": "high",
+            "members_json_source": "ensemble_snapshots.daily_extrema",
+            "members_json_hash": members_json_hash,
+            "members_extrema_transform": "daily_max",
+            "target_local_date": "2026-05-24",
+            "city_timezone": "America/Chicago",
+            "bin_labels_hash": bin_labels_hash,
+            "local_date_window_hash": "windowhash-1",
+            "snapshot_id": "snap-1",
+            "unit": unit,
+            "unit_authority_source": unit_authority_source,
+            "horizon_profile": "h0",
+        },
+    )
+    calibration = ev(
+        claims.CALIBRATION,
+        "calibration",
+        {
+            "authority": "VERIFIED",
+            "maturity_level": 1,
+            "input_space": "space-1",
+            "training_cutoff": decision_time.isoformat(),
+            "model_available_at": decision_time.isoformat(),
+            "calibrator_model_key": calibrator_model_key,
+            "model_hash": calibrator_model_hash,
+            "horizon_profile": "h0",
+        },
+    )
+    model_config = ev(
+        claims.MODEL_CONFIG,
+        "model_config",
+        {
+            "calibration_input_space": "space-1",
+            "calibrator_model_key": calibrator_model_key,
+            "calibrator_model_hash": calibrator_model_hash,
+            "edge_bootstrap_n": 1000,
+        },
+    )
+    belief = ev(
+        claims.BELIEF,
+        "belief",
+        {
+            "forecast_snapshot_id": "snap-1",
+            "calibrator_model_key": calibrator_model_key,
+            "calibrator_model_hash": calibrator_model_hash,
+            "p_cal_vector_hash": p_cal_vector_hash,
+            "p_live_vector_hash": p_live_vector_hash,
+            "p_cal_hash": p_cal_vector_hash,
+            "p_live_hash": p_live_vector_hash,
+            "bin_labels_hash": bin_labels_hash,
+            "members_json_hash": members_json_hash,
+            "unit": unit,
+            "unit_authority_source": unit_authority_source,
+        },
+    )
+    market_topology = ev(
+        claims.MARKET_TOPOLOGY,
+        "market_topology",
+        {"family_id": family_id, "condition_id": condition_id},
+    )
+    family_closure = ev(
+        claims.FAMILY_CLOSURE,
+        "family_closure",
+        {
+            "family_id": family_id,
+            "bin_labels_hash": bin_labels_hash,
+            "bin_units": [unit],
+            "metric": "high",
+            "target_date": "2026-05-24",
+        },
+    )
+    executable_snapshot = ev(
+        claims.EXECUTABLE_SNAPSHOT,
+        "executable_snapshot",
+        {"condition_id": condition_id, "selected_snapshot_id": executable_snapshot_id},
+    )
+    quote_feasibility = ev(
+        claims.QUOTE_FEASIBILITY,
+        "quote_feasibility",
+        {
+            "condition_id": condition_id,
+            "token_id": token_id,
+            "selected_token_id": token_id,
+            "direction": direction,
+            "native_side": "YES_ASK",
+            "forbidden_cost_source": False,
+            "cost_source": "native_orderbook_ask",
+            "quote_source_kind": "executable_market_snapshot_native_book",
+        },
+    )
+    cost_model = ev(
+        claims.COST_MODEL,
+        "cost_model",
+        {
+            "condition_id": condition_id,
+            "token_id": token_id,
+            "cost_basis_id": cost_basis_id,
+            "execution_price_type": execution_price_type,
+            "forbidden_cost_source": False,
+            "cost_source": "native_orderbook_ask",
+            "quote_source_kind": "executable_market_snapshot_native_book",
+        },
+    )
+    pre_trade_evidence = ev(
+        claims.PRE_TRADE_EVIDENCE,
+        "pre_trade_evidence",
+        {"quote_edge_bound": 0.05, "conditional_edge_given_fill": 0.05},
+    )
+    candidate_evidence = ev(
+        claims.CANDIDATE_EVIDENCE,
+        "candidate_evidence",
+        {
+            "family_id": family_id,
+            "condition_id": condition_id,
+            "selected_token_id": token_id,
+            "direction": direction,
+            "hypothesis_id": f"{family_id}:{token_id}",
+        },
+    )
+    testing_protocol = ev(claims.TESTING_PROTOCOL, "testing_protocol", {"family_id": family_id})
+    fdr = ev(
+        claims.FDR,
+        "fdr",
+        {
+            "fdr_family_id": family_id,
+            "edge_bootstrap_n": 1000,
+            "selected_hypotheses": [f"{family_id}:{token_id}"],
+        },
+    )
+    sizing = ev(
+        claims.SIZING,
+        "sizing",
+        {"cost_basis_id": cost_basis_id, "execution_price_type": execution_price_type},
+    )
+    risk_level = ev(claims.RISK_LEVEL, "risk_level", {"final_intent_id": final_intent_id})
+
+    projection = {
+        "event_id": event.event_id,
+        "final_intent_id": final_intent_id,
+        "side_effect_status": "NO_SUBMIT",
+        "submitted": False,
+        "proof_accepted": True,
+        "executable_snapshot_id": executable_snapshot_id,
+    }
+    projection["projection_hash"] = stable_hash(projection)
+
+    return PreSubmitProofBundle(
+        final_intent_id=final_intent_id,
+        source_truth=source_truth,
+        market_topology=market_topology,
+        family_closure=family_closure,
+        forecast_authority=forecast_authority,
+        calibration=calibration,
+        model_config=model_config,
+        belief=belief,
+        executable_snapshot=executable_snapshot,
+        quote_feasibility=quote_feasibility,
+        cost_model=cost_model,
+        pre_trade_evidence=pre_trade_evidence,
+        candidate_evidence=candidate_evidence,
+        testing_protocol=testing_protocol,
+        fdr=fdr,
+        sizing=sizing,
+        risk_level=risk_level,
+        pre_submit_projection=projection,
+    )
+
+
 def _reactor(store, *, gates=True, config=None):
     rejected = []
     submitted = []
@@ -2108,6 +2380,17 @@ def _reactor(store, *, gates=True, config=None):
             kelly_decision_id="kelly-1",
             risk_decision_id="risk-1",
             final_intent_id="intent-1",
+            decision_proof_bundle=_verified_pre_submit_proof_bundle(
+                event, decision_time=_decision_time
+            ),
+            # A full-pass proof_accepted NO_SUBMIT receipt is only ever a typed
+            # LIVE_PRE_VENUE_ABORT (_assert_no_submit_lane_invariant,
+            # src/events/reactor.py) — an ordinary submit_lane never reaches
+            # persistence with proof_accepted=True + NO_SUBMIT. DAY0_LIVE_ADMISSION_REJECTED
+            # is a registered TERMINAL pre-venue-abort reason (rejection_reasons.py),
+            # so this stays terminal rather than the fail-open UNKNOWN-base requeue.
+            submit_lane=SUBMIT_LANE_LIVE_PRE_VENUE_ABORT,
+            reason="DAY0_LIVE_ADMISSION_REJECTED",
         )
         return receipt
 
@@ -3546,7 +3829,7 @@ def _terminal_surfaces(conn: sqlite3.Connection, event_id: str) -> dict[str, int
         SELECT COUNT(*)
         FROM edli_no_submit_receipts AS receipt
         JOIN decision_certificates AS cert
-          ON cert.certificate_type = 'NoSubmitDecisionCertificate'
+          ON cert.certificate_type = 'PreSubmitDecisionCertificate'
          AND cert.verifier_status = 'VERIFIED'
          AND json_extract(cert.payload_json, '$.event_id') = receipt.event_id
          AND json_extract(cert.payload_json, '$.projection_hash') = receipt.projection_hash
@@ -9056,7 +9339,7 @@ def test_reactor_persists_no_submit_certificate_before_processed():
         """
         SELECT certificate_hash, verifier_status
         FROM decision_certificates
-        WHERE certificate_type = 'NoSubmitDecisionCertificate'
+        WHERE certificate_type = 'PreSubmitDecisionCertificate'
         """
     ).fetchone()
     assert cert_row is not None
@@ -9441,13 +9724,13 @@ def test_reactor_rejects_no_submit_receipt_without_decision_proof_bundle():
 
     assert result.rejected == 1
     assert rejected[0][1] == "DECISION_CERTIFICATE"
-    assert rejected[0][2] == "NO_SUBMIT_PROOF_BUNDLE_REQUIRED"
+    assert rejected[0][2] == "PRE_SUBMIT_PROOF_BUNDLE_REQUIRED"
     assert conn.execute("SELECT COUNT(*) FROM decision_certificates").fetchone()[0] == 0
     failure = conn.execute(
         "SELECT stage, reason_code FROM decision_compile_failures WHERE event_id = ?",
         (event.event_id,),
     ).fetchall()
-    assert ("NO_SUBMIT_COMPILER", "NO_SUBMIT_PROOF_BUNDLE_REQUIRED") in failure
+    assert ("PRE_SUBMIT_COMPILER", "PRE_SUBMIT_PROOF_BUNDLE_REQUIRED") in failure
 
 
 def test_transition_proof_bundle_builder_not_used_in_runtime_reactor():
@@ -9624,7 +9907,7 @@ def test_no_submit_projection_rows_require_verified_decision_certificate():
     reactor.process_pending(decision_time=decision_time)
 
     assert len(no_submit_projection_rows(conn)) == 1
-    conn.execute("DELETE FROM decision_certificates WHERE certificate_type = 'NoSubmitDecisionCertificate'")
+    conn.execute("DELETE FROM decision_certificates WHERE certificate_type = 'PreSubmitDecisionCertificate'")
     assert no_submit_projection_rows(conn) == []
 
 
@@ -9964,7 +10247,7 @@ def test_pr332_db_concurrency_smoke_reactor_world_writes(tmp_path):
             """
             SELECT COUNT(*)
             FROM decision_certificates
-            WHERE certificate_type = 'NoSubmitDecisionCertificate'
+            WHERE certificate_type = 'PreSubmitDecisionCertificate'
               AND json_extract(payload_json, '$.event_id') = ?
             """,
             (event.event_id,),
@@ -10622,9 +10905,11 @@ def test_reactor_overfetches_before_lane_interleave_under_day0_flood():
         return original_fetch(**kwargs)
 
     store.fetch_pending = _recording_fetch  # type: ignore[method-assign]
+    # day0_is_tradeable was extirpated from ReactorConfig by fe5afb2d2 (2026-07-24);
+    # Day0 is unconditionally tradeable now, so the config carries no toggle for it.
     reactor, _rejected, submitted = _reactor(
         store,
-        config=ReactorConfig(day0_is_tradeable=True),
+        config=ReactorConfig(),
     )
 
     reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)

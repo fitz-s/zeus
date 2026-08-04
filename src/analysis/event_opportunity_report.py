@@ -27,8 +27,8 @@ def build_event_opportunity_report(conn: sqlite3.Connection) -> dict[str, object
             SELECT receipt.event_id, receipt.final_intent_id
             FROM edli_no_submit_receipts AS receipt
             JOIN decision_certificates AS cert
-              ON cert.certificate_type = 'NoSubmitDecisionCertificate'
-             AND cert.semantic_key = 'no_submit:' || receipt.event_id || ':' || receipt.final_intent_id
+              ON cert.certificate_type = 'PreSubmitDecisionCertificate'
+             AND cert.semantic_key = 'pre_submit:' || receipt.event_id || ':' || receipt.final_intent_id
              AND cert.verifier_status = 'VERIFIED'
              AND receipt.final_intent_id = json_extract(cert.payload_json, '$.final_intent_id')
              AND receipt.side_effect_status = json_extract(cert.payload_json, '$.side_effect_status')
@@ -115,9 +115,9 @@ def _event_time_violation_counts(conn: sqlite3.Connection, event_time_column: st
               AND EXISTS (
                   SELECT 1
                   FROM decision_certificates AS cert
-                  WHERE cert.certificate_type = 'NoSubmitDecisionCertificate'
+                  WHERE cert.certificate_type = 'PreSubmitDecisionCertificate'
                     AND cert.verifier_status = 'VERIFIED'
-                    AND cert.semantic_key = 'no_submit:' || receipt.event_id || ':' || receipt.final_intent_id
+                    AND cert.semantic_key = 'pre_submit:' || receipt.event_id || ':' || receipt.final_intent_id
                     AND NOT EXISTS (
                         SELECT 1
                         FROM decision_certificate_supersessions AS supersession
@@ -137,7 +137,7 @@ def _event_time_violation_counts(conn: sqlite3.Connection, event_time_column: st
                 cert.decision_time,
                 'verified_no_submit_certificate' AS surface
             FROM decision_certificates AS cert
-            WHERE cert.certificate_type = 'NoSubmitDecisionCertificate'
+            WHERE cert.certificate_type = 'PreSubmitDecisionCertificate'
               AND cert.verifier_status = 'VERIFIED'
               AND json_extract(cert.payload_json, '$.event_id') IS NOT NULL
               AND NOT EXISTS (
@@ -150,7 +150,7 @@ def _event_time_violation_counts(conn: sqlite3.Connection, event_time_column: st
                   FROM edli_no_submit_receipts AS receipt
                   WHERE receipt.event_id = json_extract(cert.payload_json, '$.event_id')
                     AND receipt.final_intent_id = json_extract(cert.payload_json, '$.final_intent_id')
-                    AND 'no_submit:' || receipt.event_id || ':' || receipt.final_intent_id = cert.semantic_key
+                    AND 'pre_submit:' || receipt.event_id || ':' || receipt.final_intent_id = cert.semantic_key
               )
         ),
         violations AS (
@@ -189,7 +189,7 @@ def _generated_decision_time_semantics(conn: sqlite3.Connection) -> dict[str, in
             COUNT(*) AS generated_no_submit_decisions,
             SUM(CASE WHEN created_at > persisted_at THEN 1 ELSE 0 END) AS db_created_after_header_persisted_at
         FROM decision_certificates
-        WHERE certificate_type = 'NoSubmitDecisionCertificate'
+        WHERE certificate_type = 'PreSubmitDecisionCertificate'
           AND json_extract(payload_json, '$.generated_at_decision_time') = 1
           AND json_extract(payload_json, '$.header_persisted_at_semantics') = 'decision_kernel_generated_at_decision_time'
         """

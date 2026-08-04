@@ -1230,6 +1230,8 @@ def test_pre_submit_current_state_winner_ignores_legacy_profit_density_floors(
             "selection_guard_n": 64,
             "optimal_stake_usd": 0.01,
             "global_actuation_identity": "global-current-1",
+            "global_economic_identity": "economic-current-1",
+            "global_wealth_economic_identity": "wealth-economic-current-1",
             "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
             "global_candidate_id": "candidate-current-1",
             "global_bin_id": "bin-1",

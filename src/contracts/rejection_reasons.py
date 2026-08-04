@@ -492,7 +492,18 @@ class RejectionReason(str, Enum):
         "NO_SUBMIT_CERTIFICATE_REJECTED",
         RejectionCategory.ARTIFICIAL_SUSPECT,
         "Certificate verification rejected our own no-submit certificate (the "
-        "wrong-chain-credential cert wall was this category).",
+        "wrong-chain-credential cert wall was this category). Retired by "
+        "fe5afb2d2 (2026-07-24) in favor of PRE_SUBMIT_CERTIFICATE_REJECTED; kept "
+        "registered so pre-rename DB rows (no_trade_regret_events history) stay "
+        "recognized.",
+    )
+    PRE_SUBMIT_CERTIFICATE_REJECTED = (
+        "PRE_SUBMIT_CERTIFICATE_REJECTED",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "Certificate verification rejected our own pre-submit certificate (the "
+        "wrong-chain-credential cert wall was this category). Current name for "
+        "the NO_SUBMIT_CERTIFICATE_REJECTED base after fe5afb2d2 (2026-07-24) "
+        "retired the NO_SUBMIT decision-compiler vocabulary.",
     )
     EXECUTOR_BOUNDARY_MISSING = (
         "EXECUTOR_BOUNDARY_MISSING",
