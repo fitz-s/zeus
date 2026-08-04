@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-08-03
+# Last reused/audited: 2026-08-04
 # Authority basis (2026-06-13 add): docs/archive/2026-Q2/operations_historical/live_inventory_warm_skip_2026-06-13.md —
 #   venue-close warm-skip relationship tests (live-inventory focus; market_phase.family_venue_closed).
 # Authority basis: src/main.py:_edli_event_reactor_cycle (historical inline substrate refresh
@@ -55,6 +55,7 @@ import json
 import re
 import sqlite3
 import threading
+import time as time_module
 from datetime import date, datetime, time, timezone
 from types import SimpleNamespace
 
@@ -6239,6 +6240,127 @@ def test_pending_family_refresh_matches_gamma_with_canonical_city_alias(monkeypa
     assert gamma_calls == [{"slug": "highest-temperature-in-hong-kong-on-june-7-2026"}]
     assert len(submitted) == 1
     assert submitted[0][0]["slug"] == gamma_event["slug"]
+
+
+def test_pending_family_refresh_starts_budget_before_query_and_cleans_deadline(monkeypatch):
+    world_conn = _pending_family_conn("event-1", "Hong Kong", "2026-06-07", "high")
+    events: list[str] = []
+    timers: list[threading.Timer] = []
+
+    original_install = substrate_observer._install_sqlite_deadline
+    original_start = substrate_observer._start_sqlite_deadline_interrupt
+    original_cancel = substrate_observer._cancel_sqlite_deadline_interrupt
+    original_clear = substrate_observer._clear_sqlite_deadline
+
+    def _install(conn, *, deadline_monotonic):
+        events.append("install")
+        return original_install(conn, deadline_monotonic=deadline_monotonic)
+
+    def _start(conn, *, deadline_monotonic):
+        events.append("start")
+        timer = original_start(conn, deadline_monotonic=deadline_monotonic)
+        if conn is world_conn and timer is not None:
+            timers.append(timer)
+        return timer
+
+    def _cancel(timer):
+        if timer in timers:
+            events.append("cancel")
+        original_cancel(timer)
+
+    def _clear(conn):
+        if conn is world_conn:
+            events.append("clear")
+        original_clear(conn)
+
+    monkeypatch.setattr(substrate_observer, "_install_sqlite_deadline", _install)
+    monkeypatch.setattr(substrate_observer, "_start_sqlite_deadline_interrupt", _start)
+    monkeypatch.setattr(substrate_observer, "_cancel_sqlite_deadline_interrupt", _cancel)
+    monkeypatch.setattr(substrate_observer, "_clear_sqlite_deadline", _clear)
+
+    def _pending(*_args, **_kwargs):
+        assert events[:2] == ["install", "start"]
+        events.append("pending")
+        return []
+
+    monkeypatch.setattr(substrate_observer, "_pending_family_rows_for_refresh", _pending)
+
+    result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        _FakeConn(),
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+        include_money_risk_families=False,
+    )
+
+    for timer in timers:
+        timer.join(timeout=1.0)
+    assert result["status"] == "no_pending_open_rest_or_held_families"
+    assert events == ["install", "start", "pending", "cancel", "clear"]
+    assert timers and all(not timer.is_alive() for timer in timers)
+
+
+def test_pending_family_refresh_query_deadline_is_fail_closed(monkeypatch):
+    world_conn = sqlite3.connect(":memory:")
+    deadline = time_module.monotonic() + 0.05
+    monkeypatch.setattr(
+        substrate_observer,
+        "_topology_lookup_deadline_for_snapshot_refresh",
+        lambda **_kwargs: deadline,
+    )
+
+    def _slow_pending(conn, **_kwargs):
+        return conn.execute(
+            """
+            WITH RECURSIVE numbers(value) AS (
+                SELECT 1
+                UNION ALL
+                SELECT value + 1 FROM numbers WHERE value < 1000000000
+            )
+            SELECT sum(value) FROM numbers
+            """
+        ).fetchall()
+
+    monkeypatch.setattr(substrate_observer, "_pending_family_rows_for_refresh", _slow_pending)
+
+    result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        _FakeConn(),
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+        refresh_budget_seconds=5.0,
+        snapshot_reserve_seconds=1.0,
+        include_money_risk_families=False,
+    )
+
+    assert result["status"] == "error"
+    assert result["scheduler_failed"] is True
+    assert "interrupted" in result["scheduler_failure_reason"].lower()
+    assert result["scheduler_failure_reason"] != "no_pending_open_rest_or_held_families"
+    world_conn.close()
+
+
+def test_pending_family_refresh_expired_empty_query_is_not_success(monkeypatch):
+    world_conn = _pending_family_conn("event-1", "Hong Kong", "2026-06-07", "high")
+    monkeypatch.setattr(
+        substrate_observer,
+        "_topology_lookup_deadline_for_snapshot_refresh",
+        lambda **_kwargs: time_module.monotonic() - 1.0,
+    )
+    monkeypatch.setattr(
+        substrate_observer,
+        "_pending_family_rows_for_refresh",
+        lambda *_args, **_kwargs: [],
+    )
+
+    result = substrate_observer._refresh_pending_family_snapshots(
+        world_conn,
+        _FakeConn(),
+        now_utc=datetime(2026, 6, 6, 12, 0, tzinfo=timezone.utc),
+        include_money_risk_families=False,
+    )
+
+    assert result["status"] == "error"
+    assert result["scheduler_failed"] is True
+    assert "deadline" in result["scheduler_failure_reason"]
 
 
 class _FakeConn:

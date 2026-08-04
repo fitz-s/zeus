@@ -1589,6 +1589,42 @@ def _refresh_pending_family_snapshots(
     Returns a summary dict; never raises (failures are logged and skipped).
     """
 
+    # Start the wall-clock budget before any pending/open-rest/topology work.  The
+    # pending-family CTE is itself potentially expensive (JSON extraction plus
+    # GROUP BY), so it must consume the same bounded topology phase as the later
+    # topology reads while preserving the snapshot capture reserve.
+    refresh_budget_s = max(
+        5.0,
+        float(
+            refresh_budget_seconds
+            if refresh_budget_seconds is not None
+            else os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "17.0")
+        ),
+    )
+    refresh_deadline = time.monotonic() + refresh_budget_s
+    snapshot_reserve_s = min(
+        max(
+            1.0,
+            float(
+                snapshot_reserve_seconds
+                if snapshot_reserve_seconds is not None
+                else os.environ.get("ZEUS_REACTOR_SNAPSHOT_RESERVE_SECONDS", "12.0")
+            ),
+        ),
+        max(0.1, refresh_budget_s - 0.1),
+    )
+    topology_deadline = _topology_lookup_deadline_for_snapshot_refresh(
+        refresh_deadline=refresh_deadline,
+        refresh_budget_s=refresh_budget_s,
+        snapshot_reserve_s=snapshot_reserve_s,
+    )
+    _gamma_empty_backoff_s = max(
+        0.0,
+        float(os.environ.get("ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS", "300.0")),
+    )
+    pending_deadline_installed = False
+    pending_deadline_timer: threading.Timer | None = None
+
     from src.data.market_scanner import (
         reconstruct_weather_market_from_static_topology,
         refresh_executable_market_substrate_snapshots,
@@ -1633,12 +1669,29 @@ def _refresh_pending_family_snapshots(
     # Step 1: Collect distinct (city, target_date, metric) for pending events.
     if include_pending_families:
         try:
-            pending_rows = _pending_family_rows_for_refresh(
-                world_conn, consumer_name=consumer_name, now_utc=now_utc
+            pending_deadline_installed = _install_sqlite_deadline(
+                world_conn,
+                deadline_monotonic=topology_deadline,
             )
+            pending_deadline_timer = _start_sqlite_deadline_interrupt(
+                world_conn,
+                deadline_monotonic=topology_deadline,
+            )
+            try:
+                pending_rows = _pending_family_rows_for_refresh(
+                    world_conn, consumer_name=consumer_name, now_utc=now_utc
+                )
+                if _sqlite_budget_expired(topology_deadline):
+                    raise TimeoutError("pending family query deadline exceeded")
+            finally:
+                _cancel_sqlite_deadline_interrupt(pending_deadline_timer)
+                pending_deadline_timer = None
+                if pending_deadline_installed:
+                    _clear_sqlite_deadline(world_conn)
+                    pending_deadline_installed = False
         except Exception as exc:
             logger.warning("refresh_pending_family_snapshots: pending-event query failed: %s", exc)
-            return {"status": "error", "reason": str(exc)}
+            return _substrate_warm_failed_summary(status="error", reason=str(exc))
     else:
         pending_rows = []
 
@@ -1797,49 +1850,6 @@ def _refresh_pending_family_snapshots(
         else []
     )
     families = rotated_priority_families + new_priority_families + rotated_ordinary_families
-
-    # Fitz #5 scheduler-liveness fix (2026-06-08): this wall-clock budget MUST be
-    # STRICTLY LESS than the warm-cycle APScheduler interval (_EDLI_SUBSTRATE_WARM_
-    # INTERVAL_SECONDS, 20s) and MUST stay within the 30s executable-price freshness
-    # window. The prior 29.0 default predated the reactor→warm-cycle split (blame
-    # 014408394f, sized for the old 1-min reactor interval) and was never re-aligned:
-    # a 29s budget on a 20s interval guarantees the cycle overruns its own trigger,
-    # so every subsequent run is "skipped: maximum number of running instances
-    # reached (1)" (zeus-live.err 2026-06-08) and the universe-wide executable
-    # substrate is never refreshed — coverage NONE, daemon starved of candidates.
-    # The default now fits inside the interval with headroom for scheduler dispatch
-    # and connection teardown; the internal capture reserve (snapshot_reserve_s) and
-    # Gamma slice scale down off this budget below. Env-overridable, but the
-    # interval-fit invariant is asserted at job registration (see add_job below).
-    refresh_budget_s = max(
-        5.0,
-        float(
-            refresh_budget_seconds
-            if refresh_budget_seconds is not None
-            else os.environ.get("ZEUS_REACTOR_REFRESH_BUDGET_SECONDS", "17.0")
-        ),
-    )
-    refresh_deadline = time.monotonic() + refresh_budget_s
-    snapshot_reserve_s = min(
-        max(
-            1.0,
-            float(
-                snapshot_reserve_seconds
-                if snapshot_reserve_seconds is not None
-                else os.environ.get("ZEUS_REACTOR_SNAPSHOT_RESERVE_SECONDS", "12.0")
-            ),
-        ),
-        max(0.1, refresh_budget_s - 0.1),
-    )
-    topology_deadline = _topology_lookup_deadline_for_snapshot_refresh(
-        refresh_deadline=refresh_deadline,
-        refresh_budget_s=refresh_budget_s,
-        snapshot_reserve_s=snapshot_reserve_s,
-    )
-    _gamma_empty_backoff_s = max(
-        0.0,
-        float(os.environ.get("ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS", "300.0")),
-    )
 
     # Throughput contract: never slice pending families by a fixed count. Live has
     # hundreds of active weather families across time zones; a hard family cap lets
@@ -2637,6 +2647,9 @@ def _refresh_pending_family_snapshots(
         logger.warning("refresh_pending_family_snapshots: failed: %s", exc)
         return {"status": "error", "reason": str(exc)}
     finally:
+        _cancel_sqlite_deadline_interrupt(pending_deadline_timer)
+        if pending_deadline_installed:
+            _clear_sqlite_deadline(world_conn)
         _cancel_sqlite_deadline_interrupt(forecasts_deadline_timer)
         _cancel_sqlite_deadline_interrupt(snapshot_deadline_timer)
         if forecasts_deadline_installed:
