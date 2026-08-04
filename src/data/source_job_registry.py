@@ -1,5 +1,6 @@
 # Created: 2026-05-24
-# Last reused or audited: 2026-06-08 (Step 4 CLEANUP: purge the stale ``wu_daily`` references
+# Last reused or audited: 2026-08-04 (classified main-owned Day0 hourly Open-Meteo collector;
+#   Step 4 CLEANUP: purge the stale ``wu_daily`` references
 #   from the module docstrings — the order-daemon WU collector spec was deleted by §8 Step 4,
 #   so the doc must not still advertise a ``main``-owned wu_daily job; data-ingest's
 #   ingest_k2_daily_obs is the sole live WU owner. Earlier same-day: P3 lift repointed the
@@ -13,7 +14,8 @@
 SCOPE: this registry now covers ALL THREE daemons' data-collection jobs —
 ``src/ingest_main.py``, ``src/ingest/forecast_live_daemon.py`` (the K2 ingest daemons) AND the
 data-collection jobs of ``src/main.py`` (the trading daemon): ``market_discovery`` (Gamma
-topology + CLOB executable snapshots), ``venue_heartbeat``, the user-WS ingestor (a long-running
+topology + CLOB executable snapshots), ``edli_day0_hourly_refresh``, ``venue_heartbeat``,
+the user-WS ingestor (a long-running
 thread, ``dispatch_kind='long_running'``), ``harvester``. (The order daemon's ``wu_daily``
 collector was REMOVED by system_decomposition_plan §8 Step 4 — data-ingest's ``ingest_k2_daily_obs``
 is now the SOLE live owner of WU daily observations; no ``main``-owned WU spec remains.) The
@@ -316,6 +318,13 @@ _SRC_MAIN: tuple[SourceJobSpec, ...] = (
                   source_id="polymarket_clob", callable_ref="_start_venue_heartbeat_loop_if_needed",
                   family="venue_user_ws", file_only=True,
                   notes="CLOB auth/readiness/venue status loop starter; writes venue-status state"),
+    SourceJobSpec("edli_day0_hourly_refresh", "main", "live", "default", True,
+                  source_id="openmeteo_forecast_api",
+                  callable_ref="_edli_day0_hourly_refresh_cycle", family="forecast",
+                  registry_built=False,
+                  notes="bounded Open-Meteo multi-model Day0 hourly-vector collector; writes "
+                        "zeus-forecasts.db from the trading daemon because held-capital priority "
+                        "is coordinated with the live monitor/redecision lanes"),
     # PROCESS-TOPOLOGY REFACTOR P4 (2026-06-08, system_decomposition_plan §8 Step 2):
     # the harvester resolver was LIFTED out of the order daemon (`main`) into the P4
     # post-trade-capital daemon. owner_daemon repointed to "post_trade_capital" so the
@@ -401,18 +410,18 @@ def live_producing_jobs() -> list[SourceJobSpec]:
 #
 # Anything in NEITHER list is an UNTRACKED violation and fails the E gate fail-closed.
 _ACKNOWLEDGED_SAFE_DUPLICATE_LIVE_OWNERS: dict[tuple[str, str], str] = {
-    # ingest_main.ingest_replacement_availability_poll probes provider publication state and
-    # triggers lightweight extras fetches; forecast_live_daemon.replacement_forecast_download
-    # does the OpenMeteo anchor raw-input pre-fetch.  Both touch openmeteo_ecmwf_ifs_9km as a
-    # source, but they are complementary operations on a shared source — not a competing
+    # ingest_main.ingest_replacement_availability_poll probes provider publication state,
+    # forecast_live_daemon.replacement_forecast_download does the OpenMeteo anchor pre-fetch,
+    # and main.edli_day0_hourly_refresh persists a separate bounded intraday vector bundle.
+    # The first two touch openmeteo_ecmwf_ifs_9km and are complementary operations — not a competing
     # authority conflict.  The poll runs in the data-ingest daemon (independent of trading
     # restarts); the download runs in the forecast-live daemon on a dedicated lane.  Verified
     # safe 2026-06-11: probe→download separation was the explicit operator directive that
     # decoupled the ~365MB download from the 5-min materialize cycle.
     ("forecast", "openmeteo_ecmwf_ifs_9km"): (
-        "ACKNOWLEDGED_SAFE: ingest_main.ingest_replacement_availability_poll (probe+extras) + "
-        "forecast_live_daemon.replacement_forecast_download (heavy pre-fetch) are complementary "
-        "operations on the same source; operator directive 2026-06-11 explicitly split them."
+        "ACKNOWLEDGED_SAFE: ingest_main availability probe, forecast_live anchor pre-fetch, "
+        "and main Day0 hourly-vector capture write distinct artifacts from the same provider; "
+        "none competes for one canonical output authority."
     ),
 }
 

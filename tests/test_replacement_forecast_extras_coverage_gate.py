@@ -1,6 +1,6 @@
 # Created: 2026-06-16
-# Last reused or audited: 2026-07-19
-# Lifecycle: created=2026-06-16; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Last reused or audited: 2026-08-04
+# Lifecycle: created=2026-06-16; last_reviewed=2026-08-04; last_reused=2026-08-04
 # Authority basis: docs/evidence/timing_audit/capture_reactor_stall_rootcause_2026-06-16.md
 #   (PRIMARY/CODE fix) + docs/evidence/timing_audit/impl_flat_threshold_capture_fix_2026-06-16.md.
 #   BAYES_PRECISION_FUSION_SPEC §6 F1 (the q-path consumes the persisted single_runs capture).
@@ -624,6 +624,7 @@ def test_source_clock_scoped_capture_prioritizes_held_families(
     import src.data.openmeteo_model_updates as updates
     import src.data.replacement_forecast_current_target_plan as target_plan
     import src.data.replacement_forecast_seed_discovery as seed_discovery
+    import src.strategy.live_inference.source_clock_city_weights as city_weights
 
     class _Report:
         updated_sources = ("ecmwf_ifs",)
@@ -681,6 +682,11 @@ def test_source_clock_scoped_capture_prioritizes_held_families(
         seed_discovery,
         "held_position_family_priorities",
         lambda: {("Seoul", "2026-07-17", "high"): 0},
+    )
+    monkeypatch.setattr(
+        city_weights,
+        "affected_cities_for_source_updates",
+        lambda _sources: {"Paris", "Seoul"},
     )
     def _download(**kwargs):
         assert priority_active[0] is True
@@ -1835,6 +1841,7 @@ def _wire_poll(monkeypatch, tmp_path, *, download_report):
         "trades_db": tmp_path / "empty-zeus-trades.db",
         "download_output_dir": tmp_path,
         "download_release_lag_hours": 14.0,
+        "bpf_extra_rotation_state_path": tmp_path / "bpf-extra-rotation.json",
     }
     return cfg
 

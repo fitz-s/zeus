@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-05-24; last_reviewed=2026-06-08; last_reused=2026-06-08
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-04; last_reused=2026-08-04
 # Purpose: Advisory job inventory + --check (registry mirrors scheduler) + executor/scheduler dry-run previews.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-06-08 (system_decomposition_plan §8 Step 4: removed "wu_daily"
+# Last reused or audited: 2026-08-04 (classified current src.main scheduler surface; removed "wu_daily"
 #   from _SRC_MAIN_DATA_COLLECTION_JOB_IDS — the order daemon no longer collects WU daily)
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR3);
 #   operator spec §"Job registry"; src/data/source_job_registry.py;
@@ -67,6 +67,7 @@ _SRC_MAIN_FILE = REPO_ROOT / "src" / "main.py"
 # observations. It was a VERIFIED-DUPLICATE of data-ingest's ingest_k2_daily_obs (which owns the
 # (observation, wu_icao_history) family); the duplicate src.main copy is deleted, not relocated.
 _SRC_MAIN_DATA_COLLECTION_JOB_IDS: frozenset[str] = frozenset({
+    "edli_day0_hourly_refresh",
     "venue_heartbeat",
 })
 
@@ -97,8 +98,13 @@ _SRC_MAIN_NON_COLLECTION_JOB_IDS: frozenset[str] = frozenset({
     "edli_mainstream_warm",       # mainstream consensus warm (trading prep)
     "edli_continuous_redecision_screen",  # continuous redecision screen over held families
                                           # (trading control loop, reads already-collected data)
+    "edli_presubmit_jit_keepalive",       # execution connectivity keepalive
+    "chain_mirror_reconcile",             # chain-authority reconciliation control loop
+    "exit_monitor_recovery",              # durable held-monitor recovery
+    "live_health_composite",              # composite daemon health computation
     "world_wal_checkpoint",       # WAL checkpoint (DB maintenance, not data collection)
     "trades_wal_checkpoint",      # WAL checkpoint (DB maintenance, not data collection)
+    "forecasts_wal_checkpoint",   # WAL checkpoint (DB maintenance, not data collection)
 })
 
 
@@ -194,13 +200,19 @@ def _src_main_partition_violations() -> list[str]:
 
       * UNCLASSIFIED: a scheduled id in neither set — a new src/main job nobody triaged. Forces a
         conscious decision (add to the registry as data-collection, or to the non-collection set).
+      * AMBIGUOUS: an id declared in both sets — classification is not a partition.
       * UNREGISTERED: a declared data-collection id missing from JOB_REGISTRY — coverage gap.
+      * MISREGISTERED: an explicit non-collection id present in the data-collection registry.
 
     This is the antibody that keeps the registry honest about src/main once it claims to cover it.
     """
     scheduled = _scheduled_ids_in((_SRC_MAIN_FILE,))
     known = _SRC_MAIN_DATA_COLLECTION_JOB_IDS | _SRC_MAIN_NON_COLLECTION_JOB_IDS
     violations: list[str] = []
+    for jid in sorted(_SRC_MAIN_DATA_COLLECTION_JOB_IDS & _SRC_MAIN_NON_COLLECTION_JOB_IDS):
+        violations.append(
+            f"AMBIGUOUS src/main job {jid!r}: declared as both data-collection and non-collection"
+        )
     for jid in sorted(scheduled - known):
         violations.append(
             f"UNCLASSIFIED src/main job {jid!r}: not in data-collection nor non-collection set "
@@ -209,6 +221,10 @@ def _src_main_partition_violations() -> list[str]:
     for jid in sorted(_SRC_MAIN_DATA_COLLECTION_JOB_IDS):
         if jid not in JOB_REGISTRY:
             violations.append(f"UNREGISTERED src/main data-collection job {jid!r}: declared collection but missing from JOB_REGISTRY")
+    for jid in sorted(_SRC_MAIN_NON_COLLECTION_JOB_IDS & set(JOB_REGISTRY)):
+        violations.append(
+            f"MISREGISTERED src/main non-collection job {jid!r}: present in data-collection registry"
+        )
     return violations
 
 

@@ -1,5 +1,5 @@
 # Lifecycle: created=2026-05-24; last_reviewed=2026-08-04; last_reused=2026-08-04
-# Purpose: Executor-class assignment (no DB writer on file-only executor; UMA->backfill_db).
+# Purpose: Current single-live scheduler set and causal executor-class assignment.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
 # Last reused or audited: 2026-08-04
@@ -54,15 +54,14 @@ def test_validator_catches_writes_db_on_file_only_lane() -> None:
     )
 
 
-def test_uma_listener_assigned_backfill_db_not_fast() -> None:
-    """The audited fault — UMA writes DB on the file-only 'fast' executor — is structurally
-    fixed by the adapter: UMA (historical settlement) is assigned backfill_db."""
+def test_retired_alternate_jobs_are_not_schedulable() -> None:
+    """Single-live semantics must not silently revive retired alternate writers."""
     from src.data.scheduler_adapter import build_job_specs
 
     by_id = {s.job_id: s for s in build_job_specs()}
-    uma = by_id["ingest_uma_resolution_listener"]
-    assert uma.executor_class == "backfill_db"   # NOT heartbeat/io (its current 'fast')
-    assert uma.is_db_writer
+    assert "ingest_uma_resolution_listener" not in by_id
+    assert "ingest_calibration_auto_promote" not in by_id
+    assert by_id["ingest_harvester_truth_writer"].executor_class == "settlement_db"
 
 
 def test_executor_class_assignments_by_role() -> None:
@@ -78,9 +77,8 @@ def test_executor_class_assignments_by_role() -> None:
     assert by_id["ingest_day0_oracle_anomaly"].executor_class == "oracle_guard_db"
     assert by_id["ingest_k2_obs_fast_tick"].executor_class == "observation_db"
     assert by_id["ingest_tigge_archive_backfill"].executor_class == "backfill_db"
-    assert by_id["ingest_calibration_auto_promote"].executor_class == "derived_db"
     assert by_id["ingest_heartbeat"].executor_class == "heartbeat"
-    assert by_id["ingest_source_health_probe"].executor_class == "diagnostic_io"
+    assert by_id["ingest_source_health_probe"].executor_class == "health_io"
 
 
 def test_unclassified_live_db_writer_fails_closed() -> None:
@@ -1932,7 +1930,7 @@ def test_build_registry_scheduler_builds_exact_set_and_routes_executors() -> Non
             "backfill_db",
             "derived_db",
             "io",
-            "diagnostic_io",
+            "health_io",
             "heartbeat",
         )
         assert j["max_instances"] == 1 and j["coalesce"] is True   # anti-overlap preserved
@@ -1980,9 +1978,10 @@ def test_ingest_main_registry_scheduler_replaces_manual_add_job_when_enabled() -
     assert by_id["ingest_k2_forecasts_daily"]["executor"] == "forecast_archive_db"
     assert by_id["ingest_k2_obs_fast_tick"]["executor"] == "observation_db"
     assert by_id["ingest_k2_hourly_instants"]["executor"] == "backfill_db"
-    assert by_id["ingest_uma_resolution_listener"]["executor"] == "backfill_db"   # PR8 fix landed
     assert by_id["ingest_heartbeat"]["executor"] == "heartbeat"
-    assert by_id["ingest_status_rollup"]["executor"] == "diagnostic_io"
+    assert by_id["ingest_status_rollup"]["executor"] == "health_io"
+    assert "ingest_uma_resolution_listener" not in by_id
+    assert "ingest_calibration_auto_promote" not in by_id
 
 
 def test_ingest_main_non_owner_excludes_opendata_from_registry_build() -> None:
@@ -2030,11 +2029,12 @@ def test_forecast_live_legacy_and_registry_triggers_are_equivalent(monkeypatch) 
     import src.ingest.forecast_live_daemon as fld
     from datetime import datetime, timezone
     from src.config import settings
+    from src.data.scheduler_adapter import REGISTRY_OWNED_KWARGS
 
     specs = fld.forecast_live_job_specs(startup_run_date=datetime(2026, 5, 24, tzinfo=timezone.utc))
 
     # legacy view: id -> (trigger, sorted trigger-only kwargs)
-    owned = fld._REGISTRY_OWNED_KWARGS
+    owned = REGISTRY_OWNED_KWARGS
     legacy = {
         str(kw["id"]): (trig, sorted((k, str(v)) for k, v in kw.items() if k not in owned))
         for _fn, trig, kw in specs

@@ -60,7 +60,7 @@ test_trust_policy:
     tests/engine/test_shift_bin_reactor_integration.py: {created: "2026-06-22", last_used: "2026-07-23", note: "Shift-bin close-before-open integration, including final pending-family reread before venue I/O and lease abort without an orphan ENTRY_SUBMITTED intent."}
     tests/test_settlement_skill_attribution.py: {created: "2026-05-04", last_used: "2026-07-23", note: "Settlement skill attribution requires an exact decision-certificate lineage and refuses ambiguous ENTRY hashes or legacy fallback scoring."}
     tests/test_bayes_precision_fusion_download.py: {created: "2026-06-08", last_used: "2026-07-28", note: "BPF raw capture batching, injected pre-request quota authority, exact committed-family reporting and attempted-group receipts, deadline-bound persistence, LIVE writer priority, and chunk durability."}
-    tests/test_replacement_forecast_extras_coverage_gate.py: {created: "2026-06-16", last_used: "2026-07-19", note: "BPF source-clock capture coverage, typed HTTP terminal/conditional outcomes, reserved quota priority, per-commit family notification, fixpoint, quota cooldown, and held-family-first target ordering."}
+    tests/test_replacement_forecast_extras_coverage_gate.py: {created: "2026-06-16", last_used: "2026-08-04", note: "BPF source-clock capture coverage, durable rotation ownership, typed HTTP outcomes, fixpoint, quota cooldown, and held-family-first ordering isolated from dynamic source-city artifacts."}
     tests/data/test_fusion_upgrade_trigger.py: {created: "2026-06-11", last_used: "2026-07-17", note: "Fusion upgrade detects both provider-family growth and exact persisted source-row revision changes without repeated no-op materialization."}
     tests/data/test_previous_runs_substitution.py: {created: "2026-06-11", last_used: "2026-07-20", note: "Previous-runs substitution and replacement materialization queue contracts, including bounded per-family subprocess concurrency and timeout isolation."}
     tests/test_replacement_forecast_current_target_plan.py: {created: "2026-06-06", last_used: "2026-07-28", note: "Current active-family coverage and seedability, including automatic reseed for probability-semantics drift, qualified fast-station Day0 evidence, and duplicate raw-METAR writer canonicalization that preserves one causal conditioning clock."}
@@ -337,12 +337,12 @@ test_trust_policy:
     tests/ci/test_copilot_instruction_contract.py: {created: "2026-05-22", last_used: "2026-05-22"}
     # PR1 data_temporal_kernel: TemporalPolicy relationship tests + inter-registry coherence lint (2026-05-24).
     tests/test_source_temporal_policy.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/test_source_contract_lint.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/test_source_job_registry.py: {created: "2026-05-24", last_used: "2026-07-28", note: "Registry mirror and explicit HKO realtime-versus-final-daily source-role identity."}
-    tests/test_ingest_scheduler_jobs.py: {created: "2026-05-17", last_used: "2026-07-28", note: "Ingest scheduler identity, cadence, and independent HKO finalized-daily polling with failure visibility."}
+    tests/test_source_contract_lint.py: {created: "2026-05-24", last_used: "2026-08-04", note: "Inter-registry source-role and code/calendar parameter coherence with no stale expected-failure waiver."}
+    tests/test_source_job_registry.py: {created: "2026-05-24", last_used: "2026-08-04", note: "Registry mirror, mutually exclusive src.main collection partition, and current single-live source-role identity."}
+    tests/test_ingest_scheduler_jobs.py: {created: "2026-05-17", last_used: "2026-08-04", note: "Exact registry scheduler construction, cadence, and retirement antibody for alternate calibration auto-promotion."}
     tests/state/test_daily_obs_cross_db_atomicity.py: {created: "2026-05-14", last_used: "2026-07-28", note: "Atomic forecasts+world daily observation writes and explicit non-blocking admission propagation across both ordered flocks."}
     tests/test_opendata_ownership_singleton.py: {created: "2026-05-24", last_used: "2026-05-24"}
-    tests/test_scheduler_adapter.py: {created: "2026-05-24", last_used: "2026-07-28", note: "Scheduler wiring plus independent METAR, HKO realtime, and finalized HKO Daily Extract source-clock lanes; committed-scope materialization before full fanout completion; replacement discovery continues behind unrelated queue backlog."}
+    tests/test_scheduler_adapter.py: {created: "2026-05-24", last_used: "2026-08-04", note: "Single-live scheduler set, causal executor lanes, committed-scope materialization, and bounded replacement maintenance under source-clock load."}
     # PR #335: assert_writer_jobs_registered boot guard accepts registry spec-list wiring.
     tests/test_writer_jobs_registry_guard.py: {created: "2026-05-24", last_used: "2026-05-24"}
     # P5-1 + P5-3 (PR #19 closeout completion, 2026-04-26):
