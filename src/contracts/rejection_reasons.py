@@ -505,6 +505,18 @@ class RejectionReason(str, Enum):
         "the NO_SUBMIT_CERTIFICATE_REJECTED base after fe5afb2d2 (2026-07-24) "
         "retired the NO_SUBMIT decision-compiler vocabulary.",
     )
+    PRE_SUBMIT_PROOF_BUNDLE_REQUIRED = (
+        "PRE_SUBMIT_PROOF_BUNDLE_REQUIRED",
+        RejectionCategory.ARTIFICIAL_SUSPECT,
+        "DecisionCompiler.compile_pre_submit/compile_authority_graph was invoked "
+        "without a typed PreSubmitProofBundle (src/decision_kernel/compiler.py:138,"
+        "184) — the adapter reached a NO_SUBMIT verdict but never attached the "
+        "typed authority evidence the compiler requires; a receipt projection "
+        "alone is not proof. Same shape as KELLY_PROOF_MISSING and "
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED: a candidate that reached this stage "
+        "is missing a proof the pipeline should have produced, not a designed "
+        "business-condition refusal.",
+    )
     EXECUTOR_BOUNDARY_MISSING = (
         "EXECUTOR_BOUNDARY_MISSING",
         RejectionCategory.ARTIFICIAL_SUSPECT,

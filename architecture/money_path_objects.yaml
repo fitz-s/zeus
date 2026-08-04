@@ -675,6 +675,15 @@ state_machines:
       - EXPECTED_STEPS_UNKNOWN
       - NO_SUBMIT
       - NO_SUBMIT_CERTIFICATE_REJECTED
+      # fe5afb2d2 (2026-07-24) retired the NO_SUBMIT decision-compiler
+      # vocabulary in favor of PRE_SUBMIT (DecisionCompiler.compile_pre_submit,
+      # src/decision_kernel/compiler.py). The NO_SUBMIT_* entries above stay
+      # registered so pre-rename DB rows/history stay recognized; these are the
+      # current stage/reason_code strings the compiler and reactor now emit.
+      - PRE_SUBMIT_COMPILER
+      - PRE_SUBMIT_PROOF_BUNDLE_REQUIRED
+      - PRE_SUBMIT_CERTIFICATE
+      - PRE_SUBMIT_CERTIFICATE_REJECTED
       - IDENTITY_FALLBACK_NO_PLATT_BUCKET
       - ACTIONABLE_NOT_SUBMITTED
       - INTENT_BUILT
