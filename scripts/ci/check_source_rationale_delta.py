@@ -136,8 +136,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: missing {sr_path}", file=sys.stderr)
         return 2
 
-    with sr_path.open() as f:
-        sr = yaml.safe_load(f) or {}
+    # A parse failure is exit 2 (broken registry), never exit 1 (undeclared
+    # source). Letting yaml raise here exits 1 on a traceback, which the
+    # structural-blocker orchestrator reads as "the gate found a violation" —
+    # so a syntax error in the registry silently reports as an enforcement hit
+    # on every PR while enforcing nothing. Observed 2026-08-03: an unquoted
+    # `why:` scalar containing ": " broke source_rationale.yaml on `live` and
+    # took the no_override gate dark for every open PR.
+    try:
+        with sr_path.open() as f:
+            sr = yaml.safe_load(f) or {}
+    except yaml.YAMLError as exc:
+        print(f"ERROR: {sr_path} is not parseable YAML: {exc}", file=sys.stderr)
+        return 2
     known = _known_sources(sr)
 
     files = args.changed_files

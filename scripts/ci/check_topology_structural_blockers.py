@@ -209,10 +209,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"FAIL: {len(failures)} rule(s) failed:")
             for r in failures:
                 tag = " (NO_OVERRIDE)" if not r["override_allowed"] else " (override allowed)"
-                print(f"  - {r['rule_id']} via {r['enforcer']} exit={r['exit_code']}{tag}")
+                # exit 2 is the enforcers' documented "broken/unreadable input"
+                # code, not "violation found". Naming it stops a crashed
+                # enforcer from being read as a real enforcement hit.
+                kind = " — ENFORCER ERROR, not a violation" if r["exit_code"] == 2 else ""
+                print(f"  - {r['rule_id']} via {r['enforcer']} exit={r['exit_code']}{tag}{kind}")
                 if r["stdout"].strip():
                     for line in r["stdout"].splitlines()[:10]:
                         print(f"      {line}")
+                # A crashing enforcer writes its diagnosis to stderr and leaves
+                # stdout empty, so printing only stdout renders the failure
+                # undiagnosable from the CI log alone.
+                if r["stderr"].strip():
+                    for line in r["stderr"].strip().splitlines()[-8:]:
+                        print(f"      [stderr] {line}")
 
     if args.strict:
         return 0 if not failures else 1

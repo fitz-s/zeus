@@ -80,6 +80,52 @@ def test_source_rationale_delta_passes_on_no_new_sources():
     assert r.returncode == 0
 
 
+def test_source_rationale_registry_is_parseable_yaml():
+    """The real registry must parse — a broken one takes the gate dark.
+
+    `source_rationale_delta_gate` is a NO_OVERRIDE blocking rule. When the
+    registry it reads is unparseable, the enforcer dies and the orchestrator
+    counts the crash as a rule failure: the gate reports RED on every PR while
+    checking nothing. That happened on `live` on 2026-08-03, when an unquoted
+    `why:` scalar containing ": " truncated a mapping (commit 9ccf81333).
+
+    The synthetic-fixture tests around this one cannot catch it — they build
+    their own registry. Only reading the shipped file does.
+    """
+    import yaml
+
+    path = REPO_ROOT / "architecture" / "source_rationale.yaml"
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:  # pragma: no cover - the failure IS the message
+        pytest.fail(f"architecture/source_rationale.yaml does not parse: {exc}")
+    assert isinstance(loaded, dict) and loaded.get("files"), (
+        "source_rationale.yaml parsed but carries no `files` mapping"
+    )
+
+
+def test_source_rationale_unparseable_registry_exits_2_not_1(tmp_path: Path):
+    """A broken registry is exit 2 (enforcer error), never exit 1 (violation).
+
+    Exit 1 means "an undeclared source was found". Conflating the two makes a
+    crashed enforcer indistinguishable from a real enforcement hit in the CI
+    log, which is how the 2026-08-03 breakage was first misread as unrelated
+    base drift.
+    """
+    (tmp_path / "architecture").mkdir()
+    # Same shape as the real breakage: an unquoted scalar containing ": ".
+    (tmp_path / "architecture" / "source_rationale.yaml").write_text(
+        "files:\n  src/x.py:\n    why: prose with an embedded key: value pair\n"
+    )
+    r = _run(
+        "check_source_rationale_delta.py",
+        "--repo-root", str(tmp_path),
+        "--changed-files", "src/x.py",
+    )
+    assert r.returncode == 2, f"expected exit 2, got {r.returncode}: {r.stderr[:300]}"
+    assert "not parseable YAML" in r.stderr
+
+
 def test_source_rationale_delta_detects_new_provider_file(tmp_path: Path):
     # Set up minimal repo skeleton
     (tmp_path / "architecture").mkdir()
