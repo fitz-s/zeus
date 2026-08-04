@@ -4656,36 +4656,30 @@ def _recent_buy_yes_entry_command_count(conn: object, *, cutoff: str) -> int | N
 
 
 _LATEST_LIVE_POSTERIORS_SQL = """
-    SELECT posterior_id,
-           source_id,
-           posterior_identity_hash,
-           city,
-           target_date,
-           temperature_metric,
-           computed_at,
-           q_json,
-           q_lcb_json,
-           provenance_json
-      FROM (
-            SELECT posterior_id,
-                   source_id,
-                   posterior_identity_hash,
-                   city,
-                   target_date,
-                   temperature_metric,
-                   computed_at,
-                   q_json,
-                   q_lcb_json,
-                   provenance_json,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY city, target_date, temperature_metric
-                       ORDER BY datetime(computed_at) DESC, posterior_id DESC
-                   ) AS rn
-              FROM forecast_posteriors
-             WHERE runtime_layer = 'live'
-               AND datetime(computed_at) >= datetime(?)
-           )
-     WHERE rn = 1
+    WITH ranked AS (
+        SELECT posterior_id,
+               ROW_NUMBER() OVER (
+                   PARTITION BY city, target_date, temperature_metric
+                   ORDER BY datetime(computed_at) DESC, posterior_id DESC
+               ) AS rn
+          FROM forecast_posteriors
+         WHERE runtime_layer = 'live'
+           AND datetime(computed_at) >= datetime(?)
+    )
+    SELECT fp.posterior_id,
+           fp.source_id,
+           fp.posterior_identity_hash,
+           fp.city,
+           fp.target_date,
+           fp.temperature_metric,
+           fp.computed_at,
+           fp.q_json,
+           fp.q_lcb_json,
+           fp.provenance_json
+      FROM ranked
+      JOIN forecast_posteriors AS fp
+        ON fp.posterior_id = ranked.posterior_id
+     WHERE ranked.rn = 1
 """
 
 

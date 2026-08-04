@@ -5777,6 +5777,86 @@ def test_high_yes_latest_posterior_uses_live_index_and_real_timestamp_order() ->
             '{"90F": 0.95}',
             "live",
         ),
+        (
+            6,
+            "Austin",
+            "2026-07-28",
+            "high",
+            (now - timedelta(minutes=20)).isoformat(),
+            '{"90F": 0.81}',
+            '{"90F": 0.71}',
+            "live",
+        ),
+        (
+            7,
+            "Austin",
+            "2026-07-28",
+            "high",
+            (now - timedelta(minutes=20)).isoformat(),
+            '{"90F": 0.82}',
+            '{"90F": 0.72}',
+            "live",
+        ),
+        (
+            8,
+            "Austin",
+            "2026-07-28",
+            "high",
+            (now - timedelta(hours=2)).isoformat(),
+            '{"90F": 0.98}',
+            '{"90F": 0.97}',
+            "live",
+        ),
+        (
+            9,
+            "Austin",
+            "2026-07-28",
+            "high",
+            (now - timedelta(minutes=1)).isoformat(),
+            '{"90F": 0.99}',
+            '{"90F": 0.98}',
+            "shadow",
+        ),
+        (
+            10,
+            "Boston",
+            "2026-07-29",
+            "high",
+            (now - timedelta(minutes=15)).isoformat(),
+            '{"90F": 0.61}',
+            '{"90F": 0.51}',
+            "live",
+        ),
+        (
+            11,
+            "Boston",
+            "2026-07-29",
+            "high",
+            (now - timedelta(minutes=15)).isoformat(),
+            '{"90F": 0.62}',
+            '{"90F": 0.52}',
+            "live",
+        ),
+        (
+            12,
+            "Boston",
+            "2026-07-29",
+            "high",
+            (now - timedelta(minutes=1)).isoformat(),
+            '{"90F": 0.99}',
+            '{"90F": 0.98}',
+            "shadow",
+        ),
+        (
+            13,
+            "Boston",
+            "2026-07-29",
+            "high",
+            (now - timedelta(hours=2)).isoformat(),
+            '{"90F": 0.01}',
+            '{"90F": 0.01}',
+            "live",
+        ),
     )
     conn.executemany(
         "INSERT INTO forecast_posteriors ("
@@ -5790,12 +5870,83 @@ def test_high_yes_latest_posterior_uses_live_index_and_real_timestamp_order() ->
         live_health._LATEST_LIVE_POSTERIORS_SQL,
         (cutoff,),
     ).fetchall()
+    legacy_sql = """
+        SELECT posterior_id,
+               source_id,
+               posterior_identity_hash,
+               city,
+               target_date,
+               temperature_metric,
+               computed_at,
+               q_json,
+               q_lcb_json,
+               provenance_json
+          FROM (
+                SELECT posterior_id,
+                       source_id,
+                       posterior_identity_hash,
+                       city,
+                       target_date,
+                       temperature_metric,
+                       computed_at,
+                       q_json,
+                       q_lcb_json,
+                       provenance_json,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY city, target_date, temperature_metric
+                           ORDER BY datetime(computed_at) DESC, posterior_id DESC
+                       ) AS rn
+                  FROM forecast_posteriors
+                 WHERE runtime_layer = 'live'
+                   AND datetime(computed_at) >= datetime(?)
+               )
+         WHERE rn = 1
+    """
+    legacy_selected = conn.execute(legacy_sql, (cutoff,)).fetchall()
     plan = conn.execute(
         "EXPLAIN QUERY PLAN " + live_health._LATEST_LIVE_POSTERIORS_SQL,
         (cutoff,),
     ).fetchall()
 
-    assert [row["posterior_id"] for row in selected] == [2]
+    columns = [
+        "posterior_id",
+        "source_id",
+        "posterior_identity_hash",
+        "city",
+        "target_date",
+        "temperature_metric",
+        "computed_at",
+        "q_json",
+        "q_lcb_json",
+        "provenance_json",
+    ]
+    assert [list(row.keys()) for row in selected] == [columns, columns]
+    assert sorted(row["posterior_id"] for row in selected) == [7, 11]
+    assert sorted(
+        tuple(row[column] for column in columns) for row in selected
+    ) == sorted(
+        tuple(row[column] for column in columns) for row in legacy_selected
+    )
+
+    normalized_sql = " ".join(live_health._LATEST_LIVE_POSTERIORS_SQL.split()).lower()
+    ranked_shape = normalized_sql.split("with ranked as (", 1)[1].split(
+        "from forecast_posteriors", 1
+    )[0]
+    assert "select posterior_id, row_number() over" in ranked_shape
+    assert (
+        "join forecast_posteriors as fp on fp.posterior_id = ranked.posterior_id"
+        in normalized_sql
+    )
+    assert all(
+        column not in ranked_shape
+        for column in (
+            "source_id",
+            "posterior_identity_hash",
+            "q_json",
+            "q_lcb_json",
+            "provenance_json",
+        )
+    )
     assert any(
         "idx_forecast_posteriors_runtime_layer_target" in str(row["detail"])
         and "runtime_layer=?" in str(row["detail"])
@@ -5805,6 +5956,7 @@ def test_high_yes_latest_posterior_uses_live_index_and_real_timestamp_order() ->
         str(row["detail"]).startswith("SCAN forecast_posteriors")
         for row in plan
     )
+    assert any("INTEGER PRIMARY KEY" in str(row["detail"]) for row in plan)
 
 
 def test_high_yes_no_submit_window_uses_indexed_decision_time() -> None:
