@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-01; last_reused=2026-08-01
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-04; last_reused=2026-08-04
 # Purpose: Executor-class assignment (no DB writer on file-only executor; UMA->backfill_db).
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-07-31
+# Last reused or audited: 2026-08-04
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR6);
 #   operator spec §7 (Scheduler adapter / executor classes).
 """PR6: registry -> scheduler executor-class assignment (pure planner, daemon wiring deferred)."""
@@ -1616,6 +1616,90 @@ def test_replacement_maintenance_repairs_full_extras_before_reseed(
     assert result["fusion_upgrade_seeds_enqueued"] == 1
 
 
+def test_replacement_maintenance_backs_off_only_zero_progress_bpf_fanout(
+    monkeypatch,
+) -> None:
+    """A transient broad fan-out cannot spend quota every minute without new rows."""
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    now = [100.0]
+    monkeypatch.setattr(ingest_main.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(ingest_main, "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC", 0.0)
+    monkeypatch.setattr(ingest_main, "_REPLACEMENT_BPF_NO_PROGRESS_FAILURES", 0)
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC",
+        0.0,
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download."
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    current_calls: list[float] = []
+    extras_reports = [
+        {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
+            "written_row_count": 0,
+        },
+        {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "written_row_count": 2,
+        },
+    ]
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        lambda *_args, **_kwargs: current_calls.append(now[0])
+        or {"status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS"},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        lambda *_args, **_kwargs: extras_reports.pop(0),
+    )
+    reseeds: list[str] = []
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda _cfg: reseeds.append("fusion") or None,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda _cfg: reseeds.append("cycle") or None,
+    )
+
+    first = ingest_main._replacement_maintenance_tick.__wrapped__()
+    assert first["bayes_precision_fusion_extra_status"] == (
+        "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+    )
+    assert ingest_main._REPLACEMENT_BPF_NO_PROGRESS_FAILURES == 1
+
+    now[0] = 160.0
+    monkeypatch.setattr(ingest_main, "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC", 0.0)
+    second = ingest_main._replacement_maintenance_tick.__wrapped__()
+    assert second["bayes_precision_fusion_extra_status"] == (
+        "BAYES_PRECISION_FUSION_EXTRA_NO_PROGRESS_BACKOFF_SKIPPED"
+    )
+    assert len(extras_reports) == 1
+    assert current_calls == [100.0, 160.0]
+    assert reseeds == ["fusion", "cycle", "fusion", "cycle"]
+
+    now[0] = 401.0
+    monkeypatch.setattr(ingest_main, "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC", 0.0)
+    third = ingest_main._replacement_maintenance_tick.__wrapped__()
+    assert third["bayes_precision_fusion_extra_rows_written"] == 2
+    assert ingest_main._REPLACEMENT_BPF_NO_PROGRESS_FAILURES == 0
+    assert ingest_main._REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC == 0.0
+
+
 @pytest.mark.parametrize(
     ("lane", "status"),
     (
@@ -1643,6 +1727,12 @@ def test_replacement_maintenance_retryable_status_contract_runs_reseeds(
     monkeypatch.setattr(
         ingest_main,
         "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC",
+        0.0,
+    )
+    monkeypatch.setattr(ingest_main, "_REPLACEMENT_BPF_NO_PROGRESS_FAILURES", 0)
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC",
         0.0,
     )
     monkeypatch.setattr(

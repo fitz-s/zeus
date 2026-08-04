@@ -51,6 +51,8 @@ FORECAST_LIVE_OWNER_ENV = "ZEUS_FORECAST_LIVE_OWNER"
 REPLACEMENT_AVAILABILITY_POLL_SECONDS_ENV = "ZEUS_REPLACEMENT_AVAILABILITY_POLL_SECONDS"
 REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS_ENV = "ZEUS_REPLACEMENT_SOURCE_CLOCK_DOWNLOAD_BUDGET_SECONDS"
 REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV = "ZEUS_REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS"
+REPLACEMENT_BPF_NO_PROGRESS_RETRY_BASE_SECONDS = 300.0
+REPLACEMENT_BPF_NO_PROGRESS_RETRY_MAX_SECONDS = 3600.0
 DAY0_METAR_POLL_SECONDS_ENV = "ZEUS_DAY0_METAR_POLL_SECONDS"
 DAY0_METAR_WRITE_BUDGET_MS_ENV = "ZEUS_DAY0_METAR_WRITE_BUDGET_MS"
 DAY0_HKO_POLL_SECONDS_ENV = "ZEUS_DAY0_HKO_POLL_SECONDS"
@@ -74,6 +76,8 @@ _DAY0_METAR_RETRY_LOCK = threading.Lock()
 _DAY0_METAR_RETRY_FAILURES = 0
 _DAY0_METAR_RETRY_NOT_BEFORE_MONOTONIC = 0.0
 _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC = 0.0
+_REPLACEMENT_BPF_NO_PROGRESS_FAILURES = 0
+_REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC = 0.0
 
 # SIGTERM-unif (WAVE-4): captured at module load so the forensic elapsed
 # computed in _graceful_shutdown matches what src/main.py and
@@ -885,6 +889,54 @@ def _defer_replacement_maintenance(
         _REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC,
         now + max(0.0, float(seconds)),
     )
+
+
+def _replacement_bpf_no_progress_retry_after_seconds(
+    *,
+    now_monotonic: float | None = None,
+) -> int:
+    """Return the ordinary-maintenance BPF retry debt, if any."""
+
+    now = time.monotonic() if now_monotonic is None else float(now_monotonic)
+    remaining = _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC - now
+    return max(0, int(remaining + 0.999))
+
+
+def _record_replacement_bpf_maintenance_progress(
+    report: object,
+    *,
+    now_monotonic: float | None = None,
+) -> None:
+    """Back off only a completed ordinary BPF pass that made no progress.
+
+    SCOPE: the unchanged-cycle maintenance BPF extras fan-out only; source-clock,
+    current-target, held-position, Day0, and reseed lanes never consult this debt.
+    DRAIN: a bounded monotonic timer retries the same incomplete cycle.
+    RESET: any non-transport result or positive durable write clears the streak;
+    a process restart also retries immediately instead of persisting a ratchet.
+    """
+
+    global _REPLACEMENT_BPF_NO_PROGRESS_FAILURES
+    global _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC
+
+    status = str(report.get("status") or "") if isinstance(report, dict) else ""
+    written = int(report.get("written_row_count") or 0) if isinstance(report, dict) else 0
+    if (
+        status == "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
+        and written == 0
+    ):
+        _REPLACEMENT_BPF_NO_PROGRESS_FAILURES += 1
+        delay = min(
+            REPLACEMENT_BPF_NO_PROGRESS_RETRY_MAX_SECONDS,
+            REPLACEMENT_BPF_NO_PROGRESS_RETRY_BASE_SECONDS
+            * (2 ** min(_REPLACEMENT_BPF_NO_PROGRESS_FAILURES - 1, 4)),
+        )
+        now = time.monotonic() if now_monotonic is None else float(now_monotonic)
+        _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC = now + delay
+        return
+    if status:
+        _REPLACEMENT_BPF_NO_PROGRESS_FAILURES = 0
+        _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC = 0.0
 
 
 def _compact_replacement_current_target_report(download_report):
@@ -2405,6 +2457,7 @@ _REPLACEMENT_MAINTENANCE_EXTRAS_RETRYABLE_STATUSES = frozenset(
     {
         "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED",
         "BAYES_PRECISION_FUSION_EXTRA_CYCLE_PROBE_UNRESOLVED_SKIP",
+        "BAYES_PRECISION_FUSION_EXTRA_NO_PROGRESS_BACKOFF_SKIPPED",
         "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED",
         "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
         "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
@@ -2486,23 +2539,31 @@ def _replacement_maintenance_tick():
                 "error": f"{type(exc).__name__}: {str(exc)[:220]}",
             }
 
-        try:
-            extras_report = (
-                _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
-                    cfg,
-                    max_wall_clock_seconds=timeout_s,
-                )
-            )
-        except Exception as exc:  # noqa: BLE001 - reseeds remain independent
-            logger.warning(
-                "replacement maintenance BPF-extra repair failed: %s",
-                exc,
-                exc_info=True,
-            )
+        bpf_retry_after = _replacement_bpf_no_progress_retry_after_seconds()
+        if bpf_retry_after > 0:
             extras_report = {
-                "status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED",
-                "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+                "status": "BAYES_PRECISION_FUSION_EXTRA_NO_PROGRESS_BACKOFF_SKIPPED",
+                "retry_after_seconds": bpf_retry_after,
             }
+        else:
+            try:
+                extras_report = (
+                    _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+                        cfg,
+                        max_wall_clock_seconds=timeout_s,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - reseeds remain independent
+                logger.warning(
+                    "replacement maintenance BPF-extra repair failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+                extras_report = {
+                    "status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED",
+                    "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+                }
+            _record_replacement_bpf_maintenance_progress(extras_report)
 
     report: dict[str, object] = {
         "status": "REPLACEMENT_MAINTENANCE_COMPLETED",

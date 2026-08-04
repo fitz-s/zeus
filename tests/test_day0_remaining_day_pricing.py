@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-03
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-03; last_reused=2026-08-03
+# Last reused or audited: 2026-08-04
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-04; last_reused=2026-08-04
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -3179,12 +3179,46 @@ class TestRequestHashProvenance:
         monkeypatch.setattr(hv, "maybe_refresh_day0_hourly_vectors", fake_refresh)
         monkeypatch.delenv("ZEUS_REACTOR_DAY0_HOURLY_REFRESH_INTERVAL_SECONDS", raising=False)
 
-        refresh = reactor._edli_reactor_day0_hourly_refresher()
+        refresh = reactor._edli_reactor_day0_hourly_refresher(
+            held_family_provider=lambda: (),
+        )
 
         assert refresh(city="Paris", target_date="2026-06-25", metric="high") is True
         assert captured["interval_s"] == 300.0
         assert captured["max_cities"] == 1
+        assert captured["quota_critical_cities"] == 0
         assert captured["persist_lock_blocking"] is False
+
+    def test_reactor_day0_hourly_refresher_uses_critical_quota_for_held_family(
+        self, monkeypatch
+    ):
+        """Targeted held redecision survives maintenance/source-clock exhaustion."""
+        import src.config as config
+        import src.data.day0_hourly_vectors as hv
+        from src.events import reactor
+
+        captured = {}
+
+        def fake_refresh(cities, **kwargs):
+            captured.update(kwargs)
+            assert [city.name for city in cities] == ["Paris"]
+            return SimpleNamespace(
+                vectors_written=2,
+                cities_attempted=1,
+                incomplete_expected_bundles=0,
+            )
+
+        monkeypatch.setattr(config, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+        monkeypatch.setattr(hv, "maybe_refresh_day0_hourly_vectors", fake_refresh)
+        refresh = reactor._edli_reactor_day0_hourly_refresher(
+            held_family_provider=lambda: {
+                ("Paris", "2026-06-25", "high"),
+                ("Wellington", "2026-06-26", "low"),
+            },
+        )
+
+        assert refresh(city="Paris", target_date="2026-06-25", metric="high") is True
+        assert captured["quota_critical_cities"] == 1
 
     def test_day0_hourly_priority_source_puts_held_families_before_missing_authority(
         self, monkeypatch

@@ -9886,10 +9886,12 @@ def _edli_decision_family_snapshot_refresher(topology_conn):
 
     return _refresh
 
-def _edli_reactor_day0_hourly_refresher():
+def _edli_reactor_day0_hourly_refresher(*, held_family_provider=None):
     """Build the reactor-drain refresher for Day0 remaining-day weather vectors."""
     import logging as _logging
     _log = _logging.getLogger("zeus.events.reactor")
+    if held_family_provider is None:
+        held_family_provider = _edli_reactor_held_family_provider()
 
     def _refresh(*, city, target_date, metric, **_ignored):
         family = (
@@ -9912,6 +9914,22 @@ def _edli_reactor_day0_hourly_refresher():
                     family[2],
                 )
                 return False
+            held = False
+            if held_family_provider is not None:
+                try:
+                    held_key = _substrate_refresh_family_key(*family)
+                    held = held_key in {
+                        _substrate_refresh_family_key(*raw_family)
+                        for raw_family in (held_family_provider() or ())
+                    }
+                except Exception as exc:  # noqa: BLE001 -- no proof means no reserve borrow.
+                    _log.warning(
+                        "reactor day0-hourly held-family proof failed for %s/%s/%s: %r",
+                        family[0],
+                        family[1],
+                        family[2],
+                        exc,
+                    )
             stats = maybe_refresh_day0_hourly_vectors(
                 [city_obj],
                 decision_time=datetime.now(timezone.utc),
@@ -9919,6 +9937,11 @@ def _edli_reactor_day0_hourly_refresher():
                 budget_s=_reactor_day0_hourly_refresh_budget_seconds(),
                 max_cities=1,
                 timeout_s=_reactor_day0_hourly_fetch_timeout_seconds(),
+                # SCOPE: only a canonical currently-held family may borrow the
+                # final Open-Meteo tranche. DRAIN: this one targeted complete
+                # bundle attempt. RESET: the next reactor drain re-reads held
+                # exposure, so closure immediately removes critical authority.
+                quota_critical_cities=int(held),
                 persist_lock_blocking=False,
                 return_stats=True,
             )
