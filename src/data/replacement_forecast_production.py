@@ -599,13 +599,11 @@ def _probe_resolved_available_cycle() -> datetime | None:
     """
     from src.data.replacement_cycle_availability import (  # noqa: PLC0415
         newest_complete_cycle,
-        probe_anchor_available_any,
-        resolve_anchor_cycle_availability,
+        resolve_provider_anchor_cycle_availability,
     )
 
-    availability = resolve_anchor_cycle_availability(
+    availability = resolve_provider_anchor_cycle_availability(
         datetime.now(timezone.utc),
-        probe_anchor=probe_anchor_available_any,
     )
     return newest_complete_cycle(availability)
 
@@ -2168,15 +2166,11 @@ def _replacement_cycle_availability_poll_if_needed(
     )
     from src.data.replacement_cycle_availability import (  # noqa: PLC0415
         newest_complete_cycle,
-        probe_anchor_available_any,
-        resolve_anchor_cycle_availability,
+        resolve_provider_anchor_cycle_availability,
     )
 
     now = datetime.now(timezone.utc)
-    availability = resolve_anchor_cycle_availability(
-        now,
-        probe_anchor=probe_anchor_available_any,
-    )
+    availability = resolve_provider_anchor_cycle_availability(now)
     anchor_have = _per_leg_downloaded_cycle(Path(str(forecast_db)), "openmeteo_ecmwf_ifs_9km")
     newest_anchor_published = next((a.cycle for a in availability if a.anchor_available), None)
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from src.data.replacement_cycle_availability import (
+    AnchorAvailabilityProbe,
     candidate_cycles,
     floor_to_cycle,
     newest_complete_cycle,
@@ -83,6 +84,67 @@ class TestProbeResolvedSelection:
         avail = resolve_anchor_cycle_availability(now, probe_anchor=lambda c: False)
         assert newest_complete_cycle(avail) is None
         assert all(not a.complete for a in avail)
+
+    def test_provider_resolution_fetches_current_meta_once(self, monkeypatch):
+        import src.data.replacement_cycle_availability as rca
+
+        meta_calls: list[None] = []
+        bucket_calls: list[datetime] = []
+        published = _dt("2026-06-11T12:00:00")
+
+        monkeypatch.setattr(
+            rca,
+            "probe_openmeteo_single_run_available",
+            lambda cycle, **kwargs: False,
+        )
+        probe = AnchorAvailabilityProbe(
+            meta_fetch=lambda: meta_calls.append(None) or {
+                "run_initialisation_utc": published,
+                "run_availability_utc": published,
+            },
+        )
+        monkeypatch.setattr(
+            rca,
+            "probe_bucket_run_declared",
+            lambda cycle: bucket_calls.append(cycle) or False,
+        )
+
+        availability = resolve_anchor_cycle_availability(
+            _dt("2026-06-11T19:00:00"),
+            probe_anchor=probe,
+        )
+
+        assert newest_complete_cycle(availability) == published
+        assert meta_calls == [None]
+        assert bucket_calls == [_dt("2026-06-11T18:00:00")]
+
+    def test_single_runs_success_avoids_meta_fetch(self):
+        meta_calls: list[None] = []
+        probe = AnchorAvailabilityProbe(
+            urlopen=lambda *args, **kwargs: type("Response", (), {
+                "status": 200,
+                "__enter__": lambda self: self,
+                "__exit__": lambda self, *exc: None,
+            })(),
+            meta_fetch=lambda: meta_calls.append(None) or {},
+        )
+
+        assert probe(_dt("2026-06-11T18:00:00")) is True
+        assert meta_calls == []
+
+    def test_malformed_meta_falls_through_to_bucket(self, monkeypatch):
+        import src.data.replacement_cycle_availability as rca
+
+        monkeypatch.setattr(
+            rca,
+            "probe_openmeteo_single_run_available",
+            lambda cycle, **kwargs: False,
+        )
+        monkeypatch.setattr(rca, "probe_bucket_run_declared", lambda cycle: True)
+
+        assert AnchorAvailabilityProbe(meta_fetch=lambda: {})(
+            _dt("2026-06-11T18:00:00")
+        ) is True
 
 
 class TestPollFetchDecision:

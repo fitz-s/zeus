@@ -34,7 +34,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Any, Callable, Mapping
 
 logger = logging.getLogger("zeus.replacement_cycle_availability")
 
@@ -124,6 +124,60 @@ def probe_bucket_run_declared(cycle: datetime) -> bool:
         return False
 
 
+class AnchorAvailabilityProbe:
+    """One provider snapshot reused across one candidate-cycle decision.
+
+    Single-runs and bucket availability remain cycle-specific.  Model metadata
+    describes one provider-current run, so fetching it once per candidate was
+    redundant and made the 15-second poll deterministically exhaust daily quota.
+    """
+
+    def __init__(
+        self,
+        *,
+        urlopen: Callable[..., object] = urllib.request.urlopen,
+        meta_fetch: Callable[..., Mapping[str, Any]] | None = None,
+    ) -> None:
+        self._urlopen = urlopen
+        self._meta_fetch = meta_fetch
+        self._meta_loaded = False
+        self._meta: Mapping[str, Any] | None = None
+
+    def _model_meta(self) -> Mapping[str, Any] | None:
+        if self._meta_loaded:
+            return self._meta
+        self._meta_loaded = True
+        try:
+            if self._meta_fetch is None:
+                from src.data.openmeteo_ecmwf_ifs9_anchor import (
+                    fetch_openmeteo_ifs9_model_meta,
+                )
+
+                self._meta = fetch_openmeteo_ifs9_model_meta()
+            else:
+                self._meta = self._meta_fetch()
+        except Exception as exc:  # noqa: BLE001 -- next transport rung remains valid.
+            logger.debug("anchor meta probe error (treated unavailable): %s", exc)
+            self._meta = None
+        return self._meta
+
+    def __call__(self, cycle: datetime) -> bool:
+        if probe_openmeteo_single_run_available(cycle, urlopen=self._urlopen):
+            return True
+        meta = self._model_meta()
+        if meta is not None:
+            try:
+                if (
+                    meta["run_initialisation_utc"] == cycle.astimezone(UTC)
+                    and meta["run_availability_utc"]
+                    >= meta["run_initialisation_utc"]
+                ):
+                    return True
+            except (KeyError, TypeError, ValueError) as exc:
+                logger.debug("anchor meta probe malformed (treated unavailable): %s", exc)
+        return probe_bucket_run_declared(cycle)
+
+
 def probe_anchor_available_any(
     cycle: datetime,
     *,
@@ -140,20 +194,31 @@ def probe_anchor_available_any(
     leg as published when any probe passes. The probe set MUST stay a superset-mirror of
     the downloader's ladder: a rung the probe cannot see is a rung the run-selection
     authority will starve (the downloader only ever fetches probe-confirmed cycles)."""
-    if probe_openmeteo_single_run_available(cycle, urlopen=urlopen):
-        return True
-    try:
-        from src.data.openmeteo_ecmwf_ifs9_anchor import fetch_openmeteo_ifs9_model_meta
+    return AnchorAvailabilityProbe(urlopen=urlopen)(cycle)
 
-        meta = fetch_openmeteo_ifs9_model_meta()
-        if (
-            meta["run_initialisation_utc"] == cycle.astimezone(UTC)
-            and meta["run_availability_utc"] >= meta["run_initialisation_utc"]
-        ):
-            return True
-    except Exception as exc:  # noqa: BLE001 — probe noise = not available yet
-        logger.debug("anchor meta probe error (treated unavailable): %s", exc)
-    return probe_bucket_run_declared(cycle)
+
+_DEFAULT_ANCHOR_PROBE = probe_anchor_available_any
+
+
+def resolve_provider_anchor_cycle_availability(
+    now: datetime,
+    *,
+    max_lookback_cycles: int = DEFAULT_MAX_LOOKBACK_CYCLES,
+) -> tuple["AnchorCycleAvailability", ...]:
+    """Resolve provider availability from one coherent per-poll meta snapshot."""
+
+    current_probe = probe_anchor_available_any
+    # Preserve dependency injection used by replay/tests without adding network I/O.
+    probe: Callable[[datetime], bool] = (
+        current_probe
+        if current_probe is not _DEFAULT_ANCHOR_PROBE
+        else AnchorAvailabilityProbe()
+    )
+    return resolve_anchor_cycle_availability(
+        now,
+        probe_anchor=probe,
+        max_lookback_cycles=max_lookback_cycles,
+    )
 
 
 @dataclass(frozen=True)
