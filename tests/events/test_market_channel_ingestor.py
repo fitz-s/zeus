@@ -4131,17 +4131,165 @@ def test_market_channel_refresh_queue_retries_exception_without_reinvalidating()
     assert service.refresh_action_dropped_count == 0
 
 
-def test_market_channel_condition_refresh_does_not_fallback_to_unrelated_markets():
-    from src.ingest.price_channel_ingest import _edli_filter_markets_for_condition
+def test_market_channel_condition_refresh_reconstructs_family_then_trims_siblings(monkeypatch):
+    import src.data.market_scanner as market_scanner
+    from src.ingest.price_channel_ingest import (
+        _edli_market_channel_refresh_kwargs,
+        _edli_reconstruct_exact_market_channel_market,
+    )
 
-    markets = [
-        {"condition_id": "condition-top", "outcomes": []},
-        {"condition_id": "condition-other", "outcomes": [{"condition_id": "condition-child"}]},
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.row_factory = sqlite3.Row
+    forecasts.executescript(
+        """
+        CREATE TABLE market_events (
+            event_id INTEGER PRIMARY KEY,
+            market_slug TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            condition_id TEXT,
+            token_id TEXT,
+            range_label TEXT,
+            range_low REAL,
+            range_high REAL,
+            outcome TEXT,
+            recorded_at TEXT NOT NULL
+        );
+        INSERT INTO market_events VALUES
+            (1, 'city-high', 'City', '2026-08-05', 'high',
+             'condition-exact', 'yes-exact', '70-71F', 70, 71, 'YES',
+             '2026-08-04T10:00:00+00:00'),
+            (2, 'city-high', 'City', '2026-08-05', 'high',
+             'condition-sibling', 'yes-sibling', '72-73F', 72, 73, 'YES',
+             '2026-08-04T10:00:00+00:00');
+        """
+    )
+    trade = object()
+    observed: dict[str, object] = {}
+
+    def reconstruct(snapshot_conn, *, topology_rows, now_utc):
+        observed["snapshot_conn"] = snapshot_conn
+        observed["condition_ids"] = [row["condition_id"] for row in topology_rows]
+        observed["now_utc"] = now_utc
+        return {
+            "slug": "city-high",
+            "outcomes": [
+                {
+                    "condition_id": "condition-exact",
+                    "token_id": "yes-exact",
+                    "no_token_id": "no-exact",
+                },
+                {
+                    "condition_id": "condition-sibling",
+                    "token_id": "yes-sibling",
+                    "no_token_id": "no-sibling",
+                },
+            ],
+            "condition_ids": ["condition-exact", "condition-sibling"],
+            "support_topology": {
+                "topology_status": "complete",
+                "support_child_count": 2,
+                "executable_child_count": 2,
+            },
+        }
+
+    monkeypatch.setattr(
+        market_scanner,
+        "reconstruct_weather_market_from_static_topology",
+        reconstruct,
+    )
+    now = datetime(2026, 8, 4, 12, tzinfo=timezone.utc)
+    market = _edli_reconstruct_exact_market_channel_market(
+        forecasts,
+        trade,
+        "condition-exact",
+        now_utc=now,
+    )
+
+    assert observed == {
+        "snapshot_conn": trade,
+        "condition_ids": ["condition-exact", "condition-sibling"],
+        "now_utc": now,
+    }
+    assert market is not None
+    assert market["condition_ids"] == ["condition-exact"]
+    assert market["outcomes"] == [
+        {
+            "condition_id": "condition-exact",
+            "token_id": "yes-exact",
+            "no_token_id": "no-exact",
+        }
     ]
+    assert market["support_topology"]["support_child_count"] == 1
+    assert market["support_topology"]["executable_child_count"] == 1
+    refresh_kwargs = _edli_market_channel_refresh_kwargs(
+        MarketChannelAction(
+            refresh_snapshot=True,
+            reason="tick_size_change",
+            token_id="yes-exact",
+            condition_id="condition-exact",
+        ),
+        [market],
+        object(),
+        now,
+    )
+    assert refresh_kwargs["priority_condition_ids"] == {"condition-exact"}
+    assert refresh_kwargs["force_refresh_condition_ids"] == {"condition-exact"}
 
-    assert _edli_filter_markets_for_condition(markets, "condition-top") == [markets[0]]
-    assert _edli_filter_markets_for_condition(markets, "condition-child") == [markets[1]]
-    assert _edli_filter_markets_for_condition(markets, "missing-condition") == []
+
+def test_market_channel_condition_refresh_missing_topology_is_not_completed(monkeypatch):
+    import src.data.market_scanner as market_scanner
+    from src.ingest.price_channel_ingest import (
+        _edli_reconstruct_exact_market_channel_market,
+    )
+
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.row_factory = sqlite3.Row
+    forecasts.executescript(
+        """
+        CREATE TABLE market_events (
+            event_id INTEGER PRIMARY KEY,
+            market_slug TEXT NOT NULL,
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            temperature_metric TEXT NOT NULL,
+            condition_id TEXT,
+            token_id TEXT,
+            range_label TEXT,
+            range_low REAL,
+            range_high REAL,
+            outcome TEXT,
+            recorded_at TEXT NOT NULL
+        );
+        INSERT INTO market_events VALUES
+            (1, 'city-high', 'City', '2026-08-05', 'high',
+             'condition-exact', 'yes-exact', '70-71F', 70, 71, 'YES',
+             '2026-08-04T10:00:00+00:00');
+        """
+    )
+    monkeypatch.setattr(
+        market_scanner,
+        "reconstruct_weather_market_from_static_topology",
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert (
+        _edli_reconstruct_exact_market_channel_market(
+            forecasts,
+            object(),
+            "condition-exact",
+        )
+        is None
+    )
+    assert (
+        _edli_reconstruct_exact_market_channel_market(
+            forecasts,
+            object(),
+            None,
+        )
+        is None
+    )
 
 
 def test_tick_size_change_records_append_only_snapshot_invalidation_until_refreshed():

@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-30
+# Last reused or audited: 2026-08-04
 # Authority basis: background TRADE writer fast-yield hotfix; foreground priority capture retains the established contention budget.
 #   path. Live evidence (zeus-live.err 2026-06-08 09:27:50): the EDLI market-substrate
 #   warm cycle inserted 0 snapshots ("executable_substrate_coverage_status: 'NONE'"),
@@ -134,8 +134,10 @@ with acquire_market_substrate_turnstile(priority=True, _locks_dir_override=Path(
         assert broad.acquired and broad.status == "broad_turn_admitted"
 
 
-def test_price_channel_snapshot_writer_uses_same_broad_turnstile(monkeypatch, tmp_path):
-    """The cross-process price-channel snapshot caller cannot bypass priority intent."""
+def test_price_channel_exact_refresh_uses_priority_intent_without_broad_discovery(
+    monkeypatch, tmp_path
+):
+    """Exact channel refresh declares priority and never closes over broad discovery."""
 
     import inspect
 
@@ -144,17 +146,23 @@ def test_price_channel_snapshot_writer_uses_same_broad_turnstile(monkeypatch, tm
     import src.ingest.price_channel_ingest as price_channel
 
     monkeypatch.setattr(job_lock, "_LOCKS_DIR", tmp_path)
-    with acquire_market_substrate_turnstile(priority=True) as priority:
-        assert priority.acquired
-        with price_channel._market_substrate_broad_turnstile() as broad:
-            assert broad.acquired is False
-            assert broad.status == "priority_intent_active"
+    with acquire_market_substrate_turnstile(priority=False) as broad:
+        assert broad.acquired
+        with price_channel._market_substrate_priority_turnstile() as priority:
+            assert priority.acquired is False
+            assert priority.status == "broad_turn_active"
 
     source = inspect.getsource(price_channel._edli_market_channel_ingestor_cycle)
-    refresh_action = source[source.index("def _refresh_snapshot_action") :]
-    assert refresh_action.index("_market_substrate_broad_turnstile()") < refresh_action.index(
+    refresh_action = source[source.index("def _refresh_snapshot_action") :].split(
+        "# The redecision-routing decision", 1
+    )[0]
+    assert "find_weather_markets_or_raise" not in refresh_action
+    assert refresh_action.index("_market_substrate_priority_turnstile()") < refresh_action.index(
         "_market_substrate_refresh_lock.acquire"
     )
+    assert "anonymous action cannot expand refresh scope" in refresh_action
+    missing_topology = refresh_action[refresh_action.index("if market is None:") :]
+    assert 'return "deferred"' in missing_topology
 
 
 # ---------------------------------------------------------------------------

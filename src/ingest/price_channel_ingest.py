@@ -130,10 +130,10 @@ _edli_market_channel_thread: "threading.Thread | None" = None
 _market_substrate_refresh_lock = threading.Lock()
 
 
-def _market_substrate_broad_turnstile():
+def _market_substrate_priority_turnstile():
     from src.data.job_lock import acquire_market_substrate_turnstile
 
-    return acquire_market_substrate_turnstile(priority=False)
+    return acquire_market_substrate_turnstile(priority=True)
 
 
 _held_quote_seed_refresh_lock = threading.Lock()
@@ -2256,23 +2256,81 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
 # the market-channel online service) the order runtime reads (I2). Undecorated.
 # ---------------------------------------------------------------------------
 
-def _edli_filter_markets_for_condition(markets: list[dict], condition_id: str | None) -> list[dict]:
+def _edli_reconstruct_exact_market_channel_market(
+    forecasts_conn,
+    trade_conn,
+    condition_id: str | None,
+    *,
+    now_utc: datetime | None = None,
+) -> dict | None:
+    """Reconstruct one exact condition from canonical family and snapshot topology."""
+
     condition = str(condition_id or "").strip()
     if not condition:
-        return list(markets)
-    filtered = []
-    for market in markets:
-        if str(market.get("condition_id") or market.get("market_id") or "") == condition:
-            filtered.append(market)
-            continue
-        outcomes = market.get("outcomes", []) or []
-        if any(
-            str(outcome.get("condition_id") or outcome.get("market_id") or "") == condition
-            for outcome in outcomes
-            if isinstance(outcome, dict)
-        ):
-            filtered.append(market)
-    return filtered
+        return None
+
+    family = forecasts_conn.execute(
+        """
+        SELECT market_slug, city, target_date, temperature_metric
+          FROM market_events
+         WHERE condition_id = ?
+           AND city IS NOT NULL AND TRIM(city) != ''
+           AND target_date IS NOT NULL AND TRIM(target_date) != ''
+           AND temperature_metric IN ('high', 'low')
+         ORDER BY recorded_at DESC, event_id DESC
+         LIMIT 1
+        """,
+        (condition,),
+    ).fetchone()
+    if family is None:
+        return None
+
+    topology_rows = forecasts_conn.execute(
+        """
+        SELECT market_slug, city, target_date, temperature_metric,
+               condition_id, token_id, range_label, range_low, range_high, outcome
+          FROM market_events
+         WHERE city = ?
+           AND target_date = ?
+           AND temperature_metric = ?
+           AND market_slug = ?
+           AND condition_id IS NOT NULL
+           AND TRIM(condition_id) != ''
+         ORDER BY range_low, range_high, condition_id
+        """,
+        (str(family[1]), str(family[2]), str(family[3]), str(family[0])),
+    ).fetchall()
+    if not topology_rows:
+        return None
+
+    from src.data.market_scanner import reconstruct_weather_market_from_static_topology
+
+    reconstructed = reconstruct_weather_market_from_static_topology(
+        trade_conn,
+        topology_rows=[dict(row) for row in topology_rows],
+        now_utc=now_utc,
+    )
+    if reconstructed is None:
+        return None
+
+    outcomes = [
+        outcome
+        for outcome in reconstructed.get("outcomes", []) or []
+        if isinstance(outcome, dict)
+        and str(outcome.get("condition_id") or outcome.get("market_id") or "").strip()
+        == condition
+    ]
+    if len(outcomes) != 1:
+        return None
+
+    exact = dict(reconstructed)
+    exact["outcomes"] = outcomes
+    exact["condition_ids"] = [condition]
+    topology = dict(exact.get("support_topology") or {})
+    topology["support_child_count"] = 1
+    topology["executable_child_count"] = 1
+    exact["support_topology"] = topology
+    return exact
 
 
 def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48.0, limit: int = 4000) -> list[str]:
@@ -2927,6 +2985,7 @@ def _edli_market_channel_refresh_kwargs(action, markets, clob, captured_at) -> d
     every attempt (it requires scan_authority == "VERIFIED"), making the entire
     reactive snapshot-refresh path silently dead.
     """
+    condition_id = str(action.condition_id or "").strip()
     return dict(
         markets=markets,
         clob=clob,
@@ -2935,6 +2994,8 @@ def _edli_market_channel_refresh_kwargs(action, markets, clob, captured_at) -> d
         refresh_reason=f"EDLI_MARKET_CHANNEL:{action.reason}",
         max_outcomes=20,
         budget_seconds=15.0,
+        priority_condition_ids={condition_id} if condition_id else set(),
+        force_refresh_condition_ids={condition_id} if condition_id else set(),
     )
 
 
@@ -3820,14 +3881,26 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                 action: "MarketChannelAction",
             ) -> RefreshSnapshotResult:
                 from src.data.market_scanner import (
-                    MarketEventsPersistenceError,
-                    find_weather_markets_or_raise,
                     refresh_executable_market_substrate_snapshots,
                 )
                 from src.data.job_lock import acquire_lock
-                from src.state.db import get_trade_connection
+                from src.state.db import (
+                    get_forecasts_connection_read_only,
+                    get_trade_connection,
+                    get_trade_connection_read_only,
+                )
 
-                turnstile_ctx = _market_substrate_broad_turnstile()
+                # SCOPE: one exact condition_id already invalidated by this action.
+                # DRAIN: the refresh queue retries this same typed action after any defer.
+                # RESET: only a successful exact-condition refresh completes its debt.
+                condition_id = str(action.condition_id or "").strip()
+                if not condition_id:
+                    logger.warning(
+                        "EDLI market-channel refresh deferred: anonymous action cannot expand refresh scope"
+                    )
+                    return "deferred"
+
+                turnstile_ctx = _market_substrate_priority_turnstile()
                 turnstile_entered = False
                 try:
                     turnstile_admission = turnstile_ctx.__enter__()
@@ -3842,6 +3915,38 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                         turnstile_admission.status,
                     )
                     return "deferred"
+
+                forecasts_conn = None
+                trade_read_conn = None
+                try:
+                    forecasts_conn = get_forecasts_connection_read_only()
+                    trade_read_conn = get_trade_connection_read_only()
+                    market = _edli_reconstruct_exact_market_channel_market(
+                        forecasts_conn,
+                        trade_read_conn,
+                        condition_id,
+                        now_utc=datetime.now(timezone.utc),
+                    )
+                except Exception as exc:  # noqa: BLE001 - retain invalidation and retry
+                    logger.error(
+                        "EDLI market-channel exact topology reconstruction deferred: condition_id=%s error=%s",
+                        condition_id,
+                        exc,
+                    )
+                    market = None
+                finally:
+                    if trade_read_conn is not None:
+                        trade_read_conn.close()
+                    if forecasts_conn is not None:
+                        forecasts_conn.close()
+                if market is None:
+                    turnstile_ctx.__exit__(None, None, None)
+                    logger.warning(
+                        "EDLI market-channel refresh deferred: exact topology unavailable condition_id=%s",
+                        condition_id,
+                    )
+                    return "deferred"
+
                 substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
                 if not substrate_acquired:
                     turnstile_ctx.__exit__(None, None, None)
@@ -3863,31 +3968,11 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                         return "deferred"
                     turnstile_ctx.__exit__(None, None, None)
                     turnstile_entered = False
-                    try:
-                        markets = find_weather_markets_or_raise(
-                            min_hours_to_resolution=0.0,
-                            include_slug_pattern=True,
-                        )
-                    except MarketEventsPersistenceError as _persistence_exc:
-                        logger.error(
-                            "EDLI market-channel refresh aborted: market_events persistence "
-                            "failure — snapshot substrate not refreshed: %s",
-                            _persistence_exc,
-                        )
-                        return "deferred"
-                    if action.condition_id:
-                        markets = _edli_filter_markets_for_condition(markets, action.condition_id)
-                        if not markets:
-                            logger.warning(
-                                "EDLI market-channel refresh skipped: condition_id=%s not found in active weather markets",
-                                action.condition_id,
-                            )
-                            return "completed"
                     trade_conn = get_trade_connection(write_class="live")
                     summary = refresh_executable_market_substrate_snapshots(
                         trade_conn,
                         **_edli_market_channel_refresh_kwargs(
-                            action, markets, clob, datetime.now(timezone.utc)
+                            action, [market], clob, datetime.now(timezone.utc)
                         ),
                         snapshot_write_context_factory=_edli_price_channel_trade_write_context_factory(
                             owner="price_channel_snapshot_refresh"
