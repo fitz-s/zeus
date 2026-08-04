@@ -1542,3 +1542,10 @@ process restart.
 Acceptance additionally requires that production metadata GETs acquire shared
 quota leases, unchanged polls cannot fan out every 15 seconds, and newly due
 models retain the first 15-second detection attempt.
+
+The run-pinned anchor availability probe is part of the same source-clock
+decision and must not remain an unmetered urllib side channel. Its production
+transport uses the same shared priority quota lease; injected `urlopen` remains
+only a deterministic test seam. HTTP unavailable, terminal, rate-limit, and
+transport outcomes remain fail-closed as `anchor_available=False`, and the
+next poll re-evaluates fresh provider truth under the request ledger.

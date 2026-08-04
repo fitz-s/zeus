@@ -31,10 +31,12 @@ from __future__ import annotations
 
 import logging
 import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
+
+from src.data.openmeteo_client import fetch as _fetch_openmeteo
+from src.data.openmeteo_quota import quota_tracker
 
 logger = logging.getLogger("zeus.replacement_cycle_availability")
 
@@ -78,7 +80,7 @@ def candidate_cycles(
 def probe_openmeteo_single_run_available(
     cycle: datetime,
     *,
-    urlopen: Callable[..., object] = urllib.request.urlopen,
+    urlopen: Callable[..., object] | None = None,
 ) -> bool:
     """True iff the open-meteo single-runs API serves this ecmwf_ifs run.
 
@@ -90,6 +92,21 @@ def probe_openmeteo_single_run_available(
     url = OPENMETEO_SINGLE_RUNS_URL.format(
         lat=OPENMETEO_PROBE_LAT, lon=OPENMETEO_PROBE_LON, run=run
     )
+    if urlopen is None:
+        try:
+            with quota_tracker.priority_lane():
+                _fetch_openmeteo(
+                    url,
+                    {},
+                    timeout=OPENMETEO_PROBE_TIMEOUT_SECONDS,
+                    max_retries=1,
+                    endpoint_label="source_clock_anchor_availability",
+                    fast_fail_429=True,
+                )
+            return True
+        except Exception as exc:  # noqa: BLE001 — next poll retries fresh provider truth.
+            logger.debug("openmeteo single-run probe unavailable: %s", exc)
+            return False
     try:
         with urlopen(url, timeout=OPENMETEO_PROBE_TIMEOUT_SECONDS) as resp:  # type: ignore[call-arg]
             return int(getattr(resp, "status", 0) or 0) == 200
@@ -135,7 +152,7 @@ class AnchorAvailabilityProbe:
     def __init__(
         self,
         *,
-        urlopen: Callable[..., object] = urllib.request.urlopen,
+        urlopen: Callable[..., object] | None = None,
         meta_fetch: Callable[..., Mapping[str, Any]] | None = None,
     ) -> None:
         self._urlopen = urlopen
@@ -181,7 +198,7 @@ class AnchorAvailabilityProbe:
 def probe_anchor_available_any(
     cycle: datetime,
     *,
-    urlopen: Callable[..., object] = urllib.request.urlopen,
+    urlopen: Callable[..., object] | None = None,
 ) -> bool:
     """True iff the anchor leg can be fetched for this cycle by ANY ladder transport.
 

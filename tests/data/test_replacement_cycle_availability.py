@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-06-18
+# Last reused or audited: 2026-08-04
 # Authority basis: operator directive 2026-06-11 ~03:40Z (automatic download, ahead of
 #   need, NO guessed numbers) and 2026-06-18 live/experiment separation. Relationship
 #   tests for probe-resolved anchor cycle selection and fetch decision.
@@ -13,6 +13,7 @@ from src.data.replacement_cycle_availability import (
     candidate_cycles,
     floor_to_cycle,
     newest_complete_cycle,
+    probe_openmeteo_single_run_available,
     resolve_anchor_cycle_availability,
 )
 
@@ -131,6 +132,25 @@ class TestProbeResolvedSelection:
 
         assert probe(_dt("2026-06-11T18:00:00")) is True
         assert meta_calls == []
+
+    def test_production_single_run_probe_uses_shared_priority_quota(self, monkeypatch):
+        import src.data.replacement_cycle_availability as rca
+
+        calls = []
+
+        def tracked_fetch(url, params, **kwargs):
+            calls.append((url, params, kwargs, rca.quota_tracker._is_priority()))
+            return {"hourly": {"temperature_2m": [20.0]}}
+
+        monkeypatch.setattr(rca, "_fetch_openmeteo", tracked_fetch)
+
+        assert probe_openmeteo_single_run_available(
+            _dt("2026-06-11T18:00:00")
+        ) is True
+        assert calls[0][1] == {}
+        assert calls[0][2]["endpoint_label"] == "source_clock_anchor_availability"
+        assert calls[0][2]["fast_fail_429"] is True
+        assert calls[0][3] is True
 
     def test_malformed_meta_falls_through_to_bucket(self, monkeypatch):
         import src.data.replacement_cycle_availability as rca
