@@ -222,6 +222,7 @@ def _register_substrate_observer_jobs(
         minutes=5,
         id="market_discovery",
         max_instances=1,
+        misfire_grace_time=120,
         coalesce=True,
         next_run_time=base_now + timedelta(seconds=discovery_phase_offset_seconds),
     )

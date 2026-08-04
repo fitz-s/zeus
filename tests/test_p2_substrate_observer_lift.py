@@ -237,6 +237,7 @@ def test_substrate_observer_broad_jobs_share_default_but_priority_is_independent
         == daemon._EDLI_SUBSTRATE_WARM_INTERVAL_SECONDS
     )
     assert jobs["market_discovery"].kwargs["minutes"] == 5
+    assert jobs["market_discovery"].kwargs["misfire_grace_time"] == 120
 
 
 def test_actual_priority_executor_starts_while_default_worker_is_blocked():
