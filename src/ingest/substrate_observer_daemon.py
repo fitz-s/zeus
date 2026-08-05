@@ -188,10 +188,11 @@ def _register_substrate_observer_jobs(
 ) -> None:
     """Register broad and priority triggers without weakening writer serialization.
 
-    Warm and discovery share the single-worker ``default`` executor. Priority gets a
-    dedicated worker so live-money scope discovery cannot misfire behind broad work;
-    actual writes still serialize through the shared in-process and cross-process
-    locks. The heartbeat remains on its dedicated file-only executor.
+    Warm keeps the single-worker ``default`` executor. Universe discovery gets a
+    dedicated read worker so slow Gamma enumeration cannot suppress the 20-second
+    pending-family warm trigger; its bounded snapshot phase still serializes through
+    the shared in-process and cross-process writer locks. Priority and heartbeat keep
+    their dedicated workers.
     """
     base_now = datetime.now(timezone.utc)
     warm_phase_offset_seconds = priority_refresh_interval_seconds / 2.0
@@ -221,6 +222,7 @@ def _register_substrate_observer_jobs(
         "interval",
         minutes=5,
         id="market_discovery",
+        executor="discovery",
         max_instances=1,
         misfire_grace_time=120,
         coalesce=True,
@@ -320,14 +322,15 @@ def main() -> None:
     # SIGTERM → graceful shutdown.
     signal.signal(signal.SIGTERM, _graceful_shutdown)
 
-    # Broad warm/discovery share one worker. Priority scope discovery has its own worker so
-    # a long broad run cannot consume its 1s misfire grace; only confirmed priority service
-    # enters the same in-process + file writer locks as the broad jobs.
+    # Network-heavy universe discovery has its own worker so it cannot suppress pending-
+    # family warm triggers. All snapshot writers still serialize through the same in-process
+    # and file locks; the discovery writer phase is bounded below the warm cadence.
     _scheduler = BlockingScheduler(
         executors={
-            # Broad writers stay serialized on the default worker. The heartbeat is
-            # file-only liveness evidence and must not be starved by CLOB/Gamma work.
+            # The heartbeat is file-only liveness evidence and must not be starved by
+            # CLOB/Gamma work.
             "default": _APSchedulerThreadPoolExecutor(max_workers=1),
+            "discovery": _APSchedulerThreadPoolExecutor(max_workers=1),
             "priority": _APSchedulerThreadPoolExecutor(max_workers=1),
             "heartbeat": _APSchedulerThreadPoolExecutor(max_workers=1),
         },

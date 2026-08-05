@@ -180,6 +180,7 @@ def test_substrate_observer_broad_jobs_share_default_but_priority_is_independent
         def __init__(self):
             self.executors = {
                 "default": _FakeExecutor(max_workers=1),
+                "discovery": _FakeExecutor(max_workers=1),
                 "priority": _FakeExecutor(max_workers=1),
                 "heartbeat": _FakeExecutor(max_workers=1),
             }
@@ -210,17 +211,21 @@ def test_substrate_observer_broad_jobs_share_default_but_priority_is_independent
     )
 
     jobs = {job.id: job for job in scheduler.jobs}
-    broad_jobs = [jobs["edli_market_substrate_warm"], jobs["market_discovery"]]
+    warm_job = jobs["edli_market_substrate_warm"]
+    discovery_job = jobs["market_discovery"]
     priority_job = jobs["money_path_substrate_priority"]
-    assert all(job.executor_name == "default" for job in broad_jobs)
-    assert all(job.executor is scheduler.executors["default"] for job in broad_jobs)
+    assert warm_job.executor_name == "default"
+    assert warm_job.executor is scheduler.executors["default"]
     assert scheduler.executors["default"].max_workers == 1
+    assert discovery_job.executor_name == "discovery"
+    assert discovery_job.executor is scheduler.executors["discovery"]
+    assert discovery_job.executor is not warm_job.executor
     assert priority_job.executor_name == "priority"
     assert priority_job.executor is scheduler.executors["priority"]
     assert priority_job.executor.max_workers == 1
-    assert priority_job.executor is not broad_jobs[0].executor
+    assert priority_job.executor is not warm_job.executor
     assert jobs["substrate_observer_heartbeat"].executor_name == "heartbeat"
-    assert jobs["substrate_observer_heartbeat"].executor is not broad_jobs[0].executor
+    assert jobs["substrate_observer_heartbeat"].executor is not warm_job.executor
 
     priority_time = priority_job.next_run_time
     warm_time = jobs["edli_market_substrate_warm"].next_run_time
@@ -240,8 +245,8 @@ def test_substrate_observer_broad_jobs_share_default_but_priority_is_independent
     assert jobs["market_discovery"].kwargs["misfire_grace_time"] == 120
 
 
-def test_actual_priority_executor_starts_while_default_worker_is_blocked():
-    """A long discovery run cannot make the 1s-grace priority trigger disappear."""
+def test_actual_warm_and_priority_executors_start_while_discovery_is_blocked():
+    """A long universe read cannot suppress warm or priority triggers."""
     pytest.importorskip("apscheduler")
     from apscheduler.executors.pool import ThreadPoolExecutor
     from apscheduler.schedulers.background import BackgroundScheduler
@@ -249,6 +254,7 @@ def test_actual_priority_executor_starts_while_default_worker_is_blocked():
     import src.ingest.substrate_observer_daemon as daemon
 
     broad_started = threading.Event()
+    warm_started = threading.Event()
     priority_started = threading.Event()
 
     def _long_discovery():
@@ -261,6 +267,7 @@ def test_actual_priority_executor_starts_while_default_worker_is_blocked():
     scheduler = BackgroundScheduler(
         executors={
             "default": ThreadPoolExecutor(max_workers=1),
+            "discovery": ThreadPoolExecutor(max_workers=1),
             "priority": ThreadPoolExecutor(max_workers=1),
             "heartbeat": ThreadPoolExecutor(max_workers=1),
         }
@@ -268,24 +275,26 @@ def test_actual_priority_executor_starts_while_default_worker_is_blocked():
     daemon._register_substrate_observer_jobs(
         scheduler,
         money_path_priority_cycle=_priority,
-        market_substrate_warm_cycle=lambda: None,
+        market_substrate_warm_cycle=warm_started.set,
         market_discovery_cycle=_long_discovery,
         priority_refresh_interval_seconds=20.0,
         heartbeat=lambda: None,
     )
     now = datetime.now(timezone.utc)
     scheduler.modify_job("market_discovery", next_run_time=now)
+    scheduler.modify_job("edli_market_substrate_warm", next_run_time=now + timedelta(seconds=0.05))
     scheduler.modify_job(
         "money_path_substrate_priority",
-        next_run_time=now + timedelta(seconds=0.05),
+        next_run_time=now + timedelta(seconds=0.1),
         misfire_grace_time=1,
     )
     scheduler.modify_job("substrate_observer_heartbeat", next_run_time=None)
     try:
         scheduler.start()
-        assert broad_started.wait(0.5), "broad default-executor job did not start"
+        assert broad_started.wait(0.5), "discovery job did not start"
+        assert warm_started.wait(0.6), "warm trigger queued behind discovery"
         assert priority_started.wait(0.6), (
-            "priority trigger queued behind the long default job and missed its 1s grace"
+            "priority trigger queued behind discovery and missed its 1s grace"
         )
     finally:
         scheduler.shutdown(wait=True)

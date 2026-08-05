@@ -973,7 +973,7 @@ def test_market_discovery_cycle_calls_find_weather_markets_not_slug_only(monkeyp
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(
         "src.data.job_lock.acquire_lock",
-        lambda _name: contextlib.nullcontext(True),
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
     )
 
     def _mock_find_weather_markets(**kwargs):
@@ -1059,7 +1059,7 @@ def test_market_discovery_with_pending_and_stale_substrate_still_captures(monkey
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(
         "src.data.job_lock.acquire_lock",
-        lambda _name: contextlib.nullcontext(True),
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
     )
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "1")
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_PENDING_FAIRNESS_SECONDS", "300")
@@ -1074,7 +1074,7 @@ def test_market_discovery_with_pending_and_stale_substrate_still_captures(monkey
     monkeypatch.setattr(scanner_mod, "find_weather_markets", _mock_find_weather_markets)
 
     def _capture(conn, *, markets, clob, captured_at, scan_authority, **_kwargs):
-        captured.append({"scan_authority": scan_authority})
+        captured.append({"scan_authority": scan_authority, **_kwargs})
         return {"attempted": 0, "inserted": 0, "skipped": 0, "failed": 0, "truncated": 0, "budget_exhausted": 0}
 
     monkeypatch.setattr(
@@ -1092,6 +1092,8 @@ def test_market_discovery_with_pending_and_stale_substrate_still_captures(monkey
     # Decoupled from the backlog: full executable-substrate capture ran despite pending=650.
     assert calls
     assert captured, "stale substrate + pending backlog MUST still run full executable-substrate capture"
+    assert captured[0]["max_outcomes"] == 4
+    assert 0 < captured[0]["capture_reserve_seconds"] < captured[0]["budget_seconds"] < 20
     assert mock_clob_cls.call_count > 0
 
 
@@ -1132,7 +1134,7 @@ def test_market_discovery_continues_when_pending_count_unavailable(monkeypatch):
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(
         "src.data.job_lock.acquire_lock",
-        lambda _name: contextlib.nullcontext(True),
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
     )
     # P2: force STALE substrate so the staleness gate falls through to capture (order-independent).
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
@@ -1176,7 +1178,7 @@ class _FakeLock:
         self.release_calls += 1
 
 
-def test_market_discovery_busy_substrate_lock_releases_discovery_lock(monkeypatch):
+def test_market_discovery_reads_universe_before_requesting_busy_writer_lock(monkeypatch):
     import src.data.market_scanner as scanner_mod
 
     discovery_lock = _FakeLock(True)
@@ -1190,12 +1192,18 @@ def test_market_discovery_busy_substrate_lock_releases_discovery_lock(monkeypatc
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
     monkeypatch.setenv("ZEUS_MARKET_DISCOVERY_DEFER_WHEN_EDLI_PENDING", "0")
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
-    monkeypatch.setattr(scanner_mod, "find_weather_markets", lambda **kwargs: pytest.fail("must not scan"))
+    scans = []
+    monkeypatch.setattr(
+        scanner_mod,
+        "find_weather_markets",
+        lambda **kwargs: scans.append(kwargs) or [],
+    )
 
     substrate_observer._market_discovery_cycle()
 
     assert discovery_lock.acquire_calls == 1
     assert discovery_lock.release_calls == 1
+    assert scans, "read-only Gamma enumeration must not occupy writer authority"
     assert substrate_lock.acquire_calls == 1
     assert substrate_lock.release_calls == 0
 

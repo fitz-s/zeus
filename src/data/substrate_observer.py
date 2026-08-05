@@ -2825,71 +2825,28 @@ def _market_discovery_cycle() -> None:
     if not acquired:
         logger.warning("market_discovery skipped: previous market_discovery still running")
         return
-    # PURE STALENESS GATE (system_decomposition_plan §9 point 2): skip a redundant re-capture
-    # if the substrate is still FRESH (last full capture within the staleness window). This is
-    # keyed ONLY on the producer-local _market_discovery_last_completed_monotonic clock — it
-    # NEVER reads a consumer pending_count (the old hybrid pending+staleness gate is deleted by
-    # the lift, §0). A reactor backlog cannot influence this skip; only the substrate's own age
-    # can. When stale (or never captured), fall through and capture the universe regardless of
-    # how many events are pending.
-    staleness_window_s = _market_discovery_staleness_window_seconds()
-    last_completed = _market_discovery_last_completed_monotonic
-    substrate_fresh = (
-        staleness_window_s > 0
-        and last_completed is not None
-        and (time.monotonic() - last_completed) < staleness_window_s
-    )
-    if substrate_fresh:
-        _market_discovery_lock.release()
-        logger.info(
-            "market_discovery skipped: executable substrate still fresh "
-            "(last full capture %.1fs ago, staleness window %.1fs)",
-            time.monotonic() - last_completed,
-            staleness_window_s,
+    try:
+        # PURE STALENESS GATE (system_decomposition_plan §9 point 2): skip a redundant
+        # re-capture if the substrate is still fresh. It never reads consumer backlog.
+        staleness_window_s = _market_discovery_staleness_window_seconds()
+        last_completed = _market_discovery_last_completed_monotonic
+        substrate_fresh = (
+            staleness_window_s > 0
+            and last_completed is not None
+            and (time.monotonic() - last_completed) < staleness_window_s
         )
-        return
-    turnstile_ctx = _market_substrate_broad_turnstile()
-    turnstile_entered = False
-    try:
-        turnstile_admission = turnstile_ctx.__enter__()
-        turnstile_entered = True
-    except Exception as exc:  # noqa: BLE001
-        _market_discovery_lock.release()
-        summary = {
-            "status": "turnstile_error",
-            "writer": "market_discovery",
-            "scheduler_failed": True,
-            "scheduler_failure_reason": str(exc),
-        }
-        logger.error("market_discovery turnstile failed: %s", exc)
-        return summary
-    if not turnstile_admission.acquired:
-        turnstile_ctx.__exit__(None, None, None)
-        _market_discovery_lock.release()
-        summary = {
-            "status": "priority_intent_yield",
-            "writer": "market_discovery",
-            "turnstile_status": turnstile_admission.status,
-            "scheduler_failed": False,
-        }
-        logger.info("market_discovery deferred: %s", summary)
-        return summary
-    substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
-    if not substrate_acquired:
-        turnstile_ctx.__exit__(None, None, None)
-        _market_discovery_lock.release()
-        logger.info("market_discovery deferred: executable substrate refresh already running")
-        return
-    from src.data.job_lock import acquire_lock
-
-    process_lock_ctx = acquire_lock("market_substrate_refresh")
-    try:
-        substrate_process_acquired = process_lock_ctx.__enter__()
-        if not substrate_process_acquired:
-            logger.info("market_discovery deferred: cross-process executable substrate refresh already running")
+        if substrate_fresh:
+            logger.info(
+                "market_discovery skipped: executable substrate still fresh "
+                "(last full capture %.1fs ago, staleness window %.1fs)",
+                time.monotonic() - last_completed,
+                staleness_window_s,
+            )
             return
-        turnstile_ctx.__exit__(None, None, None)
-        turnstile_entered = False
+
+        # Gamma enumeration is read-only and can consume most of a cold discovery cycle.
+        # Do it before asking for writer authority so pending-family warm and priority
+        # refresh keep producing executable truth while the broad universe is enumerated.
         from src.data.market_scanner import (
             find_weather_markets_or_raise,
             refresh_executable_market_substrate_snapshots,
@@ -2901,51 +2858,121 @@ def _market_discovery_cycle() -> None:
             min_hours_to_resolution=0.0,
             include_slug_pattern=True,
         )
-        conn = get_trade_connection(write_class="live")
-        try:
-            _discovery_clob_timeout = _substrate_clob_timeout_seconds()
-            with PolymarketClient(public_http_timeout=_discovery_clob_timeout) as snapshot_clob:
-                snapshot_summary = refresh_executable_market_substrate_snapshots(
-                    conn,
-                    markets=events,
-                    clob=snapshot_clob,
-                    captured_at=datetime.now(timezone.utc),
-                    scan_authority="VERIFIED",
-                    snapshot_write_context_factory=_substrate_snapshot_trade_write_context_factory(
-                        "substrate_market_discovery_snapshot_refresh"
-                    ),
-                    background_snapshot_write_context_factory=(
-                        _substrate_background_snapshot_trade_write_context_factory(
-                            "substrate_market_discovery_background_capture"
-                        )
-                    ),
-                    background_fast_yield=True,
-                )
-                conn.commit()
-        finally:
-            conn.close()
-        if snapshot_summary.get("attempted", 0) > 0 and snapshot_summary.get("inserted", 0) == 0:
-            raise RuntimeError(
-                "market_discovery refreshed events but captured no executable snapshots: "
-                f"{snapshot_summary}"
+
+        if (
+            money_path_substrate_priority_active()
+            and (
+                money_path_substrate_priority_families()
+                or money_path_substrate_priority_condition_ids()
             )
-        logger.info(
-            "market_discovery: refreshed %s weather events; executable_snapshots=%s",
-            len(events),
-            snapshot_summary,
-        )
-        _market_discovery_last_completed_monotonic = time.monotonic()
-    finally:
-        if turnstile_entered:
-            try:
-                turnstile_ctx.__exit__(None, None, None)
-            except Exception:  # noqa: BLE001
-                pass
+        ):
+            logger.info("market_discovery capture deferred: money-path priority became active")
+            return
+
+        turnstile_ctx = _market_substrate_broad_turnstile()
+        turnstile_entered = False
         try:
-            process_lock_ctx.__exit__(None, None, None)
-        except Exception:  # noqa: BLE001
-            pass
-        _market_substrate_refresh_lock.release()
+            try:
+                turnstile_admission = turnstile_ctx.__enter__()
+                turnstile_entered = True
+            except Exception as exc:  # noqa: BLE001
+                summary = {
+                    "status": "turnstile_error",
+                    "writer": "market_discovery",
+                    "scheduler_failed": True,
+                    "scheduler_failure_reason": str(exc),
+                }
+                logger.error("market_discovery turnstile failed: %s", exc)
+                return summary
+            if not turnstile_admission.acquired:
+                summary = {
+                    "status": "priority_intent_yield",
+                    "writer": "market_discovery",
+                    "turnstile_status": turnstile_admission.status,
+                    "scheduler_failed": False,
+                }
+                logger.info("market_discovery deferred: %s", summary)
+                return summary
+            substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
+            if not substrate_acquired:
+                logger.info("market_discovery deferred: executable substrate refresh already running")
+                return
+
+            from src.data.job_lock import acquire_lock
+
+            process_lock_ctx = acquire_lock("market_substrate_refresh")
+            try:
+                substrate_process_acquired = process_lock_ctx.__enter__()
+                if not substrate_process_acquired:
+                    logger.info(
+                        "market_discovery deferred: cross-process executable substrate "
+                        "refresh already running"
+                    )
+                    return
+                turnstile_ctx.__exit__(None, None, None)
+                turnstile_entered = False
+
+                snapshot_budget_s = _background_warm_refresh_budget_seconds()
+                snapshot_reserve_s = _background_warm_snapshot_reserve_seconds(
+                    snapshot_budget_s
+                )
+                conn = get_trade_connection(write_class="live")
+                try:
+                    _discovery_clob_timeout = _substrate_clob_timeout_seconds()
+                    with PolymarketClient(
+                        public_http_timeout=_discovery_clob_timeout
+                    ) as snapshot_clob:
+                        snapshot_summary = refresh_executable_market_substrate_snapshots(
+                            conn,
+                            markets=events,
+                            clob=snapshot_clob,
+                            captured_at=datetime.now(timezone.utc),
+                            scan_authority="VERIFIED",
+                            max_outcomes=4,
+                            budget_seconds=snapshot_budget_s,
+                            capture_reserve_seconds=snapshot_reserve_s,
+                            snapshot_write_context_factory=(
+                                _substrate_snapshot_trade_write_context_factory(
+                                    "substrate_market_discovery_snapshot_refresh"
+                                )
+                            ),
+                            background_snapshot_write_context_factory=(
+                                _substrate_background_snapshot_trade_write_context_factory(
+                                    "substrate_market_discovery_background_capture"
+                                )
+                            ),
+                            background_fast_yield=True,
+                        )
+                        conn.commit()
+                finally:
+                    conn.close()
+                if (
+                    snapshot_summary.get("attempted", 0) > 0
+                    and snapshot_summary.get("inserted", 0) == 0
+                ):
+                    raise RuntimeError(
+                        "market_discovery refreshed events but captured no executable snapshots: "
+                        f"{snapshot_summary}"
+                    )
+                logger.info(
+                    "market_discovery: refreshed %s weather events; executable_snapshots=%s",
+                    len(events),
+                    snapshot_summary,
+                )
+                _market_discovery_last_completed_monotonic = time.monotonic()
+            finally:
+                try:
+                    process_lock_ctx.__exit__(None, None, None)
+                except Exception:  # noqa: BLE001
+                    pass
+                _market_substrate_refresh_lock.release()
+        finally:
+            if turnstile_entered:
+                try:
+                    turnstile_ctx.__exit__(None, None, None)
+                except Exception:  # noqa: BLE001
+                    pass
+    finally:
         _market_discovery_lock.release()
 
 
