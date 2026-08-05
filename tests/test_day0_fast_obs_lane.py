@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-08-03
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-03; last_reused=2026-08-03
+# Last reused/audited: 2026-08-05
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-05; last_reused=2026-08-05
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -3339,6 +3339,77 @@ class TestMutexNoHttpSplit:
 
         assert calls == [["A", "B", "C"], ["D", "E", "A"]]
         assert reactor_module._DAY0_HOURLY_REFRESH_CURSOR == 1
+
+    def test_hourly_refresh_preserves_full_missing_authority_priority_prefix(
+        self, monkeypatch
+    ):
+        """A throttled front page cannot demote later authority gaps."""
+        import src.config as config_module
+        import src.main  # load settings consumers before replacing the config singleton
+        from src.events import reactor as reactor_module
+
+        cities = [
+            SimpleNamespace(name=name, timezone="UTC")
+            for name in ("A", "B", "C", "D", "E")
+        ]
+        target_date = datetime.now(UTC).date().isoformat()
+        missing = frozenset(
+            (city.name, target_date, "high") for city in cities
+        )
+        calls = []
+
+        monkeypatch.setattr(
+            config_module,
+            "settings",
+            SimpleNamespace(_data={"edli": {"enabled": True}}),
+        )
+        monkeypatch.setattr(config_module, "runtime_cities", lambda: cities)
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_current_held_position_family_keys",
+            lambda: set(),
+        )
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_day0_hourly_missing_authority_families",
+            lambda **_kwargs: reactor_module._Day0HourlyPriorityProbe(
+                missing_families=missing,
+                proved=True,
+            ),
+        )
+        monkeypatch.setattr(reactor_module, "_DAY0_HOURLY_REFRESH_CURSOR", 0)
+        monkeypatch.setenv("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", "3")
+        monkeypatch.setenv("ZEUS_DAY0_HOURLY_REFRESH_PRIORITY_CITY_CAP", "3")
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.maybe_refresh_day0_hourly_vectors",
+            lambda selected, **kwargs: calls.append(
+                {
+                    "selected": [city.name for city in selected],
+                    "max_cities": kwargs["max_cities"],
+                    "priority_prefix": kwargs["quota_priority_cities"],
+                }
+            )
+            or SimpleNamespace(
+                vectors_written=0,
+                cities_attempted=3,
+                cities_skipped_throttle=2,
+                cities_skipped_quota=0,
+                incomplete_expected_bundles=1,
+                budget_exhausted=False,
+            ),
+        )
+
+        reactor_module.run_edli_day0_hourly_refresh_cycle(
+            trading_lane_active=False
+        )
+
+        assert calls == [
+            {
+                "selected": ["A", "B", "C", "D", "E"],
+                "max_cities": 3,
+                "priority_prefix": 5,
+            }
+        ]
 
     def test_hourly_refresh_defers_unprioritized_universe_while_trading(
         self, monkeypatch, tmp_path

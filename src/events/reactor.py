@@ -5778,11 +5778,14 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
                 quota_priority_cities = len(ordered_cities)
                 cursor_advance = len(ordered_cities)
         else:
-            selected_count = min(len(ordered_cities), max_cities)
-            quota_critical_cities = min(held_city_count, selected_count)
-            quota_priority_cities = min(
-                max(0, priority_city_count - held_city_count),
-                max(0, selected_count - quota_critical_cities),
+            # Preserve capital priority for the whole proved prefix, not just
+            # the first ``max_cities`` list positions. The fetcher itself caps
+            # actual calls at ``max_cities``; a throttled front page therefore
+            # may scan forward without silently demoting another current-
+            # authority gap into the 30-minute maintenance retry lane.
+            quota_critical_cities = held_city_count
+            quota_priority_cities = max(
+                0, priority_city_count - held_city_count
             )
             cursor_advance = min(max_cities, cursor_span)
         stats = maybe_refresh_day0_hourly_vectors(
