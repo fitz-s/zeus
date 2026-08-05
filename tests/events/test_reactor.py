@@ -567,7 +567,10 @@ def test_pause_clear_after_selection_keeps_selected_cycle_no_submit(monkeypatch)
     ("empty", "interrupted", "build_locked", "emit_locked"),
 )
 @pytest.mark.parametrize("carrier_branch", ("forecast", "day0"))
-@pytest.mark.parametrize("initial_risk_level_name", ("GREEN", "YELLOW"))
+@pytest.mark.parametrize(
+    "initial_risk_level_name",
+    ("GREEN", "DATA_DEGRADED", "YELLOW"),
+)
 def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     monkeypatch,
     tmp_path,
