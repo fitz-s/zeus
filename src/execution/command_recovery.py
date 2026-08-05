@@ -14635,6 +14635,14 @@ def _recover_cancel_pending_partial_exit(
             raise RuntimeError(
                 f"canonical partial EXIT trade facts do not equal order fact for {command_id}"
             )
+        _append_unrecorded_partial_exit_economics(
+            conn,
+            current=current,
+            command_id=command_id,
+            venue_order_id=venue_order_id,
+            expected_filled_size=matched_size,
+            observed_at=observed_at,
+        )
         append_event(
             conn,
             command_id=command_id,
@@ -14680,6 +14688,239 @@ def _recover_cancel_pending_partial_exit(
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
         raise
     return True
+
+
+def _append_unrecorded_partial_exit_economics(
+    conn: sqlite3.Connection,
+    *,
+    current: Mapping[str, object],
+    command_id: str,
+    venue_order_id: str,
+    expected_filled_size: Decimal,
+    observed_at: str,
+) -> int:
+    """Book authenticated partial SELL economics without changing exposure.
+
+    Partial-remainder recovery runs after chain/order projection has already
+    reduced ``position_current`` to the residual holding.  Re-applying the fill
+    would therefore double-reduce exposure.  Instead, append the missing
+    economic atoms against the residual unit basis and fold only realized PnL.
+    The caller owns the surrounding savepoint, so event append, projection,
+    command cancellation, and pending-exit release are one atomic unit.
+    """
+
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.state.db import append_many_and_project
+    from src.state.fill_dedup import (
+        PartialExitEconomicDebtError,
+        canonical_decimal_text,
+        economic_exit_fills_for_position,
+        partial_exit_realized_pnl_fold,
+        recorded_partial_exit_fill_cursors,
+    )
+    from src.state.portfolio import _position_from_projection_row
+
+    position_id = str(current.get("position_id") or "").strip()
+    phase = str(current.get("phase") or "").strip()
+    residual_shares = _positive_decimal_or_none(current.get("shares"))
+    residual_cost = _decimal_or_none(current.get("cost_basis_usd"))
+    chain_shares = _positive_decimal_or_none(current.get("chain_shares"))
+    chain_cost = _decimal_or_none(current.get("chain_cost_basis_usd"))
+    basis_tolerance = Decimal("0.000001")
+    if (
+        not position_id
+        or phase not in {"active", "day0_window", "pending_exit"}
+        or residual_shares is None
+        or residual_cost is None
+        or chain_shares is None
+        or chain_cost is None
+        or residual_cost < 0
+        or chain_cost < 0
+        or abs(residual_shares - chain_shares) > basis_tolerance
+        or abs(residual_cost - chain_cost) > basis_tolerance
+    ):
+        raise PartialExitEconomicDebtError(
+            f"partial EXIT residual basis missing or divergent: position_id={position_id}"
+        )
+
+    fills = [
+        fill
+        for fill in economic_exit_fills_for_position(
+            conn,
+            position_id,
+            venue_order_id=venue_order_id,
+        )
+        if fill.command_id == command_id
+    ]
+    canonical_total = sum((fill.quantity for fill in fills), Decimal("0"))
+    if canonical_total != expected_filled_size:
+        raise PartialExitEconomicDebtError(
+            "partial EXIT canonical economics do not equal authenticated fill: "
+            f"position_id={position_id} command_id={command_id} "
+            f"expected={expected_filled_size} actual={canonical_total}"
+        )
+
+    cursors = recorded_partial_exit_fill_cursors(conn, position_id)
+    status_identity = f"status-fill:v1:{position_id}:{venue_order_id}"
+    status_qty, status_notional = cursors.get(
+        status_identity,
+        (Decimal("0"), Decimal("0")),
+    )
+    canonical_booked_qty = sum(
+        (cursors.get(fill.identity, (Decimal("0"), Decimal("0")))[0] for fill in fills),
+        Decimal("0"),
+    )
+    canonical_booked_notional = sum(
+        (cursors.get(fill.identity, (Decimal("0"), Decimal("0")))[1] for fill in fills),
+        Decimal("0"),
+    )
+    status_remaining_qty = max(Decimal("0"), status_qty - canonical_booked_qty)
+    status_remaining_notional = max(
+        Decimal("0"),
+        status_notional - canonical_booked_notional,
+    )
+    canonical_notional = sum((fill.notional for fill in fills), Decimal("0"))
+    if status_qty and (
+        canonical_total < status_qty
+        or canonical_notional < status_notional
+        or (canonical_total == status_qty and canonical_notional != status_notional)
+    ):
+        raise PartialExitEconomicDebtError(
+            "partial EXIT canonical economics do not reconcile status receipt: "
+            f"position_id={position_id} order_id={venue_order_id}"
+        )
+    slices: list[tuple[object, Decimal, Decimal]] = []
+    for fill in fills:
+        prior_qty, prior_notional = cursors.get(
+            fill.identity,
+            (Decimal("0"), Decimal("0")),
+        )
+        if fill.quantity < prior_qty or fill.notional < prior_notional:
+            raise PartialExitEconomicDebtError(
+                "partial EXIT canonical fill regressed: "
+                f"position_id={position_id} identity={fill.identity}"
+            )
+        available_qty = fill.quantity - prior_qty
+        available_notional = fill.notional - prior_notional
+        if status_remaining_qty > 0 and available_qty > 0:
+            consumed_qty = min(status_remaining_qty, available_qty)
+            if consumed_qty == available_qty:
+                consumed_notional = available_notional
+                if status_remaining_notional < consumed_notional:
+                    raise PartialExitEconomicDebtError(
+                        "partial EXIT status receipt notional cannot cover canonical fill: "
+                        f"position_id={position_id} identity={fill.identity}"
+                    )
+            else:
+                consumed_notional = status_remaining_notional
+                if consumed_notional != (
+                    available_notional * consumed_qty / available_qty
+                ):
+                    raise PartialExitEconomicDebtError(
+                        "partial EXIT status receipt splits canonical fill without exact economics: "
+                        f"position_id={position_id} identity={fill.identity}"
+                    )
+            status_remaining_qty -= consumed_qty
+            status_remaining_notional -= consumed_notional
+            prior_qty += consumed_qty
+            prior_notional += consumed_notional
+        delta_qty = fill.quantity - prior_qty
+        delta_notional = fill.notional - prior_notional
+        if delta_qty == 0:
+            if delta_notional != 0:
+                raise PartialExitEconomicDebtError(
+                    "partial EXIT canonical fill revised price without quantity: "
+                    f"position_id={position_id} identity={fill.identity}"
+                )
+            continue
+        if delta_notional <= 0:
+            raise PartialExitEconomicDebtError(
+                "partial EXIT canonical fill has nonpositive economics: "
+                f"position_id={position_id} identity={fill.identity}"
+            )
+        slices.append((fill, delta_qty, delta_notional))
+    if status_remaining_qty != 0 or status_remaining_notional != 0:
+        raise PartialExitEconomicDebtError(
+            "partial EXIT status receipt remains unmatched: "
+            f"position_id={position_id} order_id={venue_order_id}"
+        )
+    cumulative_realized = partial_exit_realized_pnl_fold(conn, position_id)
+    if not slices:
+        return 0
+
+    unit_cost = residual_cost / residual_shares
+    unrecorded_quantity = sum((item[1] for item in slices), Decimal("0"))
+    remaining_quantity = unrecorded_quantity
+    remaining_cost = residual_cost + unrecorded_quantity * unit_cost
+    position_row = dict(current)
+    position_row["env"] = _latest_position_env(conn, position_id)
+    position = _position_from_projection_row(position_row, current_mode="live")
+    sequence_no = _latest_position_sequence(conn, position_id) + 1
+    events: list[dict[str, object]] = []
+    projection: dict[str, object] | None = None
+    for offset, (fill, delta_qty, delta_notional) in enumerate(slices):
+        allocated_cost = delta_qty * unit_cost
+        pnl_delta = delta_notional - allocated_cost
+        cumulative_realized += pnl_delta
+        remaining_quantity -= delta_qty
+        remaining_cost -= allocated_cost
+        built, projection = build_monitor_refreshed_canonical_write(
+            position,
+            sequence_no=sequence_no + offset,
+            phase_after=phase,
+            source_module="src.execution.command_recovery",
+            occurred_at=observed_at,
+        )
+        event = dict(built[0])
+        payload = _json_dict(event.get("payload_json"))
+        payload.update(
+            {
+                "semantic_event": "PARTIAL_EXIT_ECONOMICS_REPAIRED",
+                "proof_class": "authenticated_partial_exit_canonical_trade_fact",
+                "command_id": command_id,
+                "venue_order_id": venue_order_id,
+                "economic_fill_identity": fill.identity,
+                "economic_fill_cumulative_shares": canonical_decimal_text(
+                    fill.quantity
+                ),
+                "economic_fill_cumulative_notional_usd": canonical_decimal_text(
+                    fill.notional
+                ),
+                "filled_shares": canonical_decimal_text(delta_qty),
+                "filled_notional_usd": canonical_decimal_text(delta_notional),
+                "fill_price": canonical_decimal_text(delta_notional / delta_qty),
+                "allocated_cost_basis_usd": canonical_decimal_text(allocated_cost),
+                "realized_pnl_delta_usd": canonical_decimal_text(pnl_delta),
+                "cumulative_realized_pnl_usd": canonical_decimal_text(
+                    cumulative_realized
+                ),
+                "remaining_shares": canonical_decimal_text(
+                    residual_shares + remaining_quantity
+                ),
+                "remaining_cost_basis_usd": canonical_decimal_text(remaining_cost),
+                "position_lifecycle_unchanged": True,
+            }
+        )
+        event["event_id"] = (
+            f"{position_id}:partial_exit_economics_repair:{fill.identity}"
+        )
+        event["caused_by"] = "partial_exit_economics_repair"
+        event["command_id"] = command_id
+        event["order_id"] = venue_order_id
+        event["occurred_at"] = observed_at
+        event["payload_json"] = json.dumps(payload, sort_keys=True)
+        events.append(event)
+
+    if projection is None:
+        raise RuntimeError("partial EXIT economics projection missing")
+    projection["phase"] = phase
+    projection["shares"] = canonical_decimal_text(residual_shares)
+    projection["cost_basis_usd"] = canonical_decimal_text(residual_cost)
+    projection["realized_pnl_usd"] = canonical_decimal_text(cumulative_realized)
+    projection["updated_at"] = observed_at
+    append_many_and_project(conn, events, projection)
+    partial_exit_realized_pnl_fold(conn, position_id)
+    return len(events)
 
 
 def reconcile_partial_remainders(
