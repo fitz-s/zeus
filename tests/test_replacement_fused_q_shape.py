@@ -57,7 +57,7 @@ def test_frozen_scheme_requires_a_simultaneous_current_provider_pair() -> None:
                 "ukmo_global": "2026-08-04T18:00:00+00:00",
             },
         )
-        == 1
+        == 0
     )
 
 
@@ -85,7 +85,7 @@ def test_frozen_scheme_cohort_deduplicates_provider_aliases() -> None:
                 "icon_eu": "2026-08-05T00:00:00+00:00",
             },
         )
-        == 1
+        == 0
     )
 
 
@@ -349,6 +349,31 @@ def test_current_shape_excludes_old_provider_and_records_exact_cohort() -> None:
     assert shape.as_payload()["between_cohort_status"] == "SIMULTANEOUS_PROVEN"
     assert shape.as_payload()["between_cohort_models"] == ("ecmwf_ifs", "icon_eu")
     assert shape.as_payload()["between_cohort_excluded"] == ("ukmo_global",)
+    assert shape.provider_between_sigma_c == pytest.approx(math.sqrt(0.5))
+
+
+def test_current_shape_uses_freshest_coherent_cohort_below_isolated_newest() -> None:
+    shape = _shape_for_cycle_gate(
+        provider_values_c={
+            "ecmwf_ifs": 10.0,
+            "icon_global": 11.0,
+            "hko_fnd": 12.0,
+        },
+        provider_weights={
+            "ecmwf_ifs": 1.0 / 3.0,
+            "icon_global": 1.0 / 3.0,
+            "hko_fnd": 1.0 / 3.0,
+        },
+        provider_cycles={
+            "ecmwf_ifs": "2026-08-05T00:00:00+00:00",
+            "icon_global": "2026-08-05T00:00:00+00:00",
+            "hko_fnd": "2026-08-05T03:30:00+00:00",
+        },
+    )
+
+    assert shape.between_cohort_status == "SIMULTANEOUS_PROVEN"
+    assert shape.between_cohort_models == ("ecmwf_ifs", "icon_global")
+    assert shape.between_cohort_excluded == ("hko_fnd",)
     assert shape.provider_between_sigma_c == pytest.approx(math.sqrt(0.5))
 
 

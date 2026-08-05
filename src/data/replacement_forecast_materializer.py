@@ -2308,15 +2308,30 @@ def _current_provider_cohort_family_count(
     if not eligible:
         return 0
 
-    freshest = max(cycle for _, cycle in eligible)
-    return len(
-        {
-            provider_family_for_source(source)
-            for source, cycle in eligible
-            if (freshest - cycle).total_seconds() / 3600.0
-            <= BETWEEN_COHORT_WINDOW_HOURS
-        }
+    cohort = _freshest_coherent_provider_models(dict(eligible))
+    return len({provider_family_for_source(source) for source in cohort})
+
+
+def _freshest_coherent_provider_models(
+    cycle_by_model: Mapping[str, datetime],
+) -> tuple[str, ...]:
+    """Select the newest <=3h cohort that proves two provider families."""
+
+    from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
+        provider_family_for_source,
     )
+
+    for cohort_cycle in sorted(set(cycle_by_model.values()), reverse=True):
+        cohort = tuple(
+            model
+            for model, cycle in cycle_by_model.items()
+            if 0.0
+            <= (cohort_cycle - cycle).total_seconds() / 3600.0
+            <= BETWEEN_COHORT_WINDOW_HOURS
+        )
+        if len({provider_family_for_source(model) for model in cohort}) >= 2:
+            return cohort
+    return ()
 
 
 def _current_evidence_shape_from_values(
@@ -2436,24 +2451,16 @@ def _current_evidence_shape_from_values(
                 f"current shape provider cycle unparseable: {model}"
             ) from exc
 
-    from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
-        provider_family_for_source,
-    )
-
-    freshest = max(cycle_by_model.values())
-    cohort = tuple(
-        (model, value, weight)
-        for model, value, weight in normalized
-        if (freshest - cycle_by_model[model]).total_seconds() / 3600.0
-        <= BETWEEN_COHORT_WINDOW_HOURS
-    )
-    cohort_families = {
-        provider_family_for_source(model) for model, _, _ in cohort
-    }
-    if len(cohort_families) < 2:
+    cohort_models = _freshest_coherent_provider_models(cycle_by_model)
+    if not cohort_models:
         raise ValueError(
             "current shape requires at least two simultaneous provider families"
         )
+    cohort = tuple(
+        (model, value, weight)
+        for model, value, weight in normalized
+        if model in cohort_models
+    )
     between_cohort_models: tuple[str, ...] | None = None
     between_cohort_excluded: tuple[str, ...] | None = None
     if len(cohort) < len(normalized):
