@@ -7235,10 +7235,19 @@ def run_edli_event_reactor_cycle(
     held_sell_completion_cycle = bool(
         completion_wake and producer_held_sell_reauction_requests
     )
+    paused_forecast_carrier = (
+        allow_paused_forecast_snapshot_completion and forecast_posterior_wake
+    )
     if (
         get_current_level() != RiskLevel.GREEN
         and not held_sell_completion_cycle
+        and not paused_forecast_carrier
     ):
+        # SCOPE: BUY-capable reactor work only. A main-qualified paused forecast
+        # carrier is already frozen no-submit and must still materialize the
+        # newest probability identity. DRAIN: RiskGuard returning GREEN or a
+        # qualified carrier commit completes this wake. RESET: every cycle
+        # re-reads RiskGuard and durable pause authority before qualification.
         _log.info(
             "EDLI reactor skipped before runtime DB setup: new entries are globally blocked"
         )

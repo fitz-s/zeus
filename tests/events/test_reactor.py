@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-04
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-04; last_reused=2026-08-04
+# Last reused/audited: 2026-08-05
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-05; last_reused=2026-08-05
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -567,11 +567,13 @@ def test_pause_clear_after_selection_keeps_selected_cycle_no_submit(monkeypatch)
     ("empty", "interrupted", "build_locked", "emit_locked"),
 )
 @pytest.mark.parametrize("carrier_branch", ("forecast", "day0"))
+@pytest.mark.parametrize("initial_risk_level_name", ("GREEN", "YELLOW"))
 def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     monkeypatch,
     tmp_path,
     failure_mode,
     carrier_branch,
+    initial_risk_level_name,
 ):
     import src.engine.event_reactor_adapter as adapter_module
     import src.events.event_writer as event_writer_module
@@ -661,6 +663,7 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     calls = {"auction": 0, "claim": 0, "requeue": 0, "adapter": 0, "trade_conn": 0}
     failure = [failure_mode]
     paused = [True]
+    risk_level = [getattr(RiskLevel, initial_risk_level_name)]
 
     class TestClock(datetime):
         current = first_decision_time
@@ -797,7 +800,7 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
         lambda: None,
     )
     monkeypatch.setattr(main, "_edli_reactor_active_lock", threading.Lock())
-    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: risk_level[0])
     monkeypatch.setattr(
         adapter_module,
         "_entry_pause_blocks_live_submit",
@@ -1002,6 +1005,7 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     }
     assert write_outcomes[-1] == ((False, True),)
 
+    risk_level[0] = RiskLevel.GREEN
     paused[0] = False
     TestClock.current = first_decision_time + timedelta(seconds=2)
     resumed_wake = reactor_wake.publish_reactor_wake(
