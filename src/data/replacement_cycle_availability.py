@@ -33,8 +33,10 @@ import logging
 import urllib.error
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from src.config import STATE_DIR
 from src.data.openmeteo_client import fetch as _fetch_openmeteo
 from src.data.openmeteo_quota import quota_tracker
 
@@ -60,6 +62,7 @@ OPENMETEO_PROBE_TIMEOUT_SECONDS = 20.0
 # = one day of lookback, strictly more than any observed publication lag; beyond that the
 # cycle is superseded anyway. This is a SEARCH BOUND, not an availability assumption.
 DEFAULT_MAX_LOOKBACK_CYCLES = 4
+DEFAULT_MODEL_UPDATES_JSONL = STATE_DIR / "source_updates" / "open_meteo_model_updates.jsonl"
 
 
 def floor_to_cycle(now: datetime) -> datetime:
@@ -154,9 +157,13 @@ class AnchorAvailabilityProbe:
         *,
         urlopen: Callable[..., object] | None = None,
         meta_fetch: Callable[..., Mapping[str, Any]] | None = None,
+        cached_updates_path: str | Path | None = DEFAULT_MODEL_UPDATES_JSONL,
     ) -> None:
         self._urlopen = urlopen
         self._meta_fetch = meta_fetch
+        self._cached_updates_path = (
+            None if cached_updates_path is None else Path(cached_updates_path)
+        )
         self._meta_loaded = False
         self._meta: Mapping[str, Any] | None = None
 
@@ -166,6 +173,35 @@ class AnchorAvailabilityProbe:
         self._meta_loaded = True
         try:
             if self._meta_fetch is None:
+                from src.data.openmeteo_model_updates import (  # noqa: PLC0415
+                    read_model_updates_jsonl,
+                )
+
+                if self._cached_updates_path is not None:
+                    try:
+                        cached = next(
+                            (
+                                update
+                                for update in read_model_updates_jsonl(
+                                    self._cached_updates_path
+                                )
+                                if update.model == "ecmwf_ifs"
+                            ),
+                            None,
+                        )
+                    except Exception as exc:  # noqa: BLE001 -- network fallback below.
+                        logger.debug(
+                            "source-clock metadata cache unreadable; probing provider: %s",
+                            exc,
+                        )
+                        cached = None
+                    if cached is not None:
+                        self._meta = {
+                            "run_initialisation_utc": cached.last_run_initialisation_time,
+                            "run_availability_utc": cached.last_run_availability_time,
+                            "run_modification_utc": cached.last_run_modification_time,
+                        }
+                        return self._meta
                 from src.data.openmeteo_ecmwf_ifs9_anchor import (
                     fetch_openmeteo_ifs9_model_meta,
                 )

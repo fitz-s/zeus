@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-08-04
+# Last reused or audited: 2026-08-05
 # Authority basis: operator directive 2026-06-11 ~03:40Z (automatic download, ahead of
 #   need, NO guessed numbers) and 2026-06-18 live/experiment separation. Relationship
 #   tests for probe-resolved anchor cycle selection and fetch decision.
@@ -15,6 +15,10 @@ from src.data.replacement_cycle_availability import (
     newest_complete_cycle,
     probe_openmeteo_single_run_available,
     resolve_anchor_cycle_availability,
+)
+from src.data.openmeteo_model_updates import (
+    OpenMeteoModelUpdate,
+    write_model_updates_jsonl,
 )
 
 UTC = timezone.utc
@@ -118,6 +122,64 @@ class TestProbeResolvedSelection:
         assert newest_complete_cycle(availability) == published
         assert meta_calls == [None]
         assert bucket_calls == [_dt("2026-06-11T18:00:00")]
+
+    def test_provider_resolution_reuses_source_clock_metadata(self, monkeypatch, tmp_path):
+        import src.data.replacement_cycle_availability as rca
+
+        updates_path = tmp_path / "updates.jsonl"
+        published = _dt("2026-06-11T12:00:00")
+        write_model_updates_jsonl(
+            updates_path,
+            [
+                OpenMeteoModelUpdate(
+                    model="ecmwf_ifs",
+                    last_run_initialisation_time=published,
+                    last_run_availability_time=published,
+                )
+            ],
+        )
+        monkeypatch.setattr(
+            rca,
+            "probe_openmeteo_single_run_available",
+            lambda cycle, **kwargs: False,
+        )
+        monkeypatch.setattr(rca, "probe_bucket_run_declared", lambda cycle: False)
+        monkeypatch.setattr(
+            "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ifs9_model_meta",
+            lambda: (_ for _ in ()).throw(AssertionError("network metadata duplicated")),
+        )
+
+        probe = AnchorAvailabilityProbe(cached_updates_path=updates_path)
+        availability = resolve_anchor_cycle_availability(
+            _dt("2026-06-11T19:00:00"),
+            probe_anchor=probe,
+        )
+
+        assert newest_complete_cycle(availability) == published
+
+    def test_corrupt_source_clock_metadata_falls_back_to_provider(self, monkeypatch, tmp_path):
+        import src.data.replacement_cycle_availability as rca
+
+        updates_path = tmp_path / "updates.jsonl"
+        updates_path.write_text("not-json\n", encoding="utf-8")
+        published = _dt("2026-06-11T12:00:00")
+        monkeypatch.setattr(
+            rca,
+            "probe_openmeteo_single_run_available",
+            lambda cycle, **kwargs: False,
+        )
+        monkeypatch.setattr(rca, "probe_bucket_run_declared", lambda cycle: False)
+        monkeypatch.setattr(
+            "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ifs9_model_meta",
+            lambda: {
+                "run_initialisation_utc": published,
+                "run_availability_utc": published,
+            },
+        )
+
+        probe = AnchorAvailabilityProbe(cached_updates_path=updates_path)
+
+        assert probe(published) is True
 
     def test_single_runs_success_avoids_meta_fetch(self):
         meta_calls: list[None] = []
