@@ -1,6 +1,6 @@
 # Created: 2026-06-16
-# Last reused or audited: 2026-08-04
-# Lifecycle: created=2026-06-16; last_reviewed=2026-08-04; last_reused=2026-08-04
+# Last reused or audited: 2026-08-05
+# Lifecycle: created=2026-06-16; last_reviewed=2026-08-05; last_reused=2026-08-05
 # Authority basis: docs/evidence/timing_audit/capture_reactor_stall_rootcause_2026-06-16.md
 #   (PRIMARY/CODE fix) + docs/evidence/timing_audit/impl_flat_threshold_capture_fix_2026-06-16.md.
 #   BAYES_PRECISION_FUSION_SPEC §6 F1 (the q-path consumes the persisted single_runs capture).
@@ -122,6 +122,33 @@ def test_source_cycle_full_local_day_geometry_is_timezone_aware() -> None:
         target_date="2026-07-19",
         timezone_name="Asia/Manila",
     )
+
+
+def test_extras_coverage_excludes_structurally_partial_day0(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.replacement_forecast_current_target_plan as target_plan
+
+    cycle = datetime(2026, 8, 5, 0, tzinfo=UTC)
+    db = _make_forecast_db(tmp_path)
+    monkeypatch.setattr(
+        target_plan,
+        "build_replacement_forecast_current_target_plan",
+        lambda _path: _Plan(
+            rows=(
+                _PlanRow("Tokyo", "high", "2026-08-05"),
+                _PlanRow("Tokyo", "high", "2026-08-06"),
+            )
+        ),
+    )
+
+    missing, planned = prod._extras_coverage_missing(
+        {"forecast_db": db},
+        cycle,
+    )
+
+    assert planned == 1
+    assert missing == {("Tokyo", "high", "2026-08-06")}
 
 
 def test_source_clock_does_not_retry_structurally_partial_day0(

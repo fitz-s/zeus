@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-06-08; last_reviewed=2026-08-05; last_reused=2026-08-05
 # Purpose: Relationship regression test for BAYES_PRECISION_FUSION extra-model capture wiring in src/main.py; guards against bare `date` NameError (BLOCKER 9) and verifies capture is gated by the edli flag.
 # Reuse: Run with pytest; update if the BAYES_PRECISION_FUSION extra-capture wiring or flag gate in src/main.py changes.
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-28
+# Last reused or audited: 2026-08-05
 # Authority basis: PR#400 review (src/main.py:4909 bare `date` NameError swallowed by
 #   fail-soft); CONTINUITY_AND_WIRING.md §4 step 2 + BAYES_PRECISION_FUSION_SPEC.md §6 F1 (BAYES_PRECISION_FUSION multi-model
 #   SHADOW capture gated by edli.replacement_0_1_bayes_precision_fusion_capture_enabled).
@@ -139,6 +139,11 @@ def _wire(monkeypatch, *, rows, state_root: Path, forecast_db="zeus-forecasts.db
     monkeypatch.setattr(
         production, "_probe_resolved_available_cycle", lambda: probed_cycle
     )
+    monkeypatch.setattr(
+        production,
+        "_probe_resolved_bayes_precision_fusion_extras_cycle",
+        lambda: probed_cycle,
+    )
 
     cfg_dict = {
         "forecast_db": forecast_db,
@@ -187,11 +192,10 @@ def test_does_not_raise_nameerror_and_attempts_capture(monkeypatch, tmp_path) ->
 
 
 # ---------------------------------------------------------------------------------------
-# (3) covered rows are INCLUDED (CYCLE-CURRENCY, K-root instance #5): plan 'covered' has
-# no cycle-awareness, so excluding covered rows froze covered targets on stale-cycle
-# extras (Madrid 06-10 fused with icon_global off the 06-08T12 row). The extras job
-# feeds ALL current targets; the downloader itself dedups per persisted
-# (model, city, target, metric, cycle, endpoint) row.
+# (3) covered rows are INCLUDED when exact-cycle coverage cannot be proven
+# (CYCLE-CURRENCY, K-root instance #5): plan 'covered' has no cycle-awareness, so
+# excluding covered rows froze covered targets on stale-cycle extras. Exact-cycle
+# coverage, rather than the plan projection, is the only valid optimization boundary.
 # ---------------------------------------------------------------------------------------
 def test_covered_rows_still_reach_the_downloader(monkeypatch, tmp_path) -> None:
     today = datetime.now(timezone.utc).date()
@@ -208,9 +212,59 @@ def test_covered_rows_still_reach_the_downloader(monkeypatch, tmp_path) -> None:
     assert len(calls) == 1
     cities = sorted(t.city for t in calls[0]["targets"])
     assert cities == ["Amsterdam", "Ankara"], (
-        "covered rows must NOT be filtered from the extras capture — coverage is not "
-        "currency (K-root instance #5); per-row dedup lives in the downloader"
+        "plan coverage must NOT be treated as current-cycle capture — coverage is not "
+        "currency (K-root instance #5)"
     )
+
+
+def test_full_fanout_skips_structurally_partial_day0_and_prioritizes_serviceable_gap(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    import src.data.replacement_forecast_seed_discovery as seed_discovery
+
+    cycle = datetime(2026, 8, 5, 0, tzinfo=timezone.utc)
+    rows = [
+        _row(city="Tokyo", target_date="2026-08-05", covered=False),
+        _row(city="Amsterdam", target_date="2026-08-06", covered=True),
+        _row(city="Tokyo", target_date="2026-08-06", covered=False),
+    ]
+    cfg_dict, calls = _wire(monkeypatch, rows=rows, state_root=tmp_path)
+    monkeypatch.setattr(
+        production,
+        "_probe_resolved_bayes_precision_fusion_extras_cycle",
+        lambda: cycle,
+    )
+    monkeypatch.setattr(
+        production,
+        "_extras_coverage_missing",
+        lambda _cfg, _cycle: (
+            {
+                ("Tokyo", "high", "2026-08-05"),
+                ("Amsterdam", "high", "2026-08-06"),
+                ("Tokyo", "high", "2026-08-06"),
+            },
+            3,
+        ),
+    )
+    monkeypatch.setattr(
+        seed_discovery,
+        "held_position_family_priorities",
+        lambda: {("Tokyo", "2026-08-06", "high"): 0},
+    )
+
+    report = production._download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+        cfg_dict
+    )
+
+    assert report is not None
+    assert len(calls) == 1
+    assert [
+        (target.city, target.target_date) for target in calls[0]["targets"]
+    ] == [
+        ("Tokyo", "2026-08-06"),
+        ("Amsterdam", "2026-08-06"),
+    ]
 
 
 # ---------------------------------------------------------------------------------------

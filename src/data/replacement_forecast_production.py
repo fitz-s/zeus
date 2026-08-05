@@ -823,18 +823,58 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
         if cycle is None:
             return {"status": "BAYES_PRECISION_FUSION_EXTRA_CYCLE_PROBE_UNRESOLVED_SKIP"}
 
-        # CYCLE-CURRENCY (2026-06-09, K-root instance #5 — same structural decision as the
-        # anchor downloader's include_covered): plan 'covered' has NO cycle-awareness, so
-        # skipping covered rows meant a covered target NEVER received the new cycle's extras
-        # (observed live: Madrid 06-10 fused with icon_global because its icon_eu row only
-        # existed at the stale 06-08T12 cycle — the 00z extras run had skipped Madrid 06-10 as
-        # covered). The coverage filter is REMOVED: the extras job now feeds ALL current
-        # targets, and the downloader itself skips per-ROW (model, city, target, metric,
-        # cycle, endpoint) combos that are already persisted, so the steady-state cost is
-        # only-missing fetches (self-healing per cycle, no covered/freshness conflation).
+        # CYCLE-CURRENCY (2026-06-09, K-root instance #5): plan ``covered`` is not
+        # cycle-aware, so it cannot decide capture admission. Exact-cycle provider-family
+        # coverage below can: it keeps a currently covered market in the fanout when the new
+        # cycle is absent, and removes it once the live q-path's two-family minimum has landed.
+        # A source cycle that starts after local 03:xx can never pass the full-day parser for
+        # that target date. Day0 remaining-day probability is owned by the observation carrier;
+        # repeatedly sending that structurally partial day through this full-day fanout only
+        # burns quota and delays serviceable current-market gaps.
         plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
+        coverage = _extras_coverage_missing(cfg, cycle)
+        missing_scopes = None if coverage is None else coverage[0]
+        try:
+            from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+                held_position_family_priorities,
+            )
+
+            held_priority = held_position_family_priorities()
+        except Exception:
+            held_priority = {}
+        admitted_rows = [
+            row
+            for row in plan.rows
+            if (
+                missing_scopes is None
+                or (row.city, row.temperature_metric, row.target_date) in missing_scopes
+            )
+            and (
+                (city_cfg := cities_by_name.get(row.city)) is None
+                or _source_cycle_can_cover_full_local_day(
+                    cycle=cycle,
+                    target_date=row.target_date,
+                    timezone_name=str(city_cfg.timezone),
+                )
+            )
+        ]
+        admitted_rows.sort(
+            key=lambda row: (
+                held_priority.get(
+                    (row.city, row.target_date, row.temperature_metric),
+                    2,
+                ),
+                bool(getattr(row, "day0_observed_extreme_required", False)),
+                int(getattr(row, "posterior_count", 0)) > 0,
+                not bool(getattr(row, "can_seed", False)),
+                -int(getattr(row, "fusion_current_value_count", 0)),
+                row.target_date,
+                row.city,
+                row.temperature_metric,
+            )
+        )
         targets: list[BayesPrecisionFusionDownloadTarget] = []
-        for row in plan.rows:
+        for row in admitted_rows:
             city_cfg = cities_by_name.get(row.city)
             if city_cfg is None:
                 continue
@@ -1818,7 +1858,20 @@ def _extras_coverage_missing(
         from src.state.db import _connect  # noqa: PLC0415
 
         plan = build_replacement_forecast_current_target_plan(Path(str(forecast_db)))
-        need = {(row.city, row.temperature_metric, row.target_date) for row in plan.rows}
+        from src.config import cities_by_name  # noqa: PLC0415
+
+        need = {
+            (row.city, row.temperature_metric, row.target_date)
+            for row in plan.rows
+            if (
+                (city_cfg := cities_by_name.get(row.city)) is None
+                or _source_cycle_can_cover_full_local_day(
+                    cycle=cycle,
+                    target_date=row.target_date,
+                    timezone_name=str(city_cfg.timezone),
+                )
+            )
+        }
         if not need:
             return (set(), 0)  # no planned scopes (e.g. no open markets) => nothing to capture
         conn = _connect(Path(str(forecast_db)))
