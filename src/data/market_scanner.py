@@ -69,6 +69,7 @@ def _capture_policy_trigger(
     requested_trigger: str | None,
     condition_id: str,
     selected_token: str,
+    fresh_at: datetime,
 ) -> str | None:
     """Route ordinary discovery to compact storage with periodic full keyframes."""
 
@@ -83,9 +84,19 @@ def _capture_policy_trigger(
               FROM executable_market_snapshot_latest
              WHERE condition_id = ?
                AND selected_outcome_token_id = ?
+               AND freshness_deadline >= ?
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM executable_market_snapshot_invalidations inv
+                     WHERE inv.invalidated_at >= executable_market_snapshot_latest.captured_at
+                       AND (
+                            inv.condition_id = executable_market_snapshot_latest.condition_id
+                            OR inv.token_id = executable_market_snapshot_latest.selected_outcome_token_id
+                       )
+               )
              LIMIT 1
             """,
-            (condition_id, selected_token),
+            (condition_id, selected_token, fresh_at.isoformat()),
         ).fetchone() is not None
     except sqlite3.Error:
         has_full = conn.execute(
@@ -94,9 +105,10 @@ def _capture_policy_trigger(
               FROM executable_market_snapshots
              WHERE condition_id = ?
                AND selected_outcome_token_id = ?
+               AND freshness_deadline >= ?
              LIMIT 1
             """,
-            (condition_id, selected_token),
+            (condition_id, selected_token, fresh_at.isoformat()),
         ).fetchone() is not None
     if not has_full:
         return "KEYFRAME"
@@ -3312,6 +3324,7 @@ def capture_executable_market_snapshot(
         requested_trigger=capture_trigger,
         condition_id=condition_id,
         selected_token=selected_token,
+        fresh_at=captured,
     )
     hash_identity = f"{condition_id}|{selected_token}"
     current_hash = snapshot.raw_orderbook_hash
@@ -4899,7 +4912,7 @@ def refresh_executable_market_substrate_snapshots(
         condition_id = str(raw_condition_id or "").strip()
         if condition_id and condition_id not in priority_condition_rank:
             priority_condition_rank[condition_id] = len(priority_condition_rank)
-    attempted = inserted = skipped = failed = 0
+    attempted = inserted = compact_inserted = skipped = failed = 0
     # cap_truncated counts outcomes dropped by per-city cap or budget (true
     # truncation).  skipped counts all filtered-out outcomes (missing cid,
     # non-executable, expired, duplicate sides, missing no_token) — the two
@@ -5454,7 +5467,7 @@ def refresh_executable_market_substrate_snapshots(
                         str(condition_id or "").strip() in priority_conditions
                         or str(selected_token or "").strip() in priority_tokens
                     )
-                    capture_executable_market_snapshot(
+                    capture_result = capture_executable_market_snapshot(
                         conn,
                         market=market,
                         decision=decision,
@@ -5514,8 +5527,11 @@ def refresh_executable_market_substrate_snapshots(
                         is None
                     ):
                         conn.commit()
-                    inserted += 1
-                    inserted_cities.add(_snapshot_refresh_city_key(market))
+                    if capture_result.get("snapshot_persistence_tier") == "full":
+                        inserted += 1
+                        inserted_cities.add(_snapshot_refresh_city_key(market))
+                    else:
+                        compact_inserted += 1
                     break
                 except Exception as exc:
                     # Roll back this row's partial write unit so a failed capture never leaves
@@ -5567,6 +5583,7 @@ def refresh_executable_market_substrate_snapshots(
         "executable_substrate_coverage_status": coverage_status,
         "attempted": attempted,
         "inserted": inserted,
+        "compact_inserted": compact_inserted,
         "skipped": skipped,
         "failed": failed,
         "truncated": int(truncated),

@@ -2577,12 +2577,14 @@ def test_paused_priority_preserves_discovery_capture_policy_and_event_rows(monke
         requested_trigger="DISCOVERY_SWEEP",
         condition_id="policy-condition",
         selected_token="policy-token",
+        fresh_at=datetime.now(timezone.utc),
     ) == "KEYFRAME"
     assert market_scanner._capture_policy_trigger(
         _PolicyConn(True),
         requested_trigger="DISCOVERY_SWEEP",
         condition_id="policy-condition",
         selected_token="policy-token",
+        fresh_at=datetime.now(timezone.utc),
     ) == "DISCOVERY_SWEEP"
     policy_counts[policy_key] = 1
     assert market_scanner._capture_policy_trigger(
@@ -2590,6 +2592,7 @@ def test_paused_priority_preserves_discovery_capture_policy_and_event_rows(monke
         requested_trigger="DISCOVERY_SWEEP",
         condition_id="policy-condition",
         selected_token="policy-token",
+        fresh_at=datetime.now(timezone.utc),
     ) == "KEYFRAME"
 
 
@@ -4094,6 +4097,7 @@ def test_paused_pending_urgency_preserves_mixed_exact_priority_scopes(monkeypatc
             requested_trigger=capture_trigger,
             condition_id=decision.tokens["market_id"],
             selected_token=selected_token,
+            fresh_at=datetime.now(timezone.utc),
         )
         captures.append(
             (
