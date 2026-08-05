@@ -216,6 +216,9 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+_heartbeat_fails = 0
+
+
 def _write_forecast_live_heartbeat(
     *,
     heartbeat_path: Path | None = None,
@@ -223,6 +226,7 @@ def _write_forecast_live_heartbeat(
     now_utc: datetime | None = None,
 ) -> None:
     """Write the forecast-live process heartbeat atomically."""
+    global _heartbeat_fails
     from src.config import state_path
 
     now = (now_utc or _utcnow()).astimezone(timezone.utc)
@@ -250,8 +254,13 @@ def _write_forecast_live_heartbeat(
             except OSError:
                 pass
             raise
+        _heartbeat_fails = 0
     except Exception as exc:
-        logger.error("forecast-live heartbeat write failed: %s", exc)
+        _heartbeat_fails += 1
+        logger.error("forecast-live heartbeat write failed (%d): %s", _heartbeat_fails, exc)
+        if _heartbeat_fails >= 3:
+            logger.critical("FATAL: forecast-live heartbeat is unwritable; exiting for launchd recovery")
+            os._exit(1)
 
 
 def _heartbeat_tick() -> None:

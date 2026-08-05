@@ -3771,6 +3771,57 @@ def test_storage_capacity_is_a_composite_health_failure(
     assert "storage_capacity" in result["failing_surfaces"]
 
 
+@pytest.mark.parametrize(
+    ("module_name", "writer_name", "uses_mkstemp"),
+    (
+        ("src.ingest.forecast_live_daemon", "_write_forecast_live_heartbeat", True),
+        ("src.ingest.substrate_observer_daemon", "_write_substrate_observer_heartbeat", False),
+        ("src.ingest.price_channel_daemon", "_write_price_channel_heartbeat", False),
+        ("src.ingest.post_trade_capital_daemon", "_write_post_trade_capital_heartbeat", False),
+    ),
+)
+def test_required_sidecar_exits_after_repeated_unwritable_heartbeat(
+    module_name: str,
+    writer_name: str,
+    uses_mkstemp: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import errno
+    import importlib
+
+    module = importlib.import_module(module_name)
+    monkeypatch.setattr(module, "_heartbeat_fails", 0)
+    monkeypatch.setattr(
+        module.os,
+        "_exit",
+        lambda code: (_ for _ in ()).throw(SystemExit(code)),
+    )
+    if uses_mkstemp:
+        monkeypatch.setattr(
+            module.tempfile,
+            "mkstemp",
+            lambda **_kwargs: (_ for _ in ()).throw(OSError(errno.ENOSPC, "disk full")),
+        )
+        writer = getattr(module, writer_name)
+    else:
+        monkeypatch.setattr("src.config.state_path", lambda _name: tmp_path / "heartbeat.json")
+        monkeypatch.setattr(
+            module.Path,
+            "write_text",
+            lambda _self, _data: (_ for _ in ()).throw(OSError(errno.ENOSPC, "disk full")),
+        )
+        writer = getattr(module, writer_name)
+
+    writer()
+    writer()
+    with pytest.raises(SystemExit) as raised:
+        writer()
+
+    assert raised.value.code == 1
+    assert module._heartbeat_fails == 3
+
+
 def test_pending_exit_health_scopes_event_history_by_open_position(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

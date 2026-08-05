@@ -370,6 +370,9 @@ def _write_post_trade_capital_heartbeat() -> None:
     except Exception as exc:  # noqa: BLE001
         _heartbeat_fails += 1
         logger.error("post-trade-capital heartbeat write failed (%d): %s", _heartbeat_fails, exc)
+        if _heartbeat_fails >= 3:
+            logger.critical("FATAL: post-trade-capital heartbeat is unwritable; exiting for launchd recovery")
+            os._exit(1)
 
 
 def main() -> None:

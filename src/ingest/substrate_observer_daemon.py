@@ -175,6 +175,9 @@ def _write_substrate_observer_heartbeat() -> None:
     except Exception as exc:  # noqa: BLE001
         _heartbeat_fails += 1
         logger.error("substrate-observer heartbeat write failed (%d): %s", _heartbeat_fails, exc)
+        if _heartbeat_fails >= 3:
+            logger.critical("FATAL: substrate-observer heartbeat is unwritable; exiting for launchd recovery")
+            os._exit(1)
 
 
 def _register_substrate_observer_jobs(
