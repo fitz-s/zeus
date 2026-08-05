@@ -1,5 +1,5 @@
 # Created: 2026-06-25
-# Last reused/audited: 2026-08-04
+# Last reused/audited: 2026-08-05
 
 import json
 from datetime import UTC, datetime
@@ -9,6 +9,7 @@ from src.data.openmeteo_model_updates import (
     fetch_model_updates,
     metadata_model_id,
     parse_model_updates_payload,
+    read_model_updates_jsonl,
     write_model_updates_jsonl,
 )
 from src.data.bayes_precision_fusion_capture import OPENMETEO_MODEL_IDS
@@ -61,6 +62,49 @@ def test_parse_mapping_payload_shape() -> None:
 
     assert len(updates) == 1
     assert updates[0].model == "kma_ldps"
+
+
+def test_model_update_jsonl_round_trip_does_not_recursively_nest_raw(tmp_path) -> None:
+    path = tmp_path / "updates.jsonl"
+    provider_payload = {
+        "last_run_initialisation_time": 1785888000,
+        "last_run_availability_time": 1785901728,
+        "update_interval_seconds": 21600,
+    }
+    update = parse_model_updates_payload(
+        {"models": [{"model": "icon_global", **provider_payload}]}
+    )[0]
+
+    write_model_updates_jsonl(path, [update])
+    first = read_model_updates_jsonl(path)[0]
+    write_model_updates_jsonl(path, [first])
+    second = read_model_updates_jsonl(path)[0]
+
+    assert first.raw == {"model": "icon_global", **provider_payload}
+    assert second.raw == first.raw
+    assert "raw" not in second.raw
+
+
+def test_model_update_jsonl_flattens_existing_recursive_raw(tmp_path) -> None:
+    path = tmp_path / "updates.jsonl"
+    provider_payload = {
+        "last_run_initialisation_time": 1785888000,
+        "last_run_availability_time": 1785901728,
+        "update_interval_seconds": 21600,
+    }
+    nested = {
+        "model": "icon_global",
+        **provider_payload,
+        "raw": {"model": "icon_global", **provider_payload, "raw": provider_payload},
+    }
+    path.write_text(json.dumps(nested) + "\n", encoding="utf-8")
+
+    update = read_model_updates_jsonl(path)[0]
+    write_model_updates_jsonl(path, [update])
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+
+    assert update.raw == provider_payload
+    assert persisted["raw"] == provider_payload
 
 
 def test_source_clock_probe_does_not_advance_cursor_before_public_availability(tmp_path) -> None:

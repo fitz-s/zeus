@@ -14,7 +14,7 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -286,5 +286,11 @@ def read_model_updates_jsonl(path: str | Path) -> tuple[OpenMeteoModelUpdate, ..
                 continue
             payload = json.loads(line)
             if isinstance(payload, Mapping):
-                rows.append(parse_model_update(str(payload.get("model") or ""), payload))
+                raw = payload.get("raw")
+                while isinstance(raw, Mapping) and isinstance(raw.get("raw"), Mapping):
+                    raw = raw["raw"]
+                update = parse_model_update(str(payload.get("model") or ""), payload)
+                if isinstance(raw, Mapping):
+                    update = replace(update, raw=dict(raw))
+                rows.append(update)
     return tuple(rows)
