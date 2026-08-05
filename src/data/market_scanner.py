@@ -61,6 +61,42 @@ _prev_orderbook_hash_by_market: dict[str, tuple[str, float]] = {}
 _discovery_captures_since_keyframe: dict[str, int] = {}
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
+_ORIGINAL_HTTPX_GET = httpx.get
+_GAMMA_HTTP_CLIENT: httpx.Client | None = None
+_GAMMA_HTTP_CLIENT_LOCK = threading.Lock()
+
+
+def _gamma_http_client() -> httpx.Client:
+    """Reuse Gamma TLS across recurring scans instead of handshaking per slug."""
+
+    global _GAMMA_HTTP_CLIENT
+    client = _GAMMA_HTTP_CLIENT
+    if client is None:
+        with _GAMMA_HTTP_CLIENT_LOCK:
+            client = _GAMMA_HTTP_CLIENT
+            if client is None:
+                client = httpx.Client(
+                    limits=httpx.Limits(
+                        max_keepalive_connections=8,
+                        max_connections=16,
+                        keepalive_expiry=90.0,
+                    )
+                )
+                _GAMMA_HTTP_CLIENT = client
+    return client
+
+
+def _gamma_transport_get(
+    url: str,
+    *,
+    params: dict | None,
+    timeout: float,
+) -> httpx.Response:
+    # Existing callers/tests may deliberately replace the module-level httpx.get
+    # transport. Preserve that injection seam; normal runtime uses the pooled client.
+    if httpx.get is not _ORIGINAL_HTTPX_GET:
+        return httpx.get(url, params=params, timeout=timeout)
+    return _gamma_http_client().get(url, params=params, timeout=timeout)
 
 
 def _capture_policy_trigger(
@@ -1009,7 +1045,7 @@ def _gamma_get(path: str, *, params: dict | None = None, timeout: float = 15.0, 
         try:
             url = f"{GAMMA_BASE}{path}"
             resp = polymarket_request_governor.request(
-                lambda: httpx.get(url, params=params, timeout=timeout),
+                lambda: _gamma_transport_get(url, params=params, timeout=timeout),
                 "GET",
                 url,
                 params=params,

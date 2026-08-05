@@ -6585,6 +6585,38 @@ class _FakePolymarketClient:
         return False
 
 
+def test_substrate_clob_client_reuses_one_pool_per_priority(monkeypatch):
+    import src.data.polymarket_client as polymarket_client
+
+    created = []
+
+    class _ProductionClient:
+        __module__ = "src.data.polymarket_client"
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            created.append(self)
+
+    monkeypatch.setattr(polymarket_client, "PolymarketClient", _ProductionClient)
+    substrate_observer._SUBSTRATE_CLOB_CLIENTS.clear()
+    try:
+        scan_one = substrate_observer._substrate_clob_client(
+            substrate_observer.RequestPriority.SCAN
+        )
+        scan_two = substrate_observer._substrate_clob_client(
+            substrate_observer.RequestPriority.SCAN
+        )
+        held = substrate_observer._substrate_clob_client(
+            substrate_observer.RequestPriority.HELD_REDUCE_ONLY
+        )
+    finally:
+        substrate_observer._SUBSTRATE_CLOB_CLIENTS.clear()
+
+    assert scan_one is scan_two
+    assert held is not scan_one
+    assert len(created) == 2
+
+
 class _CaptureConn:
     def __init__(self, conn):
         self._conn = conn

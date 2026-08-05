@@ -34,6 +34,43 @@ def _response(status: int, headers: dict[str, str] | None = None) -> httpx.Respo
     return httpx.Response(status, headers=headers, request=httpx.Request("GET", "https://clob.polymarket.com/book"))
 
 
+def test_gamma_transport_reuses_one_tls_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.data import market_scanner as scanner
+
+    clients = []
+
+    class _Client:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.urls: list[str] = []
+
+        def get(self, url: str, **_kwargs: Any) -> httpx.Response:
+            self.urls.append(url)
+            return httpx.Response(200, request=httpx.Request("GET", url))
+
+    def _factory(**kwargs: Any) -> _Client:
+        client = _Client(**kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(scanner.httpx, "Client", _factory)
+    scanner._GAMMA_HTTP_CLIENT = None
+    try:
+        scanner._gamma_transport_get(
+            f"{scanner.GAMMA_BASE}/events", params={"slug": "one"}, timeout=4.0
+        )
+        scanner._gamma_transport_get(
+            f"{scanner.GAMMA_BASE}/events", params={"slug": "two"}, timeout=4.0
+        )
+    finally:
+        scanner._GAMMA_HTTP_CLIENT = None
+
+    assert len(clients) == 1
+    assert clients[0].urls == [
+        f"{scanner.GAMMA_BASE}/events",
+        f"{scanner.GAMMA_BASE}/events",
+    ]
+
+
 class _Clock:
     def __init__(self) -> None:
         self.now = datetime(2026, 7, 18, tzinfo=timezone.utc)

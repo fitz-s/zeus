@@ -89,6 +89,8 @@ _SUBSTRATE_PRIORITY_REFRESH_CURSOR = 0
 _SUBSTRATE_GAMMA_REFRESH_CURSOR = 0
 _GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
 _NEW_FAMILY_CONDITION_IDS: set[str] = set()
+_SUBSTRATE_CLOB_CLIENTS: dict[tuple[int, float], object] = {}
+_SUBSTRATE_CLOB_CLIENTS_LOCK = threading.Lock()
 # Priority confirmation/entry/exit capture retains its established foreground
 # envelope. Broad discovery capture explicitly opts into the separate fast-yield
 # context below.
@@ -192,6 +194,33 @@ def _substrate_clob_timeout_seconds() -> float:
         1.0,
         float(os.environ.get("ZEUS_SUBSTRATE_CLOB_TIMEOUT_SECONDS", "4.0")),
     )
+
+
+def _substrate_clob_client(request_priority: RequestPriority):
+    """Keep one public CLOB pool per lane alive across recurring refresh ticks."""
+
+    from src.data.polymarket_client import PolymarketClient
+
+    timeout_s = _substrate_clob_timeout_seconds()
+    # Test doubles remain per-call so their state cannot leak between tests. The
+    # production class is process-lifetime and reuses TLS within its 30s keepalive.
+    if PolymarketClient.__module__ != "src.data.polymarket_client":
+        return PolymarketClient(
+            public_http_timeout=timeout_s,
+            public_request_priority=request_priority,
+        )
+    key = (int(request_priority), timeout_s)
+    client = _SUBSTRATE_CLOB_CLIENTS.get(key)
+    if client is None:
+        with _SUBSTRATE_CLOB_CLIENTS_LOCK:
+            client = _SUBSTRATE_CLOB_CLIENTS.get(key)
+            if client is None:
+                client = PolymarketClient(
+                    public_http_timeout=timeout_s,
+                    public_request_priority=request_priority,
+                )
+                _SUBSTRATE_CLOB_CLIENTS[key] = client
+    return client
 
 
 def _market_unavailable_evidence_ttl_seconds() -> float:
@@ -1654,7 +1683,6 @@ def _refresh_pending_family_snapshots(
         refresh_executable_market_substrate_snapshots,
     )
     from src.data.market_topology_rows import _event_family_market_topology_rows
-    from src.data.polymarket_client import PolymarketClient
     from src.state.db import (
         get_trade_connection,
         get_trade_connection_read_only,
@@ -2554,7 +2582,6 @@ def _refresh_pending_family_snapshots(
         #         tolerate_missing_book=True is already hardwired inside
         #         refresh_executable_market_substrate_snapshots, so illiquid bins
         #         snapshot as top_ask=None / executable_allowed=False — never tradeable.
-        _clob_timeout = _substrate_clob_timeout_seconds()
         if snapshot_read_conn is None:
             markets_for_refresh = markets
             fresh_condition_skipped = 0
@@ -2640,33 +2667,30 @@ def _refresh_pending_family_snapshots(
             snapshot_read_conn = None
         write_conn = get_trade_connection(write_class="live")
         try:
-            with PolymarketClient(
-                public_http_timeout=_clob_timeout,
-                public_request_priority=request_priority,
-            ) as clob:
-                summary = refresh_executable_market_substrate_snapshots(
-                    write_conn,
-                    markets=markets_for_refresh,
-                    clob=clob,
-                    captured_at=datetime.now(timezone.utc),
-                    scan_authority="VERIFIED",
-                    max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
-                    budget_seconds=snapshot_budget_s,
-                    capture_reserve_seconds=snapshot_reserve_s,
-                    priority_condition_ids=priority_conditions,
-                    force_refresh_condition_ids=forced_conditions,
-                    priority_token_ids=priority_tokens,
-                    force_refresh_token_ids=forced_tokens,
-                    snapshot_write_context_factory=_substrate_snapshot_trade_write_context_factory(
-                        "substrate_pending_family_snapshot_refresh"
-                    ),
-                    background_snapshot_write_context_factory=(
-                        _substrate_background_snapshot_trade_write_context_factory(
-                            "substrate_pending_family_background_capture"
-                        )
-                    ),
-                    background_fast_yield=True,
-                )
+            clob = _substrate_clob_client(request_priority)
+            summary = refresh_executable_market_substrate_snapshots(
+                write_conn,
+                markets=markets_for_refresh,
+                clob=clob,
+                captured_at=datetime.now(timezone.utc),
+                scan_authority="VERIFIED",
+                max_outcomes=0,  # UNLIMITED: capture every bin of each pending family
+                budget_seconds=snapshot_budget_s,
+                capture_reserve_seconds=snapshot_reserve_s,
+                priority_condition_ids=priority_conditions,
+                force_refresh_condition_ids=forced_conditions,
+                priority_token_ids=priority_tokens,
+                force_refresh_token_ids=forced_tokens,
+                snapshot_write_context_factory=_substrate_snapshot_trade_write_context_factory(
+                    "substrate_pending_family_snapshot_refresh"
+                ),
+                background_snapshot_write_context_factory=(
+                    _substrate_background_snapshot_trade_write_context_factory(
+                        "substrate_pending_family_background_capture"
+                    )
+                ),
+                background_fast_yield=True,
+            )
         finally:
             write_conn.close()
 
@@ -2851,7 +2875,6 @@ def _market_discovery_cycle() -> None:
             find_weather_markets_or_raise,
             refresh_executable_market_substrate_snapshots,
         )
-        from src.data.polymarket_client import PolymarketClient
         from src.state.db import get_trade_connection
 
         events = find_weather_markets_or_raise(
@@ -2918,32 +2941,29 @@ def _market_discovery_cycle() -> None:
                 )
                 conn = get_trade_connection(write_class="live")
                 try:
-                    _discovery_clob_timeout = _substrate_clob_timeout_seconds()
-                    with PolymarketClient(
-                        public_http_timeout=_discovery_clob_timeout
-                    ) as snapshot_clob:
-                        snapshot_summary = refresh_executable_market_substrate_snapshots(
-                            conn,
-                            markets=events,
-                            clob=snapshot_clob,
-                            captured_at=datetime.now(timezone.utc),
-                            scan_authority="VERIFIED",
-                            max_outcomes=4,
-                            budget_seconds=snapshot_budget_s,
-                            capture_reserve_seconds=snapshot_reserve_s,
-                            snapshot_write_context_factory=(
-                                _substrate_snapshot_trade_write_context_factory(
-                                    "substrate_market_discovery_snapshot_refresh"
-                                )
-                            ),
-                            background_snapshot_write_context_factory=(
-                                _substrate_background_snapshot_trade_write_context_factory(
-                                    "substrate_market_discovery_background_capture"
-                                )
-                            ),
-                            background_fast_yield=True,
-                        )
-                        conn.commit()
+                    snapshot_clob = _substrate_clob_client(RequestPriority.SCAN)
+                    snapshot_summary = refresh_executable_market_substrate_snapshots(
+                        conn,
+                        markets=events,
+                        clob=snapshot_clob,
+                        captured_at=datetime.now(timezone.utc),
+                        scan_authority="VERIFIED",
+                        max_outcomes=4,
+                        budget_seconds=snapshot_budget_s,
+                        capture_reserve_seconds=snapshot_reserve_s,
+                        snapshot_write_context_factory=(
+                            _substrate_snapshot_trade_write_context_factory(
+                                "substrate_market_discovery_snapshot_refresh"
+                            )
+                        ),
+                        background_snapshot_write_context_factory=(
+                            _substrate_background_snapshot_trade_write_context_factory(
+                                "substrate_market_discovery_background_capture"
+                            )
+                        ),
+                        background_fast_yield=True,
+                    )
+                    conn.commit()
                 finally:
                     conn.close()
                 if (
