@@ -908,15 +908,14 @@ def _posterior_used_models_for_cycle(
 def _used_models_from_provenance(
     provenance: Mapping[str, object],
 ) -> frozenset[str]:
-    candidates: list[object] = []
-    candidates.append(provenance.get("used_models"))
     fusion = provenance.get("bayes_precision_fusion")
+    candidates: list[object] = []
     if isinstance(fusion, dict):
-        candidates.append(fusion.get("used_models"))
         source_clock = fusion.get("source_clock_one_scheme")
         if isinstance(source_clock, dict):
             candidates.append(source_clock.get("used_weights"))
-            candidates.append(source_clock.get("configured_sources"))
+        candidates.append(fusion.get("used_models"))
+    candidates.append(provenance.get("used_models"))
     models: set[str] = set()
     for candidate in candidates:
         if isinstance(candidate, dict):
@@ -929,6 +928,8 @@ def _used_models_from_provenance(
             text = str(value or "").strip()
             if text:
                 models.add(text)
+        if models:
+            break
     return frozenset(models)
 
 
@@ -1242,7 +1243,11 @@ def _exact_consumed_anchor_artifact_cycle(
         )
     artifact_row = {
         "artifact_city": metadata.get("city"),
-        "artifact_target_date": metadata.get("target_date"),
+        # One immutable Open-Meteo payload can cover several local days. Bind
+        # this HWM proof to the posterior's consumed day; the validator below
+        # still checks the original payload bytes, hash, city, metric, and
+        # actual local-day coverage.
+        "artifact_target_date": str(target_date),
         "artifact_metric": metadata.get("metric"),
         "source_cycle_time": values["source_cycle_time"],
         "artifact_path": values["artifact_path"],

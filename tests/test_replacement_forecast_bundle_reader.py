@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-01
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-01; last_reused=2026-08-01
+# Last reused/audited: 2026-08-05
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-05; last_reused=2026-08-05
 # Purpose: Protect replacement posterior bundle reader no-bypass semantics.
 # Reuse: Run before wiring replacement posterior into executable forecast reader or event reactor.
 # Authority basis: Operator-directed live replacement forecast bundle reader semantics.
@@ -311,17 +311,30 @@ def _insert_openmeteo_anchor_artifact(
     city: str = "Shanghai",
     target_date: str = "2026-06-07",
     metric: str = "high",
+    payload_dates: tuple[str, ...] | None = None,
 ) -> int:
     payload = tmp_path / (
         f"openmeteo-{city}-{target_date}-{metric}-"
         f"{source_cycle_time.strftime('%H%M')}.json"
     )
+    covered_dates = payload_dates or (target_date,)
     payload_bytes = json.dumps(
         {
             "city": city,
             "hourly": {
-                "time": [f"{target_date}T00:00", f"{target_date}T12:00"],
-                "temperature_2m": [22.0, 28.0],
+                "time": [
+                    stamp
+                    for covered_date in covered_dates
+                    for stamp in (
+                        f"{covered_date}T00:00",
+                        f"{covered_date}T12:00",
+                    )
+                ],
+                "temperature_2m": [
+                    value
+                    for _covered_date in covered_dates
+                    for value in (22.0, 28.0)
+                ],
             },
         },
         sort_keys=True,
@@ -357,6 +370,95 @@ def _insert_openmeteo_anchor_artifact(
         ),
     )
     return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+
+def test_current_value_hwm_uses_consumed_models_not_configured_superset() -> None:
+    conn = _conn()
+    consumed: dict[str, dict[str, object]] = {}
+    for model in ("ecmwf_ifs", "icon_eu"):
+        _insert_raw_model_forecast(
+            conn,
+            model=model,
+            source_cycle_time=_dt(0),
+            captured_at=_dt(0, 5),
+            source_available_at=_dt(0, 5),
+        )
+        consumed[model] = {
+            "raw_model_forecast_id": int(
+                conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            ),
+            "served_cycle": _dt(0).isoformat(),
+            "captured_at": _dt(0, 5).isoformat(),
+            "served_via": "single_runs",
+        }
+    provenance = _with_current_value_serving(consumed)
+    fusion = provenance["bayes_precision_fusion"]
+    assert isinstance(fusion, dict)
+    fusion["source_clock_one_scheme"] = {
+        "configured_sources": ["ecmwf_ifs", "icon_eu", "icon_d2"],
+        "used_weights": {"ecmwf_ifs": 0.6, "icon_eu": 0.4},
+    }
+
+    checked, reason, _anchor = _exact_current_value_serving_lag(
+        conn,
+        city="Shanghai",
+        target_date="2026-06-07",
+        metric="high",
+        decision_time=_dt(4),
+        posterior_computed_at=_dt(3),
+        provenance=provenance,
+    )
+
+    assert checked is True
+    assert reason is None
+
+    del consumed["icon_eu"]
+    _checked, reason, _anchor = _exact_current_value_serving_lag(
+        conn,
+        city="Shanghai",
+        target_date="2026-06-07",
+        metric="high",
+        decision_time=_dt(4),
+        posterior_computed_at=_dt(3),
+        provenance=provenance,
+    )
+    assert reason == "basis=current_value_serving_provenance_unverifiable:model=icon_eu"
+
+
+def test_exact_anchor_artifact_accepts_consumed_day_covered_by_multiday_payload(
+    tmp_path,
+) -> None:
+    conn = _conn()
+    artifact_id = _insert_openmeteo_anchor_artifact(
+        conn,
+        tmp_path,
+        source_cycle_time=_dt(3),
+        target_date="2026-06-06",
+        payload_dates=("2026-06-06", "2026-06-07"),
+    )
+    provenance = {"openmeteo_anchor_artifact_id": artifact_id}
+
+    reason, cycle = _exact_consumed_anchor_artifact_cycle(
+        conn,
+        city="Shanghai",
+        target_date="2026-06-07",
+        metric="high",
+        decision_time=_dt(5),
+        provenance=provenance,
+    )
+    assert reason is None
+    assert cycle == _dt(3)
+
+    reason, cycle = _exact_consumed_anchor_artifact_cycle(
+        conn,
+        city="Shanghai",
+        target_date="2026-06-08",
+        metric="high",
+        decision_time=_dt(5),
+        provenance=provenance,
+    )
+    assert reason == f"basis=openmeteo_anchor_artifact_scope_mismatch:artifact_id={artifact_id}"
+    assert cycle is None
 
 
 def test_replacement_bundle_reader_requires_baseline_executable_bundle() -> None:
