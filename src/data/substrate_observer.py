@@ -320,21 +320,32 @@ def _pending_family_rows_for_refresh(
     stale_target_floor = _oceania_frontier_target_floor(decision_utc)
     rows = world_conn.execute(
         """
-        WITH pending AS (
+        WITH status_candidates AS (
+            SELECT p.event_id,
+                   p.last_error,
+                   p.updated_at
+            FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+            WHERE p.consumer_name = ?
+              AND p.processing_status = 'pending'
+              AND (p.claimed_at IS NULL OR p.claimed_at <= ?)
+
+            UNION ALL
+
+            SELECT p.event_id,
+                   p.last_error,
+                   p.updated_at
+            FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+            WHERE p.consumer_name = ?
+              AND p.processing_status = 'processing'
+              AND COALESCE(p.last_error, '') <> ''
+              AND (p.claimed_at IS NULL OR p.claimed_at <= ?)
+        ),
+        pending AS (
             SELECT p.event_id,
                    p.last_error
-            FROM opportunity_event_processing p INDEXED BY idx_opportunity_event_processing_status
+            FROM status_candidates p
             JOIN opportunity_events e ON e.event_id = p.event_id
-            WHERE p.consumer_name = ?
-              AND (
-                    p.processing_status = 'pending'
-                    OR (
-                        p.processing_status = 'processing'
-                        AND COALESCE(p.last_error, '') <> ''
-                    )
-                  )
-              AND (p.claimed_at IS NULL OR p.claimed_at <= ?)
-              AND (
+            WHERE (
                     e.event_type NOT IN (
                         'FORECAST_SNAPSHOT_READY',
                         'EDLI_REDECISION_PENDING',
@@ -386,7 +397,14 @@ def _pending_family_rows_for_refresh(
             MAX(json_extract(e.payload_json, '$.target_date')) DESC,
             MIN(e.event_id) ASC
         """,
-        (consumer_name, decision_utc.isoformat(), stale_target_floor, event_window_limit),
+        (
+            consumer_name,
+            decision_utc.isoformat(),
+            consumer_name,
+            decision_utc.isoformat(),
+            stale_target_floor,
+            event_window_limit,
+        ),
     ).fetchall()
     return [
         row

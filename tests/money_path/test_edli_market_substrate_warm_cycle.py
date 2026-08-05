@@ -575,6 +575,82 @@ def test_pending_family_refresh_includes_processing_day0_hourly_blocks():
         ]
 
 
+def test_substrate_pending_query_does_not_scan_processed_history():
+    """Composite status index must exclude the cold processed population."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE opportunity_events (
+            event_id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            priority INTEGER NOT NULL,
+            available_at TEXT NOT NULL,
+            payload_json TEXT NOT NULL
+        );
+        CREATE TABLE opportunity_event_processing (
+            consumer_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            processing_status TEXT NOT NULL,
+            claimed_at TEXT,
+            last_error TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (consumer_name, event_id)
+        );
+        CREATE INDEX idx_opportunity_event_processing_status
+            ON opportunity_event_processing(consumer_name, processing_status, updated_at);
+        """
+    )
+    conn.executemany(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, updated_at
+        ) VALUES ('edli_reactor_v1', ?, 'processed', '2026-08-05T00:00:00+00:00')
+        """,
+        ((f"cold-{index}",) for index in range(5000)),
+    )
+    payload = json.dumps(
+        {"city": "Tokyo", "target_date": "2026-08-06", "metric": "high"}
+    )
+    conn.execute(
+        """
+        INSERT INTO opportunity_events (
+            event_id, event_type, priority, available_at, payload_json
+        ) VALUES ('current', 'FORECAST_SNAPSHOT_READY', 100,
+                  '2026-08-05T00:01:00+00:00', ?)
+        """,
+        (payload,),
+    )
+    conn.execute(
+        """
+        INSERT INTO opportunity_event_processing (
+            consumer_name, event_id, processing_status, updated_at
+        ) VALUES ('edli_reactor_v1', 'current', 'pending',
+                  '2026-08-05T00:01:00+00:00')
+        """
+    )
+
+    progress_calls = 0
+
+    def reject_cold_scan() -> int:
+        nonlocal progress_calls
+        progress_calls += 1
+        return int(progress_calls > 1000)
+
+    conn.set_progress_handler(reject_cold_scan, 10)
+    rows = substrate_observer._pending_family_rows_for_refresh(
+        conn,
+        consumer_name="edli_reactor_v1",
+        now_utc=datetime(2026, 8, 5, 1, 0, tzinfo=timezone.utc),
+    )
+    conn.set_progress_handler(None, 0)
+
+    assert [(row[0], row[1], row[2]) for row in rows] == [
+        ("Tokyo", "2026-08-06", "high")
+    ]
+    assert progress_calls < 1000
+
+
 def test_full_family_capture_cap_is_decoupled_from_direct_clob_threshold():
     """Candidate selection cap and direct /book prefetch threshold serve different purposes."""
 
