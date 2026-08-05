@@ -22,11 +22,12 @@ WHY IT LIVES HERE (and NOT in src.main):
     so a Gamma/CLOB fetch error here cannot raise into the reactor, and a trading bug
     cannot blind substrate capture.
 
-THE TWO LIFTED JOBS SHARE ONE LOCK (system_decomposition_plan §4.1):
+THE TWO BROAD JOBS SHARE ONE LOCK (system_decomposition_plan §4.1):
   ``_market_discovery_cycle`` (universe sweep) and ``_edli_market_substrate_warm_cycle``
-  (pending-family warm) BOTH acquire the module-global ``_market_substrate_refresh_lock``
-  so they cannot race-write the snapshot table. They MUST run in ONE process; that is
-  why they are lifted together into this one module / daemon.
+  (pending-family warm) acquire ``_market_substrate_refresh_lock``. Exact held-risk
+  and FC-03 refreshes use a separate priority lock so network-bound broad work cannot
+  starve current executable truth; DB write leases and causal timestamps serialize
+  their canonical projection updates.
 
 OUTER PENDING GATES DELETED (system_decomposition_plan §0/§8 Step 1/§9): the universe
   sweep's old ``if _edli_reactor_active(): return`` and
@@ -66,17 +67,20 @@ from src.data.substrate_priority import (
     money_path_substrate_priority_request,
     record_money_path_substrate_priority_receipt,
 )
+from src.data.polymarket_request_governor import RequestPriority
 from src.contracts.canonical_lifecycle import VenueOrderStatus
 from src.contracts.position_truth import CURRENT_MONEY_RISK_CHAIN_STATES
 
 logger = logging.getLogger("zeus.substrate_observer")
 
-# In-process locks shared by the two lifted jobs (system_decomposition_plan §4.1):
-# both writers serialize through ``_market_substrate_refresh_lock`` so they cannot
-# race-write ``executable_market_snapshots``. ``_market_discovery_lock`` prevents a
-# universe sweep from overlapping itself.
+# Broad scans serialize with each other. Money-path refreshes use a distinct lock:
+# holding an HTTP-bound scan lock must never prevent held-risk or FC-03 truth from
+# being refreshed. Canonical per-row persistence remains serialized by the trade DB
+# write coordinator, and captured_at ordering prevents an older request from replacing
+# a newer exact snapshot.
 _market_discovery_lock = threading.Lock()
 _market_substrate_refresh_lock = threading.Lock()
+_market_substrate_priority_refresh_lock = threading.Lock()
 # Producer-local staleness clock — the SOLE trigger for the universe sweep after the
 # outer pending gates were deleted (§9 point 2). Never references consumer state.
 _market_discovery_last_completed_monotonic: float | None = None
@@ -1571,6 +1575,7 @@ def _refresh_pending_family_snapshots(
     snapshot_reserve_seconds: float | None = None,
     include_money_risk_families: bool = True,
     promote_pending_urgency: bool = True,
+    request_priority: RequestPriority = RequestPriority.SCAN,
 ) -> dict:
     """Targeted, cache-aware snapshot refresh for pending opportunity event families.
 
@@ -2617,7 +2622,10 @@ def _refresh_pending_family_snapshots(
             snapshot_read_conn = None
         write_conn = get_trade_connection(write_class="live")
         try:
-            with PolymarketClient(public_http_timeout=_clob_timeout) as clob:
+            with PolymarketClient(
+                public_http_timeout=_clob_timeout,
+                public_request_priority=request_priority,
+            ) as clob:
                 summary = refresh_executable_market_substrate_snapshots(
                     write_conn,
                     markets=markets_for_refresh,
@@ -3497,9 +3505,9 @@ def _edli_money_path_substrate_priority_cycle_under_intent(
         )
         lock_wait_s = _priority_refresh_lock_wait_seconds()
         substrate_acquired = (
-            _market_substrate_refresh_lock.acquire(blocking=False)
+            _market_substrate_priority_refresh_lock.acquire(blocking=False)
             if lock_wait_s <= 0.0
-            else _market_substrate_refresh_lock.acquire(timeout=lock_wait_s)
+            else _market_substrate_priority_refresh_lock.acquire(timeout=lock_wait_s)
         )
         if not substrate_acquired:
             summary = _substrate_warm_failed_summary(
@@ -3516,7 +3524,7 @@ def _edli_money_path_substrate_priority_cycle_under_intent(
 
         from src.data.job_lock import acquire_lock
 
-        process_lock_ctx = acquire_lock("market_substrate_refresh")
+        process_lock_ctx = acquire_lock("market_substrate_priority_refresh")
         if not process_lock_ctx.__enter__():
             summary = _substrate_warm_failed_summary(
                 status="priority_unserviced_cross_process_lock_busy",
@@ -3580,6 +3588,11 @@ def _edli_money_path_substrate_priority_cycle_under_intent(
             refresh_budget_seconds=priority_budget_s,
             snapshot_reserve_seconds=priority_snapshot_reserve_s,
             include_money_risk_families=False,
+            request_priority=(
+                RequestPriority.SUBMIT_JIT
+                if marker_force_refresh_condition_ids
+                else RequestPriority.HELD_REDUCE_ONLY
+            ),
         )
         summary = {
             **dict(summary or {}),
@@ -3629,7 +3642,7 @@ def _edli_money_path_substrate_priority_cycle_under_intent(
                 pass
         if substrate_acquired:
             try:
-                _market_substrate_refresh_lock.release()
+                _market_substrate_priority_refresh_lock.release()
             except RuntimeError:
                 pass
         if forecasts_conn is not None:
@@ -3660,8 +3673,8 @@ def refresh_money_path_substrate_now(
     Broad warming remains sidecar-owned. This entry point is the producer-side
     escape hatch for an already-selected live-money family whose current decision
     would otherwise fail only because its executable book row is stale. It uses the
-    same cross-process substrate lock and snapshot writer as the sidecar priority
-    lane, then returns the actual refresh summary to the consumer.
+    same priority substrate lock and snapshot writer as the sidecar priority lane,
+    independently of broad scans, then returns the actual refresh summary.
     """
 
     clean_families = {
@@ -3738,9 +3751,9 @@ def refresh_money_path_substrate_now(
     lock_wait_started = time.monotonic()
     lock_deadline = lock_wait_started + lock_wait_s
     substrate_acquired = (
-        _market_substrate_refresh_lock.acquire(blocking=False)
+        _market_substrate_priority_refresh_lock.acquire(blocking=False)
         if lock_wait_s <= 0.0
-        else _market_substrate_refresh_lock.acquire(timeout=lock_wait_s)
+        else _market_substrate_priority_refresh_lock.acquire(timeout=lock_wait_s)
     )
     if not substrate_acquired:
         intent_ctx.__exit__(None, None, None)
@@ -3760,7 +3773,7 @@ def refresh_money_path_substrate_now(
         from src.data.job_lock import acquire_lock
 
         while True:
-            process_lock_ctx = acquire_lock("market_substrate_refresh")
+            process_lock_ctx = acquire_lock("market_substrate_priority_refresh")
             substrate_process_acquired = process_lock_ctx.__enter__()
             if substrate_process_acquired:
                 intent_ctx.__exit__(None, None, None)
@@ -3813,6 +3826,11 @@ def refresh_money_path_substrate_now(
             refresh_budget_seconds=refresh_budget_seconds,
             snapshot_reserve_seconds=snapshot_reserve_seconds,
             include_money_risk_families=include_money_risk_families,
+            request_priority=(
+                RequestPriority.SUBMIT_JIT
+                if force_refresh
+                else RequestPriority.HELD_REDUCE_ONLY
+            ),
         )
         out = dict(summary or {})
         out.update(
@@ -3860,6 +3878,6 @@ def refresh_money_path_substrate_now(
             except Exception:  # noqa: BLE001
                 pass
         try:
-            _market_substrate_refresh_lock.release()
+            _market_substrate_priority_refresh_lock.release()
         except RuntimeError:
             pass

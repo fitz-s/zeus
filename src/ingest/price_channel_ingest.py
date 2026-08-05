@@ -122,12 +122,10 @@ _user_channel_ingestor = None
 _user_channel_thread: "threading.Thread | None" = None
 _edli_market_channel_thread: "threading.Thread | None" = None
 
-# In-process lock that serializes the market-channel reactive snapshot refresh against
-# itself. (In P2 the substrate observer owns its OWN copy of a like-named lock for its two
-# producers; this P3 copy only serializes the market-channel refresh callback within this
-# process — the two processes write the snapshot table via the same single-writer
-# discipline, and the lock is per-process by construction.)
-_market_substrate_refresh_lock = threading.Lock()
+# Exact market-channel refreshes serialize with priority peers, never broad scans.
+# Cross-process priority exclusion uses the matching job-lock key; canonical writes
+# remain serialized by the trade write coordinator.
+_market_substrate_priority_refresh_lock = threading.Lock()
 
 
 def _market_substrate_priority_turnstile():
@@ -3816,6 +3814,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
 
     def _runner() -> None:
         from src.data.polymarket_client import PolymarketClient
+        from src.data.polymarket_request_governor import RequestPriority
         from src.events.event_coalescer import EventCoalescer
         from src.events.event_writer import EventWriter
         from src.events.triggers.market_channel_ingestor import (
@@ -3947,14 +3946,16 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                     )
                     return "deferred"
 
-                substrate_acquired = _market_substrate_refresh_lock.acquire(blocking=False)
+                substrate_acquired = _market_substrate_priority_refresh_lock.acquire(
+                    blocking=False
+                )
                 if not substrate_acquired:
                     turnstile_ctx.__exit__(None, None, None)
                     logger.info(
                         "EDLI market-channel refresh deferred: executable substrate refresh already running"
                     )
                     return "deferred"
-                process_lock_ctx = acquire_lock("market_substrate_refresh")
+                process_lock_ctx = acquire_lock("market_substrate_priority_refresh")
                 process_entered = False
                 process_acquired = False
                 trade_conn = None
@@ -3969,15 +3970,23 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                     turnstile_ctx.__exit__(None, None, None)
                     turnstile_entered = False
                     trade_conn = get_trade_connection(write_class="live")
-                    summary = refresh_executable_market_substrate_snapshots(
-                        trade_conn,
-                        **_edli_market_channel_refresh_kwargs(
-                            action, [market], clob, datetime.now(timezone.utc)
-                        ),
-                        snapshot_write_context_factory=_edli_price_channel_trade_write_context_factory(
-                            owner="price_channel_snapshot_refresh"
-                        ),
-                    )
+                    with PolymarketClient(
+                        public_request_priority=RequestPriority.SUBMIT_JIT
+                    ) as exact_clob:
+                        summary = refresh_executable_market_substrate_snapshots(
+                            trade_conn,
+                            **_edli_market_channel_refresh_kwargs(
+                                action,
+                                [market],
+                                exact_clob,
+                                datetime.now(timezone.utc),
+                            ),
+                            snapshot_write_context_factory=(
+                                _edli_price_channel_trade_write_context_factory(
+                                    owner="price_channel_snapshot_refresh"
+                                )
+                            ),
+                        )
                 finally:
                     try:
                         if trade_conn is not None:
@@ -3991,7 +4000,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                                 if turnstile_entered:
                                     turnstile_ctx.__exit__(None, None, None)
                             finally:
-                                _market_substrate_refresh_lock.release()
+                                _market_substrate_priority_refresh_lock.release()
                 logger.info(
                     "EDLI market-channel refreshed executable snapshots: reason=%s token_id=%s condition_id=%s summary=%s",
                     action.reason,

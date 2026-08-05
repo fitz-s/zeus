@@ -3257,13 +3257,13 @@ def capture_executable_market_snapshot(
                 clob, selected_token, gamma_market_raw, outcome, raw_clob_market
             )
 
-    # Validate the caller's boundary timestamp, but do not use it as the
-    # executable snapshot's authority time.  The fresh orderbook authority is
-    # only known after all CLOB reads above have returned; stamping at call
-    # entry can make a slow-but-current snapshot self-expire before immediate
-    # repricing.
-    _utc_datetime(captured_at, field_name="captured_at")
-    captured = datetime.now(timezone.utc)
+    # Use the request boundary as the conservative causal timestamp. A broad
+    # request that started first may finish after a newer exact refresh; stamping
+    # completion time would let that older observation replace the exact latest
+    # projection. Slow reads may therefore expire earlier, which is fail-closed.
+    captured = _utc_datetime(captured_at, field_name="captured_at")
+    if captured > datetime.now(timezone.utc):
+        raise ExecutableSnapshotCaptureError("captured_at cannot be in the future")
     # PR 2: cache spread computation to avoid calling _compute_spread twice.
     _spread_usd = _compute_spread(raw_orderbook, top_bid, top_ask)
     snapshot = ExecutableMarketSnapshot(

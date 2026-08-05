@@ -4704,7 +4704,8 @@ def test_market_channel_snapshot_refresh_uses_shared_substrate_and_trade_write_c
     """The lifted price-channel lane must not race main/substrate snapshot writers."""
 
     lane_src = _PRICE_CHANNEL_MODULE.read_text(encoding="utf-8")
-    assert 'acquire_lock("market_substrate_refresh")' in lane_src
+    assert 'acquire_lock("market_substrate_priority_refresh")' in lane_src
+    assert "public_request_priority=RequestPriority.SUBMIT_JIT" in lane_src
     assert "_edli_price_channel_trade_write_context_factory(" in lane_src
     assert "snapshot_write_context_factory=" in lane_src
     assert "price_channel_snapshot_invalidate" in lane_src

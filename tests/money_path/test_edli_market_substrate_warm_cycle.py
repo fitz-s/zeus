@@ -1253,7 +1253,7 @@ def test_money_path_priority_default_budget_can_finish_hot_snapshot_backlog(monk
 
 
 def test_inline_winner_refresh_waits_through_sidecar_lock_collision(monkeypatch):
-    """A transient sidecar lock must not discard the exact FC-03 winner recapture."""
+    """A transient priority-peer lock must not discard exact FC-03 recapture."""
 
     import src.data.job_lock as job_lock
     import src.state.db as state_db
@@ -1301,10 +1301,12 @@ def test_inline_winner_refresh_waits_through_sidecar_lock_collision(monkeypatch)
 
     monkeypatch.setattr(state_db, "get_world_connection", _Conn)
     monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", _Conn)
+    refresh_calls: list[dict] = []
     monkeypatch.setattr(
         substrate_observer,
         "_refresh_pending_family_snapshots",
-        lambda *_args, **_kwargs: {"status": "refreshed", "inserted": 2},
+        lambda *_args, **kwargs: refresh_calls.append(kwargs)
+        or {"status": "refreshed", "inserted": 2},
     )
 
     summary = substrate_observer.refresh_money_path_substrate_now(
@@ -1319,6 +1321,61 @@ def test_inline_winner_refresh_waits_through_sidecar_lock_collision(monkeypatch)
     assert lock_attempts == [False, True]
     assert lock_exits == [False, True]
     assert sleep_calls and sleep_calls[0] <= 0.05
+    assert refresh_calls[0]["request_priority"] is substrate_observer.RequestPriority.SUBMIT_JIT
+
+
+def test_inline_exact_refresh_is_not_starved_by_broad_refresh_lock(monkeypatch):
+    """A slow broad HTTP scan cannot block held-risk exact executable truth."""
+
+    import src.data.job_lock as job_lock
+    import src.state.db as state_db
+
+    broad_lock = threading.Lock()
+    assert broad_lock.acquire(blocking=False)
+    monkeypatch.setattr(substrate_observer, "_market_substrate_refresh_lock", broad_lock)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_market_substrate_priority_refresh_lock",
+        threading.Lock(),
+    )
+    monkeypatch.setattr(
+        job_lock,
+        "acquire_lock",
+        lambda _name, **_kwargs: contextlib.nullcontext(True),
+    )
+
+    class _Conn:
+        def execute(self, sql, _params=()):
+            assert sql == "PRAGMA database_list"
+            return self
+
+        def fetchall(self):
+            return [(0, "main", "")]
+
+        def close(self):
+            pass
+
+    calls: list[dict] = []
+    monkeypatch.setattr(state_db, "get_world_connection", _Conn)
+    monkeypatch.setattr(state_db, "get_forecasts_connection_read_only", _Conn)
+    monkeypatch.setattr(
+        substrate_observer,
+        "_refresh_pending_family_snapshots",
+        lambda *_args, **kwargs: calls.append(kwargs)
+        or {"status": "refreshed", "inserted": 1},
+    )
+
+    try:
+        summary = substrate_observer.refresh_money_path_substrate_now(
+            families=[("Milan", "2026-08-04", "high")],
+            condition_ids=["held-condition"],
+            force_refresh=False,
+        )
+    finally:
+        broad_lock.release()
+
+    assert summary["status"] == "refreshed"
+    assert calls[0]["request_priority"] is substrate_observer.RequestPriority.HELD_REDUCE_ONLY
 
 
 def test_open_rest_condition_scope_maps_unpulled_rests_to_priority_conditions():
@@ -2404,6 +2461,7 @@ def test_money_path_priority_cycle_paused_fc03_preserves_exact_force_scope(monke
     assert calls[0]["priority_condition_ids"] == marker_condition_ids
     assert calls[0]["force_refresh_condition_ids"] == marker_condition_ids
     assert calls[0]["include_money_risk_families"] is False
+    assert calls[0]["request_priority"] is substrate_observer.RequestPriority.SUBMIT_JIT
     assert result["claim_order_priority_suppressed"] is True
 
 
@@ -4475,7 +4533,7 @@ def test_money_path_targeted_refresh_marks_substrate_priority():
     assert "condition_ids=condition_ids" in refresh_src
     assert "force_refresh_condition_ids=(condition_ids if force_refresh else ())" in refresh_src
     assert "merge_existing=not force_refresh" in refresh_src
-    assert 'acquire_lock("market_substrate_refresh")' in producer_src
+    assert 'acquire_lock("market_substrate_priority_refresh")' in producer_src
     assert "_refresh_pending_family_snapshots(" in producer_src
     assert "mark_money_path_substrate_priority(" in confirm_src
     assert 'reason="continuous_redecision_confirm_refresh"' in confirm_src

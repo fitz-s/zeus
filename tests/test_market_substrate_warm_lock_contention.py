@@ -158,11 +158,32 @@ def test_price_channel_exact_refresh_uses_priority_intent_without_broad_discover
     )[0]
     assert "find_weather_markets_or_raise" not in refresh_action
     assert refresh_action.index("_market_substrate_priority_turnstile()") < refresh_action.index(
-        "_market_substrate_refresh_lock.acquire"
+        "_market_substrate_priority_refresh_lock.acquire"
     )
+    assert 'acquire_lock("market_substrate_priority_refresh")' in refresh_action
+    assert "public_request_priority=RequestPriority.SUBMIT_JIT" in refresh_action
     assert "anonymous action cannot expand refresh scope" in refresh_action
     missing_topology = refresh_action[refresh_action.index("if market is None:") :]
     assert 'return "deferred"' in missing_topology
+
+
+def test_priority_process_lock_is_independent_of_held_broad_process_lock(tmp_path):
+    """A running broad scan cannot deny an exact cross-process refresh lease."""
+
+    from src.data.job_lock import acquire_lock
+
+    with acquire_lock(
+        "market_substrate_refresh", _locks_dir_override=tmp_path
+    ) as broad:
+        assert broad
+        with acquire_lock(
+            "market_substrate_priority_refresh", _locks_dir_override=tmp_path
+        ) as priority:
+            assert priority
+        with acquire_lock(
+            "market_substrate_refresh", _locks_dir_override=tmp_path
+        ) as competing_broad:
+            assert competing_broad is False
 
 
 # ---------------------------------------------------------------------------
