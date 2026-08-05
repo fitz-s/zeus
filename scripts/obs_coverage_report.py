@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-05-23; last_reviewed=2026-05-23; last_reused=never
+# Lifecycle: created=2026-05-23; last_reviewed=2026-08-05; last_reused=2026-08-05
 # Authority basis: operator FIX-5 CORE-P0 spec — observation coverage monitoring tool
 # Purpose: Read-only per-city obs freshness report (age vs budget across wu_pws /
 #          open_meteo / hko). Surfaces which cities are gated/stale before fills.
@@ -33,8 +33,8 @@ Source family → DB source prefix mapping:
   wu_pws            → wu_%           (wu_icao_history, most cities)
   hko               → hko_%          (hko_hourly_accumulator, HKG only)
   ogimet            → ogimet_%       (ogimet_metar_ICAO, subset of cities)
-  open_meteo_archive → (probe-only)  — no DB rows; staleness = GLOBAL gate
-  noaa              → (probe-only)   — no DB rows; staleness = GLOBAL gate
+  open_meteo_archive → (probe-only)  — diagnostic only; never proves city coverage
+  noaa              → (probe-only)   — no DB rows; staleness follows the real gate
 
 Do NOT modify freshness_gate.py or any gate/trade logic.
 Do NOT write to state/, DB, or any side-file.
@@ -61,13 +61,24 @@ from src.control.freshness_gate import (
 
 # ── Source family → DB source name prefix (for observation_instants) ──────
 # open_meteo_archive and noaa are probe-only (reachability checks, no DB rows).
-# Their freshness is global: staleness disables day0 for ALL cities.
+# Only probe sources explicitly governed by DAY0_CAPTURE_GATED_SOURCES may
+# disable Day0 globally.
 DB_SOURCE_PREFIX: dict[str, str] = {
     "wu_pws": "wu_%",
     "hko": "hko_%",
     "ogimet": "ogimet_%",
 }
 PROBE_ONLY_SOURCES = frozenset({"open_meteo_archive", "noaa"})
+
+
+def _blocking_probe_only_stale(source_fresh: dict[str, bool]) -> list[str]:
+    """Return stale probe-only sources that actually gate Day0 authority."""
+
+    return sorted(
+        source
+        for source in PROBE_ONLY_SOURCES & DAY0_CAPTURE_GATED_SOURCES
+        if not source_fresh.get(source, False)
+    )
 
 
 def _fmt_age(seconds: float | None) -> str:
@@ -177,12 +188,9 @@ def run_report(state_dir: Path, db_path: Path, lookback_hours: int) -> None:
     # ── 3. Per-city verdict ───────────────────────────────────────────────────
     city_names = sorted(cities_by_name)
 
-    # Determine global BLIND (probe-only stale sources)
-    probe_only_stale = [
-        src for src in PROBE_ONLY_SOURCES
-        if not source_fresh.get(src, False)
-    ]
-    global_gate_stale = verdict.day0_capture_disabled or bool(probe_only_stale)
+    # Diagnostic-only archive reachability must not contaminate city truth.
+    probe_only_stale = _blocking_probe_only_stale(source_fresh)
+    global_gate_stale = verdict.day0_capture_disabled
 
     print(f"  {'CITY':<22} {'VERDICT':<12} {'wu_pws':<16} {'hko':<16} {'ogimet':<16} NOTES")
     print("  " + "-" * 98)
@@ -228,7 +236,10 @@ def run_report(state_dir: Path, db_path: Path, lookback_hours: int) -> None:
             blind_cities.append(city)
         elif not covered_by:
             # No DB obs history for this city — only probe-only sources cover it
-            if all(source_fresh.get(src, False) for src in PROBE_ONLY_SOURCES if src in DAY0_CAPTURE_GATED_SOURCES):
+            if all(
+                source_fresh.get(src, False)
+                for src in PROBE_ONLY_SOURCES & DAY0_CAPTURE_GATED_SOURCES
+            ):
                 city_verdict = "COVERED"  # relies on probe-only sources, which are fresh
             else:
                 city_verdict = "BLIND"
@@ -273,7 +284,7 @@ def run_report(state_dir: Path, db_path: Path, lookback_hours: int) -> None:
     if verdict.stale_sources:
         print(f"\n  Stale sources : {', '.join(verdict.stale_sources)}")
     if probe_only_stale:
-        print(f"  Probe-only stale (global gate fires): {', '.join(probe_only_stale)}")
+        print(f"  Probe-only stale (Day0-gated): {', '.join(probe_only_stale)}")
     if blind_cities:
         print(f"\n  BLIND cities ({len(blind_cities)}):")
         for bc in blind_cities:
