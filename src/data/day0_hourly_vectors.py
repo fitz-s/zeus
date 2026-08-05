@@ -927,15 +927,16 @@ def maybe_refresh_day0_hourly_vectors(
     Cities with an in-domain regional high-res model use that regional source;
     other cities use the ECMWF IFS global fallback from
     ``day0_hourly_models_for_city``. One open-meteo call per city per interval.
-    Fail-soft per city. A failed fetch retains the normal refresh interval so a
-    provider outage cannot turn the 45-second scheduler into a quota-consuming
-    retry storm. An incomplete fetch is never persisted as a partial live
-    bundle; it returns a typed unavailable result and retries within
-    ``INCOMPLETE_BUNDLE_RETRY_INTERVAL_S`` (well inside the three-hour reader
-    freshness law). The ordered critical prefix may consume only the final
-    held-position reserve; the following priority prefix may consume the
-    source-clock reserve but never the critical reserve.  All remaining cities
-    stay in maintenance quota.
+    Fail-soft per city. A maintenance fetch failure retains the normal refresh
+    interval so a provider outage cannot turn the 45-second scheduler into a
+    quota-consuming retry storm. Missing-authority priority and held-capital
+    failures instead use the same bounded retry debt as incomplete bundles, so
+    a recovered provider cannot leave current probability dark for the full
+    normal interval. An incomplete fetch is never persisted as a partial live
+    bundle. The ordered critical prefix may consume only the final held-position
+    reserve; the following priority prefix may consume the source-clock reserve
+    but never the critical reserve. All remaining cities stay in maintenance
+    quota.
     """
     if decision_time.tzinfo is None:
         raise ValueError("decision_time must be timezone-aware")
@@ -989,7 +990,7 @@ def maybe_refresh_day0_hourly_vectors(
             _INCOMPLETE_RETRY_STREAK[refresh_key] = streak
             retry_cap_s = (
                 INCOMPLETE_BUNDLE_CRITICAL_RETRY_MAX_INTERVAL_S
-                if quota_lane == "critical"
+                if quota_lane in {"critical", "priority"}
                 else INCOMPLETE_BUNDLE_RETRY_MAX_INTERVAL_S
             )
             max_exponent = max(
@@ -1109,16 +1110,28 @@ def maybe_refresh_day0_hourly_vectors(
                 model for model in expected_models if model not in vector_models
             )
             if not vectors or not request_hash:
-                unavailable_bundles.append(
-                    Day0HourlyBundleUnavailable(
-                        city=name,
+                if quota_lane in {"critical", "priority"}:
+                    mark_incomplete(
+                        refresh_key=refresh_key,
+                        quota_lane=quota_lane,
+                        name=name,
                         target_dates=target_dates,
                         expected_models=expected_models,
                         available_models=vector_models,
                         missing_models=missing_models or expected_models,
                         reason="DAY0_HOURLY_BUNDLE_FETCH_UNAVAILABLE",
                     )
-                )
+                else:
+                    unavailable_bundles.append(
+                        Day0HourlyBundleUnavailable(
+                            city=name,
+                            target_dates=target_dates,
+                            expected_models=expected_models,
+                            available_models=vector_models,
+                            missing_models=missing_models or expected_models,
+                            reason="DAY0_HOURLY_BUNDLE_FETCH_UNAVAILABLE",
+                        )
+                    )
                 continue
             if missing_models:
                 mark_incomplete(

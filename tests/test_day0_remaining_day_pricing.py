@@ -2400,6 +2400,21 @@ class TestRemainingDayMembers:
 # ===========================================================================
 
 class TestRequestHashProvenance:
+    @pytest.fixture(autouse=True)
+    def _isolate_refresh_state(self):
+        import src.data.day0_hourly_vectors as hv
+
+        state = (
+            hv._LAST_REFRESH_MONOTONIC,
+            hv._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC,
+            hv._INCOMPLETE_RETRY_STREAK,
+        )
+        for values in state:
+            values.clear()
+        yield
+        for values in state:
+            values.clear()
+
     def test_persisted_rows_carry_non_empty_request_hash(self):
         conn = _conn()
         v = _vector()
@@ -2547,6 +2562,60 @@ class TestRequestHashProvenance:
         assert (n1, n2) == (0, 0)
         assert attempts == {"fetch": 1, "persist": 0}
 
+    @pytest.mark.parametrize("priority_cities", (0, 1))
+    def test_transport_failure_retry_follows_capital_priority(
+        self, monkeypatch, priority_cities
+    ):
+        """Current-authority gaps retry quickly; background failures stay throttled."""
+        import src.data.day0_hourly_vectors as hv
+
+        clock = {"now": 60.0}
+        attempts = {"fetch": 0}
+
+        def unavailable(*_args, **_kwargs):
+            attempts["fetch"] += 1
+            return [], ""
+
+        monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
+        monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", unavailable)
+        monkeypatch.setattr(hv.time, "monotonic", lambda: clock["now"])
+
+        decision_time = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
+        first = hv.maybe_refresh_day0_hourly_vectors(
+            [_paris()],
+            decision_time=decision_time,
+            interval_s=1800.0,
+            quota_priority_cities=priority_cities,
+            return_stats=True,
+        )
+
+        refresh_key = "Paris|2026-06-10"
+        assert first.unavailable_bundles[0].reason == (
+            "DAY0_HOURLY_BUNDLE_FETCH_UNAVAILABLE"
+        )
+        assert first.incomplete_expected_bundles == priority_cities
+        if priority_cities:
+            assert refresh_key not in hv._LAST_REFRESH_MONOTONIC
+            assert hv._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC[refresh_key] == (
+                clock["now"] + hv.INCOMPLETE_BUNDLE_RETRY_INTERVAL_S
+            )
+        else:
+            assert refresh_key in hv._LAST_REFRESH_MONOTONIC
+            assert refresh_key not in hv._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC
+
+        clock["now"] += hv.INCOMPLETE_BUNDLE_RETRY_INTERVAL_S
+        second = hv.maybe_refresh_day0_hourly_vectors(
+            [_paris()],
+            decision_time=decision_time + timedelta(
+                seconds=hv.INCOMPLETE_BUNDLE_RETRY_INTERVAL_S
+            ),
+            interval_s=1800.0,
+            quota_priority_cities=priority_cities,
+            return_stats=True,
+        )
+        assert second.cities_skipped_throttle == (0 if priority_cities else 1)
+        assert attempts == {"fetch": 1 + priority_cities}
+
     @pytest.mark.parametrize(
         ("city_name", "timezone_name"),
         [
@@ -2658,15 +2727,16 @@ class TestRequestHashProvenance:
         assert refresh_key not in hv._INCOMPLETE_RETRY_STREAK
 
     @pytest.mark.parametrize(
-        ("critical_count", "expected_cap"),
+        ("critical_count", "priority_count", "expected_cap"),
         (
-            (1, 600.0),
-            (0, 1800.0),
+            (1, 0, 600.0),
+            (0, 1, 600.0),
+            (0, 0, 1800.0),
         ),
-        ids=("held-capital", "ordinary-authority"),
+        ids=("held-capital", "missing-authority", "ordinary-authority"),
     )
     def test_repeated_incomplete_bundle_backs_off_without_quota_storm(
-        self, monkeypatch, critical_count, expected_cap
+        self, monkeypatch, critical_count, priority_count, expected_cap
     ):
         """No-change partial bundles cannot consume the Day0 quota every 45 seconds."""
         import src.data.day0_hourly_vectors as hv
@@ -2690,6 +2760,7 @@ class TestRequestHashProvenance:
                 [city],
                 decision_time=decision_time,
                 quota_critical_cities=critical_count,
+                quota_priority_cities=priority_count,
                 return_stats=True,
             )
             key = "Tokyo|2026-06-10"
