@@ -6,6 +6,7 @@ hourly_instants_append, solar_append, and forecasts_append.
 
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import logging
@@ -44,6 +45,21 @@ DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_BACKOFF_SEC = 2.0
 DEFAULT_429_FALLBACK_WAIT = 15.0
+
+# Top-level ``httpx.get`` creates and tears down a connection pool for every
+# request. Open-Meteo is a recurring multi-lane source, so that shape pays a
+# fresh TCP/TLS handshake on every city/source-clock pass. One bounded client
+# per daemon keeps transport reuse below the quota/request-lease authority: the
+# caller still acquires and settles one canonical lease for every HTTP attempt.
+_SHARED_HTTP_CLIENT = httpx.Client(
+    http2=False,
+    limits=httpx.Limits(
+        max_connections=16,
+        max_keepalive_connections=8,
+        keepalive_expiry=60.0,
+    ),
+)
+atexit.register(_SHARED_HTTP_CLIENT.close)
 
 
 class OpenMeteoRetryClass(str, Enum):
@@ -324,7 +340,7 @@ def fetch(
                 detail=reason,
             )
         try:
-            get = client.get if client is not None else httpx.get
+            get = client.get if client is not None else _SHARED_HTTP_CLIENT.get
             resp = get(url, params=params, timeout=timeout)
 
             if resp.status_code >= 400:

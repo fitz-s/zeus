@@ -1,5 +1,5 @@
 # Created: 2026-04-30
-# Last reused/audited: 2026-08-03
+# Last reused/audited: 2026-08-04
 # Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §2.1 + §6 antibody #5; PR #121 forecast-live OpenData-only source-health boundary
 """Antibody #5 (Phase 2): Source health probe contract tests.
 
@@ -392,7 +392,10 @@ class TestPriorStateSemantics:
             http_calls += 1
             raise AssertionError("reserve-protected probe must not send HTTP")
 
-        monkeypatch.setattr(omc.httpx, "get", _unexpected_http)
+        class _Client:
+            get = staticmethod(_unexpected_http)
+
+        monkeypatch.setattr(omc, "_SHARED_HTTP_CLIENT", _Client())
         with pytest.raises(OpenMeteoLocalPreflightQuotaDenied) as denied:
             omc.fetch(
                 omc.ARCHIVE_URL,
@@ -589,7 +592,10 @@ class TestPriorStateSemantics:
             http_calls += 1
             return httpx.Response(503, request=request)
 
-        monkeypatch.setattr(omc.httpx, "get", _server_error)
+        class _Client:
+            get = staticmethod(_server_error)
+
+        monkeypatch.setattr(omc, "_SHARED_HTTP_CLIENT", _Client())
         result = probe_sources(
             ("open_meteo_archive",),
             _prior_state={
@@ -624,7 +630,10 @@ class TestPriorStateSemantics:
             http_calls += 1
             return httpx.Response(429, request=request)
 
-        monkeypatch.setattr(omc.httpx, "get", _rate_limited)
+        class _Client:
+            get = staticmethod(_rate_limited)
+
+        monkeypatch.setattr(omc, "_SHARED_HTTP_CLIENT", _Client())
         results = probe_sources(
             ("open_meteo_archive",),
             _prior_state={

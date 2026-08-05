@@ -5590,10 +5590,20 @@ def _day0_hourly_refresh_budget_seconds() -> float:
 
 
 def _day0_hourly_fetch_timeout_seconds() -> float:
+    from src.data.day0_hourly_vectors import DEFAULT_FETCH_TIMEOUT_S
+
     try:
-        return max(0.25, float(os.environ.get("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", "1.5")))
+        return max(
+            0.25,
+            float(
+                os.environ.get(
+                    "ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS",
+                    str(DEFAULT_FETCH_TIMEOUT_S),
+                )
+            ),
+        )
     except (TypeError, ValueError):
-        return 1.5
+        return DEFAULT_FETCH_TIMEOUT_S
 
 
 def _rotate_day0_refresh_segment(items: list[Any], cursor: int) -> list[Any]:
@@ -9090,14 +9100,15 @@ def _reactor_day0_hourly_refresh_budget_seconds() -> float:
         return 2.5
 
 def _reactor_day0_hourly_fetch_timeout_seconds() -> float:
+    default_timeout = _day0_hourly_fetch_timeout_seconds()
     raw = os.environ.get(
         "ZEUS_REACTOR_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS",
-        os.environ.get("ZEUS_DAY0_HOURLY_FETCH_TIMEOUT_SECONDS", "1.5"),
+        str(default_timeout),
     )
     try:
         return max(0.25, float(raw))
     except (TypeError, ValueError):
-        return 1.5
+        return default_timeout
 
 def _edli_bridge_day0_extreme_materialization_seeds(event_ids: tuple[str, ...]) -> None:
     """Bridge freshly-committed DAY0_EXTREME_UPDATED events to immediate re-materialization.

@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-08-01; last_reused=2026-08-01
+# Lifecycle: created=2026-04-28; last_reviewed=2026-08-04; last_reused=2026-08-04
 # Created: 2026-04-28
-# Last reused/audited: 2026-08-01
+# Last reused/audited: 2026-08-04
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -12091,10 +12091,14 @@ def test_openmeteo_fetch_fast_fail_429_marks_cooldown_without_sleep(monkeypatch,
             req = httpx.Request("GET", "https://x")
             raise httpx.HTTPStatusError("429", request=req, response=httpx.Response(429, request=req))
 
+    class _Client:
+        def get(self, *_args, **_kwargs):
+            return _Resp()
+
     slept: list[float] = []
     monkeypatch.setattr(openmeteo_client.quota_tracker, "acquire_call", lambda _label="": True)
     monkeypatch.setattr(openmeteo_client.quota_tracker, "note_rate_limited", lambda wait: None)
-    monkeypatch.setattr(openmeteo_client.httpx, "get", lambda *a, **k: _Resp())
+    monkeypatch.setattr(openmeteo_client, "_SHARED_HTTP_CLIENT", _Client())
     monkeypatch.setattr(openmeteo_client.time, "sleep", lambda seconds: slept.append(float(seconds)))
 
     with caplog.at_level("WARNING", logger="src.data.openmeteo_client"), pytest.raises(httpx.HTTPStatusError):

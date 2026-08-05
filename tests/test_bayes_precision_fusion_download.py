@@ -234,6 +234,41 @@ def test_source_clock_fetch_uses_remaining_deadline_without_retries(monkeypatch)
     assert 0.0 < float(captured["timeout"]) <= 0.2
 
 
+def test_openmeteo_default_transport_reuses_one_bounded_client(
+    monkeypatch, tmp_path
+) -> None:
+    import src.data.openmeteo_client as client
+
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class _Client:
+        def get(self, url, *, params, timeout):
+            calls.append((str(url), dict(params)))
+            return httpx.Response(
+                200,
+                json={"ok": True},
+                request=httpx.Request("GET", url, params=params),
+            )
+
+    shared = _Client()
+    monkeypatch.setattr(client, "_SHARED_HTTP_CLIENT", shared)
+    tracker = client.OpenMeteoQuotaTracker(
+        state_path=tmp_path / "openmeteo-quota.json"
+    )
+
+    for latitude in (1.0, 2.0):
+        assert client.fetch(
+            "https://api.open-meteo.com/v1/forecast",
+            {"latitude": latitude, "longitude": 3.0},
+            max_retries=1,
+            quota=tracker,
+        ) == {"ok": True}
+
+    assert len(calls) == 2
+    assert tracker.calls_today() == 2
+
+
 def test_source_clock_fetch_batches_multiple_locations_into_one_request(monkeypatch) -> None:
     import src.data.bayes_precision_fusion_download as dl
     import src.data.openmeteo_client as client
@@ -1467,7 +1502,12 @@ def test_bpf_batched_fetch_uses_injected_quota_tracker(monkeypatch) -> None:
 
     tracker = OpenMeteoQuotaTracker()
     monkeypatch.setattr(dl, "_BPF_OPENMETEO_QUOTA_TRACKER", tracker)
-    monkeypatch.setattr(om.httpx, "get", lambda *_args, **_kwargs: _Resp())
+
+    class _Client:
+        def get(self, *_args, **_kwargs):
+            return _Resp()
+
+    monkeypatch.setattr(om, "_SHARED_HTTP_CLIENT", _Client())
 
     got = dl._default_previous_runs_fetch_batched(
         models=["icon_global"],
@@ -1509,7 +1549,10 @@ def test_default_previous_runs_batched_uses_comma_model_param(monkeypatch) -> No
         captured["models"] = params["models"]
         return _Resp()
 
-    monkeypatch.setattr(om.httpx, "get", _fake_get)
+    class _Client:
+        get = staticmethod(_fake_get)
+
+    monkeypatch.setattr(om, "_SHARED_HTTP_CLIENT", _Client())
 
     got = dl._default_previous_runs_fetch_batched(
         models=["icon_global", ANCHOR_MODEL],
