@@ -1405,6 +1405,86 @@ def test_materialization_queue_runs_default_requests_in_bounded_parallel(
     assert {path.parent.parent.name for path in claimed_inputs} == {
         queue_mod.MATERIALIZATION_INFLIGHT_DIR_NAME
     }
+    receipts = tuple((tmp_path / "succeeded_latest").glob("*.json"))
+    assert len(receipts) == len(paths)
+    assert not tuple(processed_dir.glob("*.json"))
+    assert all(
+        json.loads(path.read_text(encoding="utf-8"))["result_evidence"]
+        == {
+            "committed_posterior": True,
+            "reactor_wake_published": True,
+            "returncode": 0,
+        }
+        for path in receipts
+    )
+
+
+def test_materialization_queue_bounds_success_receipts_per_family(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    base_request = {
+        "city": "Paris",
+        "target_date": "2026-08-05",
+        "temperature_metric": "low",
+        "source_cycle_time": "2026-08-05T00:00:00+00:00",
+        "baseline_source_run_id": "baseline",
+        "openmeteo_source_run_id": "anchor",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "14C"}],
+    }
+
+    def _successful_runner(argv):
+        return subprocess.CompletedProcess(
+            list(argv),
+            0,
+            stdout=(
+                '{"status":"READY","reason_codes":[],"committed":true,'
+                '"posterior_id":42,"reactor_wake_published":true}\n'
+            ),
+            stderr="large diagnostic output is intentionally not retained",
+        )
+
+    for minute in (30, 31):
+        request_path = request_dir / f"Paris.2026-08-05.low.{minute}.json"
+        request_path.write_text(
+            json.dumps(
+                {
+                    **base_request,
+                    "computed_at": f"2026-08-05T11:{minute}:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        report = queue_mod.process_replacement_forecast_live_materialization_queue(
+            request_dir=request_dir,
+            processed_dir=processed_dir,
+            failed_dir=failed_dir,
+            forecast_db=tmp_path / "forecasts.db",
+            raw_manifest_dir=None,
+            limit=1,
+            runner=_successful_runner,
+        )
+        assert report.status == "PROCESSED"
+        assert report.failed_count == 0
+        assert report.processed_count == 1
+
+    receipts = tuple((tmp_path / "succeeded_latest").glob("*.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+    assert receipt["status"] == "SUCCEEDED"
+    assert receipt["computed_at"] == "2026-08-05T11:31:00+00:00"
+    assert receipt["result_evidence"] == {
+        "committed_posterior": True,
+        "reactor_wake_published": True,
+        "returncode": 0,
+    }
+    assert "large diagnostic output" not in receipts[0].read_text(encoding="utf-8")
+    assert not tuple(processed_dir.glob("*.json"))
 
 
 def test_materialization_queue_releases_lock_before_family_compute(

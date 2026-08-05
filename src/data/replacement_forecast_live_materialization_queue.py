@@ -1438,6 +1438,7 @@ def _record_latest_terminal_request(
     receipt_dir_name: str,
     status: str,
     reason_codes: Sequence[str],
+    result_evidence: Mapping[str, object] | None = None,
 ) -> Path:
     """Replace valueless terminal work with one compact receipt per family.
 
@@ -1473,6 +1474,8 @@ def _record_latest_terminal_request(
             else None
         ),
     }
+    if result_evidence:
+        receipt["result_evidence"] = dict(result_evidence)
     with temporary.open("w", encoding="utf-8") as handle:
         json.dump(receipt, handle, sort_keys=True, separators=(",", ":"))
         handle.flush()
@@ -2380,9 +2383,25 @@ def _process_claimed_materialization_batch(
                     item.marker_path.unlink()
                 except FileNotFoundError:
                     pass
-            moved = _move_request(input_json, processed_path)
-            _write_sidecar(moved, payload)
-            processed.append(str(moved))
+            if item.request_payload is None:
+                moved = _move_request(input_json, processed_path)
+                _write_sidecar(moved, payload)
+                processed.append(str(moved))
+            else:
+                receipt = _record_latest_terminal_request(
+                    input_json,
+                    processed_path=processed_path,
+                    request_payload=item.request_payload,
+                    receipt_dir_name="succeeded_latest",
+                    status="SUCCEEDED",
+                    reason_codes=result_reason_codes,
+                    result_evidence={
+                        "returncode": int(completed.returncode),
+                        "committed_posterior": committed,
+                        "reactor_wake_published": wake_published,
+                    },
+                )
+                processed.append(str(receipt))
         elif (
             item.request_payload is not None
             and _STALE_DAY0_ENQUEUE_OWNER_REASON in result_reason_codes
