@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-28
+# Last reused or audited: 2026-08-04
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
 #   raw_model_forecasts), §3 (causality: previous-runs fixed-lead; single-runs live capture;
 #   run_time != source_available_at), §5 (~6mo retention); §7 antibodies (C/F unit mix ->
@@ -47,6 +47,8 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
+
+import httpx
 
 from src.data.bayes_precision_fusion_capture import (
     OPENMETEO_MODEL_IDS,
@@ -548,9 +550,17 @@ def _can_split_location_batch(
     location_count: int,
     deadline_monotonic: float | None,
 ) -> bool:
-    """Whether an untyped transport failure may be isolated by location."""
+    """Whether a response failure may be isolated by location.
+
+    DNS, connection, TLS, and read failures apply to the whole request. Splitting those
+    failures recursively turns one unavailable 25-location request into as many as 49
+    attempts without adding information, consuming the quota needed for the next healthy
+    source-clock tick. Only failures above the transport layer may be location-specific.
+    """
 
     if location_count <= 1 or _typed_transport_outcome(error) is not None:
+        return False
+    if isinstance(error, (httpx.TransportError, OSError, TimeoutError)):
         return False
     text = str(error or "").lower()
     if _is_quota_transport_error(text) or any(

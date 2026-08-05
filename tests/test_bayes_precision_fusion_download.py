@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-06-08; last_reviewed=2026-08-04; last_reused=2026-08-04
 # Purpose: Regression tests for BPF raw forecast download and persistence semantics.
 # Reuse: Run when changing Bayes precision fusion raw-input capture or scheduler health.
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
@@ -23,6 +23,7 @@ import time
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+import httpx
 import pytest
 
 from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema
@@ -281,7 +282,7 @@ def test_source_clock_fetch_batches_multiple_locations_into_one_request(monkeypa
     ]
 
 
-def test_source_clock_fetch_isolates_transient_location_batch_failure(monkeypatch) -> None:
+def test_source_clock_fetch_isolates_location_response_failure(monkeypatch) -> None:
     import src.data.bayes_precision_fusion_download as dl
     import src.data.openmeteo_client as client
 
@@ -305,7 +306,7 @@ def test_source_clock_fetch_isolates_transient_location_batch_failure(monkeypatc
         location_count = len(str(params["latitude"]).split(","))
         calls.append(location_count)
         if location_count == 4:
-            raise RuntimeError("synthetic TLS handshake timeout")
+            raise RuntimeError("Open-Meteo multi-location response count mismatch")
         bases = [float(value) for value in str(params["latitude"]).split(",")]
         return [_payload(base) for base in bases]
 
@@ -332,6 +333,49 @@ def test_source_clock_fetch_isolates_transient_location_batch_failure(monkeypatc
         (42.0, 39.0),
         (52.0, 49.0),
     ]
+
+
+@pytest.mark.parametrize(
+    "error",
+    (
+        httpx.ConnectError("DNS lookup failed"),
+        httpx.ConnectTimeout("TLS handshake timed out"),
+        httpx.ReadTimeout("read timed out"),
+        OSError(8, "nodename nor servname provided, or not known"),
+        TimeoutError("request timed out"),
+    ),
+)
+def test_source_clock_fetch_does_not_split_global_transport_failure(
+    monkeypatch,
+    error: Exception,
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+
+    calls: list[int] = []
+
+    def _fetch(_url, params, **_kwargs):
+        calls.append(len(str(params["latitude"]).split(",")))
+        raise error
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+    target_date = date(2026, 6, 9)
+    got = dl._default_live_fetch_locations_batched(
+        models=["ecmwf_ifs"],
+        locations=[
+            (float(index), float(index), "UTC", (target_date,))
+            for index in range(25)
+        ],
+        run=datetime(2026, 6, 8, 0, tzinfo=UTC),
+        forecast_hours=120,
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert calls == [25]
+    assert all(
+        dl._BATCH_TRANSPORT_ERROR_KEY in result[target_date]
+        for result in got
+    )
 
 
 def test_source_clock_fetch_does_not_split_quota_failure(monkeypatch) -> None:
