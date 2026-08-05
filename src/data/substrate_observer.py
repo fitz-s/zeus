@@ -1511,19 +1511,20 @@ def _substrate_warm_business_summary(
     attempted = int(out.get("attempted") or 0)
     inserted = int(out.get("inserted") or 0)
     failed = int(out.get("failed") or 0)
+    stale_conditions = int(out.get("stale_condition_submitted") or 0)
     budget_exhausted = bool(out.get("budget_exhausted"))
     coverage_status = str(out.get("executable_substrate_coverage_status") or "").strip().upper()
     if attempted > 0 and inserted <= 0 and failed > 0:
         out["scheduler_failed"] = True
         out["scheduler_failure_reason"] = "snapshot_write_failed_no_coverage"
-    if status == "refreshed" and attempted > 0 and inserted <= 0 and (
-        budget_exhausted or coverage_status == "NONE"
+    if status == "refreshed" and inserted <= 0 and stale_conditions > 0 and (
+        attempted <= 0 or budget_exhausted or coverage_status == "NONE"
     ):
         out["scheduler_failed"] = True
         out["scheduler_failure_reason"] = (
             "snapshot_refresh_exhausted_no_coverage"
             if budget_exhausted
-            else "snapshot_refresh_no_executable_coverage"
+            else "snapshot_refresh_no_durable_progress"
         )
     if isinstance(priority_request, dict):
         condition_ids = list(priority_request.get("condition_ids") or [])

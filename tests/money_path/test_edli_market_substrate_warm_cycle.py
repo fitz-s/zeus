@@ -1186,6 +1186,7 @@ def test_substrate_warm_refreshed_zero_coverage_exhaustion_is_scheduler_failure(
             "inserted": 0,
             "failed": 0,
             "budget_exhausted": 1,
+            "stale_condition_submitted": 8,
             "executable_substrate_coverage_status": "NONE",
         },
         priority_request=None,
@@ -1194,6 +1195,25 @@ def test_substrate_warm_refreshed_zero_coverage_exhaustion_is_scheduler_failure(
 
     assert summary["scheduler_failed"] is True
     assert summary["scheduler_failure_reason"] == "snapshot_refresh_exhausted_no_coverage"
+
+
+def test_substrate_warm_stale_debt_without_attempt_is_not_success():
+    summary = substrate_observer._substrate_warm_business_summary(
+        {
+            "status": "refreshed",
+            "attempted": 0,
+            "inserted": 0,
+            "compact_inserted": 0,
+            "failed": 0,
+            "stale_condition_submitted": 770,
+            "executable_substrate_coverage_status": "NONE",
+        },
+        priority_request=None,
+        priority_marker_active=False,
+    )
+
+    assert summary["scheduler_failed"] is True
+    assert summary["scheduler_failure_reason"] == "snapshot_refresh_no_durable_progress"
 
 
 def test_targeted_decision_refresh_has_no_inline_quota_knobs():
