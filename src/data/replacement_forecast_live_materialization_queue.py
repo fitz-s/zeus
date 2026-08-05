@@ -1061,6 +1061,10 @@ _UNCHANGED_BLOCKED_SKIP_REASON = (
 _UNCHANGED_BLOCKED_SEED_SKIP_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_SEED_UNCHANGED_BLOCKED_INPUT"
 )
+_STALE_DAY0_ENQUEUE_OWNER_REASON = "STALE_DAY0_ENQUEUE_OWNER"
+_STALE_DAY0_OWNER_SUPERSEDED_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_DAY0_OWNER"
+)
 _ATTEMPT_CLOCK_FIELDS = frozenset({"computed_at", "expires_at"})
 _ATTEMPT_INPUT_PATH_FIELDS = (
     "openmeteo_payload_json",
@@ -1421,6 +1425,57 @@ def _subprocess_result_reason_codes(completed: subprocess.CompletedProcess[str])
             return ()
         return tuple(str(reason) for reason in reasons)
     return ()
+
+
+def _record_superseded_day0_request(
+    input_json: Path,
+    *,
+    processed_path: Path,
+    request_payload: Mapping[str, object],
+) -> Path:
+    """Replace stale Day0 work with one compact receipt per forecast family.
+
+    A newer observation owner makes this request causally obsolete; retaining the
+    full request in the append-only failed/processed inventories has no replay or
+    decision value.  The current owner row remains canonical.  This receipt keeps
+    the last supersession fact while bounding storage by family cardinality.
+    """
+
+    receipt_dir = processed_path.parent / "superseded_latest"
+    _ensure_directory_entry_durable(
+        receipt_dir,
+        durable_ancestor=processed_path.parent,
+    )
+    city = str(request_payload.get("city") or "unknown").replace(" ", "_")
+    target_date = str(request_payload.get("target_date") or "unknown")
+    metric = str(request_payload.get("temperature_metric") or "unknown").lower()
+    target = receipt_dir / f"{city}.{target_date}.{metric}.json"
+    temporary = receipt_dir / f".{target.name}.{os.getpid()}.tmp"
+    witness = request_payload.get("day0_enqueue_owner_witness")
+    receipt = {
+        "status": "SKIPPED_STALE_DAY0_ENQUEUE_OWNER",
+        "reason_codes": [_STALE_DAY0_OWNER_SUPERSEDED_REASON],
+        "city": request_payload.get("city"),
+        "target_date": request_payload.get("target_date"),
+        "temperature_metric": request_payload.get("temperature_metric"),
+        "source_cycle_time": request_payload.get("source_cycle_time"),
+        "computed_at": request_payload.get("computed_at"),
+        "superseded_at": datetime.now(timezone.utc).isoformat(),
+        "conditioning_identity": (
+            witness.get("conditioning_identity")
+            if isinstance(witness, Mapping)
+            else None
+        ),
+    }
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(receipt, handle, sort_keys=True, separators=(",", ":"))
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, target)
+    _fsync_directory(receipt_dir)
+    input_json.unlink()
+    _fsync_directory(input_json.parent)
+    return target
 
 
 def _coalesce_superseded_materialization_requests(
@@ -2214,6 +2269,7 @@ def _process_claimed_materialization_batch(
     processed: list[str] = list(superseded)
     failed: list[str] = []
     unchanged_blocked: list[str] = []
+    stale_day0_superseded: list[str] = []
     pending: list[_PendingMaterialization] = []
     marker_dir = marker_dir or request_path.parent / "blocked_attempts"
     for input_json in requests[:limit]:
@@ -2314,6 +2370,7 @@ def _process_claimed_materialization_batch(
             payload["reason_codes"] = [
                 "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
             ]
+        result_reason_codes = _subprocess_result_reason_codes(completed)
         if completed.returncode == 0:
             if item.marker_path is not None:
                 try:
@@ -2323,11 +2380,27 @@ def _process_claimed_materialization_batch(
             moved = _move_request(input_json, processed_path)
             _write_sidecar(moved, payload)
             processed.append(str(moved))
+        elif (
+            item.request_payload is not None
+            and _STALE_DAY0_ENQUEUE_OWNER_REASON in result_reason_codes
+        ):
+            if item.marker_path is not None:
+                try:
+                    item.marker_path.unlink()
+                except FileNotFoundError:
+                    pass
+            receipt = _record_superseded_day0_request(
+                input_json,
+                processed_path=processed_path,
+                request_payload=item.request_payload,
+            )
+            processed.append(str(receipt))
+            stale_day0_superseded.append(str(receipt))
         else:
             if (
                 item.request_payload is not None
                 and _UNCHANGED_BLOCKED_REASON
-                in _subprocess_result_reason_codes(completed)
+                in result_reason_codes
             ):
                 try:
                     _write_blocked_attempt_marker(
@@ -2347,6 +2420,8 @@ def _process_claimed_materialization_batch(
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE")
     if unchanged_blocked:
         reasons.append(_UNCHANGED_BLOCKED_SKIP_REASON)
+    if stale_day0_superseded:
+        reasons.append(_STALE_DAY0_OWNER_SUPERSEDED_REASON)
     if failed:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_FAILED")
     if committed_posterior_count > reactor_wake_published_count:

@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-07-20
+# Last reused or audited: 2026-08-05
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — 没有新的就用老的 applied to fusion
 #   membership. The gem_global-only previous_runs exception (edc598b440) is generalized into the
 #   SINGLE serving authority (src/data/replacement_current_value_serving.py): a provider absent
@@ -1074,6 +1074,76 @@ def test_materialization_queue_timeout_moves_request_to_failed(tmp_path) -> None
     assert sidecar["reason_codes"] == [
         "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_TIMEOUT"
     ]
+
+
+def test_materialization_queue_bounds_stale_day0_owner_receipts_per_family(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    base_request = {
+        "city": "NYC",
+        "target_date": "2026-08-05",
+        "temperature_metric": "low",
+        "source_cycle_time": "2026-08-05T00:00:00+00:00",
+        "baseline_source_run_id": "baseline-run",
+        "openmeteo_source_run_id": "anchor-run",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "57F-or-below"}],
+        "day0_enqueue_owner_witness": {
+            "conditioning_identity": "old-observation-owner",
+        },
+    }
+
+    def _stale_owner_runner(argv):
+        return subprocess.CompletedProcess(
+            list(argv),
+            1,
+            stdout=(
+                '{"status":"BLOCKED","reason_codes":'
+                '["STALE_DAY0_ENQUEUE_OWNER"]}\n'
+            ),
+            stderr="",
+        )
+
+    for minute in (44, 45):
+        request_path = request_dir / f"NYC.2026-08-05.low.{minute}.json"
+        request_path.write_text(
+            json.dumps(
+                {
+                    **base_request,
+                    "computed_at": f"2026-08-05T10:{minute}:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        report = queue_mod.process_replacement_forecast_live_materialization_queue(
+            request_dir=request_dir,
+            processed_dir=processed_dir,
+            failed_dir=failed_dir,
+            forecast_db=tmp_path / "forecasts.db",
+            raw_manifest_dir=None,
+            limit=1,
+            runner=_stale_owner_runner,
+        )
+        assert report.status == "PROCESSED"
+        assert report.failed_count == 0
+        assert report.processed_count == 1
+        assert (
+            "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_DAY0_OWNER"
+            in report.reason_codes
+        )
+
+    receipts = list((tmp_path / "superseded_latest").glob("*.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+    assert receipt["status"] == "SKIPPED_STALE_DAY0_ENQUEUE_OWNER"
+    assert receipt["computed_at"] == "2026-08-05T10:45:00+00:00"
+    assert not list(failed_dir.glob("*.json"))
+    assert not list(processed_dir.glob("*.json"))
 
 
 def test_materialization_queue_can_defer_seed_preparation_for_requests(
