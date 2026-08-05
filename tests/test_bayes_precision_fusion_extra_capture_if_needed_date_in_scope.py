@@ -526,6 +526,53 @@ def test_durable_rotation_does_not_starve_tail_groups_across_restarts(
     assert attempted[4:] == attempted[:4]
 
 
+def test_priority_rotation_preempts_regular_cursor_and_remains_fair(
+    tmp_path,
+) -> None:
+    cycle = datetime(2026, 8, 5, 0, tzinfo=timezone.utc)
+    state_path = tmp_path / "replacement_forecast_live" / ".rotation.json"
+    targets = _rotation_targets(
+        (
+            ("Tokyo", "2026-08-06", "high"),
+            ("Wuhan", "2026-08-06", "high"),
+            ("Sao Paulo", "2026-08-06", "high"),
+        )
+    )
+    production._advance_bpf_extra_rotation(
+        cycle=cycle,
+        rotated_targets=(targets[2],),
+        attempted_group_count=1,
+        state_path=state_path,
+    )
+    priority = {
+        ("Tokyo", "2026-08-06"),
+        ("Wuhan", "2026-08-06"),
+    }
+
+    first, _, _, first_status = production._rotate_bpf_extra_targets(
+        targets,
+        cycle=cycle,
+        state_path=state_path,
+        priority_group_keys=priority,
+    )
+    assert first[0].city == "Tokyo"
+    assert first_status.startswith("PRIORITY_")
+
+    production._advance_bpf_extra_rotation(
+        cycle=cycle,
+        rotated_targets=first,
+        attempted_group_count=1,
+        state_path=state_path,
+    )
+    second, _, _, _ = production._rotate_bpf_extra_targets(
+        targets,
+        cycle=cycle,
+        state_path=state_path,
+        priority_group_keys=priority,
+    )
+    assert second[0].city == "Wuhan"
+
+
 @pytest.mark.parametrize(
     ("outcome", "receipt", "next_head", "write_status"),
     (

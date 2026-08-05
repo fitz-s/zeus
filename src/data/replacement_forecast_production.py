@@ -222,8 +222,9 @@ def _rotate_bpf_extra_targets(
     *,
     cycle: datetime,
     state_path: Path | None,
+    priority_group_keys: set[tuple[str, str]] | None = None,
 ) -> tuple[tuple[object, ...], int, int, str]:
-    """Start each bounded extras pass after the groups attempted last time."""
+    """Rotate urgent and ordinary groups independently, with urgent groups first."""
 
     grouped: dict[tuple[str, str], list[object]] = {}
     for target in targets:
@@ -234,14 +235,43 @@ def _rotate_bpf_extra_targets(
         return (), 0, 0, "NO_TARGETS"
 
     cycle_key = cycle.astimezone(timezone.utc).isoformat()
+    priority = set(priority_group_keys or ())
+    priority_keys = tuple(key for key in keys if key in priority)
+    ordinary_keys = tuple(key for key in keys if key not in priority)
     with _BPF_EXTRA_ROTATION_LOCK:
-        start, cursor_status = _bpf_extra_rotation_start(
-            state_path=state_path,
-            cycle_key=cycle_key,
-            keys=keys,
-        )
-
-    rotated_keys = keys[start:] + keys[:start]
+        if not priority_keys:
+            start, cursor_status = _bpf_extra_rotation_start(
+                state_path=state_path,
+                cycle_key=cycle_key,
+                keys=keys,
+            )
+            rotated_keys = keys[start:] + keys[:start]
+        else:
+            priority_start, priority_status = _bpf_extra_rotation_start(
+                state_path=state_path,
+                cycle_key=cycle_key,
+                keys=priority_keys,
+            )
+            rotated_priority = (
+                priority_keys[priority_start:] + priority_keys[:priority_start]
+            )
+            if ordinary_keys:
+                ordinary_start, ordinary_status = _bpf_extra_rotation_start(
+                    state_path=state_path,
+                    cycle_key=cycle_key,
+                    keys=ordinary_keys,
+                )
+                rotated_ordinary = (
+                    ordinary_keys[ordinary_start:] + ordinary_keys[:ordinary_start]
+                )
+            else:
+                ordinary_status = "NO_TARGETS"
+                rotated_ordinary = ()
+            rotated_keys = rotated_priority + rotated_ordinary
+            start = keys.index(rotated_keys[0])
+            cursor_status = (
+                f"PRIORITY_{priority_status};ORDINARY_{ordinary_status}"
+            )
     return (
         tuple(target for key in rotated_keys for target in grouped[key]),
         start,
@@ -873,6 +903,34 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 row.temperature_metric,
             )
         )
+        held_group_keys = {
+            (row.city, row.target_date)
+            for row in admitted_rows
+            if held_priority.get(
+                (row.city, row.target_date, row.temperature_metric),
+                2,
+            ) < 2
+        }
+        starved_rows = [
+            row
+            for row in admitted_rows
+            if (
+                int(getattr(row, "posterior_count", 0)) <= 0
+                and bool(getattr(row, "can_seed", False))
+                and not bool(
+                    getattr(row, "day0_observed_extreme_required", False)
+                )
+            )
+        ]
+        starvation_frontier = min(
+            (row.target_date for row in starved_rows),
+            default=None,
+        )
+        priority_group_keys = held_group_keys | {
+            (row.city, row.target_date)
+            for row in starved_rows
+            if row.target_date == starvation_frontier
+        }
         targets: list[BayesPrecisionFusionDownloadTarget] = []
         for row in admitted_rows:
             city_cfg = cities_by_name.get(row.city)
@@ -917,6 +975,7 @@ def _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
                 targets,
                 cycle=cycle,
                 state_path=rotation_state_path,
+                priority_group_keys=priority_group_keys,
             )
             download_error: Exception | None = None
             try:
