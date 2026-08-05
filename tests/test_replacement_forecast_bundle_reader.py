@@ -461,6 +461,85 @@ def test_exact_anchor_artifact_accepts_consumed_day_covered_by_multiday_payload(
     assert cycle is None
 
 
+def test_public_hwm_always_validates_declared_multiday_anchor_artifact(tmp_path) -> None:
+    conn = _conn()
+    _insert_raw_model_forecast(
+        conn,
+        model="ecmwf_ifs",
+        source_cycle_time=_dt(0),
+        captured_at=_dt(0, 5),
+        source_available_at=_dt(0, 5),
+    )
+    consumed = {
+        "ecmwf_ifs": {
+            "raw_model_forecast_id": int(
+                conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            ),
+            "served_cycle": _dt(0).isoformat(),
+            "captured_at": _dt(0, 5).isoformat(),
+            "served_via": "single_runs",
+        }
+    }
+    artifact_id = _insert_openmeteo_anchor_artifact(
+        conn,
+        tmp_path,
+        source_cycle_time=_dt(3),
+        target_date="2026-06-06",
+        payload_dates=("2026-06-06", "2026-06-07"),
+    )
+    provenance = _with_current_value_serving(
+        consumed,
+        anchor_artifact_id=artifact_id,
+    )
+
+    covered = replacement_live_input_lag_reason(
+        conn,
+        city="Shanghai",
+        target_date="2026-06-07",
+        metric="high",
+        decision_time=_dt(5),
+        posterior_source_cycle_time=_dt(0),
+        posterior_computed_at=_dt(3),
+        posterior_provenance=provenance,
+    )
+    assert covered is None
+
+    _insert_raw_model_forecast(
+        conn,
+        model="ecmwf_ifs",
+        target_date="2026-06-08",
+        source_cycle_time=_dt(0),
+        captured_at=_dt(0, 5),
+        source_available_at=_dt(0, 5),
+    )
+    uncovered_provenance = _with_current_value_serving(
+        {
+            "ecmwf_ifs": {
+                "raw_model_forecast_id": int(
+                    conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                ),
+                "served_cycle": _dt(0).isoformat(),
+                "captured_at": _dt(0, 5).isoformat(),
+                "served_via": "single_runs",
+            }
+        },
+        anchor_artifact_id=artifact_id,
+    )
+    uncovered = replacement_live_input_lag_reason(
+        conn,
+        city="Shanghai",
+        target_date="2026-06-08",
+        metric="high",
+        decision_time=_dt(5),
+        posterior_source_cycle_time=_dt(0),
+        posterior_computed_at=_dt(3),
+        posterior_provenance=uncovered_provenance,
+    )
+    assert uncovered == (
+        f"basis=openmeteo_anchor_artifact_scope_mismatch:artifact_id={artifact_id}"
+    )
+
+
 def test_replacement_bundle_reader_requires_baseline_executable_bundle() -> None:
     conn = _conn()
     posterior_id = _insert_posterior(conn)

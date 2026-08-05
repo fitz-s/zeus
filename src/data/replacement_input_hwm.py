@@ -1470,7 +1470,10 @@ def _replacement_live_input_lag_reason(
         decision_time=decision_time,
     )
     artifact_reference_cycle = posterior_cycle
-    if artifact_cycle is not None and rich_used_input_provenance:
+    declared_anchor_artifact = provenance.get("openmeteo_anchor_artifact_id")
+    if rich_used_input_provenance and (
+        artifact_cycle is not None or declared_anchor_artifact is not None
+    ):
         artifact_identity_lag, exact_anchor_cycle = (
             _exact_consumed_anchor_artifact_cycle(
                 conn,
