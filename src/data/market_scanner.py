@@ -69,14 +69,16 @@ def _capture_policy_trigger(
     requested_trigger: str | None,
     condition_id: str,
     selected_token: str,
-    fresh_at: datetime,
 ) -> str | None:
-    """Route ordinary discovery to compact storage with periodic full keyframes."""
+    """Route discovery by evidence value, independent of executable TTL."""
 
     identity = f"{condition_id}|{selected_token}"
     if requested_trigger != "DISCOVERY_SWEEP":
         return requested_trigger
 
+    # This query answers whether the replay keyframe lineage exists, not whether
+    # it is executable now. Ordinary discovery rows are compact and cannot feed
+    # money-path readers; priority/JIT paths independently force a fresh full row.
     try:
         has_full = conn.execute(
             """
@@ -84,7 +86,6 @@ def _capture_policy_trigger(
               FROM executable_market_snapshot_latest
              WHERE condition_id = ?
                AND selected_outcome_token_id = ?
-               AND freshness_deadline >= ?
                AND NOT EXISTS (
                     SELECT 1
                       FROM executable_market_snapshot_invalidations inv
@@ -96,7 +97,7 @@ def _capture_policy_trigger(
                )
              LIMIT 1
             """,
-            (condition_id, selected_token, fresh_at.isoformat()),
+            (condition_id, selected_token),
         ).fetchone() is not None
     except sqlite3.Error:
         has_full = conn.execute(
@@ -105,10 +106,9 @@ def _capture_policy_trigger(
               FROM executable_market_snapshots
              WHERE condition_id = ?
                AND selected_outcome_token_id = ?
-               AND freshness_deadline >= ?
              LIMIT 1
             """,
-            (condition_id, selected_token, fresh_at.isoformat()),
+            (condition_id, selected_token),
         ).fetchone() is not None
     if not has_full:
         return "KEYFRAME"
@@ -3324,7 +3324,6 @@ def capture_executable_market_snapshot(
         requested_trigger=capture_trigger,
         condition_id=condition_id,
         selected_token=selected_token,
-        fresh_at=captured,
     )
     hash_identity = f"{condition_id}|{selected_token}"
     current_hash = snapshot.raw_orderbook_hash

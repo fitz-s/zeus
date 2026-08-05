@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-04; last_reused=2026-08-04
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-05; last_reused=2026-08-05
 # Purpose: U1 snapshot antibodies plus pricing-semantics contract scaffolding.
 # Reuse: Run when executable snapshots, venue_commands gating, or V2 market preflight semantics change.
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
@@ -656,7 +656,7 @@ def test_failed_compact_write_does_not_advance_keyframe_rotation(conn, monkeypat
     assert next_capture["capture_trigger"] == "KEYFRAME"
 
 
-def test_discovery_capture_refreshes_stale_full_authority_before_compacting(
+def test_discovery_capture_staleness_does_not_override_keyframe_interval(
     conn,
     monkeypatch,
 ):
@@ -672,9 +672,7 @@ def test_discovery_capture_refreshes_stale_full_authority_before_compacting(
     }
 
     first = capture_executable_market_snapshot(conn, **capture_args)
-    second = capture_executable_market_snapshot(conn, **capture_args)
     assert first["snapshot_persistence_tier"] == "full"
-    assert second["snapshot_persistence_tier"] == "compact"
 
     conn.execute(
         """
@@ -686,9 +684,45 @@ def test_discovery_capture_refreshes_stale_full_authority_before_compacting(
     )
     conn.commit()
 
-    refreshed = capture_executable_market_snapshot(conn, **capture_args)
-    assert refreshed["snapshot_persistence_tier"] == "full"
-    assert refreshed["capture_trigger"] == "KEYFRAME"
+    after_expiry = [
+        capture_executable_market_snapshot(conn, **capture_args)
+        for _ in range(20)
+    ]
+    assert [row["snapshot_persistence_tier"] for row in after_expiry] == (
+        ["compact"] * 19 + ["full"]
+    )
+    assert [row["capture_trigger"] for row in after_expiry] == (
+        ["DISCOVERY_SWEEP"] * 19 + ["KEYFRAME"]
+    )
+
+
+def test_discovery_capture_replaces_invalidated_keyframe(conn, monkeypatch):
+    market_scanner_module._discovery_captures_since_keyframe.clear()
+    monkeypatch.setenv("ZEUS_SUBSTRATE_CAPTURE_KEYFRAME_INTERVAL_CYCLES", "20")
+    capture_args = {
+        "market": _market_for_capture(),
+        "decision": _decision_for_capture(),
+        "clob": FakeClobFacts(),
+        "captured_at": NOW,
+        "scan_authority": "VERIFIED",
+        "capture_trigger": "DISCOVERY_SWEEP",
+    }
+
+    first = capture_executable_market_snapshot(conn, **capture_args)
+    assert first["snapshot_persistence_tier"] == "full"
+    loaded = get_snapshot(conn, first["executable_snapshot_id"])
+    assert loaded is not None
+    record_snapshot_invalidation(
+        conn,
+        condition_id="condition-1",
+        token_id="yes-token",
+        reason="market_channel_action",
+        invalidated_at=loaded.captured_at + timedelta(microseconds=1),
+    )
+
+    replacement = capture_executable_market_snapshot(conn, **capture_args)
+    assert replacement["snapshot_persistence_tier"] == "full"
+    assert replacement["capture_trigger"] == "KEYFRAME"
 
 
 def test_negrisk_active_false_child_captures_when_accepting_orders(conn):

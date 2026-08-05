@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-08-04
+# Last reused/audited: 2026-08-05
 # Authority basis (2026-06-13 add): docs/archive/2026-Q2/operations_historical/live_inventory_warm_skip_2026-06-13.md —
 #   venue-close warm-skip relationship tests (live-inventory focus; market_phase.family_venue_closed).
 # Authority basis: src/main.py:_edli_event_reactor_cycle (historical inline substrate refresh
@@ -2655,14 +2655,12 @@ def test_paused_priority_preserves_discovery_capture_policy_and_event_rows(monke
         requested_trigger="DISCOVERY_SWEEP",
         condition_id="policy-condition",
         selected_token="policy-token",
-        fresh_at=datetime.now(timezone.utc),
     ) == "KEYFRAME"
     assert market_scanner._capture_policy_trigger(
         _PolicyConn(True),
         requested_trigger="DISCOVERY_SWEEP",
         condition_id="policy-condition",
         selected_token="policy-token",
-        fresh_at=datetime.now(timezone.utc),
     ) == "DISCOVERY_SWEEP"
     policy_counts[policy_key] = 1
     assert market_scanner._capture_policy_trigger(
@@ -2670,7 +2668,6 @@ def test_paused_priority_preserves_discovery_capture_policy_and_event_rows(monke
         requested_trigger="DISCOVERY_SWEEP",
         condition_id="policy-condition",
         selected_token="policy-token",
-        fresh_at=datetime.now(timezone.utc),
     ) == "KEYFRAME"
 
 
@@ -4175,7 +4172,6 @@ def test_paused_pending_urgency_preserves_mixed_exact_priority_scopes(monkeypatc
             requested_trigger=capture_trigger,
             condition_id=decision.tokens["market_id"],
             selected_token=selected_token,
-            fresh_at=datetime.now(timezone.utc),
         )
         captures.append(
             (

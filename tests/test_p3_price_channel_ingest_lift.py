@@ -1,11 +1,11 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-31 (boot identity precedes network setup)
+# Last reused or audited: 2026-08-05 (current-only feasibility writer/readers)
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row + co-location decision),
 #   §7 (I2 no-back-coupling: durable fill bridge + execution_feasibility_evidence),
 #   §8 Step 3 (lift the user-channel WS thread + market-channel + reconcile cycles),
 #   §9 (regression-unconstructable proof — failure-domain isolation).
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-06-08; last_reviewed=2026-08-05; last_reused=2026-08-05
 # Purpose: RELATIONSHIP TESTS for process-topology refactor STEP P3 — lift the
 #   price-channel / CLOB-fact ingest (the persistent user/market WebSocket lifecycle)
 #   out of the order daemon into its own process (com.zeus.price-channel-ingest).
@@ -13,7 +13,7 @@
 # These tests verify CROSS-MODULE INVARIANTS (Module A's output → Module B), not just
 # function behaviour:
 #   (NO-REGRESSION) the WS producer + the two channel/reconcile cycles still EXIST and
-#     still write the durable fill bridge + execution_feasibility_evidence the order
+#     still write the durable fill bridge + current feasibility projection the order
 #     runtime READS; the durable fill-bridge SCAN helper stays importable by src.main's
 #     BOOT recovery (the persisted truth is shared, so no fill is dropped across the
 #     cutover); src.main still imports + boots with the jobs removed; the new process
@@ -558,6 +558,17 @@ def test_no_regression_order_runtime_reads_current_feasibility_projection():
     )
     assert "execution_feasibility_evidence" not in reader_src, (
         "append history cannot restore current book authority."
+    )
+
+
+def test_price_channel_quote_writer_updates_current_without_append_history():
+    """Recurring quote ingestion must not regrow the retired append journal."""
+    from src.events.triggers.market_channel_ingestor import MarketChannelIngestor
+
+    writer_src = inspect.getsource(MarketChannelIngestor.write_prepared_quote_events)
+    assert "append_evidence=False" in writer_src, (
+        "the high-rate quote writer must update execution_feasibility_latest "
+        "without appending execution_feasibility_evidence"
     )
 
 
