@@ -1146,6 +1146,77 @@ def test_materialization_queue_bounds_stale_day0_owner_receipts_per_family(tmp_p
     assert not list(processed_dir.glob("*.json"))
 
 
+def test_materialization_queue_bounds_missing_authority_receipts_per_family(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    base_request = {
+        "city": "London",
+        "target_date": "2026-08-05",
+        "temperature_metric": "low",
+        "source_cycle_time": "2026-08-05T00:00:00+00:00",
+        "baseline_source_run_id": "baseline-run",
+        "openmeteo_source_run_id": "anchor-run",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "15C"}],
+        "day0_observed_extreme_c": 14.2,
+    }
+
+    def _missing_shape_runner(argv):
+        return subprocess.CompletedProcess(
+            list(argv),
+            1,
+            stdout=(
+                '{"status":"BLOCKED","reason_codes":['
+                '"REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET",'
+                '"Q_MODE:BAYES_PRECISION_FUSION_CAPTURE_MISSING"]}\n'
+            ),
+            stderr="current ENS shape missing\n",
+        )
+
+    for minute, extreme in ((44, 14.2), (45, 14.1)):
+        request_path = request_dir / f"London.2026-08-05.low.{minute}.json"
+        request_path.write_text(
+            json.dumps(
+                {
+                    **base_request,
+                    "computed_at": f"2026-08-05T10:{minute}:00+00:00",
+                    "day0_observed_extreme_c": extreme,
+                }
+            ),
+            encoding="utf-8",
+        )
+        report = queue_mod.process_replacement_forecast_live_materialization_queue(
+            request_dir=request_dir,
+            processed_dir=processed_dir,
+            failed_dir=failed_dir,
+            forecast_db=tmp_path / "forecasts.db",
+            raw_manifest_dir=None,
+            limit=1,
+            runner=_missing_shape_runner,
+        )
+        assert report.status == "PROCESSED"
+        assert report.failed_count == 0
+        assert report.processed_count == 1
+        assert (
+            "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_UNCHANGED_BLOCKED_INPUT"
+            in report.reason_codes
+        )
+
+    receipts = list((tmp_path / "blocked_latest").glob("*.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text(encoding="utf-8"))
+    assert receipt["status"] == "BLOCKED_MISSING_PROBABILITY_AUTHORITY"
+    assert receipt["computed_at"] == "2026-08-05T10:45:00+00:00"
+    assert "Q_MODE:BAYES_PRECISION_FUSION_CAPTURE_MISSING" in receipt["reason_codes"]
+    assert not list(failed_dir.glob("*.json"))
+    assert not list(processed_dir.glob("*.json"))
+
+
 def test_materialization_queue_can_defer_seed_preparation_for_requests(
     tmp_path, monkeypatch
 ) -> None:
@@ -1699,7 +1770,8 @@ def test_materialization_queue_retries_blocked_request_only_after_input_change(
         limit=1,
         runner=_blocked_runner,
     )
-    assert first.status == "FAILED"
+    assert first.status == "PROCESSED"
+    assert first.failed_count == 0
     assert len(spawned) == 1
     assert len(tuple((tmp_path / "blocked_attempts").glob("*.json"))) == 1
 
@@ -1721,12 +1793,9 @@ def test_materialization_queue_retries_blocked_request_only_after_input_change(
         "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_UNCHANGED_BLOCKED_INPUT"
         in second.reason_codes
     )
-    skipped_receipt = max(
-        processed_dir.glob("*.receipt.json"),
-        key=lambda path: path.stat().st_mtime_ns,
-    )
+    skipped_receipt = next((tmp_path / "blocked_latest").glob("*.json"))
     skipped = json.loads(skipped_receipt.read_text(encoding="utf-8"))
-    assert skipped["subprocess_spawned"] is False
+    assert skipped["status"] == "SKIPPED_UNCHANGED_BLOCKED_INPUT"
 
     watermark["value"] = (4, 100, "2026-07-16T12:18:00+00:00", "")
     request_path.write_text(
@@ -1741,7 +1810,8 @@ def test_materialization_queue_retries_blocked_request_only_after_input_change(
         limit=1,
         runner=_blocked_runner,
     )
-    assert third.status == "FAILED"
+    assert third.status == "PROCESSED"
+    assert third.failed_count == 0
     assert len(spawned) == 2
 
 
@@ -1845,7 +1915,8 @@ def test_blocked_source_clock_request_retries_only_on_new_provider_family(
             limit=1,
             runner=_blocked_runner,
         )
-        assert first.status == "FAILED"
+        assert first.status == "PROCESSED"
+        assert first.failed_count == 0
         assert len(spawned) == 1
 
         payload_path.write_text('{"unrelated": true}', encoding="utf-8")
@@ -1894,7 +1965,8 @@ def test_blocked_source_clock_request_retries_only_on_new_provider_family(
             limit=1,
             runner=_blocked_runner,
         )
-        assert third.status == "FAILED"
+        assert third.status == "PROCESSED"
+        assert third.failed_count == 0
         assert len(spawned) == 2
 
         conn.execute(
@@ -1918,7 +1990,8 @@ def test_blocked_source_clock_request_retries_only_on_new_provider_family(
             limit=1,
             runner=_blocked_runner,
         )
-        assert fourth.status == "FAILED"
+        assert fourth.status == "PROCESSED"
+        assert fourth.failed_count == 0
         assert len(spawned) == 3
     finally:
         conn.close()

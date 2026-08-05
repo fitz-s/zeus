@@ -1058,6 +1058,9 @@ _UNCHANGED_BLOCKED_REASON = "REPLACEMENT_LIVE_POSTERIOR_REQUIREMENTS_NOT_MET"
 _UNCHANGED_BLOCKED_SKIP_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_UNCHANGED_BLOCKED_INPUT"
 )
+_BLOCKED_INPUT_RECEIPT_REASON = (
+    "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_BLOCKED_INPUT"
+)
 _UNCHANGED_BLOCKED_SEED_SKIP_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_SEED_UNCHANGED_BLOCKED_INPUT"
 )
@@ -1427,21 +1430,24 @@ def _subprocess_result_reason_codes(completed: subprocess.CompletedProcess[str])
     return ()
 
 
-def _record_superseded_day0_request(
+def _record_latest_terminal_request(
     input_json: Path,
     *,
     processed_path: Path,
     request_payload: Mapping[str, object],
+    receipt_dir_name: str,
+    status: str,
+    reason_codes: Sequence[str],
 ) -> Path:
-    """Replace stale Day0 work with one compact receipt per forecast family.
+    """Replace valueless terminal work with one compact receipt per family.
 
-    A newer observation owner makes this request causally obsolete; retaining the
-    full request in the append-only failed/processed inventories has no replay or
-    decision value.  The current owner row remains canonical.  This receipt keeps
-    the last supersession fact while bounding storage by family cardinality.
+    Canonical source/owner/posterior rows carry decision truth. Retaining every
+    full queue request after it becomes blocked or causally obsolete adds no
+    replay value. This receipt keeps the latest disposition while bounding disk
+    use by forecast-family cardinality.
     """
 
-    receipt_dir = processed_path.parent / "superseded_latest"
+    receipt_dir = processed_path.parent / receipt_dir_name
     _ensure_directory_entry_durable(
         receipt_dir,
         durable_ancestor=processed_path.parent,
@@ -1453,14 +1459,14 @@ def _record_superseded_day0_request(
     temporary = receipt_dir / f".{target.name}.{os.getpid()}.tmp"
     witness = request_payload.get("day0_enqueue_owner_witness")
     receipt = {
-        "status": "SKIPPED_STALE_DAY0_ENQUEUE_OWNER",
-        "reason_codes": [_STALE_DAY0_OWNER_SUPERSEDED_REASON],
+        "status": status,
+        "reason_codes": list(reason_codes),
         "city": request_payload.get("city"),
         "target_date": request_payload.get("target_date"),
         "temperature_metric": request_payload.get("temperature_metric"),
         "source_cycle_time": request_payload.get("source_cycle_time"),
         "computed_at": request_payload.get("computed_at"),
-        "superseded_at": datetime.now(timezone.utc).isoformat(),
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
         "conditioning_identity": (
             witness.get("conditioning_identity")
             if isinstance(witness, Mapping)
@@ -2311,19 +2317,16 @@ def _process_claimed_materialization_batch(
             else (None, None, False)
         )
         if unchanged:
-            moved = _move_request(input_json, processed_path)
-            _write_sidecar(
-                moved,
-                {
-                    "status": "SKIPPED_UNCHANGED_BLOCKED_INPUT",
-                    "reason_codes": [_UNCHANGED_BLOCKED_SKIP_REASON],
-                    "request_validated": True,
-                    "subprocess_spawned": False,
-                    "attempt_fingerprint": attempt_fingerprint,
-                },
+            receipt = _record_latest_terminal_request(
+                input_json,
+                processed_path=processed_path,
+                request_payload=request_payload,
+                receipt_dir_name="blocked_latest",
+                status="SKIPPED_UNCHANGED_BLOCKED_INPUT",
+                reason_codes=(_UNCHANGED_BLOCKED_SKIP_REASON,),
             )
-            processed.append(str(moved))
-            unchanged_blocked.append(str(moved))
+            processed.append(str(receipt))
+            unchanged_blocked.append(str(receipt))
             continue
         pending.append(
             _PendingMaterialization(
@@ -2389,27 +2392,39 @@ def _process_claimed_materialization_batch(
                     item.marker_path.unlink()
                 except FileNotFoundError:
                     pass
-            receipt = _record_superseded_day0_request(
+            receipt = _record_latest_terminal_request(
                 input_json,
                 processed_path=processed_path,
                 request_payload=item.request_payload,
+                receipt_dir_name="superseded_latest",
+                status="SKIPPED_STALE_DAY0_ENQUEUE_OWNER",
+                reason_codes=(_STALE_DAY0_OWNER_SUPERSEDED_REASON,),
             )
             processed.append(str(receipt))
             stale_day0_superseded.append(str(receipt))
+        elif (
+            item.request_payload is not None
+            and _UNCHANGED_BLOCKED_REASON in result_reason_codes
+        ):
+            try:
+                _write_blocked_attempt_marker(
+                    marker_path=item.marker_path,
+                    payload=item.request_payload,
+                    fingerprint=item.attempt_fingerprint,
+                )
+            except OSError:
+                pass
+            receipt = _record_latest_terminal_request(
+                input_json,
+                processed_path=processed_path,
+                request_payload=item.request_payload,
+                receipt_dir_name="blocked_latest",
+                status="BLOCKED_MISSING_PROBABILITY_AUTHORITY",
+                reason_codes=(_BLOCKED_INPUT_RECEIPT_REASON, *result_reason_codes),
+            )
+            processed.append(str(receipt))
+            unchanged_blocked.append(str(receipt))
         else:
-            if (
-                item.request_payload is not None
-                and _UNCHANGED_BLOCKED_REASON
-                in result_reason_codes
-            ):
-                try:
-                    _write_blocked_attempt_marker(
-                        marker_path=item.marker_path,
-                        payload=item.request_payload,
-                        fingerprint=item.attempt_fingerprint,
-                    )
-                except OSError:
-                    pass
             moved = _move_request(input_json, failed_path)
             _write_sidecar(moved, payload)
             failed.append(str(moved))
