@@ -4895,7 +4895,10 @@ def test_exit_lifecycle_full_fill_logs_commanded_execution_fact(conn):
     assert facts[0]["command_id"] == "cmd-full-exit"
 
 
-def test_pending_exit_existing_confirmed_trade_fact_closes_before_retry_or_cancel(conn):
+@pytest.mark.parametrize("realized_fill_price", ["0.049", "0.951"])
+def test_pending_exit_existing_confirmed_trade_fact_closes_before_retry_or_cancel(
+    conn, realized_fill_price
+):
     from src.execution import exit_lifecycle
     from src.state.portfolio import PortfolioState, Position
     from src.state.venue_command_repo import append_event, append_trade_fact, get_command
@@ -4965,7 +4968,7 @@ def test_pending_exit_existing_confirmed_trade_fact_closes_before_retry_or_cance
             "venue_order_id": "ord-exit-filled",
             "trade_id": "trade-exit-filled",
             "filled_size": "25.0799",
-            "fill_price": "0.61",
+            "fill_price": realized_fill_price,
             "tx_hash": "0xexitfilled",
         },
     )
@@ -4976,14 +4979,14 @@ def test_pending_exit_existing_confirmed_trade_fact_closes_before_retry_or_cance
         command_id="cmd-exit-filled",
         state="CONFIRMED",
         filled_size="25.0799",
-        fill_price="0.61",
+        fill_price=realized_fill_price,
         source="REST",
         observed_at="2026-07-08T14:42:59+00:00",
         raw_payload_hash="f" * 64,
         raw_payload_json={
             "source": "place_exit_order_matched_submit",
             "filled_size": "25.0799",
-            "fill_price": "0.61",
+            "fill_price": realized_fill_price,
         },
         tx_hash="0xexitfilled",
     )
@@ -5014,7 +5017,7 @@ def test_pending_exit_existing_confirmed_trade_fact_closes_before_retry_or_cance
     assert dict(current) == {
         "phase": "economically_closed",
         "order_status": "sell_filled",
-        "exit_price": 0.61,
+        "exit_price": float(realized_fill_price),
         "chain_shares": 0.0,
         "exit_retry_count": 0,
         "next_exit_retry_at": "",
@@ -11021,15 +11024,25 @@ def test_unproved_venue_open_sell_is_canceled_not_adopted(order):
 
 
 @pytest.mark.parametrize("price", ["0.049", "0.951", "0.999"])
-def test_exit_fill_receipt_rejects_out_of_band_price(price):
+def test_exit_fill_receipt_preserves_realized_out_of_band_price(price):
     from src.execution.exit_lifecycle import _extract_fill_price
 
-    assert _extract_fill_price({"avgPrice": price}) is None
+    assert _extract_fill_price({"avgPrice": price}) == pytest.approx(float(price))
 
 
 @pytest.mark.parametrize("price", ["0.049", "0.951", "0.999"])
-def test_reconcile_and_recovery_reject_out_of_band_fill_projection(price):
-    from src.execution.command_recovery import _append_exit_order_fill_projection
+def test_reconcile_accepts_realized_out_of_band_fill_economics(price):
+    from src.execution.exchange_reconcile import _missing_trade_fill_economics
+
+    assert _missing_trade_fill_economics(
+        state="CONFIRMED",
+        filled_size="1",
+        fill_price=price,
+    ) == ()
+
+
+@pytest.mark.parametrize("price", ["0", "-0.01", "1.001", "NaN"])
+def test_reconcile_rejects_invalid_fill_economics(price):
     from src.execution.exchange_reconcile import _missing_trade_fill_economics
 
     assert _missing_trade_fill_economics(
@@ -11037,15 +11050,37 @@ def test_reconcile_and_recovery_reject_out_of_band_fill_projection(price):
         filled_size="1",
         fill_price=price,
     ) == ("fill_price",)
-    assert not _append_exit_order_fill_projection(
-        None,
-        command={"command_id": "cmd-bad-fill", "intent_kind": "EXIT"},
+
+
+@pytest.mark.parametrize("price", ["0.049", "0.951", "0.999"])
+def test_recovery_projects_realized_out_of_band_exit_fill(monkeypatch, price):
+    from src.execution import command_recovery
+
+    projected = []
+    monkeypatch.setattr(
+        command_recovery._exchange_reconcile,
+        "_ensure_exit_fill_position_event",
+        lambda *args, **kwargs: projected.append(kwargs) or True,
+    )
+
+    class Conn:
+        def execute(self, *args, **kwargs):
+            return None
+
+    assert command_recovery._append_exit_order_fill_projection(
+        Conn(),
+        command={
+            "command_id": "cmd-realized-fill",
+            "position_id": "pos-realized-fill",
+            "intent_kind": "EXIT",
+        },
         venue_order_id="order-bad-fill",
         matched_size="1",
         fill_price=price,
         observed_at="2026-08-01T18:00:00Z",
         event_type="FILL_CONFIRMED",
     )
+    assert projected[0]["fill_price"] == price
 
 
 def test_execute_exit_adopts_matching_venue_open_sell_without_local_command(conn, monkeypatch):

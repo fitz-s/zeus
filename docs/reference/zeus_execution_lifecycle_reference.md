@@ -553,10 +553,11 @@ limit plus maker-only shape immediately before the SDK POST. Tick legality,
 minimum size, identity, tradeability, fees/depth, and economic proof remain
 additional requirements and cannot waive the band (INV-43).
 
-Venue-reported fill prices are independently range-checked before normal fill or
-economic-close projection, and the durable trade-fact journal rejects an
-out-of-band fill before persistence. The raw receipt remains external chain/venue
-truth but cannot become ordinary lifecycle economics. Likewise, an open SELL may
+The absolute price band authorizes proposed/submitted orders, not observations.
+Venue-reported positive finite fill prices are preserved in the durable trade-fact
+journal and folded into actual shares/PnL even when outside that band; provenance
+marks the breach for alerting and review. Observed facts never authorize another
+out-of-band order. Likewise, an open SELL may
 be adopted as an existing exit only when its price, GTC/GTD type, and post-only
 flag are all explicit and legal; an unproved matching open order is canceled.
 

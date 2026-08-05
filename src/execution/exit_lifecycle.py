@@ -7018,8 +7018,6 @@ def _exit_trade_fact_close_candidate(
                AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
                {order_clause}
              GROUP BY cmd.command_id, cmd.venue_order_id, cmd.size, cmd.state
-             HAVING MIN(CAST(fact.fill_price AS REAL)) >= 0.05
-                AND MAX(CAST(fact.fill_price AS REAL)) <= 0.95
              ORDER BY datetime(observed_at) DESC, cmd.updated_at DESC, cmd.command_id DESC
              LIMIT 1
             """,
@@ -7073,7 +7071,7 @@ def _exit_trade_fact_close_candidate(
     ):
         return None
     fill_price = fill_notional / filled_size
-    if not LIVE_ORDER_MIN_UNIT_PRICE <= fill_price <= LIVE_ORDER_MAX_UNIT_PRICE:
+    if fill_price <= 0 or fill_price > 1:
         return None
     from src.state.fill_dedup import economic_exit_fills_for_position
 
@@ -8490,17 +8488,14 @@ def _positive_finite_decimal(value: object) -> Decimal | None:
         numeric = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError):
         return None
-    if (
-        not numeric.is_finite()
-        or numeric < LIVE_ORDER_MIN_UNIT_PRICE
-        or numeric > LIVE_ORDER_MAX_UNIT_PRICE
-    ):
-        if numeric.is_finite() and numeric > 0:
-            logger.critical(
-                "LIVE_FILL_PRICE_OUT_OF_BOUNDS_RECEIPT price=%s; suppressing normal fill projection",
-                numeric,
-            )
+    if not numeric.is_finite() or numeric <= 0 or numeric > 1:
         return None
+    if not LIVE_ORDER_MIN_UNIT_PRICE <= numeric <= LIVE_ORDER_MAX_UNIT_PRICE:
+        logger.critical(
+            "LIVE_FILL_PRICE_OUT_OF_BOUNDS_RECEIPT price=%s; "
+            "preserving realized venue truth",
+            numeric,
+        )
     return numeric
 
 

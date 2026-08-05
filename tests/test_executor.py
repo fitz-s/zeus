@@ -2068,7 +2068,13 @@ class TestExecutor:
         assert after == before
 
     @pytest.mark.parametrize("price", ["0.049", "0.951", "0.999"])
-    def test_venue_fill_receipt_rejects_out_of_band_price(self, price):
+    def test_venue_fill_receipt_preserves_realized_out_of_band_price(self, price):
+        from src.execution.executor import _venue_submit_fill_price
+
+        assert _venue_submit_fill_price({"avgPrice": price}, side="SELL") == price
+
+    @pytest.mark.parametrize("price", ["0", "-0.01", "1.001", "NaN"])
+    def test_venue_fill_receipt_rejects_invalid_probability_price(self, price):
         from src.execution.executor import _venue_submit_fill_price
 
         assert _venue_submit_fill_price({"avgPrice": price}, side="SELL") is None

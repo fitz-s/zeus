@@ -281,6 +281,14 @@ def _positive_finite_decimal_text(value: Any) -> bool:
     return parsed.is_finite() and parsed > 0
 
 
+def _venue_fill_price_text(value: Any) -> bool:
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return parsed.is_finite() and Decimal("0") < parsed <= Decimal("1")
+
+
 def _decimal_text_equal(left: Any, right: Any) -> bool:
     try:
         left_parsed = Decimal(str(left))
@@ -4210,22 +4218,24 @@ def append_trade_fact(
         raise ValueError(f"trade fact state={state!r} is invalid")
     if state in _TRADE_FILL_ECONOMICS_STATES and not (
         _positive_finite_decimal_text(filled_size)
-        and _positive_finite_decimal_text(fill_price)
+        and _venue_fill_price_text(fill_price)
     ):
         raise ValueError(
             f"{state} trade fact requires positive finite fill economics"
         )
+    fill_price_in_live_order_band = True
     if state in _TRADE_FILL_ECONOMICS_STATES:
-        # INV-47 SCOPE: only this abnormal trade fact is rejected.
-        # DRAIN: chain/venue recovery may retain and alert on the raw receipt.
-        # RESET: no latch is stored; an in-band fill fact persists immediately.
-        try:
-            _assert_persistable_live_unit_price(fill_price)
-        except ValueError as exc:
-            raise ValueError(
-                f"{state} trade fact fill price outside absolute live band: "
-                f"fill_price={fill_price}"
-            ) from exc
+        observed_fill_price = Decimal(str(fill_price))
+        fill_price_in_live_order_band = (
+            _ABSOLUTE_LIVE_PRICE_MIN
+            <= observed_fill_price
+            <= _ABSOLUTE_LIVE_PRICE_MAX
+        )
+        # A venue fact reports an already-realized side effect; it is not a
+        # proposal or submit authority. Preserve Chain/CLOB truth so recovery
+        # can fold the real shares and economics. The absolute live-order band
+        # remains enforced at command persistence, the submission envelope,
+        # and the final SDK boundary.
     source = _validate_source(source)
     observed_at_s = _validate_observed_at(observed_at)
     venue_timestamp_s = (
@@ -4283,6 +4293,7 @@ def append_trade_fact(
                 "venue_order_id": venue_order_id,
                 "filled_size": str(filled_size),
                 "fill_price": str(fill_price),
+                "fill_price_in_live_order_band": fill_price_in_live_order_band,
                 "tx_hash": tx_hash,
                 "raw_payload": raw_payload_json,
             },

@@ -6090,7 +6090,7 @@ def _missing_trade_fill_economics(
     missing: list[str] = []
     if not _positive_decimal(filled_size):
         missing.append("filled_size")
-    if not _live_fill_price(fill_price):
+    if not _venue_fill_price(fill_price):
         missing.append("fill_price")
     return tuple(missing)
 
@@ -6105,17 +6105,10 @@ def _positive_decimal(value: Any) -> bool:
     return decimal.is_finite() and decimal > Decimal("0")
 
 
-def _live_fill_price(value: Any) -> bool:
-    if value is None or value == "":
+def _venue_fill_price(value: Any) -> bool:
+    if not _positive_decimal(value):
         return False
-    try:
-        decimal = _decimal(value)
-    except (InvalidOperation, ValueError):
-        return False
-    return (
-        decimal.is_finite()
-        and LIVE_ORDER_MIN_UNIT_PRICE <= decimal <= LIVE_ORDER_MAX_UNIT_PRICE
-    )
+    return _decimal(value) <= Decimal("1")
 
 
 def _positive_decimal_or_none(value: Any) -> Decimal | None:
@@ -6859,7 +6852,3 @@ def _canonical_json(value: Any) -> str:
 
 def _hash_payload(value: Mapping[str, Any]) -> str:
     return sha256(_canonical_json(dict(value)).encode("utf-8")).hexdigest()
-from src.contracts.venue_submission_envelope import (
-    LIVE_ORDER_MAX_UNIT_PRICE,
-    LIVE_ORDER_MIN_UNIT_PRICE,
-)

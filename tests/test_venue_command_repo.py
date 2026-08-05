@@ -199,30 +199,61 @@ class TestAbsoluteLivePriceBand:
         ).fetchone()[0] == 0
 
     @pytest.mark.parametrize("fill_price", ["0.049", "0.951", "0.999"])
-    def test_out_of_band_trade_fact_rejects_before_persistence(
+    def test_out_of_band_trade_fact_persists_as_observed_truth(
         self, conn, fill_price
     ):
         from src.state.venue_command_repo import append_trade_fact
 
         _insert(conn)
-        with pytest.raises(ValueError, match="fill price outside absolute live band"):
+        append_trade_fact(
+            conn,
+            trade_id=f"trade-{fill_price}",
+            venue_order_id="order-band",
+            command_id="cmd-001",
+            state="CONFIRMED",
+            filled_size="1",
+            fill_price=fill_price,
+            source="FAKE_VENUE",
+            observed_at="2026-08-01T18:00:00Z",
+            raw_payload_hash="a" * 64,
+        )
+
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_trade_facts WHERE trade_id = ?",
+            (f"trade-{fill_price}",),
+        ).fetchone()[0] == 1
+        provenance = json.loads(
+            conn.execute(
+                """
+                SELECT payload_json
+                  FROM provenance_envelope_events
+                 WHERE subject_type = 'trade' AND subject_id = ?
+                """,
+                (f"trade-{fill_price}",),
+            ).fetchone()[0]
+        )
+        assert provenance["fill_price_in_live_order_band"] is False
+
+    @pytest.mark.parametrize("fill_price", ["0", "-0.01", "1.001", "NaN"])
+    def test_invalid_trade_fact_price_rejects_before_persistence(
+        self, conn, fill_price
+    ):
+        from src.state.venue_command_repo import append_trade_fact
+
+        _insert(conn)
+        with pytest.raises(ValueError, match="positive finite fill economics"):
             append_trade_fact(
                 conn,
-                trade_id=f"trade-{fill_price}",
+                trade_id=f"trade-invalid-{fill_price}",
                 venue_order_id="order-band",
                 command_id="cmd-001",
                 state="CONFIRMED",
                 filled_size="1",
                 fill_price=fill_price,
-                source="test",
+                source="FAKE_VENUE",
                 observed_at="2026-08-01T18:00:00Z",
-                raw_payload_hash="a" * 64,
+                raw_payload_hash="b" * 64,
             )
-
-        assert conn.execute(
-            "SELECT COUNT(*) FROM venue_trade_facts WHERE trade_id = ?",
-            (f"trade-{fill_price}",),
-        ).fetchone()[0] == 0
 
     @pytest.mark.parametrize(
         ("intent_kind", "side", "price"),
