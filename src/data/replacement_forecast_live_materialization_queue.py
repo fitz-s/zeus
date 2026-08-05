@@ -1503,6 +1503,7 @@ def _coalesce_superseded_materialization_requests(
     """
 
     keys: dict[Path, tuple[str, ...]] = {}
+    payloads: dict[Path, Mapping[str, object]] = {}
     newest_by_key: dict[tuple[str, ...], tuple[tuple[datetime, int, str], Path]] = {}
     for path in requests:
         payload = _load_request_payload_for_coalescing(path)
@@ -1512,6 +1513,7 @@ def _coalesce_superseded_materialization_requests(
         if key is None:
             continue
         keys[path] = key
+        payloads[path] = payload
         freshness = _request_freshness_key(path, payload)
         current = newest_by_key.get(key)
         if current is None or freshness > current[0]:
@@ -1526,24 +1528,22 @@ def _coalesce_superseded_materialization_requests(
             remaining.append(path)
             continue
         newest_path = newest_by_key[key][1]
-        moved = _move_request(path, processed_path)
-        _write_sidecar(
-            moved,
-            {
-                "status": "SKIPPED_SUPERSEDED_REQUEST",
-                "reason_codes": [
-                    "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE"
-                ],
-                "request_written": False,
+        receipt = _record_latest_terminal_request(
+            path,
+            processed_path=processed_path,
+            request_payload=payloads[path],
+            receipt_dir_name="superseded_latest",
+            status="SKIPPED_SUPERSEDED_REQUEST",
+            reason_codes=(
+                "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_NEWER_DUPLICATE",
+            ),
+            result_evidence={
                 "request_validated": False,
                 "subprocess_spawned": False,
                 "superseded_by": newest_path.name,
-                "semantic_key": {
-                    field: key[idx] for idx, field in enumerate(_REQUEST_DEDUP_KEY_FIELDS)
-                },
             },
         )
-        superseded.append(str(moved))
+        superseded.append(str(receipt))
     return tuple(remaining), tuple(superseded)
 
 

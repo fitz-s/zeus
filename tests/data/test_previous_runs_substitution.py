@@ -1315,12 +1315,13 @@ def test_materialization_queue_coalesces_duplicate_requests_before_limit(tmp_pat
     assert not newer_path.exists()
     receipts = [
         json.loads(path.read_text(encoding="utf-8"))
-        for path in processed_dir.glob("*.receipt.json")
+        for path in (tmp_path / "superseded_latest").glob("*.json")
     ]
     superseded = [receipt for receipt in receipts if receipt.get("status") == "SKIPPED_SUPERSEDED_REQUEST"]
     assert len(superseded) == 1
-    assert superseded[0]["subprocess_spawned"] is False
-    assert superseded[0]["superseded_by"] == newer_path.name
+    assert superseded[0]["result_evidence"]["subprocess_spawned"] is False
+    assert superseded[0]["result_evidence"]["superseded_by"] == newer_path.name
+    assert not processed_dir.exists() or not tuple(processed_dir.iterdir())
 
 
 def test_materialization_queue_runs_default_requests_in_bounded_parallel(
