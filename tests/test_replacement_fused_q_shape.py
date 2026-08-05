@@ -47,6 +47,48 @@ def test_same_provider_aliases_do_not_satisfy_current_pair() -> None:
     )
 
 
+def test_frozen_scheme_requires_a_simultaneous_current_provider_pair() -> None:
+    assert (
+        mod._current_provider_cohort_family_count(
+            configured_weights={"icon_global": 0.6, "ukmo_global": 0.4},
+            values_c_by_source={"icon_global": 28.0, "ukmo_global": 29.0},
+            cycles_by_source={
+                "icon_global": "2026-08-05T00:00:00+00:00",
+                "ukmo_global": "2026-08-04T18:00:00+00:00",
+            },
+        )
+        == 1
+    )
+
+
+def test_frozen_scheme_accepts_two_provider_families_within_cohort() -> None:
+    assert (
+        mod._current_provider_cohort_family_count(
+            configured_weights={"ecmwf_ifs": 0.6, "icon_global": 0.4},
+            values_c_by_source={"ecmwf_ifs": 28.0, "icon_global": 29.0},
+            cycles_by_source={
+                "ecmwf_ifs": "2026-08-05T00:00:00+00:00",
+                "icon_global": "2026-08-05T03:00:00+00:00",
+            },
+        )
+        == 2
+    )
+
+
+def test_frozen_scheme_cohort_deduplicates_provider_aliases() -> None:
+    assert (
+        mod._current_provider_cohort_family_count(
+            configured_weights={"icon_global": 0.5, "icon_eu": 0.5},
+            values_c_by_source={"icon_global": 28.0, "icon_eu": 29.0},
+            cycles_by_source={
+                "icon_global": "2026-08-05T00:00:00+00:00",
+                "icon_eu": "2026-08-05T00:00:00+00:00",
+            },
+        )
+        == 1
+    )
+
+
 def test_current_ensemble_center_disagreement_stays_in_predictive_shape() -> None:
     """Absolute ENS levels cannot be recentered away from the served center."""
 

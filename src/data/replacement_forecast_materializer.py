@@ -2279,6 +2279,46 @@ def _current_provider_family_count(
     return len(families)
 
 
+def _current_provider_cohort_family_count(
+    *,
+    configured_weights: Mapping[str, float],
+    values_c_by_source: Mapping[str, float],
+    cycles_by_source: Mapping[str, datetime | str],
+) -> int:
+    """Count provider families in the freshest coherent configured cohort."""
+
+    from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
+        provider_family_for_source,
+    )
+
+    eligible: list[tuple[str, datetime]] = []
+    for source, raw_weight in configured_weights.items():
+        try:
+            weight = float(raw_weight)
+            value = float(values_c_by_source[source])
+            cycle = _to_utc(
+                cycles_by_source[source],
+                field_name=f"cycles_by_source[{source}]",
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        if weight <= 0.0 or not math.isfinite(weight) or not math.isfinite(value):
+            continue
+        eligible.append((str(source), cycle))
+    if not eligible:
+        return 0
+
+    freshest = max(cycle for _, cycle in eligible)
+    return len(
+        {
+            provider_family_for_source(source)
+            for source, cycle in eligible
+            if (freshest - cycle).total_seconds() / 3600.0
+            <= BETWEEN_COHORT_WINDOW_HOURS
+        }
+    )
+
+
 def _current_evidence_shape_from_values(
     *,
     snapshot_id: int,
@@ -3295,10 +3335,26 @@ def _replacement_bayes_precision_fusion_override(
                     values_c_by_source=_source_values,
                 )
             )
+            _scheme_current_provider_cohort_count = (
+                0
+                if _scheme is None
+                else _current_provider_cohort_family_count(
+                    configured_weights=_scheme.weights,
+                    values_c_by_source=_source_values,
+                    cycles_by_source={
+                        str(_m): str(served_current[_m].served_cycle)  # type: ignore[union-attr]
+                        for _m in _scheme.weights
+                        if _m in served_current
+                    },
+                )
+            )
             _scheme_current_pair_missing = (
                 _scheme is not None
                 and not _station_live_omitted
-                and _scheme_current_provider_count < 2
+                and (
+                    _scheme_current_provider_count < 2
+                    or _scheme_current_provider_cohort_count < 2
+                )
             )
             if (
                 _scheme is not None
@@ -3462,10 +3518,11 @@ def _replacement_bayes_precision_fusion_override(
                     )
             else:
                 # A station-augmented center, a city without a frozen scheme, or a frozen
-                # basket with fewer than two CURRENT provider families uses the existing
-                # current precision-fusion center. The last case is horizon-safe: regional
-                # sources selected on short-lead history (ICON-EU/D2) cannot cover every
-                # later target, while already-captured global sources remain current facts.
+                # basket without two simultaneous CURRENT provider families uses the
+                # existing current precision-fusion center. The last case is horizon- and
+                # cycle-safe: regional sources selected on short-lead history (ICON-EU/D2)
+                # may be absent later, while asynchronously issued configured sources can
+                # coexist with already-captured, coherent global current facts.
                 # This preserves the two-provider shape gate and never substitutes a
                 # historical width or treats missing between-spread as zero.
                 if _scheme_current_pair_missing:
@@ -3484,10 +3541,17 @@ def _replacement_bayes_precision_fusion_override(
                         "one_scheme_status": _scheme.one_scheme_status,
                         "walkforward_pass": bool(_scheme.walkforward_pass),
                         "sample_n": int(_scheme.sample_n),
-                        "fallback_reason": "configured_current_provider_pair_unavailable",
+                        "fallback_reason": (
+                            "configured_current_provider_pair_unavailable"
+                            if _scheme_current_provider_count < 2
+                            else "configured_current_provider_cohort_unavailable"
+                        ),
                         "fallback_to": "current_precision_fusion",
                         "configured_current_provider_family_count": (
                             _scheme_current_provider_count
+                        ),
+                        "configured_current_provider_cohort_family_count": (
+                            _scheme_current_provider_cohort_count
                         ),
                     }
                     try:
@@ -3496,13 +3560,15 @@ def _replacement_bayes_precision_fusion_override(
                         logging.getLogger(
                             "zeus.replacement_bayes_precision_fusion"
                         ).warning(
-                            "source-clock one-scheme current provider pair unavailable for "
-                            "%s %s %s: present_families=%d configured=%s missing=%s; "
+                            "source-clock one-scheme current provider pair/cohort unavailable for "
+                            "%s %s %s: present_families=%d cohort_families=%d "
+                            "configured=%s missing=%s; "
                             "using current precision fusion",
                             request.city,
                             metric,
                             target_date,
                             _scheme_current_provider_count,
+                            _scheme_current_provider_cohort_count,
                             list(_scheme.final_sources),
                             _missing_scheme_sources,
                         )
