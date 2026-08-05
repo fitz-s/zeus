@@ -1791,18 +1791,20 @@ def _extras_coverage_missing(
     """Per-(city, metric, target_date) coverage gap for ``cycle``'s BPF single_runs capture.
 
     Returns ``(missing_scopes, planned_count)`` where ``missing_scopes`` is the set of planned
-    scopes with NO ``single_runs`` row at this cycle's exact natural key, and ``planned_count``
-    is the size of the plan. Returns ``None`` on any probe error (caller fails-open = re-run).
+    scopes without two provider families at this cycle's exact natural key, and
+    ``planned_count`` is the size of the plan. Returns ``None`` on any probe error
+    (caller fails-open = re-run).
 
     THE DENOMINATOR is the SAME plan the fan-out builds its download targets from
     (``build_replacement_forecast_current_target_plan`` — see
     _download_bayes_precision_fusion_extra_raw_inputs_if_needed:284,312). A scope is "covered"
-    iff it has >=1 ``single_runs`` row at the exact (city, metric, target_date,
-    source_cycle_time) key the materializer's q-path reads
+    iff it has >=2 distinct provider families in ``single_runs`` rows at the exact
+    (city, metric, target_date, source_cycle_time) key the materializer's q-path reads
     (replacement_current_value_serving.read_current_instrument_values) — so completeness here
-    is byte-aligned with what actually feeds the traded q. A ``previous_runs`` substitute is a
-    q FALLBACK, not cycle completeness, so it is deliberately NOT counted: the cycle's own
-    single_runs must land or the cycle stays incomplete and we keep re-trying for THIS cycle.
+    is byte-aligned with the live shape's minimum provider-family requirement. One
+    provider row is partial capture, not completeness. A ``previous_runs`` substitute
+    is a q FALLBACK, not cycle completeness, so it is deliberately NOT counted: the
+    cycle's own two provider families must land or capture keeps retrying for THIS cycle.
     """
     forecast_db = cfg.get("forecast_db")
     if forecast_db is None:
@@ -1822,16 +1824,27 @@ def _extras_coverage_missing(
         conn = _connect(Path(str(forecast_db)))
         try:
             cycle_iso = cycle.astimezone(_tz.utc).isoformat()
-            have = {
-                (str(r[0]), str(r[1]), str(r[2]))
-                for r in conn.execute(
-                    "SELECT DISTINCT city, metric, target_date FROM raw_model_forecasts"
-                    " WHERE source_cycle_time = ? AND endpoint = 'single_runs'",
-                    (cycle_iso,),
-                )
-            }
+            rows = conn.execute(
+                "SELECT DISTINCT city, metric, target_date, model "
+                "FROM raw_model_forecasts "
+                "WHERE source_cycle_time = ? AND endpoint = 'single_runs'",
+                (cycle_iso,),
+            ).fetchall()
         finally:
             conn.close()
+        from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
+            provider_family_for_source,
+        )
+
+        families_by_scope: dict[tuple[str, str, str], set[str]] = {}
+        for city, metric, target_date, model in rows:
+            scope = (str(city), str(metric), str(target_date))
+            families_by_scope.setdefault(scope, set()).add(
+                provider_family_for_source(str(model))
+            )
+        have = {
+            scope for scope, families in families_by_scope.items() if len(families) >= 2
+        }
         return (need - have, len(need))
     except Exception:
         return None

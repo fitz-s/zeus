@@ -16,7 +16,7 @@ the still-uncaptured lead+1/lead+2 scopes -> q-path CAPTURE_MISSING -> legacy q_
 
 Proven here:
   (a) a cycle with a FULL near-day leg but MISSING lead+1 scopes is INCOMPLETE (gate re-runs);
-  (b) a cycle with ALL planned scopes captured is COMPLETE (gate skips -> terminates);
+  (b) one provider family is partial, while two provider families are COMPLETE;
   (c) an UNSERVABLE-upstream residual does NOT loop forever: once a fan-out pass lands 0 new
       rows while still incomplete, the per-cycle fixpoint latch flips the gate to
       complete-with-gap (terminates), and the latch auto-clears when the cycle advances.
@@ -286,6 +286,22 @@ def test_all_planned_scopes_captured_is_complete(_cfg_with_db, _redirect_health)
     for c in _LEAD1_CITIES:
         _insert_single_runs(db, city=c, metric="high", target_date=_LEAD1, models=_MODELS)
     assert prod._extras_cycle_incomplete(cfg, _CYCLE) is False
+
+
+def test_one_provider_family_does_not_complete_a_scope(
+    _cfg_with_db, _redirect_health
+):
+    cfg, db = _cfg_with_db
+    for row in _plan_full_two_leads().rows:
+        _insert_single_runs(
+            db,
+            city=row.city,
+            metric=row.temperature_metric,
+            target_date=row.target_date,
+            models=["icon_global", "icon_eu"],
+        )
+
+    assert prod._extras_cycle_incomplete(cfg, _CYCLE) is True
 
 
 def test_no_planned_scopes_is_complete(_cfg_with_db, _redirect_health, monkeypatch):
