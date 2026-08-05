@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-06-03
+# Last reused/audited: 2026-08-05
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/T1.yaml
 #                  + docs/operations/task_2026-05-01_bankroll_truth_chain/architect_memo.md §7
 #                  + PLAN docs/operations/task_2026-05-11_init_schema_boot_invariant/PLAN.md §5.6
@@ -11,8 +11,27 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _stable_storage_capacity_for_non_storage_tests(monkeypatch):
+    """Keep unrelated tests independent of the host volume's live free space."""
+
+    import src.riskguard.riskguard as riskguard_module
+
+    total = 1024**4
+    monkeypatch.setattr(
+        riskguard_module,
+        "_disk_usage",
+        lambda _path: SimpleNamespace(
+            total=total,
+            used=total // 2,
+            free=total // 2,
+        ),
+    )
 
 _TEST_STATE_ROOT_ENV = "ZEUS_TEST_STATE_ROOT"
 _TEST_STATE_ROOT: Path

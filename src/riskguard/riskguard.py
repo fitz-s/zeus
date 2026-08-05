@@ -26,6 +26,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import sqlite3
 import sys
 import time
@@ -101,6 +102,79 @@ _RISKGUARD_OPEN_RUNTIME_STATES = frozenset({
     "pending_exit",
     "unknown",
 })
+
+_STORAGE_ENTRY_MIN_FREE_BYTES_DEFAULT = 64 * 1024**3
+_STORAGE_ENTRY_MIN_FREE_RATIO_DEFAULT = 0.10
+_disk_usage = shutil.disk_usage
+
+
+def storage_capacity_snapshot(path=None) -> dict[str, object]:
+    """Return the live volume's entry-preserving capacity verdict.
+
+    SCOPE: DATA_DEGRADED blocks new entries only; held monitoring, cancel,
+    reduce-only SELL, reconciliation, and settlement keep running. DRAIN: an
+    operator or retention job frees the volume while the 60-second RiskGuard
+    tick keeps re-reading the same filesystem. RESET: the next successful read
+    at or above both configured watermarks returns GREEN.
+    """
+
+    capacity_config = settings["riskguard"]
+    try:
+        min_free_bytes = int(
+            capacity_config.get(
+                "storage_entry_min_free_bytes",
+                _STORAGE_ENTRY_MIN_FREE_BYTES_DEFAULT,
+            )
+        )
+        min_free_ratio = float(
+            capacity_config.get(
+                "storage_entry_min_free_ratio",
+                _STORAGE_ENTRY_MIN_FREE_RATIO_DEFAULT,
+            )
+        )
+        if min_free_bytes < 0 or not 0.0 < min_free_ratio < 1.0:
+            raise ValueError("storage entry watermarks are outside valid bounds")
+    except (TypeError, ValueError) as exc:
+        return {
+            "level": RiskLevel.DATA_DEGRADED.value,
+            "status": "CONFIG_INVALID",
+            "reason": f"{type(exc).__name__}:{exc}",
+            "path": str(path or RISK_DB_PATH.parent),
+        }
+
+    target = path or RISK_DB_PATH.parent
+    try:
+        usage = _disk_usage(target)
+    except OSError as exc:
+        return {
+            "level": RiskLevel.DATA_DEGRADED.value,
+            "status": "CAPACITY_UNAVAILABLE",
+            "reason": f"{type(exc).__name__}:{exc}",
+            "path": str(target),
+            "min_free_bytes": min_free_bytes,
+            "min_free_ratio": min_free_ratio,
+        }
+
+    ratio_required_bytes = int(usage.total * min_free_ratio)
+    required_free_bytes = max(min_free_bytes, ratio_required_bytes)
+    level = (
+        RiskLevel.GREEN
+        if usage.free >= required_free_bytes
+        else RiskLevel.DATA_DEGRADED
+    )
+    return {
+        "level": level.value,
+        "status": "READY" if level == RiskLevel.GREEN else "LOW_DISK",
+        "reason": None if level == RiskLevel.GREEN else "ENTRY_RESERVE_BREACHED",
+        "path": str(target),
+        "total_bytes": int(usage.total),
+        "used_bytes": int(usage.used),
+        "free_bytes": int(usage.free),
+        "free_ratio": float(usage.free / usage.total) if usage.total else 0.0,
+        "required_free_bytes": required_free_bytes,
+        "min_free_bytes": min_free_bytes,
+        "min_free_ratio": min_free_ratio,
+    }
 
 
 def _collateral_identity_level(zeus_conn: sqlite3.Connection) -> RiskLevel:
@@ -3400,6 +3474,8 @@ def _tick_once() -> RiskLevel:
         # the SAME risk lane every other "missing truth input" condition
         # already uses, single-seam.
         unresolved_exposure_level = _unresolved_exposure_data_degraded_level(zeus_conn, portfolio)
+        storage_capacity = storage_capacity_snapshot()
+        storage_capacity_level = RiskLevel(str(storage_capacity["level"]))
 
         level = overall_level(
             brier_level,
@@ -3410,6 +3486,7 @@ def _tick_once() -> RiskLevel:
             portfolio_consistency_level,
             unresolved_exposure_level,
             probability_semantics_level,
+            storage_capacity_level,
         )
 
         risk_conn.execute("""
@@ -3446,6 +3523,8 @@ def _tick_once() -> RiskLevel:
                 # T2 (quarantine excision, BLOCKER-1): unbounded obligation or
                 # unmapped-family ChainOnlyFact -> DATA_DEGRADED leg.
                 "unresolved_exposure_level": unresolved_exposure_level.value,
+                "storage_capacity_level": storage_capacity_level.value,
+                "storage_capacity": storage_capacity,
                 "daily_loss_level": daily_loss_level.value,
                 "weekly_loss_level": weekly_loss_level.value,
                 "trailing_loss_decision_role": "record_only",
@@ -3799,6 +3878,8 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
             return RiskLevel.DATA_DEGRADED
 
         collateral_identity_level = _collateral_identity_level(zeus_conn)
+        storage_capacity = storage_capacity_snapshot()
+        storage_capacity_level = RiskLevel(str(storage_capacity["level"]))
 
         level = overall_level(
             RiskLevel.DATA_DEGRADED if portfolio.portfolio_loader_degraded else RiskLevel.GREEN,
@@ -3806,6 +3887,7 @@ def tick_with_portfolio(portfolio: PortfolioState) -> RiskLevel:
             RiskLevel.GREEN,
             RiskLevel.GREEN,
             collateral_identity_level,
+            storage_capacity_level,
         )
 
         return level

@@ -6936,7 +6936,7 @@ def compute_composite_live_health(
 ) -> dict:
     """Compute and persist composite live-health status.
 
-    Consults twenty surfaces:
+    Consults twenty-one surfaces:
       1. heartbeat — daemon-heartbeat.json (alive + fresh timestamp)
       2. venue_heartbeat — external CLOB heartbeat/order-safety keeper
       3. runtime_code — loaded_sha.json vs current git HEAD
@@ -6958,6 +6958,7 @@ def compute_composite_live_health(
       19. execution_capability — entry/exit side-effect gate
       20. posterior_starvation — live-tradeable family with no fresh live posterior
           (log-only alert, not a gate; see _posterior_starvation_surface)
+      21. storage_capacity — free space preserves the configured entry reserve
 
     Writes state/live_health_composite.json atomically.
 
@@ -7298,6 +7299,25 @@ def compute_composite_live_health(
             "live_health_composite DEGRADED: failing_surface=%s reason=%s",
             "posterior_starvation",
             posterior_starvation_surface["issue"],
+        )
+
+    from src.riskguard.riskguard import storage_capacity_snapshot
+
+    storage_capacity = storage_capacity_snapshot(sd)
+    storage_ok = storage_capacity.get("level") == "GREEN"
+    surfaces["storage_capacity"] = {
+        **storage_capacity,
+        "ok": storage_ok,
+        "issue": None
+        if storage_ok
+        else str(storage_capacity.get("status") or "LOW_DISK"),
+    }
+    if not storage_ok:
+        failing.append("storage_capacity")
+        logger.warning(
+            "live_health_composite DEGRADED: failing_surface=%s reason=%s",
+            "storage_capacity",
+            surfaces["storage_capacity"]["issue"],
         )
 
     # ------------------------------------------------------------------ #

@@ -1,5 +1,5 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-08-03
+# Last reused or audited: 2026-08-05
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
 # Lifecycle: created=2026-05-19; last_reviewed=2026-08-03; last_reused=2026-08-03
@@ -3741,6 +3741,34 @@ def test_pending_exit_current_churn_yields_degraded(
     assert surface["pending_exit_churn_sample"][0]["position_id"] == "pos-churn"
     assert surface["pending_exit_churn_sample"][0]["exit_intent_count"] == 13
     assert "pending_exit_release_loop" in result["failing_surfaces"]
+
+
+def test_storage_capacity_is_a_composite_health_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import src.riskguard.riskguard as riskguard_module
+
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(
+        riskguard_module,
+        "storage_capacity_snapshot",
+        lambda _path: {
+            "level": "DATA_DEGRADED",
+            "status": "LOW_DISK",
+            "reason": "ENTRY_RESERVE_BREACHED",
+            "free_bytes": 1,
+            "required_free_bytes": 2,
+        },
+    )
+
+    result = compute_composite_live_health(state_dir=sd)
+
+    assert result["surfaces"]["storage_capacity"]["ok"] is False
+    assert result["surfaces"]["storage_capacity"]["issue"] == "LOW_DISK"
+    assert "storage_capacity" in result["failing_surfaces"]
 
 
 def test_pending_exit_health_scopes_event_history_by_open_position(

@@ -1,5 +1,5 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-07-31
+# Last reused/audited: 2026-08-05
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
 # Lifecycle: created=2026-03-30; last_reviewed=2026-07-31; last_reused=2026-07-31
@@ -11,6 +11,7 @@ import json
 import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -5486,3 +5487,38 @@ def test_unprojected_entry_fill_equity_excludes_terminal_lot_projection():
     conn.commit()
 
     assert riskguard_module._unprojected_entry_fill_equity_usd(conn) == 0.0
+
+
+def test_storage_capacity_blocks_entry_before_enospc(monkeypatch, tmp_path):
+    from src.engine.cycle_runner import _risk_allows_new_entries
+
+    total = 1024**4
+    free = 60 * 1024**3
+    monkeypatch.setattr(
+        riskguard_module,
+        "_disk_usage",
+        lambda _path: SimpleNamespace(total=total, used=total - free, free=free),
+    )
+
+    snapshot = riskguard_module.storage_capacity_snapshot(tmp_path)
+
+    assert snapshot["level"] == RiskLevel.DATA_DEGRADED.value
+    assert snapshot["status"] == "LOW_DISK"
+    assert snapshot["reason"] == "ENTRY_RESERVE_BREACHED"
+    assert snapshot["required_free_bytes"] == int(total * 0.10)
+    level = RiskLevel(str(snapshot["level"]))
+    assert level == RiskLevel.DATA_DEGRADED
+    assert not _risk_allows_new_entries(level)
+
+
+def test_storage_capacity_read_failure_fails_closed(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        riskguard_module,
+        "_disk_usage",
+        lambda _path: (_ for _ in ()).throw(OSError("capacity unavailable")),
+    )
+
+    snapshot = riskguard_module.storage_capacity_snapshot(tmp_path)
+
+    assert snapshot["level"] == RiskLevel.DATA_DEGRADED.value
+    assert snapshot["status"] == "CAPACITY_UNAVAILABLE"
