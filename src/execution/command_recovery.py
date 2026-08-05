@@ -10839,6 +10839,241 @@ def _exit_lifecycle_alignment_candidates(conn: sqlite3.Connection) -> list[dict]
     ]
 
 
+def _terminal_partial_exit_projection_candidates(
+    conn: sqlite3.Connection,
+) -> list[dict]:
+    """Return terminal SELL commands whose positive fill may be a reduction.
+
+    SCOPE=one open position and its exact command/order identity.
+    DRAIN=every command-recovery pass after canonical trade facts arrive.
+    RESET=the position leaves an open phase or the canonical partial-fill
+    cursor covers the command's economic fills exactly once.
+    """
+
+    if not (
+        _table_exists(conn, "venue_commands")
+        and _table_exists(conn, "venue_trade_facts")
+        and _table_exists(conn, "position_current")
+    ):
+        return []
+    rows = conn.execute(
+        """
+        SELECT cmd.*, pc.phase AS position_phase
+          FROM venue_commands cmd
+          JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+         WHERE cmd.intent_kind = 'EXIT'
+           AND UPPER(COALESCE(cmd.side, '')) = 'SELL'
+           AND cmd.state IN ('FILLED', 'EXPIRED')
+           AND COALESCE(cmd.venue_order_id, '') <> ''
+           AND pc.phase IN ('active', 'day0_window', 'pending_exit')
+           AND EXISTS (
+                SELECT 1
+                  FROM venue_trade_facts fact
+                 WHERE fact.command_id = cmd.command_id
+                   AND LOWER(COALESCE(fact.venue_order_id, '')) =
+                       LOWER(COALESCE(cmd.venue_order_id, ''))
+                   AND UPPER(COALESCE(fact.state, '')) IN
+                       ('MATCHED', 'MINED', 'CONFIRMED')
+                   AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+           )
+         ORDER BY datetime(cmd.updated_at), cmd.command_id
+        """
+    ).fetchall()
+    from src.state.fill_dedup import (
+        economic_exit_fills_for_position,
+        recorded_partial_exit_fill_cursors,
+    )
+
+    candidates: list[dict] = []
+    for row in rows:
+        command = _dict_row(row)
+        position_id = str(command.get("position_id") or "")
+        command_id = str(command.get("command_id") or "")
+        venue_order_id = str(command.get("venue_order_id") or "")
+        fills = [
+            fill
+            for fill in economic_exit_fills_for_position(
+                conn,
+                position_id,
+                venue_order_id=venue_order_id,
+            )
+            if fill.command_id == command_id
+        ]
+        cursors = recorded_partial_exit_fill_cursors(conn, position_id)
+        fully_booked = bool(fills) and all(
+            cursors.get(fill.identity) == (fill.quantity, fill.notional)
+            for fill in fills
+        )
+        if fully_booked and str(command.get("position_phase") or "") != "pending_exit":
+            continue
+        status_cursor = cursors.get(
+            f"status-fill:v1:{position_id}:{venue_order_id}"
+        )
+        canonical_total = sum((fill.quantity for fill in fills), Decimal("0"))
+        canonical_notional = sum((fill.notional for fill in fills), Decimal("0"))
+        command_size = _positive_decimal_or_none(command.get("size"))
+        if (
+            command_size is not None
+            and canonical_total == command_size
+            and _command_bound_full_exit_intent(conn, command)
+        ):
+            continue
+        if (
+            status_cursor == (canonical_total, canonical_notional)
+            and str(command.get("position_phase") or "") != "pending_exit"
+        ):
+            continue
+        candidates.append(command)
+    return candidates
+
+
+def _repair_terminal_partial_exit_projection(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+) -> bool:
+    """Converge one terminal underfill/reduction without manufacturing close."""
+
+    from src.execution.exit_lifecycle import (
+        _canonical_exit_intent_payload,
+        _complete_intentional_position_reduction,
+    )
+    from src.state.fill_dedup import economic_exit_fills_for_position
+    from src.state.portfolio import _position_from_projection_row
+
+    position_id = str(command.get("position_id") or "").strip()
+    command_id = str(command.get("command_id") or "").strip()
+    venue_order_id = str(command.get("venue_order_id") or "").strip()
+    command_size = _positive_decimal_or_none(command.get("size"))
+    if not position_id or not command_id or not venue_order_id or command_size is None:
+        return False
+    row = conn.execute(
+        "SELECT * FROM position_current WHERE position_id = ? LIMIT 1",
+        (position_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    current = _dict_row(row)
+    if str(current.get("phase") or "") not in {
+        "active",
+        "day0_window",
+        "pending_exit",
+    }:
+        return False
+
+    direction = str(current.get("direction") or "").lower()
+    held_token_id = str(
+        current.get("no_token_id")
+        if direction == "buy_no"
+        else current.get("token_id")
+        or ""
+    ).strip()
+    if not held_token_id or str(command.get("token_id") or "") != held_token_id:
+        raise RuntimeError(
+            f"terminal partial EXIT token mismatch for {command_id}"
+        )
+
+    position_row = dict(current)
+    position_row["env"] = _latest_position_env(conn, position_id)
+    position = _position_from_projection_row(position_row, current_mode="live")
+    intent = _canonical_exit_intent_payload(
+        conn,
+        position,
+        order_id=venue_order_id,
+        before_time=str(command.get("created_at") or ""),
+    )
+    intended_shares = (
+        _positive_decimal_or_none(intent.get("exit_intent_shares"))
+        if isinstance(intent, Mapping)
+        else None
+    )
+    close_position = (
+        intent.get("exit_intent_close_position")
+        if isinstance(intent, Mapping)
+        else None
+    )
+    if intended_shares != command_size or not isinstance(close_position, bool):
+        return False
+
+    fills = [
+        fill
+        for fill in economic_exit_fills_for_position(
+            conn,
+            position_id,
+            venue_order_id=venue_order_id,
+        )
+        if fill.command_id == command_id
+    ]
+    filled = sum((fill.quantity for fill in fills), Decimal("0"))
+    notional = sum((fill.notional for fill in fills), Decimal("0"))
+    if filled <= 0 or filled > command_size or notional <= 0:
+        return False
+    command_state = str(command.get("state") or "")
+    if command_state == CommandState.FILLED.value and filled != command_size:
+        raise RuntimeError(
+            f"FILLED terminal partial EXIT does not equal command size for {command_id}"
+        )
+    if close_position:
+        holding_shares = intended_shares
+        if filled >= holding_shares:
+            return False
+    else:
+        certificate = intent.get("exit_intent_capital_certificate")
+        holding_shares = (
+            _positive_decimal_or_none(certificate.get("held_shares"))
+            if isinstance(certificate, Mapping)
+            else None
+        )
+        if holding_shares is None or intended_shares > holding_shares:
+            return False
+    expected_remaining = holding_shares - filled
+    if expected_remaining <= Decimal("0"):
+        return False
+    local_shares = _positive_decimal_or_none(current.get("shares"))
+    chain_shares = _positive_decimal_or_none(current.get("chain_shares"))
+    local_basis = _positive_decimal_or_none(current.get("cost_basis_usd"))
+    chain_basis = _positive_decimal_or_none(current.get("chain_cost_basis_usd"))
+    entry_price = _positive_decimal_or_none(current.get("entry_price"))
+    expected_basis = (
+        expected_remaining * entry_price if entry_price is not None else None
+    )
+    if (
+        local_shares is None
+        or chain_shares is None
+        or local_basis is None
+        or chain_basis is None
+        or expected_basis is None
+        or local_shares != expected_remaining
+        or chain_shares != expected_remaining
+        or local_basis != expected_basis
+        or chain_basis != expected_basis
+    ):
+        raise RuntimeError(
+            f"terminal partial EXIT residual exposure conflicts for {command_id}"
+        )
+
+    applied = _complete_intentional_position_reduction(
+        position,
+        intended_shares=intended_shares,
+        confirmed_filled_shares=filled,
+        fill_price=notional / filled,
+        order_id=venue_order_id,
+        status=command_state,
+        conn=conn,
+        economic_fills=fills,
+        intent_holding_shares=holding_shares,
+        release_after_fill=True,
+    )
+    phase_after = conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    return applied > 0 or (
+        phase_after is not None and str(phase_after[0] or "") != "pending_exit"
+    )
+
+
 def _command_bound_full_exit_intent(
     conn: sqlite3.Connection,
     command: Mapping[str, object],
@@ -11192,6 +11427,31 @@ def reconcile_exit_lifecycle_alignment_repairs(conn: sqlite3.Connection) -> dict
     """Repair EXIT command/projection disagreements visible at live restart."""
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for command in _terminal_partial_exit_projection_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(command.get("command_id") or "")
+        safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+        sp_name = f"sp_terminal_partial_exit_{safe_command_id}"
+        try:
+            conn.execute(f"SAVEPOINT {sp_name}")
+            advanced = _repair_terminal_partial_exit_projection(
+                conn,
+                command=command,
+            )
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            if advanced:
+                summary["advanced"] += 1
+            else:
+                summary["stayed"] += 1
+        except Exception as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            logger.error(
+                "recovery: terminal partial EXIT projection repair failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
     for candidate in _exit_lifecycle_alignment_candidates(conn):
         summary["scanned"] += 1
         command_id = str(candidate.get("command_id") or "")
@@ -14766,19 +15026,8 @@ def _append_unrecorded_partial_exit_economics(
         status_identity,
         (Decimal("0"), Decimal("0")),
     )
-    canonical_booked_qty = sum(
-        (cursors.get(fill.identity, (Decimal("0"), Decimal("0")))[0] for fill in fills),
-        Decimal("0"),
-    )
-    canonical_booked_notional = sum(
-        (cursors.get(fill.identity, (Decimal("0"), Decimal("0")))[1] for fill in fills),
-        Decimal("0"),
-    )
-    status_remaining_qty = max(Decimal("0"), status_qty - canonical_booked_qty)
-    status_remaining_notional = max(
-        Decimal("0"),
-        status_notional - canonical_booked_notional,
-    )
+    status_remaining_qty = status_qty
+    status_remaining_notional = status_notional
     canonical_notional = sum((fill.notional for fill in fills), Decimal("0"))
     if status_qty and (
         canonical_total < status_qty
@@ -14800,32 +15049,32 @@ def _append_unrecorded_partial_exit_economics(
                 "partial EXIT canonical fill regressed: "
                 f"position_id={position_id} identity={fill.identity}"
             )
-        available_qty = fill.quantity - prior_qty
-        available_notional = fill.notional - prior_notional
-        if status_remaining_qty > 0 and available_qty > 0:
-            consumed_qty = min(status_remaining_qty, available_qty)
-            if consumed_qty == available_qty:
-                consumed_notional = available_notional
-                if status_remaining_notional < consumed_notional:
-                    raise PartialExitEconomicDebtError(
-                        "partial EXIT status receipt notional cannot cover canonical fill: "
-                        f"position_id={position_id} identity={fill.identity}"
-                    )
-            else:
-                consumed_notional = status_remaining_notional
-                if consumed_notional != (
-                    available_notional * consumed_qty / available_qty
-                ):
-                    raise PartialExitEconomicDebtError(
-                        "partial EXIT status receipt splits canonical fill without exact economics: "
-                        f"position_id={position_id} identity={fill.identity}"
-                    )
-            status_remaining_qty -= consumed_qty
-            status_remaining_notional -= consumed_notional
-            prior_qty += consumed_qty
-            prior_notional += consumed_notional
-        delta_qty = fill.quantity - prior_qty
-        delta_notional = fill.notional - prior_notional
+        covered_qty = min(status_remaining_qty, fill.quantity)
+        covered_notional = (
+            fill.notional * covered_qty / fill.quantity
+            if covered_qty > 0
+            else Decimal("0")
+        )
+        if status_remaining_notional < covered_notional:
+            raise PartialExitEconomicDebtError(
+                "partial EXIT status receipt notional cannot cover canonical fill: "
+                f"position_id={position_id} identity={fill.identity}"
+            )
+        status_remaining_qty -= covered_qty
+        status_remaining_notional -= covered_notional
+        if prior_qty > covered_qty:
+            accounted_qty, accounted_notional = prior_qty, prior_notional
+        elif prior_qty < covered_qty:
+            accounted_qty, accounted_notional = covered_qty, covered_notional
+        else:
+            if prior_qty and prior_notional != covered_notional:
+                raise PartialExitEconomicDebtError(
+                    "partial EXIT status/canonical economics disagree: "
+                    f"position_id={position_id} identity={fill.identity}"
+                )
+            accounted_qty, accounted_notional = prior_qty, prior_notional
+        delta_qty = fill.quantity - accounted_qty
+        delta_notional = fill.notional - accounted_notional
         if delta_qty == 0:
             if delta_notional != 0:
                 raise PartialExitEconomicDebtError(

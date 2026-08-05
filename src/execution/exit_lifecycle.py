@@ -6392,6 +6392,7 @@ def _complete_intentional_position_reduction(
     status: str,
     conn: sqlite3.Connection | None,
     economic_fills: Sequence[object] | None = None,
+    intent_holding_shares: Decimal | None = None,
     release_after_fill: bool = True,
 ) -> Decimal:
     """Append exact partial economics before publishing the local reduction."""
@@ -6437,11 +6438,26 @@ def _complete_intentional_position_reduction(
     # status-first receipt already reduced the local position.
     if newly_filled > Decimal("1e-9") or economic_fills:
         open_shares = Decimal(str(position.effective_shares))
-        intent_holding = _canonical_reduction_intent_holding_shares(
-            conn,
-            position,
-            order_id=order_id,
+        intent_holding = (
+            Decimal(intent_holding_shares)
+            if intent_holding_shares is not None
+            else _canonical_reduction_intent_holding_shares(
+                conn,
+                position,
+                order_id=order_id,
+            )
         )
+        if intent_holding is None:
+            full_intent_shares = _canonical_full_exit_intent_shares(
+                conn,
+                position,
+                order_id=order_id,
+            )
+            if (
+                full_intent_shares is not None
+                and total_filled < full_intent_shares
+            ):
+                intent_holding = full_intent_shares
         expected_remaining = (
             intent_holding - total_filled
             if intent_holding is not None
@@ -6491,16 +6507,13 @@ def _complete_intentional_position_reduction(
             status_qty, status_notional = cursors.get(
                 status_identity, (Decimal("0"), Decimal("0"))
             )
-            canonical_booked_qty = Decimal("0")
-            canonical_booked_notional = Decimal("0")
-            for identity, (quantity, notional) in cursors.items():
-                if identity != status_identity:
-                    canonical_booked_qty += quantity
-                    canonical_booked_notional += notional
-            status_remaining_qty = max(Decimal("0"), status_qty - canonical_booked_qty)
-            status_remaining_notional = max(
-                Decimal("0"), status_notional - canonical_booked_notional
-            )
+            # The status receipt is one command-wide prefix, while canonical
+            # trade facts are cumulative per stable trade identity.  Allocate
+            # that prefix from the first canonical fill onward on every replay;
+            # never subtract prior canonical cursors from the status prefix or
+            # a later replay will consume the same fill twice.
+            status_remaining_qty = status_qty
+            status_remaining_notional = status_notional
             canonical_total_qty = sum(
                 (Decimal(str(getattr(fact, "quantity", "0"))) for fact in canonical_fills),
                 Decimal("0"),
@@ -6531,28 +6544,30 @@ def _complete_intentional_position_reduction(
                     raise PartialExitEconomicDebtError(
                         f"partial EXIT canonical fill regressed: position_id={trade_id} identity={identity}"
                     )
-                if identity not in cursors and status_remaining_qty > 0:
-                    consumed_qty = min(status_remaining_qty, cumulative_qty)
-                    if consumed_qty == cumulative_qty:
-                        consumed_notional = cumulative_notional
-                        if status_remaining_notional < consumed_notional:
-                            raise PartialExitEconomicDebtError(
-                                f"partial EXIT status receipt notional cannot cover canonical fill: position_id={trade_id} identity={identity}"
-                            )
-                    else:
-                        consumed_notional = status_remaining_notional
-                        if consumed_notional != (
-                            cumulative_notional * consumed_qty / cumulative_qty
-                        ):
-                            raise PartialExitEconomicDebtError(
-                                f"partial EXIT status receipt splits canonical fill without exact economics: position_id={trade_id} identity={identity}"
-                            )
-                    status_remaining_qty -= consumed_qty
-                    status_remaining_notional -= consumed_notional
-                    prior_qty = consumed_qty
-                    prior_notional = consumed_notional
-                delta_qty = cumulative_qty - prior_qty
-                delta_notional = cumulative_notional - prior_notional
+                covered_qty = min(status_remaining_qty, cumulative_qty)
+                covered_notional = (
+                    cumulative_notional * covered_qty / cumulative_qty
+                    if covered_qty > 0
+                    else Decimal("0")
+                )
+                if status_remaining_notional < covered_notional:
+                    raise PartialExitEconomicDebtError(
+                        f"partial EXIT status receipt notional cannot cover canonical fill: position_id={trade_id} identity={identity}"
+                    )
+                status_remaining_qty -= covered_qty
+                status_remaining_notional -= covered_notional
+                if prior_qty > covered_qty:
+                    accounted_qty, accounted_notional = prior_qty, prior_notional
+                elif prior_qty < covered_qty:
+                    accounted_qty, accounted_notional = covered_qty, covered_notional
+                else:
+                    if prior_qty and prior_notional != covered_notional:
+                        raise PartialExitEconomicDebtError(
+                            f"partial EXIT status/canonical economics disagree: position_id={trade_id} identity={identity}"
+                        )
+                    accounted_qty, accounted_notional = prior_qty, prior_notional
+                delta_qty = cumulative_qty - accounted_qty
+                delta_notional = cumulative_notional - accounted_notional
                 if delta_qty == 0:
                     if delta_notional != 0:
                         raise PartialExitEconomicDebtError(
@@ -6572,6 +6587,10 @@ def _complete_intentional_position_reduction(
                         "cumulative_qty": cumulative_qty,
                         "cumulative_notional": cumulative_notional,
                     }
+                )
+            if status_remaining_qty != 0 or status_remaining_notional != 0:
+                raise PartialExitEconomicDebtError(
+                    f"partial EXIT status receipt remains unmatched: position_id={trade_id} order_id={order_id}"
                 )
         else:
             # A status-first receipt gets one stable command-bound cursor so a
@@ -6608,22 +6627,19 @@ def _complete_intentional_position_reduction(
             else Decimal("0")
         )
         remaining_quantity = slice_quantity
-        remaining_cost_basis = basis_cost
-        local_cost_quantity = position_fill_to_apply
         for item in slices:
             quantity = item["quantity"]
             notional = item["notional"]
             remaining_quantity -= quantity
             allocated_cost = quantity * unit_cost
-            locally_applied = min(quantity, local_cost_quantity)
-            remaining_cost_basis -= locally_applied * unit_cost
-            local_cost_quantity -= locally_applied
+            event_remaining_shares = remaining_shares + remaining_quantity
+            remaining_cost_basis = event_remaining_shares * unit_cost
             pnl_delta = notional - allocated_cost
             cumulative_realized += pnl_delta
             batch_slices.append(
                 {
                     **item,
-                    "remaining_shares": remaining_shares + remaining_quantity,
+                    "remaining_shares": event_remaining_shares,
                     "allocated_cost": allocated_cost,
                     "pnl_delta": pnl_delta,
                     "cumulative_realized": cumulative_realized,

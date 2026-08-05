@@ -1966,8 +1966,9 @@ def test_status_first_receipt_is_reconciled_against_canonical_fill(conn):
         (position_id,),
     ).fetchone()[0] == before
     assert partial_exit_realized_pnl_fold(conn, position_id) == Decimal("0.3")
-    event_count = conn.execute(
-        "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+    economics_count = conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ? "
+        "AND caused_by = 'partial_exit_fill'",
         (position_id,),
     ).fetchone()[0]
     assert conn.execute(
@@ -1979,10 +1980,159 @@ def test_status_first_receipt_is_reconciled_against_canonical_fill(conn):
     assert third["pending_exit_scan_candidates"] == 0
     assert clob.polls == 1
     assert conn.execute(
-        "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ? "
+        "AND caused_by = 'partial_exit_fill'",
         (position_id,),
-    ).fetchone()[0] == event_count
+    ).fetchone()[0] == economics_count
     assert partial_exit_realized_pnl_fold(conn, position_id) == Decimal("0.3")
+
+
+def test_status_prefix_multi_fill_growth_is_exactly_once_on_replay(conn):
+    """A command-wide status prefix must not be re-consumed per trade id."""
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.execution import exit_lifecycle
+    from src.state.fill_dedup import (
+        EconomicExitFill,
+        partial_exit_realized_pnl_fold,
+        recorded_partial_exit_fill_cursors,
+    )
+    from src.state.portfolio import Position
+    from src.state.projection import upsert_position_current
+
+    position_id = "pos-status-multi-fill-growth"
+    order_id = "ord-status-multi-fill-growth"
+    position = Position(
+        trade_id=position_id,
+        market_id="mkt-status-multi-fill-growth",
+        city="Madrid",
+        cluster="Madrid",
+        target_date="2026-08-03",
+        bin_label="30C",
+        direction="buy_yes",
+        strategy_key="center_buy",
+        size_usd=0.94,
+        entry_price=0.10,
+        shares=9.4,
+        cost_basis_usd=0.94,
+        state="pending_exit",
+        exit_state="sell_pending",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-status-multi-fill-growth",
+        last_exit_order_id=order_id,
+        last_monitor_at=_NOW.isoformat(),
+    )
+    projection = build_position_current_projection(position)
+    projection["realized_pnl_usd"] = "0.3"
+    upsert_position_current(conn, projection)
+    conn.execute(
+        """INSERT INTO position_events (
+               event_id, position_id, event_version, sequence_no, event_type,
+               occurred_at, phase_before, phase_after, strategy_key,
+               source_module, payload_json, order_id, caused_by, env
+           ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, 'pending_exit',
+                     'pending_exit', 'center_buy', 'tests.test_exit_safety',
+                     ?, ?, 'partial_exit_fill', 'live')""",
+        (
+            f"{position_id}:status-prefix",
+            position_id,
+            _NOW.isoformat(),
+            json.dumps(
+                {
+                    "semantic_event": "CAPITAL_REDUCTION_FILLED",
+                    "economic_fill_identity": (
+                        f"status-fill:v1:{position_id}:{order_id}"
+                    ),
+                    "economic_fill_cumulative_shares": "0.6",
+                    "economic_fill_cumulative_notional_usd": "0.36",
+                    "filled_shares": "0.6",
+                    "filled_notional_usd": "0.36",
+                    "allocated_cost_basis_usd": "0.06",
+                    "realized_pnl_delta_usd": "0.3",
+                    "remaining_shares": "9.4",
+                    "remaining_cost_basis_usd": "0.94",
+                    "fill_price": "0.6",
+                },
+                sort_keys=True,
+            ),
+            order_id,
+        ),
+    )
+    fill_a = EconomicExitFill(
+        identity="economic-fill:v2:cmd-status:ord-status:trade-a",
+        command_id="cmd-status",
+        venue_order_id=order_id,
+        trade_id="trade-a",
+        quantity=Decimal("0.4"),
+        unit_price=Decimal("0.5"),
+        notional=Decimal("0.2"),
+    )
+    fill_b = EconomicExitFill(
+        identity="economic-fill:v2:cmd-status:ord-status:trade-b",
+        command_id="cmd-status",
+        venue_order_id=order_id,
+        trade_id="trade-b",
+        quantity=Decimal("0.2"),
+        unit_price=Decimal("0.8"),
+        notional=Decimal("0.16"),
+    )
+
+    assert exit_lifecycle._complete_intentional_position_reduction(
+        position,
+        intended_shares=Decimal("2"),
+        confirmed_filled_shares=Decimal("0.6"),
+        fill_price=Decimal("0.6"),
+        order_id=order_id,
+        status="MATCHED",
+        conn=conn,
+        economic_fills=[fill_a, fill_b],
+        intent_holding_shares=Decimal("10"),
+    ) == Decimal("0")
+    assert position.state == "holding"
+    grown_b = replace(
+        fill_b,
+        quantity=Decimal("0.4"),
+        notional=Decimal("0.32"),
+    )
+    assert exit_lifecycle._complete_intentional_position_reduction(
+        position,
+        intended_shares=Decimal("2"),
+        confirmed_filled_shares=Decimal("0.8"),
+        fill_price=Decimal("0.65"),
+        order_id=order_id,
+        status="CONFIRMED",
+        conn=conn,
+        economic_fills=[fill_a, grown_b],
+        intent_holding_shares=Decimal("10"),
+    ) == Decimal("0.2")
+    assert position.shares == pytest.approx(9.2)
+    assert partial_exit_realized_pnl_fold(conn, position_id) == Decimal("0.44")
+    assert recorded_partial_exit_fill_cursors(conn, position_id)[grown_b.identity] == (
+        Decimal("0.4"),
+        Decimal("0.32"),
+    )
+    economics_count = conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ? "
+        "AND caused_by = 'partial_exit_fill'",
+        (position_id,),
+    ).fetchone()[0]
+    assert exit_lifecycle._complete_intentional_position_reduction(
+        position,
+        intended_shares=Decimal("2"),
+        confirmed_filled_shares=Decimal("0.8"),
+        fill_price=Decimal("0.65"),
+        order_id=order_id,
+        status="CONFIRMED",
+        conn=conn,
+        economic_fills=[fill_a, grown_b],
+        intent_holding_shares=Decimal("10"),
+    ) == Decimal("0")
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ? "
+        "AND caused_by = 'partial_exit_fill'",
+        (position_id,),
+    ).fetchone()[0] == economics_count
+    assert partial_exit_realized_pnl_fold(conn, position_id) == Decimal("0.44")
 
 
 def test_status_first_projection_failure_leaves_local_and_canonical_unchanged(

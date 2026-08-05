@@ -471,10 +471,20 @@ def recorded_partial_exit_fill_cursors(
                 f"partial EXIT cursor lacks cumulative economics: position_id={position_id} identity={identity}"
             )
         prior = cursors.get(identity)
-        if prior is not None and prior != (quantity, notional):
-            raise PartialExitEconomicDebtError(
-                f"partial EXIT stable identity conflicts: position_id={position_id} identity={identity}"
-            )
+        if prior is not None:
+            prior_quantity, prior_notional = prior
+            delta_quantity = _decimal(payload.get("filled_shares"))
+            delta_notional = _decimal(payload.get("filled_notional_usd"))
+            if (
+                quantity <= prior_quantity
+                or notional <= prior_notional
+                or delta_quantity != quantity - prior_quantity
+                or delta_notional != notional - prior_notional
+            ):
+                raise PartialExitEconomicDebtError(
+                    "partial EXIT stable identity did not advance by its exact "
+                    f"cumulative delta: position_id={position_id} identity={identity}"
+                )
         cursors[identity] = (quantity, notional)
     return cursors
 
@@ -541,7 +551,7 @@ def partial_exit_realized_pnl_fold(
         )
 
     total = Decimal("0")
-    seen: set[str] = set()
+    cursors: dict[str, tuple[Decimal, Decimal]] = {}
     for row, payload in parsed:
         identity = str(payload.get("economic_fill_identity") or "").strip()
         if not identity:
@@ -550,28 +560,49 @@ def partial_exit_realized_pnl_fold(
             raise PartialExitEconomicDebtError(
                 f"partial EXIT economics repair required: position_id={position_id} event_id={row['event_id']}"
             )
-        if identity in seen:
-            raise PartialExitEconomicDebtError(
-                f"partial EXIT duplicate stable identity: position_id={position_id} identity={identity}"
-            )
         delta = _decimal(payload.get("realized_pnl_delta_usd"))
         quantity = _decimal(payload.get("filled_shares"))
         notional = _decimal(payload.get("filled_notional_usd"))
         cost = _decimal(payload.get("allocated_cost_basis_usd"))
+        cumulative_quantity = _decimal(
+            payload.get("economic_fill_cumulative_shares", quantity)
+        )
+        cumulative_notional = _decimal(
+            payload.get("economic_fill_cumulative_notional_usd", notional)
+        )
         if (
             delta is None
             or quantity is None
             or notional is None
             or cost is None
+            or cumulative_quantity is None
+            or cumulative_notional is None
             or quantity <= 0
             or notional <= 0
             or cost < 0
+            or cumulative_quantity <= 0
+            or cumulative_notional <= 0
+            or cumulative_quantity < quantity
+            or cumulative_notional < notional
             or delta != notional - cost
         ):
             raise PartialExitEconomicDebtError(
                 f"partial EXIT event economics invalid: position_id={position_id} identity={identity}"
             )
-        seen.add(identity)
+        prior = cursors.get(identity)
+        if prior is not None:
+            prior_quantity, prior_notional = prior
+            if (
+                cumulative_quantity <= prior_quantity
+                or cumulative_notional <= prior_notional
+                or quantity != cumulative_quantity - prior_quantity
+                or notional != cumulative_notional - prior_notional
+            ):
+                raise PartialExitEconomicDebtError(
+                    "partial EXIT stable identity did not advance by its exact "
+                    f"cumulative delta: position_id={position_id} identity={identity}"
+                )
+        cursors[identity] = (cumulative_quantity, cumulative_notional)
         total += delta
     return total
 

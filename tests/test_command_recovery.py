@@ -22161,9 +22161,10 @@ class TestRecoveryResolutionTable:
             """
             UPDATE position_current
                SET phase = 'pending_exit',
-                   shares = 21.0,
-                   chain_shares = 21.0,
-                   cost_basis_usd = 2.94,
+                   shares = 11.0,
+                   chain_shares = 11.0,
+                   chain_cost_basis_usd = 1.54,
+                   cost_basis_usd = 1.54,
                    entry_price = 0.14,
                    order_status = 'sell_pending_confirmation',
                    updated_at = '2026-07-28T00:03:00Z'
@@ -22192,6 +22193,9 @@ class TestRecoveryResolutionTable:
                         {
                             "exit_intent_close_position": close_position,
                             "exit_intent_shares": shares,
+                            "exit_intent_capital_certificate": {
+                                "held_shares": "21"
+                            },
                         },
                         sort_keys=True,
                     ),
@@ -22284,8 +22288,8 @@ class TestRecoveryResolutionTable:
         summary = reconcile_exit_lifecycle_alignment_repairs(conn)
 
         assert summary == {
-            "scanned": 0,
-            "advanced": 0,
+            "scanned": 1,
+            "advanced": 1,
             "stayed": 0,
             "errors": 0,
         }
@@ -22297,9 +22301,9 @@ class TestRecoveryResolutionTable:
             """
         ).fetchone()
         assert dict(current) == {
-            "phase": "pending_exit",
-            "shares": 21.0,
-            "chain_shares": 21.0,
+            "phase": "active",
+            "shares": 11.0,
+            "chain_shares": 11.0,
         }
         assert conn.execute(
             """
@@ -22311,49 +22315,18 @@ class TestRecoveryResolutionTable:
             """
         ).fetchone()[0] == 0
 
-        conn.execute(
-            """
-            INSERT INTO position_events (
-                event_id, position_id, event_version, sequence_no, event_type,
-                occurred_at, phase_before, phase_after, strategy_key,
-                order_id, caused_by, source_module, env, payload_json
-            ) VALUES (
-                'pos-001:partial-exit-fill-applied', 'pos-001', 1, ?,
-                'MONITOR_REFRESHED', '2026-07-28T00:01:11Z',
-                'pending_exit', 'pending_exit', 'center_buy',
-                'ord-exit-partial', 'partial_exit_fill',
-                'src.execution.exit_lifecycle', 'live', ?
-            )
-            """,
-            (
-                sequence_no + 2,
-                json.dumps(
-                    {
-                        "filled_shares": 10.0,
-                        "remaining_shares": 11.0,
-                        "semantic_event": "CAPITAL_REDUCTION_FILLED",
-                    },
-                    sort_keys=True,
-                ),
-            ),
-        )
-        conn.execute(
-            """
-            UPDATE position_current
-               SET phase = 'day0_window',
-                   shares = 11.0,
-                   chain_shares = 11.0,
-                   order_id = NULL,
-                   order_status = 'filled'
-             WHERE position_id = 'pos-001'
-            """
-        )
+        partial = conn.execute(
+            "SELECT payload_json FROM position_events "
+            "WHERE position_id = 'pos-001' "
+            "AND caused_by = 'partial_exit_fill'"
+        ).fetchone()
+        assert partial is not None
+        partial_payload = json.loads(partial[0])
+        assert partial_payload["semantic_event"] == "CAPITAL_REDUCTION_FILLED"
+        assert partial_payload["filled_shares"] == "10"
+        assert partial_payload["remaining_shares"] == "11"
 
-        from src.execution.command_recovery import (
-            reconcile_exit_pending_projections,
-        )
-
-        replay = reconcile_exit_pending_projections(conn)
+        replay = reconcile_exit_lifecycle_alignment_repairs(conn)
 
         assert replay == {
             "scanned": 0,
@@ -22370,12 +22343,312 @@ class TestRecoveryResolutionTable:
                 """
             ).fetchone()
         ) == {
-            "phase": "day0_window",
+            "phase": "active",
             "shares": 11.0,
             "chain_shares": 11.0,
-            "order_id": None,
+            "order_id": "ord-entry",
             "order_status": "filled",
         }
+
+    @pytest.mark.parametrize(
+        ("status_first", "fail_after_write"),
+        [(False, False), (True, False), (False, True)],
+    )
+    def test_expired_full_exit_underfill_books_partial_economics_once(
+        self,
+        conn,
+        mock_client,
+        monkeypatch,
+        status_first,
+        fail_after_write,
+    ):
+        """A terminal underfill remains open with exact residual economics."""
+        _insert(conn, command_id="cmd-entry", position_id="pos-001", size=14.84, price=0.50)
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 1.84,
+                   chain_shares = 1.84,
+                   chain_cost_basis_usd = 0.92,
+                   cost_basis_usd = 0.92,
+                   entry_price = 0.50,
+                   order_status = 'sell_pending_confirmation'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _seed_full_exit_intent(
+            conn,
+            position_id="pos-001",
+            shares=14.84,
+            occurred_at="2026-07-28T00:01:00Z",
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit-underfill",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=14.84,
+            price=0.86,
+            token_id="tok-001",
+            created_at="2026-07-28T00:01:01Z",
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-exit-underfill",
+            venue_order_id="ord-exit-underfill",
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit-underfill",
+            order_id="ord-exit-underfill",
+            trade_id="0xunderfill",
+            state="CONFIRMED",
+            filled_size="13",
+            fill_price="0.86",
+            tx_hash="0xunderfill",
+        )
+        conn.execute(
+            """
+            UPDATE venue_commands
+               SET state = 'EXPIRED', updated_at = '2026-07-28T00:03:00Z'
+             WHERE command_id = 'cmd-exit-underfill'
+            """
+        )
+        if status_first:
+            sequence_no = conn.execute(
+                "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
+                "WHERE position_id = 'pos-001'"
+            ).fetchone()[0]
+            conn.execute(
+                """INSERT INTO position_events (
+                       event_id, position_id, event_version, sequence_no,
+                       event_type, occurred_at, phase_before, phase_after,
+                       strategy_key, source_module, payload_json, order_id,
+                       caused_by, env
+                   ) VALUES (
+                       'pos-001:status-first-underfill', 'pos-001', 1, ?,
+                       'MONITOR_REFRESHED', '2026-07-28T00:02:00Z',
+                       'pending_exit', 'pending_exit', 'opening_inertia',
+                       'tests.test_command_recovery', ?, 'ord-exit-underfill',
+                       'partial_exit_fill', 'live'
+                   )""",
+                (
+                    sequence_no,
+                    json.dumps(
+                        {
+                            "semantic_event": "CAPITAL_REDUCTION_FILLED",
+                            "economic_fill_identity": (
+                                "status-fill:v1:pos-001:ord-exit-underfill"
+                            ),
+                            "economic_fill_cumulative_shares": "13",
+                            "economic_fill_cumulative_notional_usd": "11.18",
+                            "filled_shares": "13",
+                            "filled_notional_usd": "11.18",
+                            "allocated_cost_basis_usd": "6.5",
+                            "realized_pnl_delta_usd": "4.68",
+                            "cumulative_realized_pnl_usd": "4.68",
+                            "remaining_shares": "1.84",
+                            "remaining_cost_basis_usd": "0.92",
+                            "fill_price": "0.86",
+                        },
+                        sort_keys=True,
+                    ),
+                ),
+            )
+            conn.execute(
+                "UPDATE position_current SET realized_pnl_usd = 4.68 "
+                "WHERE position_id = 'pos-001'"
+            )
+
+        from src.execution.command_recovery import (
+            reconcile_exit_lifecycle_alignment_repairs,
+        )
+        if fail_after_write:
+            from src.state import db as state_db
+
+            real_append = state_db.append_many_and_project
+
+            def write_then_fail(*args, **kwargs):
+                real_append(*args, **kwargs)
+                raise RuntimeError("injected post-projection failure")
+
+            monkeypatch.setattr(
+                state_db,
+                "append_many_and_project",
+                write_then_fail,
+            )
+
+        summary = reconcile_exit_lifecycle_alignment_repairs(conn)
+        if fail_after_write:
+            assert summary == {
+                "scanned": 1,
+                "advanced": 0,
+                "stayed": 0,
+                "errors": 1,
+            }
+            assert conn.execute(
+                "SELECT phase FROM position_current WHERE position_id = 'pos-001'"
+            ).fetchone()[0] == "pending_exit"
+            assert conn.execute(
+                "SELECT COUNT(*) FROM position_events "
+                "WHERE position_id = 'pos-001' "
+                "AND caused_by = 'partial_exit_fill'"
+            ).fetchone()[0] == 0
+            return
+        assert summary == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = dict(
+            conn.execute(
+                """
+                SELECT phase, shares, chain_shares, cost_basis_usd,
+                       realized_pnl_usd, order_status
+                  FROM position_current
+                 WHERE position_id = 'pos-001'
+                """
+            ).fetchone()
+        )
+        assert current["phase"] == "active"
+        assert Decimal(str(current["shares"])) == Decimal("1.84")
+        assert Decimal(str(current["chain_shares"])) == Decimal("1.84")
+        assert Decimal(str(current["cost_basis_usd"])) == Decimal("0.92")
+        assert Decimal(str(current["realized_pnl_usd"])) == Decimal("4.68")
+        assert current["order_status"] == "filled"
+        partial = conn.execute(
+            "SELECT payload_json FROM position_events "
+            "WHERE position_id = 'pos-001' AND caused_by = 'partial_exit_fill'"
+        ).fetchone()
+        payload = json.loads(partial[0])
+        assert payload["filled_shares"] == "13"
+        assert payload["remaining_shares"] == "1.84"
+        assert payload["allocated_cost_basis_usd"] == "6.5"
+        assert payload["realized_pnl_delta_usd"] == "4.68"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM position_events "
+            "WHERE position_id = 'pos-001' AND caused_by = 'partial_exit_fill'"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM position_events "
+            "WHERE position_id = 'pos-001' AND event_type = 'EXIT_ORDER_FILLED'"
+        ).fetchone()[0] == 0
+        assert reconcile_exit_lifecycle_alignment_repairs(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+
+    @pytest.mark.parametrize(
+        "conflict",
+        ["exposure", "basis", "stale_equal_basis", "sub_micro_share"],
+    )
+    def test_terminal_underfill_waits_for_exact_residual_truth(
+        self,
+        conn,
+        mock_client,
+        conflict,
+    ):
+        """Economic repair cannot guess whether chain exposure already moved."""
+        residual_shares = {
+            "exposure": 14.84,
+            "sub_micro_share": 1.8400005,
+        }.get(conflict, 1.84)
+        local_basis = {
+            "exposure": 7.42,
+            "stale_equal_basis": 7.42,
+        }.get(conflict, 0.92)
+        chain_basis = {
+            "exposure": 7.42,
+            "basis": 0.93,
+            "stale_equal_basis": 7.42,
+        }.get(conflict, 0.92)
+        _insert(conn, command_id="cmd-entry", position_id="pos-001", size=14.84, price=0.50)
+        _advance_to_acked(conn, command_id="cmd-entry", venue_order_id="ord-entry")
+        _seed_pending_entry_projection(conn, command_id="cmd-entry", order_id="ord-entry")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = ?,
+                   chain_shares = ?,
+                   chain_cost_basis_usd = ?,
+                   cost_basis_usd = ?,
+                   entry_price = 0.50,
+                   order_status = 'sell_pending_confirmation'
+             WHERE position_id = 'pos-001'
+            """,
+            (residual_shares, residual_shares, chain_basis, local_basis),
+        )
+        _seed_full_exit_intent(
+            conn,
+            position_id="pos-001",
+            shares=14.84,
+            occurred_at="2026-07-28T00:01:00Z",
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit-underfill",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=14.84,
+            price=0.86,
+            token_id="tok-001",
+            created_at="2026-07-28T00:01:01Z",
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-exit-underfill",
+            venue_order_id="ord-exit-underfill",
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit-underfill",
+            order_id="ord-exit-underfill",
+            trade_id="0xunderfill",
+            state="CONFIRMED",
+            filled_size="13",
+            fill_price="0.86",
+            tx_hash="0xunderfill",
+        )
+        conn.execute(
+            """
+            UPDATE venue_commands
+               SET state = 'EXPIRED', updated_at = '2026-07-28T00:03:00Z'
+             WHERE command_id = 'cmd-exit-underfill'
+            """
+        )
+
+        from src.execution.command_recovery import (
+            reconcile_exit_lifecycle_alignment_repairs,
+        )
+
+        assert reconcile_exit_lifecycle_alignment_repairs(conn) == {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 1,
+        }
+        current = conn.execute(
+            "SELECT phase, shares, chain_shares FROM position_current "
+            "WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "shares": residual_shares,
+            "chain_shares": residual_shares,
+        }
+        assert conn.execute(
+            "SELECT COUNT(*) FROM position_events "
+            "WHERE position_id = 'pos-001' AND caused_by = 'partial_exit_fill'"
+        ).fetchone()[0] == 0
 
     @pytest.mark.parametrize(
         ("ambiguous_time", "ambiguous_payload"),
