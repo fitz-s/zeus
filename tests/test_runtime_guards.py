@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-08-05; last_reused=2026-08-05
+# Lifecycle: created=2026-04-28; last_reviewed=2026-08-06; last_reused=2026-08-06
 # Created: 2026-04-28
-# Last reused/audited: 2026-08-05
+# Last reused/audited: 2026-08-06
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -11634,6 +11634,94 @@ def test_openmeteo_request_embargo_does_not_block_other_request(monkeypatch, tmp
 
     assert allowed is True
     assert reason is None
+
+
+def test_openmeteo_unmetered_request_keeps_lease_without_consuming_quota(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    path = tmp_path / "openmeteo_quota.json"
+    tracker = OpenMeteoQuotaTracker(state_path=path)
+    now = datetime.now(timezone.utc)
+    state = tracker._default_state(now)
+    state["day_count"] = PRIORITY_DAILY_LIMIT
+    state["hour_count"] = openmeteo_quota.PRIORITY_HOURLY_LIMIT
+    state["minute_count"] = openmeteo_quota.PRIORITY_MINUTE_LIMIT
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    with tracker.priority_lane():
+        allowed, reason, lease_id = tracker.acquire_request(
+            "metadata-a",
+            endpoint="api.open-meteo.com/data/ecmwf_ifs/static/meta.json",
+            job="source-clock-metadata",
+            count_toward_quota=False,
+        )
+        assert (allowed, reason) == (True, None)
+        assert lease_id
+        assert tracker.record_request_success(
+            "metadata-a",
+            endpoint="api.open-meteo.com/data/ecmwf_ifs/static/meta.json",
+            job="source-clock-metadata",
+            lease_id=lease_id,
+        ) is True
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["day_count"] == PRIORITY_DAILY_LIMIT
+    assert payload["hour_count"] == openmeteo_quota.PRIORITY_HOURLY_LIMIT
+    assert payload["minute_count"] == openmeteo_quota.PRIORITY_MINUTE_LIMIT
+    assert payload["requests"]["metadata-a"]["outcome"] == "success"
+    assert payload["requests"]["metadata-a"]["quota_cost"] == 0
+
+    with tracker.priority_lane():
+        retry_allowed, _, retry_lease = tracker.acquire_request(
+            "metadata-retry", count_toward_quota=False
+        )
+        assert retry_allowed is True
+        tracker.record_request_retry(
+            "metadata-retry", lease_id=retry_lease
+        )
+        terminal_allowed, _, terminal_lease = tracker.acquire_request(
+            "metadata-terminal", count_toward_quota=False
+        )
+        assert terminal_allowed is True
+        tracker.record_request_terminal(
+            "metadata-terminal",
+            lease_id=terminal_lease,
+            http_outcome={"status_code": 404, "retry_class": "terminal"},
+        )
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["requests"]["metadata-retry"]["quota_cost"] == 0
+    assert payload["requests"]["metadata-terminal"]["quota_cost"] == 0
+
+    with tracker.priority_lane():
+        metered, metered_reason, _ = tracker.acquire_request(
+            "forecast-a", endpoint="api.open-meteo.com/v1/forecast"
+        )
+    assert metered is False
+    assert metered_reason is not None and metered_reason.startswith("day_limit=")
+
+
+def test_openmeteo_unmetered_local_tracker_matches_shared_semantics(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "local-unmetered")
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "unused.json")
+    tracker._count = PRIORITY_DAILY_LIMIT
+    tracker._hour_count = openmeteo_quota.PRIORITY_HOURLY_LIMIT
+    tracker._minute_count = openmeteo_quota.PRIORITY_MINUTE_LIMIT
+
+    with tracker.priority_lane():
+        allowed, reason, lease_id = tracker.acquire_request(
+            "metadata-local", count_toward_quota=False
+        )
+
+    assert (allowed, reason) == (True, None)
+    assert lease_id
+    assert tracker._count == PRIORITY_DAILY_LIMIT
+    assert tracker._hour_count == openmeteo_quota.PRIORITY_HOURLY_LIMIT
+    assert tracker._minute_count == openmeteo_quota.PRIORITY_MINUTE_LIMIT
+    assert tracker._request_states["metadata-local"]["quota_cost"] == 0
 
 
 def test_openmeteo_request_success_clears_embargo(monkeypatch, tmp_path):

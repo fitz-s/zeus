@@ -303,6 +303,7 @@ def fetch(
     fast_fail_429: bool = False,
     quota: OpenMeteoQuotaTracker | None = None,
     client: httpx.Client | None = None,
+    count_toward_quota: bool = True,
 ) -> dict:
     """GET an Open-Meteo endpoint with retries, 429 handling, and quota tracking.
 
@@ -327,6 +328,7 @@ def fetch(
             endpoint=endpoint,
             job=job,
             lease_seconds=max(float(timeout) + 5.0, DEFAULT_TIMEOUT),
+            count_toward_quota=count_toward_quota,
         )
         if not allowed:
             if reason and reason.startswith("request_terminal="):

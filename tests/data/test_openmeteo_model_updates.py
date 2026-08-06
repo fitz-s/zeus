@@ -1,5 +1,5 @@
 # Created: 2026-06-25
-# Last reused/audited: 2026-08-05
+# Last reused/audited: 2026-08-06
 
 import json
 from datetime import UTC, datetime
@@ -577,6 +577,7 @@ def test_fetch_model_updates_uses_shared_quota_client_in_production(monkeypatch)
     assert calls[0][0].endswith("/data/dwd_icon/static/meta.json")
     assert calls[0][1] == {}
     assert calls[0][2]["endpoint_label"] == "source_clock_model_meta_icon_global"
+    assert calls[0][2]["count_toward_quota"] is False
     assert calls[0][3] is True
 
 

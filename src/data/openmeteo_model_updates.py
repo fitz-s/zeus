@@ -18,7 +18,7 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import requests
 
@@ -194,6 +194,21 @@ def _metadata_url(template_url: str, model: str) -> str:
     return template_url.format(model=metadata_model_id(model))
 
 
+def _official_metadata_api_url(url: str) -> bool:
+    """Return whether Open-Meteo documents this URL as unmetered metadata."""
+
+    parsed = urlsplit(url)
+    parts = tuple(part for part in parsed.path.split("/") if part)
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname == "api.open-meteo.com"
+        and len(parts) == 4
+        and parts[0] == "data"
+        and bool(parts[1])
+        and parts[2:] == ("static", "meta.json")
+    )
+
+
 def _model_update_worker_count(
     models: Sequence[str],
     *,
@@ -240,6 +255,7 @@ def fetch_model_updates(
                     max_retries=1,
                     endpoint_label=f"source_clock_model_meta_{clean_model}",
                     client=session,
+                    count_toward_quota=not _official_metadata_api_url(url),
                 )
             return parse_model_update(clean_model, payload)
 

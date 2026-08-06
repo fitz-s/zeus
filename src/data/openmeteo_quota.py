@@ -320,11 +320,18 @@ class OpenMeteoQuotaTracker:
         lease_id: str | None = None,
         in_flight_until: datetime | None = None,
         http_outcome: Mapping[str, object] | None = None,
+        quota_cost: int | None = None,
     ) -> None:
         entries = cls._request_entries(state)
         old = entries.get(request_id)
         prior_attempts = int(old.get("attempts") or 0) if isinstance(old, dict) else 0
         prior_failures = int(old.get("failure_count") or 0) if isinstance(old, dict) else 0
+        prior_quota_cost = 1
+        if isinstance(old, dict):
+            raw_quota_cost = old.get("quota_cost", 1)
+            prior_quota_cost = int(
+                1 if raw_quota_cost is None else raw_quota_cost
+            )
         entry: dict[str, object] = {
             "endpoint": cls._bounded_text(endpoint),
             "job": cls._bounded_text(job),
@@ -341,7 +348,9 @@ class OpenMeteoQuotaTracker:
                 in_flight_until.isoformat() if in_flight_until else None
             ),
             "owner_pid": os.getpid(),
-            "quota_cost": 1,
+            "quota_cost": (
+                prior_quota_cost if quota_cost is None else int(quota_cost)
+            ),
             "updated_at": now.isoformat(),
         }
         if http_outcome is not None:
@@ -597,8 +606,14 @@ class OpenMeteoQuotaTracker:
         endpoint: str = "",
         job: str = "",
         lease_seconds: float = REQUEST_LEASE_SECONDS,
+        count_toward_quota: bool = True,
     ) -> tuple[bool, str | None, str | None]:
-        """Atomically reserve one quota unit and one request-scoped attempt lease."""
+        """Atomically reserve one request lease and, when metered, one quota unit.
+
+        Unmetered requests retain the same cooldown, retry, terminal-outcome,
+        single-flight, and capacity contracts.  They differ only in that they
+        neither consult nor increment forecast API day/hour/minute counters.
+        """
 
         priority = self._is_priority()
         critical = self._is_critical()
@@ -646,12 +661,21 @@ class OpenMeteoQuotaTracker:
                     None,
                     int(state.get("day_count") or 0),
                 ), False
-            allowed, reason = self._state_allows(
-                state,
-                now,
-                priority=priority,
-                critical=critical,
-            )
+            if count_toward_quota:
+                allowed, reason = self._state_allows(
+                    state,
+                    now,
+                    priority=priority,
+                    critical=critical,
+                )
+            else:
+                blocked_until = self._blocked_until_from_state(state)
+                allowed = blocked_until is None or now >= blocked_until
+                reason = (
+                    None
+                    if allowed
+                    else f"cooldown_until={blocked_until.isoformat()}"
+                )
             if not allowed:
                 return (
                     False,
@@ -659,9 +683,10 @@ class OpenMeteoQuotaTracker:
                     None,
                     int(state.get("day_count") or 0),
                 ), False
-            state["day_count"] = int(state.get("day_count") or 0) + 1
-            state["hour_count"] = int(state.get("hour_count") or 0) + 1
-            state["minute_count"] = int(state.get("minute_count") or 0) + 1
+            if count_toward_quota:
+                state["day_count"] = int(state.get("day_count") or 0) + 1
+                state["hour_count"] = int(state.get("hour_count") or 0) + 1
+                state["minute_count"] = int(state.get("minute_count") or 0) + 1
             self._record_request(
                 state,
                 now,
@@ -672,6 +697,7 @@ class OpenMeteoQuotaTracker:
                 outcome="attempt",
                 lease_id=lease_id,
                 in_flight_until=now + timedelta(seconds=lease_seconds),
+                quota_cost=1 if count_toward_quota else 0,
             )
             return (True, None, lease_id, int(state["day_count"])), True
 
@@ -715,15 +741,27 @@ class OpenMeteoQuotaTracker:
                     allowed = False
                     reason = f"request_state_capacity={MAX_REQUEST_STATES}"
                 else:
-                    allowed, reason = self._local_allows(
-                        now,
-                        priority=priority,
-                        critical=critical,
-                    )
+                    if count_toward_quota:
+                        allowed, reason = self._local_allows(
+                            now,
+                            priority=priority,
+                            critical=critical,
+                        )
+                    else:
+                        allowed = (
+                            self._blocked_until is None
+                            or now >= self._blocked_until
+                        )
+                        reason = (
+                            None
+                            if allowed
+                            else f"cooldown_until={self._blocked_until.isoformat()}"
+                        )
                 if allowed:
-                    self._count += 1
-                    self._hour_count += 1
-                    self._minute_count += 1
+                    if count_toward_quota:
+                        self._count += 1
+                        self._hour_count += 1
+                        self._minute_count += 1
                     self._record_request(
                         local_state,
                         now,
@@ -734,13 +772,15 @@ class OpenMeteoQuotaTracker:
                         outcome="attempt",
                         lease_id=lease_id,
                         in_flight_until=now + timedelta(seconds=lease_seconds),
+                        quota_cost=1 if count_toward_quota else 0,
                     )
                     acquired_lease_id = lease_id
                 else:
                     acquired_lease_id = None
                 count = self._count
         if allowed:
-            self._log_usage(count, endpoint)
+            if count_toward_quota:
+                self._log_usage(count, endpoint)
         else:
             logger.warning(
                 "Open-Meteo request reservation blocked [%s] priority=%s reason=%s",
