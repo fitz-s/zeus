@@ -3049,7 +3049,9 @@ def test_deploy_live_waits_for_post_start_monitor_refresh(monkeypatch, tmp_path)
             datetime.now(timezone.utc).isoformat(),
             json.dumps(
                 {
+                    "last_monitor_prob": 0.5,
                     "last_monitor_prob_is_fresh": True,
+                    "last_monitor_market_price": 0.5,
                     "last_monitor_market_price_is_fresh": True,
                 }
             ),
@@ -3237,7 +3239,9 @@ def test_deploy_live_post_start_monitor_wait_is_per_position(
             datetime.now(timezone.utc).isoformat(),
             json.dumps(
                 {
+                    "last_monitor_prob": 0.5,
                     "last_monitor_prob_is_fresh": True,
+                    "last_monitor_market_price": 0.5,
                     "last_monitor_market_price_is_fresh": True,
                 }
             ),
@@ -3306,7 +3310,9 @@ def test_deploy_live_post_start_monitor_wait_accepts_one_coverage_tranche(
                 datetime.now(timezone.utc).isoformat(),
                 json.dumps(
                     {
+                        "last_monitor_prob": 0.5,
                         "last_monitor_prob_is_fresh": True,
+                        "last_monitor_market_price": 0.5,
                         "last_monitor_market_price_is_fresh": True,
                     }
                 ),

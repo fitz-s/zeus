@@ -686,6 +686,13 @@ def build_monitor_refreshed_canonical_write(
         and bool(getattr(position, "last_monitor_prob_is_fresh", False))
     ):
         payload_dict["monitor_probability_receipt"] = probability_receipt
+    held_sell_reauction_obligation = getattr(
+        position, "_held_sell_reauction_obligation", None
+    )
+    if isinstance(held_sell_reauction_obligation, dict):
+        payload_dict["held_sell_reauction_obligation"] = dict(
+            held_sell_reauction_obligation
+        )
     if exit_decision is not None:
         exit_validations = list(
             getattr(exit_decision, "applied_validations", []) or []

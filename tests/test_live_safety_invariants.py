@@ -6268,7 +6268,20 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     def request_global_completion(**kwargs):
         auction_completion_requests.append(kwargs)
         if not request_accepted:
-            return False
+            return False, SimpleNamespace(
+                request_id="request-global-auction-owned-sell-failed",
+                schema_version=4,
+                scope_identity="scope-global-auction-owned-sell",
+                generation="generation-global-auction-owned-sell",
+                position_id=pos.trade_id,
+                family=(pos.city, pos.target_date, pos.temperature_metric),
+                held_token_id="paris-no",
+                probability_content_identity="probability-content-current",
+                probability_observed_at="2026-07-14T18:00:00+00:00",
+                held_best_bid=0.49,
+                bid_observed_at="2026-07-14T18:00:00+00:00",
+                book_state="EXECUTABLE",
+            )
         return True, SimpleNamespace(
             request_id="request-global-auction-owned-sell"
         )
@@ -6370,6 +6383,44 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
                 "global_auction_completion_request_id:"
                 "request-global-auction-owned-sell"
             ) in pos.applied_validations
+        else:
+            assert (
+                "global_auction_completion_request_id:"
+                "request-global-auction-owned-sell-failed"
+            ) in pos.applied_validations
+            from src.execution.exit_lifecycle import (
+                needs_global_sell_snapshot_reauction,
+                recover_global_sell_snapshot_reauction_debt,
+            )
+
+            payload = json.loads(
+                conn.execute(
+                    """
+                    SELECT payload_json FROM position_events
+                     WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
+                     ORDER BY sequence_no DESC LIMIT 1
+                    """,
+                    (pos.trade_id,),
+                ).fetchone()[0]
+            )
+            obligation = payload["held_sell_reauction_obligation"]
+            assert obligation["scope_identity"] == (
+                "scope-global-auction-owned-sell"
+            )
+            assert obligation["generation"] == (
+                "generation-global-auction-owned-sell"
+            )
+            assert needs_global_sell_snapshot_reauction(pos, conn) is True
+            recovery_requests = []
+            assert recover_global_sell_snapshot_reauction_debt(
+                pos,
+                conn=conn,
+                requester=lambda position, force_new: (
+                    recovery_requests.append((position.trade_id, force_new)) or True
+                ),
+            ) is True
+            assert recovery_requests == [(pos.trade_id, True)]
+            assert needs_global_sell_snapshot_reauction(pos, conn) is False
         request_summary_key = (
             "monitor_statistical_sell_auction_completion_requested"
             if request_accepted

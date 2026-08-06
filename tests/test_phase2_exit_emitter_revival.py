@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-20; last_reviewed=2026-08-05; last_reused=2026-08-05
+# Lifecycle: created=2026-06-20; last_reviewed=2026-08-06; last_reused=2026-08-06
 # Purpose: RED-on-revert antibodies for the Phase 2 live exit-POST emitter revival
 #   (exit_pending_missing re-stamp loop, day0 static-close deferral, canonical
 #   EXIT_ORDER_POSTED dual-write, monitor-cadence watchdog).
 # Reuse: pytest tests/test_phase2_exit_emitter_revival.py
 # Created: 2026-06-20
-# Last reused or audited: 2026-08-05
+# Last reused or audited: 2026-08-06
 # Authority basis: /tmp/phase2_exit_emitter_diagnosis.md §4-§5 (Phase 2 of the
 #   Zeus lifecycle-alpha fix). RANK 2 of /tmp/lifecycle_alpha_diagnosis_2026-06-20.md.
 """RED-on-revert antibodies for the Phase 2 live exit-POST emitter revival.
@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -1024,7 +1024,9 @@ class TestMonitorCadenceWatchdog:
                     payload
                     if payload is not None
                     else {
+                        "last_monitor_prob": 0.5,
                         "last_monitor_prob_is_fresh": probability_fresh,
+                        "last_monitor_market_price": 0.5,
                         "last_monitor_market_price_is_fresh": quote_fresh,
                     },
                     sort_keys=True,
@@ -1091,6 +1093,32 @@ class TestMonitorCadenceWatchdog:
             "monitor_clob_stale"
         )
 
+    def test_watchdog_rejects_fresh_inputs_when_exit_completion_publish_failed(self):
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
+
+        conn = _db()
+        recent = datetime.now(timezone.utc).isoformat()
+        self._insert_monitor_refreshed(
+            conn,
+            recent,
+            payload={
+                "last_monitor_prob": 0.5,
+                "last_monitor_prob_is_fresh": True,
+                "last_monitor_market_price": 0.5,
+                "last_monitor_market_price_is_fresh": True,
+                "applied_validations": [
+                    "global_auction_completion_request_failed"
+                ],
+            },
+        )
+
+        record = _check_monitor_cadence_watchdog(conn, {})
+
+        assert record is not None
+        assert record["stale_or_missing_positions"][0]["issue"] == (
+            "monitor_exit_completion_unavailable"
+        )
+
     def test_watchdog_accepts_typed_absorbing_win_quote_bypass(self):
         from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
 
@@ -1111,6 +1139,50 @@ class TestMonitorCadenceWatchdog:
         )
 
         assert _check_monitor_cadence_watchdog(conn, {}) is None
+
+    def test_watchdog_future_tolerance_does_not_bypass_stale_inputs(self):
+        from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+
+        conn = _db()
+        future = (datetime.now(timezone.utc) + timedelta(seconds=10)).isoformat()
+        self._insert_monitor_refreshed(
+            conn,
+            future,
+            probability_fresh=True,
+            quote_fresh=False,
+        )
+
+        record = collect_monitor_cadence_evidence(
+            conn,
+            now=datetime.now(timezone.utc),
+            max_age_seconds=240.0,
+            monitor_refreshed_only=True,
+            require_fresh_inputs=True,
+        )
+
+        assert record["stale_or_missing_positions"][0]["issue"] == (
+            "monitor_clob_stale"
+        )
+
+    def test_watchdog_rejects_fresh_flags_with_missing_values(self):
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
+
+        conn = _db()
+        self._insert_monitor_refreshed(
+            conn,
+            datetime.now(timezone.utc).isoformat(),
+            payload={
+                "last_monitor_prob_is_fresh": True,
+                "last_monitor_market_price_is_fresh": True,
+            },
+        )
+
+        record = _check_monitor_cadence_watchdog(conn, {})
+
+        assert record is not None
+        assert record["stale_or_missing_positions"][0]["issue"] == (
+            "monitor_probability_value_invalid"
+        )
 
     def test_watchdog_ignores_recent_monitor_history_for_closed_positions(self):
         from datetime import datetime, timezone

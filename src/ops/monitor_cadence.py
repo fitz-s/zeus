@@ -174,7 +174,21 @@ def collect_monitor_cadence_evidence(
             0.0 if strict_future else -MONITOR_CADENCE_FUTURE_TOLERANCE_SECONDS
         ):
             future_events.append(position_evidence)
-        elif age_seconds < 0.0:
+            continue
+        if require_fresh_inputs:
+            input_issue = _monitor_event_fresh_input_issue(monitor_event)
+            if input_issue is not None:
+                if _monitor_event_closed_market_pending_settlement(
+                    position_evidence,
+                    monitor_event,
+                ):
+                    settlement_recoverable.append(position_evidence.copy())
+                else:
+                    stale_or_missing.append(
+                        {**position_evidence, "issue": input_issue}
+                    )
+                continue
+        if age_seconds < 0.0:
             fresh_count += 1
         elif min_occurred_utc is not None and occurred_dt < min_occurred_utc:
             if monitor_refreshed_only:
@@ -239,19 +253,6 @@ def collect_monitor_cadence_evidence(
                 else:
                     stale_or_missing.append(position_evidence)
         else:
-            if require_fresh_inputs:
-                input_issue = _monitor_event_fresh_input_issue(monitor_event)
-                if input_issue is not None:
-                    if _monitor_event_closed_market_pending_settlement(
-                        position_evidence,
-                        monitor_event,
-                    ):
-                        settlement_recoverable.append(position_evidence.copy())
-                    else:
-                        stale_or_missing.append(
-                            {**position_evidence, "issue": input_issue}
-                        )
-                    continue
             fresh_count += 1
     open_count = len(monitored_rows)
     return {
@@ -589,19 +590,37 @@ def _monitor_event_fresh_input_issue(
     if not isinstance(payload, dict):
         return "monitor_payload_invalid"
 
-    def _is_true(value: object) -> bool:
-        return value is True or (type(value) is int and value == 1)
-
-    probability_fresh = _is_true(payload.get("last_monitor_prob_is_fresh"))
-    quote_fresh = _is_true(payload.get("last_monitor_market_price_is_fresh"))
-    if probability_fresh and quote_fresh:
-        return None
     validations_raw = payload.get("applied_validations")
     validations = (
         {str(item) for item in validations_raw}
         if isinstance(validations_raw, list)
         else set()
     )
+    if "global_auction_completion_request_failed" in validations:
+        return "monitor_exit_completion_unavailable"
+
+    def _is_true(value: object) -> bool:
+        return value is True or (type(value) is int and value == 1)
+
+    probability_flag = _is_true(payload.get("last_monitor_prob_is_fresh"))
+    quote_flag = _is_true(payload.get("last_monitor_market_price_is_fresh"))
+
+    def _is_unit_interval(value: object) -> bool:
+        return (
+            not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and math.isfinite(float(value))
+            and 0.0 <= float(value) <= 1.0
+        )
+
+    probability_fresh = probability_flag and _is_unit_interval(
+        payload.get("last_monitor_prob")
+    )
+    quote_fresh = quote_flag and _is_unit_interval(
+        payload.get("last_monitor_market_price")
+    )
+    if probability_fresh and quote_fresh:
+        return None
     structural_win = (
         probability_fresh
         and payload.get("last_monitor_prob") == 1.0
@@ -610,6 +629,10 @@ def _monitor_event_fresh_input_issue(
     )
     if structural_win:
         return None
+    if probability_flag and not probability_fresh:
+        return "monitor_probability_value_invalid"
+    if quote_flag and not quote_fresh:
+        return "monitor_market_price_value_invalid"
     if not probability_fresh and not quote_fresh:
         return "monitor_probability_and_clob_stale"
     if not probability_fresh:

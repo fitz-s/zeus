@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-18; last_reviewed=2026-08-03; last_reused=2026-08-03
+# Lifecycle: created=2026-06-18; last_reviewed=2026-08-06; last_reused=2026-08-06
 # Purpose: Read-only preflight before restarting the live trading daemon.
 # Reuse: Run immediately before loading com.zeus.live-trading or python -m src.main.
 # Created: 2026-06-18
-# Last reused or audited: 2026-08-03
+# Last reused or audited: 2026-08-06
 # Authority basis: Zeus live-money restart proof gates in AGENTS.md.
 """Read-only live restart preflight.
 
@@ -6663,6 +6663,8 @@ def _monitor_cadence_restart_evidence_check(rows: list[sqlite3.Row]) -> CheckRes
                 conn,
                 now=datetime.now(timezone.utc),
                 max_age_seconds=MONITOR_CADENCE_RESTART_MAX_AGE_SECONDS,
+                monitor_refreshed_only=True,
+                require_fresh_inputs=True,
             )
     except Exception as exc:  # noqa: BLE001
         evidence["error"] = str(exc)

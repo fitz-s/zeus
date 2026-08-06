@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-03-26; last_reviewed=2026-07-31; last_reused=2026-07-31
+# Lifecycle: created=2026-03-26; last_reviewed=2026-08-06; last_reused=2026-08-06
 # Purpose: Operator healthcheck for live daemon, launchd, source truth, entry capability, and settlement freshness.
 # Reuse: Run when live health predicates, launchd contracts, or readiness/status summary health fields change.
 # Created: 2026-03-26
-# Last reused or audited: 2026-07-31
+# Last reused or audited: 2026-08-06
 # Authority basis: docs/archive/2026-Q2/task_2026-05-14_k1_followups/PLAN.md §4.5 (K1 broken-script remediation); docs/archive/2026-Q2/task_2026-05-16_live_continuous_run_package/LIVE_CONTINUOUS_RUN_PACKAGE_PLAN.md Phase C; 2026-05-17 riskguard live DB-holder health contract.
 """Zeus health check for Venus/OpenClaw monitoring.
 
@@ -1166,6 +1166,8 @@ def _monitor_cadence_status() -> dict:
             conn,
             now=datetime.now(timezone.utc),
             max_age_seconds=MONITOR_CADENCE_STALE_SECONDS,
+            monitor_refreshed_only=True,
+            require_fresh_inputs=True,
         )
         evidence.update(cadence)
         open_count = int(cadence["open_position_count"])

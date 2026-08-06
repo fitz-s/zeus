@@ -7202,6 +7202,10 @@ def execute_monitoring_phase(
                 probability_receipt
             )
             held_token_id = _position_held_token_id(pos).strip()
+            # A canonical reauction obligation belongs to this exact monitor
+            # q/book attempt.  Never carry an older attempt forward after the
+            # current monitor has recomputed HOLD/SELL authority.
+            setattr(pos, "_held_sell_reauction_obligation", None)
             from src.engine.global_batch_runtime import (
                 CurrentGlobalHoldingCoverage,
                 GlobalHoldingCoverageOutcome,
@@ -7341,6 +7345,34 @@ def execute_monitoring_phase(
                 request_id = str(
                     getattr(completion_request, "request_id", "") or ""
                 ).strip()
+                if not completion_requested and completion_request is not None:
+                    obligation = {
+                        field: getattr(completion_request, field, None)
+                        for field in (
+                            "schema_version",
+                            "scope_identity",
+                            "generation",
+                            "position_id",
+                            "family",
+                            "held_token_id",
+                            "probability_content_identity",
+                            "probability_observed_at",
+                            "held_best_bid",
+                            "bid_observed_at",
+                            "book_state",
+                        )
+                    }
+                    required_obligation_fields = (
+                        "scope_identity",
+                        "generation",
+                        "position_id",
+                        "held_token_id",
+                    )
+                    if all(
+                        str(obligation.get(field) or "").strip()
+                        for field in required_obligation_fields
+                    ):
+                        setattr(pos, "_held_sell_reauction_obligation", obligation)
                 should_exit = False
                 exit_reason = "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
                 completion_validations = [

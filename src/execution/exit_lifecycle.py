@@ -767,7 +767,8 @@ def _latest_held_sell_reauction_obligation(
         row = conn.execute(
             """
             SELECT payload_json FROM position_events
-             WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+             WHERE position_id = ?
+               AND event_type IN ('EXIT_RETRY_RELEASED', 'MONITOR_REFRESHED')
              ORDER BY sequence_no DESC, datetime(occurred_at) DESC LIMIT 1
             """,
             (position_id,),
@@ -1024,7 +1025,18 @@ def _canonical_global_sell_command_ownership(
             (position_id,),
         ).fetchone()
         if row is None:
-            return "NOT_GLOBAL"
+            obligation = _latest_held_sell_reauction_obligation(conn, position)
+            if obligation.get("schema_version") != 4:
+                return "NOT_GLOBAL"
+            command_row = conn.execute(
+                """
+                SELECT 1 FROM venue_commands
+                 WHERE position_id = ? AND intent_kind = 'EXIT'
+                 LIMIT 1
+                """,
+                (position_id,),
+            ).fetchone()
+            return "COMMAND_OWNED" if command_row is not None else "GLOBAL_NO_COMMAND"
         intent_sequence = int(row[0])
         payload = json.loads(str(row[1] or "{}"))
         if not isinstance(payload, dict):
@@ -1104,7 +1116,7 @@ def needs_global_sell_snapshot_reauction(
             SELECT event_type, payload_json
              FROM position_events
              WHERE position_id = ?
-               AND event_type = 'EXIT_RETRY_RELEASED'
+               AND event_type IN ('EXIT_RETRY_RELEASED', 'MONITOR_REFRESHED')
              ORDER BY sequence_no DESC, datetime(occurred_at) DESC
              LIMIT 1
             """,
@@ -1112,7 +1124,7 @@ def needs_global_sell_snapshot_reauction(
         ).fetchone()
     except (sqlite3.Error, AttributeError):
         return False
-    if row is None or str(row[0]) != "EXIT_RETRY_RELEASED":
+    if row is None:
         return False
     try:
         payload = json.loads(str(row[1] or "{}"))
@@ -1124,6 +1136,8 @@ def needs_global_sell_snapshot_reauction(
     ):
         return False
     canonical_debt = (
+        str(row[0]) == "EXIT_RETRY_RELEASED"
+        and
         payload.get("release_reason")
         == "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
         and _is_global_sell_snapshot_reauction_error(payload.get("error"))

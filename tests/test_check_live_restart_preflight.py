@@ -138,7 +138,16 @@ def _insert_monitor_events(
     payload: dict[str, object] | None = None,
 ) -> None:
     now = datetime.now(timezone.utc)
-    payload_json = json.dumps(payload or {})
+    payload_json = json.dumps(
+        payload
+        if payload is not None
+        else {
+            "last_monitor_prob": 0.5,
+            "last_monitor_prob_is_fresh": True,
+            "last_monitor_market_price": 0.5,
+            "last_monitor_market_price_is_fresh": True,
+        }
+    )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS position_events (
@@ -8638,7 +8647,7 @@ def test_monitor_cadence_restart_evidence_classifies_expired_voided_chain_risk_a
     assert result.evidence["non_monitor_chain_risk_positions"][0]["position_id"] == "expired-voided"
 
 
-def test_monitor_cadence_restart_evidence_accepts_pending_exit_redecision_event(
+def test_monitor_cadence_restart_evidence_rejects_redecision_without_monitor_refresh(
     monkeypatch, tmp_path
 ):
     trade_db = tmp_path / "zeus_trades.db"
@@ -8691,9 +8700,9 @@ def test_monitor_cadence_restart_evidence_accepts_pending_exit_redecision_event(
 
     result = preflight._monitor_cadence_restart_evidence_check(preflight._open_positions())
 
-    assert result.ok is True
-    assert result.evidence["fresh_position_count"] == 1
-    assert result.evidence["stale_or_missing_position_count"] == 0
+    assert result.ok is False
+    assert result.evidence["fresh_position_count"] == 0
+    assert result.evidence["stale_or_missing_position_count"] == 1
 
 
 def test_monitor_cadence_restart_evidence_is_per_position_not_global_latest(

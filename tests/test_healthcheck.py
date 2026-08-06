@@ -1738,7 +1738,8 @@ def _init_monitor_cadence_db(db_path, *, monitor_at: datetime | None) -> None:
             position_id TEXT NOT NULL,
             sequence_no INTEGER NOT NULL,
             event_type TEXT NOT NULL,
-            occurred_at TEXT NOT NULL
+            occurred_at TEXT NOT NULL,
+            payload_json TEXT
         )
         """
     )
@@ -1755,16 +1756,28 @@ def _init_monitor_cadence_db(db_path, *, monitor_at: datetime | None) -> None:
         conn.execute(
             """
             INSERT INTO position_events (
-                event_id, position_id, sequence_no, event_type, occurred_at
-            ) VALUES ('evt-monitor', 'pos-1', 1, 'MONITOR_REFRESHED', ?)
+                event_id, position_id, sequence_no, event_type, occurred_at,
+                payload_json
+            ) VALUES ('evt-monitor', 'pos-1', 1, 'MONITOR_REFRESHED', ?, ?)
             """,
-            (monitor_at.isoformat(),),
+            (
+                monitor_at.isoformat(),
+                json.dumps(
+                    {
+                        "last_monitor_prob": 0.5,
+                        "last_monitor_prob_is_fresh": True,
+                        "last_monitor_market_price": 0.5,
+                        "last_monitor_market_price_is_fresh": True,
+                    }
+                ),
+            ),
         )
     conn.execute(
         """
         INSERT INTO position_events (
-            event_id, position_id, sequence_no, event_type, occurred_at
-        ) VALUES ('evt-chain', 'pos-1', 2, 'CHAIN_SIZE_CORRECTED', ?)
+            event_id, position_id, sequence_no, event_type, occurred_at,
+            payload_json
+        ) VALUES ('evt-chain', 'pos-1', 2, 'CHAIN_SIZE_CORRECTED', ?, '{}')
         """,
         (now.isoformat(),),
     )
@@ -1859,7 +1872,6 @@ def test_monitor_cadence_monitor_refreshed_only_rejects_post_boot_alternative_ev
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     try:
-        conn.execute("ALTER TABLE position_events ADD COLUMN payload_json TEXT")
         payload = None
         if event_type == "REVIEW_REQUIRED":
             payload = json.dumps(
@@ -1949,7 +1961,7 @@ def test_monitor_cadence_monitor_refreshed_only_rejects_dust_without_monitor_eve
     assert evidence["stale_or_missing_position_count"] == 1 - expected_fresh
 
 
-def test_monitor_cadence_status_accepts_fresh_typed_review_management(
+def test_monitor_cadence_status_does_not_accept_review_as_monitor_refresh(
     monkeypatch,
     tmp_path,
 ):
@@ -1957,7 +1969,6 @@ def test_monitor_cadence_status_accepts_fresh_typed_review_management(
     stale_monitor = datetime.now(timezone.utc) - timedelta(minutes=20)
     _init_monitor_cadence_db(db_path, monitor_at=stale_monitor)
     conn = sqlite3.connect(str(db_path))
-    conn.execute("ALTER TABLE position_events ADD COLUMN payload_json TEXT")
     conn.execute(
         """
         INSERT INTO position_events (
@@ -1982,12 +1993,9 @@ def test_monitor_cadence_status_accepts_fresh_typed_review_management(
 
     result = _ORIGINAL_MONITOR_CADENCE_STATUS()
 
-    assert result["ok"] is True
-    assert result["issue"] is None
-    assert result["review_managed_position_count"] == 1
-    assert result["review_managed_positions"][0]["cadence_source"] == (
-        "REVIEW_REQUIRED"
-    )
+    assert result["ok"] is False
+    assert result["issue"] == "MONITOR_CADENCE_STALE"
+    assert result["review_managed_position_count"] == 0
 
 
 def test_monitor_cadence_status_rejects_one_stale_position_when_another_is_fresh(
