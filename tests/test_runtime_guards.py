@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-08-04; last_reused=2026-08-04
+# Lifecycle: created=2026-04-28; last_reviewed=2026-08-05; last_reused=2026-08-05
 # Created: 2026-04-28
-# Last reused/audited: 2026-08-04
+# Last reused/audited: 2026-08-05
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -14423,7 +14423,7 @@ def test_check_pending_entries_ignores_non_pending_states():
     assert pos.state == "entered"
 
 
-def test_check_pending_exits_restores_day0_window_state_after_bare_exit_intent_release():
+def test_check_pending_exits_without_db_keeps_bare_exit_intent_pending():
     pos = _position(state="day0_window")
     pos.day0_entered_at = "2026-04-04T00:00:00Z"
     pos.exit_state = "exit_intent"
@@ -14434,8 +14434,8 @@ def test_check_pending_exits_restores_day0_window_state_after_bare_exit_intent_r
 
     assert stats["retried"] == 0
     assert stats["unchanged"] == 1
-    assert pos.exit_state == ""
-    assert pos.state == "day0_window"
+    assert pos.exit_state == "exit_intent"
+    assert pos.state == "pending_exit"
 
 
 # T5 BRIDGE RETIREMENT (docs/rebuild/quarantine_excision_2026-07-11.md): the
@@ -14452,7 +14452,7 @@ def test_check_pending_exits_restores_day0_window_state_after_bare_exit_intent_r
 # current "active" phase) as the REPLACEMENT PHASE LAW carrier.
 
 
-def test_check_pending_exits_restores_pre_exit_state_after_bare_exit_intent_release_no_conn():
+def test_check_pending_exits_without_db_preserves_pre_exit_state_and_pending_owner():
     pos = _position(
         state="pending_exit",
         pre_exit_state="entered",
@@ -14466,9 +14466,10 @@ def test_check_pending_exits_restores_pre_exit_state_after_bare_exit_intent_rele
 
     assert stats["retried"] == 0
     assert stats["unchanged"] == 1
-    assert pos.exit_state == ""
-    assert pos.state == "entered"
-    assert pos.order_status == "filled"
+    assert pos.exit_state == "exit_intent"
+    assert pos.state == "pending_exit"
+    assert pos.pre_exit_state == "entered"
+    assert pos.order_status == "exit_intent"
 
 
 def test_check_pending_exits_persists_bare_exit_intent_release(tmp_path):
@@ -14671,6 +14672,549 @@ def test_check_pending_exits_releases_loaded_pre_exit_state_bare_exit_intent_wit
         "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? AND intent_kind = 'EXIT'",
         (pos.trade_id,),
     ).fetchone()[0] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("exit_state", "last_exit_error"),
+    [
+        ("exit_intent", ""),
+        ("retry_pending", "pre_submit_db_locked_transient"),
+        ("retry_pending", "ctf_tokens_insufficient"),
+    ],
+)
+def test_global_sell_without_command_survives_restart_as_v4_reauction_debt(
+    tmp_path,
+    monkeypatch,
+    exit_state,
+    last_exit_error,
+):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.execution.exit_lifecycle import (
+        check_pending_retries,
+        needs_global_sell_snapshot_reauction,
+        release_pending_exit_without_order_if_retryable,
+    )
+    from src.state.db import query_portfolio_loader_view
+    from src.state.portfolio import _position_from_projection_row
+    from src.state.projection import upsert_position_current
+
+    conn = get_connection(tmp_path / f"global-sell-no-command-{exit_state}.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    pos = _position(
+        trade_id=f"global-sell-no-command-{exit_state}-{last_exit_error or 'bare'}",
+        state="pending_exit",
+        pre_exit_state="entered",
+        exit_state=exit_state,
+        order_status=exit_state,
+    )
+    pos.last_exit_error = last_exit_error
+    pos.next_exit_retry_at = ""
+    upsert_position_current(conn, build_position_current_projection(pos))
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
+            command_id, caused_by, idempotency_key, venue_status, source_module, payload_json,
+            env
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            f"{pos.trade_id}:exit-intent",
+            pos.trade_id,
+            1,
+            1,
+            "EXIT_INTENT",
+            "2026-08-05T20:00:00+00:00",
+            "active",
+            "pending_exit",
+            pos.strategy_key,
+            f"exit:{pos.trade_id}",
+            pos.decision_snapshot_id,
+            None,
+            None,
+            "global_auction",
+            f"{pos.trade_id}:exit-intent",
+            None,
+            "src.execution.exit_lifecycle",
+            json.dumps(
+                {
+                    "status": "exit_intent",
+                    "exit_intent_reason": "GLOBAL_CAPITAL_OPTIMAL_SELL",
+                    "exit_reason": "GLOBAL_CAPITAL_OPTIMAL_SELL",
+                    "exit_intent_close_position": True,
+                    "exit_intent_shares": pos.shares,
+                }
+            ),
+            "live",
+        ),
+    )
+    conn.commit()
+
+    if exit_state == "exit_intent":
+        released = release_pending_exit_without_order_if_retryable(pos, conn=conn)
+    else:
+        released = check_pending_retries(
+            pos,
+            conn=conn,
+            global_sell_reauction_requester=lambda _position, _force: True,
+        )
+    assert released is True
+    conn.commit()
+
+    event = conn.execute(
+        """
+        SELECT json_extract(payload_json, '$.release_reason'),
+               json_extract(payload_json, '$.held_sell_reauction_obligation.schema_version')
+          FROM position_events
+         WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+         ORDER BY sequence_no DESC LIMIT 1
+        """,
+        (pos.trade_id,),
+    ).fetchone()
+    assert tuple(event) == ("GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED", 4)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? AND intent_kind = 'EXIT'",
+        (pos.trade_id,),
+    ).fetchone()[0] == 0
+
+    loaded = query_portfolio_loader_view(conn)["positions"][0]
+    restarted = _position_from_projection_row(loaded, current_mode="live")
+    assert needs_global_sell_snapshot_reauction(restarted, conn) is True
+    requests: list[dict] = []
+    from src.execution.exit_safety import (
+        global_sell_reauction_publish_claim_blocks_exit_command,
+    )
+
+    def request_reauction(**kwargs):
+        assert global_sell_reauction_publish_claim_blocks_exit_command(
+            conn,
+            pos.trade_id,
+        ) is True
+        requests.append(kwargs)
+        return True
+
+    monkeypatch.setattr(
+        "src.events.reactor.request_global_auction_completion",
+        request_reauction,
+    )
+    monkeypatch.setattr(cycle_runtime, "_monitoring_phase_positions", lambda *args, **kwargs: [])
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        conn=conn,
+        clob=types.SimpleNamespace(),
+        portfolio=PortfolioState(positions=[restarted]),
+        artifact=CycleArtifact(mode="opening_hunt", started_at="2026-08-05T20:00:00Z"),
+        tracker=StrategyTracker(),
+        summary=summary,
+        deps=_monitor_chain_deps(datetime(2026, 8, 5, 20, 1, tzinfo=timezone.utc)),
+        run_exit_preflight=False,
+    )
+    assert len(requests) == 1
+    assert requests[0]["position_id"] == pos.trade_id
+    assert requests[0]["force_new_generation"] is True
+    assert requests[0]["schema_version"] == 4
+    assert summary["global_sell_snapshot_reauction_debts_recovered"] == 1
+    assert needs_global_sell_snapshot_reauction(restarted, conn) is False
+    assert global_sell_reauction_publish_claim_blocks_exit_command(
+        conn,
+        pos.trade_id,
+    ) is False
+    conn.close()
+
+
+def test_global_sell_with_persisted_command_stays_owned_by_command_recovery(tmp_path):
+    from src.execution.exit_lifecycle import (
+        _canonical_global_sell_command_ownership,
+        release_pending_exit_without_order_if_retryable,
+    )
+
+    conn = get_connection(tmp_path / "global-sell-command-owned.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    pos = _position(
+        trade_id="global-sell-command-owned",
+        state="pending_exit",
+        pre_exit_state="entered",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, caused_by, idempotency_key,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, 1, 'EXIT_INTENT', ?, 'active', 'pending_exit', ?, ?, ?, ?, ?, 'live')
+        """,
+        (
+            f"{pos.trade_id}:exit-intent",
+            pos.trade_id,
+            "2026-08-05T20:00:00+00:00",
+            pos.strategy_key,
+            "global_auction",
+            f"{pos.trade_id}:exit-intent",
+            "src.execution.exit_lifecycle",
+            json.dumps(
+                {
+                    "exit_intent_reason": "GLOBAL_CAPITAL_OPTIMAL_SELL",
+                    "exit_intent_close_position": True,
+                    "exit_intent_shares": pos.shares,
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'EXIT', ?, ?, 'SELL', ?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd-global-sell-command-owned",
+            "snapshot-global-sell-command-owned",
+            "envelope-global-sell-command-owned",
+            pos.trade_id,
+            "decision-global-sell-command-owned",
+            "idem-global-sell-command-owned",
+            pos.market_id,
+            pos.token_id,
+            pos.shares,
+            0.30,
+            "INTENT_CREATED",
+            "2026-08-05T19:59:59+00:00",
+            "2026-08-05T19:59:59+00:00",
+        ),
+    )
+
+    assert _canonical_global_sell_command_ownership(conn, pos) == "COMMAND_OWNED"
+    assert release_pending_exit_without_order_if_retryable(pos, conn=conn) is False
+    assert pos.state == "pending_exit"
+    assert pos.exit_state == "exit_intent"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ? "
+        "AND event_type = 'EXIT_RETRY_RELEASED'",
+        (pos.trade_id,),
+    ).fetchone()[0] == 0
+    pos.exit_state = "retry_pending"
+    pos.order_status = "retry_pending"
+    pos.last_exit_error = "global_sell_exit_executable_snapshot_error:timeout"
+    assert exit_lifecycle_module.check_pending_retries(
+        pos,
+        conn=conn,
+        global_sell_reauction_requester=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("command-owned SELL must not request a second global auction")
+        ),
+    ) is False
+    conn.close()
+
+
+def test_global_sell_command_ownership_uses_event_sequence_not_caller_timestamp(tmp_path):
+    conn = get_connection(tmp_path / "global-sell-command-sequence.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    pos = _position(
+        trade_id="global-sell-command-sequence",
+        state="pending_exit",
+        pre_exit_state="entered",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+    )
+
+    def insert_command(command_id, created_at):
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, snapshot_id, envelope_id, position_id, decision_id,
+                idempotency_key, intent_kind, market_id, token_id, side, size,
+                price, state, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'EXIT', ?, ?, 'SELL', ?, 0.30,
+                      'REJECTED', ?, ?)
+            """,
+            (
+                command_id,
+                f"snapshot-{command_id}",
+                f"envelope-{command_id}",
+                pos.trade_id,
+                f"decision-{command_id}",
+                f"idem-{command_id}",
+                pos.market_id,
+                pos.token_id,
+                pos.shares,
+                created_at,
+                created_at,
+            ),
+        )
+
+    def insert_event(sequence_no, event_type, *, command_id=None, payload=None):
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key, command_id,
+                caused_by, idempotency_key, source_module, payload_json, env
+            ) VALUES (?, ?, 1, ?, ?, ?, 'pending_exit', 'pending_exit', ?, ?,
+                      'test_sequence_binding', ?, 'src.execution.exit_lifecycle', ?, 'live')
+            """,
+            (
+                f"{pos.trade_id}:{event_type}:{sequence_no}",
+                pos.trade_id,
+                sequence_no,
+                event_type,
+                f"2026-08-05T20:00:0{sequence_no}+00:00",
+                pos.strategy_key,
+                command_id,
+                f"{pos.trade_id}:{event_type}:{sequence_no}",
+                json.dumps(payload or {}),
+            ),
+        )
+
+    insert_command("old-command", "2026-08-05T21:00:00+00:00")
+    insert_event(2, "EXIT_ORDER_POSTED", command_id="old-command")
+    insert_event(
+        3,
+        "EXIT_INTENT",
+        payload={"exit_intent_reason": "GLOBAL_CAPITAL_OPTIMAL_SELL"},
+    )
+    assert (
+        exit_lifecycle_module._canonical_global_sell_command_ownership(conn, pos)
+        == "GLOBAL_NO_COMMAND"
+    )
+
+    insert_command("new-command", "2026-08-05T19:00:00+00:00")
+    insert_event(4, "EXIT_ORDER_POSTED", command_id="new-command")
+    assert (
+        exit_lifecycle_module._canonical_global_sell_command_ownership(conn, pos)
+        == "COMMAND_OWNED"
+    )
+    conn.close()
+
+
+def test_late_command_after_v4_release_blocks_restart_enqueue_and_preserves_debt(tmp_path):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.projection import upsert_position_current
+
+    conn = get_connection(tmp_path / "late-command-after-v4-release.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    pos = _position(
+        trade_id="late-command-after-v4-release",
+        state="pending_exit",
+        pre_exit_state="entered",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+    )
+    upsert_position_current(conn, build_position_current_projection(pos))
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, caused_by, idempotency_key,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, 1, 'EXIT_INTENT', ?, 'active', 'pending_exit', ?, ?, ?, ?, ?, 'live')
+        """,
+        (
+            f"{pos.trade_id}:exit-intent",
+            pos.trade_id,
+            "2026-08-05T20:00:00+00:00",
+            pos.strategy_key,
+            "global_auction",
+            f"{pos.trade_id}:exit-intent",
+            "src.execution.exit_lifecycle",
+            json.dumps({"exit_intent_reason": "GLOBAL_CAPITAL_OPTIMAL_SELL"}),
+        ),
+    )
+    assert exit_lifecycle_module.release_pending_exit_without_order_if_retryable(
+        pos,
+        conn=conn,
+    ) is True
+    conn.commit()
+    assert exit_lifecycle_module.needs_global_sell_snapshot_reauction(pos, conn) is True
+
+    conn.execute(
+        """
+        INSERT INTO venue_commands (
+            command_id, snapshot_id, envelope_id, position_id, decision_id,
+            idempotency_key, intent_kind, market_id, token_id, side, size,
+            price, state, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'EXIT', ?, ?, 'SELL', ?, 0.30,
+                  'INTENT_CREATED', ?, ?)
+        """,
+        (
+            "late-command",
+            "snapshot-late-command",
+            "envelope-late-command",
+            pos.trade_id,
+            "decision-late-command",
+            "idem-late-command",
+            pos.market_id,
+            pos.token_id,
+            pos.shares,
+            "2026-08-05T19:00:00+00:00",
+            "2026-08-05T19:00:00+00:00",
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, command_id, caused_by,
+            idempotency_key, source_module, payload_json, env
+        ) VALUES (?, ?, 1, 3, 'EXIT_ORDER_POSTED', ?, 'active', 'pending_exit', ?, ?,
+                  'late_command', ?, 'src.execution.exit_lifecycle', '{}', 'live')
+        """,
+        (
+            f"{pos.trade_id}:late-command-posted",
+            pos.trade_id,
+            "2026-08-05T20:00:03+00:00",
+            pos.strategy_key,
+            "late-command",
+            f"{pos.trade_id}:late-command-posted",
+        ),
+    )
+    conn.commit()
+
+    assert exit_lifecycle_module.recover_global_sell_snapshot_reauction_debt(
+        pos,
+        conn=conn,
+        requester=lambda *_args: (_ for _ in ()).throw(
+            AssertionError("late command must prevent restart reauction enqueue")
+        ),
+    ) is False
+    assert exit_lifecycle_module.needs_global_sell_snapshot_reauction(pos, conn) is True
+    conn.close()
+
+
+def test_malformed_latest_exit_intent_holds_pending_instead_of_generic_release(tmp_path):
+    conn = get_connection(tmp_path / "malformed-global-sell-intent.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    pos = _position(
+        trade_id="malformed-global-sell-intent",
+        state="pending_exit",
+        pre_exit_state="entered",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, caused_by, idempotency_key,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, 1, 'EXIT_INTENT', ?, 'active', 'pending_exit', ?, ?, ?, ?, ?, 'live')
+        """,
+        (
+            f"{pos.trade_id}:exit-intent",
+            pos.trade_id,
+            "2026-08-05T20:00:00+00:00",
+            pos.strategy_key,
+            "global_auction",
+            f"{pos.trade_id}:exit-intent",
+            "src.execution.exit_lifecycle",
+            "{",
+        ),
+    )
+
+    assert exit_lifecycle_module.release_pending_exit_without_order_if_retryable(
+        pos,
+        conn=conn,
+    ) is False
+    assert (pos.state, pos.exit_state, pos.order_status) == (
+        "pending_exit",
+        "exit_intent",
+        "exit_intent",
+    )
+    conn.close()
+
+
+def test_chain_zero_exposure_does_not_create_global_sell_reauction_debt(tmp_path):
+    conn = get_connection(tmp_path / "chain-zero-global-sell.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    pos = _position(
+        trade_id="chain-zero-global-sell",
+        state="pending_exit",
+        pre_exit_state="entered",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+    )
+    pos.fill_authority = "venue_position_observed"
+    pos.chain_shares = 0.0
+    assert pos.shares > 0
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, caused_by, idempotency_key,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, 1, 'EXIT_INTENT', ?, 'active', 'pending_exit', ?, ?, ?, ?, ?, 'live')
+        """,
+        (
+            f"{pos.trade_id}:exit-intent",
+            pos.trade_id,
+            "2026-08-05T20:00:00+00:00",
+            pos.strategy_key,
+            "global_auction",
+            f"{pos.trade_id}:exit-intent",
+            "src.execution.exit_lifecycle",
+            json.dumps(
+                {"exit_intent_reason": "GLOBAL_CAPITAL_OPTIMAL_SELL"}
+            ),
+        ),
+    )
+
+    assert (
+        exit_lifecycle_module._canonical_global_sell_command_ownership(conn, pos)
+        == "NOT_GLOBAL"
+    )
+    conn.close()
+
+
+def test_no_order_release_write_failure_restores_complete_runtime_state(
+    tmp_path,
+    monkeypatch,
+):
+    conn = get_connection(tmp_path / "no-order-release-write-failure.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    pos = _position(
+        trade_id="no-order-release-write-failure",
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        exit_state="exit_intent",
+        order_status="exit_intent",
+    )
+    before = (
+        pos.state,
+        pos.pre_exit_state,
+        pos.exit_state,
+        pos.next_exit_retry_at,
+        pos.exit_retry_count,
+        pos.order_status,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle_module,
+        "_dual_write_exit_retry_released_if_available",
+        lambda *args, **kwargs: False,
+    )
+
+    assert exit_lifecycle_module.release_pending_exit_without_order_if_retryable(
+        pos,
+        conn=conn,
+    ) is False
+    assert (
+        pos.state,
+        pos.pre_exit_state,
+        pos.exit_state,
+        pos.next_exit_retry_at,
+        pos.exit_retry_count,
+        pos.order_status,
+    ) == before
     conn.close()
 
 

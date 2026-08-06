@@ -790,12 +790,98 @@ def has_global_sell_snapshot_reauction_retry(
 ) -> bool:
     """Recognize the retry from runtime or its canonical reject event."""
 
+    command_ownership = _canonical_global_sell_command_ownership(conn, position)
+    if command_ownership == "GLOBAL_NO_COMMAND":
+        return True
+    if command_ownership in {"COMMAND_OWNED", "UNKNOWN"}:
+        return False
+
     error = str(getattr(position, "last_exit_error", "") or "")
     if not error:
         error = _latest_exit_reject_error(conn, position)
     if _is_post_only_cross_reauction_error(error):
         return _post_only_cross_reauction_proof_for_position(conn, position)
     return _is_global_sell_snapshot_reauction_error(error)
+
+
+def _canonical_global_sell_command_ownership(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    require_pending_exit: bool = True,
+) -> str:
+    """Classify the latest canonical global SELL at the command boundary.
+
+    Event sequence, not caller-supplied wall-clock timestamps, binds command
+    persistence to an EXIT_INTENT.  UNKNOWN is fail-closed at release callers.
+    """
+
+    if conn is None:
+        return "UNKNOWN"
+    if require_pending_exit and _runtime_state_value(position) != "pending_exit":
+        return "NOT_GLOBAL"
+    try:
+        exposure = position.effective_exposure()
+        if not math.isfinite(float(exposure.shares)) or float(exposure.shares) <= 0:
+            return "NOT_GLOBAL"
+    except (AttributeError, TypeError, ValueError):
+        return "UNKNOWN"
+    position_id = str(getattr(position, "trade_id", "") or "").strip()
+    if not position_id:
+        return "UNKNOWN"
+    try:
+        row = conn.execute(
+            """
+            SELECT sequence_no, payload_json
+              FROM position_events
+             WHERE position_id = ? AND event_type = 'EXIT_INTENT'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        if row is None:
+            return "NOT_GLOBAL"
+        intent_sequence = int(row[0])
+        payload = json.loads(str(row[1] or "{}"))
+        if not isinstance(payload, dict):
+            return "UNKNOWN"
+        if payload.get("exit_intent_reason") != "GLOBAL_CAPITAL_OPTIMAL_SELL":
+            return "NOT_GLOBAL"
+        command_rows = conn.execute(
+            """
+            SELECT command_id
+              FROM venue_commands
+             WHERE position_id = ? AND intent_kind = 'EXIT'
+            """,
+            (position_id,),
+        ).fetchall()
+    except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+        return "UNKNOWN"
+    if not command_rows:
+        return "GLOBAL_NO_COMMAND"
+    for command_row in command_rows:
+        command_id = str(command_row[0] or "").strip()
+        if not command_id:
+            return "UNKNOWN"
+        try:
+            binding = conn.execute(
+                """
+                SELECT sequence_no
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'EXIT_ORDER_POSTED'
+                   AND command_id = ?
+                 ORDER BY sequence_no DESC
+                 LIMIT 1
+                """,
+                (position_id, command_id),
+            ).fetchone()
+        except sqlite3.Error:
+            return "UNKNOWN"
+        if binding is None or int(binding[0]) > intent_sequence:
+            return "COMMAND_OWNED"
+    return "GLOBAL_NO_COMMAND"
 
 
 def needs_global_sell_snapshot_reauction(
@@ -7389,10 +7475,6 @@ def check_pending_exits(
                     stats["unchanged"] += 1
                     continue
                 if not _last_exit_order_id(pos, conn=conn):
-                    pos.exit_state = ""
-                    if str(getattr(pos, "order_status", "") or "") == "exit_intent":
-                        pos.order_status = "filled"
-                    _release_pending_exit(pos)
                     stats["unchanged"] += 1
                     continue
                 continue
@@ -7883,6 +7965,9 @@ def check_pending_retries(
     previous_error = str(getattr(position, "last_exit_error", "") or "")
     if not previous_error:
         previous_error = _latest_exit_reject_error(conn, position)
+    command_ownership = _canonical_global_sell_command_ownership(conn, position)
+    if command_ownership in {"COMMAND_OWNED", "UNKNOWN"}:
+        return False
     post_only_cross_reauction = _is_post_only_cross_reauction_error(previous_error)
     if post_only_cross_reauction and not _post_only_cross_reauction_proof_for_position(
         conn, position
@@ -7895,6 +7980,13 @@ def check_pending_retries(
         position,
         conn,
     )
+    command_witness = _latest_exit_command_release_witness(position, conn=conn)
+    if (
+        command_witness is not None
+        and not command_witness[0]
+        and not global_snapshot_reauction
+    ):
+        return False
 
     if position.exit_state == "backoff_exhausted":
         if not _is_out_of_band_exit_price_error(previous_error):
@@ -8033,6 +8125,7 @@ def _build_exit_retry_released_event_and_projection(
     event_type: str = "EXIT_RETRY_RELEASED",
     release_reason: str = "EXIT_RETRY_COOLDOWN_EXPIRED",
     caused_by: str = "exit_retry_cooldown_expired",
+    base_projection: Mapping[str, object] | None = None,
 ) -> tuple[dict, dict] | None:
     """Build one retry-release event and its final active projection.
 
@@ -8049,18 +8142,6 @@ def _build_exit_retry_released_event_and_projection(
     from src.state.lifecycle_manager import fold_lifecycle_phase, phase_for_runtime_position
 
     occurred_at = datetime.now(timezone.utc).isoformat()
-    if not any(
-        getattr(position, field, "")
-        for field in (
-            "last_monitor_at",
-            "last_exit_at",
-            "chain_verified_at",
-            "day0_entered_at",
-            "entered_at",
-            "order_posted_at",
-        )
-    ):
-        position.order_posted_at = occurred_at
     phase_after = phase_for_runtime_position(
         state=getattr(position, "state", ""),
         exit_state=getattr(position, "exit_state", ""),
@@ -8068,7 +8149,11 @@ def _build_exit_retry_released_event_and_projection(
     ).value
     if phase_after == LifecyclePhase.PENDING_EXIT.value:
         return None
-    projection = build_position_current_projection(position)
+    projection = (
+        dict(base_projection)
+        if base_projection is not None
+        else build_position_current_projection(position)
+    )
     projection["phase"] = phase_after
     projection["updated_at"] = occurred_at
     projection["order_status"] = "filled"
@@ -8152,6 +8237,31 @@ def _dual_write_exit_retry_released_if_available(
     try:
         from src.state.db import append_many_and_project
 
+        base_projection = None
+        if not any(
+            getattr(position, field, "")
+            for field in (
+                "last_monitor_at",
+                "last_exit_at",
+                "chain_verified_at",
+                "day0_entered_at",
+                "entered_at",
+                "order_posted_at",
+            )
+        ):
+            cursor = conn.execute(
+                "SELECT * FROM position_current WHERE position_id = ? LIMIT 1",
+                (trade_id,),
+            )
+            current = cursor.fetchone()
+            if current is None:
+                return False
+            base_projection = (
+                dict(current)
+                if isinstance(current, sqlite3.Row)
+                else dict(zip((item[0] for item in cursor.description), current))
+            )
+
         built = _build_exit_retry_released_event_and_projection(
             position,
             sequence_no=_next_canonical_sequence_no(conn, trade_id),
@@ -8161,6 +8271,7 @@ def _dual_write_exit_retry_released_if_available(
             event_type=event_type,
             release_reason=release_reason,
             caused_by=caused_by,
+            base_projection=base_projection,
         )
         if built is None:
             return False
@@ -8188,20 +8299,25 @@ def record_global_sell_reauction_reserved(
     if not trade_id:
         return False
     try:
-        from src.engine.lifecycle_events import build_position_current_projection
         from src.state.db import append_many_and_project
-        from src.state.lifecycle_manager import phase_for_runtime_position
 
-        phase = phase_for_runtime_position(
-            state=getattr(position, "state", ""),
-            exit_state=getattr(position, "exit_state", ""),
-            chain_state=getattr(position, "chain_state", ""),
-        ).value
+        cursor = conn.execute(
+            "SELECT * FROM position_current WHERE position_id = ? LIMIT 1",
+            (trade_id,),
+        )
+        current = cursor.fetchone()
+        if current is None:
+            return False
+        projection = (
+            dict(current)
+            if isinstance(current, sqlite3.Row)
+            else dict(zip((item[0] for item in cursor.description), current))
+        )
+        phase = str(projection.get("phase") or "")
         if phase == LifecyclePhase.PENDING_EXIT.value:
             return False
         sequence_no = _next_canonical_sequence_no(conn, trade_id)
         occurred_at = datetime.now(timezone.utc).isoformat()
-        projection = build_position_current_projection(position)
         projection["phase"] = phase
         projection["updated_at"] = occurred_at
         event_type = "EXIT_RETRY_RELEASED"
@@ -8252,6 +8368,107 @@ def record_global_sell_reauction_reserved(
         return False
 
 
+def _record_global_sell_reauction_publish_claim(
+    conn: sqlite3.Connection,
+    position: Position,
+    obligation: Mapping[str, object],
+) -> bool:
+    """Atomically claim command ownership before publishing a V4 wake."""
+
+    trade_id = str(getattr(position, "trade_id", "") or "").strip()
+    generation = str(obligation.get("generation") or "").strip()
+    if not trade_id or not generation:
+        return False
+    try:
+        latest = conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (trade_id,),
+        ).fetchone()
+        latest_payload = json.loads(str(latest[0] or "{}")) if latest else {}
+        latest_obligation = (
+            latest_payload.get("held_sell_reauction_obligation")
+            if isinstance(latest_payload, dict)
+            else None
+        )
+        if (
+            isinstance(latest_payload, dict)
+            and latest_payload.get("global_sell_reauction_status") == "publish_claimed"
+            and isinstance(latest_obligation, dict)
+            and str(latest_obligation.get("generation") or "") == generation
+        ):
+            return True
+        cursor = conn.execute(
+            "SELECT * FROM position_current WHERE position_id = ? LIMIT 1",
+            (trade_id,),
+        )
+        current = cursor.fetchone()
+        if current is None:
+            return False
+        projection = (
+            dict(current)
+            if isinstance(current, sqlite3.Row)
+            else dict(zip((item[0] for item in cursor.description), current))
+        )
+        phase = str(projection.get("phase") or "")
+        if phase == LifecyclePhase.PENDING_EXIT.value:
+            return False
+        from src.state.db import append_many_and_project
+
+        sequence_no = _next_canonical_sequence_no(conn, trade_id)
+        occurred_at = datetime.now(timezone.utc).isoformat()
+        projection["updated_at"] = occurred_at
+        event_type = "EXIT_RETRY_RELEASED"
+        event = {
+            "event_id": f"{trade_id}:{event_type.lower()}:{sequence_no}",
+            "position_id": trade_id,
+            "event_version": 1,
+            "sequence_no": sequence_no,
+            "event_type": event_type,
+            "occurred_at": occurred_at,
+            "phase_before": phase,
+            "phase_after": phase,
+            "strategy_key": str(
+                getattr(position, "strategy_key", "")
+                or getattr(position, "strategy", "")
+                or ""
+            ),
+            "decision_id": None,
+            "snapshot_id": getattr(position, "decision_snapshot_id", "") or None,
+            "order_id": None,
+            "command_id": None,
+            "caused_by": "global_sell_snapshot_reauction",
+            "idempotency_key": f"{trade_id}:{event_type.lower()}:{sequence_no}",
+            "venue_status": "publish_claimed",
+            "source_module": "src.execution.exit_lifecycle",
+            "env": str(getattr(position, "env", "") or "live"),
+            "payload_json": json.dumps(
+                {
+                    "status": "publish_claimed",
+                    "global_sell_reauction_status": "publish_claimed",
+                    "release_reason": "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+                    "held_sell_reauction_obligation": dict(obligation),
+                },
+                default=str,
+                sort_keys=True,
+            ),
+        }
+        append_many_and_project(conn, [event], projection)
+        return True
+    except Exception as exc:  # noqa: BLE001 - an unreadable claim is no fence.
+        logger.warning(
+            "GLOBAL_SELL_REAUCTION publish claim failed for %s: %s",
+            trade_id,
+            exc,
+        )
+        return False
+
+
 def recover_global_sell_snapshot_reauction_debt(
     position: Position,
     *,
@@ -8269,11 +8486,53 @@ def recover_global_sell_snapshot_reauction_debt(
     if runtime_state == "pending_exit":
         return False
     obligation = _latest_held_sell_reauction_obligation(conn, position)
-    if obligation:
-        setattr(position, "_held_sell_reauction_obligation", obligation)
+    if not obligation:
+        return False
+    from src.execution.executor import (
+        _EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
+        _EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+        _canonical_trade_write_lease,
+    )
+
+    try:
+        with _canonical_trade_write_lease(
+            conn,
+            owner="global_sell_reauction_publish_claim",
+            deadline_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
+            max_hold_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+        ):
+            if (
+                _canonical_global_sell_command_ownership(
+                    conn,
+                    position,
+                    require_pending_exit=False,
+                )
+                != "GLOBAL_NO_COMMAND"
+                or not _record_global_sell_reauction_publish_claim(
+                    conn,
+                    position,
+                    obligation,
+                )
+            ):
+                conn.rollback()
+                return False
+            conn.commit()
+    except Exception as exc:  # noqa: BLE001 - an uncommitted claim is no fence.
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        logger.warning(
+            "GLOBAL_SELL_REAUCTION publish claim failed for %s: %s",
+            getattr(position, "trade_id", ""),
+            exc,
+        )
+        return False
+    setattr(position, "_held_sell_reauction_obligation", obligation)
     if not requester(position, True):
         return False
     if not record_global_sell_reauction_reserved(conn, position):
+        conn.rollback()
         return False
     try:
         conn.commit()
@@ -8309,6 +8568,9 @@ def release_pending_exit_without_order_if_retryable(
         return False
     if _last_exit_order_id(position, conn=conn):
         return False
+    command_witness = _latest_exit_command_release_witness(position, conn=conn)
+    if command_witness is not None and not command_witness[0]:
+        return False
     if _pending_exit_no_order_waits_for_liquidity(position, conn=conn):
         return False
     if exit_state in _EXIT_LIFECYCLE_IN_FLIGHT_STATES and conn is None:
@@ -8326,6 +8588,21 @@ def release_pending_exit_without_order_if_retryable(
     previous_next_retry_at = str(getattr(position, "next_exit_retry_at", "") or "")
     previous_retry_count = int(getattr(position, "exit_retry_count", 0) or 0)
     previous_error = str(getattr(position, "last_exit_error", "") or "")
+    previous_runtime = {
+        "state": position.state,
+        "pre_exit_state": getattr(position, "pre_exit_state", ""),
+        "exit_state": position.exit_state,
+        "next_exit_retry_at": getattr(position, "next_exit_retry_at", ""),
+        "exit_retry_count": getattr(position, "exit_retry_count", 0),
+        "order_status": getattr(position, "order_status", ""),
+    }
+    command_ownership = _canonical_global_sell_command_ownership(
+        conn,
+        position,
+    )
+    if command_ownership in {"COMMAND_OWNED", "UNKNOWN"}:
+        return False
+    global_snapshot_reauction = command_ownership == "GLOBAL_NO_COMMAND"
     position.exit_state = ""
     position.next_exit_retry_at = ""
     position.exit_retry_count = 0
@@ -8334,15 +8611,27 @@ def release_pending_exit_without_order_if_retryable(
         position.order_status = "filled"
     _release_pending_exit(position)
     if conn is not None:
-        _dual_write_exit_retry_released_if_available(
+        release_persisted = _dual_write_exit_retry_released_if_available(
             conn,
             position,
             previous_next_retry_at=previous_next_retry_at,
             previous_retry_count=previous_retry_count,
             previous_error=previous_error,
-            release_reason="PENDING_EXIT_NO_ORDER_RELEASED",
-            caused_by="pending_exit_no_order_released",
+            release_reason=(
+                "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
+                if global_snapshot_reauction
+                else "PENDING_EXIT_NO_ORDER_RELEASED"
+            ),
+            caused_by=(
+                "global_sell_snapshot_reauction"
+                if global_snapshot_reauction
+                else "pending_exit_no_order_released"
+            ),
         )
+        if not release_persisted:
+            for field, value in previous_runtime.items():
+                setattr(position, field, value)
+            return False
     return True
 
 

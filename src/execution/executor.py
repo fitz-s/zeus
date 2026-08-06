@@ -6501,6 +6501,24 @@ def execute_exit_order(
                 deadline_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
                 max_hold_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
             ):
+                from src.execution.exit_safety import (
+                    global_sell_reauction_publish_claim_blocks_exit_command,
+                )
+
+                if global_sell_reauction_publish_claim_blocks_exit_command(
+                    conn,
+                    intent.trade_id,
+                ):
+                    return OrderResult(
+                        trade_id=intent.trade_id,
+                        status="rejected",
+                        reason="global_sell_reauction_publish_claim_owned",
+                        submitted_price=limit_price,
+                        shares=shares,
+                        order_role="exit",
+                        intent_id=intent.intent_id,
+                        idempotency_key=idem.value,
+                    )
                 if _trade_writer_lease_required(conn):
                     from src.execution.collateral import initialize_collateral_schema_for_submit
 

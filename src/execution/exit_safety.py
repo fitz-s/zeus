@@ -215,6 +215,36 @@ def init_exit_mutex_schema(conn: sqlite3.Connection) -> None:
     conn.execute(_EXIT_MUTEX_SCHEMA)
 
 
+def global_sell_reauction_publish_claim_blocks_exit_command(
+    conn: sqlite3.Connection,
+    position_id: str,
+) -> bool:
+    """Whether a committed V4 publish claim currently owns this SELL slot."""
+
+    row = conn.execute(
+        """
+        SELECT payload_json
+          FROM position_events
+         WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (str(position_id),),
+    ).fetchone()
+    if row is None:
+        return False
+    try:
+        payload = json.loads(str(row[0] or "{}"))
+    except (TypeError, json.JSONDecodeError):
+        return True
+    return bool(
+        isinstance(payload, dict)
+        and payload.get("global_sell_reauction_status") == "publish_claimed"
+        and payload.get("release_reason")
+        == "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
+    )
+
+
 def _mutex_key(position_id: int | str, token_id: str) -> str:
     position = str(position_id).strip()
     token = str(token_id).strip()
