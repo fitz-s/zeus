@@ -2652,9 +2652,6 @@ def _replacement_availability_poll_tick():
         _ingest_station_forecasts_if_due,
         _replacement_forecast_live_materialization_queue_config,
     )
-    from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
-        bayes_precision_fusion_quota_cooldown_seconds,
-    )
     from src.data.source_clock_update_probe import (  # noqa: PLC0415
         advance_source_clock_cursor,
         probe_openmeteo_source_clock_updates,
@@ -2662,19 +2659,6 @@ def _replacement_availability_poll_tick():
     )
 
     cfg = _replacement_forecast_live_materialization_queue_config()
-    cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
-    if cooldown_seconds > 0:
-        # No source-clock payload can land during provider cooldown. Re-probing
-        # the unchanged metadata cursor only rediscovers the same blocked work.
-        _defer_replacement_maintenance(float(cooldown_seconds))
-        report = {
-            "status": "SOURCE_CLOCK_BPF_SCOPED_QUOTA_COOLDOWN_SKIPPED",
-            "cooldown_seconds": cooldown_seconds,
-            "reseed_maintenance_status": "RESEED_MAINTENANCE_NOT_DUE",
-        }
-        logger.info("replacement source-clock quota cooldown: %s", report)
-        return report
-
     # Station-calibrated official forecasts (CWA township / HKO fnd) ingest on THIS lane — re-homed
     # 2026-07-20 after the 2026-06-11 download-lane migration orphaned the call (it lived only in the
     # descheduled forecast-live _replacement_forecast_download_cycle, so cwa_township/hko_fnd went dark
@@ -2827,8 +2811,10 @@ def _replacement_availability_poll_tick():
                 "error": f"{type(exc).__name__}: {str(exc)[:220]}",
             }
 
-    # The public source clock owns this latency path. Generic target repair may
-    # consume most of the poll cadence, so it must never delay detecting a new run.
+    # The public source clock owns this latency path. Its metadata requests are
+    # unmetered by provider contract, so metered download cooldown must never
+    # suppress the probe. The scoped downloader below still fails closed on its
+    # own quota gate and preserves the cursor until raw inputs commit.
     source_clock_report = probe_openmeteo_source_clock_updates(advance_cursor=False)
     source_clock_payload = source_clock_report.as_dict()
     if not source_clock_report.updated_sources:

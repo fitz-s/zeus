@@ -1335,7 +1335,7 @@ def test_replacement_availability_notification_error_keeps_global_reseed(
     assert ingest_main._REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC == 0.0
 
 
-def test_replacement_availability_cooldown_suppresses_repeated_reseed_scans(
+def test_replacement_availability_cooldown_keeps_metadata_probe_alive_but_suppresses_reseeds(
     monkeypatch,
 ) -> None:
     import src.data.replacement_forecast_production as prod
@@ -1358,12 +1358,6 @@ def test_replacement_availability_cooldown_suppresses_repeated_reseed_scans(
         prod,
         "_replacement_forecast_live_materialization_queue_config",
         lambda: {"download_current_targets_enabled": True},
-    )
-    cooldown = iter((0, 241))
-    monkeypatch.setattr(
-        "src.data.bayes_precision_fusion_download."
-        "bayes_precision_fusion_quota_cooldown_seconds",
-        lambda: next(cooldown),
     )
     monkeypatch.setattr(
         source_clock_probe,
@@ -1417,6 +1411,8 @@ def test_replacement_availability_cooldown_suppresses_repeated_reseed_scans(
         "scoped_download",
         "fusion_reseed",
         "cycle_reseed",
+        "probe",
+        "scoped_download",
     ]
     assert ingest_main._REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC == 341.0
 
