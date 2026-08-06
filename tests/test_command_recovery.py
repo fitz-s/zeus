@@ -3703,6 +3703,24 @@ def test_terminal_no_fill_global_maker_rest_creates_one_v4_reauction_debt(conn):
         current_mode="live",
     )
     position.env = "live"
+    original_command_state = conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = 'cmd-exit-global-maker'"
+    ).fetchone()[0]
+    conn.execute(
+        "UPDATE venue_commands SET state = 'UNKNOWN' "
+        "WHERE command_id = 'cmd-exit-global-maker'"
+    )
+    assert (
+        exit_lifecycle._canonical_global_sell_command_ownership(
+            conn, position, require_pending_exit=False
+        )
+        == "COMMAND_OWNED"
+    )
+    conn.execute(
+        "UPDATE venue_commands SET state = ? "
+        "WHERE command_id = 'cmd-exit-global-maker'",
+        (original_command_state,),
+    )
     assert (
         exit_lifecycle._canonical_global_sell_command_ownership(
             conn, position, require_pending_exit=False
@@ -25230,6 +25248,18 @@ class TestRecoveryResolutionTable:
             current_mode="live",
         )
         position.env = "live"
+        conn.execute(
+            "UPDATE venue_commands SET state = 'UNKNOWN' WHERE command_id = 'cmd-exit'"
+        )
+        assert (
+            exit_lifecycle._canonical_global_sell_command_ownership(
+                conn, position, require_pending_exit=False
+            )
+            == "COMMAND_OWNED"
+        )
+        conn.execute(
+            "UPDATE venue_commands SET state = 'CANCELLED' WHERE command_id = 'cmd-exit'"
+        )
         assert (
             exit_lifecycle._canonical_global_sell_command_ownership(
                 conn, position, require_pending_exit=False

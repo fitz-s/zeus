@@ -791,6 +791,7 @@ def _is_exact_held_sell_command(
     command_id: str,
     held_token_id: str,
     venue_order_id: str = "",
+    expected_state: str = "",
 ) -> bool:
     """Bind a handoff witness to the exact position-side-token command."""
 
@@ -799,7 +800,7 @@ def _is_exact_held_sell_command(
     try:
         row = conn.execute(
             """
-            SELECT position_id, intent_kind, side, token_id, venue_order_id
+            SELECT position_id, intent_kind, side, token_id, venue_order_id, state
               FROM venue_commands
              WHERE command_id = ?
              LIMIT 1
@@ -807,6 +808,14 @@ def _is_exact_held_sell_command(
             (command_id,),
         ).fetchone()
     except sqlite3.Error:
+        return False
+    expected_state = expected_state.strip().upper()
+    if expected_state in {
+        "UNKNOWN",
+        "SUBMIT_UNKNOWN",
+        "SUBMIT_UNKNOWN_SIDE_EFFECT",
+        "REVIEW_REQUIRED",
+    }:
         return False
     return bool(
         row is not None
@@ -817,6 +826,10 @@ def _is_exact_held_sell_command(
         and (
             not venue_order_id
             or str(row[4] or "").lower() == venue_order_id.lower()
+        )
+        and (
+            not expected_state
+            or str(row[5] or "").upper() == expected_state
         )
     )
 
@@ -906,6 +919,7 @@ def _relinquished_global_sell_command_id(
                 command_id=command_id,
                 held_token_id=obligation_token_id,
                 venue_order_id=str(payload.get("venue_order_id") or ""),
+                expected_state=str(payload.get("venue_command_state") or ""),
             )
         ):
             return ""
@@ -938,6 +952,7 @@ def _relinquished_global_sell_command_id(
             position_id=position_id,
             command_id=command_id,
             held_token_id=obligation_token_id,
+            expected_state=str(payload.get("command_state") or ""),
         )
     ):
         return ""
@@ -1017,7 +1032,14 @@ def _canonical_global_sell_command_ownership(
             payload.get("exit_intent_reason") != "GLOBAL_CAPITAL_OPTIMAL_SELL"
             and not released_command_id
         ):
-            return "NOT_GLOBAL"
+            return (
+                "COMMAND_OWNED"
+                if _latest_held_sell_reauction_obligation(conn, position).get(
+                    "schema_version"
+                )
+                == 4
+                else "NOT_GLOBAL"
+            )
         command_rows = conn.execute(
             """
             SELECT command_id
