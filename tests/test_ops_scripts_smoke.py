@@ -3031,7 +3031,8 @@ def test_deploy_live_waits_for_post_start_monitor_refresh(monkeypatch, tmp_path)
             sequence_no INTEGER PRIMARY KEY,
             position_id TEXT,
             event_type TEXT,
-            occurred_at TEXT
+            occurred_at TEXT,
+            payload_json TEXT
         )
         """
     )
@@ -3041,10 +3042,18 @@ def test_deploy_live_waits_for_post_start_monitor_refresh(monkeypatch, tmp_path)
     conn.execute(
         """
         INSERT INTO position_events (
-            sequence_no, position_id, event_type, occurred_at
-        ) VALUES (1, 'pos-1', 'MONITOR_REFRESHED', ?)
+            sequence_no, position_id, event_type, occurred_at, payload_json
+        ) VALUES (1, 'pos-1', 'MONITOR_REFRESHED', ?, ?)
         """,
-        (datetime.now(timezone.utc).isoformat(),),
+        (
+            datetime.now(timezone.utc).isoformat(),
+            json.dumps(
+                {
+                    "last_monitor_prob_is_fresh": True,
+                    "last_monitor_market_price_is_fresh": True,
+                }
+            ),
+        ),
     )
     conn.commit()
     conn.close()
@@ -3059,7 +3068,9 @@ def test_deploy_live_waits_for_post_start_monitor_refresh(monkeypatch, tmp_path)
     assert "post-start monitor cadence verified" in detail
 
 
-def test_deploy_live_accepts_post_start_typed_review_management(monkeypatch, tmp_path):
+def test_deploy_live_review_management_does_not_replace_monitor_refresh(
+    monkeypatch, tmp_path
+):
     dl = _load("deploy_live_monitor_review_wait", "deploy_live.py")
     state = tmp_path / "state"
     state.mkdir()
@@ -3114,8 +3125,8 @@ def test_deploy_live_accepts_post_start_typed_review_management(monkeypatch, tmp
         timeout_seconds=0,
     )
 
-    assert ok is True
-    assert "post-start monitor cadence verified" in detail
+    assert ok is False
+    assert "did not verify" in detail
 
 
 def test_deploy_live_post_start_monitor_wait_rejects_stale_chain_only_projection(
@@ -3144,7 +3155,8 @@ def test_deploy_live_post_start_monitor_wait_rejects_stale_chain_only_projection
             sequence_no INTEGER PRIMARY KEY,
             position_id TEXT,
             event_type TEXT,
-            occurred_at TEXT
+            occurred_at TEXT,
+            payload_json TEXT
         )
         """
     )
@@ -3208,7 +3220,8 @@ def test_deploy_live_post_start_monitor_wait_is_per_position(
             sequence_no INTEGER PRIMARY KEY,
             position_id TEXT,
             event_type TEXT,
-            occurred_at TEXT
+            occurred_at TEXT,
+            payload_json TEXT
         )
         """
     )
@@ -3217,10 +3230,18 @@ def test_deploy_live_post_start_monitor_wait_is_per_position(
     conn.execute(
         """
         INSERT INTO position_events (
-            sequence_no, position_id, event_type, occurred_at
-        ) VALUES (1, 'pos-1', 'MONITOR_REFRESHED', ?)
+            sequence_no, position_id, event_type, occurred_at, payload_json
+        ) VALUES (1, 'pos-1', 'MONITOR_REFRESHED', ?, ?)
         """,
-        (datetime.now(timezone.utc).isoformat(),),
+        (
+            datetime.now(timezone.utc).isoformat(),
+            json.dumps(
+                {
+                    "last_monitor_prob_is_fresh": True,
+                    "last_monitor_market_price_is_fresh": True,
+                }
+            ),
+        ),
     )
     conn.commit()
     conn.close()
@@ -3262,7 +3283,8 @@ def test_deploy_live_post_start_monitor_wait_accepts_one_coverage_tranche(
             sequence_no INTEGER PRIMARY KEY,
             position_id TEXT,
             event_type TEXT,
-            occurred_at TEXT
+            occurred_at TEXT,
+            payload_json TEXT
         )
         """
     )
@@ -3275,10 +3297,20 @@ def test_deploy_live_post_start_monitor_wait_accepts_one_coverage_tranche(
         conn.execute(
             """
             INSERT INTO position_events (
-                sequence_no, position_id, event_type, occurred_at
-            ) VALUES (?, ?, 'MONITOR_REFRESHED', ?)
+                sequence_no, position_id, event_type, occurred_at, payload_json
+            ) VALUES (?, ?, 'MONITOR_REFRESHED', ?, ?)
             """,
-            (sequence_no, position_id, datetime.now(timezone.utc).isoformat()),
+            (
+                sequence_no,
+                position_id,
+                datetime.now(timezone.utc).isoformat(),
+                json.dumps(
+                    {
+                        "last_monitor_prob_is_fresh": True,
+                        "last_monitor_market_price_is_fresh": True,
+                    }
+                ),
+            ),
         )
     conn.commit()
     conn.close()

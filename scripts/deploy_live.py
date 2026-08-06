@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-02; last_reused=2026-08-02
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-06; last_reused=2026-08-06
 # Purpose: make live daemon restarts SAFE — refuse `launchctl kickstart` while the LIVE
 #   checkout's runtime surface is uncommitted/unpushed, and require live restart preflight
 #   before booting the trading daemon.
 # Reuse: read-mostly (git status/rev-parse + launchctl list + preflight checks); the only
 #   state change is kickstart after the gates pass.
-# Last reused/audited: 2026-07-23
+# Last reused/audited: 2026-08-06
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做") +
 #   incident: a `launchctl kickstart` booted a concurrent agent's mid-edit working tree
 #   into live money.
@@ -564,6 +564,8 @@ def _wait_for_post_start_monitor_cadence(
                     conn,
                     now=datetime.now(timezone.utc),
                     min_occurred_at=launched_floor,
+                    monitor_refreshed_only=True,
+                    require_fresh_inputs=True,
                     sample_limit=5,
                 )
                 conn.close()

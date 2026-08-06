@@ -294,6 +294,7 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
                 min_occurred_at=boot_at,
                 strict_future=True,
                 monitor_refreshed_only=True,
+                require_fresh_inputs=True,
                 sample_limit=0,
             )
         finally:
@@ -7913,6 +7914,7 @@ def _durable_held_position_monitor_recovery_cycle() -> bool:
                 now=datetime.now(timezone.utc),
                 max_age_seconds=HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS,
                 monitor_refreshed_only=True,
+                require_fresh_inputs=True,
                 sample_limit=5,
             )
         finally:

@@ -9839,6 +9839,7 @@ def _check_monitor_cadence_watchdog(conn, summary: dict) -> dict | None:
             max_age_seconds=threshold_seconds,
             strict_future=True,
             monitor_refreshed_only=True,
+            require_fresh_inputs=True,
         )
     except Exception as exc:  # noqa: BLE001 - watchdog must not break exits.
         summary["monitor_cadence_watchdog_error"] = str(exc)

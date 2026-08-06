@@ -54,6 +54,7 @@ def collect_monitor_cadence_evidence(
     min_occurred_at: datetime | None = None,
     strict_future: bool = False,
     monitor_refreshed_only: bool = False,
+    require_fresh_inputs: bool = False,
     sample_limit: int = 25,
 ) -> dict[str, Any]:
     """Return per-position monitor cadence evidence for current money risk.
@@ -66,7 +67,16 @@ def collect_monitor_cadence_evidence(
     the concurrent-write tolerance.
     ``monitor_refreshed_only`` excludes non-monitor fallback authority from
     coverage without changing the default health/preflight behavior.
+    ``require_fresh_inputs`` additionally requires the latest canonical monitor
+    event to attest both current probability and held-side CLOB authority.  It
+    is meaningful only with ``monitor_refreshed_only`` and prevents a fresh
+    timestamp carrying stale inputs from falsely clearing recovery debt.
     """
+
+    if require_fresh_inputs and not monitor_refreshed_only:
+        raise ValueError(
+            "MONITOR_CADENCE_FRESH_INPUTS_REQUIRE_MONITOR_REFRESHED_ONLY"
+        )
 
     position_columns = _table_columns(conn, "position_current")
     event_columns = _table_columns(conn, "position_events")
@@ -229,6 +239,19 @@ def collect_monitor_cadence_evidence(
                 else:
                     stale_or_missing.append(position_evidence)
         else:
+            if require_fresh_inputs:
+                input_issue = _monitor_event_fresh_input_issue(monitor_event)
+                if input_issue is not None:
+                    if _monitor_event_closed_market_pending_settlement(
+                        position_evidence,
+                        monitor_event,
+                    ):
+                        settlement_recoverable.append(position_evidence.copy())
+                    else:
+                        stale_or_missing.append(
+                            {**position_evidence, "issue": input_issue}
+                        )
+                    continue
             fresh_count += 1
     open_count = len(monitored_rows)
     return {
@@ -550,6 +573,48 @@ def _monitor_event_closed_market_pending_settlement(
         }
     )
     return True
+
+
+def _monitor_event_fresh_input_issue(
+    monitor_event: dict[str, str] | None,
+) -> str | None:
+    """Return why a current monitor event lacks redecision authority."""
+
+    if monitor_event is None:
+        return "monitor_payload_missing"
+    try:
+        payload = json.loads(monitor_event.get("payload_json") or "{}")
+    except (TypeError, ValueError):
+        return "monitor_payload_unparseable"
+    if not isinstance(payload, dict):
+        return "monitor_payload_invalid"
+
+    def _is_true(value: object) -> bool:
+        return value is True or (type(value) is int and value == 1)
+
+    probability_fresh = _is_true(payload.get("last_monitor_prob_is_fresh"))
+    quote_fresh = _is_true(payload.get("last_monitor_market_price_is_fresh"))
+    if probability_fresh and quote_fresh:
+        return None
+    validations_raw = payload.get("applied_validations")
+    validations = (
+        {str(item) for item in validations_raw}
+        if isinstance(validations_raw, list)
+        else set()
+    )
+    structural_win = (
+        probability_fresh
+        and payload.get("last_monitor_prob") == 1.0
+        and payload.get("selected_method") == "day0_absorbing_hard_fact"
+        and "day0_hard_fact_structural_win_quote_bypassed" in validations
+    )
+    if structural_win:
+        return None
+    if not probability_fresh and not quote_fresh:
+        return "monitor_probability_and_clob_stale"
+    if not probability_fresh:
+        return "monitor_probability_stale"
+    return "monitor_clob_stale"
 
 
 def _latest_exit_redecision_event(

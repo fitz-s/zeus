@@ -994,6 +994,9 @@ class TestMonitorCadenceWatchdog:
         *,
         position_id: str = "p1",
         phase: str = "active",
+        probability_fresh: bool = True,
+        quote_fresh: bool = True,
+        payload: dict | None = None,
     ) -> None:
         conn.execute(
             """
@@ -1010,13 +1013,22 @@ class TestMonitorCadenceWatchdog:
                 event_id, position_id, event_version, sequence_no, event_type,
                 occurred_at, strategy_key, idempotency_key, source_module, env,
                 payload_json
-            ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, 'opening_inertia', ?, 'test', 'live', '{}')
+            ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, 'opening_inertia', ?, 'test', 'live', ?)
             """,
             (
                 f"e:{position_id}:{occurred_at}",
                 position_id,
                 occurred_at,
                 f"i:{position_id}:{occurred_at}",
+                json.dumps(
+                    payload
+                    if payload is not None
+                    else {
+                        "last_monitor_prob_is_fresh": probability_fresh,
+                        "last_monitor_market_price_is_fresh": quote_fresh,
+                    },
+                    sort_keys=True,
+                ),
             ),
         )
         conn.commit()
@@ -1057,6 +1069,48 @@ class TestMonitorCadenceWatchdog:
         record = _check_monitor_cadence_watchdog(conn, summary)
         assert record is None, "watchdog must NOT flag a healthy cadence"
         assert "monitor_cadence_gap_flagged" not in summary
+
+    def test_watchdog_rejects_fresh_timestamp_with_stale_monitor_inputs(self):
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
+
+        conn = _db()
+        recent = datetime.now(timezone.utc).isoformat()
+        self._insert_monitor_refreshed(
+            conn,
+            recent,
+            probability_fresh=True,
+            quote_fresh=False,
+        )
+
+        record = _check_monitor_cadence_watchdog(conn, {})
+
+        assert record is not None
+        assert record["fresh_position_count"] == 0
+        assert record["stale_or_missing_position_count"] == 1
+        assert record["stale_or_missing_positions"][0]["issue"] == (
+            "monitor_clob_stale"
+        )
+
+    def test_watchdog_accepts_typed_absorbing_win_quote_bypass(self):
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
+
+        conn = _db()
+        recent = datetime.now(timezone.utc).isoformat()
+        self._insert_monitor_refreshed(
+            conn,
+            recent,
+            payload={
+                "last_monitor_prob": 1.0,
+                "last_monitor_prob_is_fresh": True,
+                "last_monitor_market_price_is_fresh": False,
+                "selected_method": "day0_absorbing_hard_fact",
+                "applied_validations": [
+                    "day0_hard_fact_structural_win_quote_bypassed"
+                ],
+            },
+        )
+
+        assert _check_monitor_cadence_watchdog(conn, {}) is None
 
     def test_watchdog_ignores_recent_monitor_history_for_closed_positions(self):
         from datetime import datetime, timezone
