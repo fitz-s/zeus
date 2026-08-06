@@ -3578,6 +3578,35 @@ def _seed_full_exit_intent(
         )
 
 
+def _append_position_event_payload_copy(
+    conn,
+    *,
+    source_idempotency_key: str,
+    suffix: str,
+    payload: dict,
+) -> None:
+    row = dict(
+        conn.execute(
+            "SELECT * FROM position_events WHERE idempotency_key = ?",
+            (source_idempotency_key,),
+        ).fetchone()
+    )
+    row["event_id"] = f"{row['event_id']}:{suffix}"
+    row["sequence_no"] = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
+        "WHERE position_id = ?",
+        (row["position_id"],),
+    ).fetchone()[0]
+    row["idempotency_key"] = f"{row['idempotency_key']}:{suffix}"
+    row["payload_json"] = json.dumps(payload, sort_keys=True, default=str)
+    columns = tuple(row)
+    conn.execute(
+        f"INSERT INTO position_events ({','.join(columns)}) "
+        f"VALUES ({','.join('?' for _ in columns)})",
+        tuple(row[column] for column in columns),
+    )
+
+
 def test_terminal_no_fill_global_maker_rest_creates_one_v4_reauction_debt(conn):
     from src.execution import command_recovery, exit_lifecycle
     from src.state.portfolio import _position_from_projection_row
@@ -3720,6 +3749,30 @@ def test_terminal_no_fill_global_maker_rest_creates_one_v4_reauction_debt(conn):
         "UPDATE venue_commands SET state = ? "
         "WHERE command_id = 'cmd-exit-global-maker'",
         (original_command_state,),
+    )
+    malformed_payload = dict(payload)
+    malformed_payload.pop("venue_command_state")
+    _append_position_event_payload_copy(
+        conn,
+        source_idempotency_key=(
+            "pos-global-maker:exit_terminal_no_fill:cmd-exit-global-maker"
+        ),
+        suffix="missing-state",
+        payload=malformed_payload,
+    )
+    assert (
+        exit_lifecycle._canonical_global_sell_command_ownership(
+            conn, position, require_pending_exit=False
+        )
+        == "COMMAND_OWNED"
+    )
+    _append_position_event_payload_copy(
+        conn,
+        source_idempotency_key=(
+            "pos-global-maker:exit_terminal_no_fill:cmd-exit-global-maker"
+        ),
+        suffix="restored-state",
+        payload=payload,
     )
     assert (
         exit_lifecycle._canonical_global_sell_command_ownership(
@@ -25259,6 +25312,31 @@ class TestRecoveryResolutionTable:
         )
         conn.execute(
             "UPDATE venue_commands SET state = 'CANCELLED' WHERE command_id = 'cmd-exit'"
+        )
+        original_payload = json.loads(event["payload_json"])
+        malformed_payload = dict(original_payload)
+        malformed_payload.pop("command_state")
+        source_key = conn.execute(
+            "SELECT idempotency_key FROM position_events "
+            "WHERE position_id = 'pos-001' AND event_type = 'EXIT_RETRY_RELEASED'"
+        ).fetchone()[0]
+        _append_position_event_payload_copy(
+            conn,
+            source_idempotency_key=source_key,
+            suffix="missing-state",
+            payload=malformed_payload,
+        )
+        assert (
+            exit_lifecycle._canonical_global_sell_command_ownership(
+                conn, position, require_pending_exit=False
+            )
+            == "COMMAND_OWNED"
+        )
+        _append_position_event_payload_copy(
+            conn,
+            source_idempotency_key=source_key,
+            suffix="restored-state",
+            payload=original_payload,
         )
         assert (
             exit_lifecycle._canonical_global_sell_command_ownership(

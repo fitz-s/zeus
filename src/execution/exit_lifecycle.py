@@ -912,6 +912,7 @@ def _relinquished_global_sell_command_id(
             != "global_sell_exit_terminal_no_fill_reauction:venue_terminal_no_fill"
             or str(payload.get("command_id") or "").strip() != command_id
             or not str(payload.get("venue_order_id") or "").strip()
+            or not str(payload.get("venue_command_state") or "").strip()
             or not isinstance(payload.get("terminal_order_fact"), dict)
             or not _is_exact_held_sell_command(
                 conn,
@@ -947,6 +948,7 @@ def _relinquished_global_sell_command_id(
     if (
         str(residual.get("command_token_id") or "").strip()
         != obligation_token_id
+        or not str(payload.get("command_state") or "").strip()
         or not _is_exact_held_sell_command(
             conn,
             position_id=position_id,
