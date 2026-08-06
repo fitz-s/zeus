@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-05
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-05; last_reused=2026-08-05
+# Last reused/audited: 2026-08-06
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-06; last_reused=2026-08-06
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -2805,6 +2805,49 @@ def test_reactor_wake_day0_still_preempts_older_joint_inputs(tmp_path):
 
     assert selected is not None
     assert selected.wake_id == "day0-new"
+
+
+def test_post_terminal_day0_cleanup_gives_one_turn_to_material_input(tmp_path):
+    from src.runtime import reactor_wake
+
+    path = tmp_path / "wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="price",
+        reason="market_price_advanced",
+        path=path,
+        wake_id="price-old",
+        published_at=datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="day0",
+        reason="day0_extreme_event_committed",
+        path=path,
+        wake_id="day0-new",
+        published_at=datetime(2026, 7, 25, 12, 0, 1, tzinfo=timezone.utc),
+    )
+
+    selected = reactor_wake.read_reactor_wake(
+        path=path,
+        prefer_material_progress=True,
+    )
+
+    assert selected is not None
+    assert selected.wake_id == "price-old"
+
+    reactor_wake.publish_reactor_wake(
+        source="fill",
+        reason="position_fill_projected",
+        path=path,
+        wake_id="fill-newest",
+        published_at=datetime(2026, 7, 25, 12, 0, 2, tzinfo=timezone.utc),
+        event_ids=("fill-event",),
+    )
+    selected = reactor_wake.read_reactor_wake(
+        path=path,
+        prefer_material_progress=True,
+    )
+    assert selected is not None
+    assert selected.wake_id == "fill-newest"
 
 
 def test_reactor_wake_fill_is_bounded_fair_with_continuous_joint_inputs(tmp_path):

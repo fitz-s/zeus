@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-08-05
+# Last reused or audited: 2026-08-06
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-08-03; last_reused=2026-08-03
+# Lifecycle: created=2026-05-19; last_reviewed=2026-08-06; last_reused=2026-08-06
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -8655,6 +8655,225 @@ def test_processed_day0_wake_runs_held_monitor_before_ack(monkeypatch) -> None:
         frozenset({("Singapore", "2026-07-24", "high")})
     ]
     assert acknowledgements == ["wake-day0-processed"]
+
+
+def test_terminal_day0_cleanup_batches_only_obligation_free_wakes(monkeypatch) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    def day0(wake_id, event_id, city, *, held_requests=()):
+        return wake_module.ReactorWake(
+            wake_id,
+            "2026-08-06T07:00:00+00:00",
+            "day0_extreme_updated_trigger",
+            "day0_extreme_event_committed",
+            (event_id,),
+            ((city, "2026-08-06", "high"),),
+            held_requests,
+        )
+
+    selected = day0("wake-selected", "event-terminal-selected", "Paris")
+    safe = day0("wake-safe", "event-terminal-safe", "London")
+    missing = day0("wake-missing", "event-missing", "Toronto")
+    pending = day0("wake-pending", "event-pending", "Madrid")
+    deferred = day0("wake-deferred", "event-future-retry", "Berlin")
+    exposed = day0("wake-exposed", "event-terminal-exposed", "Milan")
+    held_sell = day0(
+        "wake-held-sell",
+        "event-terminal-held-sell",
+        "Rome",
+        held_requests=(object(),),
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "reactor_wakes_for_reason",
+        lambda *_args, **_kwargs: (
+            selected,
+            safe,
+            missing,
+            pending,
+            deferred,
+            exposed,
+            held_sell,
+        ),
+    )
+    monkeypatch.setattr(main_module, "_pending_held_day0_wake_families", lambda: frozenset())
+    monkeypatch.setattr(
+        main_module,
+        "_reactor_wake_event_state",
+        lambda event_ids: main_module._ReactorWakeEventState(
+            ready=event_ids == ("event-pending",),
+            finished=event_ids != ("event-pending",),
+            terminal=event_ids not in {
+                ("event-pending",),
+                ("event-future-retry",),
+            },
+            all_terminal=event_ids not in {
+                ("event-pending",),
+                ("event-future-retry",),
+            },
+            all_missing=event_ids == ("event-missing",),
+        ),
+    )
+    event_families = {
+        "event-terminal-selected": frozenset({("Paris", "2026-08-06", "high")}),
+        "event-terminal-safe": frozenset({("London", "2026-08-06", "high")}),
+        "event-pending": frozenset({("Madrid", "2026-08-06", "high")}),
+        "event-future-retry": frozenset({("Berlin", "2026-08-06", "high")}),
+        "event-terminal-exposed": frozenset({("Milan", "2026-08-06", "high")}),
+        "event-terminal-held-sell": frozenset({("Rome", "2026-08-06", "high")}),
+    }
+    monkeypatch.setattr(
+        main_module,
+        "_day0_wake_target_families",
+        lambda event_ids: event_families.get(event_ids[0]),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_day0_wake_requires_exit_monitor",
+        lambda families: any(city == "Milan" for city, _date, _metric in families),
+    )
+
+    cleanup = main_module._terminal_day0_cleanup_wakes(selected)
+
+    assert tuple(wake.wake_id for wake in cleanup) == (
+        "wake-selected",
+        "wake-safe",
+        "wake-missing",
+    )
+
+
+def test_terminal_day0_cleanup_is_bounded_and_probe_failure_retains_selected(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    wakes = tuple(
+        wake_module.ReactorWake(
+            f"wake-{index}",
+            "2026-08-06T07:00:00+00:00",
+            "day0_extreme_updated_trigger",
+            "day0_extreme_event_committed",
+            (f"event-{index}",),
+            (("Paris", "2026-08-06", "high"),),
+        )
+        for index in range(101)
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "reactor_wakes_for_reason",
+        lambda *_args, **_kwargs: wakes,
+    )
+    monkeypatch.setattr(main_module, "_pending_held_day0_wake_families", lambda: frozenset())
+    monkeypatch.setattr(
+        main_module,
+        "_reactor_wake_event_state",
+        lambda _event_ids: main_module._ReactorWakeEventState(
+            ready=False,
+            finished=True,
+            terminal=True,
+            all_terminal=True,
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_day0_wake_target_families",
+        lambda _event_ids: frozenset({("Paris", "2026-08-06", "high")}),
+    )
+    monkeypatch.setattr(main_module, "_day0_wake_requires_exit_monitor", lambda _families: False)
+
+    assert len(main_module._terminal_day0_cleanup_wakes(wakes[0])) == 100
+
+    monkeypatch.setattr(main_module, "_pending_held_day0_wake_families", lambda: None)
+    assert main_module._terminal_day0_cleanup_wakes(wakes[0]) is None
+
+    held_selected = wake_module.ReactorWake(
+        **{
+            **wakes[0].__dict__,
+            "held_sell_reauction_requests": (object(),),
+        }
+    )
+    monkeypatch.setattr(main_module, "_pending_held_day0_wake_families", lambda: frozenset())
+    assert main_module._terminal_day0_cleanup_wakes(held_selected) is None
+
+
+def test_terminal_day0_poll_acknowledges_safe_cleanup_as_one_exact_batch(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    selected = wake_module.ReactorWake(
+        "wake-selected-batch",
+        "2026-08-06T07:00:01+00:00",
+        "day0_extreme_updated_trigger",
+        "day0_extreme_event_committed",
+        ("event-selected-batch",),
+        (("Paris", "2026-08-06", "high"),),
+    )
+    safe = wake_module.ReactorWake(
+        "wake-safe-batch",
+        "2026-08-06T07:00:00+00:00",
+        "day0_extreme_updated_trigger",
+        "day0_extreme_event_committed",
+        ("event-safe-batch",),
+        (("London", "2026-08-06", "high"),),
+    )
+    acknowledged: list[tuple[str, ...]] = []
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _name: False)
+    monkeypatch.setattr(main_module, "_paused_forecast_carrier_priority_allowed", lambda: False)
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda **_kwargs: selected)
+    monkeypatch.setattr(wake_module, "coalescible_reactor_wakes", lambda _wake: (selected,))
+    monkeypatch.setattr(
+        wake_module,
+        "reactor_wakes_for_reason",
+        lambda *_args, **_kwargs: (selected, safe),
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "acknowledge_reactor_wakes",
+        lambda wakes: acknowledged.append(tuple(wake.wake_id for wake in wakes)) or True,
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "acknowledge_reactor_wake",
+        lambda _wake: pytest.fail("terminal cleanup must use one exact batch ACK"),
+    )
+    monkeypatch.setattr(wake_module, "reactor_urgent_wake_identity", lambda: None)
+    monkeypatch.setattr(
+        main_module,
+        "_reactor_wake_event_state",
+        lambda _event_ids: main_module._ReactorWakeEventState(
+            ready=False,
+            finished=True,
+            terminal=True,
+            all_terminal=True,
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_day0_wake_target_families",
+        lambda event_ids: frozenset(
+            {
+                (
+                    "Paris" if event_ids == ("event-selected-batch",) else "London",
+                    "2026-08-06",
+                    "high",
+                )
+            }
+        ),
+    )
+    monkeypatch.setattr(main_module, "_pending_held_day0_wake_families", lambda: frozenset())
+    monkeypatch.setattr(main_module, "_day0_wake_requires_exit_monitor", lambda _families: False)
+    monkeypatch.setattr(main_module, "_record_day0_no_monitor_completion", lambda _wake_id: True)
+    monkeypatch.setattr(main_module, "_edli_last_reactor_wake_id", None)
+    main_module._held_position_monitor_active.clear()
+
+    assert main_module._edli_reactor_wake_poll_once() is True
+    assert acknowledged == [("wake-selected-batch", "wake-safe-batch")]
+    assert main_module._edli_terminal_day0_cleanup_yield.is_set()
+    main_module._edli_terminal_day0_cleanup_yield.clear()
 
 
 def test_targeted_exit_monitor_filters_positions_without_mutating_full_portfolio() -> None:

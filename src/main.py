@@ -138,6 +138,7 @@ class _OneTurnWakeExclusion:
 
 _edli_global_completion_yield = _OneTurnWakeExclusion()
 _edli_day0_post_monitor_yield = _OneTurnWakeExclusion()
+_edli_terminal_day0_cleanup_yield = threading.Event()
 _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
     {
         "edli_event_reactor",
@@ -4106,6 +4107,7 @@ def _edli_initialize_reactor_wake_cursor() -> None:
     _edli_last_reactor_wake_id = None
     _edli_global_completion_yield.reset()
     _edli_day0_post_monitor_yield.reset()
+    _edli_terminal_day0_cleanup_yield.clear()
     _edli_collateral_authority_wake_backoff_until.clear()
     _edli_last_collateral_authority_captured_at = None
     _day0_urgent_wake_pending.clear()
@@ -4298,7 +4300,12 @@ def _pending_held_day0_wake_families(
         for queued in reversed(reactor_wakes_since(None)):
             if queued.reason != "day0_extreme_event_committed":
                 continue
-            for raw_city, raw_target_date, raw_metric in queued.forecast_families:
+            queued_families = tuple(queued.forecast_families) or tuple(
+                _day0_wake_target_families(tuple(queued.event_ids)) or ()
+            )
+            if not queued_families:
+                return None
+            for raw_city, raw_target_date, raw_metric in queued_families:
                 key = (
                     str(raw_city or "").strip().casefold(),
                     str(raw_target_date or "").strip()[:10],
@@ -4326,6 +4333,8 @@ class _ReactorWakeEventState:
     finished: bool
     terminal: bool = False
     in_flight: bool = False
+    all_terminal: bool = False
+    all_missing: bool = False
 
 
 def _reactor_wake_event_state(
@@ -4375,6 +4384,7 @@ def _reactor_wake_event_state(
     ready = False
     deferred = False
     terminal = False
+    all_terminal = bool(rows)
     in_flight = False
     missing = 0
     for _event_id, status, claimed_at in rows:
@@ -4389,10 +4399,12 @@ def _reactor_wake_event_state(
         status = str(status)
         if status == "processing":
             in_flight = True
+            all_terminal = False
             continue
         if status != "pending":
             terminal = True
             continue
+        all_terminal = False
         if claimed_at in {None, ""}:
             ready = True
             continue
@@ -4418,6 +4430,8 @@ def _reactor_wake_event_state(
         finished=not ready and not in_flight and (deferred or bool(rows)),
         terminal=terminal,
         in_flight=in_flight,
+        all_terminal=all_terminal,
+        all_missing=bool(rows) and missing == len(rows),
     )
 
 
@@ -4438,6 +4452,104 @@ def _reactor_wake_events_ready(
         event_ids,
         decision_time=decision_time,
     ).ready
+
+
+def _terminal_day0_cleanup_eligible(queued: object) -> bool:
+    """Prove one Day0 hint has no remaining event or capital obligation."""
+
+    if (
+        str(getattr(queued, "reason", "") or "")
+        != "day0_extreme_event_committed"
+        or getattr(queued, "held_sell_reauction_requests", ())
+    ):
+        return False
+    event_ids = tuple(getattr(queued, "event_ids", ()) or ())
+    if not event_ids:
+        return False
+    event_state = _reactor_wake_event_state(event_ids)
+    if not event_state.finished or not event_state.all_terminal:
+        return False
+    declared_families = tuple(getattr(queued, "forecast_families", ()) or ())
+    declared_scope = None
+    if declared_families:
+        try:
+            declared_scope = frozenset(
+                (
+                    str(city).strip(),
+                    date.fromisoformat(str(target_date).strip()[:10]).isoformat(),
+                    str(metric).strip().lower(),
+                )
+                for city, target_date, metric in declared_families
+            )
+        except (TypeError, ValueError):
+            return False
+        if any(not city or metric not in {"high", "low"} for city, _date, metric in declared_scope):
+            return False
+    family_scope = _day0_wake_target_families(event_ids)
+    if family_scope is None:
+        if not event_state.all_missing or not declared_scope:
+            return False
+        family_scope = declared_scope
+    elif declared_scope is not None:
+        if declared_scope != family_scope:
+            return False
+    return not _day0_wake_requires_exit_monitor(family_scope)
+
+
+def _terminal_day0_cleanup_wakes(
+    selected: object,
+    *,
+    max_wakes: int = 100,
+) -> tuple[object, ...] | None:
+    """Collect only Day0 hints whose money-path obligations are already over.
+
+    SCOPE: exact Day0 queue files whose canonical event IDs are all terminal or
+    missing non-authoritative hints, whose family scope is valid, and whose
+    families have no open/resting exposure. DRAIN: one successful bounded ACK
+    retires at most ``max_wakes`` immutable hints after the selected wake has
+    completed its monitor-before-ACK path. RESET: pending/in-flight/deferred
+    events, unreadable probes, held-family debt, exposure, or ACK failure leave
+    their exact files queued for ordinary priority service.
+    """
+
+    from src.runtime.reactor_wake import reactor_wakes_for_reason
+
+    if (
+        str(getattr(selected, "reason", "") or "")
+        != "day0_extreme_event_committed"
+    ):
+        return None
+    pending_held_families = _pending_held_day0_wake_families()
+    if pending_held_families is None or pending_held_families:
+        return None
+
+    limit = min(100, max(1, int(max_wakes)))
+    try:
+        candidates = (selected,) + tuple(
+            queued
+            for queued in reactor_wakes_for_reason(
+                "day0_extreme_event_committed",
+                max_wakes=limit,
+                fail_on_error=True,
+            )
+            if getattr(queued, "wake_id", None)
+            != getattr(selected, "wake_id", None)
+        )
+    except (OSError, ValueError):
+        logger.warning(
+            "terminal Day0 cleanup queue probe failed; retaining selected-only debt",
+            exc_info=True,
+        )
+        return None
+    cleanup: list[object] = []
+    for queued in candidates:
+        if len(cleanup) >= limit:
+            break
+        if _terminal_day0_cleanup_eligible(queued):
+            cleanup.append(queued)
+    if not cleanup or cleanup[0].wake_id != getattr(selected, "wake_id", None):
+        return None
+    return tuple(cleanup)
 
 
 def _day0_exit_monitor_attempt_state(wake_id: str) -> tuple[bool, bool | None]:
@@ -5051,6 +5163,8 @@ def _edli_reactor_wake_poll_once() -> bool:
     )
     global_yield_ids = _edli_global_completion_yield.consume()
     day0_post_monitor_yield_ids = _edli_day0_post_monitor_yield.consume()
+    terminal_day0_cleanup_yield = _edli_terminal_day0_cleanup_yield.is_set()
+    _edli_terminal_day0_cleanup_yield.clear()
     paused_forecast_carrier_priority_allowed = (
         _paused_forecast_carrier_priority_allowed()
     )
@@ -5086,6 +5200,18 @@ def _edli_reactor_wake_poll_once() -> bool:
                 exclude_wake_ids=excluded_wake_ids,
                 prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
                 fail_on_error=prefer_forecast_carrier_progress,
+            )
+        if (
+            terminal_day0_cleanup_yield
+            and wake is not None
+            and wake.reason == "day0_extreme_event_committed"
+            and _pending_held_day0_wake_families() == frozenset()
+            and _terminal_day0_cleanup_eligible(wake)
+        ):
+            wake = read_reactor_wake(
+                exclude_wake_ids=excluded_wake_ids,
+                prefer_material_progress=True,
+                fail_on_error=True,
             )
     except (OSError, ValueError):
         logger.warning(
@@ -5332,6 +5458,11 @@ def _edli_reactor_wake_poll_once() -> bool:
         if wake_event_state is not None and wake_event_state.finished:
             if not day0_monitor_succeeded:
                 return False
+            if wake_event_state.all_terminal and not day0_requires_exit_monitor:
+                cleanup_wakes = _terminal_day0_cleanup_wakes(wake)
+                if cleanup_wakes is None:
+                    return False
+                wakes = cleanup_wakes
             _yield_incomplete_day0_after_monitor_once(
                 wake,
                 monitor_succeeded=True,
@@ -5342,6 +5473,8 @@ def _edli_reactor_wake_poll_once() -> bool:
                 day0_wake=True,
             ):
                 return False
+            if len(wakes) > 1:
+                _edli_terminal_day0_cleanup_yield.set()
             logger.info(
                 "Day0 monitor completed after terminal reactor event: "
                 "wake id=%s batch=%d events=%d families=%d",

@@ -930,6 +930,7 @@ def read_reactor_wake(
     exclude_wake_ids: Collection[str] = (),
     prefer_exact_held_sell: bool = False,
     prefer_forecast_carrier_progress: bool = False,
+    prefer_material_progress: bool = False,
     fail_on_error: bool = False,
 ) -> ReactorWake | None:
     """Read the queued fact with the shortest alpha clock first.
@@ -985,6 +986,27 @@ def read_reactor_wake(
                 return wake
         for _queue_file, wake in reversed(queued):
             if wake.reason == "forecast_posterior_advanced":
+                return wake
+    if prefer_material_progress:
+        # SCOPE: one post-terminal-Day0-cleanup turn, after src.main proves the
+        # currently selected Day0 hint has no event or capital obligation.
+        # DRAIN: exact held SELL and fill remain first; otherwise the ordinary
+        # oldest material input gets one turn. RESET: the caller consumes the
+        # preference once, so unfinished Day0 immediately regains priority.
+        for _queue_file, wake in queued:
+            if (
+                wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+                and wake.held_sell_reauction_requests
+            ):
+                return wake
+        for _queue_file, wake in queued:
+            if wake.reason == "position_fill_projected":
+                return wake
+        for _queue_file, wake in queued:
+            if wake.reason in {
+                "market_price_advanced",
+                "forecast_posterior_advanced",
+            }:
                 return wake
     for _queue_file, wake in reversed(queued):
         if wake.reason == "day0_extreme_event_committed":
