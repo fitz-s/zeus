@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-04
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-04; last_reused=2026-08-04
+# Last reused or audited: 2026-08-06
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-06; last_reused=2026-08-06
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -3011,6 +3011,105 @@ class TestRequestHashProvenance:
         assert stats.priority_reserve_exhausted is True
         assert stats.cities_skipped_quota == 1
         assert tracker._count == PRIORITY_DAILY_LIMIT
+
+    def test_priority_recovery_uses_bounded_lane_only_when_explicit(self, monkeypatch):
+        import src.data.day0_hourly_vectors as hv
+        from src.data.openmeteo_quota import (
+            PRIORITY_DAILY_LIMIT,
+            OpenMeteoQuotaTracker,
+        )
+
+        tracker = OpenMeteoQuotaTracker()
+        tracker._count = PRIORITY_DAILY_LIMIT
+        observed_lanes: list[tuple[bool, bool]] = []
+        monkeypatch.setattr(hv, "quota_tracker", tracker)
+        monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
+
+        def fetch(city, *, models=None, **_kw):
+            observed_lanes.append((tracker._is_recovery(), tracker._is_critical()))
+            return (
+                [
+                    _refresh_vector(
+                        city,
+                        model,
+                        datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+                    )
+                    for model in models
+                ],
+                "sha256:bounded-recovery",
+            )
+
+        monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fetch)
+        monkeypatch.setattr(
+            hv,
+            "persist_day0_hourly_vectors",
+            lambda vectors, **_kw: len(vectors),
+        )
+        monkeypatch.setattr(
+            hv,
+            "read_freshest_day0_hourly_vectors",
+            lambda **_kw: [object()],
+        )
+        hv._LAST_REFRESH_MONOTONIC.clear()
+
+        stats = hv.maybe_refresh_day0_hourly_vectors(
+            [_paris()],
+            decision_time=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+            quota_priority_cities=1,
+            allow_priority_recovery=True,
+            return_stats=True,
+        )
+
+        assert stats.vectors_written == 6
+        assert stats.priority_reserve_exhausted is False
+        assert observed_lanes == [(True, False)]
+
+    def test_priority_recovery_keeps_normal_priority_lane_when_available(self, monkeypatch):
+        import src.data.day0_hourly_vectors as hv
+        from src.data.openmeteo_quota import OpenMeteoQuotaTracker
+
+        tracker = OpenMeteoQuotaTracker()
+        observed_lanes: list[tuple[bool, bool]] = []
+        monkeypatch.setattr(hv, "quota_tracker", tracker)
+        monkeypatch.setattr(hv, "in_domain_models_for_city", lambda c, **kw: [])
+
+        def fetch(city, *, models=None, **_kw):
+            observed_lanes.append((tracker._is_priority(), tracker._is_recovery()))
+            return (
+                [
+                    _refresh_vector(
+                        city,
+                        model,
+                        datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+                    )
+                    for model in models
+                ],
+                "sha256:normal-priority",
+            )
+
+        monkeypatch.setattr(hv, "fetch_day0_hourly_vectors", fetch)
+        monkeypatch.setattr(
+            hv,
+            "persist_day0_hourly_vectors",
+            lambda vectors, **_kw: len(vectors),
+        )
+        monkeypatch.setattr(
+            hv,
+            "read_freshest_day0_hourly_vectors",
+            lambda **_kw: [object()],
+        )
+        hv._LAST_REFRESH_MONOTONIC.clear()
+
+        stats = hv.maybe_refresh_day0_hourly_vectors(
+            [_paris()],
+            decision_time=datetime(2026, 6, 10, 9, 0, tzinfo=UTC),
+            quota_priority_cities=1,
+            allow_priority_recovery=True,
+            return_stats=True,
+        )
+
+        assert stats.vectors_written == 6
+        assert observed_lanes == [(True, False)]
 
     def test_no_regional_model_uses_global_multimodel_bundle(self, monkeypatch):
         import src.data.day0_hourly_vectors as hv

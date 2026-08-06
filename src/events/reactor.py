@@ -5796,6 +5796,9 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
             timeout_s=_day0_hourly_fetch_timeout_seconds(),
             quota_critical_cities=quota_critical_cities,
             quota_priority_cities=quota_priority_cities,
+            allow_priority_recovery=(
+                held_city_count == 0 and priority_city_count > 0
+            ),
             remaining_window_starts={
                 (city_name, target_date): window_start
                 for city_name, target_date, window_start in priority_probe.window_starts

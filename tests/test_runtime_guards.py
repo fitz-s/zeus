@@ -45,6 +45,9 @@ from src.data.openmeteo_quota import (
     MAX_REQUEST_STATES,
     MAINTENANCE_DAILY_LIMIT,
     PRIORITY_DAILY_LIMIT,
+    RECOVERY_DAILY_LIMIT,
+    RECOVERY_HOURLY_LIMIT,
+    RECOVERY_MINUTE_LIMIT,
     OpenMeteoQuotaTracker,
 )
 from src.contracts import EdgeContext, EntryMethod, SettlementSemantics
@@ -11722,6 +11725,37 @@ def test_openmeteo_unmetered_local_tracker_matches_shared_semantics(
     assert tracker._hour_count == openmeteo_quota.PRIORITY_HOURLY_LIMIT
     assert tracker._minute_count == openmeteo_quota.PRIORITY_MINUTE_LIMIT
     assert tracker._request_states["metadata-local"]["quota_cost"] == 0
+
+
+def test_openmeteo_recovery_lane_preserves_held_capital_floor(monkeypatch, tmp_path):
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "recovery-floor")
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "unused.json")
+    tracker._count = PRIORITY_DAILY_LIMIT
+
+    with tracker.recovery_lane():
+        allowed, reason, lease_id = tracker.acquire_request("recovery-a")
+    assert (allowed, reason) == (True, None)
+    assert lease_id
+    assert tracker._request_states["recovery-a"]["priority"] == "recovery"
+    assert tracker._limits(False, False, True) == (
+        RECOVERY_DAILY_LIMIT,
+        RECOVERY_HOURLY_LIMIT,
+        RECOVERY_MINUTE_LIMIT,
+    )
+
+    tracker._count = RECOVERY_DAILY_LIMIT
+    with tracker.recovery_lane():
+        allowed, reason, lease_id = tracker.acquire_request("recovery-floor")
+    assert allowed is False
+    assert reason == f"day_limit={RECOVERY_DAILY_LIMIT}/{RECOVERY_DAILY_LIMIT}"
+    assert lease_id is None
+
+    with tracker.critical_lane():
+        critical_allowed, critical_reason, critical_lease = tracker.acquire_request(
+            "held-capital"
+        )
+    assert (critical_allowed, critical_reason) == (True, None)
+    assert critical_lease
 
 
 def test_openmeteo_request_success_clears_embargo(monkeypatch, tmp_path):

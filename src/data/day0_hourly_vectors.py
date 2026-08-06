@@ -918,6 +918,7 @@ def maybe_refresh_day0_hourly_vectors(
     timeout_s: float = DEFAULT_FETCH_TIMEOUT_S,
     quota_critical_cities: int = 0,
     quota_priority_cities: int = 0,
+    allow_priority_recovery: bool = False,
     remaining_window_starts: Mapping[tuple[str, str], datetime] | None = None,
     persist_lock_blocking: bool = True,
     return_stats: bool = False,
@@ -936,7 +937,9 @@ def maybe_refresh_day0_hourly_vectors(
     bundle. The ordered critical prefix may consume only the final held-position
     reserve; the following priority prefix may consume the source-clock reserve
     but never the critical reserve. All remaining cities stay in maintenance
-    quota.
+    quota.  When explicitly authorized, a priority city may use the bounded
+    recovery lane after ordinary priority quota is exhausted.  That lane is
+    capped below the critical limits, preserving a hard held-capital floor.
     """
     if decision_time.tzinfo is None:
         raise ValueError("decision_time must be timezone-aware")
@@ -1051,7 +1054,16 @@ def maybe_refresh_day0_hourly_vectors(
                 quota_context = quota_tracker.critical_lane()
             elif city_index < critical_city_count + priority_city_count:
                 quota_lane = "priority"
-                quota_context = quota_tracker.priority_lane()
+                if allow_priority_recovery:
+                    with quota_tracker.priority_lane():
+                        priority_available = quota_tracker.can_call()
+                    if not priority_available:
+                        quota_lane = "recovery"
+                quota_context = (
+                    quota_tracker.recovery_lane()
+                    if quota_lane == "recovery"
+                    else quota_tracker.priority_lane()
+                )
             else:
                 quota_lane = "maintenance"
                 quota_context = nullcontext()
@@ -1075,13 +1087,14 @@ def maybe_refresh_day0_hourly_vectors(
             with quota_context:
                 if not quota_tracker.can_call():
                     skipped_quota += 1
-                    if quota_lane == "priority":
+                    if quota_lane in {"priority", "recovery"}:
                         priority_reserve_exhausted = True
                         logger.error(
-                            "DAY0_HOURLY_PRIORITY_RESERVE_EXHAUSTED "
-                            "city=%s checked=%d; refusing critical-reserve borrow",
+                            "DAY0_HOURLY_PRIORITY_RECOVERY_EXHAUSTED "
+                            "city=%s checked=%d lane=%s; held reserve preserved",
                             name,
                             checked,
+                            quota_lane,
                         )
                     break
                 with _REFRESH_LOCK:
