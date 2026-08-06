@@ -330,6 +330,7 @@ def _seed_exit_intent_event(
     close_position: bool,
     occurred_at: datetime | None = None,
     order_id: str | None = None,
+    reason: str = "",
 ) -> None:
     sequence_no = c.execute(
         "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
@@ -354,6 +355,7 @@ def _seed_exit_intent_event(
                 {
                     "exit_intent_close_position": close_position,
                     "exit_intent_shares": shares,
+                    **({"exit_intent_reason": reason} if reason else {}),
                 },
                 sort_keys=True,
             ),
@@ -9612,7 +9614,7 @@ def test_global_sell_post_only_cross_rejection_reauctions_without_backoff(
         conn,
         command_id=command_id,
         position_id="pos-post-only-cross",
-        token_id=YES_TOKEN,
+        token_id=NO_TOKEN,
     )
     append_event(
         conn,
@@ -9672,6 +9674,14 @@ def test_global_sell_post_only_cross_rejection_reauctions_without_backoff(
         exit_retry_count=4,
         exit_reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
     )
+    _seed_exit_intent_event(
+        conn,
+        position_id=position.trade_id,
+        shares=position.shares,
+        close_position=True,
+        occurred_at=now - timedelta(seconds=1),
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+    )
 
     exit_lifecycle._mark_exit_retry(
         position,
@@ -9705,11 +9715,28 @@ def test_global_sell_post_only_cross_rejection_reauctions_without_backoff(
     )
     conn.commit()
     assert exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
+    assert exit_lifecycle._relinquished_global_sell_command_id(conn, position) == command_id
+    conn.execute(
+        "UPDATE venue_commands SET token_id = ? WHERE command_id = ?",
+        (YES_TOKEN, command_id),
+    )
+    assert exit_lifecycle._relinquished_global_sell_command_id(conn, position) == ""
+    assert (
+        exit_lifecycle._canonical_global_sell_command_ownership(
+            conn, position, require_pending_exit=False
+        )
+        == "COMMAND_OWNED"
+    )
+    conn.execute(
+        "UPDATE venue_commands SET token_id = ? WHERE command_id = ?",
+        (NO_TOKEN, command_id),
+    )
+    conn.commit()
     _insert_exit_command(
         conn,
         command_id="cmd-post-only-cross-active-before-recovery",
         position_id=position.trade_id,
-        token_id=YES_TOKEN,
+        token_id=NO_TOKEN,
     )
     conn.commit()
     blocked_requests = []
@@ -9724,6 +9751,23 @@ def test_global_sell_post_only_cross_rejection_reauctions_without_backoff(
         ("cmd-post-only-cross-active-before-recovery",),
     )
     conn.commit()
+    assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+        position,
+        conn=conn,
+        requester=lambda *_args: blocked_requests.append(True) or True,
+    )
+    assert blocked_requests == []
+    conn.execute(
+        "DELETE FROM venue_commands WHERE command_id = ?",
+        ("cmd-post-only-cross-active-before-recovery",),
+    )
+    conn.commit()
+    assert (
+        exit_lifecycle._canonical_global_sell_command_ownership(
+            conn, position, require_pending_exit=False
+        )
+        == "GLOBAL_NO_COMMAND"
+    )
     requests = []
     requested_obligations = []
 
@@ -9743,7 +9787,7 @@ def test_global_sell_post_only_cross_rejection_reauctions_without_backoff(
     assert requested_obligations[0]["schema_version"] == 4
     assert requested_obligations[0]["held_token_id"] == NO_TOKEN
     assert requested_obligations[0]["book_state"] == "UNKNOWN"
-    assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 2
+    assert conn.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0] == 1
     assert not exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
     assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
         position,
@@ -9925,6 +9969,13 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
         order_status="filled",
     )
     upsert_position_current(conn, build_position_current_projection(position))
+    _seed_exit_intent_event(
+        conn,
+        position_id=position.trade_id,
+        shares=position.shares,
+        close_position=True,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+    )
 
     exit_lifecycle._mark_exit_retry(
         position,
@@ -10018,14 +10069,15 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
           FROM position_events
          WHERE position_id = ?
            AND event_type = 'EXIT_RETRY_RELEASED'
-           AND COALESCE(
-               json_extract(
-                   payload_json,
-                   '$.global_sell_reauction_status'
-               ),
-               ''
-           ) != 'durable_wake_reserved'
-         ORDER BY sequence_no DESC
+               AND COALESCE(
+                   json_extract(
+                       payload_json,
+                       '$.global_sell_reauction_status'
+                   ),
+                   ''
+               ) != 'durable_wake_reserved'
+               AND json_extract(payload_json, '$.error') IS NOT NULL
+             ORDER BY sequence_no DESC
          LIMIT 1
         """,
         (position.trade_id,),
@@ -10078,6 +10130,13 @@ def test_global_sell_snapshot_failure_releases_to_new_global_auction(
     upsert_position_current(
         conn,
         build_position_current_projection(failed_wake),
+    )
+    _seed_exit_intent_event(
+        conn,
+        position_id=failed_wake.trade_id,
+        shares=failed_wake.shares,
+        close_position=True,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
     )
     exit_lifecycle._mark_exit_retry(
         failed_wake,
@@ -10226,6 +10285,13 @@ def test_restart_republishes_unbound_v4_residual_with_same_generation_until_term
         entered_at="2026-07-29T10:00:00+00:00",
     )
     upsert_position_current(conn, build_position_current_projection(position))
+    _seed_exit_intent_event(
+        conn,
+        position_id=position.trade_id,
+        shares=position.shares,
+        close_position=True,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+    )
     exit_lifecycle._mark_exit_retry(
         position,
         reason="GLOBAL_CAPITAL_OPTIMAL_SELL [EXECUTABLE_SNAPSHOT_UNAVAILABLE]",

@@ -784,6 +784,172 @@ def _latest_held_sell_reauction_obligation(
     return dict(obligation)
 
 
+def _is_exact_held_sell_command(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    command_id: str,
+    held_token_id: str,
+    venue_order_id: str = "",
+) -> bool:
+    """Bind a handoff witness to the exact position-side-token command."""
+
+    if not all((position_id, command_id, held_token_id)):
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT position_id, intent_kind, side, token_id, venue_order_id
+              FROM venue_commands
+             WHERE command_id = ?
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return bool(
+        row is not None
+        and str(row[0] or "") == position_id
+        and str(row[1] or "").upper() == "EXIT"
+        and str(row[2] or "").upper() == "SELL"
+        and str(row[3] or "") == held_token_id
+        and (
+            not venue_order_id
+            or str(row[4] or "").lower() == venue_order_id.lower()
+        )
+    )
+
+
+def _relinquished_global_sell_command_id(
+    conn: sqlite3.Connection | None,
+    position: Position,
+) -> str:
+    """Return the one command canonically handed from recovery to reauction.
+
+    Command state alone is never handoff proof.  An exact post-only rejection,
+    terminal no-fill debt, or authenticated residual debt must cite the command.
+    Every other command remains command-recovery owned.
+    """
+
+    if conn is None:
+        return ""
+    position_id = str(getattr(position, "trade_id", "") or "").strip()
+    if not position_id:
+        return ""
+    post_only_command_id = _post_only_cross_command_id_for_position(conn, position)
+    raw_direction = getattr(position, "direction", "")
+    direction = str(getattr(raw_direction, "value", raw_direction) or "").lower()
+    held_token_id = str(
+        getattr(position, "no_token_id", "")
+        if direction == "buy_no"
+        else getattr(position, "token_id", "")
+    ).strip()
+    if (
+        post_only_command_id
+        and _is_exact_held_sell_command(
+            conn,
+            position_id=position_id,
+            command_id=post_only_command_id,
+            held_token_id=held_token_id,
+        )
+        and _post_only_cross_reauction_proof_for_position(conn, position)
+    ):
+        return post_only_command_id
+
+    obligation = _latest_held_sell_reauction_obligation(conn, position)
+    if obligation.get("schema_version") != 4:
+        return ""
+    try:
+        row = conn.execute(
+            """
+            SELECT command_id, caused_by, venue_status, source_module, payload_json
+              FROM position_events
+             WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+             ORDER BY sequence_no DESC, datetime(occurred_at) DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        payload = json.loads(str(row[4] or "{}")) if row is not None else {}
+    except (sqlite3.Error, TypeError, json.JSONDecodeError):
+        return ""
+    if (
+        row is None
+        or not isinstance(payload, dict)
+        or payload.get("held_sell_reauction_obligation") != obligation
+    ):
+        return ""
+
+    if str(row[3] or "") != "src.execution.command_recovery":
+        return ""
+    command_id = str(row[0] or "").strip()
+    if not command_id or str(row[1] or "") != f"venue_command:{command_id}":
+        return ""
+    obligation_token_id = str(obligation.get("held_token_id") or "").strip()
+
+    proof_class = str(payload.get("proof_class") or "")
+    error = str(payload.get("error") or "")
+    if proof_class == "exit_point_order_terminal_no_fill_plus_open_trade_absence":
+        if (
+            str(row[2] or "") != "TERMINAL_NO_FILL"
+            or payload.get("release_reason")
+            != "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
+            or error
+            != "global_sell_exit_terminal_no_fill_reauction:venue_terminal_no_fill"
+            or str(payload.get("command_id") or "").strip() != command_id
+            or not str(payload.get("venue_order_id") or "").strip()
+            or not isinstance(payload.get("terminal_order_fact"), dict)
+            or not _is_exact_held_sell_command(
+                conn,
+                position_id=position_id,
+                command_id=command_id,
+                held_token_id=obligation_token_id,
+                venue_order_id=str(payload.get("venue_order_id") or ""),
+            )
+        ):
+            return ""
+        try:
+            from src.execution.command_recovery import (
+                _exit_command_has_positive_or_unresolved_cancel_truth,
+            )
+
+            if _exit_command_has_positive_or_unresolved_cancel_truth(
+                conn,
+                position_id=position_id,
+                command_id=command_id,
+                venue_order_id=str(payload["venue_order_id"]),
+            ):
+                return ""
+        except Exception:  # noqa: BLE001 - unreadable venue truth stays owned.
+            return ""
+        return command_id
+
+    residual = obligation.get("residual_proof")
+    if not isinstance(residual, dict):
+        return ""
+    if str(residual.get("command_id") or "").strip() != command_id:
+        return ""
+    if (
+        str(residual.get("command_token_id") or "").strip()
+        != obligation_token_id
+        or not _is_exact_held_sell_command(
+            conn,
+            position_id=position_id,
+            command_id=command_id,
+            held_token_id=obligation_token_id,
+        )
+    ):
+        return ""
+    if proof_class not in {
+        "post_fill_chain_confirmed_positive_remainder",
+        "cancel_pending_partial_exit_authenticated_remainder",
+        "terminal_positive_exit_order_fact",
+    }:
+        return ""
+    return command_id
+
+
 def has_global_sell_snapshot_reauction_retry(
     position: Position,
     conn: sqlite3.Connection | None = None,
@@ -846,7 +1012,11 @@ def _canonical_global_sell_command_ownership(
         payload = json.loads(str(row[1] or "{}"))
         if not isinstance(payload, dict):
             return "UNKNOWN"
-        if payload.get("exit_intent_reason") != "GLOBAL_CAPITAL_OPTIMAL_SELL":
+        released_command_id = _relinquished_global_sell_command_id(conn, position)
+        if (
+            payload.get("exit_intent_reason") != "GLOBAL_CAPITAL_OPTIMAL_SELL"
+            and not released_command_id
+        ):
             return "NOT_GLOBAL"
         command_rows = conn.execute(
             """
@@ -864,6 +1034,8 @@ def _canonical_global_sell_command_ownership(
         command_id = str(command_row[0] or "").strip()
         if not command_id:
             return "UNKNOWN"
+        if command_id == released_command_id:
+            continue
         try:
             binding = conn.execute(
                 """

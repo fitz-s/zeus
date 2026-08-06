@@ -3580,6 +3580,7 @@ def _seed_full_exit_intent(
 
 def test_terminal_no_fill_global_maker_rest_creates_one_v4_reauction_debt(conn):
     from src.execution import command_recovery, exit_lifecycle
+    from src.state.portfolio import _position_from_projection_row
 
     _insert(
         conn,
@@ -3693,6 +3694,32 @@ def test_terminal_no_fill_global_maker_rest_creates_one_v4_reauction_debt(conn):
         SimpleNamespace(trade_id="pos-global-maker", last_exit_error=""),
         conn,
     )
+    position = _position_from_projection_row(
+        dict(
+            conn.execute(
+                "SELECT * FROM position_current WHERE position_id = 'pos-global-maker'"
+            ).fetchone()
+        ),
+        current_mode="live",
+    )
+    position.env = "live"
+    assert (
+        exit_lifecycle._canonical_global_sell_command_ownership(
+            conn, position, require_pending_exit=False
+        )
+        == "GLOBAL_NO_COMMAND"
+    )
+    conn.commit()
+    requests = []
+    assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+        position,
+        conn=conn,
+        requester=lambda released, force_new: (
+            requests.append((released.trade_id, force_new)) or True
+        ),
+    )
+    assert requests == [("pos-global-maker", True)]
+    assert not exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn)
 
 
 @pytest.mark.parametrize("filled_size", ["10", "11"])
@@ -25126,7 +25153,8 @@ class TestRecoveryResolutionTable:
         mock_client,
         monkeypatch,
     ):
-        from src.execution import command_recovery
+        from src.execution import command_recovery, exit_lifecycle
+        from src.state.portfolio import _position_from_projection_row
 
         _seed_cancel_pending_partial_exit_dust_case(
             conn,
@@ -25193,6 +25221,31 @@ class TestRecoveryResolutionTable:
             "stayed": 0,
             "errors": 0,
         }
+        position = _position_from_projection_row(
+            dict(
+                conn.execute(
+                    "SELECT * FROM position_current WHERE position_id = 'pos-001'"
+                ).fetchone()
+            ),
+            current_mode="live",
+        )
+        position.env = "live"
+        assert (
+            exit_lifecycle._canonical_global_sell_command_ownership(
+                conn, position, require_pending_exit=False
+            )
+            == "GLOBAL_NO_COMMAND"
+        )
+        conn.commit()
+        requests = []
+        assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+            position,
+            conn=conn,
+            requester=lambda released, force_new: (
+                requests.append((released.trade_id, force_new)) or True
+            ),
+        )
+        assert requests == [("pos-001", True)]
 
     def test_cancel_pending_partial_exit_point_remaining_is_not_position_residual(
         self,
