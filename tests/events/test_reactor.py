@@ -529,6 +529,112 @@ def test_main_threads_pause_carrier_qualification_to_reactor(monkeypatch):
     )
 
 
+def test_main_drains_control_commands_before_edli_readiness(monkeypatch):
+    import src.events.reactor as reactor_module
+    import src.main as main
+    from src.control import control_plane
+
+    order: list[str] = []
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        control_plane,
+        "process_commands",
+        lambda **_kwargs: order.append("control_drain"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_start_edli_reactor_wake_listener",
+        lambda: order.append("wake_listener"),
+    )
+
+    def readiness(_cfg):
+        order.append("entry_readiness")
+        return (None, {})
+
+    monkeypatch.setattr(main, "_edli_live_entry_readiness_block", readiness)
+
+    def run_cycle(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(reactor_module, "run_edli_event_reactor_cycle", run_cycle)
+
+    assert main._edli_event_reactor_cycle() is True
+    assert order == ["control_drain", "wake_listener", "entry_readiness"]
+    assert captured["live_entry_block_reason"] is None
+
+
+def test_main_control_drain_failure_blocks_entries_but_runs_reactor(monkeypatch):
+    import src.events.reactor as reactor_module
+    import src.main as main
+    from src.control import control_plane
+
+    captured: dict[str, object] = {}
+    pauses: list[str] = []
+
+    def fail_drain(**_kwargs):
+        raise OSError("control queue unavailable")
+
+    monkeypatch.setattr(control_plane, "process_commands", fail_drain)
+    monkeypatch.setattr(
+        control_plane,
+        "pause_entries",
+        lambda reason: pauses.append(reason),
+    )
+    monkeypatch.setattr(main, "_start_edli_reactor_wake_listener", lambda: None)
+    monkeypatch.setattr(
+        main,
+        "_edli_live_entry_readiness_block",
+        lambda _cfg: (None, {}),
+    )
+
+    def run_cycle(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(reactor_module, "run_edli_event_reactor_cycle", run_cycle)
+
+    assert main._edli_event_reactor_cycle() is True
+    assert captured["live_entry_block_reason"] == (
+        "control_plane_command_drain_failed"
+    )
+    assert pauses == ["control_plane_command_drain_failed"]
+
+
+def test_wake_listener_drains_control_before_recurring_work():
+    import src.main as main
+
+    source = inspect.getsource(main._run_edli_reactor_wake_listener)
+    assert source.index("_consume_live_control_commands()") < source.index(
+        "_service_pending_collateral_authority_wake()"
+    )
+    assert source.index("_consume_live_control_commands()") < source.index(
+        "_edli_reactor_wake_poll_once()"
+    )
+
+
+@pytest.mark.parametrize(
+    ("job_name", "first_work"),
+    (
+        ("_edli_command_recovery_cycle", "get_mode()"),
+        (
+            "_edli_continuous_redecision_screen_cycle",
+            '_defer_for_held_position_monitor("edli_continuous_redecision_screen")',
+        ),
+        (
+            "_edli_day0_hourly_refresh_cycle",
+            '_defer_for_held_position_monitor("edli_day0_hourly_refresh")',
+        ),
+    ),
+)
+def test_active_edli_jobs_drain_control_before_work(job_name, first_work):
+    import src.main as main
+
+    source = inspect.getsource(getattr(main, job_name))
+    assert source.index("_consume_live_control_commands()") < source.index(first_work)
+
+
 def test_pause_clear_after_selection_keeps_selected_cycle_no_submit(monkeypatch):
     """A later pause clear cannot reopen the selected snapshot's BUY lane."""
 

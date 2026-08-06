@@ -15,7 +15,11 @@ that actually runs the ingest tick and asserts it honors the control plane key.
 
 from __future__ import annotations
 
+import json
+import multiprocessing
 import re
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -25,7 +29,291 @@ INGEST_MAIN = PROJECT_ROOT / "src" / "ingest_main.py"
 CONTROL_PLANE = PROJECT_ROOT / "src" / "control" / "control_plane.py"
 
 
+def _consume_control_queue_in_child(path: str) -> None:
+    from src.control import control_plane as cp_module
+
+    cp_module.CONTROL_PATH = Path(path)
+    cp_module.refresh_control_state = lambda: {}
+    cp_module._apply_command = lambda _name, _command: (True, "")
+    cp_module.process_commands(refresh_when_empty=False)
+
+
 class TestControlPlaneDualConsumer:
+    def test_empty_fast_poll_does_not_refresh_db_state(self, tmp_path, monkeypatch):
+        from src.control import control_plane as cp_module
+
+        cp_path = tmp_path / "control_plane.json"
+        cp_path.write_text('{"commands":[],"acks":[]}')
+        monkeypatch.setattr(cp_module, "CONTROL_PATH", cp_path)
+        refreshes: list[bool] = []
+        monkeypatch.setattr(
+            cp_module,
+            "refresh_control_state",
+            lambda: refreshes.append(True),
+        )
+
+        assert cp_module.process_commands(refresh_when_empty=False) == []
+        assert refreshes == []
+
+    def test_concurrent_command_consumers_execute_queue_once(self, tmp_path, monkeypatch):
+        from src.control import control_plane as cp_module
+
+        cp_path = tmp_path / "control_plane.json"
+        cp_path.write_text(
+            '{"commands":[{"command":"request_status"}],"acks":[]}'
+        )
+        monkeypatch.setattr(cp_module, "CONTROL_PATH", cp_path)
+        monkeypatch.setattr(cp_module, "refresh_control_state", lambda: {})
+        calls: list[str] = []
+
+        def apply_once(name, _command):
+            calls.append(name)
+            time.sleep(0.05)
+            return True, ""
+
+        monkeypatch.setattr(cp_module, "_apply_command", apply_once)
+        results: list[list[str]] = []
+
+        threads = [
+            threading.Thread(target=lambda: results.append(cp_module.process_commands()))
+            for _ in range(2)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert calls == ["request_status"]
+        assert sorted(results, key=len) == [[], ["request_status"]]
+        payload = cp_module.read_control_payload()
+        assert payload["commands"] == []
+        assert [ack["command"] for ack in payload["acks"]] == ["request_status"]
+
+    def test_cross_process_consumers_execute_queue_once(self, tmp_path):
+        cp_path = tmp_path / "control_plane.json"
+        cp_path.write_text(
+            '{"commands":[{"command":"request_status"}],"acks":[]}'
+        )
+        ctx = multiprocessing.get_context("spawn")
+        processes = [
+            ctx.Process(target=_consume_control_queue_in_child, args=(str(cp_path),))
+            for _ in range(2)
+        ]
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=5)
+
+        assert [process.exitcode for process in processes] == [0, 0]
+        payload = json.loads(cp_path.read_text())
+        assert payload["commands"] == []
+        assert [ack["command"] for ack in payload["acks"]] == ["request_status"]
+
+    def test_processing_pause_source_preserves_directive_and_ack(self, tmp_path, monkeypatch):
+        from src.control import control_plane as cp_module
+
+        cp_path = tmp_path / "control_plane.json"
+        cp_path.write_text(
+            '{"commands":[{"command":"pause_source","source":"ecmwf_open_data"}],"acks":[]}'
+        )
+        monkeypatch.setattr(cp_module, "CONTROL_PATH", cp_path)
+        monkeypatch.setattr(cp_module, "refresh_control_state", lambda: {})
+
+        assert cp_module.process_commands() == ["pause_source"]
+        payload = cp_module.read_control_payload()
+        assert payload["commands"] == []
+        assert payload["paused_sources"] == {"ecmwf_open_data": True}
+        assert payload["acks"][-1]["command"] == "pause_source"
+        assert payload["acks"][-1]["status"] == "executed"
+
+    def test_enqueue_during_command_processing_is_not_lost(self, tmp_path, monkeypatch):
+        from src.control import control_plane as cp_module
+
+        cp_path = tmp_path / "control_plane.json"
+        cp_path.write_text(
+            '{"commands":[{"command":"request_status"}],"acks":[]}'
+        )
+        monkeypatch.setattr(cp_module, "CONTROL_PATH", cp_path)
+        monkeypatch.setattr(cp_module, "refresh_control_state", lambda: {})
+        applying = threading.Event()
+        release = threading.Event()
+
+        def apply_then_release(_name, _command):
+            applying.set()
+            assert release.wait(timeout=2)
+            return True, ""
+
+        monkeypatch.setattr(cp_module, "_apply_command", apply_then_release)
+        consumer = threading.Thread(target=cp_module.process_commands)
+        consumer.start()
+        assert applying.wait(timeout=2)
+
+        producer = threading.Thread(
+            target=lambda: cp_module.enqueue_command(
+                {"command": "tighten_risk", "note": "arrived_during_drain"}
+            )
+        )
+        producer.start()
+        release.set()
+        consumer.join(timeout=2)
+        producer.join(timeout=2)
+
+        assert not consumer.is_alive()
+        assert not producer.is_alive()
+        payload = cp_module.read_control_payload()
+        assert payload["commands"] == [
+            {"command": "tighten_risk", "note": "arrived_during_drain"}
+        ]
+        assert [ack["command"] for ack in payload["acks"]] == ["request_status"]
+
+    def test_repaired_control_payload_clears_prior_parse_fault(self, tmp_path, monkeypatch):
+        from src.control import control_plane as cp_module
+
+        cp_path = tmp_path / "control_plane.json"
+        cp_path.write_text("{")
+        monkeypatch.setattr(cp_module, "CONTROL_PATH", cp_path)
+        monkeypatch.setattr(cp_module, "refresh_control_state", lambda: {})
+        monkeypatch.setattr(cp_module, "_apply_command", lambda _name, _cmd: (True, ""))
+
+        with pytest.raises(ValueError, match="Corrupted control_plane.json"):
+            cp_module.process_commands()
+
+        cp_path.write_text(
+            '{"commands":[{"command":"request_status"}],"acks":[]}'
+        )
+        assert cp_module.process_commands() == ["request_status"]
+
+    def test_known_command_rejection_is_retained_and_fails_closed(
+        self, tmp_path, monkeypatch
+    ):
+        from src.control import control_plane as cp_module
+
+        command = {"command": "tighten_risk", "note": "must_retry"}
+        cp_path = tmp_path / "control_plane.json"
+        cp_path.write_text(
+            '{"commands":[{"command":"tighten_risk","note":"must_retry"}],"acks":[]}'
+        )
+        monkeypatch.setattr(cp_module, "CONTROL_PATH", cp_path)
+        monkeypatch.setattr(cp_module, "refresh_control_state", lambda: {})
+        monkeypatch.setattr(
+            cp_module,
+            "_apply_command",
+            lambda _name, _cmd: (False, "durable_write_failed"),
+        )
+
+        with pytest.raises(RuntimeError, match="retry retained"):
+            cp_module.process_commands()
+        payload = cp_module.read_control_payload()
+        assert payload["commands"] == [command]
+        assert payload["acks"][-1]["status"] == "rejected"
+        assert payload["acks"][-1]["reason"] == "durable_write_failed"
+
+    def test_pause_resume_tighten_batch_finishes_resumed_and_tightened(
+        self, tmp_path, monkeypatch
+    ):
+        import json
+
+        from src.control import control_plane as cp_module
+        from src.state.db import apply_architecture_kernel_schema, get_connection
+
+        cp_path = tmp_path / "control_plane.json"
+        db_path = tmp_path / "world.db"
+        conn = get_connection(db_path)
+        apply_architecture_kernel_schema(conn)
+        conn.close()
+        cp_path.write_text(
+            json.dumps(
+                {
+                    "commands": [
+                        {"command": "pause_entries", "note": "existing_freeze"},
+                        {"command": "resume", "note": "canary_resume"},
+                        {"command": "tighten_risk", "note": "canary_tighten"},
+                    ],
+                    "acks": [],
+                }
+            )
+        )
+        monkeypatch.setattr(cp_module, "CONTROL_PATH", cp_path)
+        monkeypatch.setattr(
+            cp_module,
+            "get_world_connection",
+            lambda: get_connection(db_path),
+        )
+        monkeypatch.setattr(
+            cp_module,
+            "get_world_connection_with_trades_required",
+            lambda: get_connection(db_path),
+        )
+        monkeypatch.setattr(
+            cp_module,
+            "_refresh_live_allowed_strategy_cache",
+            lambda _conn: None,
+        )
+        cp_module.clear_control_state()
+
+        assert cp_module.process_commands() == [
+            "pause_entries",
+            "resume",
+            "tighten_risk",
+        ]
+        assert cp_module.is_entries_paused() is False
+        assert cp_module.get_edge_threshold_multiplier() == 2.0
+        payload = cp_module.read_control_payload()
+        assert payload["commands"] == []
+        assert [ack["status"] for ack in payload["acks"][-3:]] == [
+            "executed",
+            "executed",
+            "executed",
+        ]
+
+    def test_atomic_enqueue_and_source_pause_never_expose_partial_json(
+        self, tmp_path, monkeypatch
+    ):
+        import json
+
+        from src.control import control_plane as cp_module
+
+        cp_path = tmp_path / "control_plane.json"
+        cp_path.write_text('{"commands":[],"acks":[],"operator_key":"keep"}')
+        monkeypatch.setattr(cp_module, "CONTROL_PATH", cp_path)
+        monkeypatch.setattr(cp_module, "refresh_control_state", lambda: {})
+        errors: list[Exception] = []
+
+        def enqueue_many():
+            for index in range(30):
+                cp_module.enqueue_commands(
+                    [{"command": "request_status", "note": f"command-{index}"}]
+                )
+
+        def pause_sources():
+            for index in range(30):
+                cp_module.set_pause_source(f"source-{index}", paused=True)
+
+        def read_many():
+            for _ in range(300):
+                try:
+                    json.loads(cp_path.read_text())
+                except Exception as exc:
+                    errors.append(exc)
+
+        threads = [
+            threading.Thread(target=enqueue_many),
+            threading.Thread(target=pause_sources),
+            threading.Thread(target=read_many),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+
+        assert all(not thread.is_alive() for thread in threads)
+        assert errors == []
+        payload = cp_module.read_control_payload()
+        assert len(payload["commands"]) == 30
+        assert len(payload["paused_sources"]) == 30
+        assert payload["operator_key"] == "keep"
+
     def test_ingest_main_exists(self):
         """src/ingest_main.py must exist (ingest daemon entry point)."""
         assert INGEST_MAIN.exists(), "src/ingest_main.py must exist"

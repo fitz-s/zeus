@@ -1922,6 +1922,16 @@ def test_inv_tighten_risk_survives_control_state_refresh_until_resume(monkeypatc
     conn.close()
     monkeypatch.setattr(control_plane_module, "CONTROL_PATH", control_path)
     monkeypatch.setattr(control_plane_module, "get_world_connection", lambda: get_connection(db_path))
+    monkeypatch.setattr(
+        control_plane_module,
+        "get_world_connection_with_trades_required",
+        lambda: get_connection(db_path),
+    )
+    monkeypatch.setattr(
+        control_plane_module,
+        "_refresh_live_allowed_strategy_cache",
+        lambda _conn: None,
+    )
     control_plane_module.clear_control_state()
     control_path.write_text(json.dumps({"commands": [{"command": "tighten_risk"}], "acks": []}))
 
@@ -1962,7 +1972,7 @@ def test_inv_tighten_risk_survives_control_state_refresh_until_resume(monkeypatc
     assert row["effective_until"] is not None
 
 
-def test_inv_control_plane_records_explicit_skip_when_control_overrides_table_missing(monkeypatch, tmp_path):
+def test_inv_control_plane_retries_when_control_overrides_table_missing(monkeypatch, tmp_path):
     control_path = tmp_path / "control_plane.json"
     db_path = tmp_path / "zeus.db"
     conn = get_connection(db_path)
@@ -1972,14 +1982,15 @@ def test_inv_control_plane_records_explicit_skip_when_control_overrides_table_mi
     control_plane_module.clear_control_state()
     control_path.write_text(json.dumps({"commands": [{"command": "pause_entries"}], "acks": []}))
 
-    processed = control_plane_module.process_commands()
+    with pytest.raises(RuntimeError, match="retry retained"):
+        control_plane_module.process_commands()
     payload = json.loads(control_path.read_text())
 
-    assert processed == ["pause_entries"]
-    assert payload["commands"] == []
-    assert payload["acks"][-1]["reason"] == "missing_control_overrides_table"
+    assert payload["commands"] == [{"command": "pause_entries"}]
+    assert payload["acks"][-1]["status"] == "rejected"
+    assert payload["acks"][-1]["reason"] == "skipped_missing_table"
     control_plane_module.clear_control_state()
-    assert control_plane_module.is_entries_paused() is False
+    assert control_plane_module.is_entries_paused() is True
 
 
 def test_inv_supervisor_command_matches_real_control_plane_contract():

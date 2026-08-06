@@ -6,10 +6,16 @@ Narrow-by-intent: each command does exactly one thing.
 
 import json
 import logging
+import os
 import sys
+import tempfile
+import threading
 import traceback as _traceback
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
+
+import fcntl
 
 from src.architecture.decorators import capability, protects
 from src.config import state_path
@@ -102,12 +108,42 @@ def assert_live_safe_strategies_under_live_mode(enabled: Iterable[str]) -> None:
         )
 
 _control_state: dict = {}
+_control_thread_lock = threading.RLock()
+_control_lock_depth = threading.local()
+
+
+@contextmanager
+def _control_payload_transaction():
+    """Serialize control-queue mutations across threads and processes."""
+
+    with _control_thread_lock:
+        depth = int(getattr(_control_lock_depth, "value", 0) or 0)
+        if depth:
+            _control_lock_depth.value = depth + 1
+            try:
+                yield
+            finally:
+                _control_lock_depth.value = depth
+            return
+
+        parent = os.path.dirname(str(CONTROL_PATH)) or "."
+        lock_path = f"{CONTROL_PATH}.lock"
+        os.makedirs(parent, exist_ok=True)
+        with open(lock_path, "a+") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            _control_lock_depth.value = 1
+            try:
+                yield
+            finally:
+                _control_lock_depth.value = 0
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _load_control_payload() -> dict:
     try:
         with open(CONTROL_PATH) as f:
             data = json.load(f)
+            _set_state("control_plane_fault", False)
             return data if isinstance(data, dict) else {}
     except json.JSONDecodeError as e:
         logger.error("control_plane.json corrupted (JSONDecodeError)")
@@ -118,9 +154,32 @@ def _load_control_payload() -> dict:
 
 
 
-def _write_control_payload(commands: list[dict], acks: list[dict]) -> None:
-    with open(CONTROL_PATH, "w") as f:
-        json.dump({"commands": commands, "acks": acks[-20:]}, f, indent=2)
+def _write_control_payload(
+    commands: list[dict],
+    acks: list[dict],
+    *,
+    payload_updates: dict | None = None,
+) -> None:
+    with _control_payload_transaction():
+        payload = _load_control_payload()
+        if payload_updates:
+            payload.update(payload_updates)
+        payload["commands"] = commands
+        payload["acks"] = acks[-20:]
+        parent = os.path.dirname(str(CONTROL_PATH)) or "."
+        os.makedirs(parent, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=".control_plane.", suffix=".tmp", dir=parent)
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(payload, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, CONTROL_PATH)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
 
 
 
@@ -147,6 +206,11 @@ def _refresh_entries_pause_from_durable_state() -> dict:
     try:
         conn = get_world_connection()
         durable_state = query_control_override_state(conn)
+        if durable_state.get("status") != "ok":
+            raise RuntimeError(
+                "entries pause durable authority unavailable: "
+                f"{durable_state.get('status') or 'unknown'}"
+            )
     except Exception as exc:
         logger.error("entries pause durable-state query failed: %s", exc, exc_info=True)
         durable_state = {
@@ -570,6 +634,15 @@ def refresh_control_state() -> None:
     finally:
         if conn is not None:
             conn.close()
+    if durable_state.get("status") != "ok":
+        durable_state = {
+            "status": "query_error",
+            "entries_paused": True,
+            "entries_pause_source": "control_db_query_error",
+            "entries_pause_reason": "entries_pause_durable_state_unavailable",
+            "edge_threshold_multiplier": float(TIGHTENED_EDGE_THRESHOLD_MULTIPLIER),
+            "strategy_gates": {},
+        }
     if durable_state.get("status") in {"ok", "query_error"}:
         entries_paused = bool(durable_state.get("entries_paused", False))
         edge_threshold_multiplier = float(
@@ -647,19 +720,25 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
                 effective_until=effective_until,
                 precedence=precedence,
             )
-            return result["status"] in {"written", "skipped_missing_table"}, "" if result["status"] != "skipped_missing_table" else "missing_control_overrides_table"
+            status = str(result.get("status") or "unknown")
+            return status == "written", "" if status == "written" else status
         if name == "resume":
-            expire_control_override(
+            pause_result = expire_control_override(
                 conn,
                 override_id="control_plane:global:entries_paused",
                 expired_at=issued_at,
             )
-            expire_control_override(
+            edge_result = expire_control_override(
                 conn,
                 override_id="control_plane:global:edge_threshold_multiplier",
                 expired_at=issued_at,
             )
-            return True, ""
+            statuses = {
+                str(pause_result.get("status") or "unknown"),
+                str(edge_result.get("status") or "unknown"),
+            }
+            ok = statuses <= {"expired", "noop"}
+            return ok, "" if ok else "+".join(sorted(statuses))
         if name == "tighten_risk":
             result = upsert_control_override(
                 conn,
@@ -674,7 +753,8 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
                 effective_until=effective_until,
                 precedence=precedence,
             )
-            return result["status"] in {"written", "skipped_missing_table"}, "" if result["status"] != "skipped_missing_table" else "missing_control_overrides_table"
+            status = str(result.get("status") or "unknown")
+            return status == "written", "" if status == "written" else status
         if name == "request_status":
             # Single-writer principle: status_summary.json is written ONLY by the
             # live-trading daemon (write_status / write_cycle_pulse in src/main.py).
@@ -720,7 +800,8 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
                 effective_until=effective_until,
                 precedence=precedence,
             )
-            return result["status"] in {"written", "skipped_missing_table"}, "" if result["status"] != "skipped_missing_table" else "missing_control_overrides_table"
+            status = str(result.get("status") or "unknown")
+            return status == "written", "" if status == "written" else status
         if name == "resolve_review_item":
             work_id = _extract_review_work_id(cmd)
             resolver_identity = str(cmd.get("resolver_identity") or issued_by)
@@ -781,34 +862,46 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
 
 
 
-def process_commands() -> list[str]:
-    data = _load_control_payload()
-    commands = data.get("commands", [])
-    acks = data.get("acks", [])
-    if not commands:
-        refresh_control_state()
-        return []
+def process_commands(*, refresh_when_empty: bool = True) -> list[str]:
+    with _control_payload_transaction():
+        data = _load_control_payload()
+        commands = data.get("commands", [])
+        acks = data.get("acks", [])
+        if not commands:
+            if refresh_when_empty:
+                refresh_control_state()
+            return []
 
-    if _control_state.get("control_plane_fault"):
-        logger.error("Control plane fault detected. Halting command processing.")
-        return []
+        if _control_state.get("control_plane_fault"):
+            logger.error("Control plane fault detected. Halting command processing.")
+            return []
 
-    processed = []
-    for cmd in commands:
-        name = cmd.get("command")
-        if name not in COMMANDS:
-            logger.warning("Unknown control command: %s", name)
-            acks.append(_acknowledge_command(str(name or ""), cmd, status="rejected", reason="unknown_command"))
-            continue
+        processed = []
+        retry_commands: list[dict] = []
+        rejected_commands: list[str] = []
+        for cmd in commands:
+            name = cmd.get("command")
+            if name not in COMMANDS:
+                logger.warning("Unknown control command: %s", name)
+                acks.append(_acknowledge_command(str(name or ""), cmd, status="rejected", reason="unknown_command"))
+                continue
 
-        logger.info("CONTROL: executing %s", name)
-        ok, reason = _apply_command(name, cmd)
-        acks.append(_acknowledge_command(name, cmd, status="executed" if ok else "rejected", reason=reason))
-        if ok:
-            processed.append(name)
+            logger.info("CONTROL: executing %s", name)
+            ok, reason = _apply_command(name, cmd)
+            acks.append(_acknowledge_command(name, cmd, status="executed" if ok else "rejected", reason=reason))
+            if ok:
+                processed.append(name)
+            else:
+                retry_commands.append(cmd)
+                rejected_commands.append(f"{name}:{reason or 'rejected'}")
 
-    _write_control_payload([], acks)
+        _write_control_payload(retry_commands, acks)
     refresh_control_state()
+    if rejected_commands:
+        raise RuntimeError(
+            "control command application rejected; retry retained: "
+            + ",".join(rejected_commands)
+        )
     return processed
 
 
@@ -818,15 +911,16 @@ def enqueue_commands(new_commands: list[dict]) -> int:
     """Append commands to the durable control queue without duplicating identical payloads."""
     if not new_commands:
         return 0
-    data = _load_control_payload()
-    commands = list(data.get("commands", []))
-    acks = list(data.get("acks", []))
-    added = 0
-    for cmd in new_commands:
-        if cmd not in commands:
-            commands.append(cmd)
-            added += 1
-    _write_control_payload(commands, acks)
+    with _control_payload_transaction():
+        data = _load_control_payload()
+        commands = list(data.get("commands", []))
+        acks = list(data.get("acks", []))
+        added = 0
+        for cmd in new_commands:
+            if cmd not in commands:
+                commands.append(cmd)
+                added += 1
+        _write_control_payload(commands, acks)
     return added
 
 
@@ -913,17 +1007,19 @@ def recommended_commands_from_status(
 
 
 def enqueue_command(command: dict) -> None:
-    data = _load_control_payload()
-    commands = data.get("commands", [])
-    commands.append(command)
-    _write_control_payload(commands, data.get("acks", []))
+    with _control_payload_transaction():
+        data = _load_control_payload()
+        commands = data.get("commands", [])
+        commands.append(command)
+        _write_control_payload(commands, data.get("acks", []))
     refresh_control_state()
 
 
 
 def write_commands(commands: list[dict], *, acks: list[dict] | None = None) -> None:
-    data = _load_control_payload()
-    _write_control_payload(commands, data.get("acks", []) if acks is None else acks)
+    with _control_payload_transaction():
+        data = _load_control_payload()
+        _write_control_payload(commands, data.get("acks", []) if acks is None else acks)
     refresh_control_state()
 
 
@@ -966,27 +1062,18 @@ def set_pause_source(source_id: str, paused: bool) -> None:
     The ingest daemon reads this on each tick via read_ingest_control_state()
     and skips ticks for a paused source until cleared.
     """
-    import json
-    import os
-
-    path = CONTROL_PATH
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except (FileNotFoundError, OSError, json.JSONDecodeError):
-        data = {}
-
-    paused_sources = data.get(_PAUSE_SOURCE_KEY) or {}
-    if paused:
-        paused_sources[source_id] = True
-    else:
-        paused_sources.pop(source_id, None)
-
-    data[_PAUSE_SOURCE_KEY] = paused_sources
-    tmp = str(path) + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, path)
+    with _control_payload_transaction():
+        data = _load_control_payload()
+        paused_sources = data.get(_PAUSE_SOURCE_KEY) or {}
+        if paused:
+            paused_sources[source_id] = True
+        else:
+            paused_sources.pop(source_id, None)
+        _write_control_payload(
+            data.get("commands", []),
+            data.get("acks", []),
+            payload_updates={_PAUSE_SOURCE_KEY: paused_sources},
+        )
     logger.info("set_pause_source: source_id=%s paused=%s", source_id, paused)
 
 

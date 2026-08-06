@@ -4017,6 +4017,28 @@ from src.data.replacement_forecast_production import (  # noqa: E402
 # registers them.
 
 
+def _consume_live_control_commands() -> str | None:
+    """Drain operator commands or establish a durable entry-only block."""
+
+    try:
+        from src.control.control_plane import process_commands
+
+        process_commands(refresh_when_empty=False)
+        return None
+    except Exception:
+        # SCOPE: every BUY-capable live lane; monitor, exit, command recovery,
+        # and settlement continue. DRAIN: the 1-second listener and canonical
+        # reactor retry the durable queue. RESET: a repaired queue drains and
+        # the bounded auto-pause expires or an explicit resume clears it.
+        from src.control.control_plane import pause_entries
+
+        pause_entries("control_plane_command_drain_failed")
+        logger.exception(
+            "Live control command drain failed; blocking new entries"
+        )
+        return "control_plane_command_drain_failed"
+
+
 @_scheduler_job("edli_event_reactor")
 def _edli_event_reactor_cycle(
     *,
@@ -4039,6 +4061,8 @@ def _edli_event_reactor_cycle(
     object itself into the extracted cycle, which owns its own
     acquire/release lifecycle exactly as it did inline.
     """
+    control_drain_block_reason = _consume_live_control_commands()
+
     from src.events.reactor import run_edli_event_reactor_cycle
 
     _start_edli_reactor_wake_listener()
@@ -4052,6 +4076,8 @@ def _edli_event_reactor_cycle(
         # receipt may complete, while newer wakes stay durable for the next
         # cycle. RESET: the next cycle re-qualifies from durable control state.
         _global_block_reason = "paused_forecast_snapshot_completion"
+    if control_drain_block_reason is not None:
+        _global_block_reason = control_drain_block_reason
     return run_edli_event_reactor_cycle(
         active_lock=_edli_reactor_active_lock,
         live_entry_block_reason=_global_block_reason,
@@ -5526,6 +5552,7 @@ def _run_edli_reactor_wake_listener(
                     if stop_event.wait(fallback_seconds):
                         break
             try:
+                _consume_live_control_commands()
                 collateral_serviced = _service_pending_collateral_authority_wake()
                 if collateral_serviced is None:
                     _edli_reactor_wake_poll_once()
@@ -5745,6 +5772,7 @@ def _edli_command_recovery_cycle() -> None:
     unchanged (venue lookup per in-flight command; REVIEW_REQUIRED handoff for
     ack-lost rows without an order id).
     """
+    _consume_live_control_commands()
     edli_cfg = _settings_section("edli", {})
     if get_mode() != "live":
         return
@@ -6608,6 +6636,7 @@ def _edli_continuous_redecision_screen_cycle() -> None:
     function itself: it is a plain mutable dict (no lock lifecycle), still
     mutated directly by the command-recovery cluster here in main.py.
     """
+    _consume_live_control_commands()
     if _defer_for_held_position_monitor("edli_continuous_redecision_screen"):
         return
     if _defer_for_active_entry_reactor("edli_redecision_screen"):
@@ -7200,6 +7229,7 @@ def _edli_day0_hourly_refresh_cycle() -> None:
     without competing with this background scan. After bootstrap, fresh vectors
     resume and their durable wake triggers targeted re-monitoring.
     """
+    _consume_live_control_commands()
     if _defer_for_held_position_monitor("edli_day0_hourly_refresh"):
         return
 
