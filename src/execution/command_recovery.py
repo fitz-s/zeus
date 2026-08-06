@@ -833,9 +833,10 @@ def _lookup_unknown_side_effect_order(
     """Return (status, venue_response, proof, lookup_method).
 
     status is one of ``found`` or ``unavailable``.  A ``found`` status with a
-    ``None`` response means the venue read completed and found no matching
-    exposure, allowing the age-gated safe-replay path below to terminalize the
-    command.
+    ``None`` response means the complete authenticated orders+trades read found
+    no matching exposure, allowing the age-gated safe-replay path below to
+    terminalize the command. An idempotency-key miss alone is only corroboration
+    and never supplies that absence proof.
     """
 
     if cmd.venue_order_id:
@@ -853,17 +854,21 @@ def _lookup_unknown_side_effect_order(
             if exc.__class__.__name__ != "SnapshotMissError":
                 raise
         else:
-            if found is None:
-                return "found", None, None, "idempotency_key"
-            payload = _venue_order_payload(found)
-            if payload is not None:
-                return "found", payload, None, "idempotency_key"
-            logger.warning(
-                "recovery: command %s idempotency-key lookup returned non-order %s; "
-                "treating lookup as unavailable",
-                cmd.command_id, type(found).__name__,
+            if found is not None:
+                payload = _venue_order_payload(found)
+                if payload is not None:
+                    return "found", payload, None, "idempotency_key"
+                logger.warning(
+                    "recovery: command %s idempotency-key lookup returned non-order %s; "
+                    "treating lookup as unavailable",
+                    cmd.command_id, type(found).__name__,
+                )
+                return "unavailable", None, None, "idempotency_key"
+            logger.info(
+                "recovery: command %s idempotency-key lookup found no order; "
+                "corroborating with complete authenticated venue reads",
+                cmd.command_id,
             )
-            return "unavailable", None, None, "idempotency_key"
     venue_status, venue_resp, proof = _lookup_unknown_side_effect_by_venue_reads(cmd, client)
     return venue_status, venue_resp, proof, "authenticated_venue_absence"
 

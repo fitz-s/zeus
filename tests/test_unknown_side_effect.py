@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-05-15; last_reused=2026-05-15
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-06; last_reused=2026-08-06
 # Purpose: R3 M2 unknown-side-effect semantics for post-POST submit uncertainty.
 # Reuse: Run when executor submit exception handling, venue command recovery,
 #        or idempotency/economic-intent duplicate blocking changes.
@@ -410,7 +410,7 @@ def _insert_unknown_side_effect(
             price=Decimal(str(price)),
             size=Decimal(str(size)),
             order_type="GTC",
-            post_only=False,
+            post_only=True,
             tick_size=Decimal("0.01"),
             min_order_size=Decimal("0.01"),
             neg_risk=False,
@@ -444,7 +444,12 @@ def _insert_unknown_side_effect(
         position_id="trade-m2",
         decision_id="decision-m2",
         idempotency_key=idem,
-        intent_kind="ENTRY",
+        # Seed the legacy post-submit state through the current command-repo
+        # admission seam, then restore the historical ENTRY identity used by
+        # this recovery fixture. ENTRY admission itself now requires the full
+        # live certificate/world closure, which this in-memory recovery test
+        # intentionally does not model.
+        intent_kind="EXIT",
         market_id="condition-m2",
         token_id=token_id,
         side="BUY",
@@ -453,6 +458,10 @@ def _insert_unknown_side_effect(
         created_at=created.isoformat(),
         q_version="test-q-version",
         snapshot_checked_at=created.isoformat(),
+    )
+    conn.execute(
+        "UPDATE venue_commands SET intent_kind = 'ENTRY' WHERE command_id = ?",
+        (command_id,),
     )
     append_event(
         conn,
@@ -2316,3 +2325,73 @@ def test_unknown_without_idempotency_lookup_does_not_release_when_venue_reads_ma
     event_types = [row["event_type"] for row in events]
     assert "PARTIAL_FILL_OBSERVED" not in event_types
     assert "SUBMIT_REJECTED" not in event_types
+
+
+@pytest.mark.parametrize(
+    "matching_method, matching_payload",
+    [
+        (
+            "get_open_orders",
+            {
+                "id": "open-order-match",
+                "asset_id": "tok-m2",
+                "price": "0.55",
+                "size": "18.19",
+                "side": "BUY",
+                "status": "LIVE",
+            },
+        ),
+        (
+            "get_trades",
+            {
+                "id": "trade-match-after-idempotency-miss",
+                "asset_id": "tok-m2",
+                "price": "0.55",
+                "size": "18.19",
+                "side": "BUY",
+                "match_time": str((NOW + timedelta(seconds=1)).timestamp()),
+            },
+        ),
+        ("incomplete_reads", None),
+    ],
+)
+def test_idempotency_miss_still_requires_complete_reads_before_release(
+    conn,
+    matching_method,
+    matching_payload,
+):
+    from src.execution.command_recovery import reconcile_unresolved_commands
+
+    old = NOW - timedelta(minutes=30)
+    _insert_unknown_side_effect(conn, idem="7" * 32, created_at=old)
+
+    class IdempotencyMissWithMatchingExposureClient:
+        venue_reads_are_complete = matching_method != "incomplete_reads"
+
+        def find_order_by_idempotency_key(self, _idempotency_key):
+            return None
+
+        def get_open_orders(self):
+            return [matching_payload] if matching_method == "get_open_orders" else []
+
+        def get_trades(self):
+            return [matching_payload] if matching_method == "get_trades" else []
+
+    summary = reconcile_unresolved_commands(
+        conn,
+        IdempotencyMissWithMatchingExposureClient(),
+    )
+
+    cmd = _command(conn)
+    event_types = _events(conn, cmd["command_id"])
+    assert "SUBMIT_REJECTED" not in event_types
+    if matching_method == "get_open_orders":
+        assert summary["advanced"] == 1
+        assert summary["errors"] == 0
+        assert cmd["state"] == "ACKED"
+        assert "SUBMIT_ACKED" in event_types
+    else:
+        assert summary["advanced"] == 0
+        assert summary["errors"] == 1
+        assert cmd["state"] == "SUBMIT_UNKNOWN_SIDE_EFFECT"
+        assert "PARTIAL_FILL_OBSERVED" not in event_types
