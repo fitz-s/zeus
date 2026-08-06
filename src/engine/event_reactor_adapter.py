@@ -7741,6 +7741,7 @@ def event_bound_live_adapter_from_trade_conn(
                     status=status,
                     replacement_candidate=replacement_candidate,
                     reason=preflight_reason,
+                    rejection_receipt=receipt,
                 )
             probability_tightening = _global_probability_tightening_from_receipt(
                 receipt,
@@ -7751,6 +7752,7 @@ def event_bound_live_adapter_from_trade_conn(
                     status="PROBABILITY_TIGHTENED",
                     probability_tightening=probability_tightening,
                     reason=reason,
+                    rejection_receipt=receipt,
                 )
             _evict_superseded_global_probability_family_cache(
                 probability_cache_namespace,
@@ -7767,6 +7769,7 @@ def event_bound_live_adapter_from_trade_conn(
             return GlobalWinnerPreflight(
                 status=status,
                 reason=reason or "GLOBAL_WINNER_PREFLIGHT_REJECTED",
+                rejection_receipt=receipt,
             )
 
         def _actuate_preflighted(event, actuation, at, token, authority):

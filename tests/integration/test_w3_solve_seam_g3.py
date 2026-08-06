@@ -21264,6 +21264,97 @@ def test_live_adapter_sell_preflight_skips_entry_checks_and_survives_monitor_han
     assert cancelled() is True
 
 
+def test_live_adapter_preflight_transports_rejected_entry_evidence(monkeypatch):
+    captured = {}
+    rejected = EventSubmissionReceipt(
+        False,
+        "event-placeholder",
+        "snapshot-placeholder",
+        condition_id="condition-alpha",
+        token_id="token-alpha",
+        direction="BUY_YES",
+        q_live=0.72,
+        q_lcb_5pct=0.68,
+        c_fee_adjusted=0.40,
+        qkernel_execution_economics={"expected_ev_usd": 1.25},
+        envelope_json='{"probability":{"q_live":0.72}}',
+        reason=(
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+            "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:replacement_0_1"
+        ),
+        proof_accepted=False,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        lambda events, **kwargs: captured.update(kwargs)
+        or SimpleNamespace(events=tuple(events)),
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_preflight_candidate_receipt",
+        lambda _submit, *, event, **_kwargs: replace(
+            rejected,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+            proof_accepted=True,
+            decision_proof_bundle=object(),
+            reason="",
+        ),
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_preflight_entry_authority_receipt",
+        lambda event, _receipt, **_kwargs: replace(
+            rejected,
+            event_id=event.event_id,
+            causal_snapshot_id=event.causal_snapshot_id,
+        ),
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_preflight_entry_jit_receipt",
+        lambda _event, receipt, **_kwargs: receipt,
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        sqlite3.connect(":memory:"),
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=sqlite3.connect(":memory:"),
+        topology_conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
+    )
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    decision_at = _dt.datetime(2026, 7, 27, 8, 0, tzinfo=_dt.timezone.utc)
+    adapter.process_global_batch((event,), decision_at)
+    preflight = captured["preflight_winner"]
+    result = preflight(
+        event,
+        SimpleNamespace(
+            actuation_identity="actuation-1",
+            decision=SimpleNamespace(candidate=SimpleNamespace(action="BUY")),
+        ),
+        decision_at,
+        global_batch_runtime.GlobalPreflightAuthority(
+            probability_manifest=(("family-alpha", "q-1"),),
+            book_epoch_identity="book-1",
+            book_economics_manifest=(("family-alpha", "book-1"),),
+            wealth_witness_identity="wealth-1",
+            actuation_deadline=decision_at + _dt.timedelta(seconds=30),
+        ),
+    )
+
+    assert result.status == "BATCH_BLOCKED"
+    assert result.rejection_receipt is not None
+    assert result.rejection_receipt.event_id == event.event_id
+    assert result.rejection_receipt.q_live == 0.72
+    assert result.rejection_receipt.qkernel_execution_economics == {
+        "expected_ev_usd": 1.25
+    }
+    assert result.rejection_receipt.envelope_json == (
+        '{"probability":{"q_live":0.72}}'
+    )
+
+
 def test_global_batch_stable_preflight_token_survives_later_unrelated_wake(
     monkeypatch,
 ):
@@ -24645,6 +24736,21 @@ def test_global_batch_stops_on_batch_wide_preflight_block(monkeypatch, batch_rea
         return global_batch_runtime.GlobalWinnerPreflight(
             status="BATCH_BLOCKED",
             reason=batch_reason,
+            rejection_receipt=EventSubmissionReceipt(
+                False,
+                event.event_id,
+                event.causal_snapshot_id,
+                condition_id="condition-alpha",
+                token_id="token-alpha",
+                direction="BUY_YES",
+                q_live=0.72,
+                q_lcb_5pct=0.68,
+                c_fee_adjusted=0.40,
+                qkernel_execution_economics={"expected_ev_usd": 1.25},
+                envelope_json='{"probability":{"q_live":0.72}}',
+                reason=batch_reason,
+                proof_accepted=False,
+            ),
         )
 
     def store_preflight(*_args, **kwargs):
@@ -24705,6 +24811,20 @@ def test_global_batch_stops_on_batch_wide_preflight_block(monkeypatch, batch_rea
     assert result.receipts[runner_up.event_id].reason == (
         f"GLOBAL_PREFLIGHT_BATCH_BLOCKED:{batch_reason}"
     )
+    assert result.receipts[event.event_id].condition_id == "condition-alpha"
+    assert result.receipts[event.event_id].token_id == "token-alpha"
+    assert result.receipts[event.event_id].q_live == 0.72
+    assert result.receipts[event.event_id].q_lcb_5pct == 0.68
+    assert result.receipts[event.event_id].c_fee_adjusted == 0.40
+    assert result.receipts[event.event_id].qkernel_execution_economics == {
+        "expected_ev_usd": 1.25
+    }
+    assert result.receipts[event.event_id].envelope_json == (
+        '{"probability":{"q_live":0.72}}'
+    )
+    assert result.receipts[event.event_id].proof_accepted is False
+    assert result.receipts[event.event_id].side_effect_status == "NO_SUBMIT"
+    assert result.receipts[runner_up.event_id].q_live is None
 
 
 @pytest.mark.parametrize(

@@ -857,6 +857,7 @@ class GlobalWinnerPreflight:
     replacement_candidate: object | None = None
     probability_tightening: "GlobalCandidateProbabilityTightening | None" = None
     reason: str = ""
+    rejection_receipt: EventSubmissionReceipt | None = None
 
     def __post_init__(self) -> None:
         if self.status not in {
@@ -882,6 +883,8 @@ class GlobalWinnerPreflight:
             raise ValueError("GLOBAL_WINNER_PREFLIGHT_Q_TIGHTENING_INVALID")
         if self.status != "STABLE" and not str(self.reason or "").strip():
             raise ValueError("GLOBAL_WINNER_PREFLIGHT_REASON_MISSING")
+        if self.status == "STABLE" and self.rejection_receipt is not None:
+            raise ValueError("GLOBAL_WINNER_PREFLIGHT_STABLE_REJECTION_RECEIPT")
 
 
 @dataclass(frozen=True)
@@ -4076,6 +4079,7 @@ def process_current_global_batch(
     selection_snapshot_release: Callable[[], None] | None = None
     actuation_started = False
     prepared_loser_receipts: dict[str, EventSubmissionReceipt] = {}
+    preflight_rejection_receipts: dict[str, EventSubmissionReceipt] = {}
     batch_started = time.monotonic()
     stage_started = batch_started
 
@@ -4449,19 +4453,33 @@ def process_current_global_batch(
             raise ValueError("GLOBAL_DEFERRED_CLAIM_IDENTITY_CONFLICT")
         terminal_cut_completed = economic_cut_completed and effective_next_claim is None
         release_selection_snapshot()
-        return GlobalBatchSubmitResult(
-            receipts={
-                event.event_id: stamp_receipt(
-                    EventSubmissionReceipt(
-                        False,
-                        event.event_id,
-                        event.causal_snapshot_id,
-                        reason=scoped_rejection_by_event.get(event.event_id, reason),
-                        proof_accepted=False,
-                    )
+        receipts: dict[str, EventSubmissionReceipt] = {}
+        for event in event_tuple:
+            event_reason = scoped_rejection_by_event.get(event.event_id, reason)
+            prior = preflight_rejection_receipts.get(event.event_id)
+            if prior is not None:
+                if prior.event_id != event.event_id:
+                    raise ValueError("GLOBAL_PREFLIGHT_REJECTION_EVENT_MISMATCH")
+                receipt = replace(
+                    prior,
+                    submitted=False,
+                    event_id=event.event_id,
+                    causal_snapshot_id=event.causal_snapshot_id,
+                    side_effect_status="NO_SUBMIT",
+                    reason=event_reason,
+                    proof_accepted=False,
                 )
-                for event in event_tuple
-            },
+            else:
+                receipt = EventSubmissionReceipt(
+                    False,
+                    event.event_id,
+                    event.causal_snapshot_id,
+                    reason=event_reason,
+                    proof_accepted=False,
+                )
+            receipts[event.event_id] = stamp_receipt(receipt)
+        return GlobalBatchSubmitResult(
+            receipts=receipts,
             winner_event_id=None,
             venue_submit_count=0,
             economic_cut_completed=terminal_cut_completed,
@@ -5490,6 +5508,10 @@ def process_current_global_batch(
                     preflight_at,
                     preflight_authority,
                 )
+                if preflight.rejection_receipt is not None:
+                    preflight_rejection_receipts[winner_id] = (
+                        preflight.rejection_receipt
+                    )
                 if cancelled("winner_preflight"):
                     return reject(
                         "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
