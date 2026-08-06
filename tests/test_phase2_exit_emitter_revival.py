@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-20; last_reviewed=2026-07-30; last_reused=2026-07-30
+# Lifecycle: created=2026-06-20; last_reviewed=2026-08-05; last_reused=2026-08-05
 # Purpose: RED-on-revert antibodies for the Phase 2 live exit-POST emitter revival
 #   (exit_pending_missing re-stamp loop, day0 static-close deferral, canonical
 #   EXIT_ORDER_POSTED dual-write, monitor-cadence watchdog).
 # Reuse: pytest tests/test_phase2_exit_emitter_revival.py
 # Created: 2026-06-20
-# Last reused or audited: 2026-07-30
+# Last reused or audited: 2026-08-05
 # Authority basis: /tmp/phase2_exit_emitter_diagnosis.md §4-§5 (Phase 2 of the
 #   Zeus lifecycle-alpha fix). RANK 2 of /tmp/lifecycle_alpha_diagnosis_2026-06-20.md.
 """RED-on-revert antibodies for the Phase 2 live exit-POST emitter revival.
@@ -998,8 +998,9 @@ class TestMonitorCadenceWatchdog:
         conn.execute(
             """
             INSERT INTO position_current (
-                position_id, phase, strategy_key, updated_at, temperature_metric
-            ) VALUES (?, ?, 'opening_inertia', ?, 'high')
+                position_id, phase, strategy_key, updated_at, temperature_metric,
+                shares, chain_shares, chain_state
+            ) VALUES (?, ?, 'opening_inertia', ?, 'high', 10.0, 10.0, 'synced')
             """,
             (position_id, phase, occurred_at),
         )
@@ -1082,3 +1083,126 @@ class TestMonitorCadenceWatchdog:
 
         assert record is not None
         assert record["last_monitor_refreshed_at"] == active_old
+
+    def test_fresh_position_cannot_hide_stale_sibling(self):
+        from datetime import datetime, timezone
+
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
+
+        conn = _db()
+        stale_at = "2026-06-19T00:41:00+00:00"
+        self._insert_monitor_refreshed(conn, stale_at, position_id="stale")
+        self._insert_monitor_refreshed(
+            conn,
+            datetime.now(timezone.utc).isoformat(),
+            position_id="fresh",
+        )
+        summary: dict = {}
+
+        record = _check_monitor_cadence_watchdog(conn, summary)
+
+        assert record is not None
+        assert record["open_position_count"] == 2
+        assert record["fresh_position_count"] == 1
+        assert record["stale_or_missing_position_count"] == 1
+        assert [item["position_id"] for item in record["stale_or_missing_positions"]] == [
+            "stale"
+        ]
+
+    def test_missing_and_future_monitor_evidence_are_flagged_without_writes(self):
+        from datetime import datetime, timedelta, timezone
+
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
+
+        conn = _db()
+        now = datetime.now(timezone.utc)
+        self._insert_monitor_refreshed(
+            conn,
+            (now + timedelta(hours=1)).isoformat(),
+            position_id="future",
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, strategy_key, updated_at, temperature_metric,
+                shares, chain_shares, chain_state
+            ) VALUES ('missing', 'active', 'opening_inertia', ?, 'high', 5.0, 5.0, 'synced')
+            """,
+            (now.isoformat(),),
+        )
+        conn.commit()
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+
+        record = _check_monitor_cadence_watchdog(conn, {})
+
+        conn.set_trace_callback(None)
+        assert record is not None
+        assert record["stale_or_missing_position_count"] == 1
+        assert record["stale_or_missing_positions"][0]["position_id"] == "missing"
+        assert record["future_monitor_event_count"] == 1
+        assert record["future_monitor_events"][0]["position_id"] == "future"
+        assert not any(
+            statement.lstrip().upper().startswith(("INSERT", "UPDATE", "DELETE"))
+            for statement in statements
+        )
+
+    def test_unknown_exposure_cannot_remove_active_position_from_watchdog(self):
+        from datetime import datetime, timezone
+
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
+
+        conn = _db()
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, strategy_key, updated_at, temperature_metric,
+                shares, chain_shares, chain_state
+            ) VALUES ('unknown-exposure', 'active', 'opening_inertia', ?, 'high',
+                      'malformed', NULL, 'synced')
+            """,
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        conn.commit()
+
+        record = _check_monitor_cadence_watchdog(conn, {})
+
+        assert record is not None
+        assert record["open_position_count"] == 1
+        assert record["stale_or_missing_position_count"] == 1
+        assert record["stale_or_missing_positions"][0]["position_id"] == (
+            "unknown-exposure"
+        )
+
+    def test_latest_sequence_with_malformed_timestamp_is_not_hidden_by_old_event(self):
+        from src.execution.exit_lifecycle import _check_monitor_cadence_watchdog
+
+        conn = _db()
+        self._insert_monitor_refreshed(
+            conn,
+            "2099-01-01T00:00:00+00:00",
+            position_id="malformed-latest",
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, strategy_key, idempotency_key, source_module, env,
+                payload_json
+            ) VALUES ('e:malformed-latest:2', 'malformed-latest', 1, 2,
+                      'MONITOR_REFRESHED', '2026-99-99T99:99:99+00:00', 'opening_inertia',
+                      'i:malformed-latest:2', 'test', 'live', '{}')
+            """
+        )
+        conn.commit()
+
+        record = _check_monitor_cadence_watchdog(conn, {})
+
+        assert record is not None
+        assert record["stale_or_missing_position_count"] == 1
+        assert record["stale_or_missing_positions"][0]["position_id"] == (
+            "malformed-latest"
+        )
+        assert record["stale_or_missing_positions"][0]["issue"] == (
+            "timestamp_unparseable"
+        )

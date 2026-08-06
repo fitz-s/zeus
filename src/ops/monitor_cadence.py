@@ -355,16 +355,19 @@ def _monitor_cadence_position_rows(
         position_id = str(row["position_id"] or "")
         phase = str(row["phase"] or "").strip().lower()
         chain_state = str(row["chain_state"] or "").strip()
-        shares = _float_or_zero(row["shares"])
-        chain_shares = _float_or_zero(row["chain_shares"])
+        shares = _finite_nonnegative_float_or_none(row["shares"])
+        chain_shares = _finite_nonnegative_float_or_none(row["chain_shares"])
         exposure_positive = (
-            shares > MONITOR_CADENCE_EXPOSURE_EPS
-            or chain_shares > MONITOR_CADENCE_EXPOSURE_EPS
+            shares is not None and shares > MONITOR_CADENCE_EXPOSURE_EPS
+        ) or (
+            chain_shares is not None
+            and chain_shares > MONITOR_CADENCE_EXPOSURE_EPS
         )
+        exposure_unknown = shares is None or chain_shares is None
         if _position_requires_monitor_cadence(
             phase=phase,
             chain_state=chain_state,
-            exposure_positive=exposure_positive,
+            exposure_positive=exposure_positive or exposure_unknown,
             target_date=row["target_date"],
             now_utc=now_utc,
         ):
@@ -377,6 +380,7 @@ def _monitor_cadence_position_rows(
                     "exit_reason": str(row["exit_reason"] or "").strip(),
                     "shares": shares,
                     "chain_shares": chain_shares,
+                    "exposure_unknown": exposure_unknown,
                 }
             )
     return monitored
@@ -484,9 +488,11 @@ def _latest_monitor_refreshed_event(
     position_id: str,
     event_columns: set[str],
 ) -> dict[str, str] | None:
-    order_by = "datetime(occurred_at) DESC"
-    if "sequence_no" in event_columns:
-        order_by += ", sequence_no DESC"
+    order_by = (
+        "sequence_no DESC"
+        if "sequence_no" in event_columns
+        else "datetime(occurred_at) DESC"
+    )
     payload_select = "payload_json" if "payload_json" in event_columns else "NULL AS payload_json"
     row = conn.execute(
         f"""
@@ -717,3 +723,13 @@ def _float_or_zero(value: object) -> float:
         return float(value or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _finite_nonnegative_float_or_none(value: object) -> float | None:
+    try:
+        parsed = float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+    if parsed is None or not math.isfinite(parsed) or parsed < 0.0:
+        return None
+    return parsed

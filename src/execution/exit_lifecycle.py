@@ -9623,68 +9623,85 @@ def _refresh_global_allocator_for_held_position_monitor(conn, portfolio) -> dict
 
 
 def _check_monitor_cadence_watchdog(conn, summary: dict) -> dict | None:
-    """Flag when MONITOR_REFRESHED cadence has lapsed beyond ~2× the interval.
+    """Flag any held position whose canonical monitor cadence is not current.
 
-    Reads the newest canonical MONITOR_REFRESHED occurred_at from position_events
-    (same trade DB this conn owns) and compares to now. Detection only — records
-    the gap in ``summary`` and logs a warning so operator supervision can act;
-    never restarts or back-fills. Returns the watchdog record dict when a gap is
-    flagged, else None. Fail-soft: any read/parse error returns None.
+    Detection is per positive-exposure position.  A fresh sibling must never
+    hide a stale, missing, malformed, or future-dated ``MONITOR_REFRESHED``.
+    This reader records evidence only; the independent durable monitor recovery
+    lane remains the sole recovery writer.
     """
     if conn is None:
         return None
     threshold_seconds = _EXIT_MONITOR_INTERVAL_SECONDS * _MONITOR_CADENCE_GAP_FACTOR
-    try:
-        row = conn.execute(
-            """
-            SELECT MAX(
-                       (
-                           SELECT pe.occurred_at
-                             FROM position_events pe
-                            WHERE pe.position_id = pc.position_id
-                              AND pe.event_type = 'MONITOR_REFRESHED'
-                            ORDER BY pe.sequence_no DESC
-                            LIMIT 1
-                       )
-                   )
-              FROM position_current pc
-             WHERE pc.phase IN ('active', 'day0_window', 'pending_exit')
-            """
-        ).fetchone()
-    except Exception:
-        return None
-    if row is None or row[0] is None:
-        return None
-    last_refresh_raw = str(row[0])
-    try:
-        last_refresh = datetime.fromisoformat(last_refresh_raw.replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return None
-    if last_refresh.tzinfo is None:
-        last_refresh = last_refresh.replace(tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
-    gap_seconds = (now - last_refresh.astimezone(timezone.utc)).total_seconds()
-    summary["monitor_cadence_gap_seconds"] = round(gap_seconds, 1)
-    if gap_seconds <= threshold_seconds:
+    try:
+        from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+
+        evidence = collect_monitor_cadence_evidence(
+            conn,
+            now=now,
+            max_age_seconds=threshold_seconds,
+            strict_future=True,
+            monitor_refreshed_only=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - watchdog must not break exits.
+        summary["monitor_cadence_watchdog_error"] = str(exc)
+        logger.warning("MONITOR_CADENCE_WATCHDOG_READ_FAILED: %s", exc)
         return None
+
+    stale = list(evidence.get("stale_or_missing_positions") or [])
+    future = list(evidence.get("future_monitor_events") or [])
+    summary["monitor_cadence_open_position_count"] = int(
+        evidence.get("open_position_count") or 0
+    )
+    summary["monitor_cadence_fresh_position_count"] = int(
+        evidence.get("fresh_position_count") or 0
+    )
+    if not stale and not future:
+        return None
+
+    stale_with_age = [
+        item for item in stale if isinstance(item.get("age_seconds"), (int, float))
+    ]
+    worst = max(stale_with_age, key=lambda item: float(item["age_seconds"])) \
+        if stale_with_age else None
+    gap_seconds = float(worst["age_seconds"]) if worst is not None else None
     record = {
-        "last_monitor_refreshed_at": last_refresh_raw,
         "observed_at": now.isoformat(),
-        "gap_seconds": round(gap_seconds, 1),
         "interval_seconds": _EXIT_MONITOR_INTERVAL_SECONDS,
         "threshold_seconds": threshold_seconds,
-        "gap_factor": round(gap_seconds / _EXIT_MONITOR_INTERVAL_SECONDS, 2),
+        "open_position_count": int(evidence.get("open_position_count") or 0),
+        "fresh_position_count": int(evidence.get("fresh_position_count") or 0),
+        "stale_or_missing_position_count": int(
+            evidence.get("stale_or_missing_position_count") or 0
+        ),
+        "stale_or_missing_positions": stale,
+        "future_monitor_event_count": int(
+            evidence.get("future_monitor_event_count") or 0
+        ),
+        "future_monitor_events": future,
     }
+    if worst is not None and gap_seconds is not None:
+        record["last_monitor_refreshed_at"] = worst.get("last_monitor_refreshed_at")
+        record["gap_seconds"] = round(gap_seconds, 1)
+        record["gap_factor"] = round(
+            gap_seconds / _EXIT_MONITOR_INTERVAL_SECONDS,
+            2,
+        )
+        summary["monitor_cadence_gap_seconds"] = round(gap_seconds, 1)
     summary["monitor_cadence_gap_flagged"] = record
     logger.warning(
-        "MONITOR_CADENCE_GAP: last MONITOR_REFRESHED was %s (%.1fs ago, %.1f× the "
-        "%.0fs interval > %.1f× threshold). exit_monitor cadence lapsed — likely a "
-        "daemon/scheduler process gap (operator supervision, out of code).",
-        last_refresh_raw,
-        gap_seconds,
-        gap_seconds / _EXIT_MONITOR_INTERVAL_SECONDS,
-        _EXIT_MONITOR_INTERVAL_SECONDS,
-        _MONITOR_CADENCE_GAP_FACTOR,
+        "MONITOR_CADENCE_GAP: stale_or_missing=%d future=%d open=%d fresh=%d "
+        "threshold=%.1fs positions=%s",
+        record["stale_or_missing_position_count"],
+        record["future_monitor_event_count"],
+        record["open_position_count"],
+        record["fresh_position_count"],
+        threshold_seconds,
+        [
+            str(item.get("position_id") or "")
+            for item in stale + future
+        ],
     )
     return record
 
