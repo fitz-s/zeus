@@ -1132,7 +1132,7 @@ def section_price_holes() -> dict:
     """
     out: dict = {
         "stale_hours": PRICE_HOLE_STALE_HOURS,
-        "scope": "market_events target_date today_or_tomorrow",
+        "scope": "market_events today_or_tomorrow minus latest-snapshot proven-ended conditions",
         "holes_semantics": "BBA token coverage failures, not snapshot topology",
     }
     today = _now().strftime("%Y-%m-%d")
@@ -1155,6 +1155,24 @@ def section_price_holes() -> dict:
         out["error"] = f"forecasts_db: {type(exc).__name__}: {exc}"
         return out
 
+    def _timestamp(value: object) -> datetime | None:
+        if value is None:
+            return None
+        try:
+            text = str(value).strip().replace(" ", "T")
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except (TypeError, ValueError):
+            return None
+
+    def _fresh(value: object) -> bool:
+        parsed = _timestamp(value)
+        return parsed is not None and (_now() - parsed).total_seconds() <= PRICE_HOLE_STALE_HOURS * 3600
+
     targets = [
         {
             "city": r["city"],
@@ -1163,6 +1181,68 @@ def section_price_holes() -> dict:
         }
         for r in scope_rows
     ]
+    # A local-date query is only a discovery bound.  It is not executable
+    # lifecycle truth: by UTC afternoon many cities' ``today`` markets have
+    # already crossed their venue end boundary.  Requiring fresh quotes for
+    # those proven-closed conditions made every city look red while the live
+    # channel was correctly refreshing the still-open next target day.
+    #
+    # Fail closed on unknown topology (keep it in scope), but remove a condition
+    # only when the latest compact snapshot binds to an explicit past
+    # ``market_end_at``.  This is observability-only and cannot authorize entry.
+    try:
+        tr_scope = ro(TRADES_DB)
+        try:
+            snapshot_tables = {
+                row["name"]
+                for row in tr_scope.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            if {
+                "executable_market_snapshot_latest",
+                "executable_market_snapshots",
+            } <= snapshot_tables:
+                snapshot_columns = {
+                    row["name"]
+                    for row in tr_scope.execute(
+                        "PRAGMA table_info(executable_market_snapshots)"
+                    ).fetchall()
+                }
+                if "market_end_at" in snapshot_columns:
+                    condition_ids = sorted(
+                        {
+                            str(target["condition_id"])
+                            for target in targets
+                            if target["condition_id"]
+                        }
+                    )
+                    ended: set[str] = set()
+                    for offset in range(0, len(condition_ids), 400):
+                        batch = condition_ids[offset : offset + 400]
+                        placeholders = ",".join("?" for _ in batch)
+                        rows = tr_scope.execute(
+                            f"SELECT l.condition_id, s.market_end_at "
+                            f"FROM executable_market_snapshot_latest AS l "
+                            f"JOIN executable_market_snapshots AS s "
+                            f"  ON s.snapshot_id = l.snapshot_id "
+                            f"WHERE l.condition_id IN ({placeholders})",
+                            batch,
+                        ).fetchall()
+                        for row in rows:
+                            end_at = _timestamp(row["market_end_at"])
+                            if end_at is not None and end_at <= _now():
+                                ended.add(str(row["condition_id"]))
+                    targets = [
+                        target
+                        for target in targets
+                        if str(target["condition_id"] or "") not in ended
+                    ]
+                    out["proven_ended_tokens_excluded"] = len(scope_rows) - len(targets)
+        finally:
+            tr_scope.close()
+    except sqlite3.Error as exc:
+        out["scope_topology_warning"] = f"{type(exc).__name__}: {exc}"
     cities = {target["city"] for target in targets}
     out["cities_with_market_events"] = len(cities)
 
@@ -1186,24 +1266,6 @@ def section_price_holes() -> dict:
             "stale_or_missing_conditions": [],
         }
         return out
-
-    def _timestamp(value: object) -> datetime | None:
-        if value is None:
-            return None
-        try:
-            text = str(value).strip().replace(" ", "T")
-            if text.endswith("Z"):
-                text = text[:-1] + "+00:00"
-            parsed = datetime.fromisoformat(text)
-            if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
-            return parsed.astimezone(timezone.utc)
-        except (TypeError, ValueError):
-            return None
-
-    def _fresh(value: object) -> bool:
-        parsed = _timestamp(value)
-        return parsed is not None and (_now() - parsed).total_seconds() <= PRICE_HOLE_STALE_HOURS * 3600
 
     def _valid_bba(row: sqlite3.Row) -> bool:
         try:

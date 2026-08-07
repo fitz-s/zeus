@@ -1,10 +1,10 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-02; last_reused=2026-08-02
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-07; last_reused=2026-08-07
 # Purpose: light smoke coverage for the three new ops scripts (zeus_status,
 #   deploy_live, generate_schema_cheatsheet).
 # Reuse: asserts the FAIL-SOFT contract (a locked/empty/missing DB degrades one
 #   section to ERR, the rest still render) and that each script runs read-only
 #   against temp DBs. No live DB is touched.
-# Last reused/audited: 2026-08-02
+# Last reused/audited: 2026-08-07
 # Authority basis: operator big-direction 2026-06-12 ("大方向现在也只是添加几个文件现在做")
 """Smoke tests for scripts/zeus_status.py, deploy_live.py, generate_schema_cheatsheet.py."""
 from __future__ import annotations
@@ -733,6 +733,80 @@ def test_zeus_status_price_truth_no_evidence_is_missing(tmp_path):
     assert result["full_depth_token_coverage"]["cities"][0]["status"] == "missing"
     assert result["holes"][0]["age"] == "NONE"
     assert result["holes"][0]["reason"] == "stale_or_missing_evidence"
+
+
+def test_zeus_status_price_truth_excludes_proven_ended_local_today_market(tmp_path):
+    """A past venue end boundary cannot make the still-open surface look stale."""
+    zs = _load("zeus_status_smoke_price5", "zeus_status.py")
+    now = datetime.now(timezone.utc)
+    fdb = tmp_path / "forecasts.db"
+    tdb = tmp_path / "trades.db"
+    today = now.strftime("%Y-%m-%d")
+    tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    fc = sqlite3.connect(str(fdb))
+    fc.execute(
+        "CREATE TABLE market_events "
+        "(city TEXT, target_date TEXT, condition_id TEXT, token_id TEXT)"
+    )
+    fc.executemany(
+        "INSERT INTO market_events VALUES ('Tokyo', ?, ?, ?)",
+        [
+            (today, "cond-ended", "tok-ended"),
+            (tomorrow, "cond-open", "tok-open"),
+        ],
+    )
+    fc.commit()
+    fc.close()
+
+    tr = sqlite3.connect(str(tdb))
+    tr.execute(
+        "CREATE TABLE execution_feasibility_latest "
+        "(token_id TEXT, quote_seen_at TEXT, best_bid_before REAL, "
+        "best_ask_before REAL, depth_before_json TEXT)"
+    )
+    tr.executemany(
+        "INSERT INTO execution_feasibility_latest VALUES (?, ?, 0.45, 0.55, ?)",
+        [
+            ("tok-ended", (now - timedelta(hours=8)).isoformat(), '{"bids":[[0.45,1]],"asks":[[0.55,1]]}'),
+            ("tok-open", now.isoformat(), '{"bids":[[0.45,1]],"asks":[[0.55,1]]}'),
+        ],
+    )
+    tr.execute(
+        "CREATE TABLE executable_market_snapshot_latest "
+        "(condition_id TEXT, snapshot_id TEXT, outcome_label TEXT, "
+        "orderbook_top_ask REAL, captured_at TEXT)"
+    )
+    tr.execute(
+        "CREATE TABLE executable_market_snapshots "
+        "(snapshot_id TEXT, market_end_at TEXT)"
+    )
+    tr.executemany(
+        "INSERT INTO executable_market_snapshot_latest VALUES (?, ?, 'YES', 0.55, ?)",
+        [
+            ("cond-ended", "snap-ended", (now - timedelta(hours=8)).isoformat()),
+            ("cond-open", "snap-open", now.isoformat()),
+        ],
+    )
+    tr.executemany(
+        "INSERT INTO executable_market_snapshots VALUES (?, ?)",
+        [
+            ("snap-ended", (now - timedelta(hours=1)).isoformat()),
+            ("snap-open", (now + timedelta(hours=12)).isoformat()),
+        ],
+    )
+    tr.commit()
+    tr.close()
+
+    zs.FORECASTS_DB, zs.TRADES_DB = str(fdb), str(tdb)
+    result = zs.section_price_holes()
+
+    assert result.get("error") is None, result.get("error")
+    assert result["proven_ended_tokens_excluded"] == 1
+    assert result["bba_token_coverage"]["tokens_total"] == 1
+    assert result["bba_token_coverage"]["fresh_tokens"] == 1
+    assert result["bba_token_coverage"]["cities"][0]["status"] == "green"
+    assert result["holes"] == []
 
 
 # --------------------------------------------------------------------------
