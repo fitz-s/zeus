@@ -3062,15 +3062,6 @@ def _replacement_bayes_precision_fusion_override(
             decision_utc=computed_at,
             model_available_at=model_available_at,
         )
-        if not capture.has_history:
-            import logging  # noqa: PLC0415
-
-            logging.getLogger("zeus.replacement_bayes_precision_fusion").warning(
-                "replacement_0_1 BAYES_PRECISION_FUSION history MISSING for %s %s %s -> "
-                "live posterior blocked (no alternate authority)",
-                request.city, metric, target_date,
-            )
-            return None
         if not capture.has_extras:
             # K3 ANTIBODY (2026-06-09): all multi-model extras absent. This is a wiring failure
             # (for example, a lead-calendar mismatch), not permission to revive the old anchor path.

@@ -381,9 +381,10 @@ def capture_bayes_precision_instruments(
     missing/malformed availability remains fail-closed, and future availability remains excluded.
     Legacy/test callers that omit ``decision_utc`` retain the historical no-arrival-guard behavior.
 
-    NEVER raises. Any failure of an individual model -> that model is dropped. A total failure
-    (all extras dropped), or no history, is returned as absent fusion evidence for the caller to
-    fail closed.
+    NEVER raises. Any failure of an individual model -> that model is dropped. A total current-
+    input failure (all extras dropped) is absent fusion evidence and fails closed. Missing walk-
+    forward history leaves current instruments at the explicit low-N/equal-weight prior; the
+    current-evidence shape remains the live probability gate.
     """
     provider = history_provider or _empty_history_provider
     fetch_fn = live_fetch or _default_live_fetch
