@@ -173,6 +173,7 @@ def test_live_health_composite_yields_to_active_entry_reactor(monkeypatch):
         "_defer_for_active_entry_reactor",
         lambda job_name: job_name == "live_health_composite",
     )
+    monkeypatch.setattr(main, "_status_summary_refresh_can_defer", lambda: True)
     monkeypatch.setattr(
         live_health,
         "compute_composite_live_health",
@@ -180,6 +181,62 @@ def test_live_health_composite_yields_to_active_entry_reactor(monkeypatch):
     )
 
     assert main._live_health_composite_cycle.__wrapped__() is None
+
+
+def test_live_health_composite_breaks_entry_defer_before_status_stales(monkeypatch):
+    """Normal reactor activity cannot indefinitely suppress its own health refresh."""
+
+    import src.control.live_health as live_health
+    import src.main as main
+    import src.observability.status_summary as status_summary
+
+    calls = []
+    monkeypatch.setattr(main, "_status_summary_refresh_can_defer", lambda: False)
+    monkeypatch.setattr(
+        main,
+        "_defer_for_active_entry_reactor",
+        lambda _name: pytest.fail("expired status budget must bypass entry defer"),
+    )
+    monkeypatch.setattr(
+        status_summary,
+        "write_cycle_pulse",
+        lambda payload: calls.append(("pulse", payload)),
+    )
+    monkeypatch.setattr(
+        live_health,
+        "compute_composite_live_health",
+        lambda: calls.append(("health", None)),
+    )
+
+    assert main._live_health_composite_cycle.__wrapped__() is None
+    assert calls == [
+        ("pulse", {"mode": "heartbeat_pulse", "heartbeat": True}),
+        ("health", None),
+    ]
+
+
+def test_status_summary_refresh_defer_has_half_budget_backstop(monkeypatch, tmp_path):
+    """The normal defer is bounded well inside the health freshness deadline."""
+
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    import src.config as config
+    import src.main as main
+    from src.control.live_health import STATUS_FRESH_BUDGET_SECONDS
+
+    status_path = tmp_path / "status_summary.json"
+    monkeypatch.setattr(config, "state_path", lambda _name: status_path)
+    status_path.write_text(
+        json.dumps({"timestamp": datetime.now(timezone.utc).isoformat()})
+    )
+    assert main._status_summary_refresh_can_defer()
+
+    old = datetime.now(timezone.utc) - timedelta(
+        seconds=STATUS_FRESH_BUDGET_SECONDS / 2.0 + 1.0
+    )
+    status_path.write_text(json.dumps({"timestamp": old.isoformat()}))
+    assert not main._status_summary_refresh_can_defer()
 
 
 def test_live_health_composite_refreshes_status_before_evaluation(monkeypatch):
@@ -190,6 +247,7 @@ def test_live_health_composite_refreshes_status_before_evaluation(monkeypatch):
     import src.observability.status_summary as status_summary
 
     calls = []
+    monkeypatch.setattr(main, "_status_summary_refresh_can_defer", lambda: True)
     monkeypatch.setattr(main, "_defer_for_active_entry_reactor", lambda _name: False)
     monkeypatch.setattr(
         status_summary,

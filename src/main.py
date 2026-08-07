@@ -1694,7 +1694,10 @@ def _live_health_composite_cycle() -> None:
 
     if _defer_for_held_position_monitor("live_health_composite"):
         return
-    if _defer_for_active_entry_reactor("live_health_composite"):
+    if (
+        _status_summary_refresh_can_defer()
+        and _defer_for_active_entry_reactor("live_health_composite")
+    ):
         return
 
     from src.control.live_health import compute_composite_live_health
@@ -1702,6 +1705,26 @@ def _live_health_composite_cycle() -> None:
 
     write_cycle_pulse({"mode": "heartbeat_pulse", "heartbeat": True})
     compute_composite_live_health()
+
+
+def _status_summary_refresh_can_defer() -> bool:
+    """Yield to entry only while the last verified status cut has ample freshness budget."""
+
+    try:
+        from src.config import state_path
+        from src.control.live_health import STATUS_FRESH_BUDGET_SECONDS
+
+        payload = json.loads(state_path("status_summary.json").read_text())
+        raw = payload.get("timestamp")
+        stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if stamp.tzinfo is None or stamp.utcoffset() is None:
+            return False
+        age_seconds = (
+            datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)
+        ).total_seconds()
+        return age_seconds < STATUS_FRESH_BUDGET_SECONDS / 2.0
+    except Exception:
+        return False
 
 
 _venue_heartbeat_supervisor = None
