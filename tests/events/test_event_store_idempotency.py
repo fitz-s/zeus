@@ -955,6 +955,66 @@ def test_global_winner_current_claim_lookup_preserves_exact_equivalence_and_empt
     conn.rollback()
 
 
+def test_global_winner_pointer_rebind_preserves_current_epoch_claim_generations():
+    conn = _world_conn()
+    store = EventStore(conn)
+    current_claimed_at = datetime.now().astimezone().isoformat()
+    base = _event(
+        "pointer-rebind-base",
+        0,
+        "2026-05-24T04:17:00+00:00",
+        "2026-05-24T04:18:00+00:00",
+    )
+    store.insert_or_ignore(base)
+    base_claimed_at = current_claimed_at
+    assert store.claim(base.event_id, claimed_at=base_claimed_at)
+    conn.commit()
+    claims = {base.event_id: base_claimed_at}
+
+    claimed_targets = []
+    for index in range(3):
+        target = _event(
+            f"pointer-rebind-target-{index}",
+            index + 1,
+            "2026-05-24T04:17:00+00:00",
+            f"2026-05-24T04:18:0{index + 2}+00:00",
+        )
+        conn.execute("BEGIN IMMEDIATE")
+        prioritized = store.prioritized_global_winner_event(
+            target,
+            current_batch_claim_generations=claims,
+        )
+        assert prioritized == target
+        claimed_at = current_claimed_at
+        assert store.claim(target.event_id, claimed_at=claimed_at)
+        conn.commit()
+        claims[target.event_id] = claimed_at
+        claimed_targets.append(target.event_id)
+
+    rows = conn.execute(
+        "SELECT event_id, processing_status, claimed_at "
+        "FROM opportunity_event_processing "
+        "WHERE consumer_name = ? AND event_id IN (?, ?, ?) "
+        "ORDER BY event_id",
+        (store.consumer_name, *claimed_targets),
+    ).fetchall()
+    assert {
+        str(row[0]): (str(row[1]), str(row[2])) for row in rows
+    } == {
+        event_id: ("processing", claims[event_id])
+        for event_id in claimed_targets
+    }
+    pointer_rows = conn.execute(
+        "SELECT event_id, processing_status "
+        "FROM opportunity_event_processing "
+        "WHERE consumer_name = ? AND event_id IN (?, ?, ?) "
+        "ORDER BY processing_status, event_id",
+        (store._winner_pointer_consumer_name, *claimed_targets),
+    ).fetchall()
+    assert [row[1] for row in pointer_rows].count("pending") == 1
+    assert [row[1] for row in pointer_rows].count("expired") == 2
+
+
 def test_global_winner_current_claim_lookup_caps_chunk_at_251_parameters():
     conn = _claim_lookup_world_conn()
     store = EventStore(conn)

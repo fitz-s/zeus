@@ -240,7 +240,13 @@ class EventStore:
         with _winner_hint_lock:
             _winner_hints[self._winner_hint_key] = (candidate, None)
 
-    def _bind_winner_pointer(self, event_id: str, *, updated_at: str) -> None:
+    def _bind_winner_pointer(
+        self,
+        event_id: str,
+        *,
+        updated_at: str,
+        preserve_processing_event_ids: frozenset[str] = frozenset(),
+    ) -> None:
         """Persist the sole global winner through an existing indexed consumer."""
 
         superseded_target_ids = tuple(
@@ -257,17 +263,23 @@ class EventStore:
             ).fetchall()
             if str(row[0] or "")
         )
-        if superseded_target_ids and _table_exists(
+        terminalizable_target_ids = tuple(
+            target_id
+            for target_id in superseded_target_ids
+            if target_id not in preserve_processing_event_ids
+        )
+        if terminalizable_target_ids and _table_exists(
             self.conn, "edli_live_order_events"
         ):
             # SCOPE: only superseded global-winner main claims without a venue
-            # submit attempt are terminalized. DRAIN: pointer supersession and
-            # main-claim expiry share this write transaction. RESET: a carrier
-            # with a durable execution command or venue attempt remains
-            # recovery-owned; otherwise the new pointer may claim a fresh
-            # carrier immediately.
-            for start in range(0, len(superseded_target_ids), 250):
-                chunk = superseded_target_ids[start : start + 250]
+            # submit attempt are terminalized, excluding claims owned by the
+            # current reactor epoch. DRAIN: the epoch finalizes its preserved
+            # claims from their exact receipts; pointer supersession expires
+            # abandoned claims in this transaction. RESET: after finalization
+            # the preserved generation leaves processing, while a carrier with
+            # a durable venue attempt remains recovery-owned.
+            for start in range(0, len(terminalizable_target_ids), 250):
+                chunk = terminalizable_target_ids[start : start + 250]
                 placeholders = ",".join("?" for _ in chunk)
                 self.conn.execute(
                     f"""
@@ -3324,7 +3336,11 @@ class EventStore:
                     for row in same_source_targets
                     if str(row[0] or "") == retained_target_id
                 )
-                self._bind_winner_pointer(retained_target_id, updated_at=now)
+                self._bind_winner_pointer(
+                    retained_target_id,
+                    updated_at=now,
+                    preserve_processing_event_ids=frozenset(allowed_claims),
+                )
                 self._set_winner(retained_target_id, retained_received_at)
                 event_cols = ", ".join(_EVENT_ROW_KEYS)
                 row = self.conn.execute(
@@ -3410,7 +3426,11 @@ class EventStore:
         )
         prioritized = cur.rowcount == 1
         if prioritized:
-            self._bind_winner_pointer(event.event_id, updated_at=now)
+            self._bind_winner_pointer(
+                event.event_id,
+                updated_at=now,
+                preserve_processing_event_ids=frozenset(allowed_claims),
+            )
             self._set_winner(event.event_id, event.received_at)
             return event
         return None
