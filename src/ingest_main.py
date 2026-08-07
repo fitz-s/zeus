@@ -2518,6 +2518,11 @@ def _replacement_maintenance_tick():
     timeout_s = _replacement_current_target_poll_timeout_seconds(
         _replacement_availability_poll_seconds()
     )
+    deadline_monotonic = time.monotonic() + timeout_s
+
+    def _remaining_budget() -> float:
+        return max(0.0, deadline_monotonic - time.monotonic())
+
     if cooldown_seconds > 0:
         _defer_replacement_maintenance(float(cooldown_seconds))
         download_report = None
@@ -2529,7 +2534,7 @@ def _replacement_maintenance_tick():
         try:
             download_report = _download_replacement_forecast_current_targets_if_needed(
                 cfg,
-                max_wall_clock_seconds=timeout_s,
+                max_wall_clock_seconds=_remaining_budget(),
             )
         except TimeoutError as exc:
             download_report = {
@@ -2555,23 +2560,32 @@ def _replacement_maintenance_tick():
                 "retry_after_seconds": bpf_retry_after,
             }
         else:
-            try:
-                extras_report = (
-                    _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
-                        cfg,
-                        max_wall_clock_seconds=timeout_s,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001 - reseeds remain independent
-                logger.warning(
-                    "replacement maintenance BPF-extra repair failed: %s",
-                    exc,
-                    exc_info=True,
-                )
+            remaining = _remaining_budget()
+            if remaining <= 0.0:
                 extras_report = {
-                    "status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED",
-                    "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+                    "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+                    "timeboxed_incomplete": True,
+                    "attempted_target_group_count": 0,
+                    "max_wall_clock_seconds": 0.0,
                 }
+            else:
+                try:
+                    extras_report = (
+                        _download_bayes_precision_fusion_extra_raw_inputs_if_needed(
+                            cfg,
+                            max_wall_clock_seconds=remaining,
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001 - reseeds remain independent
+                    logger.warning(
+                        "replacement maintenance BPF-extra repair failed: %s",
+                        exc,
+                        exc_info=True,
+                    )
+                    extras_report = {
+                        "status": "BAYES_PRECISION_FUSION_EXTRA_CAPTURE_FAILSOFT_SKIPPED",
+                        "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+                    }
             _record_replacement_bpf_maintenance_progress(extras_report)
 
     report: dict[str, object] = {
@@ -2609,21 +2623,36 @@ def _replacement_maintenance_tick():
         )
         if error is not None
     ]
-    for prefix, reseed in (
-        ("fusion_upgrade", _enqueue_fusion_upgrade_reseeds_if_needed),
-        ("cycle_advance", _enqueue_cycle_advance_reseeds_if_needed),
-    ):
-        try:
-            reseed_report = reseed(cfg)
-        except Exception as exc:  # noqa: BLE001 - isolate independent repair lanes
-            maintenance_errors.append(
-                f"{prefix}:{type(exc).__name__}: {str(exc)[:180]}"
-            )
-            logger.warning("replacement maintenance %s failed: %s", prefix, exc)
-            continue
-        if reseed_report is not None:
-            report[f"{prefix}_status"] = reseed_report.get("status")
-            report[f"{prefix}_seeds_enqueued"] = reseed_report.get("seeds_enqueued")
+    download_timeboxed = any(
+        isinstance(lane_report, dict)
+        and bool(lane_report.get("timeboxed_incomplete"))
+        for lane_report in (download_report, extras_report)
+    )
+    if download_timeboxed or _remaining_budget() <= 0.0:
+        report["reseed_maintenance_status"] = (
+            "REPLACEMENT_MAINTENANCE_RESEEDS_DEFERRED_DEADLINE"
+        )
+    else:
+        for prefix, reseed in (
+            ("fusion_upgrade", _enqueue_fusion_upgrade_reseeds_if_needed),
+            ("cycle_advance", _enqueue_cycle_advance_reseeds_if_needed),
+        ):
+            if _remaining_budget() <= 0.0:
+                report["reseed_maintenance_status"] = (
+                    "REPLACEMENT_MAINTENANCE_RESEEDS_DEFERRED_DEADLINE"
+                )
+                break
+            try:
+                reseed_report = reseed(cfg)
+            except Exception as exc:  # noqa: BLE001 - isolate independent repair lanes
+                maintenance_errors.append(
+                    f"{prefix}:{type(exc).__name__}: {str(exc)[:180]}"
+                )
+                logger.warning("replacement maintenance %s failed: %s", prefix, exc)
+                continue
+            if reseed_report is not None:
+                report[f"{prefix}_status"] = reseed_report.get("status")
+                report[f"{prefix}_seeds_enqueued"] = reseed_report.get("seeds_enqueued")
     if maintenance_errors:
         report["status"] = "REPLACEMENT_MAINTENANCE_PARTIAL"
         report["retryable"] = True

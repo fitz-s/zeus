@@ -1418,7 +1418,7 @@ def test_replacement_availability_cooldown_keeps_metadata_probe_alive_but_suppre
 
 
 def test_replacement_maintenance_tick_throttles_timeboxed_repair(monkeypatch) -> None:
-    """A timeboxed repair remains retryable/unhealthy while independent reseeds run."""
+    """A timeboxed repair defers broad reseeds instead of multiplying the tick budget."""
     import src.ingest_main as ingest_main
     import src.data.replacement_forecast_production as prod
     import src.observability.scheduler_health as scheduler_health
@@ -1482,7 +1482,10 @@ def test_replacement_maintenance_tick_throttles_timeboxed_repair(monkeypatch) ->
     assert result["current_target_download"]["status"] == "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE"
     assert result["current_target_download"]["timeboxed_incomplete"] is True
     assert result["current_target_download"]["unattempted_target_count"] == 2
-    assert result["cycle_advance_seeds_enqueued"] == 3
+    assert result["reseed_maintenance_status"] == (
+        "REPLACEMENT_MAINTENANCE_RESEEDS_DEFERRED_DEADLINE"
+    )
+    assert "cycle_advance_seeds_enqueued" not in result
     assert health[-1] == {
         "job_name": "ingest_replacement_maintenance",
         "failed": True,
@@ -1491,7 +1494,80 @@ def test_replacement_maintenance_tick_throttles_timeboxed_repair(monkeypatch) ->
 
     second = ingest_main._replacement_maintenance_tick()
     assert second["status"] == "REPLACEMENT_MAINTENANCE_NOT_DUE"
-    assert calls == [1.0]
+    assert calls == [pytest.approx(1.0, abs=0.01)]
+
+
+def test_replacement_maintenance_uses_one_parent_deadline(monkeypatch) -> None:
+    """Current-target work cannot grant BPF and broad reseeds fresh full budgets."""
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    now = [100.0]
+    monkeypatch.setattr(ingest_main.time, "monotonic", lambda: now[0])
+    monkeypatch.setenv(
+        ingest_main.REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV,
+        "10",
+    )
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC",
+        0.0,
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download."
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    budgets: list[tuple[str, float]] = []
+
+    def _current(_cfg, *, max_wall_clock_seconds):
+        budgets.append(("current", max_wall_clock_seconds))
+        now[0] += 7.0
+        return {"status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS"}
+
+    def _extras(_cfg, *, max_wall_clock_seconds):
+        budgets.append(("extras", max_wall_clock_seconds))
+        now[0] += max_wall_clock_seconds
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+            "timeboxed_incomplete": True,
+        }
+
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        _current,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        _extras,
+    )
+    reseeds: list[str] = []
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda _cfg: reseeds.append("fusion"),
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda _cfg: reseeds.append("cycle"),
+    )
+
+    result = ingest_main._replacement_maintenance_tick.__wrapped__()
+
+    assert budgets == [("current", 10.0), ("extras", 3.0)]
+    assert reseeds == []
+    assert result["status"] == "REPLACEMENT_MAINTENANCE_PARTIAL"
+    assert result["reseed_maintenance_status"] == (
+        "REPLACEMENT_MAINTENANCE_RESEEDS_DEFERRED_DEADLINE"
+    )
 
 
 def test_replacement_maintenance_quota_cooldown_is_partial_but_reseeds(
