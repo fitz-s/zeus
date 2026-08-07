@@ -19075,7 +19075,12 @@ def _actionable_payload_from_receipt(
         "candidate_bin_id": receipt.candidate_bin_id,
         "qkernel_execution_economics": qkernel_execution_economics,
         "day0_probability_authority": day0_probability_authority,
-        "_edli_q_source": _day0_probability_value("q_source"),
+        # Keep the internal provenance projection byte-consistent with the
+        # receipt's canonical probability witness. Day0 may carry a more
+        # specific nested witness; ordinary forecast events do not.
+        "_edli_q_source": _first_present(
+            _day0_probability_value("q_source"), receipt.q_source
+        ),
         "_edli_day0_q_mode": _day0_probability_value("q_mode"),
         "_edli_day0_remaining_models": _day0_probability_value("remaining_models"),
         "_edli_day0_remaining_model_names": _day0_probability_value("remaining_model_names"),

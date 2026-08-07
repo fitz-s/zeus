@@ -2758,11 +2758,12 @@ def test_actionable_payload_preserves_sealed_global_execution_economics(
     payload["event_type"] = "FORECAST_SNAPSHOT_READY"
 
     assert payload["qkernel_execution_economics"] == cert
+    assert payload["_edli_q_source"] == "replacement_0_1"
     with pytest.raises(
         ValueError,
         match=(
             "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
-            "authority=missing:q_source=missing:"
+            "authority=missing:q_source=replacement_0_1:"
             "canonical_q_source=replacement_0_1"
         ),
     ):
