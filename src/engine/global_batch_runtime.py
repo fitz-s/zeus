@@ -5721,15 +5721,24 @@ def process_current_global_batch(
                         return reject("GLOBAL_PREFLIGHT_BLOCKED_CANDIDATE_INVALID")
                     reason = preflight.reason or "GLOBAL_WINNER_PREFLIGHT_REJECTED"
                     candidate_exclusion_keys = (candidate_key,)
+                    probability_authority_exclusion = reason.startswith(
+                        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+                        "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
+                    )
                     entry_scope_exclusion = reason.startswith(
                         (
                             "LIVE_ENTRY_BLOCKED:entry_readiness_family:",
                             "LIVE_ENTRY_BLOCKED:entry_readiness:",
                         )
-                    )
-                    if reason.startswith(
-                        "LIVE_ENTRY_BLOCKED:entry_readiness_family:"
+                    ) or probability_authority_exclusion
+                    if (
+                        reason.startswith(
+                            "LIVE_ENTRY_BLOCKED:entry_readiness_family:"
+                        )
+                        or probability_authority_exclusion
                     ):
+                        # The unqualified witness blocks this family's BUYs,
+                        # never its reduce-only SELLs.
                         candidate_exclusion_keys = tuple(
                             sorted(
                                 {

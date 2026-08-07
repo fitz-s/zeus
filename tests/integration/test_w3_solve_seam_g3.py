@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-02
+# Last reused/audited: 2026-08-07
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -23727,6 +23727,16 @@ def test_global_batch_falls_through_family_local_preflight_block(
             "SELL",
         ),
         (
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+            "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
+            "authority=day0_remaining_day_global_probability_v1:"
+            "q_source=day0_remaining_day:"
+            "canonical_q_source=day0_remaining_day:"
+            "event_type=DAY0_EXTREME_UPDATED",
+            "BUY",
+            "SELL",
+        ),
+        (
             "FDR_REJECTED:event_type=DAY0_EXTREME_UPDATED:"
             "attempted=22:selected_post_fdr=0:alpha=0.100000",
             "BUY",
@@ -23788,7 +23798,13 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
         token_id="token-a",
     )
     family_entry_block = reason.startswith(
-        "LIVE_ENTRY_BLOCKED:entry_readiness_family:"
+        (
+            "LIVE_ENTRY_BLOCKED:entry_readiness_family:",
+            (
+                "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+                "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
+            ),
+        )
     )
     candidate_b = SimpleNamespace(
         candidate_id="candidate-b",

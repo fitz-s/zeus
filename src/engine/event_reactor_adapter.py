@@ -11701,14 +11701,19 @@ def _global_preflight_block_status(reason: str) -> str:
         (
             "LIVE_ENTRY_BLOCKED:entry_readiness:",
             "LIVE_ENTRY_BLOCKED:entry_readiness_family:",
+            (
+                "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+                "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
+            ),
         )
     ):
-        # SCOPE: entry readiness governs BUY admission only. The batch runner
-        # expands this typed reason to every BUY in the reported global/family
-        # scope while preserving SELL. DRAIN: re-run this complete
+        # SCOPE: entry readiness and an unqualified probability binding govern
+        # BUY admission only. The batch runner expands these typed reasons to
+        # their BUY scope while preserving SELL. DRAIN: re-run this complete
         # BUY/SELL/HOLD/CASH cut immediately. RESET: the next cut rebuilds
-        # readiness from current state. Rejecting the complete epoch here would
-        # let an entry hold starve an executable reduce-only SELL.
+        # readiness and probability authority from current state. Rejecting the
+        # complete epoch here would let an impossible entry starve an executable
+        # qualified BUY or reduce-only SELL.
         return "CANDIDATE_BLOCKED"
     if reason.startswith(
         (
