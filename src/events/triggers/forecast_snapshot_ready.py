@@ -908,20 +908,33 @@ class ForecastSnapshotReadyTrigger:
         _ranked_readiness_from_sql = "FROM readiness_state AS rs"
         _ranked_readiness_prefix_params: tuple[str, ...] = ()
         if market_backed_current_scope:
-            # Drive the current-scope scan from the much smaller executable
-            # market family set.  Ranking every historical readiness family
-            # first made the cold forecast DB path page through unrelated
-            # state before the existing market predicate could discard it.
+            # Drive the current-scope scan from the bounded live-posterior
+            # frontier, then point-probe market existence.  ``market_events``
+            # is append-only history and can grow far beyond the current
+            # tradable universe; scanning it by target_date (not a leading
+            # index column) pinned the only reactor lane for minutes.  The
+            # posterior partial index and market family index make this shape
+            # proportional to current probability authority instead.
             # The latest-row ranking remains unchanged inside each requested
             # family, so a newer BLOCKED row still suppresses an older READY row.
-            _ranked_readiness_market_cte_sql = """
+            _ranked_readiness_market_cte_sql = f"""
             market_families AS (
                 SELECT DISTINCT
-                       m.city,
-                       m.target_date,
-                       m.temperature_metric
-                  FROM market_events AS m
-                 WHERE m.target_date >= ?
+                       current_fp.city,
+                       current_fp.target_date,
+                       current_fp.temperature_metric
+                  FROM forecast_posteriors AS current_fp
+                 WHERE current_fp.product_id = '{REPLACEMENT_0_1_PRODUCT_ID}'
+                   AND current_fp.runtime_layer = 'live'
+                   AND current_fp.training_allowed = 0
+                   AND current_fp.target_date >= ?
+                   AND EXISTS (
+                       SELECT 1
+                         FROM market_events AS m
+                        WHERE m.city = current_fp.city
+                          AND m.target_date = current_fp.target_date
+                          AND m.temperature_metric = current_fp.temperature_metric
+                   )
             ),
             """
             _ranked_readiness_from_sql = f"""
