@@ -2910,6 +2910,40 @@ def _bayes_precision_fusion_lead_bucket(lead_days: int) -> str:
     return "L4P"
 
 
+def _freshest_declared_provider_representatives(
+    served: Mapping[str, object],
+) -> dict[str, object]:
+    """Remove stale same-provider alternatives before the specificity selector runs.
+
+    A regional nest is preferable only within the same provider cycle.  If its latest
+    possessed run is older than a global member from that provider, selecting it first
+    can discard the fresh member and leave the current-evidence cohort impossible.
+    Keep every newest-cycle tie so ``select_models`` still applies the declared
+    highest-resolution-first rule within one issuance.
+    """
+    from src.forecast.model_selection import PROVIDER_FAMILIES  # noqa: PLC0415
+
+    out = dict(served)
+    for family in PROVIDER_FAMILIES:
+        present = [model for model in family if model in out]
+        cycles: dict[str, datetime] = {}
+        for model in present:
+            raw_cycle = getattr(out[model], "served_cycle", None)
+            try:
+                cycles[model] = _to_utc(
+                    str(raw_cycle), field_name=f"served_cycle[{model}]"
+                )
+            except (TypeError, ValueError, OverflowError):
+                continue
+        if len(cycles) < 2:
+            continue
+        newest = max(cycles.values())
+        for model, cycle in cycles.items():
+            if cycle < newest:
+                out.pop(model, None)
+    return out
+
+
 def _replacement_bayes_precision_fusion_override(
     request: "ReplacementForecastMaterializeRequest",
     *,
@@ -2994,6 +3028,9 @@ def _replacement_bayes_precision_fusion_override(
                 # weights them at initial precision (raw_second_moment_weights) and the frozen-scheme
                 # skip (_station_live_omitted below) serves that live fusion center.
                 include_station_sources=True,
+            )
+            served_current = _freshest_declared_provider_representatives(
+                served_current
             )
             persisted_current = {
                 m: (s.value_c, s.raw_model_forecast_id) for m, s in served_current.items()
