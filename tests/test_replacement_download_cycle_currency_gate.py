@@ -1,5 +1,5 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-07-20
+# Last reused or audited: 2026-08-07
 # Authority basis: 2026-06-09 anchor-lag root cause (/tmp/anchor_lag_report.md, verified against
 #   src/data/replacement_forecast_production.py + replacement_forecast_current_target_plan.py):
 #   the ALREADY_COVERED / HAVE_RAW_MANIFESTS short-circuits contained NO cycle comparison, so once
@@ -192,6 +192,50 @@ def test_meta_stamped_wave_brackets_concurrent_payloads_once(monkeypatch) -> Non
     assert events.count("meta") == 2
     assert events[0] == events[-1] == "meta"
     assert all(row[1]["meta_stamp_scope"] == "download_wave" for row in resolved.values())
+
+
+def test_deadlined_meta_wave_never_queues_more_than_one_worker_width(monkeypatch) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+    from src.data.openmeteo_ecmwf_ifs9_anchor import build_anchor_request
+
+    requests = {
+        (f"City {i}", "2026-08-07"): build_anchor_request(
+            latitude=30.0 + i,
+            longitude=10.0 + i,
+            run="2026-08-07T12:00:00+00:00",
+            timezone_name="UTC",
+        )
+        for i in range(8)
+    }
+    meta = {
+        "run_initialisation_utc": datetime(2026, 8, 7, 12, tzinfo=timezone.utc),
+        "run_availability_utc": datetime(2026, 8, 7, 13, tzinfo=timezone.utc),
+        "run_modification_utc": datetime(2026, 8, 7, 13, tzinfo=timezone.utc),
+    }
+    attempted: list[object] = []
+
+    monkeypatch.setattr(dl, "fetch_openmeteo_ifs9_model_meta", lambda **_kwargs: meta)
+
+    def _payload(request, **_kwargs):
+        attempted.append(request)
+        return {"hourly": {"time": [], "temperature_2m": []}}
+
+    monkeypatch.setattr(
+        dl,
+        "fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped",
+        _payload,
+    )
+
+    resolved, failures = dl._fetch_meta_stamped_anchor_wave(
+        requests,
+        max_workers=2,
+        deadline_monotonic=dl.time.monotonic() + 1.0,
+        client=object(),
+    )
+
+    assert failures == {}
+    assert list(resolved) == list(requests)[:2]
+    assert len(attempted) == 2
 
 
 def test_meta_stamped_wave_discards_every_payload_when_provider_changes_run(

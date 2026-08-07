@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-07
-# Last reused/audited: 2026-07-20
-# Lifecycle: created=2026-06-07; last_reviewed=2026-07-20
+# Last reused/audited: 2026-08-07
+# Lifecycle: created=2026-06-07; last_reviewed=2026-08-07
 # Purpose: Download current-target Open-Meteo ECMWF IFS 9km raw inputs for replacement forecast materialization.
 # Reuse: Run before live replacement materialization when dry-run reports current-target coverage gaps.
 # Authority basis: Raw artifacts are live inputs only after the replacement materializer emits
@@ -504,6 +504,13 @@ def _fetch_meta_stamped_anchor_wave(
     payloads: dict[tuple[str, str], tuple[dict, datetime]] = {}
     failures: dict[tuple[str, str], Exception] = {}
     workers = min(max(1, int(max_workers)), 8, len(requests))
+    wave_requests = requests
+    if deadline_monotonic is not None:
+        # A ThreadPoolExecutor context waits for every submitted future at shutdown.
+        # Submit one worker-width wave so this bounded live slice cannot multiply its
+        # wall-clock budget by the number of queued city/date targets. Unattempted
+        # targets remain absent and are reconsidered by the next maintenance cycle.
+        wave_requests = dict(list(requests.items())[:workers])
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="openmeteo-anchor") as executor:
         future_keys = {
             executor.submit(
@@ -514,7 +521,7 @@ def _fetch_meta_stamped_anchor_wave(
                 fast_fail_429=True,
                 client=client,
             ): key
-            for key, request in requests.items()
+            for key, request in wave_requests.items()
         }
         for future in as_completed(future_keys):
             key = future_keys[future]
