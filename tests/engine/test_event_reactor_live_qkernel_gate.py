@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-08-02
+# Last reused/audited: 2026-08-07
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -3896,6 +3896,34 @@ def test_live_entry_unqualified_q_source_cannot_hide_behind_unknown_authority(di
         match=(
             "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
             "authority=renamed_but_unqualified:q_source=replacement_0_1"
+        ),
+    ):
+        _assert_live_entry_submit_authority(payload)
+
+
+@pytest.mark.parametrize("direction", ("buy_yes", "buy_no"))
+def test_live_entry_unqualified_probability_reports_exact_q_version(direction):
+    cert = _current_qkernel_cert(side="YES" if direction == "buy_yes" else "NO")
+    cert["q_version"] = "posterior-identity-exact-1"
+    _seal_current_qkernel_cert(cert)
+    payload = _day0_payload(
+        **_day0_probability_fields(),
+        event_type="FORECAST_SNAPSHOT_READY",
+        probability_authority="replacement_0_1",
+        selection_authority_applied="qkernel_spine",
+        direction=direction,
+        strategy_key="forecast_qkernel_entry",
+        candidate_bin_id="bin-1",
+        qkernel_execution_economics=cert,
+    )
+    payload["q_source"] = "replacement_0_1"
+    payload["_edli_q_source"] = "replacement_0_1"
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
+            ".*q_version=posterior-identity-exact-1"
         ),
     ):
         _assert_live_entry_submit_authority(payload)

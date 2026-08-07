@@ -18814,6 +18814,12 @@ def _assert_live_entry_submit_authority(actionable_payload: Mapping[str, object]
     ).strip()
     canonical_q_source = str(actionable_payload.get("q_source") or "").strip()
     q_source = str(actionable_payload.get("_edli_q_source") or "").strip()
+    qkernel_economics = actionable_payload.get("qkernel_execution_economics")
+    q_version = str(
+        qkernel_economics.get("q_version")
+        if isinstance(qkernel_economics, Mapping)
+        else ""
+    ).strip()
     authority_binding = (event_type, probability_authority, q_source)
     if (
         authority_binding not in _QUALIFIED_LIVE_ENTRY_PROBABILITY_BINDINGS
@@ -18835,7 +18841,8 @@ def _assert_live_entry_submit_authority(actionable_payload: Mapping[str, object]
             f"authority={probability_authority or 'missing'}:"
             f"q_source={q_source or 'missing'}:"
             f"canonical_q_source={canonical_q_source or 'missing'}:"
-            f"event_type={event_type or 'missing'}"
+            f"event_type={event_type or 'missing'}:"
+            f"q_version={q_version or 'missing'}"
         )
     if event_type in _FORECAST_DECISION_EVENT_TYPES or (
         event_type in _DAY0_LANE_EVENT_TYPES
