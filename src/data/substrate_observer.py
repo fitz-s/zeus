@@ -166,12 +166,17 @@ def _substrate_background_snapshot_trade_write_context_factory(owner: str):
     """Return the explicit fast-yield context for broad substrate capture only."""
 
     def _factory():
-        from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
+        from src.state.write_coordinator import (
+            DBIdentity,
+            WritePriority,
+            default_runtime_write_coordinator,
+        )
 
         return default_runtime_write_coordinator().lease(
             (DBIdentity.TRADE,),
             owner=owner,
             write_class="live",
+            priority=WritePriority.BACKGROUND_RECOVERY,
             deadline_ms=SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
             max_hold_ms=SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
         )

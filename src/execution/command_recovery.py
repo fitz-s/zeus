@@ -98,6 +98,10 @@ _FULL_SWEEP_BUDGET_SECONDS = 45.0
 # writer turn instead of waiting for a historical debt scan to finish.
 _FULL_BACKGROUND_RECOVERY_QUANTUM_COMMANDS = 1
 _FULL_BACKGROUND_RECOVERY_QUANTUM_ROTATION_SECONDS = 60
+# Chain/portfolio projections are persisted to four decimal places. Recovery
+# compares exact identities and complete venue reads, but must not demand
+# precision that the canonical projection contract cannot represent.
+_POSITION_PROJECTION_TOLERANCE = Decimal("0.0001")
 _RESTART_ACCOUNT_TRUTH_DEADLINE_ENV = (
     "ZEUS_RESTART_RECOVERY_ACCOUNT_TRUTH_DEADLINE_SECONDS"
 )
@@ -16529,7 +16533,7 @@ def _cancel_unknown_partial_position_proof(
     if str(current.get("order_id") or "").lower() != venue_order_id.lower():
         return False
     expected_cost = filled * price
-    tolerance = Decimal("0.000001")
+    tolerance = _POSITION_PROJECTION_TOLERANCE
     for field, expected in (
         ("shares", filled),
         ("chain_shares", filled),

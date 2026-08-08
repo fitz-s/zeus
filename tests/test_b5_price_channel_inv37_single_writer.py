@@ -658,6 +658,55 @@ def test_submit_ack_and_monitor_keep_their_own_foreground_write_opportunity():
     assert "max_hold_ms=_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS" in monitor_source
 
 
+def test_price_channel_writer_roles_reach_coordinator_priority(monkeypatch):
+    """Held evidence outranks replayable quote and invalidation producers."""
+    from src.ingest import price_channel_ingest as lane
+    from src.state import write_coordinator
+    from src.state.write_coordinator import WritePriority
+
+    observed: list[tuple[str, object]] = []
+
+    class _Coordinator:
+        @contextlib.contextmanager
+        def lease(self, _dbs, **kwargs):
+            observed.append((kwargs["owner"], kwargs["priority"]))
+            yield
+
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: _Coordinator(),
+    )
+
+    with lane._edli_price_channel_trade_write_gate(
+        owner="price_channel_held_quote_refresh",
+        priority="monitor",
+    ):
+        pass
+    with lane._edli_price_channel_trade_write_gate(
+        owner="price_channel_market_quote",
+        priority="background_recovery",
+    ):
+        pass
+    with lane._edli_background_snapshot_trade_write_context_factory(
+        owner="price_channel_snapshot_invalidate"
+    )():
+        pass
+
+    assert observed == [
+        ("price_channel_held_quote_refresh", "monitor"),
+        ("price_channel_market_quote", "background_recovery"),
+        (
+            "price_channel_snapshot_invalidate",
+            WritePriority.BACKGROUND_RECOVERY,
+        ),
+    ]
+
+    lane_source = _PRICE_CHANNEL_MODULE.read_text(encoding="utf-8")
+    assert 'owner="price_channel_candidate_quote_refresh",\n                    priority="background_recovery"' in lane_source
+    assert 'owner="price_channel_market_quote",\n                        priority="background_recovery"' in lane_source
+
+
 def test_submit_ack_retry_persists_after_a_180ms_legacy_sqlite_lock(tmp_path):
     """Post-venue ACK persistence retries the local fact write, never the venue call."""
     from src.execution.executor import _retry_persist_on_db_lock

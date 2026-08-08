@@ -31,6 +31,7 @@ Two tests:
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 import subprocess
@@ -514,6 +515,34 @@ def test_background_capture_busy_timeout_is_fixed_fast_yield_budget(monkeypatch)
     monkeypatch.delenv("ZEUS_DB_BUSY_TIMEOUT_MS", raising=False)
 
     assert ms._background_snapshot_capture_busy_timeout_ms() == 25
+
+
+def test_background_substrate_factory_uses_monitor_aware_priority(monkeypatch):
+    """Broad warm capture must yield once a canonical monitor waiter exists."""
+    from src.data import substrate_observer
+    from src.state import write_coordinator
+    from src.state.write_coordinator import WritePriority
+
+    observed: list[object] = []
+
+    class _Coordinator:
+        @contextlib.contextmanager
+        def lease(self, _dbs, **kwargs):
+            observed.append(kwargs["priority"])
+            yield
+
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: _Coordinator(),
+    )
+
+    with substrate_observer._substrate_background_snapshot_trade_write_context_factory(
+        "substrate_pending_family_background_capture"
+    )():
+        pass
+
+    assert observed == [WritePriority.BACKGROUND_RECOVERY]
 
 
 def test_priority_capture_keeps_foreground_budget_and_context_when_background_enabled(

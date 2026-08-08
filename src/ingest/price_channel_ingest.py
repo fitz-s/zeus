@@ -282,6 +282,7 @@ class _PriceChannelWriteGate:
         scope: str,
         deadline_ms: int = PRICE_CHANNEL_DB_WRITE_LEASE_DEADLINE_MS,
         max_hold_ms: int = PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
+        priority: str = "standard",
         deadline_monotonic: float | None = None,
         on_enter: Callable[[], None] | None = None,
     ) -> None:
@@ -289,6 +290,7 @@ class _PriceChannelWriteGate:
         self._scope = scope
         self._deadline_ms = max(0, int(deadline_ms))
         self._max_hold_ms = max(0, int(max_hold_ms))
+        self._priority = priority
         self._deadline_monotonic = deadline_monotonic
         self._on_enter = on_enter
         self._stack: contextlib.ExitStack | None = None
@@ -333,14 +335,16 @@ class _PriceChannelWriteGate:
                 if DBIdentity.WORLD in dbs or self._deadline_monotonic is not None
                 else self._deadline_ms
             )
+            lease_kwargs = {
+                "owner": self._owner,
+                "write_class": "live",
+                "deadline_ms": remaining_ms,
+                "max_hold_ms": self._max_hold_ms,
+            }
+            if self._priority != "standard":
+                lease_kwargs["priority"] = self._priority
             stack.enter_context(
-                default_runtime_write_coordinator().lease(
-                    dbs,
-                    owner=self._owner,
-                    write_class="live",
-                    deadline_ms=remaining_ms,
-                    max_hold_ms=self._max_hold_ms,
-                )
+                default_runtime_write_coordinator().lease(dbs, **lease_kwargs)
             )
             if self._on_enter is not None:
                 self._on_enter()
@@ -380,6 +384,7 @@ def _edli_price_channel_trade_write_gate(
     *,
     owner: str,
     deadline_ms: int = PRICE_CHANNEL_QUOTE_DB_WRITE_LEASE_DEADLINE_MS,
+    priority: str = "standard",
     deadline_monotonic: float | None = None,
     on_enter: Callable[[], None] | None = None,
 ) -> _PriceChannelWriteGate:
@@ -388,6 +393,7 @@ def _edli_price_channel_trade_write_gate(
         scope="trade",
         deadline_ms=deadline_ms,
         max_hold_ms=PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS,
+        priority=priority,
         deadline_monotonic=deadline_monotonic,
         on_enter=on_enter,
     )
@@ -558,12 +564,17 @@ def _edli_background_snapshot_trade_write_context_factory(*, owner: str):
     """Return the fast-yield context used only by background invalidation."""
 
     def _factory():
-        from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
+        from src.state.write_coordinator import (
+            DBIdentity,
+            WritePriority,
+            default_runtime_write_coordinator,
+        )
 
         return default_runtime_write_coordinator().lease(
             (DBIdentity.TRADE,),
             owner=owner,
             write_class="live",
+            priority=WritePriority.BACKGROUND_RECOVERY,
             deadline_ms=PRICE_CHANNEL_QUOTE_DB_WRITE_LEASE_DEADLINE_MS,
             max_hold_ms=PRICE_CHANNEL_QUOTE_DB_WRITE_MAX_HOLD_MS,
         )
@@ -3188,6 +3199,7 @@ def _edli_refresh_held_position_quote_evidence(
                 received_at=datetime.now(timezone.utc).isoformat(),
                 write_gate=_edli_price_channel_trade_write_gate(
                     owner="price_channel_held_quote_refresh",
+                    priority="monitor",
                     deadline_ms=(
                         PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS
                     ),
@@ -3418,6 +3430,7 @@ def _edli_refresh_candidate_priority_quote_evidence(
                 received_at=datetime.now(timezone.utc).isoformat(),
                 write_gate=_edli_price_channel_trade_write_gate(
                     owner="price_channel_candidate_quote_refresh",
+                    priority="background_recovery",
                     deadline_ms=(
                         PRICE_CHANNEL_CANDIDATE_QUOTE_DB_WRITE_LEASE_DEADLINE_MS
                     ),
@@ -4065,7 +4078,8 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                     commit=_commit_quote,
                     rollback=_rollback_quote,
                     quote_write_gate=_edli_price_channel_trade_write_gate(
-                        owner="price_channel_market_quote"
+                        owner="price_channel_market_quote",
+                        priority="background_recovery",
                     ),
                     world_event_write_gate=_edli_price_channel_world_write_gate(
                         owner="price_channel_market_event"

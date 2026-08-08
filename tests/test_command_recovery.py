@@ -28073,3 +28073,52 @@ def test_command_recovery_follow_through_retries_world_mutex_contention(monkeypa
         )
         is False
     )
+
+
+def test_cancel_unknown_partial_accepts_canonical_projection_precision(conn):
+    """Venue decimals may exceed the four-place chain/portfolio projection."""
+    from src.execution.command_recovery import _cancel_unknown_partial_position_proof
+
+    _insert(conn, size=41.0, price=0.33)
+    _advance_to_acked(conn, venue_order_id="ord-rounded-partial")
+    _seed_pending_entry_projection(
+        conn,
+        position_id="pos-001",
+        command_id="cmd-001",
+        order_id="ord-rounded-partial",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'day0_window',
+               chain_state = 'synced',
+               order_id = 'ord-rounded-partial',
+               shares = 29.8507,
+               chain_shares = 29.8507,
+               cost_basis_usd = 9.8507,
+               chain_cost_basis_usd = 9.8507
+         WHERE position_id = 'pos-001'
+        """
+    )
+    command = {
+        "position_id": "pos-001",
+        "venue_order_id": "ord-rounded-partial",
+    }
+
+    assert _cancel_unknown_partial_position_proof(
+        conn,
+        command=command,
+        filled_size="29.850742",
+        fill_price="0.33",
+    )
+
+    conn.execute(
+        "UPDATE position_current SET chain_shares = 29.8505 "
+        "WHERE position_id = 'pos-001'"
+    )
+    assert not _cancel_unknown_partial_position_proof(
+        conn,
+        command=command,
+        filled_size="29.850742",
+        fill_price="0.33",
+    )
