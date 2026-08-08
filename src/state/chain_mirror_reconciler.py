@@ -418,6 +418,44 @@ def classify_local_position(
         )
     local_shares = row.local_reported_shares()
     delta = abs(chain_fact.size - local_shares)
+    attributed_chain_shares = (
+        chain_fact.size
+        if row.fill_authority == "venue_position_observed"
+        else min(chain_fact.size, local_shares)
+    )
+    projected_chain_shares = float(row.chain_shares or 0.0)
+    chain_projection_delta = abs(
+        projected_chain_shares - attributed_chain_shares
+    )
+    if (
+        chain_fact.size + _SIZE_MISMATCH_TOLERANCE >= local_shares
+        and chain_projection_delta > _SIZE_MISMATCH_TOLERANCE
+    ):
+        details = {
+            "reason": "chain_projection_stale_prefix",
+            "chain_size": chain_fact.size,
+            "local_shares": local_shares,
+            "chain_shares_before": row.chain_shares,
+            "attributed_chain_shares": attributed_chain_shares,
+            "shares_unchanged": True,
+            "delta": chain_projection_delta,
+        }
+        if delta <= _SIZE_MISMATCH_TOLERANCE:
+            details.update(
+                {
+                    "chain_avg_price": chain_fact.avg_price,
+                    "chain_cost_basis_usd": chain_fact.cost_basis_usd,
+                }
+            )
+        else:
+            details["unattributed_residual"] = chain_fact.size - local_shares
+        return MirrorFinding(
+            classification=SIZE_CORRECTED,
+            position_id=row.position_id,
+            asset=held_token,
+            writes=True,
+            details=details,
+        )
     if delta > _SIZE_MISMATCH_TOLERANCE:
         if chain_fact.size > local_shares:
             # The Data API row is the wallet's token aggregate. It can contain

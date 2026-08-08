@@ -164,6 +164,101 @@ def test_matching_size_unresolved_market_is_consistent():
     assert finding.writes is False
 
 
+def test_matching_owned_size_repairs_stale_chain_projection_prefix(trades_conn):
+    row = _row(
+        position_id="pos-stale-chain-prefix",
+        direction="buy_yes",
+        token_id="tok-stale-chain-prefix",
+        chain_shares=3.5,
+        shares=11.5,
+        fill_authority="venue_confirmed_full",
+    )
+    chain = {
+        "tok-stale-chain-prefix": ChainPositionFact(
+            token_id="tok-stale-chain-prefix",
+            condition_id="cond-1",
+            size=11.5,
+            avg_price=0.29,
+            cost_basis_usd=3.335,
+            redeemable=False,
+            current_value=5.0,
+            side="Yes",
+        )
+    }
+
+    finding = classify_local_position(row, chain_by_asset=chain, settlement_by_key={})
+
+    assert finding.classification == SIZE_CORRECTED
+    assert finding.writes is True
+    assert finding.details["reason"] == "chain_projection_stale_prefix"
+    assert finding.details["attributed_chain_shares"] == 11.5
+    _insert_position_current(
+        trades_conn,
+        position_id="pos-stale-chain-prefix",
+        token_id="tok-stale-chain-prefix",
+        chain_shares=3.5,
+        shares=11.5,
+        cost_basis_usd=3.335,
+        fill_authority="venue_confirmed_full",
+    )
+    assert apply_size_correction_finding(
+        trades_conn,
+        finding,
+        now=datetime(2026, 8, 8, 10, 15, tzinfo=timezone.utc),
+    ) is True
+    repaired = trades_conn.execute(
+        """
+        SELECT shares, cost_basis_usd, chain_shares, chain_avg_price,
+               chain_cost_basis_usd
+          FROM position_current
+         WHERE position_id = 'pos-stale-chain-prefix'
+        """
+    ).fetchone()
+    assert dict(repaired) == {
+        "shares": 11.5,
+        "cost_basis_usd": 3.335,
+        "chain_shares": 11.5,
+        "chain_avg_price": 0.29,
+        "chain_cost_basis_usd": 3.335,
+    }
+
+
+def test_wallet_excess_repairs_stale_owned_chain_prefix_without_expanding_position():
+    row = _row(
+        direction="buy_yes",
+        token_id="tok-owned-stale-prefix",
+        chain_shares=3.0,
+        shares=10.0,
+        fill_authority="venue_confirmed_full",
+    )
+    chain = {
+        "tok-owned-stale-prefix": ChainPositionFact(
+            token_id="tok-owned-stale-prefix",
+            condition_id="cond-1",
+            size=25.0,
+            avg_price=0.8,
+            cost_basis_usd=20.0,
+            redeemable=False,
+            current_value=5.0,
+            side="Yes",
+        )
+    }
+
+    finding = classify_local_position(row, chain_by_asset=chain, settlement_by_key={})
+
+    assert finding.classification == SIZE_CORRECTED
+    assert finding.details == {
+        "reason": "chain_projection_stale_prefix",
+        "chain_size": 25.0,
+        "local_shares": 10.0,
+        "chain_shares_before": 3.0,
+        "attributed_chain_shares": 10.0,
+        "shares_unchanged": True,
+        "delta": 7.0,
+        "unattributed_residual": 15.0,
+    }
+
+
 def test_wallet_excess_does_not_expand_owned_position():
     row = _row(
         direction="buy_yes",
