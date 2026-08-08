@@ -6751,10 +6751,10 @@ def test_global_sell_reauction_publish_failure_recovers_exact_armed_obligation_o
     conn.close()
 
 
-def test_global_sell_reauction_same_generation_attempt_refresh_is_publishable(
+def test_global_sell_reauction_queued_executable_attempt_is_coalesced(
     tmp_path,
 ):
-    """A fresher q/book attempt replaces an older queued attempt in one scope."""
+    """Monitor refreshes cannot replace an actionable SELL debt mid-cut."""
     from src.events import reactor
     from src.runtime import reactor_wake
 
@@ -6798,6 +6798,69 @@ def test_global_sell_reauction_same_generation_attempt_refresh_is_publishable(
     assert second_result[0] is True
     assert second is not None
     assert second.generation == first.generation
+    assert second.attempt_identity == first.attempt_identity
+    assert reactor.publish_prepared_global_auction_completion(
+        reason=common["reason"],
+        prepared_request=second,
+        wake_path=wake_path,
+    ) is True
+    latest = reactor_wake.latest_v4_held_sell_reauction_request(
+        first.scope_identity,
+        path=wake_path,
+    )
+    assert latest is not None
+    assert latest.generation == first.generation
+    assert latest.attempt_identity == first.attempt_identity
+    assert latest.held_best_bid == pytest.approx(0.49)
+
+
+def test_global_sell_reauction_executable_book_upgrades_queued_no_book_attempt(
+    tmp_path,
+):
+    """A newly executable book must promptly upgrade a queued no-book debt."""
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    wake_path = tmp_path / "reactor-wake-book-upgrade.json"
+    common = {
+        "reason": "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+        "position_id": "global-reauction-book-upgrade",
+        "family": ("Paris", "2026-08-08", "high"),
+        "probability_content_identity": "q-book-upgrade",
+        "held_token_id": "paris-yes-book-upgrade",
+        "schema_version": 4,
+        "wake_path": wake_path,
+        "return_request": True,
+        "prepare_only": True,
+    }
+    first_result = reactor.request_global_auction_completion(
+        **common,
+        held_best_bid=0.01,
+        bid_observed_at="2026-08-08T18:00:00+00:00",
+        probability_observed_at="2026-08-08T18:00:00+00:00",
+        book_state="NO_EXECUTABLE_BOOK",
+    )
+    first = first_result[1]
+    assert first_result[0] is True
+    assert first is not None
+    assert reactor.publish_prepared_global_auction_completion(
+        reason=common["reason"],
+        prepared_request=first,
+        wake_path=wake_path,
+    ) is True
+
+    second_result = reactor.request_global_auction_completion(
+        **common,
+        scope_identity=first.scope_identity,
+        generation=first.generation,
+        held_best_bid=0.47,
+        bid_observed_at="2026-08-08T18:00:30+00:00",
+        probability_observed_at="2026-08-08T18:00:30+00:00",
+        book_state="EXECUTABLE",
+    )
+    second = second_result[1]
+    assert second_result[0] is True
+    assert second is not None
     assert second.attempt_identity != first.attempt_identity
     assert reactor.publish_prepared_global_auction_completion(
         reason=common["reason"],
@@ -6811,6 +6874,7 @@ def test_global_sell_reauction_same_generation_attempt_refresh_is_publishable(
     assert latest is not None
     assert latest.generation == first.generation
     assert latest.attempt_identity == second.attempt_identity
+    assert latest.book_state == "EXECUTABLE"
     assert latest.held_best_bid == pytest.approx(0.47)
 
 

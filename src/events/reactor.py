@@ -6687,16 +6687,32 @@ def request_global_auction_completion(
                 or existing_v4.scope_identity != held_request.scope_identity
             ):
                 raise ValueError("HELD_SELL_REAUCTION_LINEAGE_SCOPE_CONFLICT")
-            durable_request_exists = bool(
+            existing_request_is_queued = bool(
                 existing_v4 is not None
-                and existing_v4.request_id == held_request.request_id
-                and existing_v4.attempt_identity == held_request.attempt_identity
                 and v4_held_sell_reauction_request_is_queued(
                     existing_v4,
                     path=wake_path,
                 )
             )
-            context_upgrade = False
+            context_upgrade = bool(
+                existing_request_is_queued
+                and existing_v4.book_state != "EXECUTABLE"
+                and held_request.book_state == "EXECUTABLE"
+            )
+            if existing_request_is_queued and not context_upgrade:
+                # SCOPE: one outstanding position/token SELL obligation.
+                # DRAIN: the global auction rebinds current q/book and writes a
+                # terminal receipt for this queued attempt. RESET: only an
+                # executable-book upgrade or terminal receipt advances it.
+                # Monitor timestamps are evidence refreshes, not new debts;
+                # replacing the deterministic slot on every refresh can starve
+                # the global cut that is already answering this obligation.
+                held_request = existing_v4
+            durable_request_exists = bool(
+                existing_request_is_queued
+                and existing_v4.request_id == held_request.request_id
+                and existing_v4.attempt_identity == held_request.attempt_identity
+            )
             attempt_refresh = bool(
                 existing_v4 is not None
                 and existing_v4.attempt_identity != held_request.attempt_identity
