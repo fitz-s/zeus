@@ -19063,6 +19063,106 @@ class TestRecoveryResolutionTable:
             "fill_price": 0.2,
         }
 
+    def test_cancelled_entry_late_fill_advances_strict_position_prefix(
+        self,
+        conn,
+    ):
+        """Cancel closes the remainder, not fills confirmed after the ACK race."""
+
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+            reconcile_filled_entry_projection_repairs,
+        )
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=33.0, price=0.29)
+        _open_test_entry_obligation(conn, "cmd-001")
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        _append_confirmed_trade_fact(
+            conn,
+            trade_id="trade-cancelled-prefix-1",
+            filled_size="3.5",
+            fill_price="0.29",
+        )
+        assert reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id="cmd-001",
+        ) == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        conn.execute("DELETE FROM execution_fact WHERE command_id = 'cmd-001'")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET fill_authority = 'venue_confirmed_full',
+                   chain_state = 'synced',
+                   chain_shares = 3.5,
+                   chain_avg_price = 0.29,
+                   chain_cost_basis_usd = 1.015
+             WHERE position_id = 'pos-001'
+            """
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:08:00Z",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:09:00Z",
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            trade_id="trade-cancelled-prefix-2",
+            filled_size="8",
+            fill_price="0.29",
+        )
+
+        summary = reconcile_filled_entry_projection_repairs(conn)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT shares, cost_basis_usd, entry_price, chain_state, chain_shares
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "shares": 11.5,
+            "cost_basis_usd": pytest.approx(3.335),
+            "entry_price": pytest.approx(0.29),
+            # Fill recovery does not invent a newer chain observation.  The
+            # stale 3.5-share prefix remains explicit until chain reconcile.
+            "chain_state": "synced",
+            "chain_shares": 3.5,
+        }
+        execution = conn.execute(
+            """
+            SELECT shares, fill_price, venue_status, terminal_exec_status
+              FROM execution_fact
+             WHERE command_id = 'cmd-001'
+               AND order_role = 'entry'
+            """
+        ).fetchone()
+        assert dict(execution) == {
+            "shares": 11.5,
+            "fill_price": pytest.approx(0.29),
+            "venue_status": "PARTIAL",
+            "terminal_exec_status": "filled",
+        }
+        assert conn.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = 'cmd-001'"
+        ).fetchone()[0] == "RESOLVED"
+        assert reconcile_filled_entry_projection_repairs(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+
     def test_live_rest_entry_repairs_confirmed_partial_fill_past_ack_fact(
         self,
         conn,

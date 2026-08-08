@@ -2896,6 +2896,92 @@ def _append_terminal_partial_order_fact(
     raise RuntimeError("terminal partial correction was rejected by order-fact authority")
 
 
+def _append_cancelled_entry_terminal_partial_order_fact(
+    conn: sqlite3.Connection,
+    *,
+    candidate: Mapping[str, object],
+) -> bool:
+    """Persist that CANCELLED terminated only the unmatched remainder."""
+
+    state = str(candidate.get("state") or candidate.get("cmd_state") or "").upper()
+    if state != CommandState.CANCELLED.value:
+        return False
+    command_id = str(candidate.get("command_id") or "")
+    venue_order_id = str(candidate.get("venue_order_id") or "")
+    filled_size = (
+        candidate.get("fill_filled_size")
+        if candidate.get("fill_filled_size") is not None
+        else candidate.get("filled_size")
+    )
+    requested_size = (
+        candidate.get("size")
+        if candidate.get("size") is not None
+        else candidate.get("cmd_size")
+    )
+    cancel_ack = conn.execute(
+        """
+        SELECT occurred_at
+          FROM venue_command_events
+         WHERE command_id = ?
+           AND event_type = 'CANCEL_ACKED'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    if cancel_ack is None or _fill_size_completes_limit_order(
+        filled_size,
+        requested_size,
+        side=candidate.get("side"),
+    ):
+        raise RuntimeError(
+            "cancelled entry projection requires acknowledged terminal partial fill"
+        )
+    source = str(candidate.get("fill_source") or candidate.get("source") or "").upper()
+    if source not in _LIVE_TERMINAL_ORDER_FACT_SOURCES:
+        raise RuntimeError("cancelled entry projection requires authenticated fill source")
+    observed_at = str(
+        cancel_ack["occurred_at"]
+        or candidate.get("fill_observed_at")
+        or candidate.get("execution_filled_at")
+        or candidate.get("observed_at")
+        or _now_iso()
+    )
+    matched_size = _decimal_text(
+        _positive_decimal_or_none(filled_size) or Decimal("0")
+    )
+    payload = {
+        "schema_version": 1,
+        "reason": "cancelled_entry_confirmed_partial_fill_projection_repair",
+        "proof_class": "terminal_partial_order_fact",
+        "command_id": command_id,
+        "venue_order_id": venue_order_id,
+        "matched_size": matched_size,
+        "remaining_size": "0",
+        "requested_size": str(requested_size or ""),
+        "source_trade_fact_id": (
+            candidate.get("source_trade_fact_id")
+            or candidate.get("trade_fact_id")
+        ),
+        "required_predicates": {
+            "command_state_cancelled": True,
+            "cancel_acked": True,
+            "canonical_positive_trade_facts": True,
+            "cumulative_fill_below_requested_size": True,
+        },
+    }
+    _append_terminal_partial_order_fact(
+        conn,
+        venue_order_id=venue_order_id,
+        command_id=command_id,
+        matched_size=matched_size,
+        source=source,
+        observed_at=observed_at,
+        payload=payload,
+    )
+    return True
+
+
 def _coerce_iso_datetime(value: str) -> datetime:
     text = str(value or _now_iso())
     if text.endswith("Z"):
@@ -3456,6 +3542,8 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                    MAX(fact.venue_timestamp) AS venue_timestamp,
                    MAX(fact.source) AS fill_source,
                    GROUP_CONCAT(DISTINCT fact.state) AS fill_states,
+                   MAX(CASE WHEN fact.state = 'CONFIRMED' THEN 1 ELSE 0 END)
+                       AS has_confirmed_fill,
                    MAX(fact.trade_fact_id) AS trade_fact_id
               FROM economic_trade_fact fact
              WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
@@ -3470,8 +3558,12 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                COALESCE(NULLIF(entry_fill.venue_timestamp, ''), entry_fill.observed_at) AS fill_observed_at,
                entry_fill.fill_source AS fill_source,
                entry_fill.fill_states AS fill_states,
+               entry_fill.has_confirmed_fill AS has_confirmed_fill,
                entry_fill.trade_fact_id AS source_trade_fact_id,
                pc.phase AS projected_phase,
+               pc.shares AS projected_shares,
+               pc.cost_basis_usd AS projected_cost_basis_usd,
+               pc.order_id AS projected_order_id,
                env.condition_id AS env_condition_id,
                env.yes_token_id AS env_yes_token_id,
                env.no_token_id AS env_no_token_id,
@@ -3516,6 +3608,18 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                     AND ABS(CAST(COALESCE(pc.shares, '0') AS REAL)) <= 0.000000001
                     AND ABS(CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL)) <= 0.000000001
                     AND COALESCE(pc.fill_authority, '') IN ('', 'none')
+                )
+                OR (
+                    -- CANCELLED terminates only the unfilled remainder.  A
+                    -- later authenticated trade fact must still advance the
+                    -- already-open position from its strict fill prefix.
+                    cmd.state = 'CANCELLED'
+                    AND entry_fill.has_confirmed_fill = 1
+                    AND pc.phase IN ('active', 'day0_window')
+                    AND lower(COALESCE(pc.order_id, '')) =
+                        lower(cmd.venue_order_id)
+                    AND COALESCE(pc.shares, 0) + 0.000001 <
+                        entry_fill.filled_size
                 )
                 OR (
                     (
@@ -5086,6 +5190,60 @@ def _append_filled_entry_projection_repair(
             """,
             (position_id, command_id, venue_order_id),
         ).fetchone()
+        before_shares = _float_or_none(candidate.get("projected_shares"))
+        before_cost = _float_or_none(candidate.get("projected_cost_basis_usd"))
+        expected_shares = _float_or_none(candidate.get("fill_filled_size"))
+        expected_price = _float_or_none(candidate.get("fill_price"))
+        same_order_reobservation = (
+            str(candidate.get("projected_order_id") or "").lower()
+            == venue_order_id.lower()
+        )
+        expected_position_shares = expected_shares
+        expected_position_cost = (
+            expected_shares * expected_price
+            if expected_shares is not None and expected_price is not None
+            else None
+        )
+        if same_order_reobservation and before_shares is not None and before_cost is not None:
+            command_count = int(
+                conn.execute(
+                    """
+                    SELECT COUNT(*)
+                      FROM venue_commands
+                     WHERE position_id = ?
+                       AND intent_kind = 'ENTRY'
+                       AND side = 'BUY'
+                    """,
+                    (position_id,),
+                ).fetchone()[0]
+                or 0
+            )
+            prior = conn.execute(
+                """
+                SELECT shares, fill_price
+                  FROM execution_fact
+                 WHERE position_id = ?
+                   AND command_id = ?
+                   AND order_role = 'entry'
+                   AND voided_at IS NULL
+                 ORDER BY filled_at DESC, intent_id
+                 LIMIT 1
+                """,
+                (position_id, command_id),
+            ).fetchone()
+            if (
+                command_count > 1
+                and prior is not None
+                and expected_shares is not None
+                and expected_price is not None
+            ):
+                prior_shares = float(prior["shares"] or 0.0)
+                prior_price = float(prior["fill_price"] or 0.0)
+                expected_position_shares = before_shares - prior_shares + expected_shares
+                expected_position_cost = (
+                    before_cost - (prior_shares * prior_price)
+                    + (expected_shares * expected_price)
+                )
         if existing_fill is None:
             _log_filled_entry_trade_candidate_execution_fact(
                 conn,
@@ -5108,6 +5266,27 @@ def _append_filled_entry_projection_repair(
             fill_price=str(candidate.get("fill_price") or candidate.get("price") or ""),
             observed_at=str(candidate.get("fill_observed_at") or _now_iso()),
         )
+        _append_cancelled_entry_terminal_partial_order_fact(
+            conn,
+            candidate=candidate,
+        )
+        _log_filled_entry_trade_candidate_execution_fact(
+            conn,
+            candidate={
+                **candidate,
+                "cmd_state": candidate.get("state"),
+                "cmd_size": candidate.get("size"),
+                "cmd_price": candidate.get("price"),
+                "cmd_created_at": candidate.get("created_at"),
+                "filled_size": candidate.get("fill_filled_size"),
+                "trade_fact_id": candidate.get("source_trade_fact_id"),
+                "execution_filled_at": candidate.get("fill_observed_at"),
+            },
+        )
+        reconcile_terminal_entry_exposure_obligations(
+            conn,
+            command_id=command_id,
+        )
         projected_fill = conn.execute(
             """
             SELECT 1
@@ -5124,7 +5303,58 @@ def _append_filled_entry_projection_repair(
                 "filled entry increment repair did not produce a command-bound "
                 f"projection event: command_id={command_id}"
             )
-        return existing_fill is None
+        if same_order_reobservation and expected_shares is not None:
+            repaired = conn.execute(
+                """
+                SELECT shares, cost_basis_usd
+                  FROM position_current
+                 WHERE position_id = ?
+                """,
+                (position_id,),
+            ).fetchone()
+            execution = conn.execute(
+                """
+                SELECT shares, fill_price
+                  FROM execution_fact
+                 WHERE position_id = ?
+                   AND command_id = ?
+                   AND order_role = 'entry'
+                   AND voided_at IS NULL
+                 LIMIT 1
+                """,
+                (position_id, command_id),
+            ).fetchone()
+            if (
+                repaired is None
+                or execution is None
+                or expected_position_shares is None
+                or expected_position_cost is None
+                or abs(
+                    float(repaired["shares"] or 0.0) - expected_position_shares
+                ) > 0.000001
+                or abs(
+                    float(repaired["cost_basis_usd"] or 0.0)
+                    - expected_position_cost
+                ) > 0.000001
+                or abs(float(execution["shares"] or 0.0) - expected_shares) > 0.000001
+                or expected_price is None
+                or abs(float(execution["fill_price"] or 0.0) - expected_price) > 0.000001
+            ):
+                raise RuntimeError(
+                    "cumulative entry fill repair did not converge position and "
+                    f"execution provenance: command_id={command_id}"
+                )
+        return bool(
+            existing_fill is None
+            or (
+                same_order_reobservation
+                and expected_position_shares is not None
+                and (
+                    before_shares is None
+                    or abs(before_shares - expected_position_shares) > 0.000001
+                )
+            )
+        )
 
     candidate = _hydrate_command_execution_identity(conn, candidate)
     trade_case, decision_log_id = _decision_log_trade_case_for_command(conn, candidate, client=client)
@@ -5151,67 +5381,10 @@ def _append_filled_entry_projection_repair(
             existing_order_projection.get("phase"),
         )
         return False
-    if str(candidate.get("state") or "").upper() == CommandState.CANCELLED.value:
-        cancel_ack = conn.execute(
-            """
-            SELECT occurred_at
-              FROM venue_command_events
-             WHERE command_id = ?
-               AND event_type = 'CANCEL_ACKED'
-             ORDER BY sequence_no DESC
-             LIMIT 1
-            """,
-            (str(position.command_id),),
-        ).fetchone()
-        cancelled_partial = not _fill_size_completes_limit_order(
-            candidate.get("fill_filled_size"),
-            candidate.get("size"),
-            side=candidate.get("side"),
-        )
-        if cancel_ack is None or not cancelled_partial:
-            raise RuntimeError(
-                "cancelled entry projection requires acknowledged terminal partial fill"
-            )
-        order_fact_source = str(candidate.get("fill_source") or "").upper()
-        if order_fact_source not in _LIVE_TERMINAL_ORDER_FACT_SOURCES:
-            raise RuntimeError(
-                "cancelled entry projection requires authenticated fill source"
-            )
-        terminal_at = str(
-            cancel_ack["occurred_at"]
-            or candidate.get("fill_observed_at")
-            or _now_iso()
-        )
-        terminal_payload = {
-            "schema_version": 1,
-            "reason": "cancelled_entry_confirmed_partial_fill_projection_repair",
-            "proof_class": "terminal_partial_order_fact",
-            "command_id": str(position.command_id),
-            "venue_order_id": str(position.order_id),
-            "matched_size": _decimal_text(
-                _positive_decimal_or_none(candidate.get("fill_filled_size"))
-                or Decimal("0")
-            ),
-            "remaining_size": "0",
-            "requested_size": str(candidate.get("size") or ""),
-            "source_trade_fact_id": candidate.get("source_trade_fact_id"),
-            "required_predicates": {
-                "command_state_cancelled": True,
-                "cancel_acked": True,
-                "canonical_positive_trade_facts": True,
-                "cumulative_fill_below_requested_size": True,
-                "pending_entry_projection_zero_exposure": True,
-            },
-        }
-        _append_terminal_partial_order_fact(
-            conn,
-            venue_order_id=str(position.order_id),
-            command_id=str(position.command_id),
-            matched_size=terminal_payload["matched_size"],
-            source=order_fact_source,
-            observed_at=terminal_at,
-            payload=terminal_payload,
-        )
+    _append_cancelled_entry_terminal_partial_order_fact(
+        conn,
+        candidate=candidate,
+    )
     projection = build_position_current_projection(position)
     position_id = str(position.trade_id)
     existing_fill = conn.execute(
@@ -8817,7 +8990,12 @@ def _terminal_partial_entry_obligation_proven(
     return (
         execution_shares is not None
         and abs(execution_shares - filled_size) <= Decimal("0.000001")
-        and str(execution.get("terminal_exec_status") or "").lower() == "partial"
+        and str(execution.get("terminal_exec_status") or "").lower()
+        in (
+            {"filled", "partial"}
+            if command_state == CommandState.CANCELLED.value
+            else {"partial"}
+        )
         and str(execution.get("venue_status") or "").upper() == "PARTIAL"
     )
 

@@ -5034,6 +5034,14 @@ def _ensure_entry_fill_position_event(
         and current_cost is not None
         and str(current.get("order_id") or "").strip() != venue_order_id
     )
+    cumulative_reobservation = bool(
+        existing is not None
+        and not missing_projection
+        and phase in {"active", "day0_window"}
+        and current_shares is not None
+        and current_cost is not None
+        and str(current.get("order_id") or "").strip() == venue_order_id
+    )
     chain_shares = _positive_decimal_or_none(current.get("chain_shares"))
     chain_cost = _positive_decimal_or_none(current.get("chain_cost_basis_usd"))
     chain_state_after = current.get("chain_state") or "unknown"
@@ -5057,7 +5065,75 @@ def _ensure_entry_fill_position_event(
     projection_order_id = venue_order_id
     projection_order_status = order_status
     projection_size_usd: object = current.get("size_usd") or cost_basis
-    if incremental_fill:
+    if cumulative_reobservation:
+        command_id = str(command.get("command_id") or "")
+        command_count = int(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                  FROM venue_commands
+                 WHERE position_id = ?
+                   AND intent_kind = 'ENTRY'
+                   AND side = 'BUY'
+                """,
+                (position_id,),
+            ).fetchone()[0]
+            or 0
+        )
+        prior = conn.execute(
+            """
+            SELECT shares, fill_price
+              FROM execution_fact
+             WHERE position_id = ?
+               AND command_id = ?
+               AND order_role = 'entry'
+               AND voided_at IS NULL
+             ORDER BY filled_at DESC, intent_id
+             LIMIT 1
+            """,
+            (position_id, command_id),
+        ).fetchone()
+        if command_count == 1:
+            projection_shares = shares_dec
+            projection_cost = cost_basis_dec
+        elif prior is None:
+            if command_count > 1:
+                logger.error(
+                    "exchange_reconcile: refuse cumulative reobservation without "
+                    "command provenance on a multi-command position "
+                    "position_id=%s command_id=%s",
+                    position_id,
+                    command_id,
+                )
+                return
+        else:
+            prior_shares = _positive_decimal_or_none(prior["shares"])
+            prior_price = _positive_decimal_or_none(prior["fill_price"])
+            if prior_shares is None or prior_price is None:
+                logger.error(
+                    "exchange_reconcile: refuse cumulative reobservation with "
+                    "invalid prior command provenance position_id=%s command_id=%s",
+                    position_id,
+                    command_id,
+                )
+                return
+            projection_shares = current_shares - prior_shares + shares_dec
+            projection_cost = current_cost - (prior_shares * prior_price) + cost_basis_dec
+            if projection_shares <= 0 or projection_cost <= 0:
+                logger.error(
+                    "exchange_reconcile: refuse non-positive cumulative reobservation "
+                    "position_id=%s command_id=%s shares=%s cost=%s",
+                    position_id,
+                    command_id,
+                    projection_shares,
+                    projection_cost,
+                )
+                return
+        projection_entry_price = projection_cost / projection_shares
+        projection_order_id = str(current.get("order_id") or venue_order_id)
+        projection_order_status = order_status
+        projection_size_usd = _decimal_text(projection_cost)
+    elif incremental_fill:
         from src.state.db import query_entry_execution_fill_aggregate
 
         historical = query_entry_execution_fill_aggregate(

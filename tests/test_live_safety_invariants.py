@@ -15149,6 +15149,52 @@ def test_multi_db_reservation_oserror_releases_partial_set(tmp_path):
         coordinator._release_turnstile(fd)
 
 
+def test_multi_db_gate_fault_releases_every_remaining_reservation(
+    tmp_path,
+):
+    """One reservation cleanup fault cannot strand the rest of a DB set."""
+
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WritePriority
+
+    ordered = (DBIdentity.TRADE, DBIdentity.WORLD, DBIdentity.FORECAST)
+    coordinator = WriteCoordinator(
+        {
+            DBIdentity.TRADE: tmp_path / "a-trade.db",
+            DBIdentity.WORLD: tmp_path / "b-world.db",
+            DBIdentity.FORECAST: tmp_path / "c-forecast.db",
+        }
+    )
+    reservations = {
+        DBIdentity.TRADE: 1,
+        DBIdentity.WORLD: 2,
+        DBIdentity.FORECAST: 3,
+    }
+    released = []
+    coordinator._acquire_nonmonitor_reservations = lambda *_a, **_k: dict(
+        reservations
+    )
+    coordinator._acquire_process_lock = lambda lock, **_k: lock.acquire()
+    coordinator._acquire_file_lock = lambda *_a, **_k: (_ for _ in ()).throw(
+        OSError("gate fault")
+    )
+
+    def release(fd):
+        released.append(fd)
+        if fd in {1, 3}:
+            raise OSError(f"release fault {fd}")
+
+    coordinator._release_turnstile = release
+    with pytest.raises(OSError, match="gate fault"):
+        coordinator._acquire_gates(
+            ordered,
+            deadline=None,
+            owner="faulted-standard",
+            priority=WritePriority.STANDARD,
+        )
+
+    assert released == [1, 3, 2]
+
+
 def test_turnstile_blocks_background_while_monitor_waits(tmp_path):
     """A queued MONITOR holds admission; BACKGROUND defers until the next call."""
     from src.state.write_coordinator import (

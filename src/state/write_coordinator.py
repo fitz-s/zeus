@@ -566,11 +566,30 @@ class WriteCoordinator:
                     )
                 )
             return acquired
-        except BaseException:
-            for fd in reversed(tuple(nonmonitor_reservations.values())):
-                self._release_turnstile(fd)
-            self._release_gates(acquired)
+        except BaseException as exc:
+            cleanup_error = self._release_turnstile_set(
+                reversed(tuple(nonmonitor_reservations.values()))
+            )
+            try:
+                self._release_gates(acquired)
+            except BaseException as release_exc:
+                if cleanup_error is None:
+                    cleanup_error = release_exc
+            if isinstance(exc, WriteLeaseTimeout) and cleanup_error is not None:
+                raise cleanup_error from exc
             raise
+
+    def _release_turnstile_set(self, fds) -> BaseException | None:
+        """Release every reservation even when one close path faults."""
+
+        first_error: BaseException | None = None
+        for fd in fds:
+            try:
+                self._release_turnstile(fd)
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        return first_error
 
     def _acquire_nonmonitor_reservations(
         self,
@@ -619,13 +638,9 @@ class WriteCoordinator:
                     )
                 return reservations
             except BaseException as exc:
-                cleanup_error: BaseException | None = None
-                for fd in reversed(tuple(reservations.values())):
-                    try:
-                        self._release_turnstile(fd)
-                    except BaseException as release_exc:
-                        if cleanup_error is None:
-                            cleanup_error = release_exc
+                cleanup_error = self._release_turnstile_set(
+                    reversed(tuple(reservations.values()))
+                )
                 if not isinstance(exc, WriteLeaseTimeout):
                     raise
                 if cleanup_error is not None:
@@ -908,14 +923,25 @@ class WriteCoordinator:
         return first_error
 
     def _release_gates(self, acquired: list[_AcquiredGate]) -> None:
+        first_error: BaseException | None = None
         for gate in reversed(acquired):
             try:
                 fcntl.flock(gate.fd, fcntl.LOCK_UN)
-            finally:
-                try:
-                    os.close(gate.fd)
-                finally:
-                    gate.process_lock.release()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+            try:
+                os.close(gate.fd)
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+            try:
+                gate.process_lock.release()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     def _emit_telemetry(
         self,
