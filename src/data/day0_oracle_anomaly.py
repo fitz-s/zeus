@@ -200,12 +200,16 @@ def metar_margin_units_for_city(
       margin-adjusted inclusion — stays excluded.
     """
     threshold, provenance = divergence_threshold_for_city(city_name, unit, path=path)
-    if city_metar_settlement_faithful(city_name, path=path):
-        if provenance == "empirical" and threshold <= 1.0:
-            return 0.0
-        return float(threshold)
+    # Sample adequacy is logically prior to the measured verdict.  A thin
+    # sample can happen to contain zero disagreements and therefore carry
+    # settlement_faithful=true, but that boolean is not executable evidence
+    # until the threshold itself is empirical.
     if provenance != "empirical":
         return None
+    if city_metar_settlement_faithful(city_name, path=path):
+        if threshold <= 1.0:
+            return 0.0
+        return float(threshold)
     return float(threshold)
 
 

@@ -1371,12 +1371,20 @@ class TestSourceDiscipline:
             now=NOW,
         ) is None
 
-    def test_metar_kill_at_unmeasured_city_is_excluded_not_default_margin(self, monkeypatch):
-        """An unmeasured city remains excluded rather than consuming a guessed
-        margin; authorizing measured cities must not weaken this law."""
+    def test_metar_kill_at_thin_city_is_excluded_not_default_margin(self, monkeypatch):
+        """A thin city remains excluded rather than consuming a guessed margin."""
         _set_metar_memo(monkeypatch, 27)
         effective, source = settlement_grade_effective_extreme(
-            city=_manila(), target_date="2026-06-10", metric="high", now=NOW,
+            city=SimpleNamespace(
+                name="Jinan",
+                timezone="Asia/Shanghai",
+                settlement_unit="C",
+                wu_station="ZSJN",
+                settlement_source_type="wu_icao",
+            ),
+            target_date="2026-06-10",
+            metric="high",
+            now=NOW,
         )
         assert effective is None and source == ""
 

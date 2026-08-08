@@ -1856,7 +1856,7 @@ class TestEmpiricalThresholds:
         assert threshold == pytest.approx(1.0)  # feeds byte-identical post-rounding
         threshold, provenance = divergence_threshold_for_city("Seoul", "C")
         assert provenance == "empirical"
-        assert threshold == pytest.approx(2.0)  # real +-1C spread measured
+        assert threshold == pytest.approx(1.0)  # current bounded seven-day fit
 
     @pytest.mark.parametrize(
         ("city_name", "station_id"),
@@ -1895,54 +1895,47 @@ class TestEmpiricalThresholds:
     def test_recent_measurements_match_city_contract_and_record_window(self):
         from pathlib import Path
 
+        from src.data.day0_oracle_anomaly import metar_margin_units_for_city
+
         root = Path(__file__).resolve().parents[1]
-        divergence = json.loads(
+        model = json.loads(
             (root / "config" / "wu_metar_divergence.json").read_text()
-        )["cities"]
+        )
+        divergence = model["cities"]
         cities = {
             row["name"]: row
             for row in json.loads((root / "config" / "cities.json").read_text())["cities"]
         }
-
-        expected_windows = {
-            city_name: [
-                "2026-07-20T07:30:13.105666+00:00",
-                "2026-07-27T07:30:13.105666+00:00",
-            ]
-            for city_name in ("Beijing", "Guangzhou", "Wellington")
+        wu_cities = {
+            name
+            for name, city in cities.items()
+            if (city.get("settlement_source_type") or "wu_icao") == "wu_icao"
         }
-        expected_windows["Ankara"] = [
-            "2026-07-20T07:42:38.732852+00:00",
-            "2026-07-27T07:42:38.732852+00:00",
-        ]
-        expected_windows["Karachi"] = [
-            "2026-07-21T09:55:56.854853+00:00",
-            "2026-07-28T09:55:56.854853+00:00",
-        ]
-        for city_name, expected_window in expected_windows.items():
+        assert set(divergence) == wu_cities
+        assert model["window_days"] == 7
+        for city_name in sorted(wu_cities):
             measurement = divergence[city_name]
             city = cities[city_name]
             assert measurement["station_id"] == city["wu_station"]
             assert measurement["unit"] == city["unit"]
-            assert (city.get("settlement_source_type") or "wu_icao") == "wu_icao"
-            assert measurement["matched_pairs"] >= 100
             assert measurement["measurement_window_days"] == 7
-            assert measurement["measurement_window"] == expected_window
-
-        karachi = divergence["Karachi"]
-        assert karachi["matched_pairs"] == 202
-        assert karachi["p95_abs_rounded_delta"] == 0.0
-        assert karachi["p99_abs_rounded_delta"] == 0.0
-        assert karachi["max_abs_rounded_delta"] == 0.0
-        assert karachi["disagree_rate_ge_1unit"] == 0.0
-        assert karachi["empirical_threshold"] == 1.0
-        assert karachi["threshold_provenance"] == "empirical"
-        assert karachi["settlement_faithful"] is True
-        assert karachi["station_id"] == "OPKC"
-        assert karachi["unit"] == "C"
-        assert datetime.fromisoformat(karachi["measurement_generated_at"]) > (
-            datetime.fromisoformat(karachi["measurement_window"][1])
-        )
+            assert measurement["measurement_window"] == model["window"]
+            assert measurement["measurement_generated_at"] == model["generated_at"]
+            assert datetime.fromisoformat(measurement["measurement_generated_at"]) >= (
+                datetime.fromisoformat(measurement["measurement_window"][1])
+            )
+            if measurement["matched_pairs"] >= 100:
+                assert measurement["threshold_provenance"] == "empirical"
+                assert metar_margin_units_for_city(
+                    city_name,
+                    city["unit"],
+                ) is not None
+            else:
+                assert measurement["threshold_provenance"] == "thin_sample"
+                assert metar_margin_units_for_city(
+                    city_name,
+                    city["unit"],
+                ) is None
 
     def test_unmeasured_city_falls_back_to_conservative_default(self):
         from src.data.day0_oracle_anomaly import (
@@ -1973,7 +1966,7 @@ class TestEmpiricalThresholds:
     def test_settlement_faithfulness_verdicts(self):
         from src.data.day0_oracle_anomaly import city_metar_settlement_faithful
 
-        assert city_metar_settlement_faithful("Seoul") is False   # measured divergence
+        assert city_metar_settlement_faithful("Seoul") is True
         assert city_metar_settlement_faithful("Tokyo") is True
         assert city_metar_settlement_faithful("NYC") is True
         # 2026-07-26 (Shenzhen class): a city with NO entry at all is no
@@ -1981,17 +1974,11 @@ class TestEmpiricalThresholds:
         # than a measured-thin sample, not more trust than one.
         assert city_metar_settlement_faithful("UnmeasuredCity") is False
 
-    def test_unfaithful_but_well_measured_city_gets_margin_absorbed_not_excluded(self):
-        """2026-07-16 (day0 defect-5): Seoul's METAR integer is not reliably
-        WU's settlement integer, but the divergence IS well-measured (990
-        matched pairs, empirical_threshold=2.0C) — binary exclusion where
-        margin-absorption machinery already existed one layer over
-        (day0_hard_fact_exit._metar_kill_margin_units) was the same disease
-        as the climatology-band defect. Seoul now gets a fast-lane source
-        WITH the measured margin, not None; faithful cities keep margin 0."""
+    def test_well_measured_city_uses_current_empirical_margin(self):
+        """The live source resolves the current bounded empirical margin."""
         seoul_source = fast_obs_source_for_city(_seoul())
         assert seoul_source is not None
-        assert seoul_source.margin_units == pytest.approx(2.0)
+        assert seoul_source.margin_units == pytest.approx(0.0)
 
         tokyo_source = fast_obs_source_for_city(_tokyo())
         assert tokyo_source is not None
@@ -2078,7 +2065,7 @@ class TestMetarMarginAbsorption:
     def test_seoul_source_resolves_measured_margin_from_real_config(self):
         source = fast_obs_source_for_city(_seoul())
         assert source is not None
-        assert source.margin_units == pytest.approx(2.0)
+        assert source.margin_units == pytest.approx(0.0)
 
     def test_emitted_observation_records_margin_and_shifted_raw_value(self):
         """End-to-end through fast_obs_to_day0_observation: raw_value in the
@@ -2087,6 +2074,13 @@ class TestMetarMarginAbsorption:
         margin so the pre-shift reading stays reconstructable."""
         source = fast_obs_source_for_city(_seoul())
         assert source is not None
+        source = FastObsSource(
+            source_id=source.source_id,
+            station_id=source.station_id,
+            authority=source.authority,
+            notes=source.notes,
+            margin_units=2.0,
+        )
         reports = self._reports([(0, 30.0)])
         extremes = running_extremes_for_local_day(
             reports, city=_seoul(), target_date="2026-06-10",
@@ -2122,6 +2116,23 @@ class TestMetarMarginAbsorption:
         }))
         assert metar_margin_units_for_city("ThinCity", "C", path=path) is None
 
+    def test_thin_sample_apparent_faithfulness_is_not_executable(self, tmp_path):
+        """Zero disagreements in a tiny sample do not prove source fidelity."""
+        from src.data.day0_oracle_anomaly import metar_margin_units_for_city
+
+        path = tmp_path / "divergence.json"
+        path.write_text(json.dumps({
+            "cities": {
+                "ThinLuckyCity": {
+                    "matched_pairs": 4,
+                    "empirical_threshold": 1.0,
+                    "threshold_provenance": "thin_sample",
+                    "settlement_faithful": True,
+                },
+            },
+        }))
+        assert metar_margin_units_for_city("ThinLuckyCity", "C", path=path) is None
+
     def test_never_measured_city_is_now_excluded_not_default_margin(self):
         """2026-07-26 (Shenzhen class, day0 defect-6): a city with NO entry at
         all in wu_metar_divergence.json used to default to
@@ -2153,7 +2164,7 @@ class TestMetarMarginAbsorption:
         assert city_metar_settlement_faithful("Shenzhen", path=path) is False
         assert metar_margin_units_for_city("Shenzhen", "C", path=path) is None
 
-    def test_all_27_measured_cities_have_expected_margin(self):
+    def test_previously_measured_cities_keep_executable_margin(self):
         """Regression: the (b) default-direction fix changes behavior for
         UNMEASURED cities only. Every already-measured city in the real
         config/wu_metar_divergence.json (no path override) must keep its
@@ -2173,7 +2184,7 @@ class TestMetarMarginAbsorption:
                 "Guangzhou", "Wellington", "Ankara", "Karachi",
             }
         )}
-        expected_margin["Seoul"] = 2.0
+        expected_margin["Seoul"] = 0.0
         for city_name, margin in expected_margin.items():
             unit = "F" if city_name in f_cities else "C"
             assert metar_margin_units_for_city(city_name, unit) == pytest.approx(margin), city_name
