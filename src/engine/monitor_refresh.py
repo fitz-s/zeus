@@ -4762,6 +4762,7 @@ def _build_current_global_day0_family_snapshot(
     cached_snapshots: tuple[_CurrentGlobalDay0FamilySnapshot, ...]
     | list[_CurrentGlobalDay0FamilySnapshot],
     deadline_monotonic: float | None = None,
+    hwm_deadline_monotonic: float | None = None,
 ) -> _CurrentGlobalDay0FamilySnapshot:
     condition_id = _canonical_condition_id(position)
     if condition_id is None:
@@ -4781,6 +4782,7 @@ def _build_current_global_day0_family_snapshot(
 
     world = None
     forecasts = None
+    hwm_forecasts = None
     try:
         _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
         with ExitStack() as sqlite_deadlines:
@@ -4793,6 +4795,7 @@ def _build_current_global_day0_family_snapshot(
             sqlite_deadlines.enter_context(
                 _day0_snapshot_sqlite_read_deadline(forecasts, deadline_monotonic)
             )
+            hwm_forecasts = get_forecasts_connection_read_only()
             _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
             row = world.execute(
                 """
@@ -4847,6 +4850,11 @@ def _build_current_global_day0_family_snapshot(
                     allow_unobserved_day0_replacement=unobserved_prefix,
                     allow_provisional_day0_replacement=True,
                     probability_use=_CurrentProbabilityUse.HELD_MONITOR,
+                    raw_input_hwm_conn=hwm_forecasts,
+                    raw_input_hwm_deadline_monotonic=hwm_deadline_monotonic,
+                    raw_input_hwm_read_max_seconds=(
+                        _HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+                    ),
                 )
             except ValueError as exc:
                 if (
@@ -4860,6 +4868,8 @@ def _build_current_global_day0_family_snapshot(
                 raise
             _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
     finally:
+        if hwm_forecasts is not None:
+            hwm_forecasts.close()
         if forecasts is not None:
             forecasts.close()
         if world is not None:
@@ -4996,6 +5006,7 @@ def _refresh_current_global_day0_probability(
             decision_time=decision_time,
             cached_snapshots=cached_snapshots,
             deadline_monotonic=primary_deadline,
+            hwm_deadline_monotonic=deadline_monotonic,
         )
     except Exception as exc:
         if _is_day0_materialization_visibility_gap(exc):
@@ -5023,6 +5034,7 @@ def _refresh_current_global_day0_probability(
                         decision_time=decision_time,
                         cached_snapshots=cached_snapshots,
                         deadline_monotonic=effective_deadline,
+                        hwm_deadline_monotonic=effective_deadline,
                     )
                 except Exception as retry_exc:
                     exc = retry_exc

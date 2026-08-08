@@ -31640,6 +31640,9 @@ def _prepare_current_global_probability_family(
     allow_unobserved_day0_replacement: bool = False,
     allow_provisional_day0_replacement: bool = False,
     probability_use: _CurrentProbabilityUse = _CurrentProbabilityUse.ENTRY,
+    raw_input_hwm_conn: sqlite3.Connection | None = None,
+    raw_input_hwm_deadline_monotonic: float | None = None,
+    raw_input_hwm_read_max_seconds: float | None = None,
 ):
     """Build current simplex or exact-bin payoff authority without price dependency.
 
@@ -31913,6 +31916,9 @@ def _prepare_current_global_probability_family(
                 require_baseline_bundle=False,
                 current_bin_topology_hash=current_topology_hash,
                 enforce_raw_input_hwm=True,
+                raw_input_hwm_conn=raw_input_hwm_conn,
+                raw_input_hwm_deadline_monotonic=raw_input_hwm_deadline_monotonic,
+                raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
             )
             if not result.ok or result.bundle is None:
                 raise ValueError(
@@ -32019,6 +32025,9 @@ def _prepare_current_global_probability_family(
             require_baseline_bundle=False,
             current_bin_topology_hash=current_topology_hash,
             enforce_raw_input_hwm=True,
+            raw_input_hwm_conn=raw_input_hwm_conn,
+            raw_input_hwm_deadline_monotonic=raw_input_hwm_deadline_monotonic,
+            raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
         )
         if not result.ok or result.bundle is None:
             raise ValueError(
@@ -32620,6 +32629,9 @@ def _prepare_current_global_probability_family(
                     require_baseline_bundle=False,
                     current_bin_topology_hash=current_topology_hash,
                     enforce_raw_input_hwm=True,
+                    raw_input_hwm_conn=raw_input_hwm_conn,
+                    raw_input_hwm_deadline_monotonic=raw_input_hwm_deadline_monotonic,
+                    raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
                 )
                 if not bound_result.ok or bound_result.bundle is None:
                     raise ValueError(

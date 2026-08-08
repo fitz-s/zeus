@@ -6,6 +6,7 @@ import json
 import hashlib
 import math
 import sqlite3
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -496,6 +497,9 @@ def read_replacement_forecast_bundle(
     require_baseline_bundle: bool = True,
     current_bin_topology_hash: str | None = None,
     enforce_raw_input_hwm: bool = False,
+    raw_input_hwm_conn: sqlite3.Connection | None = None,
+    raw_input_hwm_deadline_monotonic: float | None = None,
+    raw_input_hwm_read_max_seconds: float | None = None,
 ) -> ReplacementForecastBundleReadResult:
     """Read a derived replacement posterior only after B0 executable proof exists.
 
@@ -722,16 +726,71 @@ def read_replacement_forecast_bundle(
             },
         }
     if enforce_raw_input_hwm:
-        raw_lag_reason = replacement_live_input_lag_reason(
-            conn,
-            city=city,
-            target_date=target_date_text,
-            metric=metric,
-            decision_time=decision_utc,
-            posterior_source_cycle_time=row_map["source_cycle_time"],
-            posterior_computed_at=row_map["computed_at"],
-            posterior_provenance=provenance,
-        )
+        hwm_conn = raw_input_hwm_conn or conn
+        hwm_deadline = raw_input_hwm_deadline_monotonic
+        raw_lag_reason: str | None
+        if hwm_deadline is not None and time.monotonic() >= hwm_deadline:
+            raw_lag_reason = "basis=HWM_READ_DEADLINE"
+        else:
+            previous_busy_timeout = None
+            has_progress_handler = hasattr(hwm_conn, "set_progress_handler")
+            if has_progress_handler:
+                previous_busy_timeout = hwm_conn.execute(
+                    "PRAGMA busy_timeout"
+                ).fetchone()[0]
+            if raw_input_hwm_read_max_seconds is not None:
+                stage_deadline = time.monotonic() + max(
+                    0.0, float(raw_input_hwm_read_max_seconds)
+                )
+                hwm_deadline = (
+                    stage_deadline
+                    if hwm_deadline is None
+                    else min(hwm_deadline, stage_deadline)
+                )
+            try:
+                if hwm_deadline is not None and has_progress_handler:
+                    remaining_ms = max(
+                        0,
+                        int((hwm_deadline - time.monotonic()) * 1000.0),
+                    )
+                    hwm_conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
+                    hwm_conn.set_progress_handler(
+                        lambda: int(time.monotonic() >= hwm_deadline),
+                        1_000,
+                    )
+                if hwm_deadline is not None and time.monotonic() >= hwm_deadline:
+                    raw_lag_reason = "basis=HWM_READ_DEADLINE"
+                else:
+                    raw_lag_reason = replacement_live_input_lag_reason(
+                        hwm_conn,
+                        city=city,
+                        target_date=target_date_text,
+                        metric=metric,
+                        decision_time=decision_utc,
+                        posterior_source_cycle_time=row_map["source_cycle_time"],
+                        posterior_computed_at=row_map["computed_at"],
+                        posterior_provenance=provenance,
+                    )
+                    if (
+                        hwm_deadline is not None
+                        and time.monotonic() >= hwm_deadline
+                    ):
+                        raw_lag_reason = "basis=HWM_READ_DEADLINE"
+            finally:
+                if previous_busy_timeout is not None:
+                    cleanup_errors: list[Exception] = []
+                    try:
+                        hwm_conn.set_progress_handler(None, 0)
+                    except Exception as exc:
+                        cleanup_errors.append(exc)
+                    try:
+                        hwm_conn.execute(
+                            f"PRAGMA busy_timeout = {int(previous_busy_timeout)}"
+                        )
+                    except Exception as exc:
+                        cleanup_errors.append(exc)
+                    if cleanup_errors:
+                        raise RuntimeError("HWM_READ_CLEANUP_FAILED") from cleanup_errors[0]
         if raw_lag_reason is not None:
             return ReplacementForecastBundleReadResult(
                 "BLOCKED", f"REPLACEMENT_RAW_INPUT_HWM:{raw_lag_reason}"

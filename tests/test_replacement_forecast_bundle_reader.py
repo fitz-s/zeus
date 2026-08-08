@@ -836,6 +836,118 @@ def test_replacement_bundle_reader_enforce_raw_input_hwm_allows_fresh_serve() ->
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
 
 
+def test_replacement_bundle_reader_hwm_budget_starts_at_hwm_stage(monkeypatch) -> None:
+    """A slow prior snapshot stage must not consume the independent HWM budget."""
+    conn = _conn()
+    hwm_conn = sqlite3.connect(":memory:")
+    posterior_id = _insert_posterior(conn)
+    clock = [4.0]
+
+    def read_hwm(active_conn, **_kwargs):
+        assert active_conn is hwm_conn
+        clock[0] += 3.0
+        return None
+
+    monkeypatch.setattr(reader.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(reader, "replacement_live_input_lag_reason", read_hwm)
+
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(4),
+        current_bin_topology_hash="topology-hash",
+        enforce_raw_input_hwm=True,
+        raw_input_hwm_conn=hwm_conn,
+        raw_input_hwm_deadline_monotonic=75.0,
+        raw_input_hwm_read_max_seconds=5.0,
+    )
+
+    hwm_conn.close()
+    assert result.ok is True
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READY"
+
+
+def test_replacement_bundle_reader_hwm_never_crosses_outer_deadline(
+    monkeypatch,
+) -> None:
+    conn = _conn()
+    hwm_conn = sqlite3.connect(":memory:")
+    posterior_id = _insert_posterior(conn)
+    monkeypatch.setattr(reader.time, "monotonic", lambda: 76.0)
+    monkeypatch.setattr(
+        reader,
+        "replacement_live_input_lag_reason",
+        lambda *_args, **_kwargs: pytest.fail("expired HWM stage must not start"),
+    )
+
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(4),
+        current_bin_topology_hash="topology-hash",
+        enforce_raw_input_hwm=True,
+        raw_input_hwm_conn=hwm_conn,
+        raw_input_hwm_deadline_monotonic=75.0,
+        raw_input_hwm_read_max_seconds=5.0,
+    )
+
+    hwm_conn.close()
+    assert result.ok is False
+    assert result.reason_code == (
+        "REPLACEMENT_RAW_INPUT_HWM:basis=HWM_READ_DEADLINE"
+    )
+
+
+def test_replacement_bundle_reader_hwm_cleanup_failure_is_not_masked(
+    monkeypatch,
+) -> None:
+    class FaultedCleanupConnection:
+        def execute(self, sql):
+            if sql == "PRAGMA busy_timeout":
+                return type("Cursor", (), {"fetchone": lambda self: (10_000,)})()
+            if sql == "PRAGMA busy_timeout = 10000":
+                raise sqlite3.OperationalError("restore failed")
+            if sql.startswith("PRAGMA busy_timeout ="):
+                return None
+            raise AssertionError(sql)
+
+        def set_progress_handler(self, *_args):
+            return None
+
+    conn = _conn()
+    posterior_id = _insert_posterior(conn)
+    monkeypatch.setattr(reader.time, "monotonic", lambda: 1.0)
+    monkeypatch.setattr(
+        reader,
+        "replacement_live_input_lag_reason",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with pytest.raises(RuntimeError, match="HWM_READ_CLEANUP_FAILED"):
+        read_replacement_forecast_bundle(
+            conn,
+            baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+            readiness=_readiness(posterior_id=posterior_id),
+            city="Shanghai",
+            target_date="2026-06-07",
+            temperature_metric="high",
+            decision_time=_dt(4),
+            current_bin_topology_hash="topology-hash",
+            enforce_raw_input_hwm=True,
+            raw_input_hwm_conn=FaultedCleanupConnection(),
+            raw_input_hwm_deadline_monotonic=75.0,
+            raw_input_hwm_read_max_seconds=5.0,
+        )
+
+
 def test_current_value_serving_sqlite_interrupt_is_typed_and_chained() -> None:
     conn = _conn()
     _insert_raw_model_forecast(
