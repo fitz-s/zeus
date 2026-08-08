@@ -18730,6 +18730,99 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
 
+    def test_cancelled_pending_zero_entry_late_confirmed_fill_materializes_one_lot_idempotently(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A cancel closes only the remainder, not a later canonical fill."""
+        _insert(conn, size=5.0, price=0.50)
+        _advance_to_cancel_pending(conn, venue_order_id="ord-001")
+        _seed_pending_entry_projection(conn)
+        conn.execute(
+            """
+            INSERT INTO trade_decisions (
+                market_id, bin_label, direction, size_usd, price, timestamp,
+                p_raw, p_posterior, edge, ci_lower, ci_upper, kelly_fraction,
+                status, runtime_trade_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "condition-test",
+                "Karachi high",
+                "buy_yes",
+                2.5,
+                0.50,
+                "2026-04-26T00:02:00Z",
+                0.6,
+                0.6,
+                0.1,
+                0.05,
+                0.15,
+                0.0,
+                "entered",
+                "pos-001",
+            ),
+        )
+        _append_order_fact(
+            conn,
+            state="CANCEL_CONFIRMED",
+            matched_size="0",
+            remaining_size="5",
+        )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        cancel_summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "CANCELLED"
+        assert cancel_summary["filled_entry_position_lot_repair"] == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert conn.execute("SELECT COUNT(*) FROM position_lots").fetchone()[0] == 0
+
+        trade_fact_id = _append_trade_fact(
+            conn,
+            state="CONFIRMED",
+            filled_size="1.25",
+            fill_price="0.50",
+        )
+
+        first_late_summary = reconcile_unresolved_commands(conn, mock_client)
+        second_late_summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert first_late_summary["filled_entry_position_lot_repair"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert second_late_summary["filled_entry_position_lot_repair"] == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        lot_totals = conn.execute(
+            """
+            SELECT COUNT(*) AS lot_count,
+                   SUM(CAST(shares AS REAL)) AS shares,
+                   SUM(CAST(shares AS REAL) * CAST(entry_price_avg AS REAL)) AS cost
+              FROM position_lots
+             WHERE source_trade_fact_id = ?
+            """,
+            (trade_fact_id,),
+        ).fetchone()
+        assert dict(lot_totals) == {
+            "lot_count": 1,
+            "shares": pytest.approx(1.25),
+            "cost": pytest.approx(0.625),
+        }
+
     def test_existing_entry_lot_repairs_stale_execution_fact(
         self,
         conn,

@@ -7683,7 +7683,9 @@ def _filled_entry_lot_materialization_candidates(conn: sqlite3.Connection) -> li
             ON lot.source_trade_fact_id = fact.trade_fact_id
          WHERE cmd.intent_kind = 'ENTRY'
            AND cmd.side = 'BUY'
-           AND cmd.state = 'FILLED'
+           -- CANCELLED terminates only the unfilled remainder; canonical
+           -- positive fills still own exposure lots after a late cancel.
+           AND cmd.state IN ('FILLED', 'CANCELLED')
            AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
            AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
            AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
@@ -9001,7 +9003,7 @@ def _terminal_partial_entry_obligation_proven(
 
 
 def reconcile_filled_entry_position_lot_repairs(conn: sqlite3.Connection) -> dict:
-    """Repair filled ENTRY commands whose trade facts never materialized lots."""
+    """Repair terminal ENTRY commands whose trade facts never materialized lots."""
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
     for candidate in _filled_entry_lot_materialization_candidates(conn):
