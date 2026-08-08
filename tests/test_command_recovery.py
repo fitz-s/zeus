@@ -4077,6 +4077,255 @@ def _append_trade_fact(
     )
 
 
+def test_complete_exit_trade_facts_terminalize_command_and_release_collateral(conn):
+    """Complete canonical EXIT fills outrank a stale nonterminal order fact."""
+    _insert(
+        conn,
+        command_id="cmd-complete-exit",
+        position_id="pos-complete-exit",
+        intent_kind="EXIT",
+        side="SELL",
+        order_type="GTC",
+        size=6.0,
+        price=0.46,
+    )
+    _advance_to_acked(
+        conn,
+        command_id="cmd-complete-exit",
+        venue_order_id="ord-complete-exit",
+    )
+    for trade_id, filled_size in (("trade-complete-1", "2"), ("trade-complete-2", "4")):
+        _append_trade_fact(
+            conn,
+            command_id="cmd-complete-exit",
+            order_id="ord-complete-exit",
+            trade_id=trade_id,
+            state="CONFIRMED",
+            filled_size=filled_size,
+            fill_price="0.46",
+            tx_hash=f"0x{trade_id}",
+        )
+    _append_trade_fact(
+        conn,
+        command_id="cmd-complete-exit",
+        order_id="ord-complete-exit",
+        trade_id="0xtrade-complete-1",
+        state="CONFIRMED",
+        filled_size="2",
+        fill_price="0.46",
+        tx_hash="0xtrade-complete-1",
+    )
+    conn.execute(
+        """
+        INSERT INTO collateral_reservations (
+            command_id, reservation_type, token_id, amount, created_at
+        ) VALUES (
+            'cmd-complete-exit', 'CTF_SELL', 'tok-001', 6000000,
+            '2026-04-26T00:04:00Z'
+        )
+        """
+    )
+
+    from src.execution.command_recovery import (
+        reconcile_complete_exit_trade_fact_commands,
+    )
+
+    assert reconcile_complete_exit_trade_fact_commands(conn) == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert _get_state(conn, "cmd-complete-exit") == "FILLED"
+    event = _get_events(conn, "cmd-complete-exit")[-1]
+    assert event["event_type"] == "FILL_CONFIRMED"
+    payload = json.loads(event["payload_json"])
+    assert payload["proof_class"] == (
+        "canonical_confirmed_trade_facts_equal_submitted_size"
+    )
+    assert payload["filled_size"] == "6"
+    assert payload["fill_price"] == "0.46"
+    assert payload["trade_fact_count"] == 2
+    reservation = conn.execute(
+        """
+        SELECT released_at, release_reason, converted_amount
+          FROM collateral_reservations
+         WHERE command_id = 'cmd-complete-exit'
+        """
+    ).fetchone()
+    assert reservation["released_at"] is not None
+    assert reservation["release_reason"] == "CONVERTED_ON_FILL"
+    assert reservation["converted_amount"] == 6000000
+    proceeds = conn.execute(
+        """
+        SELECT amount_micro
+          FROM collateral_unsettled_proceeds
+         WHERE command_id = 'cmd-complete-exit'
+        """
+    ).fetchone()
+    assert proceeds["amount_micro"] == 2760000
+    assert reconcile_complete_exit_trade_fact_commands(conn) == {
+        "scanned": 0,
+        "advanced": 0,
+        "stayed": 0,
+        "errors": 0,
+    }
+
+
+def test_partial_exit_trade_facts_remain_nonterminal(conn):
+    """A genuine unfilled remainder cannot be relabeled as a complete exit."""
+    _insert(
+        conn,
+        command_id="cmd-partial-exit",
+        position_id="pos-partial-exit",
+        intent_kind="EXIT",
+        side="SELL",
+        order_type="GTC",
+        size=6.0,
+        price=0.46,
+    )
+    _advance_to_acked(
+        conn,
+        command_id="cmd-partial-exit",
+        venue_order_id="ord-partial-exit",
+    )
+    _append_trade_fact(
+        conn,
+        command_id="cmd-partial-exit",
+        order_id="ord-partial-exit",
+        trade_id="trade-partial",
+        state="CONFIRMED",
+        filled_size="5.98",
+        fill_price="0.46",
+    )
+    conn.execute(
+        """
+        INSERT INTO collateral_reservations (
+            command_id, reservation_type, token_id, amount, created_at
+        ) VALUES (
+            'cmd-partial-exit', 'CTF_SELL', 'tok-001', 6000000,
+            '2026-04-26T00:04:00Z'
+        )
+        """
+    )
+
+    from src.execution.command_recovery import (
+        reconcile_complete_exit_trade_fact_commands,
+    )
+
+    assert reconcile_complete_exit_trade_fact_commands(conn) == {
+        "scanned": 1,
+        "advanced": 0,
+        "stayed": 1,
+        "errors": 0,
+    }
+    assert _get_state(conn, "cmd-partial-exit") == "ACKED"
+    assert conn.execute(
+        """
+        SELECT released_at
+          FROM collateral_reservations
+         WHERE command_id = 'cmd-partial-exit'
+        """
+    ).fetchone()["released_at"] is None
+
+
+def test_complete_exit_trade_facts_reject_one_bad_sell_fill(conn):
+    """A good aggregate VWAP cannot launder one fill below the SELL limit."""
+    _insert(
+        conn,
+        command_id="cmd-bad-price-exit",
+        position_id="pos-bad-price-exit",
+        intent_kind="EXIT",
+        side="SELL",
+        order_type="GTC",
+        size=6.0,
+        price=0.46,
+    )
+    _advance_to_acked(
+        conn,
+        command_id="cmd-bad-price-exit",
+        venue_order_id="ord-bad-price-exit",
+    )
+    for trade_id, size, price in (
+        ("trade-bad-price", "2", "0.40"),
+        ("trade-good-price", "4", "0.50"),
+    ):
+        _append_trade_fact(
+            conn,
+            command_id="cmd-bad-price-exit",
+            order_id="ord-bad-price-exit",
+            trade_id=trade_id,
+            filled_size=size,
+            fill_price=price,
+        )
+
+    from src.execution.command_recovery import (
+        reconcile_complete_exit_trade_fact_commands,
+    )
+
+    assert reconcile_complete_exit_trade_fact_commands(conn) == {
+        "scanned": 1,
+        "advanced": 0,
+        "stayed": 1,
+        "errors": 0,
+    }
+    assert _get_state(conn, "cmd-bad-price-exit") == "ACKED"
+
+
+def test_complete_exit_trade_facts_clear_review_with_typed_proof(conn):
+    """REVIEW_REQUIRED uses the validated confirmed-fill clearance grammar."""
+    _insert(
+        conn,
+        command_id="cmd-reviewed-exit",
+        position_id="pos-reviewed-exit",
+        intent_kind="EXIT",
+        side="SELL",
+        order_type="GTC",
+        size=6.0,
+        price=0.46,
+    )
+    _advance_to_acked(
+        conn,
+        command_id="cmd-reviewed-exit",
+        venue_order_id="ord-reviewed-exit",
+    )
+    from src.state.venue_command_repo import append_event
+
+    append_event(
+        conn,
+        command_id="cmd-reviewed-exit",
+        event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:05:00Z",
+        payload={"reason": "exit_trade_fact_waiting_for_terminal_order_fact"},
+    )
+    _append_trade_fact(
+        conn,
+        command_id="cmd-reviewed-exit",
+        order_id="ord-reviewed-exit",
+        trade_id="trade-reviewed-exit",
+        filled_size="6",
+        fill_price="0.46",
+    )
+
+    from src.execution.command_recovery import (
+        reconcile_complete_exit_trade_fact_commands,
+    )
+
+    assert reconcile_complete_exit_trade_fact_commands(conn) == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert _get_state(conn, "cmd-reviewed-exit") == "FILLED"
+    payload = json.loads(_get_events(conn, "cmd-reviewed-exit")[-1]["payload_json"])
+    assert payload["reason"] == "review_cleared_confirmed_fill"
+    assert payload["proof_class"] == "authenticated_trade_fact_full_fill"
+    assert payload["source_proof"]["source_function"] == (
+        "command_recovery.reconcile_complete_exit_trade_fact_commands"
+    )
+
+
 class TestAuthenticatedEntryTradeFactProjection:
     """A confirmed authenticated fill must become owned wealth immediately."""
 

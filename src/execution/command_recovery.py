@@ -3249,6 +3249,8 @@ def _confirmed_bound_trade_fact_summary(
     *,
     command_id: str,
     venue_order_id: str,
+    limit_price: object = None,
+    side: object = None,
 ) -> dict:
     """Summarize canonical confirmed fills bound to one command and order."""
 
@@ -3258,8 +3260,8 @@ def _confirmed_bound_trade_fact_summary(
         + ", "
         + _economic_trade_fact_cte()
         + """
-        SELECT trade_id, filled_size, fill_price, source, observed_at,
-               venue_timestamp
+        SELECT trade_fact_id, trade_id, filled_size, fill_price, source,
+               observed_at, venue_timestamp
           FROM economic_trade_fact
          WHERE command_id = ?
            AND venue_order_id = ?
@@ -3271,22 +3273,31 @@ def _confirmed_bound_trade_fact_summary(
         """,
         (command_id, venue_order_id),
     ).fetchall()
-    fills: list[tuple[Decimal, Decimal, str]] = []
+    fills: list[tuple[int, str, Decimal, Decimal, str, str]] = []
     for raw in rows:
         fact = _dict_row(raw)
+        trade_fact_id = int(fact.get("trade_fact_id") or 0)
         trade_id = str(fact.get("trade_id") or "").strip()
         size = _positive_decimal_or_none(fact.get("filled_size"))
         price = _positive_decimal_or_none(fact.get("fill_price"))
+        source = str(fact.get("source") or "").upper()
         observed_at = str(
             fact.get("venue_timestamp") or fact.get("observed_at") or ""
         )
-        if not trade_id or size is None or price is None or _parse_ts(observed_at) is None:
+        if (
+            trade_fact_id <= 0
+            or not trade_id
+            or size is None
+            or price is None
+            or source not in {"REST", "WS_USER"}
+            or _parse_ts(observed_at) is None
+        ):
             continue
-        fills.append((size, price, observed_at))
-    filled = sum((item[0] for item in fills), Decimal("0"))
-    cost = sum((item[0] * item[1] for item in fills), Decimal("0"))
+        fills.append((trade_fact_id, trade_id, size, price, source, observed_at))
+    filled = sum((item[2] for item in fills), Decimal("0"))
+    cost = sum((item[2] * item[3] for item in fills), Decimal("0"))
     latest_at = max(
-        (item[2] for item in fills),
+        (item[5] for item in fills),
         key=lambda value: _parse_ts(value),
         default="",
     )
@@ -3295,8 +3306,152 @@ def _confirmed_bound_trade_fact_summary(
         "filled_size": _decimal_text(filled),
         "fill_price": _decimal_text(cost / filled) if filled > 0 else "",
         "authenticated_confirmed": bool(fills),
+        "fill_prices_respect_limit": bool(fills) and all(
+            _fill_price_respects_limit(item[3], limit_price, side=side)
+            for item in fills
+        ),
         "observed_at": latest_at,
+        "source": "REST" if any(item[4] == "REST" for item in fills) else "WS_USER",
+        "trade_ids": [item[1] for item in fills],
+        "trade_fact_ids": [item[0] for item in fills],
     }
+
+
+def reconcile_complete_exit_trade_fact_commands(conn: sqlite3.Connection) -> dict:
+    """Terminalize one SELL when exact confirmed fills cover its command size.
+
+    SCOPE: one nonterminal EXIT/SELL command and its exact venue order id.
+    DRAIN: every recovery pass after canonical confirmed trade facts arrive.
+    RESET: ``FILL_CONFIRMED`` atomically terminalizes the command and converts
+    its collateral reservation; partial or identity-incomplete fills stay put.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    if not (
+        _table_exists(conn, "venue_commands")
+        and _table_exists(conn, "venue_trade_facts")
+    ):
+        return summary
+    rows = conn.execute(
+        """
+        SELECT *
+          FROM venue_commands
+         WHERE intent_kind = 'EXIT'
+           AND UPPER(COALESCE(side, '')) = 'SELL'
+           AND state IN ('ACKED', 'POST_ACKED', 'PARTIAL', 'REVIEW_REQUIRED')
+           AND COALESCE(venue_order_id, '') != ''
+           AND EXISTS (
+                SELECT 1
+                  FROM venue_trade_facts fact
+                 WHERE fact.command_id = venue_commands.command_id
+                   AND fact.venue_order_id = venue_commands.venue_order_id
+                   AND fact.state = 'CONFIRMED'
+                   AND fact.source IN ('REST', 'WS_USER')
+                   AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+           )
+         ORDER BY datetime(updated_at), command_id
+        """
+    ).fetchall()
+    for raw in rows:
+        command = _dict_row(raw)
+        summary["scanned"] += 1
+        command_id = str(command.get("command_id") or "")
+        venue_order_id = str(command.get("venue_order_id") or "")
+        try:
+            fills = _confirmed_bound_trade_fact_summary(
+                conn,
+                command_id=command_id,
+                venue_order_id=venue_order_id,
+                limit_price=command.get("price"),
+                side=command.get("side"),
+            )
+            if not (
+                fills.get("authenticated_confirmed") is True
+                and fills.get("fill_prices_respect_limit") is True
+                and _fill_size_completes_limit_order(
+                    fills.get("filled_size"),
+                    command.get("size"),
+                    side=command.get("side"),
+                )
+                and _positive_decimal_or_none(fills.get("fill_price")) is not None
+                and _parse_ts(fills.get("observed_at")) is not None
+            ):
+                summary["stayed"] += 1
+                continue
+            review_required = (
+                str(command.get("state") or "")
+                == CommandState.REVIEW_REQUIRED.value
+            )
+            payload = {
+                "schema_version": 1,
+                "reason": "canonical_trade_facts_complete_exit_command",
+                "proof_class": (
+                    "canonical_confirmed_trade_facts_equal_submitted_size"
+                ),
+                "command_id": command_id,
+                "position_id": str(command.get("position_id") or ""),
+                "decision_id": str(command.get("decision_id") or ""),
+                "venue_order_id": venue_order_id,
+                "token_id": str(command.get("token_id") or ""),
+                "trade_id": str(fills["trade_ids"][-1]),
+                "trade_ids": list(fills["trade_ids"]),
+                "trade_fact_ids": list(fills["trade_fact_ids"]),
+                "filled_size": str(fills["filled_size"]),
+                "fill_price": str(fills["fill_price"]),
+                "trade_fact_count": int(fills["count"]),
+                "source": str(fills["source"]),
+                "required_predicates": {
+                    "confirmed_trade_facts_bound_to_command_and_order": True,
+                    "cumulative_fill_covers_submitted_size": True,
+                    "every_fill_price_respects_submitted_limit": True,
+                    "positive_fill_economics": True,
+                },
+                "source_proof": {
+                    "source_commit": "runtime",
+                    "source_function": (
+                        "command_recovery."
+                        "reconcile_complete_exit_trade_fact_commands"
+                    ),
+                    "source_reason": (
+                        "canonical_confirmed_exit_trade_facts_complete_command"
+                    ),
+                },
+            }
+            if review_required:
+                payload = {
+                    **payload,
+                    "reason": "review_cleared_confirmed_fill",
+                    "proof_class": "authenticated_trade_fact_full_fill",
+                    "side_effect_boundary_crossed": True,
+                    "sdk_submit_attempted": True,
+                    "reviewed_by": "command_recovery",
+                    "cleared_at": str(fills["observed_at"]),
+                    "required_predicates": {
+                        **payload["required_predicates"],
+                        "command_state_review_required": True,
+                        "latest_event_is_review_boundary": True,
+                        "authenticated_confirmed_trade_facts": True,
+                        "bound_venue_order_id_matches_trade": True,
+                        "trade_facts_cover_command_or_leave_only_dust": True,
+                        "source_fill_time_valid": True,
+                    },
+                }
+            append_event(
+                conn,
+                command_id=command_id,
+                event_type=CommandEventType.FILL_CONFIRMED.value,
+                occurred_at=str(fills["observed_at"]),
+                payload=payload,
+            )
+            summary["advanced"] += 1
+        except Exception as exc:
+            logger.error(
+                "recovery: complete EXIT trade-fact terminalization failed for %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
 
 
 def _latest_review_cancel_blocked_payload(conn: sqlite3.Connection, command_id: str) -> dict:
@@ -25355,6 +25510,11 @@ def _reconcile_passes_short_conn(
             "exit_lifecycle_alignment_repair",
         )
         _boot_db_pass(
+            "complete_exit_trade_fact_commands",
+            reconcile_complete_exit_trade_fact_commands,
+            "complete_exit_trade_fact_commands",
+        )
+        _boot_db_pass(
             "filled_exit_trade_fact_tx_repair",
             reconcile_filled_exit_trade_fact_tx_repairs,
             "filled_exit_trade_fact_tx_repair",
@@ -25767,6 +25927,11 @@ def _reconcile_passes_short_conn(
             "edli_entry_posterior_projection_repair",
         )
         _db_pass(
+            "complete_exit_trade_fact_commands",
+            reconcile_complete_exit_trade_fact_commands,
+            "complete_exit_trade_fact_commands",
+        )
+        _db_pass(
             "filled_exit_trade_fact_tx_repair",
             reconcile_filled_exit_trade_fact_tx_repairs,
             "filled_exit_trade_fact_tx_repair",
@@ -25801,6 +25966,11 @@ def _reconcile_passes_short_conn(
                      "matched_order_facts",
                      skip_stale_terminal_zero=True,
                      skip_projected_hard_terminal=scope == "live_tick")
+        _db_pass(
+            "complete_exit_trade_fact_commands",
+            reconcile_complete_exit_trade_fact_commands,
+            "complete_exit_trade_fact_commands",
+        )
         _db_pass(
             "filled_exit_trade_fact_tx_repair",
             reconcile_filled_exit_trade_fact_tx_repairs,
@@ -25921,6 +26091,11 @@ def _reconcile_passes_short_conn(
                 break
     else:
         _client_pass("matched_order_facts", reconcile_matched_order_facts, "matched_order_facts")
+    _db_pass(
+        "complete_exit_trade_fact_commands",
+        reconcile_complete_exit_trade_fact_commands,
+        "complete_exit_trade_fact_commands",
+    )
     _db_pass(
         "filled_exit_trade_fact_tx_repair",
         reconcile_filled_exit_trade_fact_tx_repairs,
