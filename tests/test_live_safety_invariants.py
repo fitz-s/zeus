@@ -15109,6 +15109,46 @@ def test_multi_db_standard_releases_partial_reservation_for_monitor(tmp_path):
     assert completions == ["monitor", "standard"]
 
 
+def test_multi_db_reservation_oserror_releases_partial_set(tmp_path):
+    """A later DB admission fault cannot leak an earlier reservation."""
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WritePriority
+
+    coordinator = WriteCoordinator(
+        {
+            DBIdentity.TRADE: tmp_path / "a-trade.db",
+            DBIdentity.WORLD: tmp_path / "b-world.db",
+        }
+    )
+    original_acquire = coordinator._acquire_nonmonitor_reservation
+    calls = 0
+
+    def fail_second_reservation(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("second reservation fault")
+        return original_acquire(*args, **kwargs)
+
+    coordinator._acquire_nonmonitor_reservation = fail_second_reservation
+    with pytest.raises(OSError, match="second reservation fault"):
+        coordinator._acquire_nonmonitor_reservations(
+            (DBIdentity.TRADE, DBIdentity.WORLD),
+            deadline=None,
+            owner="faulted-standard",
+            priority=WritePriority.STANDARD,
+        )
+
+    coordinator._acquire_nonmonitor_reservation = original_acquire
+    reservations = coordinator._acquire_nonmonitor_reservations(
+        (DBIdentity.TRADE, DBIdentity.WORLD),
+        deadline=time.monotonic() + 1,
+        owner="subsequent-standard",
+        priority=WritePriority.STANDARD,
+    )
+    for fd in reversed(tuple(reservations.values())):
+        coordinator._release_turnstile(fd)
+
+
 def test_turnstile_blocks_background_while_monitor_waits(tmp_path):
     """A queued MONITOR holds admission; BACKGROUND defers until the next call."""
     from src.state.write_coordinator import (

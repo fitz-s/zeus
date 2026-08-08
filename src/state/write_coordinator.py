@@ -618,9 +618,18 @@ class WriteCoordinator:
                         f"for owner={owner}: monitor intent visible"
                     )
                 return reservations
-            except WriteLeaseTimeout:
+            except BaseException as exc:
+                cleanup_error: BaseException | None = None
                 for fd in reversed(tuple(reservations.values())):
-                    self._release_turnstile(fd)
+                    try:
+                        self._release_turnstile(fd)
+                    except BaseException as release_exc:
+                        if cleanup_error is None:
+                            cleanup_error = release_exc
+                if not isinstance(exc, WriteLeaseTimeout):
+                    raise
+                if cleanup_error is not None:
+                    raise cleanup_error from exc
                 if background or (deadline is not None and self._clock() >= deadline):
                     raise
                 sleep_for = 0.01
