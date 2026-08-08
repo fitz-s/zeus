@@ -4103,7 +4103,7 @@ def _edli_event_reactor_cycle(
         _global_block_reason = "paused_forecast_snapshot_completion"
     if control_drain_block_reason is not None:
         _global_block_reason = control_drain_block_reason
-    return run_edli_event_reactor_cycle(
+    result = run_edli_event_reactor_cycle(
         active_lock=_edli_reactor_active_lock,
         live_entry_block_reason=_global_block_reason,
         live_entry_family_block_reasons=_family_block_reasons,
@@ -4123,6 +4123,20 @@ def _edli_event_reactor_cycle(
             _periodic_held_position_monitor_handoff_pending.is_set
         ),
     )
+    # Recovery is deliberately after the reactor invocation: this cycle keeps
+    # its already-selected pause, while the next cycle reads fresh control state.
+    try:
+        from src.control.control_plane import recover_deploy_live_restart_guard
+
+        recovery = recover_deploy_live_restart_guard()
+        if recovery.get("status") not in {"noop", "reset"}:
+            logger.warning("deploy live restart guard retained: %s", recovery)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "deploy live restart guard recovery unavailable",
+            exc_info=True,
+        )
+    return result
 
 
 def _edli_initialize_reactor_wake_cursor() -> None:

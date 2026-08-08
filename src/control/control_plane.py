@@ -13,6 +13,7 @@ import threading
 import traceback as _traceback
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
 from typing import Iterable
 
 import fcntl
@@ -25,7 +26,9 @@ from src.state.db import (
     DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
     expire_control_override,
     get_trade_connection,
+    get_trade_connection_read_only,
     get_world_connection,
+    get_world_connection_read_only,
     get_world_connection_with_trades_required,
     query_control_override_state,
     upsert_control_override,
@@ -275,6 +278,28 @@ def alert_auto_pause(reason_code: str) -> None:
 
 AUTO_PAUSE_OVERRIDE_ID = "control_plane:global:entries_paused"
 
+DEPLOY_LIVE_RESTART_GUARD_REASON = "deploy_live_restart_guard"
+DEPLOY_LIVE_RESTART_GUARD_ISSUER = "control_plane"
+_DEPLOY_LIVE_RESTART_GUARD_MAX_MONITOR_AGE_SECONDS = 150.0
+# SCOPE: global entries gate for one fixed control identity. DRAIN: the
+# post-issued reactor monitor/queue proof. RESET: exact SHA+issued_at CAS only.
+
+
+@dataclass(frozen=True)
+class DeployLiveRestartGuardWitness:
+    """Exact invocation identity carried by the fixed control override row."""
+
+    override_id: str
+    expected_sha: str
+    issued_at: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "override_id": self.override_id,
+            "expected_sha": self.expected_sha,
+            "issued_at": self.issued_at,
+        }
+
 
 def _has_active_auto_pause_override(
     conn,
@@ -324,6 +349,381 @@ def _has_active_auto_pause_override(
     return str(effective_until) > now_iso
 
 
+def _normalise_restart_guard_sha(expected_sha: object) -> str:
+    value = str(expected_sha or "").strip().lower()
+    if len(value) < 40 or len(value) > 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise ValueError("deploy restart guard requires a full hexadecimal git SHA")
+    return value
+
+
+def _restart_guard_value(expected_sha: str) -> str:
+    return json.dumps({"paused": True, "expected_sha": expected_sha}, sort_keys=True)
+
+
+def _restart_guard_witness_from_row(row) -> DeployLiveRestartGuardWitness | None:
+    if row is None:
+        return None
+    if (
+        str(row["override_id"] or "") != AUTO_PAUSE_OVERRIDE_ID
+        or str(row["target_type"] or "") != "global"
+        or str(row["target_key"] or "") != "entries"
+        or str(row["action_type"] or "") != "gate"
+        or str(row["reason"] or "") != DEPLOY_LIVE_RESTART_GUARD_REASON
+        or str(row["issued_by"] or "") != DEPLOY_LIVE_RESTART_GUARD_ISSUER
+        or row["effective_until"] is not None
+    ):
+        return None
+    try:
+        payload = json.loads(str(row["value"] or ""))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("paused") is not True:
+        return None
+    try:
+        expected_sha = _normalise_restart_guard_sha(payload.get("expected_sha"))
+    except ValueError:
+        return None
+    issued_at = str(row["issued_at"] or "")
+    if not issued_at:
+        return None
+    return DeployLiveRestartGuardWitness(
+        override_id=AUTO_PAUSE_OVERRIDE_ID,
+        expected_sha=expected_sha,
+        issued_at=issued_at,
+    )
+
+
+def _active_entries_pause_row(conn, *, now_iso: str):
+    row = conn.execute(
+        """
+        SELECT override_id, target_type, target_key, action_type, value,
+               issued_by, issued_at, effective_until, reason, precedence
+          FROM control_overrides
+         WHERE override_id = ? AND issued_at <= ?
+        """,
+        (AUTO_PAUSE_OVERRIDE_ID, now_iso),
+    ).fetchone()
+    if row is None or row["effective_until"] is not None and row["effective_until"] <= now_iso:
+        return None
+    raw_value = str(row["value"] or "").strip().lower()
+    if raw_value in {"0", "false", "no", "off", "disabled"}:
+        return None
+    if raw_value not in {"1", "true", "yes", "on", "enabled"}:
+        try:
+            payload = json.loads(raw_value)
+        except ValueError:
+            return None
+        if not isinstance(payload, dict) or payload.get("paused") is not True:
+            return None
+    return row
+
+
+def arm_deploy_live_restart_guard(
+    expected_sha: str,
+    *,
+    issued_at: str | None = None,
+) -> dict[str, object]:
+    """Append one invocation witness to the existing global control row."""
+
+    expected = _normalise_restart_guard_sha(expected_sha)
+    issued = str(issued_at or datetime.now(timezone.utc).isoformat()).strip()
+    if not issued:
+        raise ValueError("deploy restart guard requires issued_at")
+    conn = get_world_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        current = _active_entries_pause_row(conn, now_iso=issued)
+        if current is not None and _restart_guard_witness_from_row(current) is None:
+            conn.rollback()
+            return {
+                "status": "preserved",
+                "reason": str(current["reason"] or ""),
+                "issued_by": str(current["issued_by"] or ""),
+                "witness": None,
+            }
+        upsert_control_override(
+            conn,
+            override_id=AUTO_PAUSE_OVERRIDE_ID,
+            target_type="global",
+            target_key="entries",
+            action_type="gate",
+            value=_restart_guard_value(expected),
+            issued_by=DEPLOY_LIVE_RESTART_GUARD_ISSUER,
+            issued_at=issued,
+            reason=DEPLOY_LIVE_RESTART_GUARD_REASON,
+            effective_until=None,
+            precedence=DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
+        )
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+    witness = DeployLiveRestartGuardWitness(AUTO_PAUSE_OVERRIDE_ID, expected, issued)
+    return {"status": "armed", "witness": witness.as_dict()}
+
+
+def get_active_deploy_live_restart_guard(
+    *,
+    now: datetime | None = None,
+) -> DeployLiveRestartGuardWitness | None:
+    """Return the selected active guard, never an unselected historical row."""
+
+    now_iso = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+    conn = get_world_connection_read_only()
+    try:
+        return _restart_guard_witness_from_row(_active_entries_pause_row(conn, now_iso=now_iso))
+    finally:
+        conn.close()
+
+
+def _coerce_restart_guard_witness(value) -> DeployLiveRestartGuardWitness:
+    if isinstance(value, DeployLiveRestartGuardWitness):
+        witness = value
+    elif isinstance(value, dict):
+        witness = DeployLiveRestartGuardWitness(
+            override_id=str(value.get("override_id") or ""),
+            expected_sha=str(value.get("expected_sha") or "").strip().lower(),
+            issued_at=str(value.get("issued_at") or ""),
+        )
+    else:
+        raise TypeError("deploy restart guard witness must be a dataclass or mapping")
+    expected = _normalise_restart_guard_sha(witness.expected_sha)
+    if witness.expected_sha != expected:
+        raise ValueError("deploy restart guard witness SHA is not canonical")
+    if witness.override_id != AUTO_PAUSE_OVERRIDE_ID:
+        raise ValueError("deploy restart guard witness identity mismatch")
+    if not witness.issued_at:
+        raise ValueError("deploy restart guard witness issued_at is missing")
+    return witness
+
+
+def _read_loaded_sha() -> str:
+    try:
+        with open(state_path("loaded_sha.json"), encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(
+        payload.get("loaded_sha")
+        or payload.get("boot_sha")
+        or payload.get("current_sha")
+        or ""
+    ).strip().lower()
+
+
+def _restart_guard_queue_evidence(conn, *, issued_at: str, now: datetime) -> dict[str, bool]:
+    """Use bounded indexed probes; never aggregate the EDLI history table."""
+
+    stale = conn.execute(
+        """
+        SELECT 1
+          FROM opportunity_event_processing
+               INDEXED BY idx_opportunity_event_processing_stale_claim
+         WHERE consumer_name = ?
+           AND processing_status = 'processing'
+           AND claimed_at IS NOT NULL
+           AND claimed_at <= ?
+           AND COALESCE(last_error, '') <> 'GLOBAL_WINNER_SUBMIT_FENCED'
+         LIMIT 1
+        """,
+        ("edli_reactor_v1", (now - timedelta(seconds=300.0)).isoformat()),
+    ).fetchone() is not None
+
+    claimable_pending = conn.execute(
+        """
+        SELECT 1
+          FROM opportunity_event_processing
+               INDEXED BY idx_opportunity_event_processing_pending_retry_floor
+         WHERE consumer_name = ?
+           AND processing_status = 'pending'
+           AND claimed_at IS NULL
+         LIMIT 1
+        """,
+        ("edli_reactor_v1",),
+    ).fetchone() is not None
+    if not claimable_pending:
+        claimable_pending = conn.execute(
+            """
+            SELECT 1
+              FROM opportunity_event_processing
+                   INDEXED BY idx_opportunity_event_processing_pending_retry_floor
+             WHERE consumer_name = ?
+               AND processing_status = 'pending'
+               AND claimed_at IS NOT NULL
+               AND claimed_at <= ?
+             LIMIT 1
+            """,
+            ("edli_reactor_v1", now.isoformat()),
+        ).fetchone() is not None
+
+    progress = False
+    for status, timestamp_column in (
+        ("processing", "claimed_at"),
+        ("processed", "processed_at"),
+        ("failed", "processed_at"),
+        ("dead_letter", "processed_at"),
+        ("expired", "processed_at"),
+    ):
+        progress = conn.execute(
+            f"""
+            SELECT 1
+              FROM opportunity_event_processing
+                   INDEXED BY idx_opportunity_event_processing_status
+             WHERE consumer_name = ?
+               AND processing_status = ?
+               AND updated_at >= ?
+               AND updated_at <= ?
+               AND {timestamp_column} IS NOT NULL
+               AND {timestamp_column} >= ?
+               AND {timestamp_column} <= ?
+             LIMIT 1
+            """,
+            (
+                "edli_reactor_v1",
+                status,
+                issued_at,
+                now.isoformat(),
+                issued_at,
+                now.isoformat(),
+            ),
+        ).fetchone() is not None
+        if progress:
+            break
+    return {
+        "stale_processing": stale,
+        "claimable_pending": claimable_pending,
+        "post_issued_progress": progress,
+        "green": not stale and (progress or not claimable_pending),
+    }
+
+
+def prove_deploy_live_restart_guard(
+    witness,
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Evaluate loaded SHA plus post-issued monitor and queue evidence."""
+
+    witness = _coerce_restart_guard_witness(witness)
+    now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    try:
+        issued_dt = datetime.fromisoformat(witness.issued_at).astimezone(timezone.utc)
+        loaded_sha = _read_loaded_sha()
+        runtime_green = loaded_sha == witness.expected_sha
+
+        from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+
+        trade_conn = get_trade_connection_read_only()
+        try:
+            monitor = collect_monitor_cadence_evidence(
+                trade_conn,
+                now=now_utc,
+                min_occurred_at=issued_dt,
+                max_age_seconds=_DEPLOY_LIVE_RESTART_GUARD_MAX_MONITOR_AGE_SECONDS,
+                strict_future=True,
+                monitor_refreshed_only=True,
+                require_fresh_inputs=True,
+                sample_limit=5,
+            )
+        finally:
+            trade_conn.close()
+
+        world_conn = get_world_connection_read_only()
+        try:
+            queue = _restart_guard_queue_evidence(
+                world_conn,
+                issued_at=issued_dt.isoformat(),
+                now=now_utc,
+            )
+        finally:
+            world_conn.close()
+        monitor_green = (
+            int(monitor.get("future_monitor_event_count") or 0) == 0
+            and int(monitor.get("stale_or_missing_position_count") or 0) == 0
+        )
+        queue_green = bool(queue.get("green"))
+        green = (
+            runtime_green
+            and monitor_green
+            and queue_green
+        )
+        return {
+            "green": green,
+            "witness": witness.as_dict(),
+            "runtime": {"loaded_sha": loaded_sha, "expected_sha": witness.expected_sha, "green": runtime_green},
+            "monitor": {**monitor, "green": monitor_green},
+            "queue": {**queue, "green": queue_green},
+        }
+    except Exception as exc:
+        return {
+            "green": False,
+            "witness": witness.as_dict(),
+            "reason": f"DEPLOY_RESTART_GUARD_PROOF_UNAVAILABLE:{type(exc).__name__}:{exc}",
+        }
+
+
+def reset_deploy_live_restart_guard(
+    witness,
+    *,
+    proof: dict[str, object],
+    retired_at: str | None = None,
+) -> dict[str, object]:
+    """CAS-retire exactly the selected guard after a green proof."""
+
+    witness = _coerce_restart_guard_witness(witness)
+    if proof.get("green") is not True or proof.get("witness") != witness.as_dict():
+        return {"status": "refused", "reason": "restart_guard_proof_not_green"}
+    retired = str(retired_at or datetime.now(timezone.utc).isoformat())
+    conn = get_world_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = _active_entries_pause_row(conn, now_iso=retired)
+        current = _restart_guard_witness_from_row(row)
+        if current != witness:
+            conn.rollback()
+            return {"status": "noop", "reason": "restart_guard_invocation_mismatch"}
+        result = expire_control_override(
+            conn,
+            override_id=witness.override_id,
+            expired_at=retired,
+        )
+        if int(result.get("expired_count") or 0) != 1:
+            conn.rollback()
+            return {"status": "noop", "reason": "restart_guard_already_retired"}
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+    logger.warning(
+        "DEPLOY_LIVE_RESTART_GUARD_RESET expected_sha=%s issued_at=%s",
+        witness.expected_sha,
+        witness.issued_at,
+    )
+    return {"status": "reset", "witness": witness.as_dict()}
+
+
+def recover_deploy_live_restart_guard() -> dict[str, object]:
+    """Prove and CAS-reset the selected guard after one reactor invocation."""
+
+    witness = get_active_deploy_live_restart_guard()
+    if witness is None:
+        return {"status": "noop", "reason": "restart_guard_not_selected"}
+    proof = prove_deploy_live_restart_guard(witness)
+    result = reset_deploy_live_restart_guard(witness, proof=proof)
+    result["proof"] = proof
+    return result
+
+
 def _has_active_control_plane_override(conn, *, now_iso: str) -> bool:
     """Return True iff an indefinite operator/control_plane row is active.
 
@@ -356,8 +756,14 @@ def _has_active_control_plane_override(conn, *, now_iso: str) -> bool:
         return False
     if str(issued_by or "") not in {"control_plane", "operator"}:
         return False
-    if str(value or "").strip().lower() not in {"true", "1", "yes"}:
-        return False
+    raw_value = str(value or "").strip().lower()
+    if raw_value not in {"true", "1", "yes", "on", "enabled"}:
+        try:
+            payload = json.loads(raw_value)
+        except ValueError:
+            return False
+        if not isinstance(payload, dict) or payload.get("paused") is not True:
+            return False
     return effective_until is None
 
 

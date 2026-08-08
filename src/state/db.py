@@ -13033,6 +13033,12 @@ def _parse_boolish_text(raw: str) -> bool:
         return True
     if text in {"0", "false", "no", "off", "disabled"}:
         return False
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError):
+        payload = None
+    if isinstance(payload, dict) and payload.get("paused") is True:
+        return True
     raise ValueError(f"unsupported boolish value in DB: {raw!r}")
 
 

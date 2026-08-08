@@ -770,9 +770,9 @@ def _paused_entry_backlog_is_expected_parked(
     if not bool(pause.get("entries_paused")):
         return False, "durable_entries_paused=false"
 
-    exposure_count = _canonical_open_exposure_count(trade_db)
-    if exposure_count:
-        return False, f"canonical_open_exposure={exposure_count}"
+    unresolved_position_count = _canonical_unresolved_position_count(trade_db)
+    if unresolved_position_count:
+        return False, f"canonical_unresolved_positions={unresolved_position_count}"
 
     nonterminal_sell_count = _nonterminal_sell_command_count(trade_db)
     if nonterminal_sell_count:
@@ -785,45 +785,16 @@ def _paused_entry_backlog_is_expected_parked(
     return (
         True,
         "post-start EDLI queue expected parked: "
-        "durable_entries_paused=true canonical_open_exposure=0 "
+        "durable_entries_paused=true monitor_fresh_inputs=verified "
+        "canonical_unresolved_positions=0 "
         "nonterminal_sell_commands=0 held_sell_global_auction_debt=0 "
         "stale_processing=0 post_start_freshness=verified "
         f"claimable_pending={int(queue.get('claimable_pending_count') or 0)}",
     )
 
 
-def _durable_entries_pause_state(world_db: Path) -> dict[str, object]:
-    """Read the current WORLD pause authority from a separate read-only handle."""
-
-    try:
-        conn = sqlite3.connect(f"file:{world_db}?mode=ro", uri=True, timeout=2.0)
-        conn.row_factory = sqlite3.Row
-        required_columns = {
-            "override_id", "target_type", "target_key", "action_type", "value",
-            "issued_by", "issued_at", "effective_until", "reason", "precedence",
-        }
-        try:
-            columns = _sqlite_table_columns(conn, "control_overrides")
-        except RuntimeError as exc:
-            raise RuntimeError(
-                "EDLI_EXPECTED_PARKED_PAUSE_UNREADABLE:missing_table"
-            ) from exc
-        if not required_columns.issubset(columns):
-            raise RuntimeError(
-                "EDLI_EXPECTED_PARKED_PAUSE_UNREADABLE:projection_columns"
-            )
-        return dict(query_control_override_state(conn))
-    except sqlite3.Error as exc:
-        raise RuntimeError("EDLI_EXPECTED_PARKED_PAUSE_UNREADABLE:sqlite_error") from exc
-    finally:
-        try:
-            conn.close()
-        except UnboundLocalError:
-            pass
-
-
-def _canonical_open_exposure_count(trade_db: Path) -> int:
-    """Count only open-lifecycle positions that can still require a SELL lane."""
+def _canonical_unresolved_position_count(trade_db: Path) -> int:
+    """Count malformed or unresolved entry projections, not healthy exposure."""
 
     from src.contracts.position_truth import NO_CURRENT_MONEY_RISK_CHAIN_STATES
 
@@ -851,11 +822,8 @@ def _canonical_open_exposure_count(trade_db: Path) -> int:
         row = conn.execute(
             f"""
             SELECT COUNT(*)
-             FROM position_current
+              FROM position_current
              WHERE LOWER(TRIM(COALESCE(phase, ''))) NOT IN ({governed_phase_placeholders})
-                OR LOWER(TRIM(COALESCE(phase, ''))) IN (
-                    'active', 'day0_window', 'pending_exit'
-                )
                 OR (
                     LOWER(TRIM(COALESCE(phase, ''))) = 'pending_entry'
                     AND (
@@ -869,6 +837,36 @@ def _canonical_open_exposure_count(trade_db: Path) -> int:
         return int(row[0] or 0)
     except sqlite3.Error as exc:
         raise RuntimeError("EDLI_EXPECTED_PARKED_POSITION_PROJECTION_UNREADABLE") from exc
+    finally:
+        try:
+            conn.close()
+        except UnboundLocalError:
+            pass
+
+
+def _durable_entries_pause_state(world_db: Path) -> dict[str, object]:
+    """Read the current WORLD pause authority from a separate read-only handle."""
+
+    try:
+        conn = sqlite3.connect(f"file:{world_db}?mode=ro", uri=True, timeout=2.0)
+        conn.row_factory = sqlite3.Row
+        required_columns = {
+            "override_id", "target_type", "target_key", "action_type", "value",
+            "issued_by", "issued_at", "effective_until", "reason", "precedence",
+        }
+        try:
+            columns = _sqlite_table_columns(conn, "control_overrides")
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "EDLI_EXPECTED_PARKED_PAUSE_UNREADABLE:missing_table"
+            ) from exc
+        if not required_columns.issubset(columns):
+            raise RuntimeError(
+                "EDLI_EXPECTED_PARKED_PAUSE_UNREADABLE:projection_columns"
+            )
+        return dict(query_control_override_state(conn))
+    except sqlite3.Error as exc:
+        raise RuntimeError("EDLI_EXPECTED_PARKED_PAUSE_UNREADABLE:sqlite_error") from exc
     finally:
         try:
             conn.close()
@@ -1460,7 +1458,11 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
     return True, f"live restart recovery passed: {json.dumps(summary, sort_keys=True)}"
 
 
-def _pause_entries_for_live_restart_if_needed(labels: list[str]) -> tuple[bool, str]:
+def _pause_entries_for_live_restart_if_needed(
+    labels: list[str],
+    *,
+    expected_sha: str | None = None,
+) -> tuple[bool, str]:
     """Durably pause entries before a live-trading restart can boot new code.
 
     Restarting ``src.main`` creates a short window where deployment-freshness
@@ -1476,42 +1478,29 @@ def _pause_entries_for_live_restart_if_needed(labels: list[str]) -> tuple[bool, 
     py = os.path.join(live_repo, ".venv", "bin", "python")
     if not os.path.exists(py):
         py = sys.executable
+    expected_literal = json.dumps(str(expected_sha or head_sha(short=False)))
     code = textwrap.dedent(
-        """
-        from datetime import datetime, timezone
-        from src.control.control_plane import pause_entries
-        from src.state.db import get_world_connection
+        f"""
+        from src.control.control_plane import arm_deploy_live_restart_guard
 
-        now = datetime.now(timezone.utc).isoformat()
-        conn = get_world_connection()
-        try:
-            row = conn.execute(
-                '''
-                SELECT reason, issued_by, issued_at
-                  FROM control_overrides
-                 WHERE target_type = 'global'
-                   AND target_key = 'entries'
-                   AND action_type = 'gate'
-                   AND lower(COALESCE(value, '')) IN ('1', 'true', 'yes', 'on')
-                   AND issued_by IN ('control_plane', 'operator')
-                   AND effective_until IS NULL
-                   AND issued_at <= ?
-                 ORDER BY precedence DESC, issued_at DESC, override_id DESC
-                 LIMIT 1
-                ''',
-                (now,),
-            ).fetchone()
-        finally:
-            conn.close()
-
-        if row is not None:
+        # Existing operator/risk/source pauses remain selected and untouched.
+        # The guard is indefinite (effective_until=None), never a TTL.
+        result = arm_deploy_live_restart_guard(expected_sha={expected_literal})
+        if result.get('status') == 'preserved':
             print(
                 'entries pause guard preserved: '
-                f"issued_by={row[1]} reason={row[0]}"
+                f"issued_by={{result.get('issued_by')}} "
+                f"reason={{result.get('reason')}}"
+            )
+        elif result.get('status') == 'armed':
+            witness = result.get('witness') or {{}}
+            print(
+                'entries pause guard armed: '
+                f"expected_sha={{witness.get('expected_sha')}} "
+                f"issued_at={{witness.get('issued_at')}}"
             )
         else:
-            pause_entries('deploy_live_restart_guard', issued_by='control_plane', effective_until=None)
-            print('entries pause guard armed')
+            raise RuntimeError(f"restart guard arm refused: {{result}}")
         """
     ).strip()
     try:
@@ -1536,6 +1525,7 @@ def _pause_entries_with_stuck_live_recovery(
     labels: list[str],
     *,
     live_was_loaded: bool,
+    expected_sha: str | None = None,
 ) -> tuple[bool, str]:
     """Arm the restart guard after stopping requested daemons that hold the writer.
 
@@ -1546,7 +1536,13 @@ def _pause_entries_with_stuck_live_recovery(
     Other pause failures remain fail-closed, with every stopped label left down.
     """
 
-    ok, detail = _pause_entries_for_live_restart_if_needed(labels)
+    if expected_sha is None:
+        ok, detail = _pause_entries_for_live_restart_if_needed(labels)
+    else:
+        ok, detail = _pause_entries_for_live_restart_if_needed(
+            labels,
+            expected_sha=expected_sha,
+        )
     writer_stuck = "timed out after" in detail or "database is locked" in detail
     if ok or not writer_stuck:
         return ok, detail
@@ -1560,7 +1556,13 @@ def _pause_entries_with_stuck_live_recovery(
         if not _wait_for_launchctl_unloaded(label):
             stop_details.append(f"FAILED unload wait {label}")
             return False, f"{detail}\n" + "; ".join(stop_details)
-    retry_ok, retry_detail = _pause_entries_for_live_restart_if_needed(labels)
+    if expected_sha is None:
+        retry_ok, retry_detail = _pause_entries_for_live_restart_if_needed(labels)
+    else:
+        retry_ok, retry_detail = _pause_entries_for_live_restart_if_needed(
+            labels,
+            expected_sha=expected_sha,
+        )
     prior_state = "loaded" if live_was_loaded else "already absent"
     return (
         retry_ok,
@@ -1573,7 +1575,7 @@ def _pause_entries_with_stuck_live_recovery(
 def _resume_entries_after_verified_live_restart_if_needed(
     labels: list[str],
 ) -> tuple[bool, str]:
-    """Clear only this deploy's guard after every post-start proof is green."""
+    """CAS-reset only this invocation's guard after sync post-start proofs."""
 
     if LIVE_TRADING_LABEL not in labels:
         return True, "entry resume not required for this daemon"
@@ -1583,45 +1585,17 @@ def _resume_entries_after_verified_live_restart_if_needed(
         py = sys.executable
     code = textwrap.dedent(
         """
-        from datetime import datetime, timezone
-        from src.control.control_plane import resume_entries
-        from src.state.db import get_world_connection
+        from src.control.control_plane import recover_deploy_live_restart_guard
 
-        now = datetime.now(timezone.utc).isoformat()
-        conn = get_world_connection()
-        try:
-            row = conn.execute(
-                '''
-                SELECT reason, issued_by
-                  FROM control_overrides
-                 WHERE target_type = 'global'
-                   AND target_key = 'entries'
-                   AND action_type = 'gate'
-                   AND lower(COALESCE(value, '')) IN ('1', 'true', 'yes', 'on')
-                   AND issued_by IN ('control_plane', 'operator')
-                   AND (effective_until IS NULL OR effective_until > ?)
-                   AND issued_at <= ?
-                 ORDER BY precedence DESC, issued_at DESC, override_id DESC
-                 LIMIT 1
-                ''',
-                (now, now),
-            ).fetchone()
-        finally:
-            conn.close()
-
-        if row is None:
-            print('entries pause guard already clear')
-        elif row[0] == 'deploy_live_restart_guard' and row[1] == 'control_plane':
-            resume_entries(
-                'deploy_live_restart_guard_verified_runtime_queue_monitor',
-                issued_by='control_plane',
-            )
-            print('deploy live restart guard cleared')
+        result = recover_deploy_live_restart_guard()
+        status = result.get('status')
+        if status == 'reset':
+            print('deploy live restart guard cleared by shared proof-driven CAS reset')
+        elif status == 'noop':
+            print(f"entries pause guard preserved after deploy: {result.get('reason')}")
         else:
-            print(
-                'entries pause guard preserved after deploy: '
-                f"issued_by={row[1]} reason={row[0]}"
-            )
+            print(f"deploy live restart guard retained: {result}")
+            raise SystemExit(1)
         """
     ).strip()
     try:
@@ -1763,6 +1737,7 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         if includes_live_trading
         else False
     )
+    expected_live_sha = head_sha(short=False) if includes_live_trading else ""
 
     pause_ok, pause_detail = _pause_entries_with_stuck_live_recovery(
         labels,
@@ -1774,7 +1749,6 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         return 1
     print(pause_detail)
 
-    expected_live_sha = ""
     launched_after: datetime | None = None
     non_live_labels = [label for label in labels if label != LIVE_TRADING_LABEL]
     # The venue-heartbeat service owns the heartbeat supervisor, which repairs an
@@ -1789,7 +1763,6 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         label for label in non_live_labels if label not in post_live_labels
     ]
     if includes_live_trading:
-        expected_live_sha = head_sha(short=False)
         ok, detail = _stop_label(LIVE_TRADING_LABEL)
         if ok:
             print(detail)

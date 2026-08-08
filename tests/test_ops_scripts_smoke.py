@@ -3591,7 +3591,7 @@ def test_deploy_live_paused_entry_backlog_is_explicitly_expected_parked(
     assert ok is True
     assert "post-start EDLI queue expected parked" in detail
     assert "durable_entries_paused=true" in detail
-    assert "canonical_open_exposure=0" in detail
+    assert "canonical_unresolved_positions=0" in detail
     assert "nonterminal_sell_commands=0" in detail
     assert "held_sell_global_auction_debt=0" in detail
 
@@ -3644,7 +3644,7 @@ def test_deploy_live_paused_entry_backlog_requires_post_start_freshness(
     assert "expected_parked=post_start_freshness=unverified" in detail
 
 
-def test_deploy_live_paused_entry_backlog_rejects_canonical_open_exposure(
+def test_deploy_live_paused_entry_backlog_allows_fresh_monitored_open_exposure(
     monkeypatch, tmp_path
 ):
     dl = _load("deploy_live_paused_entry_open_exposure", "deploy_live.py")
@@ -3677,8 +3677,8 @@ def test_deploy_live_paused_entry_backlog_rejects_canonical_open_exposure(
         timeout_seconds=0,
     )
 
-    assert ok is False
-    assert "expected_parked=canonical_open_exposure=1" in detail
+    assert ok is True
+    assert "canonical_unresolved_positions=0" in detail
 
 
 def test_deploy_live_paused_entry_backlog_ignores_terminal_historical_exposure(
@@ -3721,7 +3721,7 @@ def test_deploy_live_paused_entry_backlog_ignores_terminal_historical_exposure(
     )
 
     assert ok is True
-    assert "canonical_open_exposure=0" in detail
+    assert "canonical_unresolved_positions=0" in detail
 
 
 def test_deploy_live_paused_entry_backlog_rejects_pending_fill_unknown_exposure(
@@ -3748,7 +3748,7 @@ def test_deploy_live_paused_entry_backlog_rejects_pending_fill_unknown_exposure(
     )
 
     assert ok is False
-    assert "expected_parked=canonical_open_exposure=1" in detail
+    assert "expected_parked=canonical_unresolved_positions=1" in detail
 
 
 @pytest.mark.parametrize("phase", (None, "", "unknown", "unrecognized_phase"))
@@ -3777,7 +3777,7 @@ def test_deploy_live_paused_entry_backlog_rejects_ungoverned_lifecycle_phase(
     )
 
     assert ok is False
-    assert "expected_parked=canonical_open_exposure=1" in detail
+    assert "expected_parked=canonical_unresolved_positions=1" in detail
 
 
 def test_deploy_live_paused_entry_backlog_rejects_nonterminal_sell_debt(
@@ -4367,6 +4367,7 @@ def test_deploy_live_restart_pause_guard_is_indefinite_control_plane(monkeypatch
 
     monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
     monkeypatch.setattr(dl, "_live_trading_subprocess_env", lambda: {})
+    monkeypatch.setattr(dl, "head_sha", lambda short=False: "a" * 40)
 
     class Result:
         returncode = 0
@@ -4384,11 +4385,10 @@ def test_deploy_live_restart_pause_guard_is_indefinite_control_plane(monkeypatch
     assert ok is True
     assert "entries pause guard armed" in detail
     assert calls
-    code = calls[0][0][2]
+    code = calls[-1][0][2]
     assert "deploy_live_restart_guard" in code
+    assert "arm_deploy_live_restart_guard" in code
     assert "entries pause guard preserved" in code
-    assert "issued_by IN ('control_plane', 'operator')" in code
-    assert "issued_by='control_plane'" in code
     assert "effective_until=None" in code
     assert "system_auto_pause" not in code
 
@@ -4533,34 +4533,18 @@ def test_deploy_live_restart_pause_does_not_retry_before_scoped_unload(
 
 def test_deploy_live_restart_pause_preserves_existing_operator_pause(monkeypatch, tmp_path):
     dl = _load("deploy_live_restart_pause_guard_preserve_operator", "deploy_live.py")
-    pause_calls = []
-    sql_calls = []
 
     monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
     monkeypatch.setattr(dl, "_live_trading_subprocess_env", lambda: {})
+    monkeypatch.setattr(dl, "head_sha", lambda short=False: "a" * 40)
 
     control_mod = types.ModuleType("src.control.control_plane")
-    state_db_mod = types.ModuleType("src.state.db")
-
-    def fake_pause_entries(*args, **kwargs):
-        pause_calls.append((args, kwargs))
-
-    class _Cursor:
-        def fetchone(self):
-            return ("operator_investigation", "control_plane", "2026-07-03T00:00:00+00:00")
-
-    class _Conn:
-        def execute(self, sql, params=()):
-            sql_calls.append((sql, params))
-            return _Cursor()
-
-        def close(self):
-            return None
-
-    control_mod.pause_entries = fake_pause_entries
-    state_db_mod.get_world_connection = lambda: _Conn()
+    control_mod.arm_deploy_live_restart_guard = lambda **_kwargs: {
+        "status": "preserved",
+        "reason": "operator_investigation",
+        "issued_by": "control_plane",
+    }
     monkeypatch.setitem(sys.modules, "src.control.control_plane", control_mod)
-    monkeypatch.setitem(sys.modules, "src.state.db", state_db_mod)
 
     class Result:
         returncode = 0
@@ -4582,9 +4566,6 @@ def test_deploy_live_restart_pause_preserves_existing_operator_pause(monkeypatch
     assert ok is True
     assert "entries pause guard preserved" in detail
     assert "operator_investigation" in detail
-    assert pause_calls == []
-    assert sql_calls
-    assert "effective_until IS NULL" in sql_calls[0][0]
 
 
 def test_deploy_live_verified_restart_clears_only_its_control_plane_guard(
@@ -4592,29 +4573,13 @@ def test_deploy_live_verified_restart_clears_only_its_control_plane_guard(
     tmp_path,
 ):
     dl = _load("deploy_live_restart_resume_exact_guard", "deploy_live.py")
-    resume_calls = []
 
     monkeypatch.setattr(dl, "_require_live_repo", lambda: str(tmp_path))
     monkeypatch.setattr(dl, "_live_trading_subprocess_env", lambda: {})
 
     control_mod = types.ModuleType("src.control.control_plane")
-    state_db_mod = types.ModuleType("src.state.db")
-    control_mod.resume_entries = lambda *args, **kwargs: resume_calls.append((args, kwargs))
-
-    class _Cursor:
-        def fetchone(self):
-            return ("deploy_live_restart_guard", "control_plane")
-
-    class _Conn:
-        def execute(self, _sql, _params=()):
-            return _Cursor()
-
-        def close(self):
-            return None
-
-    state_db_mod.get_world_connection = lambda: _Conn()
+    control_mod.recover_deploy_live_restart_guard = lambda: {"status": "reset"}
     monkeypatch.setitem(sys.modules, "src.control.control_plane", control_mod)
-    monkeypatch.setitem(sys.modules, "src.state.db", state_db_mod)
 
     class Result:
         returncode = 0
@@ -4637,12 +4602,6 @@ def test_deploy_live_verified_restart_clears_only_its_control_plane_guard(
 
     assert ok is True
     assert "restart guard cleared" in detail
-    assert resume_calls == [
-        (
-            ("deploy_live_restart_guard_verified_runtime_queue_monitor",),
-            {"issued_by": "control_plane"},
-        )
-    ]
 
 
 def test_deploy_live_verified_restart_preserves_non_deploy_pause(monkeypatch, tmp_path):

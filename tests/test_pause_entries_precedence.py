@@ -453,3 +453,305 @@ def test_precedence_skip_logs_warning(caplog):
     )
     assert latest["operation"] == "upsert"
     conn2.close()
+
+
+def _mock_restart_guard_proof_inputs(monkeypatch, *, loaded_sha: str):
+    class ReadOnlyConnection:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(cp, "_read_loaded_sha", lambda: loaded_sha)
+    monkeypatch.setattr(cp, "get_trade_connection_read_only", ReadOnlyConnection)
+    monkeypatch.setattr(cp, "get_world_connection_read_only", ReadOnlyConnection)
+
+    import src.ops.monitor_cadence as monitor_cadence
+
+    monkeypatch.setattr(
+        monitor_cadence,
+        "collect_monitor_cadence_evidence",
+        lambda _conn, **_kwargs: {
+            "open_position_count": 1,
+            "fresh_position_count": 1,
+            "stale_or_missing_position_count": 0,
+            "future_monitor_event_count": 0,
+        },
+    )
+
+
+def test_restart_guard_allows_healthy_open_exposure_and_resets_once(monkeypatch):
+    issued_at = "2026-08-08T00:00:00+00:00"
+    expected_sha = "a" * 40
+    armed = cp.arm_deploy_live_restart_guard(expected_sha, issued_at=issued_at)
+    witness = armed["witness"]
+
+    _mock_restart_guard_proof_inputs(monkeypatch, loaded_sha=expected_sha)
+    import src.ops.edli_queue as edli_queue
+
+    collector_called = False
+
+    def fail_if_called(*_args, **_kwargs):
+        nonlocal collector_called
+        collector_called = True
+        raise AssertionError("restart guard proof must not scan EDLI history aggregate")
+
+    monkeypatch.setattr(edli_queue, "collect_edli_queue_evidence", fail_if_called)
+    monkeypatch.setattr(
+        cp,
+        "_restart_guard_queue_evidence",
+        lambda *_args, **_kwargs: {
+            "stale_processing": False,
+            "claimable_pending": True,
+            "post_issued_progress": True,
+            "green": True,
+        },
+    )
+    proof = cp.prove_deploy_live_restart_guard(witness)
+    assert proof["green"] is True
+    assert proof["monitor"]["open_position_count"] == 1
+    assert proof["queue"]["post_issued_progress"] is True
+    result = cp.reset_deploy_live_restart_guard(witness, proof=proof)
+    assert result["status"] == "reset"
+    assert cp.reset_deploy_live_restart_guard(witness, proof=proof)["status"] == "noop"
+    assert collector_called is False
+
+
+def test_restart_guard_preserves_operator_and_newer_invocation(monkeypatch):
+    first = cp.arm_deploy_live_restart_guard(
+        "b" * 40,
+        issued_at="2026-08-08T00:00:00+00:00",
+    )["witness"]
+    second = cp.arm_deploy_live_restart_guard(
+        "c" * 40,
+        issued_at="2026-08-08T00:00:01+00:00",
+    )["witness"]
+
+    green = {"green": True, "witness": first}
+    assert cp.reset_deploy_live_restart_guard(first, proof=green)["status"] == "noop"
+    active = cp.get_active_deploy_live_restart_guard()
+    assert active is not None
+    assert active.expected_sha == second["expected_sha"]
+
+    conn = get_world_connection()
+    upsert_control_override(
+        conn,
+        override_id=AUTO_PAUSE_OVERRIDE_ID,
+        target_type="global",
+        target_key="entries",
+        action_type="gate",
+        value="true",
+        issued_by="control_plane",
+        issued_at="2026-08-08T00:00:02+00:00",
+        reason="operator_hold",
+        effective_until=None,
+        precedence=DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
+    )
+    conn.commit()
+    conn.close()
+    assert cp.reset_deploy_live_restart_guard(second, proof={"green": True, "witness": second})["status"] == "noop"
+    state = query_control_override_state(get_world_connection())
+    assert state["entries_pause_reason"] == "operator_hold"
+
+
+def test_restart_guard_proof_refuses_sha_monitor_or_queue_debt(monkeypatch):
+    expected_sha = "d" * 40
+    witness = cp.arm_deploy_live_restart_guard(
+        expected_sha,
+        issued_at="2026-08-08T00:00:00+00:00",
+    )["witness"]
+    _mock_restart_guard_proof_inputs(monkeypatch, loaded_sha="e" * 40)
+    monkeypatch.setattr(
+        cp,
+        "_restart_guard_queue_evidence",
+        lambda *_args, **_kwargs: {
+            "stale_processing": False,
+            "claimable_pending": True,
+            "post_issued_progress": True,
+            "green": True,
+        },
+    )
+    assert cp.prove_deploy_live_restart_guard(witness)["green"] is False
+
+    monkeypatch.setattr(cp, "_read_loaded_sha", lambda: expected_sha)
+    import src.ops.monitor_cadence as monitor_cadence
+
+    monkeypatch.setattr(
+        monitor_cadence,
+        "collect_monitor_cadence_evidence",
+        lambda _conn, **_kwargs: {
+            "stale_or_missing_position_count": 1,
+            "future_monitor_event_count": 0,
+        },
+    )
+    assert cp.prove_deploy_live_restart_guard(witness)["green"] is False
+
+    monkeypatch.setattr(
+        monitor_cadence,
+        "collect_monitor_cadence_evidence",
+        lambda _conn, **_kwargs: {
+            "stale_or_missing_position_count": 0,
+            "future_monitor_event_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        cp,
+        "_restart_guard_queue_evidence",
+        lambda *_args, **_kwargs: {
+            "stale_processing": True,
+            "claimable_pending": True,
+            "post_issued_progress": True,
+            "green": False,
+        },
+    )
+    assert cp.prove_deploy_live_restart_guard(witness)["green"] is False
+
+
+def test_restart_guard_recovery_runs_after_reactor_failure_return(monkeypatch):
+    import src.events.reactor as reactor
+    import src.main as main_module
+
+    calls = []
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(main_module, "_start_edli_reactor_wake_listener", lambda: None)
+    monkeypatch.setattr(main_module, "_settings_section", lambda *_args: {})
+    monkeypatch.setattr(
+        main_module,
+        "_edli_live_entry_readiness_block",
+        lambda _settings: ("deploy_live_restart_guard", {}),
+    )
+    monkeypatch.setattr(
+        reactor,
+        "run_edli_event_reactor_cycle",
+        lambda **_kwargs: calls.append("reactor") or False,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_unowned_day0_urgent_wake_pending",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        cp,
+        "recover_deploy_live_restart_guard",
+        lambda: calls.append("recover") or {"status": "reset"},
+    )
+
+    assert main_module._edli_event_reactor_cycle() is False
+    assert calls == ["reactor", "recover"]
+
+
+def test_restart_guard_queue_probe_is_indexed_and_bounded():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE opportunity_event_processing (
+            consumer_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            processing_status TEXT NOT NULL,
+            claimed_at TEXT,
+            processed_at TEXT,
+            last_error TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (consumer_name, event_id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX idx_opportunity_event_processing_status "
+        "ON opportunity_event_processing(consumer_name, processing_status, updated_at)"
+    )
+    conn.execute(
+        "CREATE INDEX idx_opportunity_event_processing_pending_retry_floor "
+        "ON opportunity_event_processing(consumer_name, processing_status, claimed_at, updated_at, event_id)"
+    )
+    conn.execute(
+        "CREATE INDEX idx_opportunity_event_processing_stale_claim "
+        "ON opportunity_event_processing(consumer_name, processing_status, claimed_at, event_id)"
+    )
+    issued_at = "2026-08-08T00:00:00+00:00"
+    conn.execute(
+        """INSERT INTO opportunity_event_processing
+           (consumer_name, event_id, processing_status, claimed_at, processed_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        ("edli_reactor_v1", "event-1", "processed", None, issued_at, issued_at),
+    )
+
+    evidence = cp._restart_guard_queue_evidence(
+        conn,
+        issued_at=issued_at,
+        now=datetime.fromisoformat("2026-08-08T00:01:00+00:00"),
+    )
+    assert evidence == {
+        "stale_processing": False,
+        "claimable_pending": False,
+        "post_issued_progress": True,
+        "green": True,
+    }
+    stale_plan = conn.execute(
+        """
+        EXPLAIN QUERY PLAN
+        SELECT 1 FROM opportunity_event_processing
+             INDEXED BY idx_opportunity_event_processing_stale_claim
+        WHERE consumer_name = 'edli_reactor_v1'
+          AND processing_status = 'processing'
+          AND claimed_at IS NOT NULL
+        LIMIT 1
+        """
+    ).fetchall()
+    status_plan = conn.execute(
+        """
+        EXPLAIN QUERY PLAN
+        SELECT 1 FROM opportunity_event_processing
+             INDEXED BY idx_opportunity_event_processing_status
+        WHERE consumer_name = 'edli_reactor_v1'
+          AND processing_status = 'processed'
+          AND updated_at >= '2026-08-08T00:00:00+00:00'
+        LIMIT 1
+        """
+    ).fetchall()
+    assert "idx_opportunity_event_processing_stale_claim" in str(stale_plan)
+    assert "idx_opportunity_event_processing_status" in str(status_plan)
+    conn.close()
+
+
+def test_restart_guard_queue_probe_accepts_a_truly_idle_queue():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE opportunity_event_processing (
+            consumer_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            processing_status TEXT NOT NULL,
+            claimed_at TEXT,
+            processed_at TEXT,
+            last_error TEXT,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (consumer_name, event_id)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX idx_opportunity_event_processing_status "
+        "ON opportunity_event_processing(consumer_name, processing_status, updated_at)"
+    )
+    conn.execute(
+        "CREATE INDEX idx_opportunity_event_processing_pending_retry_floor "
+        "ON opportunity_event_processing(consumer_name, processing_status, claimed_at, updated_at, event_id)"
+    )
+    conn.execute(
+        "CREATE INDEX idx_opportunity_event_processing_stale_claim "
+        "ON opportunity_event_processing(consumer_name, processing_status, claimed_at, event_id) "
+        "WHERE claimed_at IS NOT NULL"
+    )
+
+    evidence = cp._restart_guard_queue_evidence(
+        conn,
+        issued_at="2026-08-08T00:00:00+00:00",
+        now=datetime.fromisoformat("2026-08-08T00:01:00+00:00"),
+    )
+
+    assert evidence == {
+        "stale_processing": False,
+        "claimable_pending": False,
+        "post_issued_progress": False,
+        "green": True,
+    }
+    conn.close()
