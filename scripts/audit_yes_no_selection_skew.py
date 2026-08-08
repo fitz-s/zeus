@@ -599,7 +599,7 @@ def _audit_rejected_probability_capital(
         "q_versions_observed": 0,
         "by_probability_binding": {},
         "samples": [],
-        "verdict": "NO_EXACT_Q_VERSION_REJECTED_DECISIONS",
+        "verdict": "no_exact_q_version_rejected_decisions",
     }
     settlement_lookup = _SettlementLookup(forecast_db)
     selected: dict[tuple[str, str], dict[str, Any]] = {}
@@ -741,9 +741,9 @@ def _audit_rejected_probability_capital(
                     "binary_log_loss": log_loss,
                     "execution_mode": execution_mode,
                     "fill_status": (
-                        "FILL_UNKNOWN_COUNTERFACTUAL"
+                        "fill_unknown_counterfactual"
                         if execution_mode == "MAKER_REST"
-                        else "DECISION_TIME_EXECUTABLE_COUNTERFACTUAL"
+                        else "decision_time_executable_counterfactual"
                     ),
                     "quoted_full_fill_pnl_usd": quoted_pnl,
                     "decision_expected_ev_usd": expected_ev,
@@ -765,9 +765,9 @@ def _audit_rejected_probability_capital(
     report["by_probability_binding"] = by_probability_binding
     if report["exact_q_version_rows"] > 0:
         report["verdict"] = (
-            "CAUSAL_SETTLEMENTS_AVAILABLE_NOT_CAPITAL_AUTHORITY"
+            "causal_settlements_available_not_capital_authority"
             if report["causal_settlements"] > 0
-            else "INSUFFICIENT_CAUSAL_SETTLEMENTS"
+            else "insufficient_causal_settlements"
         )
     return report
 

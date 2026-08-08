@@ -1743,13 +1743,13 @@ def test_audit_rejected_probability_capital_grades_exact_q_without_inventing_mak
     assert report["causal_settlements"] == 1
     assert report["maker_fill_unknown"] == 1
     assert report["taker_executable_counterfactuals"] == 0
-    assert report["verdict"] == "CAUSAL_SETTLEMENTS_AVAILABLE_NOT_CAPITAL_AUTHORITY"
+    assert report["verdict"] == "causal_settlements_available_not_capital_authority"
     assert report["q_versions_observed"] == 1
     binding = next(iter(report["by_probability_binding"].values()))
     assert binding["wins"] == 1
     assert binding["mean_binary_brier"] == pytest.approx(0.04)
     assert binding["quoted_full_fill_pnl_usd"] == 10.0
-    assert report["samples"][0]["fill_status"] == "FILL_UNKNOWN_COUNTERFACTUAL"
+    assert report["samples"][0]["fill_status"] == "fill_unknown_counterfactual"
 
 
 def _init_live_probability_reality_trade_db(path: Path) -> sqlite3.Connection:
