@@ -51,6 +51,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import math
 import os
 import plistlib
 import sqlite3
@@ -569,10 +570,20 @@ def _wait_for_post_start_monitor_cadence(
                     sample_limit=5,
                 )
                 conn.close()
+                non_monitor_chain_risk_count = int(
+                    cadence.get("non_monitor_chain_risk_position_count") or 0
+                )
                 open_count = int(cadence["open_position_count"])
-                if open_count == 0:
+                if non_monitor_chain_risk_count:
+                    last_detail = (
+                        f"open_positions={open_count} "
+                        "non_monitor_chain_risk_position_count="
+                        f"{non_monitor_chain_risk_count} "
+                        f"sample={cadence.get('non_monitor_chain_risk_positions', [])}"
+                    )
+                elif open_count == 0:
                     return True, "post-start monitor cadence skipped: no open positions"
-                if cadence["future_monitor_event_count"]:
+                elif cadence["future_monitor_event_count"]:
                     last_detail = (
                         f"open_positions={open_count} "
                         f"future_monitor_events={cadence['future_monitor_event_count']} "
@@ -794,20 +805,21 @@ def _paused_entry_backlog_is_expected_parked(
 
 
 def _canonical_unresolved_position_count(trade_db: Path) -> int:
-    """Count malformed or unresolved entry projections, not healthy exposure."""
+    """Count malformed or unresolved canonical positions, not healthy exposure."""
 
-    from src.contracts.position_truth import NO_CURRENT_MONEY_RISK_CHAIN_STATES
+    from src.contracts.position_truth import (
+        CURRENT_MONEY_RISK_CHAIN_STATES,
+        NO_CURRENT_MONEY_RISK_CHAIN_STATES,
+    )
 
     if not trade_db.exists():
         raise RuntimeError("EDLI_EXPECTED_PARKED_TRADE_DB_MISSING")
     try:
         conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
         columns = _sqlite_table_columns(conn, "position_current")
-        required = {"phase", "chain_state", "chain_shares"}
+        required = {"phase", "chain_state", "shares", "chain_shares"}
         if not required.issubset(columns):
             raise RuntimeError("EDLI_EXPECTED_PARKED_POSITION_PROJECTION_UNREADABLE")
-        no_risk_states = sorted(NO_CURRENT_MONEY_RISK_CHAIN_STATES)
-        no_risk_placeholders = ", ".join("?" for _ in no_risk_states)
         governed_phases = (
             "pending_entry",
             "active",
@@ -818,23 +830,85 @@ def _canonical_unresolved_position_count(trade_db: Path) -> int:
             "voided",
             "admin_closed",
         )
-        governed_phase_placeholders = ", ".join("?" for _ in governed_phases)
-        row = conn.execute(
-            f"""
-            SELECT COUNT(*)
+        rows = conn.execute(
+            """
+            SELECT phase, chain_state, shares, chain_shares
               FROM position_current
-             WHERE LOWER(TRIM(COALESCE(phase, ''))) NOT IN ({governed_phase_placeholders})
-                OR (
-                    LOWER(TRIM(COALESCE(phase, ''))) = 'pending_entry'
-                    AND (
-                        COALESCE(chain_shares, 0) > 0.000001
-                        OR LOWER(COALESCE(chain_state, 'unknown')) NOT IN ({no_risk_placeholders})
-                    )
+            """
+        ).fetchall()
+
+        def finite_nonnegative(value: object) -> float | None:
+            try:
+                parsed = float(value) if value is not None else None
+            except (TypeError, ValueError):
+                return None
+            if parsed is None or not math.isfinite(parsed) or parsed < 0.0:
+                return None
+            return parsed
+
+        open_phases = {"active", "day0_window", "pending_exit"}
+        no_risk_states = set(NO_CURRENT_MONEY_RISK_CHAIN_STATES)
+        current_risk_states = set(CURRENT_MONEY_RISK_CHAIN_STATES)
+        unresolved = 0
+        for phase_raw, chain_state_raw, shares_raw, chain_shares_raw in rows:
+            phase = str(phase_raw or "").strip().lower()
+            chain_state = str(chain_state_raw or "").strip().lower()
+            shares = finite_nonnegative(shares_raw)
+            chain_shares = finite_nonnegative(chain_shares_raw)
+            shares_invalid = shares_raw is not None and shares is None
+            chain_shares_invalid = chain_shares_raw is not None and chain_shares is None
+            positive_exposure = any(
+                value is not None and value > 0.000001
+                for value in (shares, chain_shares)
+            )
+
+            if phase not in governed_phases:
+                unresolved += 1
+                continue
+            if phase in open_phases:
+                # Open exposure is allowed only when both local and chain
+                # quantities are finite/positive and the chain still owns
+                # money risk.  A zero-share open phase is not a healthy held
+                # position and cannot satisfy restart monitor proof.
+                if (
+                    shares is None
+                    or chain_shares is None
+                    or shares <= 0.000001
+                    or chain_shares <= 0.000001
+                ):
+                    unresolved += 1
+                elif chain_state not in current_risk_states:
+                    unresolved += 1
+                continue
+            if phase == "pending_entry":
+                # An entry projection must still be empty and explicitly
+                # classified as carrying no current chain money risk.  NULL
+                # quantities are the canonical unfilled projection shape and
+                # therefore mean no proved exposure here, not malformed risk.
+                if (
+                    shares_invalid
+                    or chain_shares_invalid
+                    or positive_exposure
+                    or chain_state not in no_risk_states
+                ):
+                    unresolved += 1
+                continue
+
+            # Settled/economically-closed/history rows legitimately retain
+            # their last shares and chain snapshot; those are attribution
+            # facts, not monitor obligations.  A voided position is the one
+            # terminal phase that can still contradict venue truth, so only
+            # positive current-risk chain exposure there blocks recovery.
+            if (
+                phase == "voided"
+                and chain_state in current_risk_states
+                and (
+                    chain_shares_invalid
+                    or (chain_shares is not None and chain_shares > 0.000001)
                 )
-            """,
-            (*governed_phases, *no_risk_states),
-        ).fetchone()
-        return int(row[0] or 0)
+            ):
+                unresolved += 1
+        return unresolved
     except sqlite3.Error as exc:
         raise RuntimeError("EDLI_EXPECTED_PARKED_POSITION_PROJECTION_UNREADABLE") from exc
     finally:
@@ -1742,6 +1816,7 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
     pause_ok, pause_detail = _pause_entries_with_stuck_live_recovery(
         labels,
         live_was_loaded=live_was_loaded_before,
+        expected_sha=expected_live_sha,
     )
     if not pause_ok:
         print("REFUSING to restart — live entry pause guard is not armed:")

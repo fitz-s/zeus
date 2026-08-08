@@ -3459,6 +3459,44 @@ def test_deploy_live_post_start_monitor_wait_rejects_future_monitor_event(
     assert "future_monitor_events=1" in detail
 
 
+def test_deploy_live_post_start_monitor_wait_rejects_non_monitor_chain_risk(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_monitor_cadence_wait_non_monitor_chain_risk", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    trade_db = state / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            chain_shares REAL,
+            chain_state TEXT
+        );
+        CREATE TABLE position_events (
+            sequence_no INTEGER PRIMARY KEY,
+            position_id TEXT,
+            event_type TEXT,
+            occurred_at TEXT
+        );
+        INSERT INTO position_current VALUES ('pos-voided', 'voided', 1.0, 'synced');
+        """
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_monitor_cadence(
+        launched_after=datetime.now(timezone.utc),
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "non_monitor_chain_risk_position_count=1" in detail
+
+
 def _init_edli_queue_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.execute(
@@ -3519,6 +3557,7 @@ def _init_paused_entry_park_authority(
             position_id TEXT PRIMARY KEY,
             phase TEXT,
             chain_shares REAL,
+            shares REAL,
             chain_state TEXT NOT NULL
         );
         CREATE TABLE venue_commands (
@@ -3644,17 +3683,17 @@ def test_deploy_live_paused_entry_backlog_requires_post_start_freshness(
     assert "expected_parked=post_start_freshness=unverified" in detail
 
 
+@pytest.mark.parametrize("phase", ("active", "day0_window", "pending_exit"))
 def test_deploy_live_paused_entry_backlog_allows_fresh_monitored_open_exposure(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, phase
 ):
-    dl = _load("deploy_live_paused_entry_open_exposure", "deploy_live.py")
+    dl = _load(f"deploy_live_paused_entry_open_exposure_{phase}", "deploy_live.py")
     state = tmp_path / "state"
     state.mkdir()
     world, trade = _init_paused_entry_park_authority(state)
     _insert_claimable_edli_entry_backlog(world)
     trade.executescript(
         """
-        ALTER TABLE position_current ADD COLUMN shares REAL;
         ALTER TABLE position_current ADD COLUMN cost_basis_usd REAL;
         """
     )
@@ -3662,8 +3701,9 @@ def test_deploy_live_paused_entry_backlog_allows_fresh_monitored_open_exposure(
         """
         INSERT INTO position_current (
             position_id, phase, chain_shares, chain_state, shares, cost_basis_usd
-        ) VALUES ('pos-open', 'active', 7, 'synced', 7, 42)
-        """
+        ) VALUES ('pos-open', ?, 7, 'synced', 7, 42)
+        """,
+        (phase,),
     )
     world.commit()
     trade.commit()
@@ -3691,7 +3731,6 @@ def test_deploy_live_paused_entry_backlog_ignores_terminal_historical_exposure(
     _insert_claimable_edli_entry_backlog(world)
     trade.executescript(
         """
-        ALTER TABLE position_current ADD COLUMN shares REAL;
         ALTER TABLE position_current ADD COLUMN cost_basis_usd REAL;
         """
     )
@@ -3699,7 +3738,7 @@ def test_deploy_live_paused_entry_backlog_ignores_terminal_historical_exposure(
         """
         INSERT INTO position_current (
             position_id, phase, chain_shares, chain_state, shares, cost_basis_usd
-        ) VALUES (?, ?, 7, 'synced', 7, 42)
+        ) VALUES (?, ?, 7, 'closed_redeemed', 7, 42)
         """,
         (
             (f"terminal-{index}", phase)
@@ -3724,6 +3763,48 @@ def test_deploy_live_paused_entry_backlog_ignores_terminal_historical_exposure(
     assert "canonical_unresolved_positions=0" in detail
 
 
+@pytest.mark.parametrize(
+    ("case", "phase", "shares", "chain_shares", "chain_state"),
+    (
+        ("voided_chain_risk", "voided", 0.0, 1.0, "synced"),
+        ("active_null_shares", "active", None, 1.0, "synced"),
+        ("active_infinite_shares", "active", float("inf"), 1.0, "synced"),
+        ("active_null_chain_shares", "active", 1.0, None, "synced"),
+        ("active_infinite_chain_shares", "active", 1.0, float("inf"), "synced"),
+    ),
+)
+def test_deploy_live_paused_entry_backlog_rejects_unresolved_position_authority(
+    monkeypatch, tmp_path, case, phase, shares, chain_shares, chain_state
+):
+    dl = _load(f"deploy_live_paused_entry_unresolved_{case}", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    world, trade = _init_paused_entry_park_authority(state)
+    _insert_claimable_edli_entry_backlog(world)
+    trade.execute(
+        """
+        INSERT INTO position_current (
+            position_id, phase, chain_shares, shares, chain_state
+        ) VALUES ('pos-unresolved', ?, ?, ?, ?)
+        """,
+        (phase, chain_shares, shares, chain_state),
+    )
+    world.commit()
+    trade.commit()
+    world.close()
+    trade.close()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_edli_queue_progress(
+        launched_after=datetime.now(timezone.utc),
+        post_start_freshness_verified=True,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "expected_parked=canonical_unresolved_positions=1" in detail
+
+
 def test_deploy_live_paused_entry_backlog_rejects_pending_fill_unknown_exposure(
     monkeypatch, tmp_path
 ):
@@ -3733,7 +3814,11 @@ def test_deploy_live_paused_entry_backlog_rejects_pending_fill_unknown_exposure(
     world, trade = _init_paused_entry_park_authority(state)
     _insert_claimable_edli_entry_backlog(world)
     trade.execute(
-        "INSERT INTO position_current VALUES ('pos-pending', 'pending_entry', 0, 'unknown')"
+        """
+        INSERT INTO position_current (
+            position_id, phase, chain_shares, chain_state
+        ) VALUES ('pos-pending', 'pending_entry', 0, 'unknown')
+        """
     )
     world.commit()
     trade.commit()
@@ -3761,7 +3846,11 @@ def test_deploy_live_paused_entry_backlog_rejects_ungoverned_lifecycle_phase(
     world, trade = _init_paused_entry_park_authority(state)
     _insert_claimable_edli_entry_backlog(world)
     trade.execute(
-        "INSERT INTO position_current VALUES ('pos-ungoverned', ?, 0, 'closed_redeemed')",
+        """
+        INSERT INTO position_current (
+            position_id, phase, chain_shares, chain_state
+        ) VALUES ('pos-ungoverned', ?, 0, 'closed_redeemed')
+        """,
         (phase,),
     )
     world.commit()
@@ -4176,9 +4265,17 @@ def test_deploy_live_post_start_edli_queue_wait_skips_future_retry_floor(
 def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, capsys):
     dl = _load("deploy_live_restart_order_live", "deploy_live.py")
     calls = []
+    pause_expected_shas = []
+    live_head = {"sha": "c" * 40}
 
     monkeypatch.setattr(dl, "_gate", lambda allow_dirty, allow_unpushed=False: (True, []))
-    monkeypatch.setattr(dl, "head_sha", lambda short=True: "c" * 40)
+
+    def _head_sha(short=True):
+        captured = live_head["sha"]
+        live_head["sha"] = "f" * 40
+        return captured
+
+    monkeypatch.setattr(dl, "head_sha", _head_sha)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
 
     def _stop(label):
@@ -4193,8 +4290,10 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         calls.append(("recovery", tuple(labels)))
         return True, "live restart recovery passed"
 
-    def _pause(labels):
+    def _pause(labels, **kwargs):
         calls.append(("pause_entries", tuple(labels)))
+        pause_expected_shas.append(kwargs["expected_sha"])
+        assert live_head["sha"] == "f" * 40
         return True, "live restart entry pause guard armed"
 
     def _launch(label):
@@ -4266,6 +4365,7 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         ("queue", True),
         ("resume_entries", tuple(expanded_labels)),
     ]
+    assert pause_expected_shas == ["c" * 40]
     assert "live restart preflight passed" in capsys.readouterr().out
 
 
@@ -4280,7 +4380,7 @@ def test_deploy_live_projection_recovery_failure_leaves_daemons_stopped(monkeypa
     monkeypatch.setattr(
         dl,
         "_pause_entries_for_live_restart_if_needed",
-        lambda labels: (True, "pause armed"),
+        lambda labels, **_kwargs: (True, "pause armed"),
     )
     monkeypatch.setattr(
         dl,
@@ -4317,7 +4417,7 @@ def test_deploy_live_starts_heartbeat_before_monitor_and_stops_after_failure(
     monkeypatch.setattr(
         dl,
         "_pause_entries_for_live_restart_if_needed",
-        lambda labels: (True, "pause armed"),
+        lambda labels, **_kwargs: (True, "pause armed"),
     )
     monkeypatch.setattr(dl, "_stop_label", lambda label: (True, f"stopped {label}"))
     monkeypatch.setattr(
@@ -4638,7 +4738,7 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     monkeypatch.setattr(
         dl,
         "_pause_entries_for_live_restart_if_needed",
-        lambda labels: (calls.append(("pause_entries", tuple(labels))) or (True, "pause ok")),
+        lambda labels, **_kwargs: (calls.append(("pause_entries", tuple(labels))) or (True, "pause ok")),
     )
     monkeypatch.setattr(
         dl,
@@ -4744,7 +4844,7 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
     monkeypatch.setattr(
         dl,
         "_pause_entries_for_live_restart_if_needed",
-        lambda labels: (calls.append(("pause_entries", tuple(labels))) or (True, "pause ok")),
+        lambda labels, **_kwargs: (calls.append(("pause_entries", tuple(labels))) or (True, "pause ok")),
     )
     monkeypatch.setattr(
         dl,
