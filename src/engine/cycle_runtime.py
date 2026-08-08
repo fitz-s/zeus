@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+import sqlite3
 import threading
 import time
 import uuid
@@ -135,7 +136,6 @@ _HELD_POSITION_MONITOR_DEGRADED_COVERAGE_CYCLES = 3
 _MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS = 50
 _MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS = 100
 _MONITOR_CANONICAL_WRITE_RETRY_DEADLINE_MS = 100
-_HELD_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS = 30.0
 
 
 def _held_position_monitor_reservation_count(position_count: int) -> int:
@@ -5672,6 +5672,7 @@ def execute_monitoring_phase(
         refresh_position,
     )
     from src.execution.exit_lifecycle import (
+        GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS,
         ExitContext,
         build_exit_intent,
         check_pending_exits,
@@ -5680,7 +5681,9 @@ def execute_monitoring_phase(
         has_global_sell_snapshot_reauction_retry,
         handle_exit_pending_missing,
         is_exit_cooldown_active,
+        latest_held_sell_reauction_obligation,
         needs_global_sell_snapshot_reauction,
+        preserve_held_sell_reauction_deadline,
         recover_global_sell_snapshot_reauction_debt,
         release_backoff_exhausted_pending_exit_for_redecision,
         release_pending_exit_without_order_if_retryable,
@@ -5708,7 +5711,9 @@ def execute_monitoring_phase(
         armed_at_text = armed_at.isoformat()
         deadline_text = (
             armed_at
-            + timedelta(seconds=_HELD_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS)
+            + timedelta(
+                seconds=GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS
+            )
         ).isoformat()
         fields = (
             "request_id",
@@ -5741,7 +5746,10 @@ def execute_monitoring_phase(
             obligation["position_id"] = str(
                 getattr(position, "trade_id", "") or ""
             )
-        return obligation
+        existing = getattr(position, "_held_sell_reauction_obligation", None)
+        if not isinstance(existing, dict):
+            existing = latest_held_sell_reauction_obligation(conn, position)
+        return preserve_held_sell_reauction_deadline(obligation, existing)
 
     def request_global_sell_snapshot_reauction(
         position,
@@ -5754,6 +5762,50 @@ def execute_monitoring_phase(
 
             obligation = getattr(position, "_held_sell_reauction_obligation", {})
             obligation = obligation if isinstance(obligation, dict) else {}
+            if force_new_generation:
+                refresh_position(conn, clob, position)
+                if not (
+                    bool(getattr(position, "last_monitor_prob_is_fresh", False))
+                    and bool(
+                        getattr(
+                            position,
+                            "last_monitor_market_price_is_fresh",
+                            False,
+                        )
+                    )
+                    and str(getattr(position, "last_monitor_at", "") or "")
+                ):
+                    raise ValueError(
+                        "GLOBAL_SELL_REAUCTION_CURRENT_MONITOR_WITNESS_UNAVAILABLE"
+                    )
+            canonical_monitor_at = ""
+            canonical_monitor_payload: dict[str, object] = {}
+            if force_new_generation and conn is not None:
+                try:
+                    monitor_row = conn.execute(
+                        """
+                        SELECT occurred_at, payload_json
+                          FROM position_events
+                         WHERE position_id = ?
+                           AND event_type = 'MONITOR_REFRESHED'
+                         ORDER BY sequence_no DESC
+                         LIMIT 1
+                        """,
+                        (
+                            str(
+                                getattr(position, "position_id", "")
+                                or getattr(position, "trade_id", "")
+                                or ""
+                            ),
+                        ),
+                    ).fetchone()
+                    if monitor_row is not None:
+                        canonical_monitor_at = str(monitor_row[0] or "")
+                        decoded = json.loads(str(monitor_row[1] or "{}"))
+                        if isinstance(decoded, dict):
+                            canonical_monitor_payload = decoded
+                except (sqlite3.Error, TypeError, json.JSONDecodeError):
+                    canonical_monitor_payload = {}
             held_token_id = str(
                 obligation.get("held_token_id")
                 or _position_held_token_id(position)
@@ -5762,45 +5814,89 @@ def execute_monitoring_phase(
             probability_receipt = getattr(
                 position, "_day0_monitor_probability_receipt", None
             )
-            probability_content_identity = str(
-                obligation.get("probability_content_identity")
-                or (
+            if not isinstance(probability_receipt, dict):
+                probability_receipt = getattr(
+                    position,
+                    "_monitor_probability_receipt",
+                    None,
+                )
+            current_probability_content_identity = str(
+                (
                     probability_receipt.get("probability_content_identity")
                     if isinstance(probability_receipt, dict)
                     else ""
                 )
                 or ""
             ).strip()
-            if (
-                int(obligation.get("schema_version") or 4) == 4
-                and obligation.get("scope_identity")
-                and obligation.get("generation")
-                and obligation.get("attempt_identity")
-            ):
+            if not current_probability_content_identity:
+                canonical_receipt = canonical_monitor_payload.get(
+                    "day0_monitor_probability_receipt"
+                ) or canonical_monitor_payload.get("monitor_probability_receipt")
+                current_probability_content_identity = (
+                    _monitor_probability_content_identity(canonical_receipt)
+                )
+            probability_content_identity = str(
+                (
+                    current_probability_content_identity
+                    if force_new_generation
+                    else obligation.get("probability_content_identity")
+                )
+                or current_probability_content_identity
+                or obligation.get("probability_content_identity")
+                or ""
+            ).strip()
+            if force_new_generation and not probability_content_identity:
+                raise ValueError(
+                    "GLOBAL_SELL_REAUCTION_CURRENT_PROBABILITY_IDENTITY_UNAVAILABLE"
+                )
+            current_bid = getattr(position, "last_monitor_best_bid", None)
+            if current_bid is None:
+                current_bid = canonical_monitor_payload.get("last_monitor_best_bid")
+            try:
+                current_bid = float(current_bid)
+            except (TypeError, ValueError):
+                current_bid = None
+            if current_bid is not None and not math.isfinite(current_bid):
+                current_bid = None
+            current_observed_at = str(
+                getattr(position, "last_monitor_at", "")
+                or canonical_monitor_at
+                or ""
+            )
+            if force_new_generation:
+                held_best_bid = current_bid
+                bid_observed_at = current_observed_at
+                probability_observed_at = current_observed_at
+                book_state = (
+                    "EXECUTABLE"
+                    if current_bid is not None
+                    and 0.05 <= current_bid <= 0.95
+                    else "NO_EXECUTABLE_BOOK"
+                )
+            else:
+                held_best_bid = obligation.get("held_best_bid")
+                bid_observed_at = str(obligation.get("bid_observed_at") or "")
+                probability_observed_at = str(
+                    obligation.get("probability_observed_at")
+                    or current_observed_at
+                )
+                book_state = str(obligation.get("book_state") or "UNKNOWN")
+            request_scope_identity = str(
+                obligation.get("scope_identity") or ""
+            )
+            request_generation = str(obligation.get("generation") or "")
+            if force_new_generation and request_scope_identity:
                 from src.runtime.reactor_wake import (
                     latest_v4_held_sell_reauction_request,
                 )
 
                 latest_request = latest_v4_held_sell_reauction_request(
-                    str(obligation["scope_identity"])
+                    request_scope_identity
                 )
-                if latest_request is not None and (
-                    latest_request.generation
-                    != str(obligation["generation"])
-                    or latest_request.attempt_identity
-                    != str(obligation["attempt_identity"])
-                ):
-                    # SCOPE: this canonical position-scoped attempt. DRAIN: a
-                    # later canonical attempt owns the lineage. RESET: never
-                    # downgrade a fresher q/book attempt during recovery.
-                    summary["global_sell_snapshot_reauction_stale_recovery"] = (
-                        summary.get(
-                            "global_sell_snapshot_reauction_stale_recovery", 0
-                        )
-                        + 1
-                    )
-                    return False
-            durable_request_accepted = request_global_auction_completion(
+                if latest_request is not None:
+                    request_scope_identity = latest_request.scope_identity
+                    request_generation = latest_request.generation
+            request_result = request_global_auction_completion(
                 reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
                 position_id=str(
                     getattr(position, "position_id", "")
@@ -5816,19 +5912,32 @@ def execute_monitoring_phase(
                 ),
                 probability_content_identity=probability_content_identity,
                 held_token_id=held_token_id,
-                held_best_bid=obligation.get("held_best_bid"),
-                bid_observed_at=str(obligation.get("bid_observed_at") or ""),
-                probability_observed_at=str(
-                    obligation.get("probability_observed_at")
-                    or getattr(position, "last_monitor_at", "")
-                    or ""
-                ),
-                book_state=str(obligation.get("book_state") or "UNKNOWN"),
-                generation=str(obligation.get("generation") or "") or None,
-                scope_identity=str(obligation.get("scope_identity") or ""),
+                held_best_bid=held_best_bid,
+                bid_observed_at=bid_observed_at,
+                probability_observed_at=probability_observed_at,
+                book_state=book_state,
+                generation=request_generation or None,
+                scope_identity=request_scope_identity,
                 schema_version=int(obligation.get("schema_version") or 4),
                 force_new_generation=force_new_generation,
+                return_request=True,
             )
+            if not isinstance(request_result, tuple) or len(request_result) != 2:
+                raise ValueError(
+                    "GLOBAL_SELL_REAUCTION_TYPED_REQUEST_WITNESS_UNAVAILABLE"
+                )
+            durable_request_accepted = bool(request_result[0])
+            prepared_request = request_result[1]
+            if durable_request_accepted and prepared_request is None:
+                raise ValueError(
+                    "GLOBAL_SELL_REAUCTION_PREPARED_REQUEST_UNAVAILABLE"
+                )
+            if durable_request_accepted:
+                setattr(
+                    position,
+                    "_held_sell_reauction_obligation",
+                    arm_global_sell_reauction_obligation(position, prepared_request),
+                )
         except Exception as exc:  # noqa: BLE001 - failed reservation keeps retry pending.
             summary["global_sell_snapshot_reauction_request_failed"] = (
                 summary.get(
@@ -7287,10 +7396,9 @@ def execute_monitoring_phase(
                 probability_receipt
             )
             held_token_id = _position_held_token_id(pos).strip()
-            # A canonical reauction obligation belongs to this exact monitor
-            # q/book attempt.  Never carry an older attempt forward after the
-            # current monitor has recomputed HOLD/SELL authority.
-            setattr(pos, "_held_sell_reauction_obligation", None)
+            # A canonical SELL debt survives monitor refreshes. Only an exact
+            # terminal receipt, command ownership, or position closure may
+            # retire it; a later HOLD caused by a vanished bid is not proof.
             from src.engine.global_batch_runtime import (
                 CurrentGlobalHoldingCoverage,
                 GlobalHoldingCoverageOutcome,

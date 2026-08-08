@@ -66,6 +66,24 @@ logger = logging.getLogger(__name__)
 _HELD_MONITOR_CLOB_CLIENT = None
 _HELD_MONITOR_CLOB_CLIENT_FACTORY = None
 _HELD_MONITOR_CLOB_CLIENT_LOCK = threading.Lock()
+GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS = 30.0
+
+
+def preserve_held_sell_reauction_deadline(
+    obligation: Mapping[str, object],
+    existing: Mapping[str, object],
+) -> dict[str, object]:
+    """Keep one attempt's original actuation deadline across monitor refreshes."""
+
+    result = dict(obligation)
+    same_attempt = all(
+        str(existing.get(field) or "") == str(result.get(field) or "")
+        for field in ("scope_identity", "generation", "attempt_identity")
+    )
+    if same_attempt and existing.get("completion_deadline_at"):
+        result["armed_at"] = existing.get("armed_at")
+        result["completion_deadline_at"] = existing["completion_deadline_at"]
+    return result
 
 
 def _held_monitor_clob_timeout():
@@ -752,11 +770,11 @@ def _held_sell_reauction_obligation(
     }
 
 
-def _latest_held_sell_reauction_obligation(
+def latest_held_sell_reauction_obligation(
     conn: sqlite3.Connection | None,
     position: Position,
 ) -> dict[str, object]:
-    """Return only an exact canonical versioned residual obligation."""
+    """Return the newest durable versioned SELL obligation for a position."""
 
     if conn is None:
         return {}
@@ -764,25 +782,97 @@ def _latest_held_sell_reauction_obligation(
     if not position_id:
         return {}
     try:
-        row = conn.execute(
+        rows = conn.execute(
             """
             SELECT payload_json FROM position_events
              WHERE position_id = ?
                AND event_type IN ('EXIT_RETRY_RELEASED', 'MONITOR_REFRESHED')
-             ORDER BY sequence_no DESC, datetime(occurred_at) DESC LIMIT 1
+               AND payload_json LIKE '%"held_sell_reauction_obligation"%'
+             ORDER BY sequence_no DESC, datetime(occurred_at) DESC LIMIT 16
             """,
             (position_id,),
-        ).fetchone()
-        payload = json.loads(str(row[0] or "{}")) if row is not None else {}
-    except (sqlite3.Error, AttributeError, TypeError, json.JSONDecodeError):
+        ).fetchall()
+    except (sqlite3.Error, AttributeError):
         return {}
-    obligation = payload.get("held_sell_reauction_obligation")
-    if not isinstance(obligation, dict) or obligation.get("schema_version") not in {2, 3, 4}:
-        return {}
-    required = ("scope_identity", "generation", "position_id", "held_token_id")
-    if not all(str(obligation.get(key) or "").strip() for key in required):
-        return {}
-    return dict(obligation)
+    for row in rows:
+        try:
+            payload = json.loads(str(row[0] or "{}"))
+        except (TypeError, json.JSONDecodeError):
+            continue
+        obligation = payload.get("held_sell_reauction_obligation")
+        if (
+            not isinstance(obligation, dict)
+            or obligation.get("schema_version") not in {2, 3, 4}
+        ):
+            continue
+        required = ("scope_identity", "generation", "position_id", "held_token_id")
+        if all(str(obligation.get(key) or "").strip() for key in required):
+            return dict(obligation)
+    return {}
+
+
+def _held_sell_reauction_recovery_due(
+    obligation: Mapping[str, object],
+    *,
+    durable_reserved: bool = False,
+) -> bool:
+    """Whether an exact V4 SELL debt lacks timely terminal proof.
+
+    The deadline is an actuation contract, not telemetry. A queued request may
+    wait only until that deadline; a missing or mismatched queue attempt is an
+    immediate crash-recovery debt. Any latest terminal receipt retires the debt.
+    """
+
+    try:
+        schema_version = int(obligation.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        return False
+    if schema_version != 4:
+        return False
+    scope_identity = str(obligation.get("scope_identity") or "").strip()
+    deadline_text = str(obligation.get("completion_deadline_at") or "").strip()
+    if not scope_identity or not deadline_text:
+        return True
+    try:
+        deadline = datetime.fromisoformat(deadline_text.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if deadline.tzinfo is None:
+        return True
+    now = _utcnow()
+    deadline_utc = deadline.astimezone(timezone.utc)
+    if durable_reserved and now <= deadline_utc:
+        return False
+
+    try:
+        from src.runtime.reactor_wake import (
+            held_sell_reauction_requests_completed,
+            latest_v4_held_sell_reauction_request,
+        )
+
+        request = latest_v4_held_sell_reauction_request(scope_identity)
+        if request is None:
+            return True
+        expected = (
+            str(obligation.get("request_id") or ""),
+            str(obligation.get("material_identity") or ""),
+            str(obligation.get("generation") or ""),
+            str(obligation.get("attempt_identity") or ""),
+        )
+        current = (
+            request.request_id,
+            request.material_identity,
+            request.generation,
+            request.attempt_identity,
+        )
+        if held_sell_reauction_requests_completed((request,)):
+            return False
+        if current != expected:
+            return True
+        return now > deadline_utc
+    except (OSError, ValueError):
+        # An unreadable queue cannot prove that the deadline was satisfied.
+        return True
 
 
 def _is_exact_held_sell_command(
@@ -871,7 +961,7 @@ def _relinquished_global_sell_command_id(
     ):
         return post_only_command_id
 
-    obligation = _latest_held_sell_reauction_obligation(conn, position)
+    obligation = latest_held_sell_reauction_obligation(conn, position)
     if obligation.get("schema_version") != 4:
         return ""
     try:
@@ -1025,7 +1115,7 @@ def _canonical_global_sell_command_ownership(
             (position_id,),
         ).fetchone()
         if row is None:
-            obligation = _latest_held_sell_reauction_obligation(conn, position)
+            obligation = latest_held_sell_reauction_obligation(conn, position)
             if obligation.get("schema_version") != 4:
                 return "NOT_GLOBAL"
             command_row = conn.execute(
@@ -1048,7 +1138,7 @@ def _canonical_global_sell_command_ownership(
         ):
             return (
                 "COMMAND_OWNED"
-                if _latest_held_sell_reauction_obligation(conn, position).get(
+                if latest_held_sell_reauction_obligation(conn, position).get(
                     "schema_version"
                 )
                 == 4
@@ -1130,10 +1220,16 @@ def needs_global_sell_snapshot_reauction(
         payload = json.loads(str(row[1] or "{}"))
     except (TypeError, json.JSONDecodeError):
         return False
-    if (
-        payload.get("global_sell_reauction_status")
-        == "durable_wake_reserved"
-    ):
+    obligation = latest_held_sell_reauction_obligation(conn, position)
+    if obligation.get("schema_version") == 4:
+        return _held_sell_reauction_recovery_due(
+            obligation,
+            durable_reserved=(
+                payload.get("global_sell_reauction_status")
+                == "durable_wake_reserved"
+            ),
+        )
+    if payload.get("global_sell_reauction_status") == "durable_wake_reserved":
         return False
     canonical_debt = (
         str(row[0]) == "EXIT_RETRY_RELEASED"
@@ -1144,7 +1240,7 @@ def needs_global_sell_snapshot_reauction(
     )
     if canonical_debt and _is_post_only_cross_reauction_error(payload.get("error")):
         return _post_only_cross_reauction_proof_for_position(conn, position)
-    return canonical_debt or bool(_latest_held_sell_reauction_obligation(conn, position))
+    return canonical_debt or bool(obligation)
 
 
 def _is_runtime_submit_gate_block_error(error: str) -> bool:
@@ -8696,11 +8792,7 @@ def recover_global_sell_snapshot_reauction_debt(
         return False
     if conn is None or conn.in_transaction:
         return False
-    raw_state = getattr(position, "state", "")
-    runtime_state = str(getattr(raw_state, "value", raw_state) or "")
-    if runtime_state == "pending_exit":
-        return False
-    obligation = _latest_held_sell_reauction_obligation(conn, position)
+    obligation = latest_held_sell_reauction_obligation(conn, position)
     if not obligation:
         return False
     from src.execution.executor import (
@@ -8746,6 +8838,31 @@ def recover_global_sell_snapshot_reauction_debt(
     setattr(position, "_held_sell_reauction_obligation", obligation)
     if not requester(position, True):
         return False
+    refreshed_obligation = getattr(
+        position,
+        "_held_sell_reauction_obligation",
+        obligation,
+    )
+    if not isinstance(refreshed_obligation, dict):
+        refreshed_obligation = dict(obligation)
+    if refreshed_obligation == obligation:
+        rearmed_at = _utcnow()
+        refreshed_obligation = {
+            **obligation,
+            "state": "ARMED",
+            "armed_at": rearmed_at.isoformat(),
+            "completion_deadline_at": (
+                rearmed_at
+                + timedelta(
+                    seconds=GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS
+                )
+            ).isoformat(),
+        }
+        setattr(
+            position,
+            "_held_sell_reauction_obligation",
+            refreshed_obligation,
+        )
     if not record_global_sell_reauction_reserved(conn, position):
         conn.rollback()
         return False

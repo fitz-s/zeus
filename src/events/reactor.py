@@ -6699,7 +6699,11 @@ def request_global_auction_completion(
                 and existing_v4.book_state != "EXECUTABLE"
                 and held_request.book_state == "EXECUTABLE"
             )
-            if existing_request_is_queued and not context_upgrade:
+            if (
+                existing_request_is_queued
+                and not context_upgrade
+                and not force_new_generation
+            ):
                 # SCOPE: one outstanding position/token SELL obligation.
                 # DRAIN: the global auction rebinds current q/book and writes a
                 # terminal receipt for this queued attempt. RESET: only an

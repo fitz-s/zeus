@@ -6569,6 +6569,309 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     conn.close()
 
 
+def test_reserved_global_sell_reauction_deadline_is_an_actuation_contract(
+    monkeypatch,
+):
+    """An unanswered reserved SELL returns to recovery after its deadline."""
+    from src.execution import exit_lifecycle
+    from src.runtime import reactor_wake
+
+    now = datetime(2026, 8, 8, 18, 0, tzinfo=timezone.utc)
+    request = SimpleNamespace(
+        request_id="request-deadline",
+        material_identity="material-deadline",
+        generation="generation-deadline",
+        attempt_identity="attempt-deadline",
+    )
+    obligation = {
+        "schema_version": 4,
+        "scope_identity": "scope-deadline",
+        "request_id": request.request_id,
+        "material_identity": request.material_identity,
+        "generation": request.generation,
+        "attempt_identity": request.attempt_identity,
+        "position_id": "position-deadline",
+        "held_token_id": "token-deadline",
+        "completion_deadline_at": (now + timedelta(seconds=1)).isoformat(),
+    }
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_events (
+            position_id TEXT,
+            event_type TEXT,
+            sequence_no INTEGER,
+            occurred_at TEXT,
+            payload_json TEXT
+        )
+        """
+    )
+
+    def write_obligation(value):
+        conn.execute("DELETE FROM position_events")
+        conn.execute(
+            "INSERT INTO position_events VALUES (?, ?, ?, ?, ?)",
+            (
+                "position-deadline",
+                "MONITOR_REFRESHED",
+                1,
+                now.isoformat(),
+                json.dumps(
+                    {
+                        "global_sell_reauction_status": "durable_wake_reserved",
+                        "held_sell_reauction_obligation": value,
+                    }
+                ),
+            ),
+        )
+
+    position = SimpleNamespace(
+        trade_id="position-deadline",
+        last_exit_error="",
+    )
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: now)
+    monkeypatch.setattr(
+        reactor_wake,
+        "latest_v4_held_sell_reauction_request",
+        lambda _scope: request,
+    )
+    completed = False
+    monkeypatch.setattr(
+        reactor_wake,
+        "held_sell_reauction_requests_completed",
+        lambda _requests: completed,
+    )
+
+    write_obligation(obligation)
+    assert exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn) is False
+
+    obligation["completion_deadline_at"] = (now - timedelta(seconds=1)).isoformat()
+    write_obligation(obligation)
+    assert exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn) is True
+
+    conn.execute(
+        "INSERT INTO position_events VALUES (?, ?, ?, ?, ?)",
+        (
+            "position-deadline",
+            "MONITOR_REFRESHED",
+            2,
+            (now + timedelta(seconds=2)).isoformat(),
+            json.dumps({"exit_decision_reason": "HOLD"}),
+        ),
+    )
+    assert exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn) is True
+
+    completed = True
+    assert exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn) is False
+
+    request.attempt_identity = "newer-attempt"
+    completed = False
+    assert exit_lifecycle.needs_global_sell_snapshot_reauction(position, conn) is True
+    conn.close()
+
+
+def test_same_global_sell_attempt_cannot_slide_its_deadline():
+    """Repeated monitor evidence cannot postpone an unanswered SELL forever."""
+    from src.execution.exit_lifecycle import preserve_held_sell_reauction_deadline
+
+    existing = {
+        "scope_identity": "scope",
+        "generation": "generation",
+        "attempt_identity": "attempt",
+        "armed_at": "2026-08-08T18:00:00+00:00",
+        "completion_deadline_at": "2026-08-08T18:00:30+00:00",
+    }
+    refreshed = {
+        **existing,
+        "armed_at": "2026-08-08T18:00:20+00:00",
+        "completion_deadline_at": "2026-08-08T18:00:50+00:00",
+    }
+    preserved = preserve_held_sell_reauction_deadline(refreshed, existing)
+    assert preserved["armed_at"] == existing["armed_at"]
+    assert preserved["completion_deadline_at"] == existing[
+        "completion_deadline_at"
+    ]
+
+    refreshed["attempt_identity"] = "new-attempt"
+    advanced = preserve_held_sell_reauction_deadline(refreshed, existing)
+    assert advanced["armed_at"] == refreshed["armed_at"]
+    assert advanced["completion_deadline_at"] == refreshed[
+        "completion_deadline_at"
+    ]
+
+
+def test_expired_global_sell_debt_refreshes_q_and_book_before_reauction(
+    tmp_path,
+    monkeypatch,
+):
+    """Deadline recovery is a fresh decision, not a replay of its old witness."""
+    from src.engine import cycle_runtime, monitor_refresh
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.events import reactor as event_reactor
+    from src.runtime import reactor_wake
+    from src.state.db import get_connection, init_schema
+    from src.state.projection import upsert_position_current
+
+    conn = get_connection(tmp_path / "fresh-global-sell-recovery.db")
+    init_schema(conn)
+    position = _make_position(
+        trade_id="fresh-global-sell-recovery",
+        state="holding",
+        chain_state="synced",
+        chain_shares=10.0,
+        shares=10.0,
+        token_id="fresh-global-sell-token",
+        no_token_id="fresh-global-sell-no-token",
+        condition_id="0x" + "7c" * 32,
+        direction="buy_yes",
+        strategy_key="center_buy",
+        entered_at="2026-08-08T17:00:00+00:00",
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    old_request = SimpleNamespace(
+        request_id="request-fresh-recovery",
+        material_identity="scope-fresh-recovery",
+        generation="generation-fresh-recovery",
+        attempt_identity="attempt-stale",
+        scope_identity="scope-fresh-recovery",
+        probability_observed_at="2026-08-08T18:00:00+00:00",
+        bid_observed_at="2026-08-08T18:00:00+00:00",
+    )
+    obligation = {
+        "schema_version": 4,
+        "scope_identity": old_request.scope_identity,
+        "request_id": old_request.request_id,
+        "material_identity": old_request.material_identity,
+        "generation": old_request.generation,
+        "attempt_identity": old_request.attempt_identity,
+        "position_id": position.trade_id,
+        "family": (position.city, position.target_date, position.temperature_metric),
+        "held_token_id": position.token_id,
+        "probability_content_identity": "q-stale",
+        "probability_observed_at": old_request.probability_observed_at,
+        "held_best_bid": 0.49,
+        "bid_observed_at": old_request.bid_observed_at,
+        "book_state": "EXECUTABLE",
+        "state": "ARMED",
+        "armed_at": "2026-08-08T18:00:00+00:00",
+        "completion_deadline_at": "2026-08-08T18:00:30+00:00",
+    }
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, source_module, env, payload_json
+        ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, ?, 'live', ?)
+        """,
+        (
+            "fresh-global-sell-recovery:monitor:1",
+            position.trade_id,
+            "2026-08-08T18:00:00+00:00",
+            "tests/test_live_safety_invariants",
+            json.dumps(
+                {
+                    "global_sell_reauction_status": "durable_wake_reserved",
+                    "held_sell_reauction_obligation": obligation,
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        reactor_wake,
+        "latest_v4_held_sell_reauction_request",
+        lambda _scope: old_request,
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "held_sell_reauction_requests_completed",
+        lambda _requests: False,
+    )
+    refreshes = []
+
+    def refresh_current(_conn, _clob, refreshed):
+        refreshes.append(refreshed.trade_id)
+        refreshed.last_monitor_prob = 0.08
+        refreshed.last_monitor_prob_is_fresh = True
+        refreshed.last_monitor_market_price = 0.31
+        refreshed.last_monitor_market_price_is_fresh = True
+        refreshed.last_monitor_best_bid = 0.31
+        refreshed.last_monitor_at = "2026-08-08T18:01:00+00:00"
+        refreshed._monitor_probability_receipt = {
+            "probability_content_identity": "q-current",
+        }
+        return SimpleNamespace()
+
+    monkeypatch.setattr(monitor_refresh, "refresh_position", refresh_current)
+    published = []
+
+    def request_current(**kwargs):
+        published.append(kwargs)
+        return True, SimpleNamespace(
+            request_id=old_request.request_id,
+            material_identity=old_request.material_identity,
+            generation=old_request.generation,
+            attempt_identity="attempt-current",
+            scope_identity=old_request.scope_identity,
+            position_id=position.trade_id,
+            family=kwargs["family"],
+            held_token_id=position.token_id,
+            probability_content_identity=kwargs[
+                "probability_content_identity"
+            ],
+            probability_observed_at=kwargs["probability_observed_at"],
+            held_best_bid=kwargs["held_best_bid"],
+            bid_observed_at=kwargs["bid_observed_at"],
+            book_state=kwargs["book_state"],
+            schema_version=4,
+        )
+
+    monkeypatch.setattr(
+        event_reactor,
+        "request_global_auction_completion",
+        request_current,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: [],
+    )
+    summary = {"monitors": 0, "exits": 0}
+    deps = _monitor_test_deps("test_fresh_global_sell_recovery")
+    deps._utcnow = lambda: datetime(2026, 8, 8, 18, 1, tzinfo=timezone.utc)
+
+    cycle_runtime.execute_monitoring_phase(
+        conn,
+        object(),
+        _make_portfolio(position),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=deps,
+        run_exit_preflight=False,
+    )
+
+    assert refreshes == [position.trade_id]
+    assert len(published) == 1
+    assert published[0]["force_new_generation"] is True
+    assert published[0]["probability_content_identity"] == "q-current"
+    assert published[0]["held_best_bid"] == pytest.approx(0.31)
+    assert published[0]["bid_observed_at"] == "2026-08-08T18:01:00+00:00"
+    assert summary["global_sell_snapshot_reauction_debts_recovered"] == 1
+    payload = json.loads(
+        conn.execute(
+            "SELECT payload_json FROM position_events WHERE position_id = ? "
+            "ORDER BY sequence_no DESC LIMIT 1",
+            (position.trade_id,),
+        ).fetchone()[0]
+    )
+    assert payload["global_sell_reauction_status"] == "durable_wake_reserved"
+    assert payload["held_sell_reauction_obligation"]["attempt_identity"] == (
+        "attempt-current"
+    )
+    conn.close()
+
+
 def test_global_sell_reauction_publish_failure_recovers_exact_armed_obligation_once(
     tmp_path,
     monkeypatch,
@@ -6701,6 +7004,9 @@ def test_global_sell_reauction_publish_failure_recovers_exact_armed_obligation_o
     monkeypatch.setattr(reactor_wake, "publish_reactor_wake", real_publish)
 
     recovered = []
+    position.state = "pending_exit"
+    position.exit_state = "exit_intent"
+    position.order_status = "exit_intent"
 
     def recover_request(position, force_new_generation):
         restored = position._held_sell_reauction_obligation
@@ -6737,7 +7043,7 @@ def test_global_sell_reauction_publish_failure_recovers_exact_armed_obligation_o
     assert recovered[0].attempt_identity == prepared.attempt_identity
     assert recovered[0].scope_identity == prepared.scope_identity
     assert recovered[0].generation == prepared.generation
-    assert position.state == "holding"
+    assert position.state == "pending_exit"
     assert conn.execute(
         "SELECT COUNT(*) FROM venue_commands WHERE position_id = ?",
         (position.trade_id,),
@@ -6812,6 +7118,60 @@ def test_global_sell_reauction_queued_executable_attempt_is_coalesced(
     assert latest.generation == first.generation
     assert latest.attempt_identity == first.attempt_identity
     assert latest.held_best_bid == pytest.approx(0.49)
+
+
+def test_expired_global_sell_reauction_rebinds_current_q_and_book(tmp_path):
+    """Deadline recovery replaces a stale queued attempt with current truth."""
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    wake_path = tmp_path / "reactor-wake-expired-attempt.json"
+    common = {
+        "reason": "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+        "position_id": "global-reauction-expired-attempt",
+        "family": ("Paris", "2026-08-08", "high"),
+        "held_token_id": "paris-yes-expired-attempt",
+        "book_state": "EXECUTABLE",
+        "schema_version": 4,
+        "wake_path": wake_path,
+        "return_request": True,
+    }
+    first_result = reactor.request_global_auction_completion(
+        **common,
+        probability_content_identity="q-stale",
+        held_best_bid=0.49,
+        bid_observed_at="2026-08-08T18:00:00+00:00",
+        probability_observed_at="2026-08-08T18:00:00+00:00",
+    )
+    first = first_result[1]
+    assert first_result[0] is True
+    assert first is not None
+
+    second_result = reactor.request_global_auction_completion(
+        **common,
+        probability_content_identity="q-current",
+        held_best_bid=0.31,
+        bid_observed_at="2026-08-08T18:00:31+00:00",
+        probability_observed_at="2026-08-08T18:00:31+00:00",
+        scope_identity=first.scope_identity,
+        generation=first.generation,
+        force_new_generation=True,
+    )
+    second = second_result[1]
+    assert second_result[0] is True
+    assert second is not None
+    assert second.request_id == first.request_id
+    assert second.generation == first.generation
+    assert second.attempt_identity != first.attempt_identity
+    assert second.probability_content_identity == "q-current"
+    assert second.held_best_bid == 0.31
+    assert (
+        reactor_wake.latest_v4_held_sell_reauction_request(
+            first.scope_identity,
+            path=wake_path,
+        ).attempt_identity
+        == second.attempt_identity
+    )
 
 
 def test_global_sell_reauction_executable_book_upgrades_queued_no_book_attempt(
