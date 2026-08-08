@@ -473,7 +473,15 @@ class WriteCoordinator:
         priority: WritePriority,
     ) -> list[_AcquiredGate]:
         acquired: list[_AcquiredGate] = []
+        nonmonitor_reservations: dict[DBIdentity, int] = {}
         try:
+            if priority is not WritePriority.MONITOR:
+                nonmonitor_reservations = self._acquire_nonmonitor_reservations(
+                    ordered,
+                    deadline=deadline,
+                    owner=owner,
+                    priority=priority,
+                )
             for db in ordered:
                 db_path = self._db_paths[db]
                 process_lock = self._process_locks[db_path]
@@ -490,19 +498,9 @@ class WriteCoordinator:
                             owner=owner,
                         )
                     elif priority is WritePriority.BACKGROUND_RECOVERY:
-                        monitor_waiter_fd = self._acquire_background_reservation(
-                            db_path,
-                            db=db,
-                            owner=owner,
-                        )
+                        monitor_waiter_fd = nonmonitor_reservations.pop(db)
                     else:
-                        monitor_waiter_fd = self._acquire_nonmonitor_reservation(
-                            db_path,
-                            deadline=deadline,
-                            db=db,
-                            owner=owner,
-                            blocking=True,
-                        )
+                        monitor_waiter_fd = nonmonitor_reservations.pop(db)
                     if _priority_uses_turnstile(priority):
                         turnstile_fd = self._acquire_turnstile(
                             db_path,
@@ -569,8 +567,69 @@ class WriteCoordinator:
                 )
             return acquired
         except BaseException:
+            for fd in reversed(tuple(nonmonitor_reservations.values())):
+                self._release_turnstile(fd)
             self._release_gates(acquired)
             raise
+
+    def _acquire_nonmonitor_reservations(
+        self,
+        ordered: tuple[DBIdentity, ...],
+        *,
+        deadline: float | None,
+        owner: str,
+        priority: WritePriority,
+    ) -> dict[DBIdentity, int]:
+        """Acquire a non-monitor DB set atomically with respect to MONITOR.
+
+        A writer must not hold one DB gate while waiting for another DB's
+        monitor reservation.  Acquire the complete reservation set first; on
+        any conflict, release the partial set before retrying.  A MONITOR that
+        publishes intent during the sweep therefore cannot form a cross-DB
+        lock-order cycle with this writer.
+        """
+
+        background = priority is WritePriority.BACKGROUND_RECOVERY
+        while True:
+            reservations: dict[DBIdentity, int] = {}
+            try:
+                if any(
+                    self._monitor_intent_locked(self._db_paths[db])
+                    for db in ordered
+                ):
+                    raise WriteLeaseTimeout(
+                        "DB writer monitor waiter reservation deferred "
+                        f"for owner={owner}: monitor intent visible"
+                    )
+                for db in ordered:
+                    reservations[db] = self._acquire_nonmonitor_reservation(
+                        self._db_paths[db],
+                        deadline=self._clock(),
+                        db=db,
+                        owner=owner,
+                        blocking=False,
+                    )
+                if any(
+                    self._monitor_intent_locked(self._db_paths[db])
+                    for db in ordered
+                ):
+                    raise WriteLeaseTimeout(
+                        "DB writer monitor waiter reservation deferred "
+                        f"for owner={owner}: monitor intent visible"
+                    )
+                return reservations
+            except WriteLeaseTimeout:
+                for fd in reversed(tuple(reservations.values())):
+                    self._release_turnstile(fd)
+                if background or (deadline is not None and self._clock() >= deadline):
+                    raise
+                sleep_for = 0.01
+                if deadline is not None:
+                    sleep_for = max(
+                        0.001,
+                        min(sleep_for, deadline - self._clock()),
+                    )
+                self._sleep(sleep_for)
 
     def _acquire_process_lock(
         self,

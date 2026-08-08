@@ -15040,6 +15040,75 @@ def test_process_shared_trade_turnstile_allows_seven_exactly_once_writes(tmp_pat
         assert conn.execute("SELECT COUNT(DISTINCT owner) FROM writes").fetchone() == (7,)
 
 
+def test_multi_db_standard_releases_partial_reservation_for_monitor(tmp_path):
+    """A partial STANDARD reservation cannot deadlock a multi-DB MONITOR."""
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WritePriority
+
+    trade_path = tmp_path / "a-trade.db"
+    world_path = tmp_path / "b-world.db"
+    coordinator = WriteCoordinator(
+        {
+            DBIdentity.TRADE: trade_path,
+            DBIdentity.WORLD: world_path,
+        }
+    )
+    first_reservation = threading.Event()
+    release_standard = threading.Event()
+    original_acquire = coordinator._acquire_nonmonitor_reservation
+    first_call = True
+
+    def pause_after_first_reservation(*args, **kwargs):
+        nonlocal first_call
+        fd = original_acquire(*args, **kwargs)
+        if first_call:
+            first_call = False
+            first_reservation.set()
+            assert release_standard.wait(timeout=2)
+        return fd
+
+    coordinator._acquire_nonmonitor_reservation = pause_after_first_reservation
+    completions = []
+    failures = []
+
+    def acquire(owner, priority):
+        try:
+            with coordinator.lease(
+                (DBIdentity.TRADE, DBIdentity.WORLD),
+                owner=owner,
+                priority=priority,
+                deadline_ms=2_000,
+            ):
+                completions.append(owner)
+        except BaseException as exc:  # pragma: no cover - asserted below.
+            failures.append(exc)
+
+    standard = threading.Thread(
+        target=acquire,
+        args=("standard", WritePriority.STANDARD),
+    )
+    monitor = threading.Thread(
+        target=acquire,
+        args=("monitor", WritePriority.MONITOR),
+    )
+    standard.start()
+    assert first_reservation.wait(timeout=2)
+    monitor.start()
+    deadline = time.monotonic() + 2
+    while not coordinator.has_pending_monitor_waiter(
+        (DBIdentity.TRADE, DBIdentity.WORLD)
+    ):
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+    release_standard.set()
+    standard.join(timeout=3)
+    monitor.join(timeout=3)
+
+    assert not standard.is_alive()
+    assert not monitor.is_alive()
+    assert failures == []
+    assert completions == ["monitor", "standard"]
+
+
 def test_turnstile_blocks_background_while_monitor_waits(tmp_path):
     """A queued MONITOR holds admission; BACKGROUND defers until the next call."""
     from src.state.write_coordinator import (

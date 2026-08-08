@@ -24558,12 +24558,15 @@ def _reconcile_passes_short_conn(
             # a response that repeats the command's already-persisted order id;
             # unavailable/NOT_FOUND responses remain durable continuations.
             assert_no_open_connection("recovery.identity_bound_inflight_fast")
+            identity_deadline = _bounded_recovery_deadline(
+                scheduler_deadline,
+                live_tick_budget,
+            )
             point_read_budget = _identity_bound_point_read_budget_seconds()
-            if scheduler_deadline is not None:
-                point_read_budget = min(
-                    point_read_budget,
-                    max(0.0, scheduler_deadline - time.monotonic()),
-                )
+            point_read_budget = min(
+                point_read_budget,
+                max(0.0, identity_deadline - time.monotonic()),
+            )
             if point_read_budget <= 0.0:
                 raw_point_orders, point_read_timed_out = {}, True
             else:
@@ -24583,10 +24586,6 @@ def _reconcile_passes_short_conn(
                     venue_order_id=venue_order_id,
                 )
             }
-            identity_deadline = _bounded_recovery_deadline(
-                scheduler_deadline,
-                live_tick_budget,
-            )
             identity_conn_factory = _recovery_apply_conn_factory(
                 conn_factory,
                 scope="live_tick",
