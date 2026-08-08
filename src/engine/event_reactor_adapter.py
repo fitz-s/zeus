@@ -23243,7 +23243,49 @@ def _day0_calibration_authority_payload_and_clock(
         assert_live_day0_probability_authority(payload)
     except Exception as exc:
         raise ValueError(f"DAY0_CALIBRATION_AUTHORITY_BLOCKED:{exc}") from exc
+    probability_block = payload.get("day0_probability_authority")
+    probability_payload = (
+        dict(probability_block) if isinstance(probability_block, Mapping) else {}
+    )
+    probability_authority = str(
+        payload.get("probability_authority")
+        or probability_payload.get("probability_authority")
+        or ""
+    ).strip()
+    q_source = str(
+        payload.get("_edli_q_source")
+        or payload.get("q_source")
+        or probability_payload.get("q_source")
+        or ""
+    ).strip()
+    q_mode = str(
+        payload.get("_edli_day0_q_mode")
+        or probability_payload.get("q_mode")
+        or ""
+    ).strip()
+    remaining_models = (
+        payload.get("_edli_day0_remaining_models")
+        or probability_payload.get("remaining_models")
+    )
     lcb_transform = payload.get("_edli_day0_lcb_transform")
+    if not isinstance(lcb_transform, Mapping):
+        lcb_transform = payload.get("day0_lcb_transform")
+    if not isinstance(lcb_transform, Mapping):
+        lcb_transform = probability_payload.get("lcb_transform")
+    probability_payload.update(
+        {
+            "probability_authority": probability_authority,
+            "q_source": q_source,
+            "q_mode": q_mode,
+            "remaining_models": remaining_models,
+            "rounded_value": evidence.rounded_value,
+            "observation_time": evidence.observation_time,
+            "observation_available_at": evidence.observation_available_at,
+            "lcb_transform": (
+                lcb_transform if isinstance(lcb_transform, Mapping) else None
+            ),
+        }
+    )
     lcb_transform_hash = _hash_jsonish(lcb_transform) if isinstance(lcb_transform, Mapping) else ""
     model_key = (
         "day0_remaining_window_probability_v1:"
@@ -23266,9 +23308,10 @@ def _day0_calibration_authority_payload_and_clock(
                 "source": payload.get("source") or payload.get("settlement_source"),
                 "rounding_rule": semantics.rounding_rule,
                 "rounded_value": evidence.rounded_value,
-                "q_source": payload.get("_edli_q_source"),
-                "q_mode": payload.get("_edli_day0_q_mode"),
-                "remaining_models": payload.get("_edli_day0_remaining_models"),
+                "probability_authority": probability_authority,
+                "q_source": q_source,
+                "q_mode": q_mode,
+                "remaining_models": remaining_models,
                 "lcb_transform_hash": lcb_transform_hash,
             }
         ),
@@ -23284,26 +23327,19 @@ def _day0_calibration_authority_payload_and_clock(
         "source_authorized_status": evidence.source_authorized_status,
         "live_authority_status": evidence.live_authority_status,
         "input_space": "day0_remaining_window_probability",
-        "q_source": payload.get("_edli_q_source"),
-        "q_mode": payload.get("_edli_day0_q_mode"),
-        "remaining_models": payload.get("_edli_day0_remaining_models"),
+        "probability_authority": probability_authority,
+        "q_source": q_source,
+        "q_mode": q_mode,
+        "remaining_models": remaining_models,
         "remaining_model_names": payload.get("_edli_day0_remaining_model_names"),
         "remaining_source_cycle_time_utc": payload.get("_edli_day0_remaining_source_cycle_time_utc"),
         "remaining_capture_times_utc": payload.get("_edli_day0_remaining_capture_times_utc"),
         "day0_exit_authority_status": payload.get("_edli_day0_exit_authority_status"),
         "day0_exit_authority_reason": payload.get("_edli_day0_exit_authority_reason"),
         "lcb_transform_hash": lcb_transform_hash,
-        "day0_probability_authority": {
-            "q_source": payload.get("_edli_q_source"),
-            "q_mode": payload.get("_edli_day0_q_mode"),
-            "remaining_models": payload.get("_edli_day0_remaining_models"),
-            "rounded_value": evidence.rounded_value,
-            "observation_time": evidence.observation_time,
-            "observation_available_at": evidence.observation_available_at,
-            "lcb_transform": lcb_transform if isinstance(lcb_transform, Mapping) else None,
-        },
+        "day0_probability_authority": probability_payload,
         "maturity_level": 4,
-        "n_samples": payload.get("_edli_day0_remaining_models") or 0,
+        "n_samples": remaining_models or 0,
         "authority": DAY0_REMAINING_WINDOW_CALIBRATION_AUTHORITY,
     }
     return payload_out, EvidenceClock(source_time, available_time, decision_time)

@@ -4,6 +4,39 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-08 Day0 probability authority survives certificate compilation
+
+The live global auction produced a current Shanghai Day0 remaining-day witness,
+ranked a positive expected-log-growth NO order, and passed exact JIT preflight.
+The calibration-certificate compiler then reconstructed a reduced Day0 block
+that omitted the already-validated `probability_authority`. Its own downstream
+live validator consequently rejected the certificate as missing authority before
+any venue command could be persisted. This was a producer/consumer transport
+split, not missing probability evidence or failed economics.
+
+The correction carries the producer's canonical Day0 authority block through
+the calibration certificate and adds the same exact authority to the certificate
+root. Authority, q source/mode, model count, observation clocks/value, and LCB
+transform are one closed binding: multiple representations must agree exactly.
+The model identity also commits to that authority. It does not infer or upgrade
+authority: the source payload must first pass the existing Day0 content validator,
+and the compiled certificate is validated again before command build.
+
+SCOPE is one current Day0 remaining-day probability certificate. DRAIN is the
+next normal global-auction redecision, which rebuilds the certificate from fresh
+observation, probability, book, and wealth evidence. RESET is every redecision;
+missing or conflicting source authority remains fail-closed. Forecast q,
+probability math, economic ranking, sizing, price bands, JIT checks, venue
+execution, held SELL, and settlement are unchanged.
+
+Allowed files are `src/engine/event_reactor_adapter.py`,
+`src/events/day0_authority.py`,
+`tests/engine/test_cert_calibration_bridge.py`, and this plan. Acceptance
+requires the compiled remaining-day certificate to preserve matching root and
+nested authority, pass its downstream live validator, retain mismatch rejection,
+pass focused Day0/calibration/global-auction tests, and produce a live command or
+an exact later-stage rejection on the next eligible positive-EV winner.
+
 ## 2026-08-08 Current probability authority must have an executable action path
 
 The live global auction repeatedly produced current, identity-bound replacement

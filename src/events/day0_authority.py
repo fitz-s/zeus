@@ -258,14 +258,22 @@ def _first_int(payload: Mapping[str, object], block: Mapping[str, object], *keys
 
 
 def _day0_lcb_transform(payload: Mapping[str, object], block: Mapping[str, object]) -> Mapping[str, object]:
-    transform = payload.get("_edli_day0_lcb_transform")
-    if not isinstance(transform, Mapping):
-        transform = payload.get("day0_lcb_transform")
-    if not isinstance(transform, Mapping):
-        transform = block.get("lcb_transform")
-    if not isinstance(transform, Mapping):
+    transforms: list[Mapping[str, object]] = []
+    for value in (
+        payload.get("_edli_day0_lcb_transform"),
+        payload.get("day0_lcb_transform"),
+        block.get("lcb_transform"),
+    ):
+        if value in (None, ""):
+            continue
+        if not isinstance(value, Mapping):
+            raise Day0AuthorityError("remaining_day_lcb_transform invalid")
+        transforms.append(value)
+    if not transforms:
         raise Day0AuthorityError("remaining_day_lcb_transform missing")
-    return transform
+    if len({stable_hash(dict(value)) for value in transforms}) != 1:
+        raise Day0AuthorityError("remaining_day_lcb_transform mismatch")
+    return transforms[0]
 
 
 def _truthy_false(value: object) -> bool:
@@ -1218,24 +1226,41 @@ def assert_live_day0_probability_authority(
         payload.get("q_source"),
         block.get("q_source"),
     )
-    q_mode = _first_text(payload, block, "_edli_day0_q_mode", "day0_q_mode", "q_mode")
+    q_mode = _matching_text(
+        "remaining_day_q_mode",
+        payload.get("_edli_day0_q_mode"),
+        payload.get("day0_q_mode"),
+        payload.get("q_mode"),
+        block.get("q_mode"),
+    )
     if q_mode != DAY0_REMAINING_DAY_Q_MODE:
         raise Day0AuthorityError(f"remaining_day_q_mode required:{q_mode or 'missing'}")
-    remaining_models = _first_int(
-        payload,
-        block,
-        "_edli_day0_remaining_models",
-        "day0_remaining_models",
-        "remaining_models",
+    remaining_models = _matching_float(
+        "remaining_day_models",
+        payload.get("_edli_day0_remaining_models"),
+        payload.get("day0_remaining_models"),
+        payload.get("remaining_models"),
+        block.get("remaining_models"),
     )
-    if remaining_models is None or remaining_models <= 0:
+    if remaining_models <= 0 or not remaining_models.is_integer():
         raise Day0AuthorityError("remaining_day_models missing")
-    rounded_value = _first_float(payload, block, "rounded_value", "rounded_extreme")
-    if rounded_value is None:
-        raise Day0AuthorityError("remaining_day_observed_extreme missing")
-    observation_time = _first_text(payload, block, "observation_time", "observation_available_at")
-    if not observation_time:
-        raise Day0AuthorityError("remaining_day_observation_time missing")
+    _matching_float(
+        "remaining_day_observed_extreme",
+        payload.get("rounded_value"),
+        payload.get("rounded_extreme"),
+        block.get("rounded_value"),
+        block.get("rounded_extreme"),
+    )
+    _matching_text(
+        "remaining_day_observation_time",
+        payload.get("observation_time"),
+        block.get("observation_time"),
+    )
+    _matching_text(
+        "remaining_day_observation_available_at",
+        payload.get("observation_available_at"),
+        block.get("observation_available_at"),
+    )
 
     transform = _day0_lcb_transform(payload, block)
     if q_lcb is None:
