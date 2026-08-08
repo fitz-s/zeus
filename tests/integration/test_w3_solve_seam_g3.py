@@ -4116,6 +4116,61 @@ def test_global_day0_actuation_binds_native_fahrenheit_to_conditioned_celsius():
             decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
             posterior_id=29915,
         )
+    held_rebound = era._global_day0_execution_payload(
+        carrier,
+        family=SimpleNamespace(city="NYC", target_date="2026-07-10", metric="high"),
+        resolution=SimpleNamespace(measurement_unit="F", station_id="KLGA"),
+        conditioning={
+            "active": True,
+            "metric": "high",
+            "observation_time": "2026-07-10T19:30:00+00:00",
+            "observed_extreme_c": 27.0,
+            "sample_count": 3,
+            "source": "durable_observation_instants",
+            "unit": "F",
+        },
+        observation_conn=conn,
+        decision_time=_dt.datetime(2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc),
+        posterior_id=29915,
+        allow_equivalent_conditioning_clock_advance=True,
+    )
+    held_binding = held_rebound["_edli_global_day0_binding"]
+    assert held_binding["probability_conditioning_observation_time"] == (
+        "2026-07-10T19:30:00+00:00"
+    )
+    assert held_binding["current_observation_time"] == (
+        "2026-07-10T19:00:00+00:00"
+    )
+    assert held_binding["conditioning_clock_lag_seconds"] == pytest.approx(1800.0)
+    assert held_binding["conditioning_clock_role"] == (
+        "same_extreme_conditioning_ahead_of_reader_clock"
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH",
+    ):
+        era._global_day0_execution_payload(
+            carrier,
+            family=SimpleNamespace(
+                city="NYC", target_date="2026-07-10", metric="high"
+            ),
+            resolution=SimpleNamespace(measurement_unit="F", station_id="KLGA"),
+            conditioning={
+                "active": True,
+                "metric": "high",
+                "observation_time": "2026-07-10T19:30:00+00:00",
+                "observed_extreme_c": 28.0,
+                "sample_count": 3,
+                "source": "durable_observation_instants",
+                "unit": "F",
+            },
+            observation_conn=conn,
+            decision_time=_dt.datetime(
+                2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+            ),
+            posterior_id=29915,
+            allow_equivalent_conditioning_clock_advance=True,
+        )
     conn.close()
 
 

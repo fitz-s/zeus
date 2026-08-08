@@ -30498,6 +30498,7 @@ def _global_day0_execution_payload(
     )
     conditioning_clock_lag_seconds: float | None = None
     conditioning_observation_time: str | None = None
+    conditioning_clock_role: str | None = None
     if conditioning is not None:
         conditioned_metric = (
             str(conditioning.get("metric") or "").strip().lower()
@@ -30577,16 +30578,6 @@ def _global_day0_execution_payload(
                 conditioning_fact.get("observation_time"),
                 reason="GLOBAL_DAY0_CURRENT_OBSERVATION_TIME_INVALID",
             )
-            if (
-                conditioned_at != conditioning_at
-                and (
-                    not allow_equivalent_conditioning_clock_advance
-                    or conditioned_at > conditioning_at
-                )
-            ):
-                raise ValueError(
-                    "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
-                )
             try:
                 conditioning_native = float(
                     conditioning_fact["observed_extreme_native"]
@@ -30610,11 +30601,23 @@ def _global_day0_execution_payload(
                 or str(conditioning.get("unit") or "").strip().upper() != unit
             ):
                 raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH")
-            if conditioned_at < conditioning_at:
+            if (
+                conditioned_at != conditioning_at
+                and not allow_equivalent_conditioning_clock_advance
+            ):
+                raise ValueError(
+                    "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
+                )
+            if conditioned_at != conditioning_at:
                 conditioning_observation_time = conditioned_at.isoformat()
-                conditioning_clock_lag_seconds = (
-                    conditioning_at - conditioned_at
-                ).total_seconds()
+                conditioning_clock_lag_seconds = abs(
+                    (conditioning_at - conditioned_at).total_seconds()
+                )
+                conditioning_clock_role = (
+                    "same_extreme_newer_observation_clock"
+                    if conditioned_at < conditioning_at
+                    else "same_extreme_conditioning_ahead_of_reader_clock"
+                )
 
     station_id = str(fact.get("station_id") or "").strip().upper()
     observation_source = str(fact.get("observation_source") or "").strip()
@@ -30692,9 +30695,7 @@ def _global_day0_execution_payload(
                 ),
                 "current_observation_time": conditioning_at.isoformat(),
                 "conditioning_clock_lag_seconds": conditioning_clock_lag_seconds,
-                "conditioning_clock_role": (
-                    "same_extreme_newer_observation_clock"
-                ),
+                "conditioning_clock_role": conditioning_clock_role,
             }
         )
     if fast_residual_conditioning is not None:
