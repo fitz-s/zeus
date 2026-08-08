@@ -2342,16 +2342,19 @@ def _latest_completed_partial_order_fact_candidates(conn: sqlite3.Connection) ->
             fact.venue_order_id AS order_fact_venue_order_id,
             fact.remaining_size AS order_fact_remaining_size,
             fact.matched_size AS order_fact_matched_size,
-            fact.source AS order_fact_source
+            fact.source AS order_fact_source,
+            pc.phase AS position_phase
           FROM venue_commands cmd
           JOIN canonical_order_truth fact
             ON fact.command_id = cmd.command_id
+          LEFT JOIN position_current pc
+            ON pc.position_id = cmd.position_id
          WHERE cmd.intent_kind IN ('ENTRY', 'EXIT')
            AND cmd.state IN ('PARTIAL', 'FILLED')
            AND cmd.venue_order_id IS NOT NULL
            AND cmd.venue_order_id != ''
            AND fact.venue_order_id = cmd.venue_order_id
-           AND fact.state = 'MATCHED'
+           AND fact.state IN ('MATCHED', 'PARTIALLY_MATCHED')
            AND fact.source IN ({source_placeholders})
            AND EXISTS (
                SELECT 1
@@ -2369,7 +2372,20 @@ def _latest_completed_partial_order_fact_candidates(conn: sqlite3.Connection) ->
     candidates: list[dict] = []
     for row in rows:
         candidate = _dict_row(row)
-        if not _decimal_is_zero(candidate.get("order_fact_remaining_size")):
+        fact_state = str(candidate.get("order_fact_state") or "").upper()
+        remaining = _decimal_or_none(candidate.get("order_fact_remaining_size"))
+        terminal_exit_dust = (
+            fact_state == "PARTIALLY_MATCHED"
+            and str(candidate.get("intent_kind") or "").upper() == "EXIT"
+            and str(candidate.get("position_phase") or "")
+            in _HARD_TERMINAL_REPAIR_PHASES
+            and remaining is not None
+            and Decimal("0") <= remaining <= Decimal("0.011")
+        )
+        if not (
+            fact_state == "MATCHED"
+            and _decimal_is_zero(candidate.get("order_fact_remaining_size"))
+        ) and not terminal_exit_dust:
             continue
         if not _decimal_is_positive(candidate.get("order_fact_matched_size")):
             continue
@@ -2396,7 +2412,10 @@ def _latest_completed_partial_order_fact_candidates(conn: sqlite3.Connection) ->
         ):
             continue
         if str(candidate.get("intent_kind") or "").upper() == "EXIT":
-            if _command_fill_coverage_state(candidate, fill_summary) != "complete":
+            if (
+                _command_fill_coverage_state(candidate, fill_summary) != "complete"
+                and not terminal_exit_dust
+            ):
                 continue
         candidates.append(candidate)
     return candidates

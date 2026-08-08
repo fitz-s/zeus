@@ -11557,6 +11557,106 @@ class TestRecoveryResolutionTable:
         }
         assert _get_state(conn, "cmd-001") == "FILLED"
 
+    def test_hard_terminal_exit_dust_finalizes_command_and_collateral(
+        self,
+        conn,
+    ):
+        """Settlement makes a proven quantization tail non-resting collateral."""
+        from src.execution.command_recovery import (
+            reconcile_completed_partial_order_facts,
+        )
+
+        _insert(
+            conn,
+            command_id="cmd-entry",
+            position_id="pos-001",
+            size=39.5,
+            price=0.14,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-entry",
+            venue_order_id="ord-entry",
+        )
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-entry",
+            order_id="ord-entry",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'settled', shares = 21.18, chain_shares = 21.18,
+                   chain_state = 'synced', order_status = 'filled'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _insert(
+            conn,
+            command_id="cmd-exit-dust",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=18.33,
+            price=0.07,
+            token_id="tok-001",
+        )
+        _advance_to_partial(
+            conn,
+            command_id="cmd-exit-dust",
+            venue_order_id="ord-exit-dust",
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit-dust",
+            order_id="ord-exit-dust",
+            trade_id="trade-exit-dust",
+            state="CONFIRMED",
+            filled_size="18.32",
+            fill_price="0.07",
+        )
+        _append_order_fact(
+            conn,
+            command_id="cmd-exit-dust",
+            order_id="ord-exit-dust",
+            state="PARTIALLY_MATCHED",
+            matched_size="18.32",
+            remaining_size="0.01",
+        )
+        conn.execute(
+            """
+            INSERT INTO collateral_reservations (
+                command_id, reservation_type, token_id, amount, created_at
+            ) VALUES (
+                'cmd-exit-dust', 'CTF_SELL', 'tok-001', 18330000,
+                '2026-04-26T00:04:00Z'
+            )
+            """
+        )
+
+        assert reconcile_completed_partial_order_facts(conn) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-exit-dust") == "FILLED"
+        reservation = conn.execute(
+            """
+            SELECT released_at, release_reason, converted_amount
+              FROM collateral_reservations
+             WHERE command_id = 'cmd-exit-dust'
+            """
+        ).fetchone()
+        assert reservation["released_at"] is not None
+        assert reservation["release_reason"] == "CONVERTED_ON_FILL"
+        assert reservation["converted_amount"] == 18320000
+        current = conn.execute(
+            "SELECT phase FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["phase"] == "settled"
+
     @pytest.mark.parametrize("scope", ["restart_preflight", "live_tick", "boot_fast"])
     def test_scoped_recovery_prioritizes_false_filled_terminal_partial(
         self,
