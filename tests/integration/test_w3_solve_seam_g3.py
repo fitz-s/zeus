@@ -20471,7 +20471,52 @@ def test_global_batch_waits_until_global_winner_family_is_claimed(monkeypatch):
         payload=__import__("json").loads(event_b.payload_json),
     )
     assert repeated.event_id == result.next_claim_event.event_id
+    successor = global_batch_runtime._next_claim_carrier(
+        event_b,
+        targeted_at=decision_at + _dt.timedelta(seconds=30),
+        economic_identity="economic-b",
+        payload=__import__("json").loads(event_b.payload_json),
+        spent_generation_identity=result.next_claim_event.event_id,
+    )
+    repeated_successor = global_batch_runtime._next_claim_carrier(
+        event_b,
+        targeted_at=decision_at + _dt.timedelta(seconds=60),
+        economic_identity="economic-b",
+        payload=__import__("json").loads(event_b.payload_json),
+        spent_generation_identity=result.next_claim_event.event_id,
+    )
+    assert successor.event_id != result.next_claim_event.event_id
+    assert repeated_successor.event_id == successor.event_id
     assert result.receipts[event_a.event_id].reason == "GLOBAL_WINNER_AWAITS_CLAIM"
+
+
+def test_global_claim_carrier_is_spent_only_after_command_boundary():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE edli_live_order_events (
+            aggregate_id TEXT NOT NULL,
+            event_sequence INTEGER NOT NULL,
+            event_type TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX idx_edli_live_order_events_aggregate "
+        "ON edli_live_order_events(aggregate_id, event_sequence)"
+    )
+    event_id = "carrier-1"
+    conn.execute(
+        "INSERT INTO edli_live_order_events VALUES (?, ?, ?)",
+        (f"{event_id}:intent-1", 1, "DecisionProofAccepted"),
+    )
+    assert not global_batch_runtime._global_claim_carrier_is_spent(conn, event_id)
+    conn.execute(
+        "INSERT INTO edli_live_order_events VALUES (?, ?, ?)",
+        (f"{event_id}:intent-1", 2, "ExecutionCommandCreated"),
+    )
+    assert global_batch_runtime._global_claim_carrier_is_spent(conn, event_id)
+    conn.close()
 
 
 def test_global_batch_restricts_urgent_scope_to_changed_families(monkeypatch):
@@ -21576,6 +21621,7 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
         (event_a, event_b), captured_at_utc=decision_at
     )
     world = sqlite3.connect(":memory:")
+    trade = object()
     family_a, family_b = scope.family_keys
 
     def _witness(family_key, suffix):
@@ -21750,7 +21796,7 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
         decision_time=decision_at,
         world_conn=world,
         forecast_conn=object(),
-        trade_conn=object(),
+        trade_conn=trade,
         payload_reader=lambda event: json.loads(event.payload_json),
         prepare_event=lambda event, _at: EventSubmissionReceipt(
             False,
@@ -21780,6 +21826,7 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
     assert rebound.economic_identity == economic_identity
 
     actuated.clear()
+    claimed_targets.clear()
     venue_calls[0] = 0
     selection_calls[0] = 0
     resumed_wealth_economic_identity = "wealth-economic-resumed"
@@ -21806,12 +21853,21 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
         "select_prepared_global_auction",
         _select_resumed,
     )
+    def _target_is_spent(conn, event_id):
+        assert conn is trade
+        return event_id == target.event_id
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_global_claim_carrier_is_spent",
+        _target_is_spent,
+    )
     resumed = global_batch_runtime.process_current_global_batch(
         (target,),
         decision_time=decision_at,
         world_conn=world,
         forecast_conn=object(),
-        trade_conn=object(),
+        trade_conn=trade,
         payload_reader=lambda event: json.loads(event.payload_json),
         prepare_event=lambda event, _at: EventSubmissionReceipt(
             False,
@@ -21824,18 +21880,64 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
         venue_submit_count=lambda: venue_calls[0],
         current_execution=lambda *_: object(),
         current_time_provider=lambda: decision_at,
-        claim_unpaged_winner=lambda _target: pytest.fail(
-            "an already-claimed deterministic target must not be claimed again"
-        ),
+        claim_unpaged_winner=_claim,
     )
 
     assert resumed.next_claim_event is None
-    assert resumed.winner_event_id == target.event_id
+    assert len(claimed_targets) == 1
+    resumed_target = claimed_targets[0]
+    assert resumed_target.event_id != target.event_id
+    assert resumed_target.source.startswith(
+        f"global_auction_winner_target:{event_b.event_id}:"
+    )
+    assert resumed.winner_event_id == resumed_target.event_id
     assert resumed.venue_submit_count == 1
     assert selection_calls[0] == 1
-    assert set(resumed.receipts) == {target.event_id}
-    assert actuated[0][0] == target
+    assert set(resumed.receipts) == {target.event_id, resumed_target.event_id}
+    assert actuated[0][0] == resumed_target
     assert actuated[0][1].economic_identity == resumed_economic_identity
+
+    actuated.clear()
+    claimed_targets.clear()
+    venue_calls[0] = 0
+    selection_calls[0] = 0
+    spent_ids = {target.event_id, resumed_target.event_id}
+    def _carrier_is_spent(conn, event_id):
+        assert conn is trade
+        return event_id in spent_ids
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_global_claim_carrier_is_spent",
+        _carrier_is_spent,
+    )
+    next_generation = global_batch_runtime.process_current_global_batch(
+        (target, resumed_target),
+        decision_time=decision_at,
+        world_conn=world,
+        forecast_conn=object(),
+        trade_conn=trade,
+        payload_reader=lambda event: json.loads(event.payload_json),
+        prepare_event=lambda event, _at: EventSubmissionReceipt(
+            False,
+            event.event_id,
+            event.causal_snapshot_id,
+            prepared_global_family=prepared[event.event_id],
+        ),
+        actuate_winner=_actuate,
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: venue_calls[0],
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        claim_unpaged_winner=_claim,
+    )
+
+    assert len(claimed_targets) == 1
+    next_target = claimed_targets[0]
+    assert next_target.event_id not in spent_ids
+    assert next_target.event_id != resumed_target.event_id
+    assert next_generation.winner_event_id == next_target.event_id
+    assert next_generation.venue_submit_count == 1
 
     fence_wealth_economic_identity = "wealth-economic-fence"
     fence_economic_identity = global_single_order_economic_identity(
@@ -21890,7 +21992,7 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
         decision_time=decision_at,
         world_conn=world,
         forecast_conn=object(),
-        trade_conn=object(),
+        trade_conn=trade,
         payload_reader=lambda event: json.loads(event.payload_json),
         prepare_event=lambda event, _at: EventSubmissionReceipt(
             False,

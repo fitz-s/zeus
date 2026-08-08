@@ -4014,17 +4014,22 @@ def _next_claim_carrier(
     targeted_at: datetime,
     economic_identity: str,
     payload: Mapping[str, object],
+    spent_generation_identity: str | None = None,
 ) -> OpportunityEvent:
-    """Create a fresh event identity for one selected current family fact."""
+    """Create one stable carrier for a selected fact and command generation."""
 
     stamp = targeted_at.astimezone(UTC).isoformat()
     identity = str(economic_identity or "").strip()
     if not identity:
         raise ValueError("GLOBAL_WINNER_ACTUATION_IDENTITY_MISSING")
+    generation = str(spent_generation_identity or "").strip()
+    source = f"global_auction_winner_target:{event.event_id}:{identity}"
+    if generation:
+        source = f"{source}:after_spent:{generation}"
     return make_opportunity_event(
         event_type=event.event_type,
         entity_key=event.entity_key,
-        source=f"global_auction_winner_target:{event.event_id}:{identity}",
+        source=source,
         observed_at=event.observed_at,
         available_at=event.available_at,
         received_at=stamp,
@@ -4034,6 +4039,43 @@ def _next_claim_carrier(
         expires_at=event.expires_at,
         created_at=stamp,
     )
+
+
+def _global_claim_carrier_is_spent(
+    trade_conn: object,
+    event_id: str,
+) -> bool:
+    """Return whether one carrier already owns a durable command attempt.
+
+    A carrier is the causal owner of exactly one command.  A terminal no-submit
+    or no-fill outcome may be re-decided, but that next attempt needs a fresh
+    carrier; the live-order-state gate then decides whether another command is
+    safe.  Reusing the spent carrier can only collide with its command fence.
+    """
+
+    execute = getattr(trade_conn, "execute", None)
+    if execute is None:
+        return False
+    try:
+        row = execute(
+            """
+            SELECT 1
+              FROM edli_live_order_events
+                   INDEXED BY idx_edli_live_order_events_aggregate
+             WHERE aggregate_id GLOB ?
+               AND event_type IN (
+                    'ExecutionCommandCreated',
+                    'VenueSubmitAttempted'
+               )
+             LIMIT 1
+            """,
+            (f"{str(event_id or '').strip()}:*",),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return False
+        raise
+    return row is not None
 
 
 def _current_held_weather_families(
@@ -4357,7 +4399,10 @@ def process_current_global_batch(
             (event for event in event_tuple if event.event_id == scope_winner_id),
             None,
         )
-        if winner is not None:
+        if winner is not None and not _global_claim_carrier_is_spent(
+            trade_conn,
+            winner.event_id,
+        ):
             return selected, winner, None
         actuation = getattr(selected, "actuation", None)
         if actuation is None:
@@ -4413,16 +4458,20 @@ def process_current_global_batch(
                 "payload_json",
                 "schema_version",
             )
-            target = next(
+            matching_targets = tuple(
                 (
-                    event
-                    for event in event_tuple
-                    if str(event.source or "").startswith(carrier_prefix)
-                    and all(
-                        getattr(event, field) == getattr(scope_event, field)
-                        for field in carrier_fields
-                    )
-                ),
+                    event,
+                    _global_claim_carrier_is_spent(trade_conn, event.event_id),
+                )
+                for event in event_tuple
+                if str(event.source or "").startswith(carrier_prefix)
+                and all(
+                    getattr(event, field) == getattr(scope_event, field)
+                    for field in carrier_fields
+                )
+            )
+            target = next(
+                (event for event, spent in matching_targets if not spent),
                 None,
             )
             # The event claim owns the selected source fact; the actuation below owns
@@ -4433,17 +4482,31 @@ def process_current_global_batch(
             if target is not None:
                 claimed_target_by_scope_and_economics[target_key] = target
                 return rebound(target)
+            spent_carrier_ids = tuple(
+                sorted(event.event_id for event, spent in matching_targets if spent)
+            )
+            spent_generation_identity = (
+                hashlib.sha256("\0".join(spent_carrier_ids).encode("utf-8")).hexdigest()
+                if spent_carrier_ids
+                else None
+            )
             target = _next_claim_carrier(
                 scope_event,
                 targeted_at=current_time(),
                 economic_identity=actuation.economic_identity,
                 payload=payload_reader(scope_event),
+                spent_generation_identity=spent_generation_identity,
             )
             existing_target = next(
                 (event for event in event_tuple if event.event_id == target.event_id),
                 None,
             )
             if existing_target is not None:
+                if _global_claim_carrier_is_spent(
+                    trade_conn,
+                    existing_target.event_id,
+                ):
+                    raise ValueError("GLOBAL_WINNER_TARGET_CARRIER_SPENT_COLLISION")
                 semantic_fields = (
                     "event_type",
                     "entity_key",

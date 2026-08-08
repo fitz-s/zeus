@@ -4627,6 +4627,10 @@ def _receipt_money_path_blocker(
 # venue order was never placed (PRICE_MOVED aborts pre-POST, MODE_FLIPPED refuses
 # the stale plan, would_cross_book fails the pre-submit revalidation certificate).
 TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
+    # A bounded global-auction cut expired before actuation.  Requeueing starts
+    # a new cut with fresh q/book/wealth truth; terminalizing would consume a
+    # still-live opportunity, while replaying the expired cut is forbidden.
+    "GLOBAL_REAUCTION_EPOCH_EXPIRED",
     # Forecast-source re-ingested AFTER this cycle's decision moment.
     "SOURCE_CAPTURED_AFTER_DECISION_TIME",
     # Replacement posterior substrate is missing/stale relative to live inputs.
