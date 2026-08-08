@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-08-05
+# Last reused or audited: 2026-08-08
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — 没有新的就用老的 applied to fusion
 #   membership. The gem_global-only previous_runs exception (edc598b440) is generalized into the
 #   SINGLE serving authority (src/data/replacement_current_value_serving.py): a provider absent
@@ -909,6 +909,132 @@ def test_cycle_priority_never_priced_family_sorts_ahead_of_held_position(tmp_pat
     sort_key_tokyo = queue_mod._cycle_advance_file_sort_key(tokyo, priority)
     sort_key_paris = queue_mod._cycle_advance_file_sort_key(paris, priority)
     assert sort_key_tokyo < sort_key_paris
+
+
+def test_cycle_priority_current_exposure_overrides_stale_enqueue_marker(tmp_path) -> None:
+    """Claim-time chain exposure outranks discovery even when its enqueue snapshot said no hold."""
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    forecast_db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(forecast_db)
+    conn.executescript(
+        """
+        CREATE TABLE cycle_advance_enqueues (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            target_cycle_time TEXT NOT NULL,
+            seed_file TEXT,
+            held_position INTEGER NOT NULL,
+            enqueued_at TEXT NOT NULL
+        );
+        CREATE TABLE forecast_posteriors (
+            source_id TEXT,
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            source_cycle_time TEXT,
+            computed_at TEXT
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO cycle_advance_enqueues VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            (
+                "Singapore",
+                "2026-08-08",
+                "high",
+                "2026-08-07T18:00:00+00:00",
+                str(tmp_path / "Singapore.current.high.json"),
+                0,
+                "2026-08-08T04:00:59+00:00",
+            ),
+            (
+                "Tokyo",
+                "2026-08-08",
+                "high",
+                "2026-08-07T18:00:00+00:00",
+                str(tmp_path / "Tokyo.current.high.json"),
+                0,
+                "2026-08-08T04:01:00+00:00",
+            ),
+        ],
+    )
+    conn.execute(
+        "INSERT INTO forecast_posteriors VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            queue_mod.SOURCE_ID,
+            "Singapore",
+            "2026-08-08",
+            "high",
+            "2026-08-07T12:00:00+00:00",
+            "2026-08-08T04:00:00+00:00",
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    trade_db = tmp_path / "trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            city TEXT,
+            target_date TEXT,
+            temperature_metric TEXT,
+            phase TEXT,
+            chain_state TEXT,
+            chain_shares REAL,
+            chain_cost_basis_usd REAL
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("Singapore", "2026-08-08", "high", "day0_window", "synced", 5.0, 1.6),
+    )
+    conn.execute(
+        "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("Tokyo", "2026-08-08", "high", "pending_entry", "synced", 5.0, 1.6),
+    )
+    conn.commit()
+    conn.close()
+
+    singapore = tmp_path / "Singapore.current.high.json"
+    tokyo = tmp_path / "Tokyo.current.high.json"
+    for path, city in ((singapore, "Singapore"), (tokyo, "Tokyo")):
+        path.write_text(
+            json.dumps(
+                {
+                    "city": city,
+                    "target_date": "2026-08-08",
+                    "temperature_metric": "high",
+                    "source_cycle_time": "2026-08-07T18:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    priority = queue_mod._cycle_advance_seed_priority_map(
+        forecast_db,
+        (singapore, tokyo),
+        trade_db=trade_db,
+    )
+
+    assert priority[singapore.name][0] == -2
+    assert priority[tokyo.name][0] == -1
+    assert queue_mod._cycle_advance_file_sort_key(
+        singapore, priority
+    ) < queue_mod._cycle_advance_file_sort_key(tokyo, priority)
+
+    without_forecast_db = queue_mod._cycle_advance_seed_priority_map(
+        None,
+        (singapore, tokyo),
+        trade_db=trade_db,
+    )
+    assert without_forecast_db[singapore.name][0] == -2
+    assert without_forecast_db[tokyo.name][0] == 1
 
 
 def test_cycle_priority_held_position_still_beats_plain_refresh_when_both_priced(

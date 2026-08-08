@@ -921,30 +921,54 @@ def _cycle_advance_never_priced_scopes(
     return frozenset(fam_scopes - priced_scopes)
 
 
+def _current_money_risk_scopes(
+    fam_scopes: frozenset[tuple[str, str, str]],
+    *,
+    trade_db: Path | str | None = None,
+) -> frozenset[tuple[str, str, str]]:
+    """Return queued families with chain-confirmed capital currently at risk."""
+
+    if not fam_scopes:
+        return frozenset()
+    try:
+        from src.data.replacement_cycle_advance_trigger import (  # noqa: PLC0415
+            _held_position_families,
+        )
+        from src.state.db import _connect_read_only, _zeus_trade_db_path  # noqa: PLC0415
+
+        db_path = Path(trade_db) if trade_db is not None else _zeus_trade_db_path()
+        if not db_path.exists():
+            return frozenset()
+        conn = _connect_read_only(db_path)
+        try:
+            return frozenset(_held_position_families(conn) & fam_scopes)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001 - priority loss is loud, queue still drains
+        _LOG.error(
+            "replacement materialization current-exposure priority read failed; "
+            "falling back to persisted enqueue priority: %s",
+            exc,
+        )
+        return frozenset()
+
+
 def _cycle_advance_seed_priority_map(
     forecast_db: Path | str | None,
     queue_files: Sequence[Path],
+    *,
+    trade_db: Path | str | None = None,
 ) -> dict[str, tuple[int, str]]:
-    """Return filename -> priority for queued cycle-advance seeds/requests.
+    """Return filename -> priority for queued materialization work.
 
-    The producer records whether a seed repairs a held-position family in
-    ``cycle_advance_enqueues``. The consumer must preserve that priority after a
-    seed becomes either a seed file or a request file; plain filename ordering
-    can otherwise spend live cycles on non-held cities while a held position has
-    stale belief.
-
-    A family that has never had a single ``forecast_posteriors`` row (never
-    priced at all) sorts strictly ahead of a held-position refresh: getting a
-    first price at all dominates the entry-lag budget (see
-    ``docs/evidence/capital_efficiency_2026_07_19/entry_leadtime.md``), and a
-    held-position refresh delayed by a burst of never-priced families is
-    bounded to low single-digit seconds at the default poll cadence (1s tick,
-    8 files/tick) against a refresh cadence measured in hours — negligible.
+    Current chain-confirmed exposure is read at claim time and dominates every
+    discovery tier.  ``cycle_advance_enqueues.held_position`` is only a producer-time
+    fallback: a position may fill after that immutable enqueue row was written, so
+    using the marker as current truth can leave the exit organ behind minutes of
+    first-price discovery.  Never-priced families lead only when no current capital is
+    at risk in the family.
     """
-    if forecast_db is None or not queue_files:
-        return {}
-    db_path = Path(forecast_db)
-    if not db_path.exists():
+    if not queue_files:
         return {}
     names_by_scope: dict[tuple[str, str, str, str], set[str]] = {}
     for path in queue_files:
@@ -962,64 +986,79 @@ def _cycle_advance_seed_priority_map(
             names_by_scope.setdefault(scope, set()).add(path.name)
     if not names_by_scope:
         return {}
-    try:
-        from src.state.db import _connect_read_only  # noqa: PLC0415
-
-        conn = _connect_read_only(db_path)
+    fam_scopes = frozenset(scope[:3] for scope in names_by_scope)
+    current_money_risk = _current_money_risk_scopes(
+        fam_scopes,
+        trade_db=trade_db,
+    )
+    rows: list[object] = []
+    never_priced_scopes: frozenset[tuple[str, str, str]] = frozenset()
+    if forecast_db is not None and Path(forecast_db).exists():
         try:
-            rows = []
-            scopes = tuple(names_by_scope)
-            for offset in range(0, len(scopes), 200):
-                chunk = scopes[offset : offset + 200]
-                values = ", ".join("(?, ?, ?, ?)" for _ in chunk)
-                rows.extend(
-                    conn.execute(
-                        f"""
-                        WITH queued(city, target_date, metric, target_cycle_time) AS (
-                            VALUES {values}
-                        )
-                        SELECT e.city,
-                               e.target_date,
-                               e.metric,
-                               e.target_cycle_time,
-                               e.held_position,
-                               e.enqueued_at
-                        FROM queued AS q
-                        JOIN cycle_advance_enqueues AS e
-                          ON e.city = q.city
-                         AND e.target_date = q.target_date
-                         AND e.metric = q.metric
-                         AND e.target_cycle_time = q.target_cycle_time
-                        """,
-                        tuple(value for scope in chunk for value in scope),
-                    ).fetchall()
-                )
-            fam_scopes = frozenset(
-                (str(row[0] or ""), str(row[1] or ""), str(row[2] or "")) for row in rows
-            )
-            never_priced_scopes = _cycle_advance_never_priced_scopes(conn, fam_scopes)
-        finally:
-            conn.close()
-    except Exception:  # noqa: BLE001 - priority is best-effort; queue must still drain
-        return {}
+            from src.state.db import _connect_read_only  # noqa: PLC0415
 
-    priority: dict[str, tuple[int, str]] = {}
+            conn = _connect_read_only(Path(forecast_db))
+            try:
+                scopes = tuple(names_by_scope)
+                for offset in range(0, len(scopes), 200):
+                    chunk = scopes[offset : offset + 200]
+                    values = ", ".join("(?, ?, ?, ?)" for _ in chunk)
+                    rows.extend(
+                        conn.execute(
+                            f"""
+                            WITH queued(city, target_date, metric, target_cycle_time) AS (
+                                VALUES {values}
+                            )
+                            SELECT e.city,
+                                   e.target_date,
+                                   e.metric,
+                                   e.target_cycle_time,
+                                   e.held_position,
+                                   e.enqueued_at
+                            FROM queued AS q
+                            JOIN cycle_advance_enqueues AS e
+                              ON e.city = q.city
+                             AND e.target_date = q.target_date
+                             AND e.metric = q.metric
+                             AND e.target_cycle_time = q.target_cycle_time
+                            """,
+                            tuple(value for scope in chunk for value in scope),
+                        ).fetchall()
+                    )
+                never_priced_scopes = _cycle_advance_never_priced_scopes(
+                    conn, fam_scopes
+                )
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001 - priority is best-effort; queue must still drain
+            pass
+
+    enqueue_priority: dict[tuple[str, str, str, str], tuple[bool, str]] = {}
     for row in rows:
         scope = tuple(str(value or "") for value in row[:4])
-        names = names_by_scope.get(scope, ())
         held_position, enqueued_at = row[4:]
+        candidate = (bool(int(held_position or 0)), str(enqueued_at or ""))
+        current = enqueue_priority.get(scope)
+        if current is None or (candidate[0] and not current[0]) or (
+            candidate[0] == current[0] and candidate[1] < current[1]
+        ):
+            enqueue_priority[scope] = candidate
+
+    priority: dict[str, tuple[int, str]] = {}
+    for scope, names in names_by_scope.items():
         fam_scope = scope[:3]
-        if fam_scope in never_priced_scopes:
+        held_marker, enqueued_at = enqueue_priority.get(scope, (False, ""))
+        if fam_scope in current_money_risk:
+            tier = -2
+        elif fam_scope in never_priced_scopes:
             tier = -1
-        elif int(held_position or 0) == 1:
+        elif held_marker:
             tier = 0
         else:
             tier = 1
-        value = (tier, str(enqueued_at or ""))
+        value = (tier, enqueued_at)
         for name in names:
-            current = priority.get(name)
-            if current is None or value < current:
-                priority[name] = value
+            priority[name] = value
     return priority
 
 
