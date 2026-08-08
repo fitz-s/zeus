@@ -184,6 +184,13 @@ def writer_monitor_waiter_path(db_path: Path | str) -> Path:
     return resolved.with_name(resolved.name + ".writer-monitor-waiters")
 
 
+def writer_monitor_intent_path(db_path: Path | str) -> Path:
+    """Return the crash-safe cross-process MONITOR intent path."""
+
+    resolved = _resolve_path(db_path)
+    return resolved.with_name(resolved.name + ".writer-monitor-intent")
+
+
 def _priority_uses_turnstile(priority: WritePriority) -> bool:
     return priority is not WritePriority.STANDARD
 
@@ -211,6 +218,86 @@ class WriteCoordinator:
         self._process_locks = {
             path: threading.Lock() for path in set(self._db_paths.values())
         }
+        self._pending_monitor_waiters_lock = threading.Lock()
+        self._pending_monitor_waiters = {
+            path: 0 for path in set(self._db_paths.values())
+        }
+
+    def has_pending_monitor_waiter(
+        self,
+        dbs: Iterable[DBIdentity | str],
+    ) -> bool:
+        """Return whether a MONITOR writer is waiting for any requested DB.
+
+        The kernel reservation prevents a new background lease from overtaking
+        a monitor.  The separate intent lock closes the other half of that
+        contract: a background pass that already owns the reservation can see
+        a newly queued monitor in this process or another process and
+        cooperatively end its current SQL quantum.
+        """
+
+        ordered = self.canonical_db_order(dbs)
+        with self._pending_monitor_waiters_lock:
+            if any(
+                self._pending_monitor_waiters[self._db_paths[db]] > 0
+                for db in ordered
+            ):
+                return True
+        return any(
+            self._monitor_intent_locked(self._db_paths[db])
+            for db in ordered
+        )
+
+    @staticmethod
+    def _monitor_intent_locked(db_path: Path) -> bool:
+        path = writer_monitor_intent_path(db_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _acquire_monitor_intents(
+        ordered: tuple[DBIdentity, ...],
+        db_paths: Mapping[DBIdentity, Path],
+    ) -> list[int]:
+        fds: list[int] = []
+        try:
+            for db in ordered:
+                path = writer_monitor_intent_path(db_paths[db])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_SH)
+                except BaseException:
+                    os.close(fd)
+                    raise
+                fds.append(fd)
+            return fds
+        except BaseException:
+            for fd in reversed(fds):
+                WriteCoordinator._release_turnstile(fd)
+            raise
+
+    def _mark_monitor_waiting(
+        self,
+        ordered: tuple[DBIdentity, ...],
+        delta: int,
+    ) -> None:
+        with self._pending_monitor_waiters_lock:
+            for db in ordered:
+                path = self._db_paths[db]
+                next_count = self._pending_monitor_waiters[path] + delta
+                if next_count < 0:
+                    raise RuntimeError("monitor waiter accounting underflow")
+                self._pending_monitor_waiters[path] = next_count
 
     def canonical_db_order(
         self,
@@ -255,12 +342,29 @@ class WriteCoordinator:
         acquired_at: float | None = None
         timeout_error: WriteLeaseTimeout | None = None
         try:
-            acquired = self._acquire_gates(
-                ordered,
-                deadline=deadline,
-                owner=owner,
-                priority=resolved_priority,
-            )
+            monitor_waiting = resolved_priority is WritePriority.MONITOR
+            monitor_intent_fds: list[int] = []
+            if monitor_waiting:
+                self._mark_monitor_waiting(ordered, 1)
+            try:
+                if monitor_waiting:
+                    monitor_intent_fds = self._acquire_monitor_intents(
+                        ordered,
+                        self._db_paths,
+                    )
+                acquired = self._acquire_gates(
+                    ordered,
+                    deadline=deadline,
+                    owner=owner,
+                    priority=resolved_priority,
+                )
+            finally:
+                if monitor_waiting:
+                    try:
+                        for fd in reversed(monitor_intent_fds):
+                            self._release_turnstile(fd)
+                    finally:
+                        self._mark_monitor_waiting(ordered, -1)
             acquired_at = self._clock()
             lease = WriteLease(
                 owner=owner,

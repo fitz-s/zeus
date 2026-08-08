@@ -5949,9 +5949,18 @@ def _edli_command_recovery_cycle() -> None:
         return
     if _defer_for_held_position_monitor("edli_command_recovery"):
         return
-    from src.execution.command_recovery import reconcile_unresolved_commands
+    from src.execution.command_recovery import (
+        reconcile_unresolved_commands,
+        scheduled_recovery_budget_seconds,
+    )
 
-    summary = reconcile_unresolved_commands(scope="live_tick")
+    invocation_deadline = (
+        _time.monotonic() + scheduled_recovery_budget_seconds()
+    )
+    summary = reconcile_unresolved_commands(
+        scope="live_tick",
+        deadline_monotonic=invocation_deadline,
+    )
     _consume_edli_command_recovery_summary(
         summary,
         log_context="edli_command_recovery.live_tick",
@@ -5960,7 +5969,16 @@ def _edli_command_recovery_cycle() -> None:
     global _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET
     if full_bucket == _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET:
         return
-    full_summary = reconcile_unresolved_commands(scope="full")
+    if _time.monotonic() >= invocation_deadline:
+        logger.info(
+            "edli_command_recovery: shared invocation deadline exhausted after "
+            "live_tick; full sweep will retry next cadence"
+        )
+        return
+    full_summary = reconcile_unresolved_commands(
+        scope="full",
+        deadline_monotonic=invocation_deadline,
+    )
     follow_through_ok = _consume_edli_command_recovery_summary(
         full_summary,
         log_context="edli_command_recovery.full",
@@ -7802,7 +7820,13 @@ def _exit_monitor_cycle(
         # to yield. A newer urgent wake has its own revision/claim attempt.
         _day0_held_monitor_preempt_requested.clear()
 
+    monitor_claim_released = False
+
     def _release_monitor_claim() -> None:
+        nonlocal monitor_claim_released
+        if monitor_claim_released:
+            return
+        monitor_claim_released = True
         if not urgent_fact:
             _day0_held_monitor_preempt_requested.clear()
             _periodic_held_position_monitor_handoff_pending.clear()
@@ -7912,7 +7936,11 @@ def _exit_monitor_cycle(
             )
         monitor_succeeded = run_exit_monitor_cycle(
             held_position_monitor_active=_held_position_monitor_active,
-            mark_held_position_monitor_complete=_held_position_monitor_active.clear,
+            # The callback fires immediately after the core artifact and
+            # canonical position decisions commit.  Releasing the outer claim
+            # here keeps status/cleanup housekeeping from blocking durable
+            # cadence recovery or a newer held-family redecision.
+            mark_held_position_monitor_complete=_release_monitor_claim,
             monitor_claimed=True,
             target_families=target_families,
             should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,

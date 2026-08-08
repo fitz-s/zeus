@@ -39,6 +39,7 @@ import multiprocessing
 import os
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from dataclasses import replace
@@ -76,6 +77,7 @@ from src.state.venue_command_repo import (
 from src.state.write_coordinator import WriteLeaseTimeout
 
 logger = logging.getLogger(__name__)
+_RECOVERY_MONITOR_PREEMPTION = threading.local()
 
 
 class TerminalExitHeldTokenMismatch(RuntimeError):
@@ -128,6 +130,28 @@ def _account_truth_snapshot_kwargs(scope: str) -> dict[str, object]:
     }
 
 
+def _scheduled_venue_snapshot_kwargs(
+    scope: str,
+    priming: Mapping[str, set[str]],
+    *,
+    deadline_monotonic: float | None,
+) -> dict[str, object]:
+    kwargs = _account_truth_snapshot_kwargs(scope)
+    kwargs.update(
+        {
+            "order_ids": priming["order_ids"],
+            "idempotency_keys": priming["idempotency_keys"],
+            "condition_ids": priming["condition_ids"],
+        }
+    )
+    if scope in {"live_tick", "full"}:
+        if deadline_monotonic is None:
+            raise ValueError(f"{scope} recovery requires a shared deadline")
+        kwargs["deadline_monotonic"] = deadline_monotonic
+        kwargs["derive_orders_from_account_truth"] = True
+    return kwargs
+
+
 def _identity_bound_point_read_budget_seconds() -> float:
     raw = os.environ.get(
         "ZEUS_LIVE_IDENTITY_BOUND_POINT_READ_BUDGET_SECONDS",
@@ -162,6 +186,12 @@ def _full_sweep_budget_seconds() -> float:
     if not value > 0.0:
         value = _FULL_SWEEP_BUDGET_SECONDS
     return min(value, 50.0)
+
+
+def scheduled_recovery_budget_seconds() -> float:
+    """Return the wall-clock budget shared by one scheduled recovery run."""
+
+    return _full_sweep_budget_seconds()
 
 
 def _full_background_recovery_quantum_slot() -> int:
@@ -22718,6 +22748,7 @@ def reconcile_unresolved_commands(
     client=None,
     *,
     scope: str = "full",
+    deadline_monotonic: float | None = None,
 ) -> dict:
     """Scan unresolved venue_commands and apply reconciliation events.
 
@@ -22773,6 +22804,8 @@ def reconcile_unresolved_commands(
         raise ValueError(f"unsupported command recovery scope: {scope!r}")
     if conn is not None and scope != "full":
         raise ValueError("non-full command recovery scopes require conn=None")
+    if conn is not None and deadline_monotonic is not None:
+        raise ValueError("caller-owned recovery cannot use a scheduled deadline")
 
     if client is None:
         from src.data.polymarket_client import PolymarketClient
@@ -22783,7 +22816,13 @@ def reconcile_unresolved_commands(
 
     if conn is None:
         # Scheduled-job lane: per-pass short connections, no conn across network.
-        _reconcile_passes_short_conn(client, summary, started_at, scope=scope)
+        _reconcile_passes_short_conn(
+            client,
+            summary,
+            started_at,
+            scope=scope,
+            deadline_monotonic=deadline_monotonic,
+        )
         logger.info(
             "recovery: scanned=%d advanced=%d stayed=%d errors=%d",
             summary["scanned"], summary["advanced"], summary["stayed"], summary["errors"],
@@ -23176,11 +23215,33 @@ def _recovery_apply_conn_factory(
         try:
             if not getattr(conn_factory, "supports_nonblocking_flocks", False):
                 conn.execute("PRAGMA busy_timeout = 0")
-            if scope == "live_tick" and deadline_monotonic is not None:
-                conn.set_progress_handler(
-                    lambda: int(time.monotonic() >= deadline_monotonic),
-                    _LIVE_TICK_DB_PROGRESS_OPCODES,
+            if deadline_monotonic is not None:
+                from src.state.write_coordinator import (
+                    DBIdentity,
+                    default_runtime_write_coordinator,
                 )
+
+                coordinator = default_runtime_write_coordinator()
+                pending_monitor = getattr(
+                    coordinator,
+                    "has_pending_monitor_waiter",
+                    lambda _dbs: False,
+                )
+
+                def _apply_progress_cancelled() -> int:
+                    if time.monotonic() >= deadline_monotonic:
+                        return 1
+                    if pending_monitor((DBIdentity.TRADE,)):
+                        _RECOVERY_MONITOR_PREEMPTION.pending = True
+                        return 1
+                    return 0
+
+                set_progress_handler = getattr(conn, "set_progress_handler", None)
+                if callable(set_progress_handler):
+                    set_progress_handler(
+                        _apply_progress_cancelled,
+                        _LIVE_TICK_DB_PROGRESS_OPCODES,
+                    )
         except BaseException:
             conn.close()
             raise
@@ -23312,6 +23373,12 @@ def _recovery_read_conn_factory(
         conn = conn_factory()
         try:
             conn.execute("PRAGMA busy_timeout = 0")
+            set_progress_handler = getattr(conn, "set_progress_handler", None)
+            if callable(set_progress_handler):
+                set_progress_handler(
+                    lambda: int(time.monotonic() >= deadline_monotonic),
+                    _LIVE_TICK_DB_PROGRESS_OPCODES,
+                )
         except BaseException:
             conn.close()
             raise
@@ -23337,6 +23404,7 @@ def _run_recovery_pass_with_lock_policy(
         return None
 
     for attempt in range(len(_RECOVERY_LOCK_RETRY_DELAYS) + 1):
+        _RECOVERY_MONITOR_PREEMPTION.pending = False
         try:
             return fn()
         except _LiveTickDBBudgetExhausted:
@@ -23351,6 +23419,20 @@ def _run_recovery_pass_with_lock_policy(
             return None
         except (BlockingIOError, WriteLeaseTimeout, sqlite3.OperationalError) as exc:
             message = str(exc)
+            if bool(getattr(_RECOVERY_MONITOR_PREEMPTION, "pending", False)):
+                _RECOVERY_MONITOR_PREEMPTION.pending = False
+                summary["monitor_preempted"] = True
+                summary["monitor_preempted_at"] = label
+                summary["db_lock_deferred"] = True
+                summary["db_lock_deferred_at"] = label
+                summary["db_lock_deferred_count"] = 1
+                logger.info(
+                    "recovery: %s pass %s yielded its write quantum to held monitor; "
+                    "remaining apply work will retry next tick",
+                    scope,
+                    label,
+                )
+                return None
             is_budget = (
                 bounded_scope
                 and deadline_monotonic is not None
@@ -24135,7 +24217,14 @@ def _full_quantum_candidates(conn: sqlite3.Connection) -> list[dict]:
     )
 
 
-def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scope: str = "full") -> None:
+def _reconcile_passes_short_conn(
+    client,
+    summary: dict,
+    started_at: str,
+    *,
+    scope: str = "full",
+    deadline_monotonic: float | None = None,
+) -> None:
     """Scheduled-job lane: per-pass short connections, no connection across network.
 
     Three structural phases (``src.execution.venue_sync_contract``):
@@ -24173,6 +24262,9 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         if getattr(conn_factory, "requires_writer_flocks", False)
         else conn_factory
     )
+    scheduler_deadline = deadline_monotonic
+    if scheduler_deadline is None and scope in {"live_tick", "full"}:
+        scheduler_deadline = time.monotonic() + scheduled_recovery_budget_seconds()
     live_tick_deadline = None
     full_deadline = None
     if scope == "live_tick":
@@ -24191,10 +24283,12 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             live_tick_budget = _LIVE_TICK_DB_BUDGET_SECONDS
         summary["live_tick_db_budget_seconds"] = live_tick_budget
         live_tick_deadline = time.monotonic() + live_tick_budget
+        if scheduler_deadline is not None:
+            live_tick_deadline = min(live_tick_deadline, scheduler_deadline)
     elif scope == "full":
         full_budget = _full_sweep_budget_seconds()
         summary["full_sweep_budget_seconds"] = full_budget
-        full_deadline = time.monotonic() + full_budget
+        full_deadline = scheduler_deadline or (time.monotonic() + full_budget)
     apply_deadline = live_tick_deadline or full_deadline
     conn_factory = _recovery_priority_conn_factory(
         conn_factory,
@@ -24212,7 +24306,7 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         # the tiny cumulative write budget here would suppress exact-order
         # recovery before it starts. The full sweep alone needs one total
         # read/network/apply deadline.
-        deadline_monotonic=full_deadline,
+        deadline_monotonic=full_deadline or scheduler_deadline,
     )
 
     def _run_pass_with_lock_retry(label: str, fn):
@@ -24451,9 +24545,21 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             # a response that repeats the command's already-persisted order id;
             # unavailable/NOT_FOUND responses remain durable continuations.
             assert_no_open_connection("recovery.identity_bound_inflight_fast")
-            raw_point_orders, point_read_timed_out = _read_identity_bound_point_orders(
-                identity_submit_order_ids,
-            )
+            point_read_budget = _identity_bound_point_read_budget_seconds()
+            if scheduler_deadline is not None:
+                point_read_budget = min(
+                    point_read_budget,
+                    max(0.0, scheduler_deadline - time.monotonic()),
+                )
+            if point_read_budget <= 0.0:
+                raw_point_orders, point_read_timed_out = {}, True
+            else:
+                raw_point_orders, point_read_timed_out = (
+                    _read_identity_bound_point_orders(
+                        identity_submit_order_ids,
+                        timeout_seconds=point_read_budget,
+                    )
+                )
             if point_read_timed_out:
                 summary["identity_bound_inflight_point_read_timed_out"] = True
             point_orders = {
@@ -24506,11 +24612,18 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
             if str(row.get("venue_order_id") or "")
         }
         assert_no_open_connection("recovery.capital_recovery_fast")
+        assert scheduler_deadline is not None
         snapshot = capture_venue_read_snapshot(
             client,
-            order_ids=order_ids,
-            idempotency_keys=set(),
-            condition_ids=set(),
+            **_scheduled_venue_snapshot_kwargs(
+                "live_tick",
+                {
+                    "order_ids": order_ids,
+                    "idempotency_keys": set(),
+                    "condition_ids": set(),
+                },
+                deadline_monotonic=scheduler_deadline,
+            ),
         )
         fast_deadline = time.monotonic() + max(live_tick_budget, 0.5)
         fast_conn_factory = _recovery_apply_conn_factory(
@@ -25180,6 +25293,17 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
         return
     except sqlite3.OperationalError as exc:
         if (
+            "interrupted" in str(exc).lower()
+            and scheduler_deadline is not None
+            and time.monotonic() >= scheduler_deadline
+        ):
+            summary["db_budget_deferred"] = True
+            summary["db_budget_deferred_at"] = "priming_snapshot"
+            summary["db_budget_deferred_count"] = 1
+            summary["scope"] = scope
+            summary["deferred_full_sweep"] = True
+            return
+        if (
             apply_deadline is None
             or (
                 "locked" not in str(exc).lower()
@@ -25196,26 +25320,11 @@ def _reconcile_passes_short_conn(client, summary: dict, started_at: str, *, scop
 
     # -- PHASE 2: NETWORK (no connection in scope) -----------------------------
     assert_no_open_connection("recovery.capture_venue_snapshot")
-    snapshot_kwargs = _account_truth_snapshot_kwargs(scope)
-    if scope == "full":
-        assert full_deadline is not None
-        snapshot_kwargs.update(
-            {
-                "order_ids": priming["order_ids"],
-                "idempotency_keys": priming["idempotency_keys"],
-                "condition_ids": priming["condition_ids"],
-                "deadline_monotonic": full_deadline,
-                "derive_orders_from_account_truth": True,
-            }
-        )
-    else:
-        snapshot_kwargs.update(
-            {
-                "order_ids": priming["order_ids"],
-                "idempotency_keys": priming["idempotency_keys"],
-                "condition_ids": priming["condition_ids"],
-            }
-        )
+    snapshot_kwargs = _scheduled_venue_snapshot_kwargs(
+        scope,
+        priming,
+        deadline_monotonic=scheduler_deadline,
+    )
     venue_snapshot = capture_venue_read_snapshot(
         client,
         **snapshot_kwargs,

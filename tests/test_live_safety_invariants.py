@@ -15190,6 +15190,133 @@ def test_priority_recovery_connection_delegates_context_before_releasing_lease(m
     assert events == ["lease_enter", "conn_enter", "conn_exit", "conn_close", "lease_exit"]
 
 
+def test_background_recovery_interrupt_is_classified_as_monitor_preemption(monkeypatch):
+    from src.execution import command_recovery
+    from src.state import write_coordinator as coordinator_module
+
+    class Coordinator:
+        @staticmethod
+        def has_pending_monitor_waiter(_dbs):
+            return True
+
+    monkeypatch.setattr(
+        coordinator_module,
+        "default_runtime_write_coordinator",
+        lambda: Coordinator(),
+    )
+
+    def factory():
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE rows (value INTEGER)")
+        conn.executemany(
+            "INSERT INTO rows VALUES (?)",
+            ((index,) for index in range(200)),
+        )
+        return conn
+
+    bounded_factory = command_recovery._recovery_apply_conn_factory(
+        factory,
+        scope="full",
+        deadline_monotonic=time.monotonic() + 5.0,
+    )
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+
+    def interrupted_pass():
+        with bounded_factory() as conn:
+            conn.execute(
+                "SELECT COUNT(*) FROM rows first, rows second, rows third"
+            ).fetchone()
+
+    result = command_recovery._run_recovery_pass_with_lock_policy(
+        "historical_apply",
+        interrupted_pass,
+        scope="full",
+        summary=summary,
+        deadline_monotonic=time.monotonic() + 5.0,
+    )
+
+    assert result is None
+    assert summary["monitor_preempted"] is True
+    assert summary["monitor_preempted_at"] == "historical_apply"
+    assert summary["db_lock_deferred_at"] == "historical_apply"
+
+
+def test_cross_process_monitor_preempts_background_apply_without_partial_commit(
+    monkeypatch,
+    tmp_path,
+):
+    from src.execution import command_recovery
+    from src.state import write_coordinator as coordinator_module
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WritePriority
+
+    db_path = tmp_path / "cross-process-monitor-preemption.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE writes(owner TEXT PRIMARY KEY)")
+
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+    monkeypatch.setattr(
+        coordinator_module,
+        "default_runtime_write_coordinator",
+        lambda: coordinator,
+    )
+    bounded_factory = command_recovery._recovery_apply_conn_factory(
+        lambda: sqlite3.connect(db_path, timeout=5),
+        scope="full",
+        deadline_monotonic=time.monotonic() + 5.0,
+    )
+    ctx = multiprocessing.get_context("spawn")
+    waiter_started, waiter_queue = ctx.Event(), ctx.Queue()
+
+    with coordinator.lease(
+        (DBIdentity.TRADE,),
+        owner="background-holder",
+        priority=WritePriority.BACKGROUND_RECOVERY,
+    ):
+        waiter = ctx.Process(
+            target=_writer_process_waiter,
+            args=(str(db_path), waiter_started, waiter_queue),
+        )
+        waiter.start()
+        assert waiter_started.wait(timeout=5)
+        intent_deadline = time.monotonic() + 5.0
+        while (
+            not coordinator.has_pending_monitor_waiter((DBIdentity.TRADE,))
+            and time.monotonic() < intent_deadline
+        ):
+            time.sleep(0.01)
+        assert coordinator.has_pending_monitor_waiter((DBIdentity.TRADE,))
+
+        summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+
+        def interrupted_pass():
+            with bounded_factory() as conn:
+                conn.execute("INSERT INTO writes(owner) VALUES ('background')")
+                conn.execute(
+                    "WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL "
+                    "SELECT n + 1 FROM seq WHERE n < 1000000) "
+                    "SELECT sum(n) FROM seq"
+                ).fetchone()
+
+        result = command_recovery._run_recovery_pass_with_lock_policy(
+            "cross_process_apply",
+            interrupted_pass,
+            scope="full",
+            summary=summary,
+            deadline_monotonic=time.monotonic() + 5.0,
+        )
+        assert result is None
+        assert summary["monitor_preempted"] is True
+
+    waiter.join(timeout=5)
+    assert waiter.exitcode == 0
+    assert waiter_queue.get(timeout=2) == "ok"
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT owner FROM writes ORDER BY owner").fetchall() == [
+            ("monitor",)
+        ]
+
+
 def test_process_death_resets_holder_and_waiter_state(tmp_path):
     """A dead holder releases the kernel gate to an already queued MONITOR."""
     from src.state.write_coordinator import DBIdentity, WriteCoordinator, WritePriority

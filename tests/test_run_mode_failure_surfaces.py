@@ -7597,6 +7597,8 @@ def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch)
             )
         )
         kwargs["mark_held_position_monitor_complete"]()
+        assert main_module._held_position_monitor_claim.acquire(blocking=False)
+        main_module._held_position_monitor_claim.release()
         return True
 
     main_module._held_position_monitor_active.clear()

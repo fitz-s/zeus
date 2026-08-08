@@ -1401,6 +1401,50 @@ def test_bounded_recovery_read_factory_rejects_expired_deadline():
     assert calls == []
 
 
+def test_bounded_recovery_read_factory_interrupts_query_at_deadline(monkeypatch):
+    from src.execution import command_recovery
+
+    now = [0.0]
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    read_factory = command_recovery._recovery_read_conn_factory(
+        lambda: sqlite3.connect(":memory:"),
+        deadline_monotonic=1.0,
+    )
+
+    conn = read_factory()
+    try:
+        now[0] = 2.0
+        with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+            conn.execute(
+                "WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL "
+                "SELECT n + 1 FROM seq WHERE n < 100000) "
+                "SELECT sum(n) FROM seq"
+            ).fetchone()
+    finally:
+        conn.close()
+
+
+def test_live_tick_snapshot_uses_complete_account_truth_and_shared_deadline():
+    from src.execution import command_recovery
+
+    priming = {
+        "order_ids": {"order-1"},
+        "idempotency_keys": {"intent-1"},
+        "condition_ids": {"condition-1"},
+    }
+    kwargs = command_recovery._scheduled_venue_snapshot_kwargs(
+        "live_tick",
+        priming,
+        deadline_monotonic=123.0,
+    )
+
+    assert kwargs == {
+        **priming,
+        "deadline_monotonic": 123.0,
+        "derive_orders_from_account_truth": True,
+    }
+
+
 def test_live_tick_apply_factory_interrupts_query_after_deadline(monkeypatch):
     from src.execution import command_recovery
 
@@ -27848,6 +27892,7 @@ def test_edli_command_recovery_runs_fast_tick_and_periodic_full_sweep(monkeypatc
     from src.execution import command_recovery
 
     scopes = []
+    deadlines = []
     consumed = []
     monkeypatch.setattr(main, "get_mode", lambda: "live")
     monkeypatch.setattr(
@@ -27860,7 +27905,10 @@ def test_edli_command_recovery_runs_fast_tick_and_periodic_full_sweep(monkeypatc
     monkeypatch.setattr(
         command_recovery,
         "reconcile_unresolved_commands",
-        lambda *, scope: scopes.append(scope)
+        lambda *, scope, deadline_monotonic: (
+            scopes.append(scope),
+            deadlines.append(deadline_monotonic),
+        )[-1]
         or {
             "scope": scope,
             "scanned": 1,
@@ -27881,12 +27929,60 @@ def test_edli_command_recovery_runs_fast_tick_and_periodic_full_sweep(monkeypatc
     main._edli_command_recovery_cycle.__wrapped__()
 
     assert scopes == ["live_tick", "full", "live_tick"]
+    assert deadlines[0] == deadlines[1]
+    assert deadlines[2] != deadlines[0]
     assert consumed == [
         ("live_tick", "edli_command_recovery.live_tick"),
         ("full", "edli_command_recovery.full"),
         ("live_tick", "edli_command_recovery.live_tick"),
     ]
     assert main._EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET == 7
+
+
+def test_edli_command_recovery_shared_deadline_prevents_late_full_sweep(monkeypatch):
+    from src import main
+    from src.execution import command_recovery
+
+    scopes = []
+    now = iter((10.0, 12.0))
+    monkeypatch.setattr(main, "get_mode", lambda: "live")
+    monkeypatch.setattr(
+        main,
+        "_defer_for_held_position_monitor",
+        lambda _job_name: False,
+    )
+    monkeypatch.setattr(main, "_edli_command_recovery_full_bucket", lambda: 17)
+    monkeypatch.setattr(main, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", None)
+    monkeypatch.setattr(main._time, "monotonic", lambda: next(now))
+    monkeypatch.setattr(
+        command_recovery,
+        "scheduled_recovery_budget_seconds",
+        lambda: 1.0,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda *, scope, deadline_monotonic: scopes.append(
+            (scope, deadline_monotonic)
+        )
+        or {
+            "scope": scope,
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        },
+    )
+    monkeypatch.setattr(
+        main,
+        "_consume_edli_command_recovery_summary",
+        lambda _summary, *, log_context: True,
+    )
+
+    main._edli_command_recovery_cycle.__wrapped__()
+
+    assert scopes == [("live_tick", 11.0)]
+    assert main._EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET is None
 
 
 def test_edli_command_recovery_retries_full_bucket_after_returned_error(monkeypatch):
@@ -27896,7 +27992,7 @@ def test_edli_command_recovery_retries_full_bucket_after_returned_error(monkeypa
     scopes = []
     full_calls = 0
 
-    def _reconcile(*, scope):
+    def _reconcile(*, scope, deadline_monotonic):
         nonlocal full_calls
         scopes.append(scope)
         if scope == "full":
@@ -27962,7 +28058,7 @@ def test_edli_command_recovery_retries_full_bucket_after_follow_through_failure(
     monkeypatch.setattr(
         command_recovery,
         "reconcile_unresolved_commands",
-        lambda *, scope: scopes.append(scope)
+        lambda *, scope, deadline_monotonic: scopes.append(scope)
         or {
             "scope": scope,
             "scanned": 0,

@@ -25,6 +25,7 @@ from src.state.write_coordinator import (
     WriteCoordinator,
     WriteLeaseTelemetry,
     WriteLeaseTimeout,
+    WritePriority,
     unified_writer_lock_path,
 )
 
@@ -62,6 +63,44 @@ def test_live_and_bulk_share_same_file_gate(tmp_path: Path) -> None:
     assert unified_writer_lock_path(tmp_path / "zeus-world.db").exists()
     assert not (tmp_path / "zeus-world.db.writer-lock.live").exists()
     assert not (tmp_path / "zeus-world.db.writer-lock.bulk").exists()
+
+
+def test_background_holder_can_observe_new_monitor_waiter(tmp_path: Path) -> None:
+    coordinator = WriteCoordinator(_db_paths(tmp_path))
+    waiter_started = threading.Event()
+    waiter_acquired = threading.Event()
+
+    def _monitor_waiter() -> None:
+        waiter_started.set()
+        with coordinator.lease(
+            (DBIdentity.TRADE,),
+            owner="monitor",
+            priority=WritePriority.MONITOR,
+            deadline_ms=1_000,
+        ):
+            waiter_acquired.set()
+
+    with coordinator.lease(
+        (DBIdentity.TRADE,),
+        owner="background",
+        priority=WritePriority.BACKGROUND_RECOVERY,
+    ):
+        waiter = threading.Thread(target=_monitor_waiter)
+        waiter.start()
+        assert waiter_started.wait(timeout=1.0)
+        deadline = time.monotonic() + 1.0
+        while (
+            not coordinator.has_pending_monitor_waiter((DBIdentity.TRADE,))
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.005)
+        assert coordinator.has_pending_monitor_waiter((DBIdentity.TRADE,))
+        assert not waiter_acquired.is_set()
+
+    waiter.join(timeout=1.0)
+    assert not waiter.is_alive()
+    assert waiter_acquired.is_set()
+    assert not coordinator.has_pending_monitor_waiter((DBIdentity.TRADE,))
 
 
 def test_exit_writer_identity_failure_cannot_bypass_trade_lease() -> None:
