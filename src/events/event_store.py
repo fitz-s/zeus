@@ -290,8 +290,7 @@ class EventStore:
                            last_error = 'GLOBAL_WINNER_TARGET_SUPERSEDED',
                            updated_at = ?
                      WHERE main.consumer_name = ?
-                       AND main.processing_status = 'processing'
-                       AND main.last_error = ?
+                       AND main.processing_status IN ('pending', 'processing')
                        AND main.event_id IN ({placeholders})
                        AND NOT EXISTS (
                             SELECT 1
@@ -308,7 +307,6 @@ class EventStore:
                         updated_at,
                         updated_at,
                         self.consumer_name,
-                        GLOBAL_WINNER_TARGETED_CLAIM,
                         *chunk,
                     ),
                 )

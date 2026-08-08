@@ -8053,6 +8053,126 @@ def test_superseded_global_target_without_venue_attempt_cannot_starve_redecision
     ) == ("pending", GLOBAL_WINNER_TARGETED_CLAIM)
 
 
+def test_pointer_supersession_expires_pending_retry_carrier_without_command(
+    monkeypatch,
+):
+    import src.events.event_store as event_store
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    clock = ["2026-05-24T18:00:00+00:00"]
+    monkeypatch.setattr(event_store, "_utc_now", lambda: clock[0])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn, processing_lease_seconds=10)
+    source = _forecast_event("pending-retry-source", target_date="2026-05-25")
+    stale = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="pending-retry-old-economics",
+        payload=json.loads(source.payload_json),
+    )
+    other_source = _forecast_event("pending-retry-other", target_date="2026-05-25")
+    other_payload = json.loads(other_source.payload_json)
+    other_payload["city"] = "Seattle"
+    replacement = _next_claim_carrier(
+        other_source,
+        targeted_at=datetime.fromisoformat(clock[0]) + timedelta(seconds=1),
+        economic_identity="pending-retry-new-economics",
+        payload=other_payload,
+    )
+
+    assert store.prioritize_global_winner(stale)
+    assert store.claim(stale.event_id, claimed_at=clock[0])
+    store.requeue_pending(
+        stale.event_id,
+        last_error="WORLD_WRITE_LOCK_BUSY_POST_SUBMIT",
+    )
+    clock[0] = "2026-05-24T18:00:01+00:00"
+    assert store.prioritize_global_winner(replacement)
+
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, claimed_at, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, stale.event_id),
+        ).fetchone()
+    ) == (
+        "expired",
+        None,
+        "GLOBAL_WINNER_TARGET_SUPERSEDED",
+    )
+    assert not store.claim(stale.event_id, claimed_at=clock[0])
+
+
+def test_pointer_supersession_preserves_pending_retry_with_durable_command(
+    monkeypatch,
+):
+    import src.events.event_store as event_store
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    clock = ["2026-05-24T18:00:00+00:00"]
+    monkeypatch.setattr(event_store, "_utc_now", lambda: clock[0])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn, processing_lease_seconds=10)
+    source = _forecast_event("pending-command-source", target_date="2026-05-25")
+    stale = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="pending-command-old-economics",
+        payload=json.loads(source.payload_json),
+    )
+    other_source = _forecast_event("pending-command-other", target_date="2026-05-25")
+    other_payload = json.loads(other_source.payload_json)
+    other_payload["city"] = "Seattle"
+    replacement = _next_claim_carrier(
+        other_source,
+        targeted_at=datetime.fromisoformat(clock[0]) + timedelta(seconds=1),
+        economic_identity="pending-command-new-economics",
+        payload=other_payload,
+    )
+
+    assert store.prioritize_global_winner(stale)
+    assert store.claim(stale.event_id, claimed_at=clock[0])
+    conn.execute(
+        "INSERT INTO edli_live_order_events ("
+        "aggregate_event_id,aggregate_id,event_sequence,event_type,"
+        "event_hash,payload_json,payload_hash,source_authority,occurred_at,"
+        "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+        (
+            "pending-command-event",
+            f"{stale.event_id}:final-intent",
+            1,
+            "ExecutionCommandCreated",
+            "pending-command-hash",
+            "{}",
+            "pending-command-payload-hash",
+            "engine_adapter",
+            clock[0],
+            clock[0],
+        ),
+    )
+    store.requeue_pending(
+        stale.event_id,
+        last_error="WORLD_WRITE_LOCK_BUSY_POST_SUBMIT",
+    )
+    clock[0] = "2026-05-24T18:00:01+00:00"
+    assert store.prioritize_global_winner(replacement)
+
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, stale.event_id),
+        ).fetchone()
+    ) == (
+        "pending",
+        "WORLD_WRITE_LOCK_BUSY_POST_SUBMIT",
+    )
+
+
 @pytest.mark.parametrize(
     "fence_event_type",
     ("ExecutionCommandCreated", "VenueSubmitAttempted"),
