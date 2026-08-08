@@ -58,6 +58,7 @@ class GlobalHoldingAuctionCoverage:
     book_deadline_at_utc: datetime
     status: str
     candidate_id: str | None = None
+    candidate_ids: tuple[str, ...] = ()
     reason: str | None = None
     bin_label: str | None = None
     canonical_bin_identity: str | None = None
@@ -80,6 +81,19 @@ class GlobalHoldingAuctionCoverage:
             canonical_bin_identity,
         )
         object.__setattr__(self, "book_state", book_state)
+        candidate_ids = tuple(
+            dict.fromkeys(
+                str(value).strip()
+                for value in (
+                    self.candidate_ids
+                    or ((self.candidate_id,) if self.candidate_id else ())
+                )
+                if str(value or "").strip()
+            )
+        )
+        object.__setattr__(self, "candidate_ids", candidate_ids)
+        if candidate_ids and self.candidate_id is None:
+            object.__setattr__(self, "candidate_id", candidate_ids[0])
         if (
             not (evaluated or excluded)
             or not all(
@@ -125,7 +139,7 @@ class GlobalHoldingAuctionCoverage:
             or self.decision_at_utc > self.book_deadline_at_utc
             or evaluated
             != bool(
-                str(self.candidate_id or "").strip()
+                candidate_ids
                 and str(self.probability_witness_identity or "").strip()
                 and str(self.probability_content_identity or "").strip()
                 and str(self.sell_book_witness_identity or "").strip()
@@ -133,7 +147,7 @@ class GlobalHoldingAuctionCoverage:
             )
             or excluded
             != bool(
-                not str(self.candidate_id or "").strip()
+                not candidate_ids
                 and str(self.reason or "").strip()
             )
         ):
@@ -803,6 +817,7 @@ def select_prepared_global_auction(
             *,
             status: str,
             candidate_id: str | None = None,
+            candidate_ids: tuple[str, ...] = (),
             reason: str | None = None,
             sell_book_witness_identity: str | None = None,
             book_state: str = "UNKNOWN",
@@ -830,6 +845,7 @@ def select_prepared_global_auction(
                 book_deadline_at_utc=book_deadline_at_utc,
                 status=status,
                 candidate_id=candidate_id,
+                candidate_ids=candidate_ids,
                 reason=reason,
                 sell_book_witness_identity=sell_book_witness_identity,
                 book_state=book_state,
@@ -983,30 +999,41 @@ def select_prepared_global_auction(
                     )
                     continue
                 try:
-                    candidate = global_sell_candidate_from_holding(
-                        holding,
-                        probability_witness=probability,
-                        ledger_snapshot_id=holdings.ledger_snapshot_id,
-                        executable_sell_curve=asset.curve,
-                        book_captured_at_utc=asset.captured_at_utc,
-                        probability_functional=sell_functional,
-                        exit_authority_status=exit_status,
-                        exit_authority_reason=exit_reason,
-                        sell_action_authority_identity=(
-                            prepared.sell_action_authority_identity
-                        ),
+                    sell_candidates = tuple(
+                        candidate
+                        for mode in ("TAKER_LIMIT", "MAKER_REST")
+                        if (
+                            candidate := global_sell_candidate_from_holding(
+                                holding,
+                                probability_witness=probability,
+                                ledger_snapshot_id=holdings.ledger_snapshot_id,
+                                executable_sell_curve=asset.curve,
+                                book_captured_at_utc=asset.captured_at_utc,
+                                probability_functional=sell_functional,
+                                exit_authority_status=exit_status,
+                                exit_authority_reason=exit_reason,
+                                sell_action_authority_identity=(
+                                    prepared.sell_action_authority_identity
+                                ),
+                                execution_mode=mode,
+                            )
+                        )
+                        is not None
                     )
-                    if candidate is not None:
-                        candidates.append(candidate)
+                    if sell_candidates:
+                        candidates.extend(sell_candidates)
                         holding_coverage.append(
                             coverage_row(
                                 holding,
                                 probability,
                                 status="EVALUATED",
-                                candidate_id=candidate.candidate_id,
+                                candidate_id=sell_candidates[0].candidate_id,
+                                candidate_ids=tuple(
+                                    row.candidate_id for row in sell_candidates
+                                ),
                                 sell_book_witness_identity=(
                                     global_sell_book_witness_identity(
-                                        candidate.executable_sell_curve
+                                        sell_candidates[0].executable_sell_curve
                                     )
                                 ),
                                 book_state="EXECUTABLE",
@@ -1191,9 +1218,10 @@ def select_prepared_global_auction(
             winner_event_id=None,
         )
     evaluated = {
-        row.candidate_id: row.position_id
+        candidate_id: row.position_id
         for row in holding_coverage
         if row.status == "EVALUATED"
+        for candidate_id in row.candidate_ids
     }
     sell_evaluations = {
         str(evaluation.candidate_id): str(evaluation.position_id or "")

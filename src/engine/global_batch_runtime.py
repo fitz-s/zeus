@@ -444,6 +444,30 @@ def _holding_coverage_key(
     )
 
 
+def _holding_coverage_owns_sell_candidate(
+    row: GlobalHoldingAuctionCoverage,
+    *,
+    candidate_id: str,
+    token_id: str,
+) -> bool:
+    """Match any fixed SELL alternative covered by one held-position row."""
+
+    candidate_ids = tuple(
+        str(value or "").strip()
+        for value in tuple(getattr(row, "candidate_ids", ()) or ())
+        if str(value or "").strip()
+    )
+    if not candidate_ids:
+        legacy_id = str(getattr(row, "candidate_id", "") or "").strip()
+        candidate_ids = (legacy_id,) if legacy_id else ()
+    return (
+        str(getattr(row, "status", "") or "") == "EVALUATED"
+        and bool(candidate_id)
+        and candidate_id in candidate_ids
+        and str(getattr(row, "token_id", "") or "") == token_id
+    )
+
+
 def _probability_content_identity(witness: object) -> str:
     return str(
         getattr(witness, "probability_content_identity", "") or ""
@@ -2456,7 +2480,7 @@ def _store_global_auction_receipt(
     expected_holding_count = len(expected_holding_obligations)
     evaluated_sell_by_candidate = {
         (
-            str(row.candidate_id),
+            str(candidate_id),
             row.position_id,
             row.family_key,
             str(row.bin_id or ""),
@@ -2472,6 +2496,7 @@ def _store_global_auction_receipt(
         )
         for row in holding_coverage
         if row.status == "EVALUATED"
+        for candidate_id in row.candidate_ids
     }
     decision_sell_by_candidate = {
         (
@@ -4572,11 +4597,11 @@ def process_current_global_batch(
                 matches = tuple(
                     row
                     for row in coverage
-                    if str(getattr(row, "status", "") or "") == "EVALUATED"
-                    and str(getattr(row, "candidate_id", "") or "")
-                    == candidate_id
-                    and str(getattr(row, "token_id", "") or "")
-                    == str(getattr(candidate, "token_id", "") or "")
+                    if _holding_coverage_owns_sell_candidate(
+                        row,
+                        candidate_id=candidate_id,
+                        token_id=str(getattr(candidate, "token_id", "") or ""),
+                    )
                 )
                 if len(matches) == 1 and candidate_id:
                     row = matches[0]

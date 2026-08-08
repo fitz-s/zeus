@@ -2195,9 +2195,16 @@ class TestExecutor:
             assert payload["terminal_no_fill"] is True
             assert payload["exposure_created"] is False
 
-    def test_high_bid_exit_revalidates_real_typed_authority_at_final_sdk_seam(
+    @pytest.mark.parametrize(
+        ("best_bid", "min_tick", "expected_limit"),
+        (("0.94", "0.01", "0.94"), ("0.999", "0.001", "0.95")),
+    )
+    def test_taker_exit_revalidates_real_typed_authority_at_final_sdk_seam(
         self,
         monkeypatch,
+        best_bid,
+        min_tick,
+        expected_limit,
     ):
         from src.engine import event_reactor_adapter as era
         from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
@@ -2207,24 +2214,26 @@ class TestExecutor:
             _global_scope_event,
         )
 
+        slug = best_bid.replace(".", "-")
         event = _global_scope_event(
             city="Executor",
-            source_run_id="real-typed-high-bid-authority",
+            source_run_id=f"real-typed-taker-authority-{slug}",
         )
         actuation = _adapter_sell_actuation(
             event,
             selected_shares="6",
-            bid_levels=(("0.999", "10"),),
-            min_tick="0.001",
+            bid_levels=((best_bid, "10"),),
+            min_tick=min_tick,
+            required_execution_mode="TAKER_LIMIT",
         )
         candidate = actuation.decision.candidate
         jit = era._global_sell_candidate_from_raw_book(
             candidate,
             {
                 "asset_id": candidate.token_id,
-                "tick_size": "0.001",
+                "tick_size": min_tick,
                 "min_order_size": "5",
-                "bids": [{"price": "0.999", "size": "10"}],
+                "bids": [{"price": best_bid, "size": "10"}],
                 "asks": [],
             },
             captured_at_utc=datetime.now(timezone.utc),
@@ -2253,12 +2262,12 @@ class TestExecutor:
             _TEST_CONN,
             token_id=candidate.token_id,
             condition_id=candidate.condition_id,
-            snapshot_id="snap-real-typed-high-bid-authority",
+            snapshot_id=f"snap-real-typed-taker-authority-{slug}",
             direction="sell_yes",
-            min_tick_size=Decimal("0.001"),
-            final_limit_price=Decimal("0.95"),
+            min_tick_size=Decimal(min_tick),
+            final_limit_price=Decimal(expected_limit),
             snapshot_top_ask=Decimal("1.0"),
-            snapshot_top_bid=Decimal("0.999"),
+            snapshot_top_bid=Decimal(best_bid),
             raw_orderbook_hash=jit.executable_sell_curve.book_hash,
         )
         captured = {}
@@ -2291,13 +2300,13 @@ class TestExecutor:
                 )
                 result = _final_submit_result(
                     self.bound_envelope,
-                    order_id="sell-real-typed-high-bid-authority",
+                    order_id=f"sell-real-typed-taker-authority-{slug}",
                     status="MATCHED",
                 )
                 result.update(
                     matchedSize="6",
-                    avgPrice="0.999",
-                    tradeIDs=["trade-real-typed-high-bid-authority"],
+                    avgPrice=best_bid,
+                    tradeIDs=[f"trade-real-typed-taker-authority-{slug}"],
                 )
                 return result
 
@@ -2322,12 +2331,12 @@ class TestExecutor:
                 trade_id=candidate.position_id,
                 token_id=candidate.token_id,
                 shares=float(actuation.decision.shares),
-                current_price=0.999,
-                best_bid=0.999,
-                exact_limit_price=0.95,
+                current_price=float(best_bid),
+                best_bid=float(best_bid),
+                exact_limit_price=float(expected_limit),
                 submit_order_type="FAK",
                 executable_snapshot_id=snapshot_id,
-                executable_snapshot_min_tick_size=Decimal("0.001"),
+                executable_snapshot_min_tick_size=Decimal(min_tick),
                 executable_snapshot_min_order_size=Decimal("0.01"),
                 executable_snapshot_neg_risk=False,
                 marketable_sell_execution_authority=authority,
@@ -2337,14 +2346,14 @@ class TestExecutor:
                 ),
             ),
             conn=_TEST_CONN,
-            decision_id="decision-real-typed-high-bid-authority",
+            decision_id=f"decision-real-typed-taker-authority-{slug}",
         )
 
-        assert result.status == "filled"
+        assert result.status == "filled", result.reason
         assert result.command_state == "FILLED"
         assert captured == {
             "token_id": candidate.token_id,
-            "price": pytest.approx(0.95),
+            "price": pytest.approx(float(expected_limit)),
             "size": pytest.approx(6.0),
             "side": "SELL",
             "order_type": "FAK",

@@ -2769,6 +2769,22 @@ def test_global_sell_materializer_floors_chain_fill_dust_to_venue_grid():
 
     assert candidate is not None
     assert candidate.held_shares == Decimal("72.50")
+    assert candidate.execution_mode == "MAKER_REST"
+
+    taker = S.global_sell_candidate_from_holding(
+        holding,
+        probability_witness=probability,
+        ledger_snapshot_id="ledger-chain-dust",
+        executable_sell_curve=sell_curve,
+        book_captured_at_utc=_DECISION_AT,
+        execution_mode="TAKER_LIMIT",
+    )
+    assert taker is not None
+    assert taker.held_shares == Decimal("72.50")
+    assert taker.execution_mode == "TAKER_LIMIT"
+    assert taker.proposal_sell_curve.levels == (
+        BookLevel(price=Decimal("0.80"), size=Decimal("72.50")),
+    )
 
 
 def test_global_sell_materializer_omits_venue_illegal_dust_only_holding():

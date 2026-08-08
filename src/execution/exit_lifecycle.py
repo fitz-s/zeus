@@ -2115,8 +2115,10 @@ class GlobalSellExecutionAuthority:
         curve = candidate.executable_sell_curve
         best_bid = Decimal(curve.levels[0].price)
         if candidate.execution_mode == "TAKER_LIMIT":
+            economic_limit = Decimal(self.actuation.decision.limit_price)
             limit = (
-                LIVE_ORDER_MAX_UNIT_PRICE / Decimal(curve.min_tick)
+                min(economic_limit, LIVE_ORDER_MAX_UNIT_PRICE)
+                / Decimal(curve.min_tick)
             ).to_integral_value(rounding=ROUND_FLOOR) * Decimal(curve.min_tick)
             try:
                 bounded = assert_live_order_unit_price(limit)
@@ -2125,7 +2127,7 @@ class GlobalSellExecutionAuthority:
                     "GLOBAL_SELL_LEGAL_TAKER_PRICE_UNAVAILABLE:"
                     f"best_bid={best_bid}:tick={curve.min_tick}"
                 ) from exc
-            if best_bid < bounded:
+            if best_bid < bounded or bounded > economic_limit:
                 raise ValueError("GLOBAL_SELL_TAKER_PRICE_NOT_MARKETABLE")
             return bounded
         try:

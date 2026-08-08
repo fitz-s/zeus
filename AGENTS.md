@@ -210,6 +210,10 @@ Durable trading rules:
   `robust_*`. After each action passes its own law, globally ranked
   fixed proposals share one posterior-mean expected-log-growth comparison;
   direction never licenses incomparable objective scores.
+- Whenever both are executable, a held SELL exposes immediate-taker and
+  maker-rest as separate fixed proposals on that same comparison axis. JIT
+  rebinding must preserve the selected execution mode rather than silently
+  switching its capital-release semantics.
 - Holding or buying multiple outcome tokens in the same weather family is not
   categorically forbidden. Every sibling-bin BUY must be evaluated against the
   exact current same-family portfolio and unresolved entry commitments through

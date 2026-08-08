@@ -296,6 +296,21 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             sell_point_counterfactual=sell_point_counterfactual,
         ),
     )
+    maker_sell_evaluation = evaluations[1]
+    taker_sell_evaluation = replace(
+        maker_sell_evaluation,
+        candidate_id="sell-taker",
+        execution_mode="TAKER_LIMIT",
+        fill_probability=1.0,
+        fill_probability_source="immediate_taker",
+        rest_deadline_minutes=None,
+        capital_action_mode="IMMEDIATE_TAKER_SELL",
+    )
+    evaluations = (
+        evaluations[0],
+        taker_sell_evaluation,
+        maker_sell_evaluation,
+    )
     decision = GlobalSingleOrderDecision(
         candidate=buy_candidate,
         shares=Decimal("12"),
@@ -322,7 +337,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             if evaluation.rejection_reason is not None
         },
         candidate_evaluations=evaluations,
-        candidate_input_count=2,
+        candidate_input_count=3,
     )
     identity_witness = SimpleNamespace(
         family_key="family-buy",
@@ -452,7 +467,8 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
                 decision_at_utc=at + _dt.timedelta(seconds=1),
                 book_deadline_at_utc=at + _dt.timedelta(seconds=30.25),
                 status="EVALUATED",
-                candidate_id="sell-negative",
+                candidate_id="sell-taker",
+                candidate_ids=("sell-taker", "sell-negative"),
                 sell_book_witness_identity="sell-book-current",
                 book_state="EXECUTABLE",
             ),
@@ -653,6 +669,11 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         "position-sell": "EVALUATED",
         "position-q-missing": "EXCLUDED",
     }
+    assert next(
+        row["candidate_ids"]
+        for row in holding_coverage
+        if row["position_id"] == "position-sell"
+    ) == ["sell-taker", "sell-negative"]
     assert summary["book_capture_freshness_complete"] is True
     assert summary["book_captured_at_utc"] == "2026-07-14T01:00:00.250000+00:00"
     assert summary["book_deadline_at_utc"] == "2026-07-14T01:00:30.250000+00:00"
@@ -751,9 +772,9 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert summary["candidate_condition_index_complete"] is True
     assert summary["buy_candidate_index_complete"] is True
     assert summary["buy_candidate_index_count"] == 1
-    assert summary["candidate_evaluation_count"] == 2
-    assert summary["candidate_input_count"] == 2
-    assert summary["candidate_detailed_count"] == 2
+    assert summary["candidate_evaluation_count"] == 3
+    assert summary["candidate_input_count"] == 3
+    assert summary["candidate_detailed_count"] == 3
     assert summary["candidate_rejection_group_count"] == 0
     assert summary["buy_minimum_marketable_repair_count"] == 0
     assert summary["buy_minimum_marketable_repair_complete"] is True
@@ -787,8 +808,8 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert summary["candidate_evaluation_encoding"] == (
         "zlib+base64+canonical-json-v12"
     )
-    assert summary["sell_point_counterfactual_count"] == 1
-    assert summary["sell_point_counterfactual_positive_count"] == 1
+    assert summary["sell_point_counterfactual_count"] == 2
+    assert summary["sell_point_counterfactual_positive_count"] == 2
     assert summary["sell_point_counterfactual_unavailable_count"] == 0
     candidate_evaluations = json.loads(evaluation_json)
     assert candidate_evaluations["rejected_groups"] == []
@@ -839,6 +860,13 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             "NON_POSITIVE_ROBUST_OBJECTIVE",
             "position-sell",
             "12.34",
+        ),
+        (
+            "SELL",
+            "REJECTED",
+            "NON_POSITIVE_ROBUST_OBJECTIVE",
+            "position-sell",
+            "12.34",
         )
     ]
     assert candidate_evaluations["detailed"][0]["buy_sizing_mode"] == (
@@ -847,6 +875,10 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert candidate_evaluations["detailed"][0][
         "expected_terminal_wealth"
     ]["probability_basis"] == "POSTERIOR_PREDICTIVE_MEAN"
+    assert candidate_evaluations["detailed"][2]["execution_mode"] == "TAKER_LIMIT"
+    assert candidate_evaluations["detailed"][2]["capital_action_mode"] == (
+        "IMMEDIATE_TAKER_SELL"
+    )
     sell_evaluation = candidate_evaluations["detailed"][1]
     assert sell_evaluation["shares"] == "12.34"
     assert sell_evaluation["cash_proceeds_usd"] == "10"
@@ -1333,6 +1365,21 @@ def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
         sell_book_witness_identity="sell-book-1",
         book_state="EXECUTABLE",
     )
+    dual_mode = replace(
+        evaluated,
+        candidate_id="sell-taker",
+        candidate_ids=("sell-taker", "sell-maker"),
+    )
+    assert global_batch_runtime._holding_coverage_owns_sell_candidate(
+        dual_mode,
+        candidate_id="sell-maker",
+        token_id="token-1",
+    )
+    assert not global_batch_runtime._holding_coverage_owns_sell_candidate(
+        dual_mode,
+        candidate_id="sell-maker",
+        token_id="other-token",
+    )
     global_batch_runtime._publish_global_holding_coverage(
         (evaluated,),
         expected_obligations=(obligation,),
@@ -1408,6 +1455,7 @@ def test_durable_global_holding_coverage_requires_position_q_and_fresh_book(
         probability_content_identity=None,
         status="EXCLUDED",
         candidate_id=None,
+        candidate_ids=(),
         reason="SELL_ASSET_NOT_EXECUTABLE",
         sell_book_witness_identity=None,
     )
@@ -18070,11 +18118,38 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
     assert actual_sell_selected.decision.candidate.position_id == (
         "position-actual-sell"
     )
+    assert actual_sell_selected.decision.candidate.execution_mode == "TAKER_LIMIT"
+    assert actual_sell_selected.decision.capital_action_mode == "IMMEDIATE_TAKER_SELL"
     assert actual_sell_selected.decision.candidate.held_shares == Decimal("10")
     assert actual_sell_selected.actuation is not None
     assert actual_sell_selected.actuation.wealth_witness_identity == (
         actual_wealth.witness_identity
     )
+    from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+
+    ordinary_taker_jit = era._global_sell_candidate_from_raw_book(
+        actual_sell_selected.decision.candidate,
+        {
+            "asset_id": weakest_token,
+            "tick_size": "0.01",
+            "min_order_size": "1",
+            "bids": [{"price": "0.94", "size": "10"}],
+            "asks": [],
+        },
+        captured_at_utc=decision_at,
+    )
+    ordinary_taker_authority = GlobalSellExecutionAuthority.from_current(
+        actuation=actual_sell_selected.actuation,
+        jit_candidate=ordinary_taker_jit,
+    )
+    assert ordinary_taker_jit.execution_mode == "TAKER_LIMIT"
+    assert ordinary_taker_authority.limit_price() == Decimal("0.94")
+    assert len(actual_sell_selected.holding_coverage[0].candidate_ids) == 2
+    assert {
+        evaluation.execution_mode
+        for evaluation in actual_sell_selected.decision.candidate_evaluations
+        if evaluation.position_id == "position-actual-sell"
+    } == {"TAKER_LIMIT", "MAKER_REST"}
     assert {
         row.position_id: (
             row.status,
@@ -27246,6 +27321,7 @@ def _adapter_sell_actuation(
     exit_authority_status="not_applicable",
     exit_authority_reason="non_day0_family",
     min_tick="0.01",
+    required_execution_mode=None,
 ):
     at = _dt.datetime(2026, 7, 13, 12, 0, tzinfo=_dt.timezone.utc)
     curve = ExecutableSellCurve(
@@ -27268,7 +27344,11 @@ def _adapter_sell_actuation(
         fill_probability,
         fill_probability_source,
         rest_deadline_minutes,
-    ) = global_sell_execution_terms(curve, capacity=Decimal("10"))
+    ) = global_sell_execution_terms(
+        curve,
+        capacity=Decimal("10"),
+        required_mode=required_execution_mode,
+    )
     candidate = GlobalSingleOrderSellCandidate(
         candidate_id="sell-position-1",
         family_key="Alpha|2026-07-14|high",
@@ -28218,47 +28298,41 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
 
 
 @pytest.mark.parametrize(
-    ("best_bid", "tick", "expected_error"),
+    ("best_bid", "tick"),
     (
-        ("0.95", "0.01", "execution proposal is unavailable"),
-        ("0.999", "0.001", "JIT_IDENTITY_SUPERSEDED"),
+        ("0.95", "0.01"),
+        ("0.999", "0.001"),
     ),
 )
-def test_global_sell_execution_authority_requires_a_legal_passive_price(
+def test_global_sell_selected_maker_mode_cannot_drift_to_taker_at_jit(
     best_bid,
     tick,
-    expected_error,
 ):
-    from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
-
     event = _global_scope_event(city="Alpha", source_run_id="run-maker-band")
     actuation = _adapter_sell_actuation(
         event,
         selected_shares="6",
         min_tick=tick,
     )
-    jit = era._global_sell_candidate_from_raw_book(
-        actuation.decision.candidate,
-        {
-            "asset_id": "yes-token",
-            "tick_size": tick,
-            "min_order_size": "5",
-            "bids": [{"price": best_bid, "size": "10"}],
-            "asks": [],
-        },
-        captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
-    )
     with pytest.raises(
         ValueError,
-        match=expected_error,
+        match="GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:MAKER_REST",
     ):
-        GlobalSellExecutionAuthority.from_current(
-            actuation=actuation,
-            jit_candidate=jit,
+        era._global_sell_candidate_from_raw_book(
+            actuation.decision.candidate,
+            {
+                "asset_id": "yes-token",
+                "tick_size": tick,
+                "min_order_size": "5",
+                "bids": [{"price": best_bid, "size": "10"}],
+                "asks": [],
+            },
+            captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
         )
     assert era._global_preflight_block_status(
-        f"GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:best_bid={best_bid}:tick={tick}"
-    ) == "CANDIDATE_BLOCKED"
+        "GLOBAL_SELL_CURRENT_AUTHORITY_FAILED:ValueError:"
+        "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:MAKER_REST"
+    ) == "BATCH_BLOCKED"
 
 
 def test_global_sell_high_bid_binds_legal_fak_floor():

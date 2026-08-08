@@ -11164,6 +11164,11 @@ def _global_sell_candidate_from_raw_book(
         min_order_size=selected_curve.min_order_size,
         quote_ttl=selected_curve.quote_ttl,
     )
+    selected_execution_mode = str(
+        getattr(candidate, "execution_mode", "") or ""
+    ).strip().upper()
+    if selected_execution_mode not in {"TAKER_LIMIT", "MAKER_REST"}:
+        raise ValueError("GLOBAL_SELL_SELECTED_EXECUTION_MODE_INVALID")
     (
         proposal,
         execution_mode,
@@ -11173,7 +11178,13 @@ def _global_sell_candidate_from_raw_book(
     ) = global_sell_execution_terms(
         curve,
         capacity=Decimal(str(getattr(candidate, "held_shares", "0") or "0")),
+        required_mode=selected_execution_mode,
     )
+    if proposal is None or execution_mode != selected_execution_mode:
+        raise ValueError(
+            "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:"
+            f"{selected_execution_mode}"
+        )
     return dataclass_replace(
         candidate,
         book_snapshot_id=snapshot_id,

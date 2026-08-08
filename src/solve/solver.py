@@ -328,29 +328,31 @@ def marketable_sell_proposal_curve(
 
     The public BID is counterparty liquidity, not our submitted unit price.  A
     bid above the live submission ceiling is therefore strictly better SELL
-    liquidity: submit the highest tick-aligned legal floor and accept venue
-    price improvement.  Only levels crossable by that floor participate in the
-    immediate-fill certificate.
+    liquidity, not invalid liquidity.  For ordinary books the submitted floor
+    is the deepest selected executable bid; above the ceiling it is the highest
+    legal tick and venue price improvement preserves the observed economics.
     """
 
     requested_capacity = Decimal(capacity)
     if not requested_capacity.is_finite() or requested_capacity <= 0:
         return None
-    limit = (
-        LIVE_ORDER_MAX_UNIT_PRICE / Decimal(curve.min_tick)
-    ).to_integral_value(rounding=ROUND_FLOOR) * Decimal(curve.min_tick)
-    if not _live_unit_price_in_band(limit):
-        return None
     remaining = requested_capacity
     levels: list[BookLevel] = []
     for level in curve.levels:
-        if level.price < limit or remaining <= 0:
+        if level.price < LIVE_ORDER_MIN_UNIT_PRICE or remaining <= 0:
             break
         take = min(remaining, Decimal(level.size))
         if take > 0:
             levels.append(BookLevel(price=level.price, size=take))
             remaining -= take
-    if not levels or curve.levels[0].price <= LIVE_ORDER_MAX_UNIT_PRICE:
+    if not levels:
+        return None
+    limit = _live_sell_limit_price(
+        Decimal(curve.levels[0].price),
+        Decimal(levels[-1].price),
+        Decimal(curve.min_tick),
+    )
+    if limit is None or not _live_unit_price_in_band(limit):
         return None
     return ExecutableSellCurve(
         token_id=curve.token_id,
@@ -369,6 +371,7 @@ def global_sell_execution_terms(
     curve: ExecutableSellCurve,
     *,
     capacity: Decimal,
+    required_mode: Literal["MAKER_REST", "TAKER_LIMIT"] | None = None,
 ) -> tuple[
     ExecutableSellCurve | None,
     Literal["MAKER_REST", "TAKER_LIMIT"],
@@ -384,8 +387,11 @@ def global_sell_execution_terms(
         MAKER_REST_ESCALATION_DEADLINE_MINUTES,
     )
 
+    if required_mode not in {None, "MAKER_REST", "TAKER_LIMIT"}:
+        raise ValueError("global SELL execution mode is invalid")
     maker = passive_sell_proposal_curve(curve, capacity=capacity)
-    if maker is not None:
+    taker = marketable_sell_proposal_curve(curve, capacity=capacity)
+    if maker is not None and required_mode in {None, "MAKER_REST"}:
         return (
             maker,
             "MAKER_REST",
@@ -393,8 +399,7 @@ def global_sell_execution_terms(
             MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
             MAKER_REST_ESCALATION_DEADLINE_MINUTES,
         )
-    taker = marketable_sell_proposal_curve(curve, capacity=capacity)
-    if taker is not None:
+    if taker is not None and required_mode in {None, "TAKER_LIMIT"}:
         return taker, "TAKER_LIMIT", 1.0, "immediate_taker", None
     return (
         None,
@@ -1974,7 +1979,6 @@ class GlobalSingleOrderSellCandidate:
             self.fill_probability != 1.0
             or self.fill_probability_source != "immediate_taker"
             or self.rest_deadline_minutes is not None
-            or curve.levels[0].price <= LIVE_ORDER_MAX_UNIT_PRICE
             or proposal is None
             or (
                 proposal is not None
@@ -2047,6 +2051,7 @@ def global_sell_candidate_from_holding(
     ] = "not_applicable",
     exit_authority_reason: str = "non_day0_family",
     sell_action_authority_identity: str = "non_day0_default_authority",
+    execution_mode: Literal["MAKER_REST", "TAKER_LIMIT"] | None = None,
 ) -> GlobalSingleOrderSellCandidate | None:
     """Materialize the venue-legal reducible part of an exact ledger holding."""
 
@@ -2085,7 +2090,10 @@ def global_sell_candidate_from_holding(
     ) = global_sell_execution_terms(
         executable_sell_curve,
         capacity=sellable_shares,
+        required_mode=execution_mode,
     )
+    if execution_mode is not None and proposal is None:
+        return None
     if proposal is None and eligibility_reason is None:
         eligibility_reason = "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
     return GlobalSingleOrderSellCandidate(
