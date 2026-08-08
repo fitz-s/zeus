@@ -1,5 +1,5 @@
 # Created: 2026-05-18
-# Last reused/audited: 2026-07-03
+# Last reused/audited: 2026-08-08
 # Authority basis: RESTART_READINESS_PLAN.md §3 PRECEDENCE-1; JOB fda4e853 audit_2026_05_17
 """Antibody tests for PRECEDENCE-1: pause_entries operator precedence guard.
 
@@ -21,10 +21,13 @@ import pytest
 
 import src.control.control_plane as cp
 from src.control.control_plane import AUTO_PAUSE_OVERRIDE_ID
+from src.events.event_store import EventStore
+from src.events.opportunity_event import make_opportunity_event
 from src.state.db import (
     DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
     apply_architecture_kernel_schema,
     get_world_connection,
+    init_schema,
     query_control_override_state,
     upsert_control_override,
 )
@@ -640,32 +643,7 @@ def test_restart_guard_recovery_runs_after_reactor_failure_return(monkeypatch):
 
 def test_restart_guard_queue_probe_is_indexed_and_bounded():
     conn = sqlite3.connect(":memory:")
-    conn.execute(
-        """
-        CREATE TABLE opportunity_event_processing (
-            consumer_name TEXT NOT NULL,
-            event_id TEXT NOT NULL,
-            processing_status TEXT NOT NULL,
-            claimed_at TEXT,
-            processed_at TEXT,
-            last_error TEXT,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY (consumer_name, event_id)
-        )
-        """
-    )
-    conn.execute(
-        "CREATE INDEX idx_opportunity_event_processing_status "
-        "ON opportunity_event_processing(consumer_name, processing_status, updated_at)"
-    )
-    conn.execute(
-        "CREATE INDEX idx_opportunity_event_processing_pending_retry_floor "
-        "ON opportunity_event_processing(consumer_name, processing_status, claimed_at, updated_at, event_id)"
-    )
-    conn.execute(
-        "CREATE INDEX idx_opportunity_event_processing_stale_claim "
-        "ON opportunity_event_processing(consumer_name, processing_status, claimed_at, event_id)"
-    )
+    init_schema(conn)
     issued_at = "2026-08-08T00:00:00+00:00"
     conn.execute(
         """INSERT INTO opportunity_event_processing
@@ -714,33 +692,7 @@ def test_restart_guard_queue_probe_is_indexed_and_bounded():
 
 def test_restart_guard_queue_probe_accepts_a_truly_idle_queue():
     conn = sqlite3.connect(":memory:")
-    conn.execute(
-        """
-        CREATE TABLE opportunity_event_processing (
-            consumer_name TEXT NOT NULL,
-            event_id TEXT NOT NULL,
-            processing_status TEXT NOT NULL,
-            claimed_at TEXT,
-            processed_at TEXT,
-            last_error TEXT,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY (consumer_name, event_id)
-        )
-        """
-    )
-    conn.execute(
-        "CREATE INDEX idx_opportunity_event_processing_status "
-        "ON opportunity_event_processing(consumer_name, processing_status, updated_at)"
-    )
-    conn.execute(
-        "CREATE INDEX idx_opportunity_event_processing_pending_retry_floor "
-        "ON opportunity_event_processing(consumer_name, processing_status, claimed_at, updated_at, event_id)"
-    )
-    conn.execute(
-        "CREATE INDEX idx_opportunity_event_processing_stale_claim "
-        "ON opportunity_event_processing(consumer_name, processing_status, claimed_at, event_id) "
-        "WHERE claimed_at IS NOT NULL"
-    )
+    init_schema(conn)
 
     evidence = cp._restart_guard_queue_evidence(
         conn,
@@ -753,5 +705,75 @@ def test_restart_guard_queue_probe_accepts_a_truly_idle_queue():
         "claimable_pending": False,
         "post_issued_progress": False,
         "green": True,
+    }
+    conn.close()
+
+
+def test_restart_guard_queue_evidence_ignores_historical_pending_and_blocks_current_claim():
+    """The guard must follow the reactor's current claim floor, not raw pending debt."""
+    now = datetime.fromisoformat("2026-08-08T00:01:00+00:00")
+    conn = get_world_connection()
+    init_schema(conn)
+    store = EventStore(conn)
+
+    def event(name: str, target_date: str, *, expires_at: str | None = None):
+        return make_opportunity_event(
+            event_type="FORECAST_SNAPSHOT_READY",
+            entity_key=f"Chicago|{target_date}|high|{name}",
+            source="restart-guard-queue-evidence",
+            observed_at="2026-08-07T20:00:00+00:00",
+            available_at="2026-08-07T20:00:00+00:00",
+            received_at="2026-08-07T20:00:00+00:00",
+            causal_snapshot_id=name,
+            payload={"city": "Chicago", "target_date": target_date, "metric": "high"},
+            expires_at=expires_at,
+        )
+
+    expired = event("expired", "2026-08-07", expires_at="2026-08-08T00:00:00+00:00")
+    past_target = event("past-target", "2026-08-06")
+    past_window = event("past-window", "2026-08-08", expires_at="2026-08-09T00:00:00+00:00")
+    for historical in (expired, past_target, past_window):
+        assert store.insert_or_ignore(historical)
+    conn.execute(
+        """
+        UPDATE opportunity_event_processing
+           SET last_error = ?
+         WHERE consumer_name = ?
+           AND event_id = ?
+        """,
+        (
+            "EVENT_BOUND_MARKET_PHASE_CLOSED:selection_deadline=2026-08-08T00:00:00+00:00",
+            "edli_reactor_v1",
+            past_window.event_id,
+        ),
+    )
+    conn.commit()
+
+    historical_evidence = cp._restart_guard_queue_evidence(
+        conn,
+        issued_at="2026-08-08T00:00:00+00:00",
+        now=now,
+    )
+    assert historical_evidence == {
+        "stale_processing": False,
+        "claimable_pending": False,
+        "post_issued_progress": False,
+        "green": True,
+    }
+
+    current = event("current", "2026-08-08", expires_at="2026-08-09T00:00:00+00:00")
+    assert store.insert_or_ignore(current)
+    conn.commit()
+
+    current_evidence = cp._restart_guard_queue_evidence(
+        conn,
+        issued_at="2026-08-08T00:00:00+00:00",
+        now=now,
+    )
+    assert current_evidence == {
+        "stale_processing": False,
+        "claimable_pending": True,
+        "post_issued_progress": False,
+        "green": False,
     }
     conn.close()

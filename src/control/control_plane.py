@@ -519,7 +519,9 @@ def _read_loaded_sha() -> str:
 
 
 def _restart_guard_queue_evidence(conn, *, issued_at: str, now: datetime) -> dict[str, bool]:
-    """Use bounded indexed probes; never aggregate the EDLI history table."""
+    """Read reactor claimability plus bounded stale/progress probes; never aggregate history."""
+
+    from src.events.event_store import EventStore
 
     stale = conn.execute(
         """
@@ -536,32 +538,18 @@ def _restart_guard_queue_evidence(conn, *, issued_at: str, now: datetime) -> dic
         ("edli_reactor_v1", (now - timedelta(seconds=300.0)).isoformat()),
     ).fetchone() is not None
 
-    claimable_pending = conn.execute(
-        """
-        SELECT 1
-          FROM opportunity_event_processing
-               INDEXED BY idx_opportunity_event_processing_pending_retry_floor
-         WHERE consumer_name = ?
-           AND processing_status = 'pending'
-           AND claimed_at IS NULL
-         LIMIT 1
-        """,
-        ("edli_reactor_v1",),
-    ).fetchone() is not None
-    if not claimable_pending:
-        claimable_pending = conn.execute(
-            """
-            SELECT 1
-              FROM opportunity_event_processing
-                   INDEXED BY idx_opportunity_event_processing_pending_retry_floor
-             WHERE consumer_name = ?
-               AND processing_status = 'pending'
-               AND claimed_at IS NOT NULL
-               AND claimed_at <= ?
-             LIMIT 1
-            """,
-            ("edli_reactor_v1", now.isoformat()),
-        ).fetchone() is not None
+    # SCOPE: only event rows the reactor can currently claim.  DRAIN: the
+    # reactor consumes or terminalizes them.  RESET: fetch_pending returns no
+    # current candidate (or post-issued progress proves the drain advanced).
+    # Reuse the reactor's read-floor so historical rows outside its expiry,
+    # selection-window, and per-city timeliness predicates cannot ratchet this
+    # global restart guard into a permanent pause.
+    claimable_pending = bool(
+        EventStore(conn, consumer_name="edli_reactor_v1").fetch_pending(
+            decision_time=now.isoformat(),
+            limit=1,
+        )
+    )
 
     progress = False
     for status, timestamp_column in (
