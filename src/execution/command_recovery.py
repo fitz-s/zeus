@@ -16348,6 +16348,357 @@ def _append_terminal_positive_order_fact_fill(
         )
 
 
+def _cancel_unknown_partial_account_trade_summary(
+    trade_items: Sequence[object],
+    *,
+    command: Mapping[str, object],
+) -> dict | None:
+    """Return the complete authenticated partial fill set for one order.
+
+    A command-scoped account trade match is not enough: every trade bound to
+    the exact venue order must be CONFIRMED, economically valid, and included
+    in the aggregate.  This makes an additional/later fill fail closed instead
+    of allowing the first visible trade to clear REVIEW_REQUIRED.
+    """
+
+    command_size = _positive_decimal_or_none(command.get("size"))
+    command_price = _positive_decimal_or_none(command.get("price"))
+    command_token = str(command.get("token_id") or "").strip()
+    command_side = str(command.get("side") or "").upper()
+    venue_order_id = str(command.get("venue_order_id") or "").strip()
+    if (
+        command_size is None
+        or command_price is None
+        or not command_token
+        or command_side != "BUY"
+        or not venue_order_id
+    ):
+        return None
+
+    by_trade_id: dict[str, dict] = {}
+    for item in trade_items:
+        raw = _trade_payload(item)
+        top_order_id = str(
+            raw.get("taker_order_id")
+            or raw.get("takerOrderId")
+            or raw.get("order_id")
+            or raw.get("orderID")
+            or ""
+        ).strip()
+        maker = next(
+            (
+                item
+                for item in _maker_order_payloads(raw)
+                if str(
+                    item.get("order_id")
+                    or item.get("orderID")
+                    or item.get("orderId")
+                    or item.get("id")
+                    or ""
+                ).strip().lower()
+                == venue_order_id.lower()
+            ),
+            None,
+        )
+        if top_order_id.lower() != venue_order_id.lower() and maker is None:
+            # A token/price/size match without the exact order identity is
+            # ambiguous account evidence, not proof for this command.
+            if _raw_matches_command_submit_trade_identity(dict(raw), dict(command)):
+                return None
+            continue
+
+        if str(raw.get("status") or raw.get("state") or "").upper() != "CONFIRMED":
+            return None
+        trade_id = str(raw.get("id") or raw.get("trade_id") or "").strip()
+        if not trade_id:
+            return None
+        if maker is None:
+            token_id = str(raw.get("asset_id") or raw.get("token_id") or "")
+            side = str(raw.get("side") or "").upper()
+            filled_size = _positive_decimal_or_none(
+                raw.get("size")
+                or raw.get("matched_amount")
+                or raw.get("matchedAmount")
+                or raw.get("size_matched")
+                or raw.get("matched_size")
+            )
+            fill_price = _positive_decimal_or_none(raw.get("price"))
+        else:
+            token_id = str(maker.get("asset_id") or maker.get("token_id") or "")
+            side = str(maker.get("side") or "").upper()
+            filled_size = _positive_decimal_or_none(
+                maker.get("matched_amount")
+                or maker.get("matchedAmount")
+                or maker.get("size_matched")
+                or maker.get("matched_size")
+                or maker.get("size")
+            )
+            fill_price = _positive_decimal_or_none(
+                maker.get("price") or raw.get("price")
+            )
+        if (
+            token_id != command_token
+            or side != command_side
+            or filled_size is None
+            or fill_price is None
+            or not _fill_price_respects_limit(
+                fill_price,
+                command_price,
+                side=command_side,
+            )
+        ):
+            return None
+        match_time = raw.get("match_time") or raw.get("last_update")
+        if _epoch_seconds(match_time) is None:
+            return None
+        leg = {
+            "trade_id": trade_id,
+            "filled_size": _decimal_text(filled_size),
+            "fill_price": _decimal_text(fill_price),
+            "observed_at": str(match_time),
+            "trade": raw,
+        }
+        previous = by_trade_id.get(trade_id)
+        if previous is not None and (
+            previous["filled_size"] != leg["filled_size"]
+            or previous["fill_price"] != leg["fill_price"]
+        ):
+            return None
+        by_trade_id[trade_id] = leg
+
+    if not by_trade_id:
+        return None
+    filled = sum(
+        (Decimal(str(leg["filled_size"])) for leg in by_trade_id.values()),
+        Decimal("0"),
+    )
+    cost = sum(
+        (
+            Decimal(str(leg["filled_size"]))
+            * Decimal(str(leg["fill_price"]))
+            for leg in by_trade_id.values()
+        ),
+        Decimal("0"),
+    )
+    if filled <= 0 or filled >= command_size:
+        return None
+    return {
+        "count": len(by_trade_id),
+        "filled_size": _decimal_text(filled),
+        "fill_price": _decimal_text(cost / filled),
+        "legs": list(by_trade_id.values()),
+    }
+
+
+def _cancel_unknown_partial_position_proof(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    filled_size: str,
+    fill_price: str,
+) -> bool:
+    """Require exact live exposure for a cancel-unknown partial fill."""
+
+    position_id = str(command.get("position_id") or "").strip()
+    venue_order_id = str(command.get("venue_order_id") or "").strip()
+    filled = _positive_decimal_or_none(filled_size)
+    price = _positive_decimal_or_none(fill_price)
+    if not position_id or not venue_order_id or filled is None or price is None:
+        return False
+    row = conn.execute(
+        """
+        SELECT phase, chain_state, order_id, shares, chain_shares,
+               cost_basis_usd, chain_cost_basis_usd
+          FROM position_current
+         WHERE position_id = ?
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    if row is None:
+        return False
+    current = _dict_row(row)
+    if str(current.get("phase") or "") not in {
+        "active",
+        "day0_window",
+        "pending_exit",
+    }:
+        return False
+    if str(current.get("chain_state") or "").lower() != "synced":
+        return False
+    if str(current.get("order_id") or "").lower() != venue_order_id.lower():
+        return False
+    expected_cost = filled * price
+    tolerance = Decimal("0.000001")
+    for field, expected in (
+        ("shares", filled),
+        ("chain_shares", filled),
+        ("cost_basis_usd", expected_cost),
+        ("chain_cost_basis_usd", expected_cost),
+    ):
+        actual = _positive_decimal_or_none(current.get(field))
+        if actual is None or abs(actual - expected) > tolerance:
+            return False
+    return True
+
+
+def _review_required_cancel_unknown_terminal_partial_recovery(
+    conn: sqlite3.Connection,
+    *,
+    command: Mapping[str, object],
+    point_order: dict | None,
+    point_order_no_live_record: bool,
+    point_order_terminal: bool = False,
+    matching_open_orders: Sequence[Mapping[str, object]],
+    account_trade_items: Sequence[object],
+    venue_read_proof: Mapping[str, object],
+) -> str:
+    """Resolve only an exact absent/terminal ENTRY partial.
+
+    Returns ``not_applicable`` when the canonical facts are not a positive
+    partial candidate; otherwise returns ``advanced`` or fail-closed
+    ``stayed``.  The latter prevents the older single-trade fallback from
+    hiding a mismatched or later fill.
+    """
+
+    if (
+        str(command.get("intent_kind") or "").upper() != "ENTRY"
+        or str(command.get("side") or "").upper() != "BUY"
+        or not (
+            point_order is None
+            or point_order_no_live_record
+            or point_order_terminal
+        )
+    ):
+        return "not_applicable"
+    command_id = str(command.get("command_id") or "").strip()
+    venue_order_id = str(command.get("venue_order_id") or "").strip()
+    command_size = _positive_decimal_or_none(command.get("size"))
+    if not command_id or not venue_order_id or command_size is None:
+        return "not_applicable"
+    canonical = _confirmed_bound_trade_fact_summary(
+        conn,
+        command_id=command_id,
+        venue_order_id=venue_order_id,
+    )
+    canonical_filled = _positive_decimal_or_none(canonical.get("filled_size"))
+    if canonical_filled is None or canonical_filled >= command_size:
+        return "not_applicable"
+    if matching_open_orders:
+        return "stayed"
+    if not (
+        venue_read_proof.get("open_orders_query_complete") is True
+        and venue_read_proof.get("trades_query_complete") is True
+    ):
+        return "stayed"
+    account = _cancel_unknown_partial_account_trade_summary(
+        account_trade_items,
+        command=command,
+    )
+    if account is None:
+        return "stayed"
+    if (
+        not canonical.get("authenticated_confirmed")
+        or not _decimal_matches(account.get("filled_size"), canonical.get("filled_size"))
+        or not _decimal_matches(account.get("fill_price"), canonical.get("fill_price"))
+        or not _cancel_unknown_partial_position_proof(
+            conn,
+            command=command,
+            filled_size=str(canonical["filled_size"]),
+            fill_price=str(canonical["fill_price"]),
+        )
+    ):
+        return "stayed"
+
+    observed_at = str(
+        canonical.get("observed_at")
+        or account.get("legs", [{}])[-1].get("observed_at")
+        or _now_iso()
+    )
+    filled_size = str(canonical["filled_size"])
+    terminal_payload = {
+        "reason": "partial_remainder_absent_from_exchange_open_orders",
+        "proof_class": "terminal_partial_order_fact",
+        "command_id": command_id,
+        "venue_order_id": venue_order_id,
+        "filled_size": filled_size,
+        "matched_size": filled_size,
+        "remaining_size": "0",
+        "requested_size": str(command.get("size") or ""),
+        "point_order_absent": point_order is None,
+        "point_order_no_live_record": point_order_no_live_record,
+        "point_order_terminal": point_order_terminal,
+        "account_trade_proof": account,
+        "venue_read_proof": dict(venue_read_proof),
+        "canonical_trade_fact_proof": canonical,
+        "required_predicates": {
+            "exact_command_identity": True,
+            "exact_venue_order_identity": True,
+            "canonical_confirmed_partial_fill_positive": True,
+            "canonical_confirmed_partial_fill_below_command_size": True,
+            "point_order_absent_or_no_live_record_or_terminal": True,
+            "authenticated_open_order_scan_has_no_match": True,
+            "authenticated_open_order_scan_complete": True,
+            "authenticated_trade_scan_complete": True,
+            "account_trades_equal_canonical_confirmed_fill": True,
+            "active_chain_synced_exposure_exactly_covers_fill": True,
+            "no_unresolved_later_fill": True,
+        },
+    }
+    safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
+    sp_name = f"sp_cancel_unknown_terminal_partial_{safe_command_id}"
+    conn.execute(f"SAVEPOINT {sp_name}")
+    try:
+        fact_id = _append_terminal_partial_order_fact(
+            conn,
+            venue_order_id=venue_order_id,
+            command_id=command_id,
+            matched_size=filled_size,
+            source="REST",
+            observed_at=observed_at,
+            payload=terminal_payload,
+        )
+        order_fact = _dict_row(
+            conn.execute(
+                "SELECT * FROM venue_order_facts WHERE fact_id = ?",
+                (fact_id,),
+            ).fetchone()
+        )
+        if not _clear_review_required_terminal_partial(
+            conn,
+            command=command,
+            order_fact=order_fact,
+            trade_summary=canonical,
+            terminal_proof=terminal_payload,
+        ):
+            raise RuntimeError(
+                f"cancel-unknown terminal partial review did not clear for {command_id}"
+            )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type=CommandEventType.EXPIRED.value,
+            occurred_at=observed_at,
+            payload={
+                "reason": "partial_remainder_absent_from_exchange_open_orders",
+                "proof_class": "confirmed_fill_plus_point_order_terminal_remainder",
+                "command_id": command_id,
+                "venue_order_id": venue_order_id,
+                "terminal_order_fact_id": fact_id,
+                "filled_size": filled_size,
+                "remaining_size": "0",
+                "unfilled_size": _decimal_text(command_size - Decimal(filled_size)),
+                "required_predicates": terminal_payload["required_predicates"],
+            },
+        )
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+    except Exception:
+        conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+        conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+        raise
+    return "advanced"
+
+
 def _review_required_cancel_unknown_live_order_recovery(
     conn: sqlite3.Connection,
     cmd: VenueCommand,
@@ -16396,6 +16747,39 @@ def _review_required_cancel_unknown_live_order_recovery(
                 (cmd.command_id,),
             ).fetchone()
         )
+        try:
+            open_order_read = _client_read_items(client, "get_open_orders")
+            trade_read = _client_read_items(client, "get_trades")
+        except Exception as exc:
+            logger.warning(
+                "recovery: command %s REVIEW_REQUIRED cancel-unknown complete "
+                "account scan unavailable: %s",
+                cmd.command_id,
+                exc,
+            )
+            return "stayed"
+        matching_open_orders = _matching_open_orders_for_command(
+            client,
+            command,
+            open_orders=open_order_read.items,
+        )
+        venue_read_proof = {
+            "open_orders_query_complete": open_order_read.query_complete,
+            "open_orders_pagination_scope": open_order_read.pagination_scope,
+            "trades_query_complete": trade_read.query_complete,
+            "trades_pagination_scope": trade_read.pagination_scope,
+        }
+        partial_outcome = _review_required_cancel_unknown_terminal_partial_recovery(
+            conn,
+            command=command,
+            point_order=order,
+            point_order_no_live_record=point_order_no_live_record,
+            matching_open_orders=matching_open_orders,
+            account_trade_items=trade_read.items,
+            venue_read_proof=venue_read_proof,
+        )
+        if partial_outcome != "not_applicable":
+            return partial_outcome
         if not _ensure_entry_projection_is_zero_exposure(
             conn,
             command=command,
@@ -16408,7 +16792,6 @@ def _review_required_cancel_unknown_live_order_recovery(
                 "has no live record" if point_order_no_live_record else "absent",
             )
             return "stayed"
-        matching_open_orders = _matching_open_orders_for_command(client, command)
         matching_trades = _matching_trades_for_command(client, command)
         if matching_open_orders:
             logger.info(
@@ -16593,6 +16976,55 @@ def _review_required_cancel_unknown_live_order_recovery(
     order_id = _extract_order_id(order)
     status = _order_status(order)
     matched_size = _order_matched_size(order)
+    terminal_point_order = (
+        order_id == venue_order_id
+        and _terminal_fact_state_for_venue_status(
+            status,
+            venue_resp_present=True,
+        )
+        is not None
+    )
+    if terminal_point_order and _is_positive_decimal(matched_size):
+        command = _dict_row(
+            conn.execute(
+                "SELECT * FROM venue_commands WHERE command_id = ?",
+                (cmd.command_id,),
+            ).fetchone()
+        )
+        try:
+            open_order_read = _client_read_items(client, "get_open_orders")
+            trade_read = _client_read_items(client, "get_trades")
+        except Exception as exc:
+            logger.warning(
+                "recovery: command %s REVIEW_REQUIRED cancel-unknown complete "
+                "account scan unavailable: %s",
+                cmd.command_id,
+                exc,
+            )
+            return "stayed"
+        matching_open_orders = _matching_open_orders_for_command(
+            client,
+            command,
+            open_orders=open_order_read.items,
+        )
+        venue_read_proof = {
+            "open_orders_query_complete": open_order_read.query_complete,
+            "open_orders_pagination_scope": open_order_read.pagination_scope,
+            "trades_query_complete": trade_read.query_complete,
+            "trades_pagination_scope": trade_read.pagination_scope,
+        }
+        partial_outcome = _review_required_cancel_unknown_terminal_partial_recovery(
+            conn,
+            command=command,
+            point_order=order,
+            point_order_no_live_record=False,
+            point_order_terminal=True,
+            matching_open_orders=matching_open_orders,
+            account_trade_items=trade_read.items,
+            venue_read_proof=venue_read_proof,
+        )
+        if partial_outcome != "not_applicable":
+            return partial_outcome
     if order_id == venue_order_id and status in {"MATCHED", "FILLED"} and _is_positive_decimal(matched_size):
         trade = _confirmed_trade_for_order_id(client, venue_order_id)
         if trade is None:

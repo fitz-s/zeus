@@ -7532,6 +7532,358 @@ class TestRecoveryResolutionTable:
         assert Decimal(str(current["cost_basis_usd"])) == Decimal("2.75")
         assert current["order_status"] == "filled"
 
+    @pytest.mark.parametrize(
+        "point_order",
+        [
+            pytest.param(None, id="point-order-absent"),
+            pytest.param(
+                {"orderID": "ord-partial", "status": "UNKNOWN"},
+                id="point-order-no-live-record",
+            ),
+            pytest.param(
+                {
+                    "orderID": "ord-partial",
+                    "status": "CANCELED",
+                    "size_matched": "4",
+                },
+                id="point-order-terminal",
+            ),
+        ],
+    )
+    def test_cancel_unknown_absent_authenticated_partial_preserves_exposure(
+        self, conn, mock_client, point_order
+    ):
+        mock_client.get_open_orders.venue_reads_are_complete = True
+        mock_client.get_trades.venue_reads_are_complete = True
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=10, price=0.5)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-partial")
+        _seed_pending_entry_projection(conn, order_id="ord-partial")
+        _append_confirmed_trade_fact(
+            conn,
+            order_id="ord-partial",
+            trade_id="trade-partial",
+            filled_size="4",
+            fill_price="0.5",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active', chain_state = 'synced',
+                   shares = 4, chain_shares = 4,
+                   cost_basis_usd = 2, chain_cost_basis_usd = 2,
+                   entry_price = 0.5, chain_avg_price = 0.5,
+                   chain_seen_at = '2026-04-26T00:07:00Z',
+                   fill_authority = 'venue_confirmed_partial',
+                   order_status = 'partial'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        mock_client.get_order.return_value = point_order
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = [
+            {
+                "id": "trade-partial",
+                "status": "CONFIRMED",
+                "taker_order_id": "ord-partial",
+                "asset_id": "tok-001",
+                "side": "BUY",
+                "price": "0.5",
+                "size": "4",
+                "match_time": "2026-04-26T00:06:00Z",
+                "transaction_hash": "0xpartial",
+            }
+        ]
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] >= 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        events = _get_events(conn, "cmd-001")
+        assert [event["event_type"] for event in events[-2:]] == [
+            "PARTIAL_FILL_OBSERVED",
+            "EXPIRED",
+        ]
+        assert sum(event["event_type"] == "PARTIAL_FILL_OBSERVED" for event in events) == 1
+        terminal_payload = json.loads(events[-1]["payload_json"])
+        assert terminal_payload["proof_class"] == "confirmed_fill_plus_point_order_terminal_remainder"
+        assert terminal_payload["required_predicates"] == {
+            "exact_command_identity": True,
+            "exact_venue_order_identity": True,
+            "canonical_confirmed_partial_fill_positive": True,
+            "canonical_confirmed_partial_fill_below_command_size": True,
+            "point_order_absent_or_no_live_record_or_terminal": True,
+            "authenticated_open_order_scan_has_no_match": True,
+            "authenticated_open_order_scan_complete": True,
+            "authenticated_trade_scan_complete": True,
+            "account_trades_equal_canonical_confirmed_fill": True,
+            "active_chain_synced_exposure_exactly_covers_fill": True,
+            "no_unresolved_later_fill": True,
+        }
+        fact = conn.execute(
+            """
+            SELECT state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """
+        ).fetchone()
+        assert dict(fact) == {
+            "state": "PARTIALLY_MATCHED",
+            "matched_size": "4",
+            "remaining_size": "0",
+        }
+        current = conn.execute(
+            """
+            SELECT phase, chain_state, order_id, shares, chain_shares,
+                   cost_basis_usd, chain_cost_basis_usd, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert current["phase"] in {"active", "day0_window", "pending_exit"}
+        assert current["chain_state"] == "synced"
+        assert current["order_id"] == "ord-partial"
+        assert Decimal(str(current["shares"])) == Decimal("4")
+        assert Decimal(str(current["chain_shares"])) == Decimal("4")
+        assert Decimal(str(current["cost_basis_usd"])) == Decimal("2")
+        assert Decimal(str(current["chain_cost_basis_usd"])) == Decimal("2")
+        assert current["order_status"] == "partial"
+
+    @pytest.mark.parametrize(
+        ("open_orders", "account_trades", "reads_complete"),
+        [
+            (
+                [],
+                [
+                    {
+                        "id": "trade-mismatch",
+                        "status": "CONFIRMED",
+                        "taker_order_id": "ord-partial-proof",
+                        "asset_id": "tok-001",
+                        "side": "BUY",
+                        "price": "0.5",
+                        "size": "3",
+                        "match_time": "2026-04-26T00:06:00Z",
+                    }
+                ],
+                True,
+            ),
+            (
+                [
+                    {
+                        "id": "ord-partial-proof",
+                        "status": "LIVE",
+                        "asset_id": "tok-001",
+                        "side": "BUY",
+                        "price": "0.5",
+                        "size": "6",
+                    }
+                ],
+                [
+                    {
+                        "id": "trade-partial-proof",
+                        "status": "CONFIRMED",
+                        "taker_order_id": "ord-partial-proof",
+                        "asset_id": "tok-001",
+                        "side": "BUY",
+                        "price": "0.5",
+                        "size": "4",
+                        "match_time": "2026-04-26T00:06:00Z",
+                    }
+                ],
+                True,
+            ),
+            (
+                [],
+                [
+                    {
+                        "id": "trade-partial-proof-1",
+                        "status": "CONFIRMED",
+                        "taker_order_id": "ord-partial-proof",
+                        "asset_id": "tok-001",
+                        "side": "BUY",
+                        "price": "0.5",
+                        "size": "2",
+                        "match_time": "2026-04-26T00:06:00Z",
+                    },
+                    {
+                        "id": "trade-partial-proof-2",
+                        "status": "CONFIRMED",
+                        "taker_order_id": "ord-partial-proof",
+                        "asset_id": "tok-001",
+                        "side": "BUY",
+                        "price": "0.5",
+                        "size": "3",
+                        "match_time": "2026-04-26T00:07:00Z",
+                    },
+                ],
+                True,
+            ),
+            (
+                [],
+                [
+                    {
+                        "id": "trade-partial-proof",
+                        "status": "CONFIRMED",
+                        "taker_order_id": "ord-partial-proof",
+                        "asset_id": "tok-001",
+                        "side": "BUY",
+                        "price": "0.5",
+                        "size": "4",
+                        "match_time": "2026-04-26T00:06:00Z",
+                    }
+                ],
+                False,
+            ),
+        ],
+        ids=[
+            "mismatched_account_fill",
+            "matching_open_order",
+            "additional_later_fill",
+            "unverified_account_scan",
+        ],
+    )
+    def test_cancel_unknown_partial_proof_mismatch_stays_review_required(
+        self, conn, mock_client, open_orders, account_trades, reads_complete
+    ):
+        mock_client.get_open_orders.venue_reads_are_complete = reads_complete
+        mock_client.get_trades.venue_reads_are_complete = reads_complete
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=10, price=0.5)
+        _advance_to_cancel_unknown_review_required(
+            conn, venue_order_id="ord-partial-proof"
+        )
+        _seed_pending_entry_projection(conn, order_id="ord-partial-proof")
+        _append_confirmed_trade_fact(
+            conn,
+            order_id="ord-partial-proof",
+            trade_id="canonical-partial-proof",
+            filled_size="4",
+            fill_price="0.5",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active', chain_state = 'synced',
+                   shares = 4, chain_shares = 4,
+                   cost_basis_usd = 2, chain_cost_basis_usd = 2,
+                   entry_price = 0.5, chain_avg_price = 0.5,
+                   chain_seen_at = '2026-04-26T00:07:00Z',
+                   fill_authority = 'venue_confirmed_partial',
+                   order_status = 'partial'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = open_orders
+        mock_client.get_trades.return_value = account_trades
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+        assert summary["matched_cancel_review_required_entries"]["advanced"] == 0
+        assert summary["stayed"] >= 1
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+        assert [event["event_type"] for event in _get_events(conn, "cmd-001")] == [
+            "INTENT_CREATED",
+            "SUBMIT_REQUESTED",
+            "SUBMIT_ACKED",
+            "CANCEL_REQUESTED",
+            "CANCEL_REPLACE_BLOCKED",
+        ]
+
+    def test_cancel_unknown_resolved_partial_markets_do_not_count_systemic_unknown(
+        self, conn, mock_client
+    ):
+        mock_client.get_open_orders.venue_reads_are_complete = True
+        mock_client.get_trades.venue_reads_are_complete = True
+        from src.risk_allocator.governor import count_unknown_side_effects
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        cases = [
+            ("a", "cmd-market-a", "pos-market-a", "tok-market-a", "ord-market-a"),
+            ("b", "cmd-market-b", "pos-market-b", "tok-market-b", "ord-market-b"),
+        ]
+        for suffix, command_id, position_id, token_id, order_id in cases:
+            _insert(
+                conn,
+                command_id=command_id,
+                position_id=position_id,
+                decision_id=f"dec-market-{suffix}",
+                market_id=f"mkt-market-{suffix}",
+                condition_id=f"condition-market-{suffix}",
+                token_id=token_id,
+                size=10,
+                price=0.5,
+            )
+            _advance_to_cancel_unknown_review_required(
+                conn, command_id=command_id, venue_order_id=order_id
+            )
+            _seed_pending_entry_projection(
+                conn,
+                position_id=position_id,
+                command_id=command_id,
+                order_id=order_id,
+                token_id=token_id,
+            )
+            _append_confirmed_trade_fact(
+                conn,
+                command_id=command_id,
+                order_id=order_id,
+                trade_id=f"trade-market-{suffix}",
+                filled_size="4",
+                fill_price="0.5",
+            )
+            conn.execute(
+                """
+                UPDATE position_current
+                   SET phase = 'active', chain_state = 'synced',
+                       shares = 4, chain_shares = 4,
+                       cost_basis_usd = 2, chain_cost_basis_usd = 2,
+                       entry_price = 0.5, chain_avg_price = 0.5,
+                       chain_seen_at = '2026-04-26T00:07:00Z',
+                       fill_authority = 'venue_confirmed_partial',
+                       order_status = 'partial'
+                 WHERE position_id = ?
+                """,
+                (position_id,),
+            )
+
+        mock_client.get_order.side_effect = [None, None]
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = [
+            {
+                "id": "trade-market-a",
+                "status": "CONFIRMED",
+                "taker_order_id": "ord-market-a",
+                "asset_id": "tok-market-a",
+                "side": "BUY",
+                "price": "0.5",
+                "size": "4",
+                "match_time": "2026-04-26T00:06:00Z",
+            },
+            {
+                "id": "trade-market-b",
+                "status": "CONFIRMED",
+                "taker_order_id": "ord-market-b",
+                "asset_id": "tok-market-b",
+                "side": "BUY",
+                "price": "0.5",
+                "size": "4",
+                "match_time": "2026-04-26T00:06:00Z",
+            },
+        ]
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["matched_cancel_review_required_entries"]["advanced"] == 0
+        assert all(_get_state(conn, command_id) == "EXPIRED" for _, command_id, *_ in cases)
+        unknown_count, unknown_markets = count_unknown_side_effects(conn)
+        assert unknown_count == 0
+        assert unknown_markets == ()
+
     def test_cancel_unknown_review_required_terminal_no_fill_expires_entry(self, conn, mock_client):
         from src.execution.exchange_reconcile import list_unresolved_findings, record_finding
 
