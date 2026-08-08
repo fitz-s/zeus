@@ -5393,17 +5393,17 @@ def _edli_latest_day0_hourly_blocked_families(
 
 @dataclass(frozen=True)
 class _Day0HourlyPriorityProbe:
-    missing_families: frozenset[tuple[str, str, str]] = frozenset()
+    refresh_due_families: frozenset[tuple[str, str, str]] = frozenset()
     window_starts: tuple[tuple[str, str, datetime], ...] = ()
     proved: bool = False
 
 
-def _edli_day0_hourly_missing_authority_families(
+def _edli_day0_hourly_refresh_due_families(
     *,
     cities: Iterable[Any],
     decision_time: datetime,
 ) -> _Day0HourlyPriorityProbe:
-    """Current authorized Day0 facts whose strict hourly authority is empty.
+    """Current authorized Day0 facts whose hourly authority is due to refresh.
 
     This is a producer scheduling predicate, not a health gate: it reads the
     same authorized fact and strict persisted bundle contract that health and
@@ -5413,7 +5413,9 @@ def _edli_day0_hourly_missing_authority_families(
     """
     from src.config import runtime_cities_by_name
     from src.data.day0_hourly_vectors import (
+        DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS,
         DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
+        DAY0_HOURLY_REFRESH_HEADROOM_HOURS,
         day0_hourly_models_for_city,
         read_freshest_day0_hourly_vectors,
     )
@@ -5505,6 +5507,14 @@ def _edli_day0_hourly_missing_authority_families(
                     city=city_name,
                     target_date=target_date,
                     now=now,
+                    # Producer priority must lead consumer expiry.  Waiting
+                    # for the 3h strict reader to go empty creates a batch of
+                    # already-dark families that the 3-city microbatch can
+                    # only repair after the authority cliff.
+                    max_age_hours=(
+                        DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS
+                        - DAY0_HOURLY_REFRESH_HEADROOM_HOURS
+                    ),
                     expected_models=expected_models,
                     require_expected=True,
                     max_bundle_skew_minutes=DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES,
@@ -5527,7 +5537,7 @@ def _edli_day0_hourly_missing_authority_families(
         )
         return _Day0HourlyPriorityProbe()
     return _Day0HourlyPriorityProbe(
-        missing_families=frozenset(missing),
+        refresh_due_families=frozenset(missing),
         window_starts=tuple(
             (city_name, target_date, window_start)
             for (city_name, target_date), window_start in sorted(window_starts.items())
@@ -5539,9 +5549,9 @@ def _edli_day0_hourly_missing_authority_families(
 def _edli_day0_hourly_priority_families(
     *,
     held_families: Iterable[tuple[str, str, str]] | None = None,
-    missing_authority_families: Iterable[tuple[str, str, str]] = (),
+    refresh_due_families: Iterable[tuple[str, str, str]] = (),
 ) -> list[tuple[str, str, str]]:
-    """Held Day0 first, then authorized current-day strict-bundle gaps."""
+    """Held Day0 first, then current-day bundles due before authority expiry."""
 
     families: list[tuple[str, str, str]] = []
     seen: set[tuple[str, str, str]] = set()
@@ -5560,7 +5570,7 @@ def _edli_day0_hourly_priority_families(
         else held_families
     )
     add(sorted(held))
-    add(sorted(missing_authority_families))
+    add(sorted(refresh_due_families))
 
     return families
 
@@ -5709,14 +5719,14 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         decision_time = datetime.now(timezone.utc)
         cities = _rc()
         held_families = sorted(_edli_current_held_position_family_keys())
-        priority_probe = _edli_day0_hourly_missing_authority_families(
+        priority_probe = _edli_day0_hourly_refresh_due_families(
             cities=cities,
             decision_time=decision_time,
         )
         try:
             priority_families = _edli_day0_hourly_priority_families(
                 held_families=held_families,
-                missing_authority_families=priority_probe.missing_families,
+                refresh_due_families=priority_probe.refresh_due_families,
             )
         except Exception as exc:  # noqa: BLE001 -- priority fails closed; held remains critical.
             _log.warning(

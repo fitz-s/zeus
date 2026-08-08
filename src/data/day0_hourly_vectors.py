@@ -78,6 +78,8 @@ DEFAULT_REFRESH_INTERVAL_S = 1800.0  # 30 min — high-res runs update hourly-is
 DEFAULT_FETCH_TIMEOUT_S = 4.0
 DEFAULT_REFRESH_BUDGET_S = 6.0
 DEFAULT_REFRESH_MAX_CITIES = 3
+DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS = 3.0
+DAY0_HOURLY_REFRESH_HEADROOM_HOURS = 1.0
 DAY0_HOURLY_BUNDLE_MAX_SKEW_MINUTES = 60.0
 INCOMPLETE_BUNDLE_RETRY_INTERVAL_S = 45.0
 INCOMPLETE_BUNDLE_RETRY_MAX_INTERVAL_S = DEFAULT_REFRESH_INTERVAL_S
@@ -490,7 +492,7 @@ def select_ready_day0_hourly_vectors(
     vectors: Iterable[Day0HourlyVector],
     *,
     target_date: str,
-    max_age_hours: float = 3.0,
+    max_age_hours: float = DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS,
     now: Optional[datetime] = None,
     expected_models: Optional[Iterable[str]] = None,
     require_expected: bool = False,
@@ -592,7 +594,7 @@ def read_freshest_day0_hourly_vectors(
     *,
     city: str,
     target_date: str,
-    max_age_hours: float = 3.0,
+    max_age_hours: float = DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS,
     now: Optional[datetime] = None,
     conn: Optional[sqlite3.Connection] = None,
     expected_models: Optional[Iterable[str]] = None,

@@ -3221,11 +3221,11 @@ class TestMutexNoHttpSplit:
         conn = sqlite3.connect(db_path)
         assert conn.execute("SELECT COUNT(*) FROM day0_hourly_vectors").fetchone()[0] == 6
         conn.close()
-        probe = reactor_module._edli_day0_hourly_missing_authority_families(
+        probe = reactor_module._edli_day0_hourly_refresh_due_families(
             cities=[tokyo], decision_time=datetime.now(UTC)
         )
         assert probe.proved is True
-        assert probe.missing_families == frozenset()
+        assert probe.refresh_due_families == frozenset()
         assert refresh_key not in vectors_module._INCOMPLETE_RETRY_NOT_BEFORE_MONOTONIC
 
         reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
@@ -3371,9 +3371,9 @@ class TestMutexNoHttpSplit:
         )
         monkeypatch.setattr(
             reactor_module,
-            "_edli_day0_hourly_missing_authority_families",
+            "_edli_day0_hourly_refresh_due_families",
             lambda **_kwargs: reactor_module._Day0HourlyPriorityProbe(
-                missing_families=missing,
+                refresh_due_families=missing,
                 proved=True,
             ),
         )

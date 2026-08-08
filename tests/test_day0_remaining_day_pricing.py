@@ -3269,7 +3269,11 @@ class TestRequestHashProvenance:
         world_conn = _Conn("world")
         forecast_conn = _Conn("forecasts")
         persisted = {"ready": False}
-        monkeypatch.setattr(config_module, "runtime_cities_by_name", lambda: {"Paris": city})
+        monkeypatch.setattr(
+            config_module,
+            "runtime_cities_by_name",
+            lambda: {"Paris": city},
+        )
         monkeypatch.setattr(
             db_module,
             "get_world_connection_read_only",
@@ -3305,18 +3309,82 @@ class TestRequestHashProvenance:
             read_vectors,
         )
 
-        missing = reactor._edli_day0_hourly_missing_authority_families(
+        missing = reactor._edli_day0_hourly_refresh_due_families(
             cities=[city], decision_time=now
         )
         assert missing.proved is True
-        assert missing.missing_families == frozenset({("Paris", target_date, "high")})
+        assert missing.refresh_due_families == frozenset(
+            {("Paris", target_date, "high")}
+        )
 
         persisted["ready"] = True
-        ready = reactor._edli_day0_hourly_missing_authority_families(
+        ready = reactor._edli_day0_hourly_refresh_due_families(
             cities=[city], decision_time=now
         )
         assert ready.proved is True
-        assert ready.missing_families == frozenset()
+        assert ready.refresh_due_families == frozenset()
+
+    def test_priority_probe_refreshes_before_consumer_freshness_expires(
+        self, monkeypatch
+    ):
+        """Producer headroom prevents a city batch from crossing the 3h cliff."""
+        import src.config as config_module
+        import src.data.day0_hourly_vectors as vectors_module
+        import src.data.replacement_forecast_current_target_plan as target_plan
+        import src.events.reactor as reactor
+        import src.state.db as db_module
+
+        city = _paris()
+        now = datetime(2026, 6, 10, 9, 0, tzinfo=UTC)
+
+        class _Conn:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            config_module,
+            "runtime_cities_by_name",
+            lambda: {"Paris": city},
+        )
+        monkeypatch.setattr(db_module, "get_world_connection_read_only", _Conn)
+        monkeypatch.setattr(db_module, "get_forecasts_connection_read_only", _Conn)
+        monkeypatch.setattr(
+            target_plan,
+            "_latest_authorized_day0_fact",
+            lambda *_args, **_kwargs: {
+                "observation_time": (now - timedelta(minutes=5)).isoformat()
+            },
+        )
+        monkeypatch.setattr(
+            vectors_module,
+            "day0_hourly_models_for_city",
+            lambda _city: ["ecmwf_ifs"],
+        )
+        observed_max_ages = []
+
+        def read_vectors(**kwargs):
+            observed_max_ages.append(kwargs["max_age_hours"])
+            # A 2.5h bundle remains valid for the 3h consumer contract but is
+            # intentionally due for producer refresh inside the 1h headroom.
+            return [object()] if kwargs["max_age_hours"] >= 2.5 else []
+
+        monkeypatch.setattr(
+            vectors_module,
+            "read_freshest_day0_hourly_vectors",
+            read_vectors,
+        )
+
+        probe = reactor._edli_day0_hourly_refresh_due_families(
+            cities=[city], decision_time=now
+        )
+
+        assert probe.proved is True
+        assert probe.refresh_due_families == frozenset(
+            {("Paris", "2026-06-10", "high"), ("Paris", "2026-06-10", "low")}
+        )
+        assert observed_max_ages == [2.0, 2.0]
+        assert vectors_module.DAY0_HOURLY_BUNDLE_MAX_AGE_HOURS == 3.0
+        assert vectors_module.DAY0_HOURLY_REFRESH_HEADROOM_HOURS == 1.0
 
     @pytest.mark.parametrize("failure", ["read", "close"])
     def test_priority_probe_db_failure_is_unproved_and_closes_both(
@@ -3371,7 +3439,7 @@ class TestRequestHashProvenance:
             read_vectors,
         )
 
-        probe = reactor._edli_day0_hourly_missing_authority_families(
+        probe = reactor._edli_day0_hourly_refresh_due_families(
             cities=[city], decision_time=now
         )
 
@@ -3502,7 +3570,7 @@ class TestRequestHashProvenance:
 
         assert reactor._edli_day0_hourly_priority_families(
             held_families={("Paris", "2026-06-25", "low")},
-            missing_authority_families={
+            refresh_due_families={
                 ("Wellington", "2026-06-26", "high"),
                 ("London", "2026-06-25", "high"),
             },
