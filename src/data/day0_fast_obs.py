@@ -2670,7 +2670,12 @@ class Day0FastObsEmitter:
                 type(exc).__name__,
                 exc,
             )
-        if awc_due and (history_missing or not cycle_ok):
+        if awc_due:
+            # NOAA's global cycle file is not an append-only log: an upstream
+            # rewrite can insert a report before our byte cursor while the
+            # ranged request still succeeds.  Transport success therefore
+            # cannot prove publication completeness.  The bounded AWC read is
+            # the independent periodic reconciliation for those silent gaps.
             with self._lock:
                 self._last_awc_attempt_monotonic = attempt_monotonic
             try:

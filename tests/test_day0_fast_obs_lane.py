@@ -883,6 +883,42 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
         assert recovered_ok is True
         assert [report.station_id for report in recovered] == ["KORD"]
 
+    def test_awc_reconciles_silent_global_cycle_rewrites(self):
+        from src.data.day0_fast_obs import Day0FastObsEmitter
+
+        report = _report(
+            "RKPK",
+            datetime(2026, 8, 8, 5, 0, tzinfo=UTC),
+            36.0,
+        )
+        recovery_calls = []
+
+        def _recovery(stations, *, hours, client):
+            recovery_calls.append((tuple(stations), hours, client))
+            return [report]
+
+        class _SyntacticallyCurrentCycle:
+            def poll(self, **_kwargs):
+                return [], True
+
+        client = object()
+        emitter = Day0FastObsEmitter(fetcher=_recovery)
+        emitter._cycle_cursor = _SyntacticallyCurrentCycle()
+
+        reports, source_ok, history_loaded = emitter._fetch_global_sources(
+            client=client,
+            stations=("RKPK",),
+            fetch_hours=0.5,
+            awc_due=True,
+            history_missing=False,
+            attempt_monotonic=1.0,
+        )
+
+        assert reports == [report]
+        assert source_ok is True
+        assert history_loaded is True
+        assert recovery_calls == [(("RKPK",), 0.5, client)]
+
     def test_priority_station_fact_bypasses_global_cycle_wait(self):
         import src.data.day0_fast_obs as fast_obs
 
@@ -909,6 +945,7 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
         emitter._station_cursor = _StationCursor()
         emitter._cycle_cursor = _CycleCursor()
         emitter._full_window_loaded = True
+        emitter._last_awc_attempt_monotonic = time.monotonic()
 
         started = time.monotonic()
         try:
@@ -964,6 +1001,7 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
         emitter._cached_reports = [cached]
         emitter._cache_fetched_monotonic = time.monotonic()
         emitter._full_window_loaded = True
+        emitter._last_awc_attempt_monotonic = time.monotonic()
 
         started = time.monotonic()
         try:
@@ -1015,6 +1053,7 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
         emitter._station_cursor = _StationCursor()
         emitter._cycle_cursor = _CycleCursor()
         emitter._full_window_loaded = True
+        emitter._last_awc_attempt_monotonic = time.monotonic()
 
         try:
             first_reports, first_status, _age = emitter._reports_with_status(
@@ -1073,6 +1112,7 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
         emitter._station_cursor = _StationCursor()
         emitter._cycle_cursor = _CycleCursor()
         emitter._full_window_loaded = True
+        emitter._last_awc_attempt_monotonic = time.monotonic()
         emitter._cached_reports = [lfpb]
         emitter._station_authority_initialized = True
         emitter._station_cache_fetched_monotonic["LFPB"] = time.monotonic() - 3600.0
@@ -1123,6 +1163,7 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
         emitter = fast_obs.Day0FastObsEmitter(min_fetch_interval_s=0.0)
         emitter._cycle_cursor = _CycleCursor()
         emitter._full_window_loaded = True
+        emitter._last_awc_attempt_monotonic = time.monotonic()
         emitter._cached_reports = [lfpb]
         emitter._station_authority_initialized = True
         emitter._station_cache_fetched_monotonic["LFPB"] = time.monotonic() - 3600.0
@@ -1160,6 +1201,7 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
         emitter = fast_obs.Day0FastObsEmitter(min_fetch_interval_s=0.0)
         emitter._cycle_cursor = _CycleCursor()
         emitter._full_window_loaded = True
+        emitter._last_awc_attempt_monotonic = time.monotonic()
         emitter._cached_reports = [lfpb]
         emitter._station_authority_initialized = True
         emitter._station_cache_fetched_monotonic["LFPB"] = time.monotonic() - 3600.0
@@ -1222,8 +1264,8 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
 
         assert first[1] == fast_obs.FETCH_FRESH
         assert second[1] == fast_obs.FETCH_CACHE_HIT
-        assert third[1] == fast_obs.FETCH_CACHE_HIT
-        assert len(awc_calls) == 1
+        assert third[1] == fast_obs.FETCH_FRESH
+        assert len(awc_calls) == 2
 
     def test_cycle_fact_survives_awc_recovery_failure(self, monkeypatch):
         import src.data.day0_fast_obs as fast_obs
@@ -1287,7 +1329,10 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
         assert status == fast_obs.FETCH_FRESH
         assert list(emitter._pending_ledger_reports.values()) == [early]
 
-    def test_incremental_cycle_fact_defers_due_awc_recovery(self, monkeypatch):
+    def test_incremental_cycle_fact_does_not_suppress_due_awc_recovery(
+        self,
+        monkeypatch,
+    ):
         import src.data.day0_fast_obs as fast_obs
 
         report = _report(
@@ -1317,8 +1362,8 @@ KORD 180420Z 24006KT 10SM CLR 29/22 A2993 RMK AO2 T02940222
 
         assert reports == [report]
         assert status == fast_obs.FETCH_FRESH
-        assert awc_calls == []
-        assert emitter._last_awc_attempt_monotonic == 0.0
+        assert awc_calls == [True]
+        assert emitter._last_awc_attempt_monotonic > 0.0
 
 
 # ===========================================================================
