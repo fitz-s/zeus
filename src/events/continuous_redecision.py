@@ -803,12 +803,19 @@ def _all_latest_beliefs(
     if requested_families is None:
         rows = conn.execute(
             f"""
-            SELECT {cols}
-              FROM probability_trace_fact
-             WHERE decision_id >= ?
-               AND decision_id < ?
-             ORDER BY recorded_at DESC, trace_id DESC
-             LIMIT ?
+            WITH latest_trace AS MATERIALIZED (
+                SELECT trace_id, recorded_at
+                  FROM probability_trace_fact
+                 WHERE decision_id >= ?
+                   AND decision_id < ?
+                 ORDER BY recorded_at DESC, trace_id DESC
+                 LIMIT ?
+            )
+            SELECT {', '.join(f'p.{column.strip()}' for column in cols.split(','))}
+              FROM latest_trace latest
+              JOIN probability_trace_fact p
+                ON p.trace_id = latest.trace_id
+             ORDER BY latest.recorded_at DESC, latest.trace_id DESC
             """,
             (_BELIEF_PREFIX, _prefix_upper_bound(_BELIEF_PREFIX), scan_limit),
         ).fetchall()

@@ -107,6 +107,14 @@ def test_belief_reads_use_indexable_prefix_ranges_not_like_scans():
         assert " LIKE " not in upper
         assert "DECISION_ID >= ?" in upper
         assert "DECISION_ID < ?" in upper
+    all_latest = next(
+        stmt
+        for stmt in probability_reads
+        if "LATEST_TRACE AS MATERIALIZED" in stmt.upper()
+    )
+    inner_select = all_latest.split(")", 1)[0].upper()
+    assert "P_POSTERIOR_JSON" not in inner_select
+    assert "BIN_LABELS_JSON" not in inner_select
     assert "ROW_NUMBER" not in statements
     assert "PARTITION BY" not in statements
 
