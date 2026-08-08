@@ -1606,6 +1606,152 @@ def test_audit_yes_no_selection_skew_joins_yes_candidate_to_settlement(tmp_path)
     assert sample["settlement_value"] == 26
 
 
+def test_audit_rejected_probability_capital_grades_exact_q_without_inventing_maker_fill(
+    tmp_path,
+    monkeypatch,
+):
+    audit = _load("audit_rejected_probability_capital", "audit_yes_no_selection_skew.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    forecast_db = tmp_path / "zeus-forecasts.db"
+    trade = _init_yes_no_selection_db(trade_db)
+    trade.execute(
+        """
+        CREATE TABLE decision_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mode TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            artifact_json TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            env TEXT NOT NULL DEFAULT 'live'
+        )
+        """
+    )
+    now = datetime.now(timezone.utc)
+    decision_at = (now - timedelta(hours=2)).isoformat()
+    settled_at = (now - timedelta(hours=1)).isoformat()
+    q_version = "a" * 64
+    family_key = "family-paris-high-2026-08-07"
+    candidate_id = "candidate-no-30c"
+    epoch = "selection-epoch-1"
+    trade.execute(
+        """
+        INSERT INTO decision_log (mode, started_at, artifact_json, timestamp)
+        VALUES ('global_single_order_auction', ?, ?, ?)
+        """,
+        (
+            decision_at,
+            json.dumps(
+                {
+                    "summary": {
+                        "selection_epoch_identity": epoch,
+                        "winner_candidate_id": candidate_id,
+                    }
+                }
+            ),
+            decision_at,
+        ),
+    )
+    trade.execute(
+        """
+        INSERT INTO decision_log (mode, started_at, artifact_json, timestamp)
+        VALUES ('global_single_order_auction_preflight', ?, ?, ?)
+        """,
+        (
+            decision_at,
+            json.dumps(
+                {
+                    "summary": {
+                        "selection_epoch_identity": epoch,
+                        "selection_cut_at_utc": decision_at,
+                            "winner_candidate_id": candidate_id,
+                            "family_key": family_key,
+                            "condition_id": "condition-30c",
+                            "preflight_reason": (
+                            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+                            "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
+                            "authority=replacement_0_1:"
+                            "q_source=replacement_0_1:"
+                            "canonical_q_source=replacement_0_1:"
+                            "event_type=FORECAST_SNAPSHOT_READY:"
+                            f"q_version={q_version}"
+                        ),
+                    }
+                }
+            ),
+            decision_at,
+        ),
+    )
+    trade.commit()
+    trade.close()
+    forecasts = _init_yes_no_forecast_db(forecast_db)
+    forecasts.execute(
+        """
+        INSERT INTO market_events (
+            city, target_date, temperature_metric, condition_id, token_id,
+            range_label, range_low, range_high
+        ) VALUES (
+            'Paris', '2026-08-07', 'high', 'condition-30c', 'yes-30c',
+            '30C', 30, 30
+        )
+        """
+    )
+    forecasts.execute(
+        """
+        INSERT INTO settlement_outcomes (
+            city, target_date, temperature_metric, winning_bin,
+            settlement_value, settlement_unit, settled_at, authority
+        ) VALUES (
+            'Paris', '2026-08-07', 'high', '31C',
+            31, 'C', ?, 'VERIFIED'
+        )
+        """,
+        (settled_at,),
+    )
+    forecasts.commit()
+    forecasts.close()
+    monkeypatch.setattr(
+        audit,
+        "_current_global_auction_candidate_payload",
+        lambda _conn, _summary: {
+            "detailed": [
+                {
+                    "candidate_id": candidate_id,
+                    "family_key": family_key,
+                    "condition_id": "condition-30c",
+                    "side": "NO",
+                    "execution_mode": "MAKER_REST",
+                    "expected_terminal_wealth": {
+                        "win_probability_mean": 0.8,
+                        "win_payoff_usd": "10",
+                        "loss_payoff_usd": "-10",
+                    },
+                    "expected_growth": {"expected_ev_usd": 6.0},
+                }
+            ]
+        },
+    )
+
+    report = audit.audit_selection_skew(
+        trade_db=trade_db,
+        forecast_db=forecast_db,
+        days=1.0,
+    )["rejected_probability_capital"]
+
+    assert report["exact_q_version_rows"] == 1
+    assert report["unique_family_decisions"] == 1
+    assert report["causal_settlements"] == 1
+    assert report["maker_fill_unknown"] == 1
+    assert report["taker_executable_counterfactuals"] == 0
+    assert report["verdict"] == "CAUSAL_SETTLEMENTS_AVAILABLE_NOT_CAPITAL_AUTHORITY"
+    assert report["q_versions_observed"] == 1
+    binding = next(iter(report["by_probability_binding"].values()))
+    assert binding["wins"] == 1
+    assert binding["mean_binary_brier"] == pytest.approx(0.04)
+    assert binding["quoted_full_fill_pnl_usd"] == 10.0
+    assert report["samples"][0]["fill_status"] == "FILL_UNKNOWN_COUNTERFACTUAL"
+
+
 def _init_live_probability_reality_trade_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.execute(

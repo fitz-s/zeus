@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-07-09; last_reviewed=2026-07-15; last_reused=2026-07-15
-# Purpose: read-only observation for EDLI YES/NO selection skew from canonical order events.
+# Lifecycle: created=2026-07-09; last_reviewed=2026-08-07; last_reused=2026-08-07
+# Purpose: read-only selection skew and exact-version rejected-capital settlement evidence.
+# Reuse: settlement-grade blocked global-auction winners without treating maker counterfactuals as fills.
 # Authority basis: AGENTS.md live-money proof gates; operator focus on absent high-quality YES fills.
-"""Audit recent EDLI YES/NO candidate selection skew from canonical event payloads.
+"""Audit EDLI selection skew and settlement-grade blocked auction winners.
 
-This observation reads ``edli_live_order_events`` in read-only SQLite mode. It
-does not authorize live trading, mutate DB truth, or contact venues.
+This observation reads ``edli_live_order_events`` and global-auction
+``decision_log`` receipts in read-only SQLite mode. It does not authorize live
+trading, mutate DB truth, contact venues, or treat maker counterfactuals as fills.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import argparse
 from collections import Counter, defaultdict
 import json
 import math
+import re
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
@@ -29,6 +32,7 @@ from src.decision.family_decision_engine import (
     roi_frontier_min_payoff_q_lcb,
     roi_frontier_min_profit_lcb_usd,
 )
+from src.control.live_health import _current_global_auction_candidate_payload
 
 
 DEFAULT_TRADE_DB = ROOT / "state" / "zeus_trades.db"
@@ -39,6 +43,12 @@ CHAIN_EVENT_TYPES = (
     "UserTradeObserved",
 )
 CHAIN_LOOKUP_EVENT_TYPES = (*CHAIN_EVENT_TYPES, "PreSubmitRevalidated", "SubmitRejected")
+_Q_VERSION_RE = re.compile(r"(?:^|:)q_version=([0-9a-f]{64})(?::|$)")
+_GLOBAL_AUCTION_MODES = (
+    "global_single_order_auction",
+    "global_single_order_auction_delta",
+    "global_single_order_auction_duplicate",
+)
 
 
 def _float(value: Any) -> float | None:
@@ -486,6 +496,280 @@ class _SettlementLookup:
             "winning_bin": settlement["winning_bin"],
             "settled_at": settlement["settled_at"],
         }
+
+
+def _iso_datetime(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _q_version(reason: Any) -> str | None:
+    match = _Q_VERSION_RE.search(str(reason or ""))
+    return match.group(1) if match else None
+
+
+def _probability_binding(reason: Any) -> str | None:
+    fields: dict[str, str] = {}
+    for part in str(reason or "").split(":"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        fields[key] = value
+    authority = fields.get("authority")
+    q_source = fields.get("canonical_q_source") or fields.get("q_source")
+    event_type = fields.get("event_type")
+    if not authority or not q_source or not event_type:
+        return None
+    return f"{event_type}|{authority}|{q_source}"
+
+
+def _auction_winner_for_preflight(
+    conn: sqlite3.Connection,
+    *,
+    preflight_id: int,
+    preflight: dict[str, Any],
+) -> dict[str, Any] | None:
+    winner_id = str(preflight.get("winner_candidate_id") or "")
+    epoch = str(preflight.get("selection_epoch_identity") or "")
+    if not winner_id or not epoch:
+        return None
+    placeholders = ",".join("?" for _ in _GLOBAL_AUCTION_MODES)
+    rows = conn.execute(
+        f"""
+        SELECT id, mode, artifact_json
+          FROM decision_log
+         WHERE id < ?
+           AND mode IN ({placeholders})
+         ORDER BY id DESC
+         LIMIT 128
+        """,
+        (preflight_id, *_GLOBAL_AUCTION_MODES),
+    ).fetchall()
+    for row in rows:
+        try:
+            artifact = json.loads(str(row["artifact_json"] or "{}"))
+            summary = _nested_dict(artifact.get("summary"))
+        except (TypeError, ValueError):
+            continue
+        if str(summary.get("selection_epoch_identity") or "") != epoch:
+            continue
+        if str(summary.get("winner_candidate_id") or "") != winner_id:
+            continue
+        try:
+            payload = _current_global_auction_candidate_payload(conn, summary)
+        except (KeyError, TypeError, ValueError, sqlite3.Error):
+            return None
+        detailed = payload.get("detailed")
+        candidates = detailed if isinstance(detailed, list) else []
+        return next(
+            (
+                candidate
+                for candidate in candidates
+                if isinstance(candidate, dict)
+                and str(candidate.get("candidate_id") or "") == winner_id
+            ),
+            None,
+        )
+    return None
+
+
+def _audit_rejected_probability_capital(
+    *,
+    trade_db: Path,
+    forecast_db: Path | None,
+    cutoff: str,
+    sample_limit: int,
+) -> dict[str, Any]:
+    """Settlement-grade exact-version blocked winners without inventing fills."""
+
+    report: dict[str, Any] = {
+        "preflight_rows": 0,
+        "exact_q_version_rows": 0,
+        "rehydrated_winners": 0,
+        "unique_family_decisions": 0,
+        "verified_settlements": 0,
+        "causal_settlements": 0,
+        "maker_fill_unknown": 0,
+        "taker_executable_counterfactuals": 0,
+        "q_versions_observed": 0,
+        "by_probability_binding": {},
+        "samples": [],
+        "verdict": "NO_EXACT_Q_VERSION_REJECTED_DECISIONS",
+    }
+    settlement_lookup = _SettlementLookup(forecast_db)
+    selected: dict[tuple[str, str], dict[str, Any]] = {}
+    exact_q_versions: set[str] = set()
+    conn = _open_readonly(trade_db)
+    try:
+        if not _table_has_column(conn, "decision_log", "artifact_json"):
+            return report
+        rows = conn.execute(
+            """
+            SELECT id, timestamp, artifact_json
+              FROM decision_log
+             WHERE mode = 'global_single_order_auction_preflight'
+               AND timestamp >= ?
+             ORDER BY id
+            """,
+            (cutoff,),
+        ).fetchall()
+        report["preflight_rows"] = len(rows)
+        for row in rows:
+            try:
+                artifact = json.loads(str(row["artifact_json"] or "{}"))
+                preflight = _nested_dict(artifact.get("summary"))
+            except (TypeError, ValueError):
+                continue
+            q_version = _q_version(preflight.get("preflight_reason"))
+            binding = _probability_binding(preflight.get("preflight_reason"))
+            if q_version is None or binding is None:
+                continue
+            report["exact_q_version_rows"] += 1
+            exact_q_versions.add(q_version)
+            preflight_family_key = str(preflight.get("family_key") or "")
+            if preflight_family_key and (binding, preflight_family_key) in selected:
+                continue
+            family_key = preflight_family_key
+            if not family_key:
+                continue
+            key = (binding, family_key)
+            if key in selected:
+                continue
+            selected[key] = {
+                "q_version": q_version,
+                "probability_binding": binding,
+                "decision_at": preflight.get("selection_cut_at_utc") or row["timestamp"],
+                "preflight_id": int(row["id"]),
+                "preflight": preflight,
+            }
+    finally:
+        conn.close()
+
+    report["unique_family_decisions"] = len(selected)
+    report["q_versions_observed"] = len(exact_q_versions)
+    scored_by_binding: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "decisions": 0,
+            "causal_settlements": 0,
+            "wins": 0,
+            "binary_brier_sum": 0.0,
+            "binary_log_loss_sum": 0.0,
+            "quoted_full_fill_pnl_usd": 0.0,
+            "decision_expected_ev_usd": 0.0,
+        }
+    )
+    decode_conn: sqlite3.Connection | None = None
+    for item in selected.values():
+        q_version = item["q_version"]
+        binding = item["probability_binding"]
+        binding_score = scored_by_binding[binding]
+        binding_score["decisions"] += 1
+        preflight = item["preflight"]
+        condition_id = str(preflight.get("condition_id") or "")
+        outcome = settlement_lookup.outcome_for_candidate(
+            {"condition_id": condition_id},
+            {},
+        )
+        if not outcome or not outcome.get("settlement_found"):
+            continue
+        report["verified_settlements"] += 1
+        decision_at = _iso_datetime(item["decision_at"])
+        settled_at = _iso_datetime(outcome.get("settled_at"))
+        if decision_at is None or settled_at is None or decision_at >= settled_at:
+            continue
+        if decode_conn is None:
+            decode_conn = _open_readonly(trade_db)
+        candidate = _auction_winner_for_preflight(
+            decode_conn,
+            preflight_id=int(item["preflight_id"]),
+            preflight=preflight,
+        )
+        if candidate is None:
+            continue
+        report["rehydrated_winners"] += 1
+        yes_won = outcome.get("yes_won")
+        side = str(candidate.get("side") or "").upper()
+        if yes_won is None or side not in {"YES", "NO"}:
+            continue
+        held_won = bool(yes_won) if side == "YES" else not bool(yes_won)
+        terminal = _nested_dict(candidate.get("expected_terminal_wealth"))
+        p_win = _float(terminal.get("win_probability_mean"))
+        if p_win is None or not 0.0 < p_win < 1.0:
+            continue
+        realized_probability = p_win if held_won else 1.0 - p_win
+        brier = (p_win - float(held_won)) ** 2
+        log_loss = -math.log(realized_probability)
+        quoted_pnl = _float(
+            terminal.get("win_payoff_usd" if held_won else "loss_payoff_usd")
+        )
+        expected_ev = _float(
+            _nested_dict(candidate.get("expected_growth")).get("expected_ev_usd")
+        )
+        binding_score["causal_settlements"] += 1
+        binding_score["wins"] += int(held_won)
+        binding_score["binary_brier_sum"] += brier
+        binding_score["binary_log_loss_sum"] += log_loss
+        if quoted_pnl is not None:
+            binding_score["quoted_full_fill_pnl_usd"] += quoted_pnl
+        if expected_ev is not None:
+            binding_score["decision_expected_ev_usd"] += expected_ev
+        report["causal_settlements"] += 1
+        execution_mode = str(candidate.get("execution_mode") or "")
+        if execution_mode == "MAKER_REST":
+            report["maker_fill_unknown"] += 1
+        else:
+            report["taker_executable_counterfactuals"] += 1
+        if len(report["samples"]) < sample_limit:
+            report["samples"].append(
+                {
+                    "q_version": q_version,
+                    "probability_binding": binding,
+                    "decision_at": item["decision_at"],
+                    "city": outcome.get("city"),
+                    "target_date": outcome.get("target_date"),
+                    "temperature_metric": outcome.get("temperature_metric"),
+                    "condition_id": outcome.get("condition_id"),
+                    "side": side,
+                    "held_side_won": held_won,
+                    "p_win": p_win,
+                    "binary_brier": brier,
+                    "binary_log_loss": log_loss,
+                    "execution_mode": execution_mode,
+                    "fill_status": (
+                        "FILL_UNKNOWN_COUNTERFACTUAL"
+                        if execution_mode == "MAKER_REST"
+                        else "DECISION_TIME_EXECUTABLE_COUNTERFACTUAL"
+                    ),
+                    "quoted_full_fill_pnl_usd": quoted_pnl,
+                    "decision_expected_ev_usd": expected_ev,
+                }
+            )
+    if decode_conn is not None:
+        decode_conn.close()
+    settlement_lookup.close()
+
+    by_probability_binding: dict[str, dict[str, Any]] = {}
+    for binding, binding_score in sorted(scored_by_binding.items()):
+        n = int(binding_score["causal_settlements"])
+        by_probability_binding[binding] = {
+            **binding_score,
+            "win_rate": binding_score["wins"] / n if n else None,
+            "mean_binary_brier": binding_score["binary_brier_sum"] / n if n else None,
+            "mean_binary_log_loss": binding_score["binary_log_loss_sum"] / n if n else None,
+        }
+    report["by_probability_binding"] = by_probability_binding
+    if report["exact_q_version_rows"] > 0:
+        report["verdict"] = (
+            "CAUSAL_SETTLEMENTS_AVAILABLE_NOT_CAPITAL_AUTHORITY"
+            if report["causal_settlements"] > 0
+            else "INSUFFICIENT_CAUSAL_SETTLEMENTS"
+        )
+    return report
 
 
 def _summarize_candidate(candidate: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1159,6 +1443,12 @@ def audit_selection_skew(
                 score_only_samples.append(record)
 
     settlement_lookup.close()
+    rejected_probability_capital = _audit_rejected_probability_capital(
+        trade_db=trade_db,
+        forecast_db=forecast_db,
+        cutoff=cutoff,
+        sample_limit=sample_limit,
+    )
 
     unique_buckets: dict[str, dict[str, int]] = defaultdict(_empty_outcome_bucket)
     for outcome in unique_yes_outcomes.values():
@@ -1239,6 +1529,7 @@ def audit_selection_skew(
         },
         "objective_better_samples": objective_better_samples,
         "score_only_samples": score_only_samples,
+        "rejected_probability_capital": rejected_probability_capital,
         "verdict": _verdict(summary, high_quality_yes_chain),
     }
 
@@ -1285,6 +1576,14 @@ def _print_markdown(report: dict[str, Any]) -> None:
     print(f"- forecast_db: `{report['forecast_db']}`")
     print(f"- cutoff: `{report['cutoff']}`")
     print(f"- verdict: `{report['verdict']}`")
+    rejected = report["rejected_probability_capital"]
+    print(f"- rejected probability capital evidence: `{rejected['verdict']}`")
+    print(
+        "  - exact q rows / unique families / causal settlements: "
+        f"{rejected['exact_q_version_rows']} / "
+        f"{rejected['unique_family_decisions']} / "
+        f"{rejected['causal_settlements']}"
+    )
     print(f"- decision_proof_rows: {summary['decision_proof_rows']}")
     print(f"- selected_buy_no: {summary['selected_buy_no']}")
     print(f"- selected_buy_yes: {summary['selected_buy_yes']}")

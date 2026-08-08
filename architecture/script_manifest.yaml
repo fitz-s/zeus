@@ -827,10 +827,10 @@ scripts:
     read_targets: [state/zeus_trades.db, state/zeus-forecasts.db]
     write_targets: [stdout]
     authority_scope: read_only_live_selection_skew_telemetry
-    reuse_when: "Audit recent EDLI DecisionProofAccepted candidate payloads to explain absent high-quality YES fills; separates true objective-selector anomalies from score-only YES wins where NO still has higher expected-utility objective."
+    reuse_when: "Audit recent EDLI DecisionProofAccepted candidate payloads to explain absent high-quality YES fills, and settlement-grade exact-q-version global-auction winners blocked by probability qualification; repeated refreshes are deduplicated by probability binding and family, unresolved receipts are not decompressed, and unconfirmed maker fills remain counterfactual."
     do_not_use_when: "Do not use as live authorization, strategy promotion, DB mutation, daemon restart, or venue action evidence by itself."
     canonical_command: "python3 scripts/audit_yes_no_selection_skew.py [--json] [--days N] [--forecast-db PATH]"
-    external_inputs: [edli_live_order_events, forecast_market_events, settlement_outcomes]
+    external_inputs: [edli_live_order_events, decision_log_global_auction_receipts, forecast_market_events, settlement_outcomes]
     promotion_barrier: "Read-only read_only_evidence; output cannot authorize live trading, live restart, submit/cancel, or DB truth mutation."
     required_tests: [tests/test_ops_scripts_smoke.py]
   audit_live_probability_reality.py:
