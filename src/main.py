@@ -4122,6 +4122,9 @@ def _edli_event_reactor_cycle(
         held_position_monitor_pending=(
             _periodic_held_position_monitor_handoff_pending.is_set
         ),
+        held_position_monitor_debt_pending=(
+            _periodic_held_position_monitor_fairness_debt.is_set
+        ),
     )
     # Recovery is deliberately after the reactor invocation: this cycle keeps
     # its already-selected pause, while the next cycle reads fresh control state.

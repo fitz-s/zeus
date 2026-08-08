@@ -7100,6 +7100,7 @@ def _held_sell_reauction_receipts_from_global_cut(
 def _global_auction_monitor_cancellation_probe(
     monitor_pending: Callable[[], bool] | None,
     *,
+    monitor_debt_pending: Callable[[], bool] | None = None,
     completion_due: bool = False,
 ) -> tuple[bool, Callable[[], bool]]:
     """Allow one periodic-monitor preemption, then reserve auction completion."""
@@ -7120,12 +7121,31 @@ def _global_auction_monitor_cancellation_probe(
 
         if cancelled_this_cycle:
             return True
-        if completion_due_at_start or monitor_pending is None:
+        debt_pending = False
+        if monitor_debt_pending is not None:
+            try:
+                debt_pending = bool(monitor_debt_pending())
+            except Exception:  # noqa: BLE001 - scheduler hint failure cannot veto trading.
+                debt_pending = False
+        if completion_due_at_start:
+            if debt_pending:
+                # SCOPE: only this in-flight selection. DRAIN: the already-set
+                # completion debt keeps one economic cut queued after monitor
+                # handoff. RESET: successful full-book handoff clears monitor
+                # debt; a later non-cancelled cut clears completion debt.
+                cancelled_this_cycle = True
+                logging.getLogger("zeus.events.reactor").info(
+                    "global auction completion yielded to held-monitor fairness debt"
+                )
+            return cancelled_this_cycle
+        if monitor_pending is None and not debt_pending:
             return False
-        try:
-            pending = bool(monitor_pending())
-        except Exception:  # noqa: BLE001 - scheduler hint failure cannot veto trading.
-            return False
+        pending = debt_pending
+        if not pending and monitor_pending is not None:
+            try:
+                pending = bool(monitor_pending())
+            except Exception:  # noqa: BLE001 - scheduler hint failure cannot veto trading.
+                return False
         if not pending:
             return False
         # SCOPE: cancel this in-flight global selection once so the claimed
@@ -7266,6 +7286,7 @@ def run_edli_event_reactor_cycle(
     allow_paused_forecast_snapshot_completion: bool = False,
     urgent_day0_pending: Callable[[], bool] | None = None,
     held_position_monitor_pending: Callable[[], bool] | None = None,
+    held_position_monitor_debt_pending: Callable[[], bool] | None = None,
     live_entry_block_reason: str | None = None,
     live_entry_family_block_reasons: Mapping[str, str] | None = None,
 ) -> bool:
@@ -7294,6 +7315,10 @@ def run_edli_event_reactor_cycle(
     completes, so neither lane can starve the other. Urgent forecast and Day0
     monitors do not consume this fairness token. Newly committed Day0 facts
     retain their independent urgent cancellation path inside the live adapter.
+
+    ``held_position_monitor_debt_pending`` remains set after a handoff timeout.
+    Unlike the transient handoff signal, it also cancels an already-reserved
+    completion auction so an in-flight selection cannot outlive monitor debt.
 
     ``allow_paused_forecast_snapshot_completion`` is qualified once by
     ``src.main`` from durable global entries-pause state. It applies only to
@@ -8012,6 +8037,7 @@ def run_edli_event_reactor_cycle(
             _monitor_selection_cancelled,
         ) = _global_auction_monitor_cancellation_probe(
             held_position_monitor_pending,
+            monitor_debt_pending=held_position_monitor_debt_pending,
             completion_due=(
                 completion_wake
                 or durable_exact_held_completion

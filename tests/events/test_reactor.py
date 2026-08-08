@@ -4132,11 +4132,15 @@ def test_main_reactor_injects_day0_and_monitor_preemption_signals(
         )
         assert captured["urgent_day0_pending"]() is False
         assert captured["held_position_monitor_pending"]() is False
+        assert captured["held_position_monitor_debt_pending"]() is False
         main._held_position_monitor_handoff_pending.set()
         assert captured["held_position_monitor_pending"]() is False
         main._periodic_held_position_monitor_handoff_pending.set()
         assert captured["held_position_monitor_pending"]() is True
+        main._periodic_held_position_monitor_fairness_debt.set()
+        assert captured["held_position_monitor_debt_pending"]() is True
         main._periodic_held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_fairness_debt.clear()
         main._held_position_monitor_handoff_pending.clear()
         main._day0_urgent_wake_pending.set()
         assert captured["urgent_day0_pending"]() is True
@@ -4146,6 +4150,7 @@ def test_main_reactor_injects_day0_and_monitor_preemption_signals(
         assert captured["urgent_day0_pending"]() is True
     finally:
         main._periodic_held_position_monitor_handoff_pending.clear()
+        main._periodic_held_position_monitor_fairness_debt.clear()
         main._held_position_monitor_handoff_pending.clear()
         main._day0_urgent_wake_pending.clear()
         main._day0_exit_monitor_attempts.clear()
@@ -4375,6 +4380,57 @@ def test_monitor_does_not_preempt_when_completion_wake_is_not_durable(
     assert due_at_start is False
     assert cancellation_probe() is False
     assert cancellation_probe() is False
+
+
+def test_monitor_fairness_debt_cancels_reserved_completion_without_new_wake(
+    monkeypatch,
+):
+    from src.events import reactor
+
+    monkeypatch.setattr(
+        reactor,
+        "request_global_auction_completion",
+        lambda **_kwargs: pytest.fail("reserved completion debt must not duplicate"),
+    )
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        due_at_start, cancellation_probe = (
+            reactor._global_auction_monitor_cancellation_probe(
+                lambda: True,
+                monitor_debt_pending=lambda: True,
+                completion_due=True,
+            )
+        )
+        assert due_at_start is True
+        assert cancellation_probe() is True
+        assert cancellation_probe() is True
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_monitor_fairness_debt_reserves_completion_before_cancelling(
+    monkeypatch,
+):
+    from src.events import reactor
+
+    reservations: list[str] = []
+    monkeypatch.setattr(
+        reactor,
+        "request_global_auction_completion",
+        lambda **kwargs: reservations.append(kwargs["reason"]) or True,
+    )
+    due_at_start, cancellation_probe = (
+        reactor._global_auction_monitor_cancellation_probe(
+            lambda: False,
+            monitor_debt_pending=lambda: True,
+        )
+    )
+
+    assert due_at_start is False
+    assert cancellation_probe() is True
+    assert cancellation_probe() is True
+    assert reservations == ["periodic_monitor_preemption"]
 
 
 def test_held_sell_completion_request_persists_position_q_and_bid_witness(monkeypatch):
