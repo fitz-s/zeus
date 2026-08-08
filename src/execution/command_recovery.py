@@ -13604,7 +13604,7 @@ def _partial_remainder_candidates(
                 (cmd.intent_kind = 'ENTRY' AND cmd.state IN ({state_placeholders}))
                 OR
                 (cmd.intent_kind = 'EXIT' AND cmd.state = 'PARTIAL'
-                 AND pc.phase = 'pending_exit')
+                 AND pc.phase IN ({open_phase_placeholders}))
            )
            AND COALESCE(cmd.venue_order_id, '') != ''
            AND (? IS NULL OR cmd.updated_at < ?)
@@ -13620,6 +13620,7 @@ def _partial_remainder_candidates(
         sql,
         (
             *tuple(_PARTIAL_REMAINDER_STATES),
+            *tuple(_RUNTIME_OPEN_REPAIR_PHASES),
             updated_before,
             updated_before,
             *tuple(_RUNTIME_OPEN_REPAIR_PHASES),

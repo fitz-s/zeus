@@ -25704,6 +25704,63 @@ class TestRecoveryResolutionTable:
             """
         ).fetchone()[0] == 1
 
+    def test_released_partial_exit_remainder_terminalizes_without_closing_position(
+        self,
+        conn,
+        mock_client,
+        monkeypatch,
+    ):
+        """Returning residual exposure to holding cannot orphan the old order."""
+        from src.execution import command_recovery
+
+        _seed_partial_exit_dust_case(conn)
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'day0_window',
+                   order_id = '',
+                   order_status = 'filled'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _configure_partial_exit_dust_client(
+            mock_client,
+            point_status="CANCELED",
+        )
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-04-26T00:10:00+00:00",
+        )
+
+        summary = command_recovery.reconcile_partial_remainders(
+            conn,
+            mock_client,
+            live_tick_scope=True,
+        )
+
+        assert summary == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-exit") == "EXPIRED"
+        current = conn.execute(
+            """
+            SELECT phase, shares, chain_shares, order_id, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "day0_window",
+            "shares": 0.4,
+            "chain_shares": 0.4,
+            "order_id": "",
+            "order_status": "filled",
+        }
+
     def test_cancel_pending_partial_exit_production_shape_is_recovered_without_lifecycle_rollback(
         self,
         conn,
