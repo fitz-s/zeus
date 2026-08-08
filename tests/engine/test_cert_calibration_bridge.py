@@ -335,6 +335,10 @@ def test_day0_remaining_probability_authority_survives_calibration_certificate()
         calibration["day0_probability_authority"]["probability_authority"]
         == expected
     )
+    assert calibration["city"] == _CITY
+    assert calibration["target_date"] == _TARGET_DATE
+    assert calibration["metric"] == _METRIC
+    assert calibration["temperature_metric"] == _METRIC
     _assert_event_bound_calibration_live_admitted(
         SimpleNamespace(payload=calibration)
     )
@@ -396,6 +400,98 @@ def test_day0_remaining_probability_authority_survives_calibration_certificate()
     assert (
         public_calibration["day0_probability_authority"]["lcb_transform"]
         == transform
+    )
+
+
+def test_day0_conditioned_replacement_keeps_settlement_identity_in_certificate():
+    binding = {
+        "posterior_id": 4242,
+        "probability_base_identity": "day0-base-1",
+        "city": _CITY,
+        "target_date": _TARGET_DATE,
+        "metric": _METRIC,
+        "observation_time": "2026-05-24T18:00:00+00:00",
+        "observation_available_at": "2026-05-24T18:01:00+00:00",
+        "observed_extreme_native": 72.0,
+        "rounded_value": 72,
+        "sample_count": 3,
+        "station_id": "KORD",
+        "configured_station_id": "KORD",
+        "settlement_source": "wu_icao_history",
+        "settlement_unit": "F",
+    }
+    observation = {
+        "city": _CITY,
+        "target_date": _TARGET_DATE,
+        "metric": _METRIC,
+        "raw_value": 72.0,
+        "rounded_value": 72,
+        "sample_count": 3,
+        "station_id": "KORD",
+        "configured_station_id": "KORD",
+        "settlement_source": "wu_icao_history",
+        "settlement_unit": "F",
+        "observation_time": binding["observation_time"],
+        "observation_available_at": binding["observation_available_at"],
+        "source_match_status": "MATCH",
+        "station_match_status": "MATCH",
+        "local_date_status": "MATCH",
+        "dst_status": "UNAMBIGUOUS",
+        "metric_match_status": "MATCH",
+        "rounding_status": "MATCH",
+        "source_authorized_status": "AUTHORIZED",
+        "live_authority_status": "live",
+        "_edli_global_day0_binding": binding,
+    }
+    payload = {
+        **observation,
+        "raw_payload_sha256": "a" * 64,
+        "posterior_id": 4242,
+        "horizon_profile": "full",
+        "probability_authority": (
+            "day0_conditioned_replacement_global_probability_v1"
+        ),
+        "q_source": "day0_conditioned_replacement",
+        "_edli_q_source": "day0_conditioned_replacement",
+        "_edli_day0_q_mode": "fast_residual_conditioned_replacement",
+        "day0_probability_authority": {
+            "probability_authority": (
+                "day0_conditioned_replacement_global_probability_v1"
+            ),
+            "q_source": "day0_conditioned_replacement",
+            "q_mode": "fast_residual_conditioned_replacement",
+            "posterior_id": 4242,
+            "probability_base_identity": "day0-base-1",
+            "global_current_observation_payload": observation,
+        },
+    }
+    payload["day0_observation_provenance_hash"] = stable_hash(
+        {
+            "city": payload["city"],
+            "target_date": payload["target_date"],
+            "metric": payload["metric"],
+            "settlement_source": payload["settlement_source"],
+            "station_id": payload["station_id"],
+            "configured_station_id": payload["configured_station_id"],
+            "raw_payload_sha256": payload["raw_payload_sha256"],
+            "observation_time": payload["observation_time"],
+            "observation_available_at": payload["observation_available_at"],
+        }
+    )
+
+    calibration, _clock = _day0_calibration_authority_payload_and_clock(
+        city=runtime_cities_by_name()[_CITY],
+        family=_family(),
+        payload=payload,
+        forecast_payload={"horizon_profile": "full"},
+        decision_time=DECISION_TIME,
+    )
+
+    assert calibration["city"] == _CITY
+    assert calibration["target_date"] == _TARGET_DATE
+    assert calibration["metric"] == _METRIC
+    _assert_event_bound_calibration_live_admitted(
+        SimpleNamespace(payload=calibration)
     )
 
 
