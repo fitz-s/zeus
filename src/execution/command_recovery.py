@@ -194,6 +194,16 @@ def scheduled_recovery_budget_seconds() -> float:
     return _full_sweep_budget_seconds()
 
 
+def _bounded_recovery_deadline(
+    scheduler_deadline: float | None,
+    local_budget_seconds: float,
+) -> float:
+    local_deadline = time.monotonic() + max(local_budget_seconds, 0.5)
+    if scheduler_deadline is None:
+        return local_deadline
+    return min(local_deadline, scheduler_deadline)
+
+
 def _full_background_recovery_quantum_slot() -> int:
     """Return a crash-stable slot for full-recovery apply quanta."""
 
@@ -23222,11 +23232,7 @@ def _recovery_apply_conn_factory(
                 )
 
                 coordinator = default_runtime_write_coordinator()
-                pending_monitor = getattr(
-                    coordinator,
-                    "has_pending_monitor_waiter",
-                    lambda _dbs: False,
-                )
+                pending_monitor = coordinator.has_pending_monitor_waiter
 
                 def _apply_progress_cancelled() -> int:
                     if time.monotonic() >= deadline_monotonic:
@@ -24265,6 +24271,7 @@ def _reconcile_passes_short_conn(
     scheduler_deadline = deadline_monotonic
     if scheduler_deadline is None and scope in {"live_tick", "full"}:
         scheduler_deadline = time.monotonic() + scheduled_recovery_budget_seconds()
+
     live_tick_deadline = None
     full_deadline = None
     if scope == "live_tick":
@@ -24480,7 +24487,10 @@ def _reconcile_passes_short_conn(
             # fact.  They globally force the allocator into reduce-only, so
             # reset them from durable truth before any venue or historical
             # maintenance work can consume the live-tick budget.
-            finding_deadline = time.monotonic() + max(live_tick_budget, 0.5)
+            finding_deadline = _bounded_recovery_deadline(
+                scheduler_deadline,
+                live_tick_budget,
+            )
             finding_conn_factory = _recovery_apply_conn_factory(
                 conn_factory,
                 scope="live_tick",
@@ -24507,7 +24517,10 @@ def _reconcile_passes_short_conn(
             summary["identity_bound_inflight_deferred"] = identity_submit_deferred
         preexisting_obligation_result = None
         if terminal_obligation_open:
-            obligation_deadline = time.monotonic() + max(live_tick_budget, 0.5)
+            obligation_deadline = _bounded_recovery_deadline(
+                scheduler_deadline,
+                live_tick_budget,
+            )
             obligation_conn_factory = _recovery_apply_conn_factory(
                 conn_factory,
                 scope="live_tick",
@@ -24570,7 +24583,10 @@ def _reconcile_passes_short_conn(
                     venue_order_id=venue_order_id,
                 )
             }
-            identity_deadline = time.monotonic() + max(live_tick_budget, 0.5)
+            identity_deadline = _bounded_recovery_deadline(
+                scheduler_deadline,
+                live_tick_budget,
+            )
             identity_conn_factory = _recovery_apply_conn_factory(
                 conn_factory,
                 scope="live_tick",
@@ -24625,7 +24641,10 @@ def _reconcile_passes_short_conn(
                 deadline_monotonic=scheduler_deadline,
             ),
         )
-        fast_deadline = time.monotonic() + max(live_tick_budget, 0.5)
+        fast_deadline = _bounded_recovery_deadline(
+            scheduler_deadline,
+            live_tick_budget,
+        )
         fast_conn_factory = _recovery_apply_conn_factory(
             conn_factory,
             scope="live_tick",
@@ -24776,7 +24795,10 @@ def _reconcile_passes_short_conn(
         ) as conn:
             if not _edli_entry_posterior_repair_candidates(conn):
                 return None
-        fast_deadline = time.monotonic() + max(live_tick_budget, 0.5)
+        fast_deadline = _bounded_recovery_deadline(
+            scheduler_deadline,
+            live_tick_budget,
+        )
         fast_conn_factory = _recovery_apply_conn_factory(
             conn_factory,
             scope="live_tick",

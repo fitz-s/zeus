@@ -15241,6 +15241,25 @@ def test_background_recovery_interrupt_is_classified_as_monitor_preemption(monke
     assert summary["db_lock_deferred_at"] == "historical_apply"
 
 
+def test_bounded_recovery_requires_monitor_preemption_capability(monkeypatch):
+    from src.execution import command_recovery
+    from src.state import write_coordinator as coordinator_module
+
+    monkeypatch.setattr(
+        coordinator_module,
+        "default_runtime_write_coordinator",
+        lambda: object(),
+    )
+    bounded_factory = command_recovery._recovery_apply_conn_factory(
+        lambda: sqlite3.connect(":memory:"),
+        scope="full",
+        deadline_monotonic=time.monotonic() + 5.0,
+    )
+
+    with pytest.raises(AttributeError, match="has_pending_monitor_waiter"):
+        bounded_factory()
+
+
 def test_cross_process_monitor_preempts_background_apply_without_partial_commit(
     monkeypatch,
     tmp_path,
@@ -15374,6 +15393,17 @@ def test_cross_process_monitor_reservation_blocks_background_loop(tmp_path):
     assert registered.wait(timeout=5)
 
     coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+    with pytest.raises(
+        WriteLeaseTimeout,
+        match="monitor waiter reservation",
+    ):
+        with coordinator.lease(
+            (DBIdentity.TRADE,),
+            owner="standard-after-monitor",
+            priority="standard",
+            deadline_ms=0,
+        ):
+            pytest.fail("STANDARD must not overtake a registered MONITOR")
     successes = 0
     for _ in range(157):
         try:

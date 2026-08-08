@@ -1445,6 +1445,15 @@ def test_live_tick_snapshot_uses_complete_account_truth_and_shared_deadline():
     }
 
 
+def test_lane_deadline_cannot_extend_scheduler_invocation(monkeypatch):
+    from src.execution import command_recovery
+
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: 10.0)
+
+    assert command_recovery._bounded_recovery_deadline(10.1, 5.0) == 10.1
+    assert command_recovery._bounded_recovery_deadline(None, 5.0) == 15.0
+
+
 def test_live_tick_apply_factory_interrupts_query_after_deadline(monkeypatch):
     from src.execution import command_recovery
 
@@ -27257,10 +27266,11 @@ def test_live_tick_identity_bound_matched_exit_outruns_account_snapshot(
         "capture_venue_read_snapshot",
         lambda *_args, **_kwargs: pytest.fail("broad account snapshot must be deferred"),
     )
-    monkeypatch.setattr(
-        command_recovery,
-        "_read_identity_bound_point_orders",
-        lambda order_ids: (
+    point_read_timeouts = []
+
+    def _point_orders(order_ids, *, timeout_seconds):
+        point_read_timeouts.append(timeout_seconds)
+        return (
             {
                 "ord-exit": {
                     "orderID": "ord-exit",
@@ -27272,13 +27282,19 @@ def test_live_tick_identity_bound_matched_exit_outruns_account_snapshot(
                 }
             },
             False,
-        ),
+        )
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_read_identity_bound_point_orders",
+        _point_orders,
     )
     client = MagicMock(spec_set=["get_order", "place_limit_order"])
 
     summary = command_recovery.reconcile_unresolved_commands(
         client=client,
         scope="live_tick",
+        deadline_monotonic=command_recovery.time.monotonic() + 1.0,
     )
 
     assert summary["identity_bound_inflight_fast"] == {
@@ -27289,6 +27305,8 @@ def test_live_tick_identity_bound_matched_exit_outruns_account_snapshot(
     }
     assert summary["venue_snapshot_deferred"] is True
     assert summary["deferred_full_sweep"] is True
+    assert len(point_read_timeouts) == 1
+    assert 0.0 < point_read_timeouts[0] <= 1.0
     client.get_order.assert_not_called()
     client.place_limit_order.assert_not_called()
     verified = _conn_factory()

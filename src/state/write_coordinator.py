@@ -495,6 +495,14 @@ class WriteCoordinator:
                             db=db,
                             owner=owner,
                         )
+                    else:
+                        monitor_waiter_fd = self._acquire_nonmonitor_reservation(
+                            db_path,
+                            deadline=deadline,
+                            db=db,
+                            owner=owner,
+                            blocking=True,
+                        )
                     if _priority_uses_turnstile(priority):
                         turnstile_fd = self._acquire_turnstile(
                             db_path,
@@ -687,28 +695,89 @@ class WriteCoordinator:
             if not owned:
                 os.close(fd)
 
-    @staticmethod
-    def _acquire_background_reservation(
+    def _acquire_nonmonitor_reservation(
+        self,
         db_path: Path,
         *,
+        deadline: float | None,
         db: DBIdentity,
         owner: str,
+        blocking: bool,
     ) -> int:
         path = writer_monitor_waiter_path(db_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
         owned = False
+        transferred = False
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            owned = True
-            return fd
-        except BlockingIOError as exc:
-            raise WriteLeaseTimeout(
-                f"DB writer monitor waiter reservation deferred for owner={owner} db={db.value}"
-            ) from exc
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    owned = True
+                except BlockingIOError as exc:
+                    if not blocking:
+                        raise WriteLeaseTimeout(
+                            "DB writer monitor waiter reservation deferred "
+                            f"for owner={owner} db={db.value}"
+                        ) from exc
+                    if deadline is not None and self._clock() >= deadline:
+                        raise WriteLeaseTimeout(
+                            "DB writer monitor waiter reservation timed out "
+                            f"for owner={owner} db={db.value}"
+                        ) from exc
+                else:
+                    # A MONITOR publishes its separate crash-safe intent before
+                    # waiting on this reservation.  A non-monitor that won the
+                    # reservation race must yield it when that intent is now
+                    # visible, closing the check/acquire race for STANDARD and
+                    # RECOVERY_CRITICAL writers as well as BACKGROUND.
+                    if not self._monitor_intent_locked(db_path):
+                        transferred = True
+                        return fd
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    finally:
+                        owned = False
+                    if not blocking:
+                        raise WriteLeaseTimeout(
+                            "DB writer monitor intent deferred "
+                            f"for owner={owner} db={db.value}"
+                        )
+                    if deadline is not None and self._clock() >= deadline:
+                        raise WriteLeaseTimeout(
+                            "DB writer monitor intent timed out "
+                            f"for owner={owner} db={db.value}"
+                        )
+                sleep_for = 0.01
+                if deadline is not None:
+                    sleep_for = max(
+                        0.001,
+                        min(sleep_for, deadline - self._clock()),
+                    )
+                self._sleep(sleep_for)
         finally:
-            if not owned:
+            if not transferred:
+                if owned:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    except BaseException:
+                        pass
                 os.close(fd)
+
+    def _acquire_background_reservation(
+        self,
+        db_path: Path,
+        *,
+        db: DBIdentity,
+        owner: str,
+    ) -> int:
+        return self._acquire_nonmonitor_reservation(
+            db_path,
+            deadline=self._clock(),
+            db=db,
+            owner=owner,
+            blocking=False,
+        )
 
     @staticmethod
     def _release_turnstile(fd: int) -> None:
