@@ -7021,6 +7021,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         "_entry_global_submit_suppression_reason",
         lambda: entry_suppression_reason[0],
     )
+    monkeypatch.setattr(era, "_entry_pause_blocks_live_submit", lambda _conn: None)
     def make_adapter(*, completion_reserved=False, fairness_reserved=False):
         return era.event_bound_live_adapter_from_trade_conn(
             trade,
@@ -21343,7 +21344,7 @@ def test_live_adapter_preflight_transports_rejected_entry_evidence(monkeypatch):
         ),
     )
 
-    assert result.status == "BATCH_BLOCKED"
+    assert result.status == "CANDIDATE_BLOCKED"
     assert result.rejection_receipt is not None
     assert result.rejection_receipt.event_id == event.event_id
     assert result.rejection_receipt.q_live == 0.72
