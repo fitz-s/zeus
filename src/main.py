@@ -6796,8 +6796,9 @@ def _edli_continuous_redecision_screen_cycle() -> None:
     _consume_live_control_commands()
     if _defer_for_held_position_monitor("edli_continuous_redecision_screen"):
         return
-    if _defer_for_active_entry_reactor("edli_redecision_screen"):
-        return
+    # A submitted maker rest is an existing venue obligation, not background
+    # discovery work.  It must keep re-deciding while new-entry computation is
+    # active; the screen's own lock and short DB transactions bound contention.
 
     from src.events.reactor import run_edli_continuous_redecision_screen_cycle
 

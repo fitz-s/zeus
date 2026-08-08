@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-08-06
+# Last reused or audited: 2026-08-08
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-08-06; last_reused=2026-08-06
+# Lifecycle: created=2026-05-19; last_reviewed=2026-08-08; last_reused=2026-08-08
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -7484,12 +7484,20 @@ def test_edli_command_recovery_runs_live_tick_during_active_redecision(monkeypat
     assert calls == ["live_tick"]
 
 
-def test_redecision_screen_defers_while_entry_reactor_is_active(monkeypatch) -> None:
+def test_redecision_screen_progresses_while_entry_reactor_is_active(monkeypatch) -> None:
+    """Submitted maker rests cannot starve behind new-entry computation."""
+
     import src.events.reactor as reactor_module
     import src.main as main_module
 
     calls: list[str] = []
-    monkeypatch.setattr(main_module, "_edli_reactor_active", lambda: True)
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_active_entry_reactor",
+        lambda _name: pytest.fail(
+            "resting-order redecision must not yield to the entry reactor"
+        ),
+    )
     monkeypatch.setattr(
         reactor_module,
         "run_edli_continuous_redecision_screen_cycle",
@@ -7498,7 +7506,7 @@ def test_redecision_screen_defers_while_entry_reactor_is_active(monkeypatch) -> 
 
     main_module._edli_continuous_redecision_screen_cycle()
 
-    assert calls == []
+    assert calls == ["screen"]
 
 
 @pytest.mark.parametrize(
