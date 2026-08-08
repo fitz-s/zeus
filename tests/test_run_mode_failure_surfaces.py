@@ -8936,9 +8936,11 @@ def test_exit_monitor_handoff_timeout_releases_priority_claim(monkeypatch) -> No
     import src.main as main_module
 
     calls: list[str] = []
+    observed_timeouts: list[float] = []
 
     class BusyReactorGate:
         def acquire(self, *, timeout: float) -> bool:
+            observed_timeouts.append(timeout)
             return False
 
     main_module._held_position_monitor_active.clear()
@@ -8957,10 +8959,52 @@ def test_exit_monitor_handoff_timeout_releases_priority_claim(monkeypatch) -> No
     assert main_module._exit_monitor_cycle() is False
 
     assert calls == []
+    assert observed_timeouts == [main_module._EXIT_MONITOR_REACTOR_HANDOFF_SECONDS]
     assert main_module._periodic_held_position_monitor_fairness_debt.is_set()
     assert not main_module._held_position_monitor_active.is_set()
     assert not main_module._held_position_monitor_handoff_pending.is_set()
     main_module._periodic_held_position_monitor_fairness_debt.clear()
+
+
+def test_recovery_full_book_handoff_returns_before_next_recovery_tick(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    observed_timeouts: list[float] = []
+
+    class BusyReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            observed_timeouts.append(timeout)
+            return False
+
+    main_module._held_position_monitor_active.clear()
+    main_module._periodic_held_position_monitor_fairness_debt.clear()
+    monkeypatch.setattr(
+        main_module,
+        "_current_periodic_monitor_obligation_count",
+        lambda: 1,
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyReactorGate())
+    monkeypatch.setattr(
+        exit_module,
+        "run_exit_monitor_cycle",
+        lambda **_kwargs: pytest.fail("busy reactor must not admit recovery writer"),
+    )
+    try:
+        assert main_module._exit_monitor_cycle(recovery_full_book=True) is False
+        assert observed_timeouts == [
+            main_module._URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
+        ]
+        assert observed_timeouts[0] < 30.0
+        assert main_module._periodic_held_position_monitor_fairness_debt.is_set()
+        assert not main_module._held_position_monitor_active.is_set()
+        assert not main_module._held_position_monitor_handoff_pending.is_set()
+        assert main_module._held_position_monitor_claim.acquire(blocking=False)
+        main_module._held_position_monitor_claim.release()
+    finally:
+        main_module._periodic_held_position_monitor_fairness_debt.clear()
 
 
 def test_periodic_full_book_timeout_fairness_debt_yields_reactor_until_coverage(
@@ -9249,7 +9293,7 @@ def test_durable_monitor_recovery_requires_canonical_refresh_after_retry(
             },
         )
     )
-    calls: list[str] = []
+    calls: list[object] = []
 
     class ReadOnlyConnection:
         def close(self) -> None:
@@ -9268,14 +9312,18 @@ def test_durable_monitor_recovery_requires_canonical_refresh_after_retry(
     monkeypatch.setattr(
         main_module,
         "_exit_monitor_cycle",
-        lambda: calls.append("monitor") or True,
+        lambda **kwargs: calls.append(("monitor", kwargs)) or True,
     )
 
     assert (
         main_module._durable_held_position_monitor_recovery_cycle.__wrapped__()
         is True
     )
-    assert calls == ["close", "monitor", "close"]
+    assert calls == [
+        "close",
+        ("monitor", {"recovery_full_book": True}),
+        "close",
+    ]
 
 
 def test_durable_monitor_recovery_arms_fairness_debt_when_reactor_stays_busy(
@@ -9288,6 +9336,7 @@ def test_durable_monitor_recovery_arms_fairness_debt_when_reactor_stays_busy(
 
     class BusyReactorGate:
         def acquire(self, *, timeout: float) -> bool:
+            assert timeout == main_module._URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
             return False
 
     class ReadOnlyConnection:

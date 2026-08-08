@@ -7795,6 +7795,7 @@ def _exit_monitor_cycle(
     target_families: frozenset[tuple[str, str, str]] | None = None,
     urgent_day0: bool = False,
     urgent_forecast: bool = False,
+    recovery_full_book: bool = False,
 ) -> bool:
     """Scheduler hook — body owned by src.execution.exit_lifecycle (R4-b
     extraction, 2026-07-08) as ``run_exit_monitor_cycle``. See that function's
@@ -7809,6 +7810,7 @@ def _exit_monitor_cycle(
 
     urgent_fact = urgent_day0 or urgent_forecast
     periodic_full_book = target_families is None and not urgent_fact
+    recovery_full_book = bool(recovery_full_book and periodic_full_book)
     if urgent_forecast and _day0_exit_monitor_priority_pending():
         logger.info("forecast exit monitor yielded to pending Day0 urgent wake")
         return False
@@ -7870,9 +7872,11 @@ def _exit_monitor_cycle(
         _periodic_held_position_monitor_handoff_pending.set()
     _held_position_monitor_active.set()
     try:
+        # Recovery repeats every 30s; a full normal handoff wait would occupy
+        # its entire slot and make max_instances=1 skip the next repair tick.
         handoff_timeout = (
             _URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
-            if urgent_fact
+            if urgent_fact or recovery_full_book
             else _EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
         )
         reactor_idle = _edli_reactor_active_lock.acquire(timeout=handoff_timeout)
@@ -8019,7 +8023,7 @@ def _durable_held_position_monitor_recovery_cycle() -> bool:
         or overdue.get("future_monitor_events")
         or [],
     )
-    _exit_monitor_cycle()
+    _exit_monitor_cycle(recovery_full_book=True)
 
     remaining = _evidence()
     remaining_overdue = int(
