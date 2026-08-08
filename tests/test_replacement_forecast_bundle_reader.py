@@ -910,17 +910,9 @@ def test_replacement_bundle_reader_hwm_cleanup_failure_is_not_masked(
     monkeypatch,
 ) -> None:
     class FaultedCleanupConnection:
-        def execute(self, sql):
-            if sql == "PRAGMA busy_timeout":
-                return type("Cursor", (), {"fetchone": lambda self: (10_000,)})()
-            if sql == "PRAGMA busy_timeout = 10000":
-                raise sqlite3.OperationalError("restore failed")
-            if sql.startswith("PRAGMA busy_timeout ="):
-                return None
-            raise AssertionError(sql)
-
-        def set_progress_handler(self, *_args):
-            return None
+        def set_progress_handler(self, callback, _instructions):
+            if callback is None:
+                raise sqlite3.OperationalError("handler cleanup failed")
 
     conn = _conn()
     posterior_id = _insert_posterior(conn)
@@ -946,6 +938,45 @@ def test_replacement_bundle_reader_hwm_cleanup_failure_is_not_masked(
             raw_input_hwm_deadline_monotonic=75.0,
             raw_input_hwm_read_max_seconds=5.0,
         )
+
+
+def test_replacement_bundle_reader_default_hwm_read_preserves_caller_handler(
+    monkeypatch,
+) -> None:
+    conn = _conn()
+    hwm_conn = sqlite3.connect(":memory:")
+    posterior_id = _insert_posterior(conn)
+    monkeypatch.setattr(
+        reader,
+        "replacement_live_input_lag_reason",
+        lambda *_args, **_kwargs: None,
+    )
+    hwm_conn.set_progress_handler(lambda: 1, 1)
+
+    result = read_replacement_forecast_bundle(
+        conn,
+        baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
+        readiness=_readiness(posterior_id=posterior_id),
+        city="Shanghai",
+        target_date="2026-06-07",
+        temperature_metric="high",
+        decision_time=_dt(4),
+        current_bin_topology_hash="topology-hash",
+        enforce_raw_input_hwm=True,
+        raw_input_hwm_conn=hwm_conn,
+    )
+
+    assert result.ok is True
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        hwm_conn.execute(
+            """
+            WITH RECURSIVE spin(value) AS (
+                SELECT 1 UNION ALL SELECT value + 1 FROM spin
+            )
+            SELECT SUM(value) FROM spin
+            """
+        ).fetchone()
+    hwm_conn.close()
 
 
 def test_current_value_serving_sqlite_interrupt_is_typed_and_chained() -> None:

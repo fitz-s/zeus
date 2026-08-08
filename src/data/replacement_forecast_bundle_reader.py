@@ -732,32 +732,32 @@ def read_replacement_forecast_bundle(
         if hwm_deadline is not None and time.monotonic() >= hwm_deadline:
             raw_lag_reason = "basis=HWM_READ_DEADLINE"
         else:
-            previous_busy_timeout = None
-            has_progress_handler = hasattr(hwm_conn, "set_progress_handler")
-            if has_progress_handler:
-                previous_busy_timeout = hwm_conn.execute(
-                    "PRAGMA busy_timeout"
-                ).fetchone()[0]
-            if raw_input_hwm_read_max_seconds is not None:
-                stage_deadline = time.monotonic() + max(
-                    0.0, float(raw_input_hwm_read_max_seconds)
-                )
-                hwm_deadline = (
-                    stage_deadline
-                    if hwm_deadline is None
-                    else min(hwm_deadline, stage_deadline)
-                )
+            managed_deadline = (
+                hwm_deadline is not None
+                or raw_input_hwm_read_max_seconds is not None
+            )
+            deadline_holder: list[float | None] = [None]
+            handler_installed = False
             try:
-                if hwm_deadline is not None and has_progress_handler:
-                    remaining_ms = max(
-                        0,
-                        int((hwm_deadline - time.monotonic()) * 1000.0),
-                    )
-                    hwm_conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
+                if managed_deadline and hasattr(hwm_conn, "set_progress_handler"):
                     hwm_conn.set_progress_handler(
-                        lambda: int(time.monotonic() >= hwm_deadline),
+                        lambda: int(
+                            deadline_holder[0] is not None
+                            and time.monotonic() >= deadline_holder[0]
+                        ),
                         1_000,
                     )
+                    handler_installed = True
+                if raw_input_hwm_read_max_seconds is not None:
+                    stage_deadline = time.monotonic() + max(
+                        0.0, float(raw_input_hwm_read_max_seconds)
+                    )
+                    hwm_deadline = (
+                        stage_deadline
+                        if hwm_deadline is None
+                        else min(hwm_deadline, stage_deadline)
+                    )
+                deadline_holder[0] = hwm_deadline
                 if hwm_deadline is not None and time.monotonic() >= hwm_deadline:
                     raw_lag_reason = "basis=HWM_READ_DEADLINE"
                 else:
@@ -777,20 +777,11 @@ def read_replacement_forecast_bundle(
                     ):
                         raw_lag_reason = "basis=HWM_READ_DEADLINE"
             finally:
-                if previous_busy_timeout is not None:
-                    cleanup_errors: list[Exception] = []
+                if handler_installed:
                     try:
                         hwm_conn.set_progress_handler(None, 0)
                     except Exception as exc:
-                        cleanup_errors.append(exc)
-                    try:
-                        hwm_conn.execute(
-                            f"PRAGMA busy_timeout = {int(previous_busy_timeout)}"
-                        )
-                    except Exception as exc:
-                        cleanup_errors.append(exc)
-                    if cleanup_errors:
-                        raise RuntimeError("HWM_READ_CLEANUP_FAILED") from cleanup_errors[0]
+                        raise RuntimeError("HWM_READ_CLEANUP_FAILED") from exc
         if raw_lag_reason is not None:
             return ReplacementForecastBundleReadResult(
                 "BLOCKED", f"REPLACEMENT_RAW_INPUT_HWM:{raw_lag_reason}"

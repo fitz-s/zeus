@@ -4796,6 +4796,14 @@ def _build_current_global_day0_family_snapshot(
                 _day0_snapshot_sqlite_read_deadline(forecasts, deadline_monotonic)
             )
             hwm_forecasts = get_forecasts_connection_read_only()
+            if hwm_deadline_monotonic is not None:
+                hwm_busy_ms = max(
+                    0,
+                    int((hwm_deadline_monotonic - time.monotonic()) * 1000.0),
+                )
+                hwm_forecasts.execute(
+                    f"PRAGMA busy_timeout = {min(1_000, hwm_busy_ms)}"
+                )
             _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
             row = world.execute(
                 """
