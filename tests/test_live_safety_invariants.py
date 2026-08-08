@@ -6107,15 +6107,22 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
 
 
 @pytest.mark.parametrize(
-    ("trigger", "has_position_coverage", "request_accepted", "outcome"),
     (
-        ("EDGE_REVERSAL", True, True, "delegated"),
-        ("EDGE_REVERSAL", False, True, "blocked"),
-        ("EDGE_REVERSAL", False, False, "request_failed"),
-        ("CI_OVERLAP_SELL_VALUE_DOMINATES", False, True, "blocked"),
-        ("SETTLEMENT_IMMINENT", False, True, "blocked"),
-        ("DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES", False, True, "direct"),
-        ("RED_FORCE_EXIT", True, True, "direct"),
+        "trigger",
+        "has_position_coverage",
+        "request_accepted",
+        "outcome",
+        "malformed_request",
+    ),
+    (
+        ("EDGE_REVERSAL", True, True, "delegated", False),
+        ("EDGE_REVERSAL", False, True, "blocked", False),
+        ("EDGE_REVERSAL", False, False, "request_failed", False),
+        ("CI_OVERLAP_SELL_VALUE_DOMINATES", False, True, "blocked", False),
+        ("SETTLEMENT_IMMINENT", False, True, "blocked", False),
+        ("DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES", False, True, "direct", False),
+        ("RED_FORCE_EXIT", True, True, "direct", False),
+        ("EDGE_REVERSAL", False, True, "blocked", True),
     ),
 )
 def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_red(
@@ -6125,6 +6132,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     has_position_coverage,
     request_accepted,
     outcome,
+    malformed_request,
 ):
     """Statistical SELL is global-only; missing authority holds while RED acts."""
     from src.contracts import EdgeContext, EntryMethod
@@ -6265,11 +6273,52 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     )
     execute_calls = []
     auction_completion_requests = []
+    published_requests = []
+    reserved_requests = []
+    event_order = []
+
+    real_emit_monitor_refreshed = (
+        cycle_runtime._emit_monitor_refreshed_canonical_if_available
+    )
+
+    def emit_monitor_refreshed_then_mark(*args, **kwargs):
+        result = real_emit_monitor_refreshed(*args, **kwargs)
+        if result:
+            event_order.append("canonical_monitor_refreshed")
+        return result
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        emit_monitor_refreshed_then_mark,
+    )
+
+    monkeypatch.setattr(
+        event_reactor,
+        "publish_prepared_global_auction_completion",
+        lambda **kwargs: (
+            event_order.append("publish"),
+            published_requests.append(kwargs["prepared_request"]),
+            True,
+        )[-1],
+    )
+    if request_accepted:
+        monkeypatch.setattr(
+            "src.execution.exit_lifecycle.record_global_sell_reauction_reserved",
+            lambda _conn, position: reserved_requests.append(position.trade_id) or True,
+        )
+
     def request_global_completion(**kwargs):
         auction_completion_requests.append(kwargs)
+        if malformed_request:
+            return True, SimpleNamespace(
+                request_id="request-global-auction-owned-sell-malformed"
+            )
         if not request_accepted:
             return False, SimpleNamespace(
                 request_id="request-global-auction-owned-sell-failed",
+                material_identity="material-global-auction-owned-sell",
+                attempt_identity="attempt-global-auction-owned-sell",
                 schema_version=4,
                 scope_identity="scope-global-auction-owned-sell",
                 generation="generation-global-auction-owned-sell",
@@ -6283,7 +6332,20 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
                 book_state="EXECUTABLE",
             )
         return True, SimpleNamespace(
-            request_id="request-global-auction-owned-sell"
+            request_id="request-global-auction-owned-sell",
+            material_identity="material-global-auction-owned-sell",
+            attempt_identity="attempt-global-auction-owned-sell",
+            schema_version=4,
+            scope_identity="scope-global-auction-owned-sell",
+            generation="generation-global-auction-owned-sell",
+            position_id=pos.trade_id,
+            family=(pos.city, pos.target_date, pos.temperature_metric),
+            held_token_id="paris-no",
+            probability_content_identity="probability-content-current",
+            probability_observed_at="2026-07-14T18:00:00+00:00",
+            held_best_bid=0.49,
+            bid_observed_at="2026-07-14T18:00:00+00:00",
+            book_state="EXECUTABLE",
         )
 
     monkeypatch.setattr(
@@ -6347,6 +6409,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             "SELECT COUNT(*) FROM venue_commands WHERE intent_kind = 'EXIT'"
         ).fetchone()[0] == 0
     elif outcome in {"blocked", "request_failed"}:
+        completion_accepted = request_accepted and not malformed_request
         assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
         assert (
             summary["monitor_statistical_sells_blocked_without_global_authority"]
@@ -6354,14 +6417,11 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         )
         assert summary["exits"] == 0
         assert results[0].should_exit is False
-        assert (
-            results[0].exit_reason
-            == "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
-        )
+        assert results[0].exit_reason == "GLOBAL_REAUCTION_PENDING"
         assert "local_statistical_sell_non_authoritative_record" in pos.applied_validations
         request_status = (
             "global_auction_completion_requested"
-            if request_accepted
+            if completion_accepted
             else "global_auction_completion_request_failed"
         )
         assert request_status in pos.applied_validations
@@ -6371,18 +6431,65 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         )
         assert (
             "global_auction_completion_debt:"
-            + ("DRAIN_PENDING" if request_accepted else "REQUEST_REJECTED")
+            + ("DRAIN_PENDING" if completion_accepted else "REQUEST_REJECTED")
         ) in pos.applied_validations
         assert (
             "global_auction_completion_monitor_identity:"
             "global-auction-owned-sell:monitor_refreshed:"
             "2026-07-14T18:00:00+00:00"
         ) in pos.applied_validations
-        if request_accepted:
+        assert "GLOBAL_REAUCTION_PENDING" in pos.applied_validations
+        if completion_accepted:
             assert (
                 "global_auction_completion_request_id:"
                 "request-global-auction-owned-sell"
             ) in pos.applied_validations
+            payload = json.loads(
+                conn.execute(
+                    """
+                    SELECT payload_json FROM position_events
+                     WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
+                     ORDER BY sequence_no DESC LIMIT 1
+                    """,
+                    (pos.trade_id,),
+                ).fetchone()[0]
+            )
+            obligation = payload["held_sell_reauction_obligation"]
+            assert obligation["state"] == "ARMED"
+            assert obligation["request_id"] == "request-global-auction-owned-sell"
+            assert obligation["material_identity"] == (
+                "material-global-auction-owned-sell"
+            )
+            assert obligation["attempt_identity"] == (
+                "attempt-global-auction-owned-sell"
+            )
+            armed_at = datetime.fromisoformat(obligation["armed_at"])
+            deadline = datetime.fromisoformat(obligation["completion_deadline_at"])
+            assert (deadline - armed_at).total_seconds() == 30.0
+            assert published_requests[0].request_id == obligation["request_id"]
+            assert reserved_requests == [pos.trade_id]
+            assert event_order == ["canonical_monitor_refreshed", "publish"]
+        elif malformed_request:
+            assert (
+                "global_auction_completion_request_failed"
+                in pos.applied_validations
+            )
+            assert "global_auction_completion_debt:DRAIN_PENDING" not in (
+                pos.applied_validations
+            )
+            payload = json.loads(
+                conn.execute(
+                    """
+                    SELECT payload_json FROM position_events
+                     WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
+                     ORDER BY sequence_no DESC LIMIT 1
+                    """,
+                    (pos.trade_id,),
+                ).fetchone()[0]
+            )
+            assert "held_sell_reauction_obligation" not in payload
+            assert published_requests == []
+            assert reserved_requests == []
         else:
             assert (
                 "global_auction_completion_request_id:"
@@ -6423,7 +6530,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             assert needs_global_sell_snapshot_reauction(pos, conn) is False
         request_summary_key = (
             "monitor_statistical_sell_auction_completion_requested"
-            if request_accepted
+            if completion_accepted
             else "monitor_statistical_sell_auction_completion_request_failed"
         )
         assert summary[request_summary_key] == 1
@@ -6443,6 +6550,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
                 "held_best_bid": 0.49,
                 "bid_observed_at": "2026-07-14T18:00:00+00:00",
                 "return_request": True,
+                "prepare_only": True,
             }
         ]
         assert execute_calls == []
@@ -6459,6 +6567,251 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert auction_completion_requests == []
     assert invalidations == ([] if outcome != "direct" else ["venue_side_effect"])
     conn.close()
+
+
+def test_global_sell_reauction_publish_failure_recovers_exact_armed_obligation_once(
+    tmp_path,
+    monkeypatch,
+):
+    """A committed ARMED outbox re-wakes the same V4 attempt after a crash."""
+    from src.engine import lifecycle_events
+    from src.events import reactor
+    from src.runtime import reactor_wake
+    from src.state.db import append_many_and_project, get_connection, init_schema
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    conn = get_connection(tmp_path / "global-reauction-outbox-recovery.db")
+    init_schema(conn)
+    position = _make_position(
+        trade_id="global-reauction-outbox-recovery",
+        state="holding",
+        city="Paris",
+        target_date="2026-08-08",
+        direction="buy_yes",
+        shares=10.0,
+        shares_filled=10.0,
+        chain_state="synced",
+        chain_shares=10.0,
+        strategy_key="center_buy",
+        entered_at="2026-08-08T17:00:00+00:00",
+        token_id="paris-yes-outbox",
+        no_token_id="paris-no-outbox",
+        condition_id="0x" + "6b" * 32,
+    )
+    entry_events, entry_projection = lifecycle_events.build_entry_canonical_write(
+        position,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        decision_id="decision-global-reauction-outbox-recovery",
+        source_module="tests/test_live_safety_invariants",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    conn.commit()
+
+    wake_path = tmp_path / "reactor-wake.json"
+    prepared_result = reactor.request_global_auction_completion(
+        reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+        position_id=position.trade_id,
+        family=(position.city, position.target_date, position.temperature_metric),
+        probability_content_identity="q-outbox-current",
+        held_token_id=position.token_id,
+        held_best_bid=0.49,
+        bid_observed_at="2026-08-08T18:00:00+00:00",
+        book_state="EXECUTABLE",
+        probability_observed_at="2026-08-08T18:00:00+00:00",
+        schema_version=4,
+        wake_path=wake_path,
+        return_request=True,
+        prepare_only=True,
+    )
+    assert prepared_result[0] is True
+    prepared = prepared_result[1]
+    assert prepared is not None
+    armed_at = datetime(2026, 8, 8, 17, 59, tzinfo=timezone.utc)
+    obligation = {
+        field: getattr(prepared, field)
+        for field in (
+            "request_id",
+            "material_identity",
+            "attempt_identity",
+            "scope_identity",
+            "generation",
+            "position_id",
+            "family",
+            "held_token_id",
+            "probability_content_identity",
+            "probability_observed_at",
+            "held_best_bid",
+            "bid_observed_at",
+            "book_state",
+            "schema_version",
+        )
+    }
+    obligation.update(
+        {
+            "state": "ARMED",
+            "armed_at": armed_at.isoformat(),
+            "completion_deadline_at": (
+                armed_at + timedelta(seconds=30)
+            ).isoformat(),
+        }
+    )
+    position._held_sell_reauction_obligation = obligation
+    position.last_monitor_at = armed_at.isoformat()
+    position.last_monitor_prob = 0.51
+    position.last_monitor_prob_is_fresh = True
+    position.last_monitor_market_price = 0.50
+    position.last_monitor_market_price_is_fresh = True
+    monitor_events, monitor_projection = (
+        lifecycle_events.build_monitor_refreshed_canonical_write(
+            position,
+            sequence_no=(
+                conn.execute(
+                    "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events WHERE position_id = ?",
+                    (position.trade_id,),
+                ).fetchone()[0]
+            ),
+            phase_after=LifecyclePhase.ACTIVE.value,
+            occurred_at=armed_at.isoformat(),
+            exit_decision=ExitDecision(
+                False,
+                "GLOBAL_REAUCTION_PENDING",
+                applied_validations=["GLOBAL_REAUCTION_PENDING"],
+            ),
+            final_should_exit=False,
+            final_exit_reason="GLOBAL_REAUCTION_PENDING",
+        )
+    )
+    append_many_and_project(conn, monitor_events, monitor_projection)
+    conn.commit()
+
+    real_publish = reactor_wake.publish_reactor_wake
+
+    def fail_publish(**_kwargs):
+        raise OSError("simulated crash after canonical commit")
+
+    monkeypatch.setattr(reactor_wake, "publish_reactor_wake", fail_publish)
+    assert (
+        reactor.publish_prepared_global_auction_completion(
+            reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+            prepared_request=prepared,
+            wake_path=wake_path,
+        )
+        is False
+    )
+    monkeypatch.setattr(reactor_wake, "publish_reactor_wake", real_publish)
+
+    recovered = []
+
+    def recover_request(position, force_new_generation):
+        restored = position._held_sell_reauction_obligation
+        result = reactor.request_global_auction_completion(
+            reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+            position_id=restored["position_id"],
+            family=tuple(restored["family"]),
+            probability_content_identity=restored["probability_content_identity"],
+            held_token_id=restored["held_token_id"],
+            held_best_bid=restored["held_best_bid"],
+            bid_observed_at=restored["bid_observed_at"],
+            book_state=restored["book_state"],
+            probability_observed_at=restored["probability_observed_at"],
+            generation=restored["generation"],
+            scope_identity=restored["scope_identity"],
+            schema_version=restored["schema_version"],
+            wake_path=wake_path,
+            force_new_generation=force_new_generation,
+            return_request=True,
+        )
+        recovered.append(result[1])
+        return bool(result[0])
+
+    from src.execution.exit_lifecycle import recover_global_sell_snapshot_reauction_debt
+
+    assert recover_global_sell_snapshot_reauction_debt(
+        position,
+        conn=conn,
+        requester=recover_request,
+    ) is True
+    assert len(recovered) == 1
+    assert recovered[0].request_id == prepared.request_id
+    assert recovered[0].material_identity == prepared.material_identity
+    assert recovered[0].attempt_identity == prepared.attempt_identity
+    assert recovered[0].scope_identity == prepared.scope_identity
+    assert recovered[0].generation == prepared.generation
+    assert position.state == "holding"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()[0] == 0
+    assert recover_global_sell_snapshot_reauction_debt(
+        position,
+        conn=conn,
+        requester=recover_request,
+    ) is False
+    assert len(recovered) == 1
+    conn.close()
+
+
+def test_global_sell_reauction_same_generation_attempt_refresh_is_publishable(
+    tmp_path,
+):
+    """A fresher q/book attempt replaces an older queued attempt in one scope."""
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    wake_path = tmp_path / "reactor-wake-attempt-refresh.json"
+    common = {
+        "reason": "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
+        "position_id": "global-reauction-attempt-refresh",
+        "family": ("Paris", "2026-08-08", "high"),
+        "probability_content_identity": "q-attempt-refresh",
+        "held_token_id": "paris-yes-attempt-refresh",
+        "book_state": "EXECUTABLE",
+        "schema_version": 4,
+        "wake_path": wake_path,
+        "return_request": True,
+        "prepare_only": True,
+    }
+    first_result = reactor.request_global_auction_completion(
+        **common,
+        held_best_bid=0.49,
+        bid_observed_at="2026-08-08T18:00:00+00:00",
+        probability_observed_at="2026-08-08T18:00:00+00:00",
+    )
+    first = first_result[1]
+    assert first_result[0] is True
+    assert first is not None
+    assert reactor.publish_prepared_global_auction_completion(
+        reason=common["reason"],
+        prepared_request=first,
+        wake_path=wake_path,
+    ) is True
+
+    second_result = reactor.request_global_auction_completion(
+        **common,
+        scope_identity=first.scope_identity,
+        generation=first.generation,
+        held_best_bid=0.47,
+        bid_observed_at="2026-08-08T18:00:30+00:00",
+        probability_observed_at="2026-08-08T18:00:30+00:00",
+    )
+    second = second_result[1]
+    assert second_result[0] is True
+    assert second is not None
+    assert second.generation == first.generation
+    assert second.attempt_identity != first.attempt_identity
+    assert reactor.publish_prepared_global_auction_completion(
+        reason=common["reason"],
+        prepared_request=second,
+        wake_path=wake_path,
+    ) is True
+    latest = reactor_wake.latest_v4_held_sell_reauction_request(
+        first.scope_identity,
+        path=wake_path,
+    )
+    assert latest is not None
+    assert latest.generation == first.generation
+    assert latest.attempt_identity == second.attempt_identity
+    assert latest.held_best_bid == pytest.approx(0.47)
 
 
 def test_global_holding_coverage_requires_exact_position_wealth_and_current_book(

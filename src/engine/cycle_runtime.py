@@ -135,6 +135,7 @@ _HELD_POSITION_MONITOR_DEGRADED_COVERAGE_CYCLES = 3
 _MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS = 50
 _MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS = 100
 _MONITOR_CANONICAL_WRITE_RETRY_DEADLINE_MS = 100
+_HELD_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS = 30.0
 
 
 def _held_position_monitor_reservation_count(position_count: int) -> int:
@@ -5689,6 +5690,59 @@ def execute_monitoring_phase(
     portfolio_dirty = False
     tracker_dirty = False
 
+    def arm_global_sell_reauction_obligation(
+        position,
+        request: object,
+    ) -> dict[str, object]:
+        """Build the canonical position-scoped outbox for one exact V4 request."""
+
+        armed_at = (
+            deps._utcnow()
+            if callable(getattr(deps, "_utcnow", None))
+            else datetime.now(timezone.utc)
+        )
+        if armed_at.tzinfo is None:
+            armed_at = armed_at.replace(tzinfo=timezone.utc)
+        else:
+            armed_at = armed_at.astimezone(timezone.utc)
+        armed_at_text = armed_at.isoformat()
+        deadline_text = (
+            armed_at
+            + timedelta(seconds=_HELD_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS)
+        ).isoformat()
+        fields = (
+            "request_id",
+            "material_identity",
+            "attempt_identity",
+            "scope_identity",
+            "generation",
+            "position_id",
+            "family",
+            "held_token_id",
+            "probability_content_identity",
+            "probability_observed_at",
+            "held_best_bid",
+            "bid_observed_at",
+            "book_state",
+            "schema_version",
+        )
+        obligation = {
+            field: getattr(request, field, None)
+            for field in fields
+        }
+        obligation.update(
+            {
+                "state": "ARMED",
+                "armed_at": armed_at_text,
+                "completion_deadline_at": deadline_text,
+            }
+        )
+        if not obligation.get("position_id"):
+            obligation["position_id"] = str(
+                getattr(position, "trade_id", "") or ""
+            )
+        return obligation
+
     def request_global_sell_snapshot_reauction(
         position,
         force_new_generation: bool = False,
@@ -5717,6 +5771,35 @@ def execute_monitoring_phase(
                 )
                 or ""
             ).strip()
+            if (
+                int(obligation.get("schema_version") or 4) == 4
+                and obligation.get("scope_identity")
+                and obligation.get("generation")
+                and obligation.get("attempt_identity")
+            ):
+                from src.runtime.reactor_wake import (
+                    latest_v4_held_sell_reauction_request,
+                )
+
+                latest_request = latest_v4_held_sell_reauction_request(
+                    str(obligation["scope_identity"])
+                )
+                if latest_request is not None and (
+                    latest_request.generation
+                    != str(obligation["generation"])
+                    or latest_request.attempt_identity
+                    != str(obligation["attempt_identity"])
+                ):
+                    # SCOPE: this canonical position-scoped attempt. DRAIN: a
+                    # later canonical attempt owns the lineage. RESET: never
+                    # downgrade a fresher q/book attempt during recovery.
+                    summary["global_sell_snapshot_reauction_stale_recovery"] = (
+                        summary.get(
+                            "global_sell_snapshot_reauction_stale_recovery", 0
+                        )
+                        + 1
+                    )
+                    return False
             durable_request_accepted = request_global_auction_completion(
                 reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
                 position_id=str(
@@ -6301,6 +6384,8 @@ def execute_monitoring_phase(
     deadline_rescue_used = False
 
     for position_index, pos in enumerate(monitor_positions):
+        armed_obligation = None
+        completion_request = None
         if urgent_preemption_requested():
             deferred_count = len(monitor_positions) - position_index
             summary["held_monitor_preempted"] = True
@@ -7327,17 +7412,13 @@ def execute_monitoring_phase(
                     held_best_bid=exit_context.best_bid,
                     bid_observed_at=str(getattr(pos, "last_monitor_at", "") or ""),
                     return_request=True,
+                    prepare_only=True,
                 )
                 if isinstance(completion_result, tuple):
                     completion_requested, completion_request = completion_result
                 else:
                     completion_requested = bool(completion_result)
                     completion_request = None
-                authority_outcome = (
-                    GlobalHoldingCoverageOutcome.DRAIN_PENDING
-                    if completion_requested
-                    else GlobalHoldingCoverageOutcome.REQUEST_REJECTED
-                )
                 monitor_identity = (
                     f"{getattr(pos, 'trade_id', '')}:monitor_refreshed:"
                     f"{getattr(pos, 'last_monitor_at', '')}"
@@ -7345,36 +7426,54 @@ def execute_monitoring_phase(
                 request_id = str(
                     getattr(completion_request, "request_id", "") or ""
                 ).strip()
-                if not completion_requested and completion_request is not None:
-                    obligation = {
-                        field: getattr(completion_request, field, None)
-                        for field in (
-                            "schema_version",
-                            "scope_identity",
-                            "generation",
-                            "position_id",
-                            "family",
-                            "held_token_id",
-                            "probability_content_identity",
-                            "probability_observed_at",
-                            "held_best_bid",
-                            "bid_observed_at",
-                            "book_state",
-                        )
-                    }
+                armed_obligation = None
+                if completion_request is not None:
+                    obligation = arm_global_sell_reauction_obligation(
+                        pos,
+                        completion_request,
+                    )
                     required_obligation_fields = (
+                        "request_id",
+                        "material_identity",
+                        "attempt_identity",
                         "scope_identity",
                         "generation",
                         "position_id",
                         "held_token_id",
                     )
-                    if all(
+                    try:
+                        is_v4_request = int(
+                            obligation.get("schema_version") or 0
+                        ) == 4
+                    except (TypeError, ValueError):
+                        is_v4_request = False
+                    if is_v4_request and all(
                         str(obligation.get(field) or "").strip()
                         for field in required_obligation_fields
                     ):
                         setattr(pos, "_held_sell_reauction_obligation", obligation)
+                        armed_obligation = obligation
+                completion_accepted = bool(
+                    completion_requested and armed_obligation is not None
+                )
+                if completion_requested and not completion_accepted:
+                    summary[
+                        "monitor_statistical_sell_auction_malformed_request"
+                    ] = summary.get(
+                        "monitor_statistical_sell_auction_malformed_request", 0
+                    ) + 1
+                completion_requested = completion_accepted
+                authority_outcome = (
+                    GlobalHoldingCoverageOutcome.DRAIN_PENDING
+                    if completion_accepted
+                    else GlobalHoldingCoverageOutcome.REQUEST_REJECTED
+                )
                 should_exit = False
-                exit_reason = "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
+                # SCOPE: this exact position-scoped global reauction debt.
+                # DRAIN: the committed V4 wake and its terminal global receipt.
+                # RESET: ACTUATED/CAPITAL_REJECTED/POSITION_NO_LONGER_EXPOSED
+                # receipt for this immutable request generation.
+                exit_reason = "GLOBAL_REAUCTION_PENDING"
                 completion_validations = [
                     (
                         "global_auction_completion_requested"
@@ -7393,6 +7492,7 @@ def execute_monitoring_phase(
                         "global_auction_completion_monitor_identity:"
                         f"{monitor_identity}"
                     ),
+                    "GLOBAL_REAUCTION_PENDING",
                 ]
                 if request_id:
                     completion_validations.append(
@@ -7481,6 +7581,56 @@ def execute_monitoring_phase(
                     )
                 else:
                     continue
+
+            if (
+                monitor_canonical_written
+                and armed_obligation is not None
+                and completion_request is not None
+                and completion_requested
+            ):
+                from src.events.reactor import (
+                    publish_prepared_global_auction_completion,
+                )
+                from src.execution.exit_lifecycle import (
+                    record_global_sell_reauction_reserved,
+                )
+
+                published = publish_prepared_global_auction_completion(
+                    reason=(
+                        "GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE"
+                    ),
+                    prepared_request=completion_request,
+                )
+                if published:
+                    reserved = record_global_sell_reauction_reserved(conn, pos)
+                    if reserved:
+                        try:
+                            conn.commit()
+                        except Exception:  # noqa: BLE001 - recovery retries the debt.
+                            conn.rollback()
+                            reserved = False
+                    if not reserved:
+                        summary[
+                            "monitor_statistical_sell_auction_reserved_write_failed"
+                        ] = summary.get(
+                            "monitor_statistical_sell_auction_reserved_write_failed",
+                            0,
+                        ) + 1
+                else:
+                    pos.applied_validations = list(
+                        dict.fromkeys(
+                            [
+                                *(pos.applied_validations or []),
+                                "global_auction_completion_publish_failed",
+                            ]
+                        )
+                    )
+                    summary[
+                        "monitor_statistical_sell_auction_completion_publish_failed"
+                    ] = summary.get(
+                        "monitor_statistical_sell_auction_completion_publish_failed",
+                        0,
+                    ) + 1
 
             if monitor_canonical_written:
                 monitor_fresh_prob, monitor_fresh_edge = _current_monitor_result_probability_and_edge(pos)

@@ -6582,6 +6582,7 @@ def request_global_auction_completion(
     wake_path: Path | None = None,
     force_new_generation: bool = False,
     return_request: bool = False,
+    prepare_only: bool = False,
 ) -> bool | tuple[bool, object | None]:
     """Persistently reserve one complete global cut for a held SELL.
 
@@ -6828,6 +6829,13 @@ def request_global_auction_completion(
         logger = logging.getLogger("zeus.events.reactor")
     if force_new_generation:
         durable_request_exists = False
+    if prepare_only:
+        # SCOPE: prepare exactly this held-position V4 request without making a
+        # wake visible. DRAIN: the caller commits its position-scoped outbox
+        # first, then calls publish_prepared_global_auction_completion().
+        # RESET: the canonical terminal receipt or position-no-longer-exposed
+        # proof retires this same request generation.
+        return (True, held_request) if return_request else True
     if not durable_request_exists or context_upgrade or attempt_refresh:
         try:
             publish_reactor_wake(
@@ -6846,6 +6854,79 @@ def request_global_auction_completion(
             )
             return (False, held_request) if return_request else False
     return (True, held_request) if return_request else True
+
+
+def publish_prepared_global_auction_completion(
+    *,
+    reason: str,
+    prepared_request: object,
+    wake_path: Path | None = None,
+) -> bool:
+    """Publish one already prepared V4 held-SELL request without rebinding it."""
+
+    request_id = str(getattr(prepared_request, "request_id", "") or "").strip()
+    material_identity = str(
+        getattr(prepared_request, "material_identity", "") or ""
+    ).strip()
+    generation = str(getattr(prepared_request, "generation", "") or "").strip()
+    attempt_identity = str(
+        getattr(prepared_request, "attempt_identity", "") or ""
+    ).strip()
+    scope_identity = str(
+        getattr(prepared_request, "scope_identity", "") or ""
+    ).strip()
+    if not all((request_id, material_identity, generation, attempt_identity, scope_identity)):
+        logging.getLogger("zeus.events.reactor").warning(
+            "prepared held SELL reauction request is incomplete: reason=%s",
+            str(reason or "authority_unavailable"),
+        )
+        return False
+    try:
+        from src.runtime.reactor_wake import (
+            latest_v4_held_sell_reauction_request,
+            publish_reactor_wake,
+            v4_held_sell_reauction_request_is_queued,
+        )
+
+        latest = latest_v4_held_sell_reauction_request(
+            scope_identity,
+            path=wake_path,
+        )
+        if latest is not None and latest.generation != generation:
+            # SCOPE: the exact prepared scope and generation. DRAIN: a newer
+            # generation owns the next immutable obligation. RESET: never let
+            # an old generation overwrite a newer lineage.
+            return False
+        if (
+            latest is not None
+            and latest.attempt_identity == attempt_identity
+            and v4_held_sell_reauction_request_is_queued(
+                latest,
+                path=wake_path,
+            )
+        ):
+            return True
+        family = tuple(getattr(prepared_request, "family", ()) or ())
+        clean_family = tuple(
+            str(value or "").strip().lower()
+            if index == 2
+            else str(value or "").strip()
+            for index, value in enumerate(family)
+        )
+        publish_reactor_wake(
+            source="held_position_monitor",
+            reason=GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+            path=wake_path,
+            forecast_families=(clean_family,) if len(clean_family) == 3 else (),
+            held_sell_reauction_requests=(prepared_request,),
+        )
+        return True
+    except (OSError, TypeError, ValueError):
+        logging.getLogger("zeus.events.reactor").exception(
+            "prepared held SELL global-auction wake publish failed: reason=%s",
+            str(reason or "authority_unavailable"),
+        )
+        return False
 
 
 def _held_sell_reauction_receipts_from_global_cut(

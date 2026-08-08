@@ -8563,7 +8563,12 @@ def record_global_sell_reauction_reserved(
                     "release_reason": (
                         "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
                     ),
+                    "held_sell_reauction_obligation": dict(
+                        getattr(position, "_held_sell_reauction_obligation", {})
+                        or {}
+                    ),
                 },
+                default=str,
                 sort_keys=True,
             ),
         }
