@@ -1525,12 +1525,18 @@ def _assert_envelope_gate(
     if _decimal(row["size"]) != _decimal(size):
         raise ValueError("venue command size does not match provenance envelope size")
     order_type = str(row["order_type"] or "").strip().upper()
-    if not bool(row["post_only"]) or order_type not in {"GTC", "GTD"}:
+    maker = bool(row["post_only"]) and order_type in {"GTC", "GTD"}
+    marketable_sell = (
+        str(row["side"]) == "SELL"
+        and not bool(row["post_only"])
+        and order_type == "FAK"
+    )
+    if not (maker or marketable_sell):
         # INV-47 SCOPE: only this token/side command is rejected.
-        # DRAIN: the next decision may persist a certified maker-only envelope.
-        # RESET: no latch is stored; legal GTC/GTD post-only passes immediately.
+        # DRAIN: the next decision may persist a certified execution envelope.
+        # RESET: no latch is stored; a legal maker or SELL FAK passes.
         raise ValueError(
-            "live fill price is unbounded for persisted taker-capable order: "
+            "live execution mode is invalid for persisted order: "
             f"order_type={order_type or 'ABSENT'}:post_only={bool(row['post_only'])}"
         )
     if isinstance(snapshot_id, str) and snapshot_id.strip():

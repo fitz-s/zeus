@@ -126,15 +126,16 @@ def _live_sell_limit_price(
     deepest_bid: Decimal,
     min_tick: Decimal,
 ) -> Decimal | None:
-    """Return a legal SELL floor only when every crossing bid is in band."""
+    """Return a legal SELL floor for probability-domain counterparty bids."""
 
     if (
-        not _live_unit_price_in_band(best_bid)
-        or not _live_unit_price_in_band(deepest_bid)
+        not best_bid.is_finite()
+        or not deepest_bid.is_finite()
+        or not 0 < deepest_bid <= best_bid <= Decimal("1")
     ):
         return None
     aligned = (
-        deepest_bid / min_tick
+        min(deepest_bid, LIVE_ORDER_MAX_UNIT_PRICE) / min_tick
     ).to_integral_value(rounding=ROUND_FLOOR) * min_tick
     return aligned if aligned >= LIVE_ORDER_MIN_UNIT_PRICE else None
 
@@ -315,6 +316,92 @@ def passive_sell_proposal_curve(
         min_tick=curve.min_tick,
         min_order_size=curve.min_order_size,
         quote_ttl=curve.quote_ttl,
+    )
+
+
+def marketable_sell_proposal_curve(
+    curve: ExecutableSellCurve,
+    *,
+    capacity: Decimal,
+) -> ExecutableSellCurve | None:
+    """Preserve venue BID economics for a SELL submitted at a legal floor.
+
+    The public BID is counterparty liquidity, not our submitted unit price.  A
+    bid above the live submission ceiling is therefore strictly better SELL
+    liquidity: submit the highest tick-aligned legal floor and accept venue
+    price improvement.  Only levels crossable by that floor participate in the
+    immediate-fill certificate.
+    """
+
+    requested_capacity = Decimal(capacity)
+    if not requested_capacity.is_finite() or requested_capacity <= 0:
+        return None
+    limit = (
+        LIVE_ORDER_MAX_UNIT_PRICE / Decimal(curve.min_tick)
+    ).to_integral_value(rounding=ROUND_FLOOR) * Decimal(curve.min_tick)
+    if not _live_unit_price_in_band(limit):
+        return None
+    remaining = requested_capacity
+    levels: list[BookLevel] = []
+    for level in curve.levels:
+        if level.price < limit or remaining <= 0:
+            break
+        take = min(remaining, Decimal(level.size))
+        if take > 0:
+            levels.append(BookLevel(price=level.price, size=take))
+            remaining -= take
+    if not levels or curve.levels[0].price <= LIVE_ORDER_MAX_UNIT_PRICE:
+        return None
+    return ExecutableSellCurve(
+        token_id=curve.token_id,
+        side=curve.side,
+        snapshot_id=curve.snapshot_id,
+        book_hash=curve.book_hash,
+        levels=tuple(levels),
+        fee_model=curve.fee_model,
+        min_tick=curve.min_tick,
+        min_order_size=curve.min_order_size,
+        quote_ttl=curve.quote_ttl,
+    )
+
+
+def global_sell_execution_terms(
+    curve: ExecutableSellCurve,
+    *,
+    capacity: Decimal,
+) -> tuple[
+    ExecutableSellCurve | None,
+    Literal["MAKER_REST", "TAKER_LIMIT"],
+    float,
+    str,
+    float | None,
+]:
+    """Select the executable SELL grammar without conflating bid and limit."""
+
+    from src.strategy.live_inference.mode_consistent_ev import (
+        MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
+        MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
+        MAKER_REST_ESCALATION_DEADLINE_MINUTES,
+    )
+
+    maker = passive_sell_proposal_curve(curve, capacity=capacity)
+    if maker is not None:
+        return (
+            maker,
+            "MAKER_REST",
+            MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
+            MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
+            MAKER_REST_ESCALATION_DEADLINE_MINUTES,
+        )
+    taker = marketable_sell_proposal_curve(curve, capacity=capacity)
+    if taker is not None:
+        return taker, "TAKER_LIMIT", 1.0, "immediate_taker", None
+    return (
+        None,
+        "MAKER_REST",
+        MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
+        MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
+        MAKER_REST_ESCALATION_DEADLINE_MINUTES,
     )
 
 
@@ -1784,10 +1871,10 @@ class GlobalSingleOrderSellCandidate:
     proposal_sell_curve: ExecutableSellCurve | None
     fill_probability: float
     fill_probability_source: str
-    rest_deadline_minutes: float
+    rest_deadline_minutes: float | None
     native_ask_levels: tuple[BookLevel, ...] = ()
     action: Literal["SELL"] = "SELL"
-    execution_mode: Literal["MAKER_REST"] = "MAKER_REST"
+    execution_mode: Literal["MAKER_REST", "TAKER_LIMIT"] = "MAKER_REST"
     eligibility_reason: GlobalEligibilityReason | None = None
     probability_functional: Literal[
         "LOWER_CVAR_PARAMETER_DRAWS",
@@ -1806,10 +1893,10 @@ class GlobalSingleOrderSellCandidate:
 
     @property
     def economic_sell_curve(self) -> ExecutableSellCurve:
-        """The exact post-only price scored conditional on a maker fill."""
+        """The exact executable proceeds curve scored by the auction."""
 
         if self.proposal_sell_curve is None:
-            raise ValueError("global SELL maker proposal is unavailable")
+            raise ValueError("global SELL execution proposal is unavailable")
         return self.proposal_sell_curve
 
     def __post_init__(self) -> None:
@@ -1852,19 +1939,13 @@ class GlobalSingleOrderSellCandidate:
                 "eligibility_reason",
                 "EXECUTION_AUTHORITY_MISSING",
             )
-        if (
-            self.fill_probability is None
-            or self.fill_probability_source is None
-            or self.rest_deadline_minutes is None
-        ):
-            raise ValueError("global SELL maker-rest authority is missing")
-        if (
-            self.execution_mode != "MAKER_REST"
-            or not math.isfinite(float(self.fill_probability))
+        if self.fill_probability is None or self.fill_probability_source is None:
+            raise ValueError("global SELL execution authority is missing")
+        common_execution_invalid = (
+            not math.isfinite(float(self.fill_probability))
             or not 0.0 < float(self.fill_probability) <= 1.0
             or not str(self.fill_probability_source or "").strip()
-            or not math.isfinite(float(self.rest_deadline_minutes))
-            or float(self.rest_deadline_minutes) <= 0.0
+            or self.execution_mode not in {"MAKER_REST", "TAKER_LIMIT"}
             or (
                 proposal is not None
                 and (
@@ -1872,14 +1953,41 @@ class GlobalSingleOrderSellCandidate:
                     or proposal.side != self.side
                     or proposal.snapshot_id != curve.snapshot_id
                     or proposal.book_hash != curve.book_hash
-                    or len(proposal.levels) != 1
+                )
+            )
+            or (proposal is None and self.eligibility_reason is None)
+        )
+        maker_invalid = self.execution_mode == "MAKER_REST" and (
+            self.rest_deadline_minutes is None
+            or not math.isfinite(float(self.rest_deadline_minutes))
+            or float(self.rest_deadline_minutes) <= 0.0
+            or (
+                proposal is not None
+                and (
+                    len(proposal.levels) != 1
                     or proposal.levels[0].price <= curve.levels[0].price
                     or not _live_unit_price_in_band(proposal.levels[0].price)
                 )
             )
-            or (proposal is None and self.eligibility_reason is None)
-        ):
-            raise ValueError("global SELL maker-rest proposal is incoherent")
+        )
+        taker_invalid = self.execution_mode == "TAKER_LIMIT" and (
+            self.fill_probability != 1.0
+            or self.fill_probability_source != "immediate_taker"
+            or self.rest_deadline_minutes is not None
+            or curve.levels[0].price <= LIVE_ORDER_MAX_UNIT_PRICE
+            or proposal is None
+            or (
+                proposal is not None
+                and _live_sell_limit_price(
+                    curve.levels[0].price,
+                    proposal.levels[-1].price,
+                    curve.min_tick,
+                )
+                is None
+            )
+        )
+        if common_execution_invalid or maker_invalid or taker_invalid:
+            raise ValueError("global SELL execution proposal is incoherent")
         functional = self.probability_functional
         status = self.exit_authority_status
         if (
@@ -1968,13 +2076,13 @@ def global_sell_candidate_from_holding(
         and probability_witness.exact_yes_payoff(binding.bin_id) is None
     ):
         eligibility_reason = "DETERMINISTIC_PAYOFF_NOT_PROVED"
-    from src.strategy.live_inference.mode_consistent_ev import (
-        MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
-        MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
-        MAKER_REST_ESCALATION_DEADLINE_MINUTES,
-    )
-
-    proposal = passive_sell_proposal_curve(
+    (
+        proposal,
+        execution_mode,
+        fill_probability,
+        fill_probability_source,
+        rest_deadline_minutes,
+    ) = global_sell_execution_terms(
         executable_sell_curve,
         capacity=sellable_shares,
     )
@@ -1995,15 +2103,15 @@ def global_sell_candidate_from_holding(
             exit_authority_status,
             exit_authority_reason,
             sell_action_authority_identity,
-            "MAKER_REST",
+            execution_mode,
             (
                 executable_curve_identity(proposal)
                 if proposal is not None
-                else "maker_price_unavailable"
+                else "sell_price_unavailable"
             ),
-            str(MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE),
-            MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
-            str(MAKER_REST_ESCALATION_DEADLINE_MINUTES),
+            str(fill_probability),
+            fill_probability_source,
+            str(rest_deadline_minutes),
         ),
         family_key=probability_witness.family_key,
         bin_id=binding.bin_id,
@@ -2019,9 +2127,10 @@ def global_sell_candidate_from_holding(
         ledger_snapshot_id=str(ledger_snapshot_id),
         executable_sell_curve=executable_sell_curve,
         proposal_sell_curve=proposal,
-        fill_probability=MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
-        fill_probability_source=MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
-        rest_deadline_minutes=MAKER_REST_ESCALATION_DEADLINE_MINUTES,
+        fill_probability=fill_probability,
+        fill_probability_source=fill_probability_source,
+        rest_deadline_minutes=rest_deadline_minutes,
+        execution_mode=execution_mode,
         resolution_identity=probability_witness.resolution_identity,
         eligibility_reason=eligibility_reason,
         probability_functional=probability_functional,
@@ -2746,6 +2855,7 @@ class GlobalSingleOrderCandidateEvaluation:
         "SETTLEMENT_LOCKED_BUY",
         "CONTINGENT_MAKER_REST_BUY",
         "CONTINGENT_MAKER_REST_SELL",
+        "IMMEDIATE_TAKER_SELL",
     ] = "UNSCORED"
     buy_sizing_mode: Literal[
         "NOT_APPLICABLE",
@@ -2770,9 +2880,6 @@ class GlobalSingleOrderCandidateEvaluation:
     buy_rejection_economics: GlobalAnyBuyRejectionEconomics | None = None
 
     def __post_init__(self) -> None:
-        if self.action == "SELL" and self.execution_mode == "TAKER_LIMIT":
-            object.__setattr__(self, "execution_mode", "NOT_APPLICABLE")
-            object.__setattr__(self, "fill_probability_source", "not_applicable")
         if self.action == "SELL" and all(
             value is None
             for value in (
@@ -2848,15 +2955,28 @@ class GlobalSingleOrderCandidateEvaluation:
         ):
             raise ValueError("BUY evaluation execution proposal is invalid")
         if self.action == "SELL" and (
-            self.execution_mode != "MAKER_REST"
+            self.execution_mode not in {"MAKER_REST", "TAKER_LIMIT"}
             or not math.isfinite(float(self.fill_probability))
             or not 0.0 < float(self.fill_probability) <= 1.0
             or not str(self.fill_probability_source or "").strip()
-            or self.rest_deadline_minutes is None
-            or not math.isfinite(float(self.rest_deadline_minutes))
-            or self.rest_deadline_minutes <= 0.0
+            or (
+                self.execution_mode == "MAKER_REST"
+                and (
+                    self.rest_deadline_minutes is None
+                    or not math.isfinite(float(self.rest_deadline_minutes))
+                    or self.rest_deadline_minutes <= 0.0
+                )
+            )
+            or (
+                self.execution_mode == "TAKER_LIMIT"
+                and (
+                    self.fill_probability != 1.0
+                    or self.fill_probability_source != "immediate_taker"
+                    or self.rest_deadline_minutes is not None
+                )
+            )
         ):
-            raise ValueError("SELL evaluation maker-rest terms are invalid")
+            raise ValueError("SELL evaluation execution terms are invalid")
         if self.sell_point_counterfactual is not None and self.action != "SELL":
             raise ValueError("only SELL evaluations may carry point counterfactuals")
         if (
@@ -2972,7 +3092,12 @@ class GlobalSingleOrderCandidateEvaluation:
                 or self.fractional_kelly_target_shares != 0
                 or terminal is None
                 or self.buy_minimum_marketable_repair is not None
-                or self.capital_action_mode != "CONTINGENT_MAKER_REST_SELL"
+                or self.capital_action_mode
+                != (
+                    "IMMEDIATE_TAKER_SELL"
+                    if self.execution_mode == "TAKER_LIMIT"
+                    else "CONTINGENT_MAKER_REST_SELL"
+                )
                 or self.resolution_at_utc is None
                 or self.resolution_at_utc.tzinfo is None
                 or self.capital_lock_hours is None
@@ -3020,7 +3145,11 @@ class GlobalSingleOrderCandidateEvaluation:
                 else "SETTLEMENT_LOCKED_BUY"
             )
             if self.action == "BUY"
-            else "CONTINGENT_MAKER_REST_SELL"
+            else (
+                "IMMEDIATE_TAKER_SELL"
+                if self.execution_mode == "TAKER_LIMIT"
+                else "CONTINGENT_MAKER_REST_SELL"
+            )
         )
         mean_action = self.action == "BUY" or (
             self.action == "SELL"
@@ -3163,6 +3292,7 @@ class GlobalSingleOrderDecision:
         "SETTLEMENT_LOCKED_BUY",
         "CONTINGENT_MAKER_REST_BUY",
         "CONTINGENT_MAKER_REST_SELL",
+        "IMMEDIATE_TAKER_SELL",
     ] = "UNSCORED"
     buy_sizing_mode: Literal[
         "NOT_APPLICABLE",
@@ -3344,7 +3474,11 @@ class GlobalSingleOrderDecision:
                     not internal_score
                     and (
                         self.capital_action_mode
-                        != "CONTINGENT_MAKER_REST_SELL"
+                        != (
+                            "IMMEDIATE_TAKER_SELL"
+                            if self.candidate.execution_mode == "TAKER_LIMIT"
+                            else "CONTINGENT_MAKER_REST_SELL"
+                        )
                         or self.resolution_at_utc is None
                         or self.resolution_at_utc.tzinfo is None
                         or self.capital_lock_hours is None
@@ -5347,8 +5481,8 @@ def _score_global_single_order_sell(
         or endowment.ledger_snapshot_id != candidate.ledger_snapshot_id
     ):
         raise ValueError("SELL portfolio endowment is not ledger aligned")
-    # SELL execution is maker-only so the conditional-fill economics must use
-    # the exact resting price, never the immediately consumable BID prefix.
+    # Maker mode scores its exact resting price; taker mode scores only the BID
+    # prefix crossable by the legal submitted floor.
     curve = candidate.economic_sell_curve
     quantum = Decimal("0.01")
     min_shares = (
@@ -5453,7 +5587,16 @@ def _score_global_single_order_sell(
     price_band_rejected = False
     for shares in sorted(venue_probes):
         proceeds, expected_fill_price, limit_price = curve.proceeds_for_shares(shares)
-        if not _live_unit_price_in_band(limit_price):
+        submitted_limit = (
+            limit_price
+            if candidate.execution_mode == "MAKER_REST"
+            else _live_sell_limit_price(
+                candidate.executable_sell_curve.levels[0].price,
+                limit_price,
+                candidate.executable_sell_curve.min_tick,
+            )
+        )
+        if submitted_limit is None or not _live_unit_price_in_band(submitted_limit):
             price_band_rejected = True
             continue
         loss_at_risk = shares - proceeds
@@ -5687,13 +5830,28 @@ def _expected_growth_comparison(
     if getattr(candidate, "execution_mode", "TAKER_LIMIT") == "MAKER_REST":
         assert candidate.rest_deadline_minutes is not None
         rest_hours = float(candidate.rest_deadline_minutes) / 60.0
-        effective_lock_hours = (
-            fill_probability * capital_lock_hours
-            + (1.0 - fill_probability) * rest_hours
-        )
+        if isinstance(candidate, GlobalSingleOrderSellCandidate):
+            # A filled SELL releases the held capital after the rest interval;
+            # an unfilled SELL leaves that capital exposed until resolution.
+            effective_lock_hours = (
+                fill_probability * rest_hours
+                + (1.0 - fill_probability) * capital_lock_hours
+            )
+        else:
+            # A filled BUY locks new capital until resolution; an unfilled BUY
+            # only reserves it for the maker-rest interval.
+            effective_lock_hours = (
+                fill_probability * capital_lock_hours
+                + (1.0 - fill_probability) * rest_hours
+            )
         expected_du *= fill_probability
         expected_ev *= fill_probability
         expected_cost *= fill_probability
+    elif isinstance(candidate, GlobalSingleOrderSellCandidate):
+        effective_lock_hours = max(
+            candidate.executable_sell_curve.quote_ttl.total_seconds() / 3600.0,
+            1e-9,
+        )
     return ExpectedGrowthComparison(
         probability_basis="POSTERIOR_PREDICTIVE_MEAN",
         probability_witness_identity=probability_witness.witness_identity,
@@ -6171,6 +6329,7 @@ def select_global_single_order(
             "SETTLEMENT_LOCKED_BUY",
             "CONTINGENT_MAKER_REST_BUY",
             "CONTINGENT_MAKER_REST_SELL",
+            "IMMEDIATE_TAKER_SELL",
         ],
     ) -> tuple[GlobalSingleOrderDecision | None, str | None]:
         resolution_at = universe_witness.resolution_at_by_family.get(family_key)
@@ -6504,7 +6663,11 @@ def select_global_single_order(
             score, horizon_reason = bind_capital_horizon(
                 score,
                 family_key=candidate.family_key,
-                action_mode="CONTINGENT_MAKER_REST_SELL",
+                action_mode=(
+                    "IMMEDIATE_TAKER_SELL"
+                    if candidate.execution_mode == "TAKER_LIMIT"
+                    else "CONTINGENT_MAKER_REST_SELL"
+                ),
             )
             if score is None:
                 assert horizon_reason is not None

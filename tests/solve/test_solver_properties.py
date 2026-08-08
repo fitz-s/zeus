@@ -364,13 +364,13 @@ def _global_sell_candidate(
         min_order_size=Decimal("1"),
         quote_ttl=timedelta(seconds=1),
     )
-    from src.strategy.live_inference.mode_consistent_ev import (
-        MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
-        MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
-        MAKER_REST_ESCALATION_DEADLINE_MINUTES,
-    )
-
-    proposal = S.passive_sell_proposal_curve(
+    (
+        proposal,
+        execution_mode,
+        fill_probability,
+        fill_probability_source,
+        rest_deadline_minutes,
+    ) = S.global_sell_execution_terms(
         curve,
         capacity=Decimal(shares),
     )
@@ -391,9 +391,10 @@ def _global_sell_candidate(
         executable_sell_curve=curve,
         resolution_identity=probability_seed.resolution_identity,
         proposal_sell_curve=proposal,
-        fill_probability=MAKER_FILL_PROBABILITY_AT_ESCALATION_DEADLINE,
-        fill_probability_source=MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
-        rest_deadline_minutes=MAKER_REST_ESCALATION_DEADLINE_MINUTES,
+        fill_probability=fill_probability,
+        fill_probability_source=fill_probability_source,
+        rest_deadline_minutes=rest_deadline_minutes,
+        execution_mode=execution_mode,
         eligibility_reason=(
             "LIVE_UNIT_PRICE_OUT_OF_BOUNDS" if proposal is None else None
         ),
@@ -414,11 +415,11 @@ def test_global_sell_candidate_does_not_invent_missing_maker_authority():
 
     missing_proposal = replace(sell, proposal_sell_curve=None, eligibility_reason=None)
     assert missing_proposal.eligibility_reason == "EXECUTION_AUTHORITY_MISSING"
-    with pytest.raises(ValueError, match="maker-rest authority is missing"):
+    with pytest.raises(ValueError, match="execution authority is missing"):
         replace(sell, fill_probability=None)
-    with pytest.raises(ValueError, match="maker-rest authority is missing"):
+    with pytest.raises(ValueError, match="execution authority is missing"):
         replace(sell, fill_probability_source=None)
-    with pytest.raises(ValueError, match="maker-rest authority is missing"):
+    with pytest.raises(ValueError, match="execution proposal is incoherent"):
         replace(sell, rest_deadline_minutes=None)
 
 
@@ -464,10 +465,10 @@ def test_global_sell_scores_the_exact_maker_rest_not_the_bid_prefix():
         decision.robust_ev_usd * float(sell.fill_probability)
     )
     assert decision.capital_lock_hours == pytest.approx(
-        float(sell.fill_probability) * 24.0
-        + (1.0 - float(sell.fill_probability))
+        float(sell.fill_probability)
         * float(sell.rest_deadline_minutes)
         / 60.0
+        + (1.0 - float(sell.fill_probability)) * 24.0
     )
 
 
@@ -1493,7 +1494,7 @@ def test_global_single_order_sell_can_beat_positive_buy_and_cash():
         candidate_id="positive-buy-runner-up",
         family="buy-family",
         side="NO",
-        q=0.80,
+        q=0.65,
         levels=(("0.60", "20"),),
     )
 
@@ -1528,10 +1529,10 @@ def test_global_single_order_sell_can_beat_positive_buy_and_cash():
         > 0
     )
     expected_lock_hours = (
-        float(sell.fill_probability) * 24.0
-        + (1.0 - float(sell.fill_probability))
+        float(sell.fill_probability)
         * float(sell.rest_deadline_minutes)
         / 60.0
+        + (1.0 - float(sell.fill_probability)) * 24.0
     )
     assert decision.capital_lock_hours == pytest.approx(expected_lock_hours)
     assert decision.robust_log_growth_per_hour == pytest.approx(
@@ -1652,10 +1653,10 @@ def test_global_single_order_ranks_buy_and_sell_by_one_capital_growth_rate():
     assert evaluations[buy.candidate_id].expected_growth is not None
     assert evaluations[sell.candidate_id].expected_growth is not None
     expected_sell_lock_hours = (
-        float(sell.fill_probability) * 24.0
-        + (1.0 - float(sell.fill_probability))
+        float(sell.fill_probability)
         * float(sell.rest_deadline_minutes)
         / 60.0
+        + (1.0 - float(sell.fill_probability)) * 24.0
     )
     assert evaluations[sell.candidate_id].capital_lock_hours == pytest.approx(
         expected_sell_lock_hours
@@ -2427,7 +2428,7 @@ def test_global_single_order_sell_rejects_bids_below_live_price_band(
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_single_order_sell_rejects_best_bid_above_live_price_band(side):
+def test_global_single_order_sell_crosses_best_bid_above_submit_band(side):
     sell = _global_sell_candidate(
         candidate_id=f"sell-favorable-above-band-{side}",
         family=f"sell-favorable-above-band-{side}-family",
@@ -2439,21 +2440,59 @@ def test_global_single_order_sell_rejects_best_bid_above_live_price_band(side):
 
     decision = _global_select((sell,))
 
-    assert decision.candidate is None
-    assert (
-        decision.rejection_reasons[sell.candidate_id]
-        == "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
+    assert decision.candidate == sell
+    assert sell.execution_mode == "TAKER_LIMIT"
+    assert sell.fill_probability == 1.0
+    assert sell.rest_deadline_minutes is None
+    assert sell.economic_sell_curve.levels[0].price == Decimal("0.999")
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_single_order_sell_holds_certain_winner_despite_high_bid(side):
+    sell = _global_sell_candidate(
+        candidate_id=f"sell-certain-winner-{side}",
+        family=f"sell-certain-winner-{side}-family",
+        side=side,
+        held_q=1.0,
+        bids=(("0.999", "10"),),
+        shares="10",
     )
 
+    decision = _global_select((sell,))
 
-def test_global_single_order_sell_rejects_out_of_band_best_bid_even_if_deepest_is_legal():
+    assert decision.candidate is None
+    assert decision.rejection_reasons[sell.candidate_id] in {
+        "NON_POSITIVE_ROBUST_OBJECTIVE",
+        "NON_POSITIVE_ROBUST_FILL_PREFIX",
+    }
+
+
+def test_global_single_order_sell_clamps_submitted_floor_not_counterparty_bid():
     assert (
         S._live_sell_limit_price(
             Decimal("0.98"),
             Decimal("0.94"),
             Decimal("0.02"),
         )
-        is None
+        == Decimal("0.94")
+    )
+
+
+def test_global_single_order_sell_high_bid_uses_tick_aligned_taker_floor():
+    sell = _global_sell_candidate(
+        candidate_id="sell-high-bid-wide-tick",
+        family="sell-high-bid-wide-tick-family",
+        side="YES",
+        held_q=0.20,
+        bids=(("0.98", "5"), ("0.94", "5")),
+        shares="10",
+        min_tick="0.02",
+    )
+
+    assert sell.execution_mode == "TAKER_LIMIT"
+    assert tuple(level.price for level in sell.economic_sell_curve.levels) == (
+        Decimal("0.98"),
+        Decimal("0.94"),
     )
 
 

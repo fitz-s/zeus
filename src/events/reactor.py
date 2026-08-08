@@ -693,7 +693,12 @@ def _is_global_reduce_only_exit_receipt(receipt: EventSubmissionReceipt) -> bool
         and receipt.side_effect_status == "EXIT_SUBMITTED"
         and receipt.venue_call_started
         and bool(receipt.venue_command_id)
-        and receipt.venue_order_type == "GTC"
+        and receipt.venue_order_type
+        == (
+            "FAK"
+            if getattr(candidate, "execution_mode", "") == "TAKER_LIMIT"
+            else "GTC"
+        )
         and str(receipt.reason or "").startswith(
             ("GLOBAL_SELL_EXIT:", "GLOBAL_SELL_EXIT_UNKNOWN:")
         )
@@ -6628,7 +6633,7 @@ def request_global_auction_completion(
                     inferred_book_state = "UNKNOWN"
                 elif (
                     not math.isfinite(float(held_best_bid))
-                    or not 0.05 <= float(held_best_bid) <= 0.95
+                    or not 0.05 <= float(held_best_bid) <= 1.0
                 ):
                     inferred_book_state = "NO_EXECUTABLE_BOOK"
                 elif not bid_observed_at:

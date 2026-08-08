@@ -191,8 +191,10 @@ Durable trading rules:
 
 - Canonical DB/event truth outranks derived JSON, CSV, reports, notebooks.
 - Every live venue BUY or SELL, including entry, reduce-only exit, single-order,
-  and batch paths, must have a finite unit price inside inclusive `[0.05, 0.95]`.
-  Anything below `0.05` or above `0.95` is rejected at command persistence,
+  and batch paths, must submit a finite unit price inside inclusive `[0.05, 0.95]`.
+  A counterparty quote or realized SELL price may improve above that submitted
+  floor but may never be worse than it. Anything submitted below `0.05` or above
+  `0.95` is rejected at command persistence,
   the submission envelope, and an independent final SDK boundary. Current
   tick/range, minimum size, identity, tradeability, fees, depth, action-law
   economics, and Kelly remain cumulative requirements; none may waive

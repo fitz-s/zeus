@@ -236,6 +236,12 @@ def _ensure_envelope(
     side: str = "SELL",
     price: float | Decimal = 0.49,
     size: float | Decimal = 10.0,
+    order_type: str = "GTC",
+    post_only: bool = True,
+    order_id: str | None = None,
+    signed_order_hash: str | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
 ) -> str:
     from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
     from src.state.venue_command_repo import insert_submission_envelope
@@ -243,7 +249,7 @@ def _ensure_envelope(
     price_dec = Decimal(str(price))
     size_dec = Decimal(str(size))
     envelope_id = envelope_id or hashlib.sha256(
-        f"{token_id}:{side}:{price_dec}:{size_dec}".encode()
+        f"{token_id}:{side}:{price_dec}:{size_dec}:{order_type}:{post_only}".encode()
     ).hexdigest()
     if c.execute(
         "SELECT 1 FROM venue_submission_envelopes WHERE envelope_id = ?",
@@ -267,22 +273,22 @@ def _ensure_envelope(
             side=side,
             price=price_dec,
             size=size_dec,
-            order_type="GTC",
-            post_only=True,
+            order_type=order_type,
+            post_only=post_only,
             tick_size=Decimal("0.01"),
             min_order_size=Decimal("0.01"),
             neg_risk=False,
             fee_details={},
             canonical_pre_sign_payload_hash="d" * 64,
             signed_order=None,
-            signed_order_hash=None,
+            signed_order_hash=signed_order_hash,
             raw_request_hash="e" * 64,
             raw_response_json=None,
-            order_id=None,
+            order_id=order_id,
             trade_ids=(),
             transaction_hashes=(),
-            error_code=None,
-            error_message=None,
+            error_code=error_code,
+            error_message=error_message,
             captured_at=_NOW.isoformat(),
         ),
         envelope_id=envelope_id,
@@ -300,6 +306,8 @@ def _insert_exit_command(
     price: float = 0.49,
     venue_order_id: str | None = None,
     created_at: datetime | None = None,
+    order_type: str = "GTC",
+    post_only: bool = True,
 ) -> None:
     from src.state.venue_command_repo import insert_command
 
@@ -307,7 +315,15 @@ def _insert_exit_command(
         c,
         command_id=command_id,
         snapshot_id=_ensure_snapshot(c, token_id=token_id),
-        envelope_id=_ensure_envelope(c, token_id=token_id, side="SELL", price=price, size=size),
+        envelope_id=_ensure_envelope(
+            c,
+            token_id=token_id,
+            side="SELL",
+            price=price,
+            size=size,
+            order_type=order_type,
+            post_only=post_only,
+        ),
         position_id=position_id,
         decision_id=f"dec-{command_id}",
         idempotency_key=f"idem-{command_id}",
@@ -7763,14 +7779,14 @@ def test_exit_liquidity_classification_uses_snapshot_bid_truth():
             above_band_intent,
             {"executable_snapshot_orderbook_top_bid": "0.95"},
         )
-        == "exit_no_in_band_bid"
+        == ""
     )
     assert (
         _exit_sell_liquidity_error(
             in_band_intent,
             {"executable_snapshot_orderbook_top_bid": "0.999"},
         )
-        == "exit_no_in_band_bid"
+        == ""
     )
 
 
@@ -10409,15 +10425,77 @@ def test_restart_republishes_unbound_v4_residual_with_same_generation_until_term
     ("pre_exit_state", "day0_entered_at"),
     (("holding", ""), ("day0_window", "2026-07-28T00:00:00+00:00")),
 )
-def test_global_fak_zero_fill_is_not_special_reauction_authority(
+def test_global_fak_zero_fill_reauctions_immediately_with_durable_proof(
+    conn,
+    monkeypatch,
     pre_exit_state,
     day0_entered_at,
 ):
     from src.execution import exit_lifecycle
+    from src.execution.executor import OrderResult
     from src.state.portfolio import Position
+    from src.state.venue_command_repo import append_event
+
+    command_id = f"cmd-global-fak-zero-{pre_exit_state}"
+    position_id = f"pos-global-fak-zero-{pre_exit_state}"
+    token_id = f"yes-token-{pre_exit_state}"
+    _insert_exit_command(
+        conn,
+        command_id=command_id,
+        position_id=position_id,
+        token_id=token_id,
+        price=0.95,
+        order_type="FAK",
+        post_only=False,
+    )
+    venue_order_id = f"0x{'a' * 64}"
+    conn.execute(
+        "UPDATE venue_commands SET venue_order_id = ? WHERE command_id = ?",
+        (venue_order_id, command_id),
+    )
+    final_envelope_id = _ensure_envelope(
+        conn,
+        token_id=token_id,
+        envelope_id=f"final-{command_id}",
+        price=0.95,
+        order_type="FAK",
+        post_only=False,
+        order_id=venue_order_id,
+        signed_order_hash="b" * 64,
+        error_code="venue_fak_no_match_400",
+        error_message="no orders found to match with FAK order",
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_REQUESTED",
+        occurred_at="2026-08-02T07:04:45+00:00",
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="SUBMIT_REJECTED",
+        occurred_at="2026-08-02T07:04:46+00:00",
+        payload={
+            "reason": "venue_fak_no_match_400",
+            "detail": "no orders found to match with FAK order",
+            "proof_class": "deterministic_venue_fak_no_match_400",
+            "terminal_no_fill": True,
+            "exposure_created": False,
+            "venue_order_id": venue_order_id,
+            "required_predicates": {
+                "structured_v2_fak_no_match": True,
+                "final_envelope_command_matches": True,
+                "final_envelope_is_fak": True,
+                "deterministic_order_id_matches": True,
+            },
+            "final_submission_envelope_id": final_envelope_id,
+            "final_submission_envelope_command_id": command_id,
+        },
+    )
 
     position = Position(
-        trade_id=f"pos-global-fak-rejected-{pre_exit_state}",
+        trade_id=position_id,
         market_id=f"condition-{pre_exit_state}",
         city="Paris",
         cluster="Paris",
@@ -10425,7 +10503,7 @@ def test_global_fak_zero_fill_is_not_special_reauction_authority(
         temperature_metric="high",
         bin_label="28C",
         direction="buy_yes",
-        token_id=f"yes-token-{pre_exit_state}",
+        token_id=token_id,
         no_token_id=f"no-token-{pre_exit_state}",
         condition_id=f"condition-{pre_exit_state}",
         state="pending_exit",
@@ -10444,23 +10522,73 @@ def test_global_fak_zero_fill_is_not_special_reauction_authority(
         exit_retry_count=3,
     )
 
-    assert not exit_lifecycle._is_global_sell_snapshot_reauction_error(
-        "global_sell_venue_fak_no_match_zero_fill_reauction"
+    classified = exit_lifecycle._global_sell_fak_no_fill_reauction_error(
+        conn,
+        OrderResult(
+            trade_id=position_id,
+            status="rejected",
+            reason="venue_fak_no_match_400",
+            command_id=command_id,
+            command_state="REJECTED",
+        ),
+    )
+    assert classified == (
+        "global_sell_exit_fak_no_fill_reauction:venue_fak_no_match_400"
+    )
+    now = datetime(2026, 8, 2, 7, 4, 47, tzinfo=timezone.utc)
+    monkeypatch.setattr(exit_lifecycle, "_utcnow", lambda: now)
+    _seed_exit_intent_event(
+        conn,
+        position_id=position.trade_id,
+        shares=position.shares,
+        close_position=True,
+        occurred_at=now - timedelta(seconds=1),
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
     )
     exit_lifecycle._mark_exit_retry(
         position,
         reason="GLOBAL_CAPITAL_OPTIMAL_SELL [SELL_ERROR]",
-        error="venue_fak_no_match_400",
+        error=classified,
+        fak_no_fill_command_id=command_id,
+        conn=conn,
     )
 
     assert position.exit_state == "retry_pending"
-    assert position.exit_retry_count == 4
-    assert position.last_exit_error == "venue_fak_no_match_400"
-    assert datetime.fromisoformat(position.next_exit_retry_at) > datetime.now(
-        timezone.utc
-    )
+    assert position.exit_retry_count == 3
+    assert position.last_exit_error == classified
+    assert position.next_exit_retry_at == now.isoformat()
+    assert exit_lifecycle.has_global_sell_snapshot_reauction_retry(position, conn)
+    assert exit_lifecycle._relinquished_global_sell_command_id(conn, position) == command_id
 
-def test_live_global_sell_rejects_fak_before_snapshot_or_venue(
+
+def test_persisted_exit_envelope_rejects_non_maker_non_fak_mode(conn):
+    from src.state.venue_command_repo import insert_command
+
+    token_id = "yes-token-invalid-mode"
+    with pytest.raises(ValueError, match="live execution mode is invalid"):
+        insert_command(
+            conn,
+            command_id="cmd-invalid-mode",
+            snapshot_id=_ensure_snapshot(conn, token_id=token_id),
+            envelope_id=_ensure_envelope(
+                conn,
+                token_id=token_id,
+                order_type="FOK",
+                post_only=False,
+            ),
+            position_id="pos-invalid-mode",
+            decision_id="dec-invalid-mode",
+            idempotency_key="idem-invalid-mode",
+            intent_kind="EXIT",
+            market_id=token_id,
+            token_id=token_id,
+            side="SELL",
+            size=10.0,
+            price=0.49,
+            created_at=_NOW.isoformat(),
+        )
+
+def test_live_global_sell_rejects_fak_for_maker_authority_before_snapshot_or_venue(
     conn,
     monkeypatch,
 ):
@@ -10516,6 +10644,7 @@ def test_live_global_sell_rejects_fak_before_snapshot_or_venue(
         "jit_candidate",
         SimpleNamespace(
             book_captured_at_utc=datetime.now(timezone.utc),
+            execution_mode="MAKER_REST",
             executable_sell_curve=SimpleNamespace(
                 book_hash="book-global-fak-rejected",
                 quote_ttl=timedelta(seconds=30),
@@ -10556,7 +10685,7 @@ def test_live_global_sell_rejects_fak_before_snapshot_or_venue(
         hard_fact_authority=None,
     )
 
-    assert result == "exit_blocked: global_sell_gtc_required"
+    assert result == "exit_blocked: global_sell_order_type_mismatch"
     assert position.state == "holding"
     assert position.exit_retry_count == 0
 

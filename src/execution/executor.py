@@ -5025,7 +5025,124 @@ class ExitOrderIntent:
     executable_snapshot_min_tick_size: Decimal | str | None = None
     executable_snapshot_min_order_size: Decimal | str | None = None
     executable_snapshot_neg_risk: bool | None = None
+    marketable_sell_execution_authority: object | None = None
+    marketable_sell_certificate: Mapping[str, object] | None = None
+    marketable_sell_certificate_identity: str = ""
     execution_authority_deadline_utc: str = ""
+
+
+def marketable_sell_certificate_identity(
+    certificate: Mapping[str, object],
+) -> str:
+    """Hash the complete immutable authority material passed to the SDK boundary."""
+
+    return hashlib.sha256(
+        canonical_json(dict(certificate)).encode("utf-8")
+    ).hexdigest()
+
+
+def _marketable_sell_certificate_error(
+    conn: sqlite3.Connection,
+    intent: ExitOrderIntent,
+    *,
+    limit_price: float,
+    shares: float,
+) -> str | None:
+    """Rebind a FAK SELL to its typed global-auction and JIT book proof."""
+
+    certificate = intent.marketable_sell_certificate
+    identity = str(intent.marketable_sell_certificate_identity or "").strip()
+    if not isinstance(certificate, Mapping) or len(identity) != 64:
+        return "marketable_sell_certificate_required"
+    try:
+        int(identity, 16)
+    except ValueError:
+        return "marketable_sell_certificate_identity_invalid"
+    if identity != marketable_sell_certificate_identity(certificate):
+        return "marketable_sell_certificate_identity_mismatch"
+
+    from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+
+    authority = intent.marketable_sell_execution_authority
+    if not isinstance(authority, GlobalSellExecutionAuthority):
+        return "marketable_sell_execution_authority_required"
+    try:
+        authority.__post_init__()
+    except (TypeError, ValueError):
+        return "marketable_sell_execution_authority_invalid"
+    candidate = authority.jit_candidate
+
+    required_text = {
+        "action": "SELL",
+        "position_id": intent.trade_id,
+        "token_id": intent.token_id,
+        "execution_mode": "TAKER_LIMIT",
+        "submit_order_type": "FAK",
+    }
+    if any(
+        str(certificate.get(field) or "") != expected
+        for field, expected in required_text.items()
+    ) or (
+        str(candidate.position_id) != intent.trade_id
+        or str(candidate.token_id) != intent.token_id
+        or str(candidate.condition_id)
+        != str(certificate.get("condition_id") or "")
+        or str(candidate.execution_mode) != "TAKER_LIMIT"
+    ):
+        return "marketable_sell_certificate_binding_mismatch"
+    for field in (
+        "candidate_id",
+        "condition_id",
+        "execution_authority_identity",
+        "jit_book_hash",
+        "jit_curve_identity",
+        "probability_witness_identity",
+        "book_snapshot_id",
+    ):
+        if not str(certificate.get(field) or "").strip():
+            return f"marketable_sell_certificate_missing:{field}"
+    authority_identity = str(
+        certificate.get("execution_authority_identity") or ""
+    ).strip()
+    if (
+        len(authority_identity) != 64
+        or authority_identity != authority.authority_identity
+        or str(certificate.get("book_snapshot_id") or "")
+        != str(candidate.book_snapshot_id)
+        or str(certificate.get("jit_book_hash") or "")
+        != str(candidate.executable_sell_curve.book_hash)
+        or str(certificate.get("jit_curve_identity") or "")
+        != str(candidate.execution_curve_identity)
+    ):
+        return "marketable_sell_execution_authority_identity_invalid"
+    try:
+        int(authority_identity, 16)
+        certified_limit = Decimal(str(certificate.get("exact_limit_price")))
+        certified_shares = Decimal(str(certificate.get("selected_shares")))
+    except (InvalidOperation, TypeError, ValueError):
+        return "marketable_sell_certificate_economics_invalid"
+    if (
+        certified_limit != Decimal(str(limit_price))
+        or certified_shares != Decimal(str(shares))
+    ):
+        return "marketable_sell_certificate_economics_mismatch"
+
+    from src.state.snapshot_repo import get_snapshot
+
+    snapshot = get_snapshot(conn, str(intent.executable_snapshot_id or ""))
+    if snapshot is None:
+        return "marketable_sell_certificate_snapshot_missing"
+    if (
+        str(snapshot.selected_outcome_token_id) != intent.token_id
+        or str(snapshot.condition_id)
+        != str(certificate.get("condition_id") or "")
+        or str(snapshot.raw_orderbook_hash)
+        != str(certificate.get("jit_book_hash") or "")
+        or Decimal(str(snapshot.orderbook_top_bid))
+        != Decimal(str(intent.best_bid))
+    ):
+        return "marketable_sell_certificate_snapshot_superseded"
+    return None
 
 
 def _orderresult_from_existing(
@@ -5977,6 +6094,9 @@ def create_exit_order_intent(
     executable_snapshot_min_tick_size: Decimal | str | None = None,
     executable_snapshot_min_order_size: Decimal | str | None = None,
     executable_snapshot_neg_risk: bool | None = None,
+    marketable_sell_certificate: Mapping[str, object] | None = None,
+    marketable_sell_certificate_identity: str = "",
+    marketable_sell_execution_authority: object | None = None,
     execution_authority_deadline_utc: str = "",
 ) -> ExitOrderIntent:
     """Build the explicit executor contract for a live sell/exit order."""
@@ -5996,6 +6116,13 @@ def create_exit_order_intent(
         executable_snapshot_min_tick_size=executable_snapshot_min_tick_size,
         executable_snapshot_min_order_size=executable_snapshot_min_order_size,
         executable_snapshot_neg_risk=executable_snapshot_neg_risk,
+        marketable_sell_certificate=(
+            dict(marketable_sell_certificate)
+            if marketable_sell_certificate is not None
+            else None
+        ),
+        marketable_sell_certificate_identity=marketable_sell_certificate_identity,
+        marketable_sell_execution_authority=marketable_sell_execution_authority,
         execution_authority_deadline_utc=execution_authority_deadline_utc,
     )
 
@@ -6146,15 +6273,24 @@ def execute_exit_order(
         )
     if best_bid is not None:
         try:
-            assert_live_order_unit_price(best_bid)
-        except ValueError as exc:
+            executable_bid = Decimal(str(best_bid))
+        except (InvalidOperation, TypeError, ValueError):
+            executable_bid = Decimal("NaN")
+        if (
+            not executable_bid.is_finite()
+            or executable_bid <= 0
+            or executable_bid > Decimal("1")
+        ):
             # INV-47 SCOPE: only this token's SELL submission is rejected.
             # DRAIN: the next monitor/JIT pass supplies a fresh best bid.
-            # RESET: no latch is stored; an in-band fresh bid passes normally.
+            # RESET: no latch is stored; a probability-domain bid passes.
             return OrderResult(
                 trade_id=intent.trade_id,
                 status="rejected",
-                reason=f"live_order_executable_price_out_of_bounds: {exc}",
+                reason=(
+                    "live_order_executable_price_out_of_bounds:"
+                    f" best_bid={best_bid}"
+                ),
                 order_role="exit",
                 intent_id=intent.intent_id,
                 idempotency_key=intent.idempotency_key,
@@ -6282,10 +6418,9 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
             )
-        # Legacy exit selection may still propose FAK/FOK. The absolute actual-
-        # fill band has no taker exception: a SELL limit is only a floor and a
-        # taker can receive price improvement above 0.95. Only GTC/GTD post-only
-        # can bind the actual fill price on both sides of the legal interval.
+        # The submitted unit price remains inside the absolute live band.  A
+        # counterparty bid and venue price improvement are separate facts and
+        # may be higher than that submitted SELL floor.
         selected_order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
         try:
             order_type = _resolve_exit_order_type(
@@ -6303,17 +6438,63 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
             )
-        if order_type not in {"GTC", "GTD"}:
-            # INV-47 SCOPE: only this token's taker-capable SELL is rejected.
-            # DRAIN: the next redecision may emit a maker-only GTC/GTD exit.
-            # RESET: no latch is stored; a post-only exit passes this gate.
+        marketable_sell = order_type == "FAK"
+        if (
+            order_type in {"GTC", "GTD"}
+            and best_bid is not None
+            and Decimal(str(best_bid)) >= Decimal(str(limit_price))
+        ):
             return OrderResult(
                 trade_id=intent.trade_id,
                 status="rejected",
                 reason=(
-                    "live_fill_price_unbounded_taker_order:"
-                    f"order_type={order_type}:post_only=False"
+                    "marketable_sell_order_type_required:"
+                    f"order_type={order_type}:best_bid={best_bid}:limit={limit_price}"
                 ),
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
+        marketable_certificate_error = (
+            _marketable_sell_certificate_error(
+                conn,
+                intent,
+                limit_price=limit_price,
+                shares=shares,
+            )
+            if marketable_sell
+            else None
+        )
+        if marketable_sell and (
+            intent.exact_limit_price is None
+            or best_bid is None
+            or Decimal(str(best_bid)) < Decimal(str(limit_price))
+            or marketable_certificate_error is not None
+        ):
+            # INV-47 SCOPE: only this token's uncertified taker SELL is rejected.
+            # DRAIN: global redecision may emit a fresh certified marketable SELL.
+            # RESET: no latch is stored; an exact certificate passes this gate.
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=(
+                    "marketable_sell_authority_required:"
+                    f"order_type={order_type}:best_bid={best_bid}:limit={limit_price}:"
+                    f"certificate={marketable_certificate_error or 'book_not_marketable'}"
+                ),
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
+        if order_type not in {"GTC", "GTD", "FAK"}:
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=f"unsupported_exit_submit_order_type:{order_type}",
                 submitted_price=limit_price,
                 shares=shares,
                 order_role="exit",
@@ -6541,7 +6722,7 @@ def execute_exit_order(
                     price=limit_price,
                     size=shares,
                     order_type=order_type,
-                    post_only=True,
+                    post_only=order_type in {"GTC", "GTD"},
                     captured_at=now_str,
                 )
                 envelope_id = _persist_prebuilt_submit_envelope(
@@ -7074,6 +7255,27 @@ def execute_exit_order(
                 or result.get("reason")
                 or "submit_rejected"
             )
+            fak_terminal_no_fill = bool(
+                order_type == "FAK"
+                and str(rejection_reason) == "venue_fak_no_match_400"
+                and order_id
+            )
+            fak_terminal_no_fill_proof = (
+                {
+                    "proof_class": "deterministic_venue_fak_no_match_400",
+                    "terminal_no_fill": True,
+                    "exposure_created": False,
+                    "venue_order_id": order_id,
+                    "required_predicates": {
+                        "structured_v2_fak_no_match": True,
+                        "final_envelope_command_matches": True,
+                        "final_envelope_is_fak": True,
+                        "deterministic_order_id_matches": True,
+                    },
+                }
+                if fak_terminal_no_fill
+                else {}
+            )
             try:
                 append_event(
                     conn,
@@ -7083,6 +7285,7 @@ def execute_exit_order(
                     payload={
                         "reason": str(rejection_reason),
                         "detail": result.get("errorMessage") or result.get("error_message") or "",
+                        **fak_terminal_no_fill_proof,
                         **final_envelope_payload,
                     },
                 )
@@ -7210,6 +7413,11 @@ def execute_exit_order(
                 if _venue_fill_covers_submit(matched_size, shares)
                 else "PARTIAL_FILL_OBSERVED"
             )
+        fill_price_floor_breach = bool(
+            fill_event_type
+            and fill_price is not None
+            and Decimal(str(fill_price)) < Decimal(str(limit_price))
+        )
 
         # SUBMIT_ACKED — order placed successfully
         # C-DBLOCK-UNKNOWN (2026-06-16): symmetric with the entry path. The venue side
@@ -7319,6 +7527,22 @@ def execute_exit_order(
                             **final_envelope_payload,
                         },
                     )
+                if fill_price_floor_breach:
+                    append_event(
+                        conn,
+                        command_id=command_id,
+                        event_type="REVIEW_REQUIRED",
+                        occurred_at=ack_time,
+                        payload={
+                            "reason": "sell_fill_price_below_submitted_floor",
+                            "venue_order_id": order_id,
+                            "trade_id": fill_trade_id,
+                            "filled_size": matched_size,
+                            "fill_price": fill_price,
+                            "submitted_limit_price": str(limit_price),
+                            **final_envelope_payload,
+                        },
+                    )
             # PR 6 (2026-05-19): persist submit intent + venue ack timing to settlement_commands.
             # Best-effort: do not fail the order on UPDATE error (column may not exist on older DBs).
             try:
@@ -7371,12 +7595,16 @@ def execute_exit_order(
         result_obj = OrderResult(
             trade_id=intent.trade_id,
             status=(
-                "filled"
+                "unknown_side_effect"
+                if fill_price_floor_breach
+                else "filled"
                 if fill_event_type == "FILL_CONFIRMED"
                 else ("partial" if fill_event_type == "PARTIAL_FILL_OBSERVED" else "pending")
             ),
             reason=(
-                "sell order filled"
+                "sell_fill_price_below_submitted_floor"
+                if fill_price_floor_breach
+                else "sell order filled"
                 if fill_event_type == "FILL_CONFIRMED"
                 else (
                     "sell order partially filled"

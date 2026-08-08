@@ -5870,7 +5870,7 @@ def execute_monitoring_phase(
                 book_state = (
                     "EXECUTABLE"
                     if current_bid is not None
-                    and 0.05 <= current_bid <= 0.95
+                    and 0.05 <= current_bid <= 1.0
                     else "NO_EXECUTABLE_BOOK"
                 )
             else:

@@ -11077,7 +11077,7 @@ def _global_sell_candidate_from_raw_book(
         BookLevel,
         ExecutableSellCurve,
         executable_curve_identity,
-        passive_sell_proposal_curve,
+        global_sell_execution_terms,
     )
 
     if captured_at_utc.tzinfo is None:
@@ -11164,7 +11164,13 @@ def _global_sell_candidate_from_raw_book(
         min_order_size=selected_curve.min_order_size,
         quote_ttl=selected_curve.quote_ttl,
     )
-    proposal = passive_sell_proposal_curve(
+    (
+        proposal,
+        execution_mode,
+        fill_probability,
+        fill_probability_source,
+        rest_deadline_minutes,
+    ) = global_sell_execution_terms(
         curve,
         capacity=Decimal(str(getattr(candidate, "held_shares", "0") or "0")),
     )
@@ -11175,6 +11181,10 @@ def _global_sell_candidate_from_raw_book(
         execution_curve_identity=executable_curve_identity(curve),
         executable_sell_curve=curve,
         proposal_sell_curve=proposal,
+        execution_mode=execution_mode,
+        fill_probability=fill_probability,
+        fill_probability_source=fill_probability_source,
+        rest_deadline_minutes=rest_deadline_minutes,
         native_ask_levels=ask_levels,
         eligibility_reason=(
             None if proposal is not None else "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
@@ -11427,15 +11437,15 @@ def _submit_current_global_sell(
                 jit_candidate=current_candidate,
             )
             try:
-                maker_limit_price = execution_authority.maker_limit_price()
+                sell_limit_price = execution_authority.limit_price()
             except ValueError as exc:
-                # SCOPE: only this SELL candidate lacks a venue-legal passive
+                # SCOPE: only this SELL candidate lacks a venue-legal submitted
                 # price. DRAIN: the same cut can rank the remaining actions.
                 # RESET: the next cut rebuilds the JIT bid and tick.
                 return _global_sell_receipt(
                     event,
                     global_actuation=global_actuation,
-                    reason=f"GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:{exc}",
+                    reason=f"GLOBAL_SELL_LEGAL_PRICE_UNAVAILABLE:{exc}",
                     proof_accepted=False,
                     jit_candidate=current_candidate,
                 )
@@ -11567,8 +11577,12 @@ def _submit_current_global_sell(
                 shares=float(Decimal(str(getattr(decision, "shares", "0")))),
                 current_market_price=float(current_vwap),
                 best_bid=best_bid,
-                exact_limit_price=float(maker_limit_price),
-                submit_order_type="GTC",
+                exact_limit_price=float(sell_limit_price),
+                submit_order_type=(
+                    "FAK"
+                    if candidate.execution_mode == "TAKER_LIMIT"
+                    else "GTC"
+                ),
                 close_position=(
                     Decimal(str(getattr(decision, "shares", "0") or "0"))
                     >= Decimal(str(getattr(position, "effective_shares", "0") or "0"))
@@ -11579,6 +11593,11 @@ def _submit_current_global_sell(
                 position_state=position_state,
                 capital_certificate={
                     "action": "SELL",
+                    "position_id": str(getattr(position, "trade_id", "") or ""),
+                    "condition_id": str(
+                        getattr(candidate, "condition_id", "") or ""
+                    ),
+                    "token_id": str(getattr(candidate, "token_id", "") or ""),
                     "candidate_id": str(getattr(candidate, "candidate_id", "") or ""),
                     "actuation_identity": str(
                         getattr(global_actuation, "actuation_identity", "") or ""
@@ -11616,17 +11635,30 @@ def _submit_current_global_sell(
                     "jit_book_hash": str(
                         current_candidate.executable_sell_curve.book_hash
                     ),
+                    "book_snapshot_id": str(
+                        current_candidate.book_snapshot_id
+                    ),
                     "jit_curve_identity": str(
                         current_candidate.execution_curve_identity
                     ),
-                    "execution_mode": "MAKER_REST",
-                    "submit_order_type": "GTC",
+                    "execution_mode": candidate.execution_mode,
+                    "submit_order_type": (
+                        "FAK"
+                        if candidate.execution_mode == "TAKER_LIMIT"
+                        else "GTC"
+                    ),
                     "fill_probability": float(candidate.fill_probability),
                     "fill_probability_source": str(
                         candidate.fill_probability_source
                     ),
-                    "rest_deadline_minutes": float(
-                        candidate.rest_deadline_minutes
+                    **(
+                        {
+                            "rest_deadline_minutes": float(
+                                candidate.rest_deadline_minutes
+                            )
+                        }
+                        if candidate.rest_deadline_minutes is not None
+                        else {}
                     ),
                     "held_probability_point": held_q,
                     "sell_favorable_probability_functional": str(
@@ -11642,9 +11674,11 @@ def _submit_current_global_sell(
                     "economic_limit_price": str(
                         getattr(decision, "limit_price", "")
                     ),
-                    "exact_limit_price": str(maker_limit_price),
+                    "exact_limit_price": str(sell_limit_price),
                     "partial_fill_certificate": (
-                        "single_price_maker_fill_all_prefixes_positive"
+                        "marketable_limit_fill_all_prefixes_positive"
+                        if candidate.execution_mode == "TAKER_LIMIT"
+                        else "single_price_maker_fill_all_prefixes_positive"
                     ),
                 },
             )
@@ -11904,7 +11938,12 @@ def _global_preflight_block_status(reason: str) -> str:
         # batch can safely compare the remaining BUY/SELL/HOLD/CASH actions,
         # while the next cut retries this token with fresh chain truth.
         return "CANDIDATE_BLOCKED"
-    if reason.startswith("GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:"):
+    if reason.startswith(
+        (
+            "GLOBAL_SELL_LEGAL_PRICE_UNAVAILABLE:",
+            "GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:",
+        )
+    ):
         return "CANDIDATE_BLOCKED"
     if reason.startswith(
         (

@@ -4452,14 +4452,14 @@ def test_held_sell_completion_request_persists_position_q_and_bid_witness(monkey
     ("held_best_bid", "expected_book_state"),
     (
         (0.03, "NO_EXECUTABLE_BOOK"),
-        (0.96, "NO_EXECUTABLE_BOOK"),
-        (0.98, "NO_EXECUTABLE_BOOK"),
-        (0.999, "NO_EXECUTABLE_BOOK"),
+        (0.96, "EXECUTABLE"),
+        (0.98, "EXECUTABLE"),
+        (0.999, "EXECUTABLE"),
         (0.05, "EXECUTABLE"),
         (0.95, "EXECUTABLE"),
     ),
 )
-def test_held_sell_completion_infers_submit_band_book_state(
+def test_held_sell_completion_infers_probability_domain_book_state(
     monkeypatch,
     held_best_bid,
     expected_book_state,

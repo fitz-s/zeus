@@ -699,6 +699,69 @@ def test_global_completion_yield_preserves_day0_and_resets_without_work_or_resta
     assert reactor_wake.read_reactor_wake(path=wake_path) == wake
 
 
+def test_unfinished_day0_monitor_cannot_starve_exact_held_sell_debt(
+    monkeypatch, tmp_path: Path
+) -> None:
+    wake_path = tmp_path / reactor_wake.REACTOR_WAKE_FILENAME
+    request = _request(position_id="capital-debt-behind-unfinished-day0")
+    monkeypatch.setattr("src.config.state_path", lambda filename: tmp_path / filename)
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        main, "_edli_global_completion_yield", main._OneTurnWakeExclusion()
+    )
+    monkeypatch.setattr(
+        main, "_edli_day0_post_monitor_yield", main._OneTurnWakeExclusion()
+    )
+    main._edli_initialize_reactor_wake_cursor()
+    monkeypatch.setattr(main, "_day0_wake_requires_exit_monitor", lambda _scope: True)
+    monkeypatch.setattr(
+        main,
+        "_day0_exit_monitor_attempt_state",
+        lambda _wake_id: (False, None),
+    )
+    monkeypatch.setattr(
+        main,
+        "_dispatch_day0_exit_monitor",
+        lambda _wake_id, _families: None,
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "held_sell_reauction_requests_completed",
+        lambda _requests: False,
+    )
+    selected_reasons: list[str] = []
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **kwargs: selected_reasons.append(kwargs["producer_wake_reason"])
+        or False,
+    )
+    published_at = datetime(2026, 8, 1, 11, 0, tzinfo=timezone.utc)
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=wake_path,
+        wake_id="wake-capital-debt-unfinished-day0",
+        published_at=published_at,
+        held_sell_reauction_requests=(request,),
+    )
+    reactor_wake.publish_reactor_wake(
+        source="day0_test_producer",
+        reason="day0_extreme_event_committed",
+        path=wake_path,
+        wake_id="wake-day0-monitor-unfinished",
+        published_at=published_at + timedelta(seconds=1),
+        event_ids=("event-day0-unfinished",),
+        forecast_families=(request.family,),
+    )
+
+    assert main._edli_reactor_wake_poll_once() is False
+    assert main._edli_reactor_wake_poll_once() is False
+    assert selected_reasons == [reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON]
+    main._edli_initialize_reactor_wake_cursor()
+
+
 def test_completed_day0_monitor_yields_one_turn_to_exact_held_sell_debt(
     monkeypatch, tmp_path: Path
 ) -> None:

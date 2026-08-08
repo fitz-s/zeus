@@ -8,6 +8,7 @@
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P2-1 required live ATTACH seam.
 """Tests for executor and portfolio."""
 
+import hashlib
 import sqlite3
 import json
 from dataclasses import replace
@@ -111,6 +112,7 @@ def _ensure_snapshot(
     conn,
     *,
     token_id: str,
+    condition_id: str = "condition-test",
     direction: str = "buy_yes",
     snapshot_id: str | None = None,
     final_limit_price: Decimal = Decimal("0.33"),
@@ -154,7 +156,7 @@ def _ensure_snapshot(
             gamma_market_id="gamma-test",
             event_id="event-test",
             event_slug="event-test",
-            condition_id="condition-test",
+            condition_id=condition_id,
             question_id="question-test",
             yes_token_id=yes_token_id,
             no_token_id=no_token_id,
@@ -716,6 +718,9 @@ class TestExecutor:
 
             def bind_submission_envelope(self, envelope):
                 self.bound_envelope = envelope
+
+            def bind_signed_submission_identity_persister(self, persister):
+                self.signed_identity_persister = persister
 
             def v2_preflight(self):
                 return None
@@ -1967,7 +1972,6 @@ class TestExecutor:
                 "allowed": True,
             },
         )
-
         result = execute_exit_order(
             create_exit_order_intent(
                 trade_id="trade-boundary-exit",
@@ -2014,6 +2018,336 @@ class TestExecutor:
         assert dict(command) == {
             "state": "ACKED",
             "venue_order_id": "sell-boundary-exit-1",
+        }
+
+    @pytest.mark.parametrize(
+        (
+            "fill_price",
+            "matched_size",
+            "expected_status",
+            "expected_command_state",
+        ),
+        (
+            ("0.999", "12", "filled", "FILLED"),
+            ("0.999", "5", "partial", "PARTIAL"),
+            ("0.94", "12", "unknown_side_effect", "REVIEW_REQUIRED"),
+            ("no_match", None, "rejected", "REJECTED"),
+            ("timeout", None, "unknown_side_effect", "SUBMIT_UNKNOWN_SIDE_EFFECT"),
+        ),
+    )
+    def test_certified_high_bid_exit_submits_legal_fak_floor(
+        self,
+        monkeypatch,
+        fill_price,
+        matched_size,
+        expected_status,
+        expected_command_state,
+    ):
+        suffix = fill_price.replace(".", "-")
+        token_id = f"yes-token-high-bid-exit-{suffix}"
+        trade_id = f"trade-high-bid-exit-{suffix}"
+        captured = {}
+
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def bind_signed_submission_identity_persister(self, persister):
+                self.signed_identity_persister = persister
+
+            def place_limit_order(self, *, token_id, price, size, side, order_type="GTC"):
+                captured.update(
+                    token_id=token_id,
+                    price=price,
+                    size=size,
+                    side=side,
+                    order_type=order_type,
+                    envelope_post_only=self.bound_envelope.post_only,
+                )
+                if fill_price == "timeout":
+                    raise TimeoutError("ambiguous FAK submit timeout")
+                if fill_price == "no_match":
+                    order_id = f"0x{'a' * 64}"
+                    signed = self.bound_envelope.with_updates(
+                        signed_order=b"{}",
+                        signed_order_hash=hashlib.sha256(b"{}").hexdigest(),
+                        order_id=order_id,
+                    )
+                    self.signed_identity_persister(signed)
+                    rejected = signed.with_updates(
+                        error_code="venue_fak_no_match_400",
+                        error_message="no orders found to match with FAK order",
+                    )
+                    return {
+                        "success": False,
+                        "status": "rejected",
+                        "errorCode": "venue_fak_no_match_400",
+                        "errorMessage": rejected.error_message,
+                        "orderID": order_id,
+                        "_venue_submission_envelope": rejected.to_dict(),
+                    }
+                result = _final_submit_result(
+                    self.bound_envelope,
+                    order_id=f"sell-high-bid-exit-{suffix}",
+                    status="MATCHED",
+                )
+                result.update(
+                    matchedSize=matched_size,
+                    avgPrice=fill_price,
+                    tradeIDs=[f"trade-fill-high-bid-{suffix}"],
+                )
+                return result
+
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+        monkeypatch.setattr(
+            "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
+            lambda conn, **kwargs: {
+                "component": "collateral_snapshot_refresh",
+                "allowed": True,
+            },
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._assert_collateral_allows_sell",
+            lambda token_id, shares, conn: {
+                "component": "collateral_sell_preflight",
+                "allowed": True,
+            },
+        )
+        snapshot_kwargs = _snapshot_kwargs(
+            token_id,
+            direction="sell_yes",
+            min_tick_size=Decimal("0.001"),
+            final_limit_price=Decimal("0.95"),
+            snapshot_top_ask=Decimal("1.0"),
+            snapshot_top_bid=Decimal("0.999"),
+        )
+        certificate = {
+            "action": "SELL",
+            "position_id": trade_id,
+            "condition_id": "condition-test",
+            "token_id": token_id,
+            "candidate_id": f"candidate-{suffix}",
+            "execution_mode": "TAKER_LIMIT",
+            "submit_order_type": "FAK",
+            "execution_authority_identity": "d" * 64,
+            "jit_book_hash": "c" * 64,
+            "book_snapshot_id": f"book-{suffix}",
+            "jit_curve_identity": "e" * 64,
+            "probability_witness_identity": "f" * 64,
+            "exact_limit_price": "0.95",
+            "selected_shares": "12.0",
+        }
+        from src.execution.executor import marketable_sell_certificate_identity
+        monkeypatch.setattr(
+            "src.execution.executor._marketable_sell_certificate_error",
+            lambda *_args, **_kwargs: None,
+        )
+
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id=trade_id,
+                token_id=token_id,
+                shares=12.0,
+                current_price=0.999,
+                best_bid=0.999,
+                exact_limit_price=0.95,
+                submit_order_type="FAK",
+                marketable_sell_certificate=certificate,
+                marketable_sell_certificate_identity=(
+                    marketable_sell_certificate_identity(certificate)
+                ),
+                **snapshot_kwargs,
+            ),
+            conn=_TEST_CONN,
+            decision_id=f"decision-high-bid-exit-{suffix}",
+        )
+
+        assert result.status == expected_status
+        assert result.command_state == expected_command_state
+        assert result.submitted_order_type == "FAK"
+        assert captured == {
+            "token_id": token_id,
+            "price": pytest.approx(0.95),
+            "size": pytest.approx(12.0),
+            "side": "SELL",
+            "order_type": "FAK",
+            "envelope_post_only": False,
+        }
+        if fill_price == "no_match":
+            command = _TEST_CONN.execute(
+                "SELECT command_id, venue_order_id FROM venue_commands "
+                "WHERE decision_id = ?",
+                (f"decision-high-bid-exit-{suffix}",),
+            ).fetchone()
+            payload = json.loads(
+                _TEST_CONN.execute(
+                    "SELECT payload_json FROM venue_command_events "
+                    "WHERE command_id = ? AND event_type = 'SUBMIT_REJECTED' "
+                    "ORDER BY sequence_no DESC LIMIT 1",
+                    (command["command_id"],),
+                ).fetchone()[0]
+            )
+            assert command["venue_order_id"] == f"0x{'a' * 64}"
+            assert payload["proof_class"] == "deterministic_venue_fak_no_match_400"
+            assert payload["terminal_no_fill"] is True
+            assert payload["exposure_created"] is False
+
+    def test_high_bid_exit_revalidates_real_typed_authority_at_final_sdk_seam(
+        self,
+        monkeypatch,
+    ):
+        from src.engine import event_reactor_adapter as era
+        from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+        from src.execution.executor import marketable_sell_certificate_identity
+        from tests.integration.test_w3_solve_seam_g3 import (
+            _adapter_sell_actuation,
+            _global_scope_event,
+        )
+
+        event = _global_scope_event(
+            city="Executor",
+            source_run_id="real-typed-high-bid-authority",
+        )
+        actuation = _adapter_sell_actuation(
+            event,
+            selected_shares="6",
+            bid_levels=(("0.999", "10"),),
+            min_tick="0.001",
+        )
+        candidate = actuation.decision.candidate
+        jit = era._global_sell_candidate_from_raw_book(
+            candidate,
+            {
+                "asset_id": candidate.token_id,
+                "tick_size": "0.001",
+                "min_order_size": "5",
+                "bids": [{"price": "0.999", "size": "10"}],
+                "asks": [],
+            },
+            captured_at_utc=datetime.now(timezone.utc),
+        )
+        authority = GlobalSellExecutionAuthority.from_current(
+            actuation=actuation,
+            jit_candidate=jit,
+        )
+        certificate = {
+            "action": "SELL",
+            "position_id": candidate.position_id,
+            "condition_id": candidate.condition_id,
+            "token_id": candidate.token_id,
+            "candidate_id": candidate.candidate_id,
+            "execution_mode": "TAKER_LIMIT",
+            "submit_order_type": "FAK",
+            "execution_authority_identity": authority.authority_identity,
+            "jit_book_hash": jit.executable_sell_curve.book_hash,
+            "book_snapshot_id": jit.book_snapshot_id,
+            "jit_curve_identity": jit.execution_curve_identity,
+            "probability_witness_identity": candidate.probability_witness_identity,
+            "exact_limit_price": str(authority.limit_price()),
+            "selected_shares": str(actuation.decision.shares),
+        }
+        snapshot_id = _ensure_snapshot(
+            _TEST_CONN,
+            token_id=candidate.token_id,
+            condition_id=candidate.condition_id,
+            snapshot_id="snap-real-typed-high-bid-authority",
+            direction="sell_yes",
+            min_tick_size=Decimal("0.001"),
+            final_limit_price=Decimal("0.95"),
+            snapshot_top_ask=Decimal("1.0"),
+            snapshot_top_bid=Decimal("0.999"),
+            raw_orderbook_hash=jit.executable_sell_curve.book_hash,
+        )
+        captured = {}
+
+        class DummyClient:
+            def __init__(self):
+                self.bound_envelope = None
+
+            def bind_submission_envelope(self, envelope):
+                self.bound_envelope = envelope
+
+            def bind_signed_submission_identity_persister(self, persister):
+                self.signed_identity_persister = persister
+
+            def place_limit_order(
+                self,
+                *,
+                token_id,
+                price,
+                size,
+                side,
+                order_type="GTC",
+            ):
+                captured.update(
+                    token_id=token_id,
+                    price=price,
+                    size=size,
+                    side=side,
+                    order_type=order_type,
+                )
+                result = _final_submit_result(
+                    self.bound_envelope,
+                    order_id="sell-real-typed-high-bid-authority",
+                    status="MATCHED",
+                )
+                result.update(
+                    matchedSize="6",
+                    avgPrice="0.999",
+                    tradeIDs=["trade-real-typed-high-bid-authority"],
+                )
+                return result
+
+        monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", DummyClient)
+        monkeypatch.setattr(
+            "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
+            lambda conn, **kwargs: {
+                "component": "collateral_snapshot_refresh",
+                "allowed": True,
+            },
+        )
+        monkeypatch.setattr(
+            "src.execution.executor._assert_collateral_allows_sell",
+            lambda token_id, shares, conn: {
+                "component": "collateral_sell_preflight",
+                "allowed": True,
+            },
+        )
+
+        result = execute_exit_order(
+            create_exit_order_intent(
+                trade_id=candidate.position_id,
+                token_id=candidate.token_id,
+                shares=float(actuation.decision.shares),
+                current_price=0.999,
+                best_bid=0.999,
+                exact_limit_price=0.95,
+                submit_order_type="FAK",
+                executable_snapshot_id=snapshot_id,
+                executable_snapshot_min_tick_size=Decimal("0.001"),
+                executable_snapshot_min_order_size=Decimal("0.01"),
+                executable_snapshot_neg_risk=False,
+                marketable_sell_execution_authority=authority,
+                marketable_sell_certificate=certificate,
+                marketable_sell_certificate_identity=(
+                    marketable_sell_certificate_identity(certificate)
+                ),
+            ),
+            conn=_TEST_CONN,
+            decision_id="decision-real-typed-high-bid-authority",
+        )
+
+        assert result.status == "filled"
+        assert result.command_state == "FILLED"
+        assert captured == {
+            "token_id": candidate.token_id,
+            "price": pytest.approx(0.95),
+            "size": pytest.approx(6.0),
+            "side": "SELL",
+            "order_type": "FAK",
         }
 
     @pytest.mark.parametrize("price", [0.0, 0.049, 0.951, 0.998, 1.0])
@@ -2064,7 +2398,7 @@ class TestExecutor:
 
         after = _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]
         assert result.status == "rejected"
-        assert "live_order_executable_price_out_of_bounds" in str(result.reason)
+        assert "marketable_sell_order_type_required" in str(result.reason)
         assert after == before
 
     @pytest.mark.parametrize("price", ["0.049", "0.951", "0.999"])
@@ -2101,9 +2435,7 @@ class TestExecutor:
 
         after = _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]
         assert result.status == "rejected"
-        assert result.reason == (
-            "live_fill_price_unbounded_taker_order:order_type=FAK:post_only=False"
-        )
+        assert result.reason.startswith("marketable_sell_authority_required:")
         assert after == before
 
     def test_exit_ack_persistence_failure_returns_unknown_not_pending(self, monkeypatch):

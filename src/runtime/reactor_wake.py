@@ -335,7 +335,7 @@ def _held_sell_reauction_material(
                 )
             )
             or clean_bid is None
-            or not 0.05 <= clean_bid <= 0.95
+            or not 0.05 <= clean_bid <= 1.0
         ):
             raise ValueError("HELD_SELL_REAUCTION_REQUEST_INVALID")
     elif clean_schema_version in {
@@ -353,7 +353,7 @@ def _held_sell_reauction_material(
                 and (
                     not all((clean_q_identity, clean_observed_at))
                     or clean_bid is None
-                    or not 0.05 <= clean_bid <= 0.95
+                    or not 0.05 <= clean_bid <= 1.0
                 )
             )
         ):

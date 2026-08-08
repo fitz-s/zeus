@@ -507,6 +507,7 @@ def _is_global_sell_snapshot_reauction_error(error: object) -> bool:
             "global_sell_exit_executable_snapshot_unavailable",
             "global_sell_exit_executable_snapshot_error:",
             "global_sell_exit_post_only_cross_reauction:",
+            "global_sell_exit_fak_no_fill_reauction:",
             "global_sell_exit_terminal_no_fill_reauction:",
         )
     )
@@ -518,11 +519,17 @@ def _is_post_only_cross_reauction_error(error: object) -> bool:
     )
 
 
-def _global_sell_post_only_cross_reauction_error(
+def _is_fak_no_fill_reauction_error(error: object) -> bool:
+    return str(error or "").lower().startswith(
+        "global_sell_exit_fak_no_fill_reauction:"
+    )
+
+
+def _global_sell_sync_no_side_effect_reauction_error(
     conn: sqlite3.Connection | None,
     sell_result: OrderResult,
 ) -> str:
-    """Classify one proved no-side-effect maker race for immediate re-auction.
+    """Classify a proved synchronous no-side-effect SELL for re-auction.
 
     A post-only SELL can become marketable after its executable snapshot is
     captured but before the venue validates it.  The synchronous 400 proves no
@@ -544,9 +551,14 @@ def _global_sell_post_only_cross_reauction_error(
     try:
         command = conn.execute(
             """
-            SELECT position_id, token_id, side, intent_kind, state
-              FROM venue_commands
-             WHERE command_id = ?
+            SELECT commands.position_id, commands.token_id, commands.side,
+                   commands.intent_kind, commands.state,
+                   commands.venue_order_id, envelopes.order_type,
+                   envelopes.post_only
+              FROM venue_commands AS commands
+              JOIN venue_submission_envelopes AS envelopes
+                ON envelopes.envelope_id = commands.envelope_id
+             WHERE commands.command_id = ?
              LIMIT 1
             """,
             (command_id,),
@@ -636,11 +648,85 @@ def _global_sell_post_only_cross_reauction_error(
         return ""
 
     reason = str(payload.get("reason") or "").strip()
-    detail = str(payload.get("detail") or "").strip().lower()
+    detail = str(
+        payload.get("detail")
+        or payload.get("exception_message")
+        or ""
+    ).strip().lower()
+    order_type = str(command[6] or "").strip().upper()
+    post_only = bool(command[7])
     if (
-        reason != "venue_rejected_400"
-        or "invalid post-only order" not in detail
-        or "crosses book" not in detail
+        order_type == "FAK"
+        and not post_only
+        and reason == "venue_fak_no_match_400"
+        and payload.get("proof_class")
+        == "deterministic_venue_fak_no_match_400"
+        and payload.get("terminal_no_fill") is True
+        and payload.get("exposure_created") is False
+    ):
+        venue_order_id = str(command[5] or "").strip()
+        predicates = payload.get("required_predicates")
+        final_envelope_id = str(
+            payload.get("final_submission_envelope_id") or ""
+        ).strip()
+        if (
+            not venue_order_id
+            or str(payload.get("venue_order_id") or "").strip()
+            != venue_order_id
+            or str(payload.get("final_submission_envelope_command_id") or "")
+            != command_id
+            or not isinstance(predicates, dict)
+            or not all(
+                predicates.get(key) is True
+                for key in (
+                    "structured_v2_fak_no_match",
+                    "final_envelope_command_matches",
+                    "final_envelope_is_fak",
+                    "deterministic_order_id_matches",
+                )
+            )
+            or not final_envelope_id
+        ):
+            return ""
+        try:
+            final_envelope = conn.execute(
+                """
+                SELECT order_type, post_only, order_id, error_code,
+                       signed_order_hash
+                  FROM venue_submission_envelopes
+                 WHERE envelope_id = ?
+                 LIMIT 1
+                """,
+                (final_envelope_id,),
+            ).fetchone()
+            order_fact = conn.execute(
+                "SELECT 1 FROM venue_order_facts WHERE command_id = ? LIMIT 1",
+                (command_id,),
+            ).fetchone()
+            trade_fact = conn.execute(
+                "SELECT 1 FROM venue_trade_facts WHERE command_id = ? LIMIT 1",
+                (command_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return ""
+        if (
+            final_envelope is None
+            or str(final_envelope[0] or "").upper() != "FAK"
+            or bool(final_envelope[1])
+            or str(final_envelope[2] or "").strip() != venue_order_id
+            or str(final_envelope[3] or "") != "venue_fak_no_match_400"
+            or not str(final_envelope[4] or "").strip()
+            or order_fact is not None
+            or trade_fact is not None
+        ):
+            return ""
+        return "global_sell_exit_fak_no_fill_reauction:venue_fak_no_match_400"
+    if not (
+        post_only
+        and order_type in {"GTC", "GTD"}
+        and reason == "venue_rejected_400"
+        and "invalid post-only order" in detail
+        and "crosses book" in detail
     ):
         return ""
 
@@ -650,6 +736,22 @@ def _global_sell_post_only_cross_reauction_error(
     # RESET: the next command must carry a new q/book/wealth certificate; no
     # latch survives the re-auction receipt.
     return "global_sell_exit_post_only_cross_reauction:venue_rejected_400"
+
+
+def _global_sell_post_only_cross_reauction_error(
+    conn: sqlite3.Connection | None,
+    sell_result: OrderResult,
+) -> str:
+    error = _global_sell_sync_no_side_effect_reauction_error(conn, sell_result)
+    return error if _is_post_only_cross_reauction_error(error) else ""
+
+
+def _global_sell_fak_no_fill_reauction_error(
+    conn: sqlite3.Connection | None,
+    sell_result: OrderResult,
+) -> str:
+    error = _global_sell_sync_no_side_effect_reauction_error(conn, sell_result)
+    return error if str(error).startswith("global_sell_exit_fak_no_fill_reauction:") else ""
 
 
 def _post_only_cross_command_id_for_position(
@@ -699,6 +801,54 @@ def _post_only_cross_reauction_proof_for_position(
         command_state="REJECTED",
     )
     return bool(_global_sell_post_only_cross_reauction_error(conn, result))
+
+
+def _fak_no_fill_command_id_for_position(
+    conn: sqlite3.Connection | None,
+    position: Position,
+) -> str:
+    """Read the command bound to a synchronous FAK terminal no-fill retry."""
+
+    if conn is None:
+        return ""
+    try:
+        row = conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'EXIT_ORDER_REJECTED'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (str(getattr(position, "trade_id", "") or ""),),
+        ).fetchone()
+        payload = json.loads(str(row[0] or "{}")) if row is not None else {}
+    except (sqlite3.Error, TypeError, ValueError, json.JSONDecodeError):
+        return ""
+    if (
+        not isinstance(payload, dict)
+        or not _is_fak_no_fill_reauction_error(payload.get("error"))
+    ):
+        return ""
+    return str(payload.get("fak_no_fill_command_id") or "").strip()
+
+
+def _fak_no_fill_reauction_proof_for_position(
+    conn: sqlite3.Connection | None,
+    position: Position,
+) -> bool:
+    command_id = _fak_no_fill_command_id_for_position(conn, position)
+    if not command_id:
+        return False
+    result = OrderResult(
+        trade_id=str(getattr(position, "trade_id", "") or ""),
+        status="rejected",
+        reason="venue_rejected_400",
+        command_id=command_id,
+        command_state="REJECTED",
+    )
+    return bool(_global_sell_fak_no_fill_reauction_error(conn, result))
 
 
 def _held_sell_reauction_obligation(
@@ -942,6 +1092,7 @@ def _relinquished_global_sell_command_id(
     if not position_id:
         return ""
     post_only_command_id = _post_only_cross_command_id_for_position(conn, position)
+    fak_no_fill_command_id = _fak_no_fill_command_id_for_position(conn, position)
     raw_direction = getattr(position, "direction", "")
     direction = str(getattr(raw_direction, "value", raw_direction) or "").lower()
     held_token_id = str(
@@ -960,6 +1111,17 @@ def _relinquished_global_sell_command_id(
         and _post_only_cross_reauction_proof_for_position(conn, position)
     ):
         return post_only_command_id
+    if (
+        fak_no_fill_command_id
+        and _is_exact_held_sell_command(
+            conn,
+            position_id=position_id,
+            command_id=fak_no_fill_command_id,
+            held_token_id=held_token_id,
+        )
+        and _fak_no_fill_reauction_proof_for_position(conn, position)
+    ):
+        return fak_no_fill_command_id
 
     obligation = latest_held_sell_reauction_obligation(conn, position)
     if obligation.get("schema_version") != 4:
@@ -1942,17 +2104,32 @@ class GlobalSellExecutionAuthority:
         if self.authority_identity != expected:
             raise ValueError("GLOBAL_SELL_EXECUTION_AUTHORITY_IDENTITY_MISMATCH")
 
-    def maker_limit_price(self) -> Decimal:
-        """Return the exact maker price already bound into JIT economics."""
+    def limit_price(self) -> Decimal:
+        """Return the legal submitted SELL limit bound into JIT economics."""
 
         from src.contracts.venue_submission_envelope import (
             assert_live_order_unit_price,
         )
 
-        curve = self.jit_candidate.executable_sell_curve
+        candidate = self.jit_candidate
+        curve = candidate.executable_sell_curve
         best_bid = Decimal(curve.levels[0].price)
+        if candidate.execution_mode == "TAKER_LIMIT":
+            limit = (
+                LIVE_ORDER_MAX_UNIT_PRICE / Decimal(curve.min_tick)
+            ).to_integral_value(rounding=ROUND_FLOOR) * Decimal(curve.min_tick)
+            try:
+                bounded = assert_live_order_unit_price(limit)
+            except ValueError as exc:
+                raise ValueError(
+                    "GLOBAL_SELL_LEGAL_TAKER_PRICE_UNAVAILABLE:"
+                    f"best_bid={best_bid}:tick={curve.min_tick}"
+                ) from exc
+            if best_bid < bounded:
+                raise ValueError("GLOBAL_SELL_TAKER_PRICE_NOT_MARKETABLE")
+            return bounded
         try:
-            limit = Decimal(self.jit_candidate.economic_sell_curve.levels[0].price)
+            limit = Decimal(candidate.economic_sell_curve.levels[0].price)
         except (AttributeError, IndexError, TypeError, ValueError) as exc:
             raise ValueError(
                 "GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:proposal_missing"
@@ -1969,6 +2146,13 @@ class GlobalSellExecutionAuthority:
         if bounded != best_bid + Decimal(curve.min_tick):
             raise ValueError("GLOBAL_SELL_MAKER_PRICE_NOT_NEAREST_TICK")
         return bounded
+
+    def maker_limit_price(self) -> Decimal:
+        """Compatibility wrapper for callers that require maker-rest authority."""
+
+        if self.jit_candidate.execution_mode != "MAKER_REST":
+            raise ValueError("GLOBAL_SELL_EXECUTION_MODE_NOT_MAKER_REST")
+        return self.limit_price()
 
 
 def place_sell_order(
@@ -1990,6 +2174,9 @@ def place_sell_order(
     decision_id: str = "",
     q_version: str = "",
     execution_proof_verified: bool = False,
+    marketable_sell_certificate: Mapping[str, object] | None = None,
+    marketable_sell_certificate_identity: str = "",
+    marketable_sell_execution_authority: object | None = None,
     execution_authority_deadline_utc: str = "",
 ) -> OrderResult:
     """Thin compatibility adapter over the executor-level exit-order path."""
@@ -2014,6 +2201,9 @@ def place_sell_order(
         executable_snapshot_min_tick_size=executable_snapshot_min_tick_size,
         executable_snapshot_min_order_size=executable_snapshot_min_order_size,
         executable_snapshot_neg_risk=executable_snapshot_neg_risk,
+        marketable_sell_certificate=marketable_sell_certificate,
+        marketable_sell_certificate_identity=marketable_sell_certificate_identity,
+        marketable_sell_execution_authority=marketable_sell_execution_authority,
         execution_authority_deadline_utc=execution_authority_deadline_utc,
     )
     deadline_error = _exit_execution_authority_deadline_error(intent)
@@ -3391,11 +3581,9 @@ def _global_sell_capital_certificate_error(
         and chain_held == exact_held
         and matches_decimal(candidate.held_shares, sellable)
         and matches_decimal(exit_intent.shares, decision.shares)
-        and matches_decimal(
-            exit_intent.exact_limit_price,
-            authority.maker_limit_price(),
-        )
-        and str(exit_intent.submit_order_type or "").upper() == "GTC"
+        and matches_decimal(exit_intent.exact_limit_price, authority.limit_price())
+        and str(exit_intent.submit_order_type or "").upper()
+        == ("FAK" if candidate.execution_mode == "TAKER_LIMIT" else "GTC")
     ):
         return "global_sell_execution_position_economics_mismatch"
     certificate = exit_intent.capital_certificate
@@ -3403,6 +3591,9 @@ def _global_sell_capital_certificate_error(
         return "capital_certificate_required"
     expected_text = {
         "action": "SELL",
+        "position_id": str(getattr(position, "trade_id", "") or ""),
+        "condition_id": candidate.condition_id,
+        "token_id": candidate.token_id,
         "candidate_id": candidate.candidate_id,
         "actuation_identity": actuation.actuation_identity,
         "economic_identity": actuation.economic_identity,
@@ -3417,9 +3608,12 @@ def _global_sell_capital_certificate_error(
         "wealth_witness_identity": actuation.wealth_witness_identity,
         "execution_authority_identity": authority.authority_identity,
         "jit_book_hash": jit.executable_sell_curve.book_hash,
+        "book_snapshot_id": jit.book_snapshot_id,
         "jit_curve_identity": jit.execution_curve_identity,
-        "execution_mode": "MAKER_REST",
-        "submit_order_type": "GTC",
+        "execution_mode": candidate.execution_mode,
+        "submit_order_type": (
+            "FAK" if candidate.execution_mode == "TAKER_LIMIT" else "GTC"
+        ),
         "fill_probability_source": candidate.fill_probability_source,
     }
     if any(
@@ -3433,14 +3627,15 @@ def _global_sell_capital_certificate_error(
         "selected_shares": decision.shares,
         "selected_cash_proceeds_usd": decision.cash_proceeds_usd,
         "economic_limit_price": decision.limit_price,
-        "exact_limit_price": authority.maker_limit_price(),
+        "exact_limit_price": authority.limit_price(),
         "fill_probability": candidate.fill_probability,
-        "rest_deadline_minutes": candidate.rest_deadline_minutes,
         "expected_comparison_delta_log_wealth": (
             decision.expected_growth.expected_delta_log_wealth
         ),
         "expected_comparison_ev_usd": decision.expected_growth.expected_ev_usd,
     }
+    if candidate.rest_deadline_minutes is not None:
+        expected_decimal["rest_deadline_minutes"] = candidate.rest_deadline_minutes
     if candidate.probability_functional == "POSTERIOR_PREDICTIVE_MEAN":
         expected_decimal.update(
             {
@@ -4489,10 +4684,8 @@ def _exit_sell_liquidity_error(
     if best_bid is None or snapshot_bid is None:
         return "exit_no_executable_bid"
     if (
-        not LIVE_ORDER_MIN_UNIT_PRICE <= best_bid <= LIVE_ORDER_MAX_UNIT_PRICE
-        or not LIVE_ORDER_MIN_UNIT_PRICE
-        <= snapshot_bid
-        <= LIVE_ORDER_MAX_UNIT_PRICE
+        not LIVE_ORDER_MIN_UNIT_PRICE <= best_bid <= Decimal("1")
+        or not LIVE_ORDER_MIN_UNIT_PRICE <= snapshot_bid <= Decimal("1")
     ):
         # INV-47 SCOPE: only this token's SELL attempt is held for liquidity.
         # DRAIN: the next monitor refresh captures a new executable snapshot.
@@ -4856,10 +5049,14 @@ def _execute_live_exit(
                 preliminary_error,
             )
             return f"exit_blocked: {preliminary_error}"
-    if global_authorized and str(exit_intent.submit_order_type or "").upper() != "GTC":
-        # Global statistical SELL has one execution grammar: the exact maker
-        # proposal ranked by the auction. No downstream caller may revive FAK.
-        return "exit_blocked: global_sell_gtc_required"
+    if global_authorized:
+        expected_order_type = (
+            "FAK"
+            if global_sell_authority.jit_candidate.execution_mode == "TAKER_LIMIT"
+            else "GTC"
+        )
+        if str(exit_intent.submit_order_type or "").upper() != expected_order_type:
+            return "exit_blocked: global_sell_order_type_mismatch"
     _record_exit_intent_before_execution_gates(conn, position, exit_intent)
 
     try:
@@ -5193,6 +5390,23 @@ def _execute_live_exit(
         submit_snapshot_context["execution_authority_deadline_utc"] = (
             execution_authority_deadline_utc
         )
+        marketable_certificate = (
+            dict(exit_intent.capital_certificate)
+            if global_authorized
+            and global_sell_authority is not None
+            and global_sell_authority.jit_candidate.execution_mode
+            == "TAKER_LIMIT"
+            and exit_intent.capital_certificate is not None
+            else None
+        )
+        if marketable_certificate is not None:
+            from src.execution.executor import marketable_sell_certificate_identity
+
+            marketable_certificate_hash = (
+                marketable_sell_certificate_identity(marketable_certificate)
+            )
+        else:
+            marketable_certificate_hash = ""
         raw_sell_result = place_sell_order(
             trade_id=position.trade_id,
             token_id=token_id,
@@ -5215,6 +5429,13 @@ def _execute_live_exit(
                 else ""
             ),
             execution_proof_verified=True,
+            marketable_sell_certificate=marketable_certificate,
+            marketable_sell_certificate_identity=(
+                marketable_certificate_hash
+            ),
+            marketable_sell_execution_authority=(
+                global_sell_authority if marketable_certificate is not None else None
+            ),
             **submit_snapshot_context,
         )
         sell_result = _coerce_sell_result(position.trade_id, raw_sell_result)
@@ -5224,14 +5445,13 @@ def _execute_live_exit(
         if sell_result.status == "rejected":
             sell_error = sell_result.reason or "sell_rejected"
             if global_authorized:
-                post_only_cross_reauction = (
-                    _global_sell_post_only_cross_reauction_error(
-                        conn,
-                        sell_result,
+                sync_no_side_effect_reauction = (
+                    _global_sell_sync_no_side_effect_reauction_error(
+                        conn, sell_result
                     )
                 )
-                if post_only_cross_reauction:
-                    sell_error = post_only_cross_reauction
+                if sync_no_side_effect_reauction:
+                    sell_error = sync_no_side_effect_reauction
             if _is_exit_transient_lock_error(sell_error):
                 active_exit = _active_exit_sell_for_lock(
                     conn,
@@ -5274,6 +5494,13 @@ def _execute_live_exit(
                 post_only_cross_command_id=(
                     sell_result.command_id
                     if _is_post_only_cross_reauction_error(sell_error)
+                    else ""
+                ),
+                fak_no_fill_command_id=(
+                    sell_result.command_id
+                    if str(sell_error).startswith(
+                        "global_sell_exit_fak_no_fill_reauction:"
+                    )
                     else ""
                 ),
                 conn=conn,
@@ -9383,6 +9610,7 @@ def _mark_exit_retry(
     cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS,
     conn: sqlite3.Connection | None = None,
     post_only_cross_command_id: str = "",
+    fak_no_fill_command_id: str = "",
 ) -> None:
     """Transition position to retry_pending with exponential backoff."""
     _mark_pending_exit(position)
@@ -9399,6 +9627,17 @@ def _mark_exit_retry(
         if not _global_sell_post_only_cross_reauction_error(conn, proof_result):
             # The typed/durable proof disappeared or was never bound to this
             # position. A prefix must not authorize immediate re-auction.
+            error = "venue_rejected_400"
+            snapshot_reauction = False
+    if _is_fak_no_fill_reauction_error(error):
+        proof_result = OrderResult(
+            trade_id=str(getattr(position, "trade_id", "") or ""),
+            status="rejected",
+            reason="venue_rejected_400",
+            command_id=str(fak_no_fill_command_id or "").strip(),
+            command_state="REJECTED",
+        )
+        if not _global_sell_fak_no_fill_reauction_error(conn, proof_result):
             error = "venue_rejected_400"
             snapshot_reauction = False
     if snapshot_reauction:
@@ -9419,6 +9658,10 @@ def _mark_exit_retry(
         if _is_post_only_cross_reauction_error(error):
             extra_payload["post_only_cross_command_id"] = str(
                 post_only_cross_command_id or ""
+            ).strip()
+        if _is_fak_no_fill_reauction_error(error):
+            extra_payload["fak_no_fill_command_id"] = str(
+                fak_no_fill_command_id or ""
             ).strip()
         _dual_write_canonical_pending_exit_if_available(
             conn,

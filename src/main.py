@@ -5190,6 +5190,7 @@ def _edli_reactor_wake_poll_once() -> bool:
         GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
         acknowledge_reactor_wakes,
         coalescible_reactor_wakes,
+        exact_held_sell_completion_wake_ids,
         held_sell_reauction_requests_completed,
         persist_held_sell_reauction_receipts,
         read_reactor_wake,
@@ -5251,6 +5252,17 @@ def _edli_reactor_wake_poll_once() -> bool:
                 prefer_material_progress=True,
                 fail_on_error=True,
             )
+        if (
+            wake is not None
+            and wake.reason == "day0_extreme_event_committed"
+            and exact_held_sell_completion_wake_ids(fail_on_error=True)
+        ):
+            # INV-47 SCOPE: only this selected Day0 wake yields one next turn.
+            # DRAIN: the immediately following poll prefers exact held-SELL
+            # debt even when this Day0 wake remains unacknowledged or its
+            # monitor/cycle fails. RESET: consume() clears the process-local
+            # preference after one selection; empty exact debt never arms it.
+            _edli_day0_post_monitor_yield.arm(wake.wake_id)
     except (OSError, ValueError):
         logger.warning(
             "paused forecast carrier selection unavailable; retaining wake debt",
