@@ -1,6 +1,6 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-07-23
-# Lifecycle: created=2026-06-12; last_reviewed=2026-07-23; last_reused=2026-07-23
+# Last reused or audited: 2026-08-08
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-08; last_reused=2026-08-08
 # Authority basis: operator stagnation root-cause 2026-06-12 ("continuous redecision没有作用中") +
 #   /tmp/continuous_redecision_resurrection.md. RELATIONSHIP antibodies for the P1 deadlock-free
 #   belief write, the P2 cheap screen, §4.5 rest management, and the EDLI_REDECISION_PENDING consume
@@ -1535,6 +1535,60 @@ def test_open_maker_rests_preserve_no_token_direction_and_held_side_posterior():
     assert rests[0].fact_state == "LIVE"
     assert rests[0].matched_size is None
     assert rests[0].min_order_size == pytest.approx(5.0)
+
+
+def test_open_maker_rests_use_current_trade_fill_when_order_fact_is_stale():
+    """A user-channel partial fill must prevent a cancel that would create dust."""
+    from src.events import reactor
+
+    world = _mem_world()
+    trade = _mem_trade()
+    trade.execute(
+        "CREATE TABLE venue_commands ("
+        "command_id TEXT, venue_order_id TEXT, token_id TEXT, market_id TEXT, "
+        "side TEXT, price REAL, snapshot_id TEXT, created_at TEXT, intent_kind TEXT)"
+    )
+    trade.execute(
+        "CREATE TABLE venue_order_facts ("
+        "venue_order_id TEXT, state TEXT, matched_size TEXT, local_sequence INTEGER)"
+    )
+    trade.execute(
+        "CREATE TABLE venue_trade_facts ("
+        "trade_id TEXT, command_id TEXT, venue_order_id TEXT, state TEXT, filled_size TEXT, "
+        "local_sequence INTEGER)"
+    )
+    _cache(world, p_yes=0.90, snapshot_id="snap1", cond="0xc30")
+    _snapshot(trade, snapshot_id="snap1", min_order_size="5")
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "cmd1", "order1", "yes-c30", "m1", "BUY", 0.70, "snap1",
+            "2026-06-12T00:00:00+00:00", "ENTRY",
+        ),
+    )
+    trade.execute(
+        "INSERT INTO venue_order_facts VALUES ('order1', 'LIVE', '0', 1)"
+    )
+    # MATCHED -> CONFIRMED is one trade's state progression, not two fills.
+    trade.execute(
+        "INSERT INTO venue_trade_facts VALUES "
+        "('trade1', 'cmd1', 'order1', 'MATCHED', '1.724135', 1), "
+        "('trade1', 'cmd1', 'order1', 'CONFIRMED', '1.724135', 2)"
+    )
+    trade.commit()
+
+    rests = reactor._edli_open_maker_rests_for_screen(trade, world)
+
+    assert len(rests) == 1
+    assert rests[0].matched_size == pytest.approx(1.724135)
+    assert rests[0].min_order_size == pytest.approx(5.0)
+    assert cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=rests,
+        decision_time="2026-06-12T00:45:00+00:00",
+        value_refresh_min_age_seconds=5 * 60,
+    ) == []
 
 
 def test_open_maker_rests_resolve_token_from_latest_snapshot_mirror_without_append_scan():

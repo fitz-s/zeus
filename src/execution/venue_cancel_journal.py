@@ -23,6 +23,7 @@ it to this executor. Relocating this function here (byte-identical body) lets
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -47,6 +48,132 @@ class _TerminalCommandNoop(RuntimeError):
         self.command_id = command_id
         self.state = state
         self.event_type = event_type
+
+
+def _finite_nonnegative(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and parsed >= 0.0 else None
+
+
+def _current_cancel_matched_size(
+    entry: dict[str, Any],
+    clob: Any,
+    *,
+    conn_factory: Callable[[], sqlite3.Connection],
+    close_connections: bool,
+) -> tuple[float | None, str]:
+    """Rebind a cancel candidate to current cumulative fill truth.
+
+    The rest screen is selection-time evidence. A user-channel trade may land
+    before the cancel side effect while the latest order fact still says
+    ``matched_size=0``. Read both the venue point order and canonical distinct
+    trade facts immediately before cancel; the maximum is the only safe
+    cumulative fill witness.
+    """
+
+    command_id = str(entry.get("command_id") or "")
+    order_id = str(entry.get("venue_order_id") or "")
+    values = [
+        value
+        for value in (_finite_nonnegative(entry.get("matched_size")),)
+        if value is not None
+    ]
+    sources = ["screen"] if values else []
+
+    get_order = getattr(clob, "get_order", None)
+    if callable(get_order):
+        try:
+            point_order = get_order(order_id)
+        except Exception as exc:  # noqa: BLE001 - stale truth may not authorize cancel.
+            logger.warning(
+                "venue_cancel_journal: pre-cancel point-order refresh failed "
+                "command=%s order=%s: %r",
+                command_id,
+                order_id,
+                exc,
+            )
+            return None, "venue_point_order_unavailable"
+        if point_order is None:
+            return None, "venue_point_order_absent"
+        raw = getattr(point_order, "raw", point_order)
+        if not isinstance(raw, dict):
+            return None, "venue_point_order_shape_invalid"
+        point_matched = next(
+            (
+                parsed
+                for key in ("_v2_matched_size", "size_matched", "sizeMatched")
+                if (parsed := _finite_nonnegative(raw.get(key))) is not None
+            ),
+            None,
+        )
+        if point_matched is None:
+            return None, "venue_point_order_matched_missing"
+        values.append(point_matched)
+        sources.append("venue_point_order")
+
+    conn = conn_factory()
+    try:
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        if "venue_order_facts" in tables:
+            row = conn.execute(
+                """
+                SELECT matched_size
+                  FROM venue_order_facts
+                 WHERE command_id = ? AND venue_order_id = ?
+                 ORDER BY local_sequence DESC
+                 LIMIT 1
+                """,
+                (command_id, order_id),
+            ).fetchone()
+            local_order_matched = _finite_nonnegative(row[0]) if row else None
+            if local_order_matched is not None:
+                values.append(local_order_matched)
+                sources.append("order_fact")
+        if "venue_trade_facts" in tables:
+            row = conn.execute(
+                """
+                WITH latest_trade AS (
+                    SELECT filled_size, state,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY trade_id ORDER BY local_sequence DESC
+                           ) AS rn
+                      FROM venue_trade_facts
+                     WHERE command_id = ? AND venue_order_id = ?
+                )
+                SELECT COALESCE(SUM(CAST(filled_size AS REAL)), 0)
+                  FROM latest_trade
+                 WHERE rn = 1
+                   AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
+                """,
+                (command_id, order_id),
+            ).fetchone()
+            trade_matched = _finite_nonnegative(row[0]) if row else None
+            if trade_matched is not None:
+                values.append(trade_matched)
+                sources.append("trade_fact")
+    except sqlite3.Error as exc:
+        logger.warning(
+            "venue_cancel_journal: pre-cancel canonical fill refresh failed "
+            "command=%s order=%s: %r",
+            command_id,
+            order_id,
+            exc,
+        )
+        return None, "canonical_fill_unavailable"
+    finally:
+        _close_conn_if_needed(conn, close=close_connections)
+
+    if not values:
+        return None, "matched_size_unavailable"
+    return max(values), "+".join(sources)
 
 
 def _close_conn_if_needed(conn: sqlite3.Connection, *, close: bool) -> None:
@@ -205,6 +332,40 @@ def run_persisted_cancels_for_expired_rests(
         cancel_reason = str(entry.get("cancel_reason") or "").strip()
         cancel_action = str(entry.get("cancel_action") or "").strip()
         cancel_detail = entry.get("cancel_detail")
+        min_order_size = _finite_nonnegative(entry.get("min_order_size"))
+        if min_order_size is not None and min_order_size > 0.0:
+            # SCOPE: this maker rest only. DRAIN: the next redecision cycle
+            # retries after point/canonical truth recovers or the rest fills to
+            # an executable size. RESET: current matched size is zero or at
+            # least the venue minimum, so ordinary cancel/reprice resumes.
+            matched_size, matched_source = _current_cancel_matched_size(
+                entry,
+                clob,
+                conn_factory=conn_factory,
+                close_connections=close_connections,
+            )
+            if matched_size is None:
+                stats["cancel_failed"] += 1
+                logger.warning(
+                    "venue_cancel_journal: deferred cancel without current fill truth "
+                    "command=%s order=%s reason=%s",
+                    command_id,
+                    order_id,
+                    matched_source,
+                )
+                continue
+            entry["matched_size"] = matched_size
+            if 0.0 < matched_size < min_order_size:
+                logger.warning(
+                    "venue_cancel_journal: deferred cancel to preserve sub-min partial "
+                    "command=%s order=%s matched=%.6f min_order=%.6f source=%s",
+                    command_id,
+                    order_id,
+                    matched_size,
+                    min_order_size,
+                    matched_source,
+                )
+                continue
         now = datetime.now(UTC).isoformat()
         try:
             _append_cancel_journal_event(

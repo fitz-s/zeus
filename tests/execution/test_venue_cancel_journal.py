@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-07-22
+# Last reused/audited: 2026-08-08
 # Authority basis: W4.2 relocation of the persisted-cancel journal engine out of the retired
 #   src/execution/maker_rest_escalation.py into src/execution/venue_cancel_journal.py (still used
 #   by main._edli_boot_invalid_pending_entry_authority_cancel_once,
@@ -137,7 +137,99 @@ class _FakeClob:
         return {"canceled": [order_id]}
 
 
+class _PointOrderClob(_FakeClob):
+    def __init__(self, *, matched_size: str):
+        super().__init__()
+        self.matched_size = matched_size
+
+    def get_order(self, order_id: str):
+        return {
+            "orderID": order_id,
+            "status": "LIVE",
+            "original_size": "26.5",
+            "size_matched": self.matched_size,
+        }
+
+
 class TestPersistedRestCancel:
+    def test_current_zero_or_executable_fill_keeps_normal_cancel_path(self):
+        for matched_size in ("0", "5", "8"):
+            conn = _db()
+            _add_order(conn, command_id="c1", venue_order_id="o1")
+            clob = _PointOrderClob(matched_size=matched_size)
+
+            stats = run_persisted_cancels_for_expired_rests(
+                [_entry("c1", "o1", min_order_size="5")],
+                clob,
+                conn_factory=lambda: conn,
+                close_connections=False,
+            )
+
+            assert stats["cancelled"] == 1
+            assert stats["cancel_failed"] == 0
+            assert clob.cancelled == ["o1"]
+
+    def test_current_partial_fill_below_venue_min_defers_cancel_before_side_effect(self):
+        conn = _db()
+        _add_order(conn, command_id="c1", venue_order_id="o1")
+        conn.execute(
+            """CREATE TABLE venue_order_facts (
+                venue_order_id TEXT, command_id TEXT, state TEXT,
+                matched_size TEXT, local_sequence INTEGER)"""
+        )
+        conn.execute(
+            """CREATE TABLE venue_trade_facts (
+                trade_id TEXT, venue_order_id TEXT, command_id TEXT, state TEXT,
+                filled_size TEXT, local_sequence INTEGER)"""
+        )
+        conn.execute(
+            "INSERT INTO venue_order_facts VALUES ('o1','c1','LIVE','0',1)"
+        )
+        conn.execute(
+            "INSERT INTO venue_trade_facts VALUES ('t1','o1','c1','CONFIRMED','1.724135',2)"
+        )
+        clob = _PointOrderClob(matched_size="1.724135")
+
+        stats = run_persisted_cancels_for_expired_rests(
+            [_entry("c1", "o1", min_order_size="5")],
+            clob,
+            conn_factory=lambda: conn,
+            close_connections=False,
+        )
+
+        assert stats == {
+            "scanned": 1, "cancelled": 0, "cancel_failed": 0, "cancel_journal_failed": 0,
+        }
+        assert clob.cancelled == []
+        assert [
+            row[0]
+            for row in conn.execute(
+                "SELECT event_type FROM venue_command_events "
+                "WHERE command_id = 'c1' ORDER BY sequence_no"
+            )
+        ] == ["INTENT_CREATED", "SUBMIT_ACKED"]
+
+    def test_current_fill_truth_failure_does_not_cancel_blind(self):
+        conn = _db()
+        _add_order(conn, command_id="c1", venue_order_id="o1")
+
+        class FailingPointOrderClob(_FakeClob):
+            def get_order(self, _order_id: str):
+                raise TimeoutError("point-order timeout")
+
+        clob = FailingPointOrderClob()
+        stats = run_persisted_cancels_for_expired_rests(
+            [_entry("c1", "o1", min_order_size="5")],
+            clob,
+            conn_factory=lambda: conn,
+            close_connections=False,
+        )
+
+        assert stats == {
+            "scanned": 1, "cancelled": 0, "cancel_failed": 1, "cancel_journal_failed": 0,
+        }
+        assert clob.cancelled == []
+
     def test_persisted_cancel_records_command_terminal_state_before_harvest(self):
         conn = _db()
         _add_order(conn, command_id="c1", venue_order_id="o1")

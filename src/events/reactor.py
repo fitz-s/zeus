@@ -10732,6 +10732,14 @@ def _row_float(row, key: str) -> float | None:
     return float(value)
 
 
+def _finite_nonnegative_float(value: object) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and parsed >= 0.0 else None
+
+
 # ---------------------------------------------------------------------------
 # R4-b4 (2026-07-08 main.py slimming): continuous-redecision-screen cluster,
 # extracted from src/main.py::_edli_continuous_redecision_screen_cycle and its
@@ -10829,6 +10837,14 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
         command_cols = {str(row[1]) for row in trade_conn.execute("PRAGMA table_info(venue_commands)").fetchall()}
     except Exception:  # noqa: BLE001
         command_cols = set()
+    try:
+        has_trade_facts = bool(
+            trade_conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'venue_trade_facts'"
+            ).fetchone()
+        )
+    except Exception:  # noqa: BLE001
+        has_trade_facts = False
     matched_select = "matched_size" if "matched_size" in fact_cols else "NULL AS matched_size"
     command_state_filter = (
         "AND state IN ('ACKED', 'POST_ACKED', 'PARTIAL')" if "state" in command_cols else ""
@@ -10845,8 +10861,28 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
     ).fetchall()
     rows = []
     if command_rows:
+        trade_matched_select = (
+            """
+            , (
+                WITH latest_trade AS (
+                    SELECT filled_size, state,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY trade_id ORDER BY local_sequence DESC
+                           ) AS rn
+                      FROM venue_trade_facts
+                     WHERE command_id = ? AND venue_order_id = ?
+                )
+                SELECT COALESCE(SUM(CAST(filled_size AS REAL)), 0)
+                  FROM latest_trade
+                 WHERE rn = 1
+                   AND state IN ('MATCHED', 'MINED', 'CONFIRMED')
+              ) AS trade_matched_size
+            """
+            if has_trade_facts
+            else ", NULL AS trade_matched_size"
+        )
         fact_sql = f"""
-            SELECT state, {matched_select}
+            SELECT state, {matched_select}{trade_matched_select}
               FROM venue_order_facts
              WHERE venue_order_id = ?
              ORDER BY local_sequence DESC
@@ -10854,13 +10890,23 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
         """
         open_states = set(OPEN_REST_FACT_STATES)
         for vc in command_rows:
-            latest_fact = trade_conn.execute(fact_sql, (vc[1],)).fetchone()
+            fact_params = (vc[0], vc[1], vc[1]) if has_trade_facts else (vc[1],)
+            latest_fact = trade_conn.execute(fact_sql, fact_params).fetchone()
             if latest_fact is None:
                 continue
             fact_state = str(latest_fact[0] or "")
             if fact_state not in open_states:
                 continue
-            rows.append(tuple(vc) + (fact_state, latest_fact[1]))
+            matched_candidates = [
+                value
+                for value in (
+                    _finite_nonnegative_float(latest_fact[1]),
+                    _finite_nonnegative_float(latest_fact[2]),
+                )
+                if value is not None
+            ]
+            matched_size = max(matched_candidates) if matched_candidates else None
+            rows.append(tuple(vc) + (fact_state, matched_size))
     if not rows:
         return []
     # Resolve token_id -> condition_id and held-side direction from the freshest
@@ -12758,7 +12804,8 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             to_cancel = [
                 {"command_id": rest.command_id, "venue_order_id": rest.venue_order_id,
                  "created_at": rest.created_at, "fact_state": rest.fact_state,
-                 "matched_size": rest.matched_size, "cancel_reason": decision.reason,
+                 "matched_size": rest.matched_size, "min_order_size": rest.min_order_size,
+                 "cancel_reason": decision.reason,
                  "cancel_action": decision.action, "cancel_detail": decision.detail}
                 for rest, decision in rest_pulls
             ]
