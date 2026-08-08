@@ -157,6 +157,15 @@ def _write_json(path: Path, payload: dict) -> None:
 def _healthy_state(root: Path) -> None:
     _write_json(root / "state" / "daemon-heartbeat.json", {"alive": True})
     _write_json(
+        root / "state" / "venue-heartbeat-keeper.json",
+        {
+            "health": "HEALTHY",
+            "resting_order_safe": True,
+            "cadence_seconds": 5,
+            "written_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    _write_json(
         root / "state" / "forecast-live-heartbeat.json",
         {"alive": True, "status": "alive"},
     )
@@ -639,6 +648,112 @@ def test_live_probe_direct_head_forecast_bridge_overrides_stale_composite_ok(
     assert out.startswith("OK")
     assert "FORECAST_TO_EVENT_BRIDGE_STALLED" not in out
     assert "LIVE_HEALTH_FORECAST_EVENT_BRIDGE" not in out
+
+
+def test_live_probe_direct_venue_health_overrides_stale_composite_unsafe(
+    tmp_path, monkeypatch, capsys
+):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    surfaces = {
+        surface: {"ok": True, "issue": None}
+        for surface in module.REQUIRED_LIVE_HEALTH_SURFACES
+    }
+    surfaces["venue_heartbeat"] = {
+        "ok": False,
+        "issue": "VENUE_HEARTBEAT_RESTING_ORDER_UNSAFE",
+    }
+    _write_json(
+        root / "state" / "live_health_composite.json",
+        {
+            "healthy": False,
+            "status": "DEGRADED",
+            "failing_surfaces": ["venue_heartbeat"],
+            "surfaces": surfaces,
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "_direct_head_live_health_surfaces",
+        lambda *args, **kwargs: {
+            "venue_heartbeat": {"ok": True, "issue": None},
+        },
+    )
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+        {404: {"ZEUS_FORECAST_LIVE_OWNER": "forecast_live"}},
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("OK")
+    assert "VENUE_HEARTBEAT_RESTING_ORDER_UNSAFE" not in out
+
+
+def test_live_probe_direct_venue_failure_replaces_stale_composite_issue(
+    tmp_path, monkeypatch, capsys
+):
+    module = _load_module()
+    root = tmp_path / "zeus"
+    _healthy_state(root)
+    surfaces = {
+        surface: {"ok": True, "issue": None}
+        for surface in module.REQUIRED_LIVE_HEALTH_SURFACES
+    }
+    surfaces["venue_heartbeat"] = {
+        "ok": False,
+        "issue": "VENUE_HEARTBEAT_RESTING_ORDER_UNSAFE",
+    }
+    _write_json(
+        root / "state" / "live_health_composite.json",
+        {
+            "healthy": False,
+            "status": "DEGRADED",
+            "failing_surfaces": ["venue_heartbeat"],
+            "surfaces": surfaces,
+        },
+    )
+    monkeypatch.setattr(
+        module,
+        "_direct_head_live_health_surfaces",
+        lambda *args, **kwargs: {
+            "venue_heartbeat": {
+                "ok": False,
+                "issue": "VENUE_HEARTBEAT_LOST",
+            },
+        },
+    )
+    _configure(
+        module,
+        monkeypatch,
+        root,
+        tmp_path / "snapshot.json",
+        {
+            "src.main": [101],
+            "src.ingest.forecast_live_daemon": [202],
+            "src.ingest_main": [404],
+            "src.riskguard": [303],
+        },
+        {404: {"ZEUS_FORECAST_LIVE_OWNER": "forecast_live"}},
+    )
+
+    module.main()
+
+    out = capsys.readouterr().out
+    assert out.startswith("ALERT")
+    assert "LIVE_HEALTH_VENUE_HEARTBEAT=VENUE_HEARTBEAT_LOST" in out
+    assert "VENUE_HEARTBEAT_RESTING_ORDER_UNSAFE" not in out
 
 
 def test_live_probe_direct_head_runtime_code_overrides_stale_composite_mismatch(
