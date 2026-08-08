@@ -314,7 +314,8 @@ def latest_fast_station_extreme_c(
     try:
         rows = conn.execute(
             f"""
-            SELECT publish_ts_utc, value_native, unit, raw_report
+            SELECT publish_ts_utc, value_native, unit, raw_report,
+                   fetched_at_utc
               FROM {table}
              WHERE city = ?
                AND upper(station_id) = ?
@@ -340,9 +341,12 @@ def latest_fast_station_extreme_c(
     # One source METAR can be rendered by two writers with distinct receipt
     # timestamps (for example with/without a leading ``METAR `` token).  Its
     # raw valid time, channel, and conditioned value name one physical fact;
-    # retain the earliest causal publication so fast-conditioning identity
-    # agrees with the canonical Day0 fact reducer and event bridge.
-    canonical_candidates: dict[tuple[str, float], tuple[float, str]] = {}
+    # retain the first causally available rendering. A later fetch can carry
+    # an earlier provider publication timestamp; choosing by publication would
+    # rewind the conditioning clock after the posterior had already served.
+    canonical_candidates: dict[
+        tuple[str, float], tuple[float, str, str]
+    ] = {}
     for row in rows:
         published = _fast_residual_utc(row[0])
         value_c = _fast_residual_value_c(
@@ -359,11 +363,24 @@ def latest_fast_station_extreme_c(
         )
         source_clock = (report_time or published).astimezone(UTC).isoformat()
         identity = (source_clock, float(value_c))
-        candidate = (float(value_c), published.isoformat())
+        fetched = _fast_residual_utc(row[4])
+        if fetched is None:
+            continue
+        candidate = (
+            float(value_c),
+            published.isoformat(),
+            fetched.isoformat(),
+        )
         previous = canonical_candidates.get(identity)
-        if previous is None or candidate[1] < previous[1]:
+        if previous is None or (candidate[2], candidate[1]) < (
+            previous[2],
+            previous[1],
+        ):
             canonical_candidates[identity] = candidate
-    candidates = tuple(canonical_candidates.values())
+    candidates = tuple(
+        (value, published)
+        for value, published, _fetched in canonical_candidates.values()
+    )
     if not candidates:
         return None
     extreme = (

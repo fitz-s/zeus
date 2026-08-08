@@ -1207,7 +1207,7 @@ def _latest_authorized_day0_fact(
                 # publication timestamp.  Those rows carry no second physical
                 # observation: collapse them on the report's source-issued
                 # valid time + channel + conditioned value, retaining the
-                # first causal publication.  This keeps the ledger's
+                # first causally available rendering.  This keeps the ledger's
                 # append-only audit trail intact while making every consumer
                 # share one conditioning identity with the Day0 event bridge.
                 canonical_prints: dict[
@@ -1292,9 +1292,9 @@ def _latest_authorized_day0_fact(
                     print_identity = (channel, source_clock, float(value))
                     previous = canonical_prints.get(print_identity)
                     if previous is None or (
-                        canonical_publish_ts,
                         canonical_fetched_at,
-                    ) < previous[:2]:
+                        canonical_publish_ts,
+                    ) < (previous[1], previous[0]):
                         canonical_prints[print_identity] = (
                             canonical_publish_ts,
                             canonical_fetched_at,

@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-08-05
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-05; last_reused=2026-08-05
+# Last reused/audited: 2026-08-08
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-08; last_reused=2026-08-08
 # Authority basis: operator green-light 2026-06-10 items A/C/E (free METAR fast
 #   lane, live-obs hook wiring, WU-vs-METAR oracle anomaly guard); day0
 #   first-principles review /tmp/day0_first_principles_review.md §6.2;
@@ -4323,7 +4323,7 @@ def test_fast_conditioning_deduplicates_same_metar_across_writer_prefixes(
             ),
             (
                 "Wellington", "NZWN", FAST_OBS_SOURCE_ID,
-                "2026-07-28T19:34:13.003000+00:00", 7.0, "C",
+                "2026-07-28T19:34:11.503000+00:00", 7.0, "C",
                 "2026-07-28T19:35:41+00:00",
                 "METAR NZWN 281930Z AUTO 02014KT 9999 NCD 07/04 Q1025",
             ),

@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-29
-# Lifecycle: created=2026-06-06; last_reviewed=2026-07-29; last_reused=2026-07-29
+# Last reused/audited: 2026-08-08
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-08; last_reused=2026-08-08
 # Purpose: Protect current-market replacement forecast download and materialization planning.
 # Reuse: Run before changing current replacement target coverage or source-run matching.
 # Authority basis: Replacement forecast coverage must bind to the live baseline source_run, not stale city/date rows.
@@ -883,7 +883,7 @@ def test_day0_ledger_deduplicates_same_metar_report_across_writer_prefixes(
             ),
             (
                 "Wellington", "NZWN", "aviationweather_metar",
-                "2026-07-28T19:34:13.003000+00:00", 7.0, "C",
+                "2026-07-28T19:34:11.503000+00:00", 7.0, "C",
                 "2026-07-28T19:35:41+00:00",
                 "METAR NZWN 281930Z AUTO 02014KT 9999 NCD 07/04 Q1025",
             ),
