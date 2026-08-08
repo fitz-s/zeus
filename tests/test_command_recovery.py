@@ -9944,6 +9944,111 @@ class TestRecoveryResolutionTable:
         ).fetchone()
         assert dict(latest_fact) == {"state": "LIVE", "matched_size": "0"}
 
+    def test_acked_incremental_entry_terminal_no_fill_preserves_existing_position(
+        self,
+        conn,
+        mock_client,
+    ):
+        command_id = "cmd-incremental-no-fill"
+        position_id = "pos-incremental-no-fill"
+        prior_order_id = "ord-prior-fill"
+        terminal_order_id = "ord-incremental-canceled"
+        _insert(
+            conn,
+            command_id=command_id,
+            position_id=position_id,
+            token_id="tok-incremental",
+            size=37.5,
+            price=0.12,
+        )
+        _advance_to_acked(
+            conn,
+            command_id=command_id,
+            venue_order_id=terminal_order_id,
+        )
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id="cmd-prior-fill",
+            order_id=prior_order_id,
+            token_id="tok-incremental",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'day0_window',
+                   shares = 13.874991,
+                   cost_basis_usd = 1.664999,
+                   entry_price = 0.12,
+                   chain_state = 'synced',
+                   chain_shares = 13.8749,
+                   chain_cost_basis_usd = 1.664999,
+                   order_status = 'filled'
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        )
+        _append_order_fact(
+            conn,
+            command_id=command_id,
+            order_id=terminal_order_id,
+            state="LIVE",
+            matched_size="0",
+            remaining_size="37.5",
+        )
+        mock_client.get_order.return_value = {
+            "orderID": terminal_order_id,
+            "status": "CANCELED",
+            "size_matched": "0",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["terminal_point_orders"] == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert summary["terminal_order_facts"]["advanced"] == 1
+        assert _get_state(conn, command_id) == "EXPIRED"
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, chain_shares, order_id, order_status
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "day0_window",
+            "shares": 13.874991,
+            "cost_basis_usd": 1.664999,
+            "chain_shares": 13.8749,
+            "order_id": prior_order_id,
+            "order_status": "filled",
+        }
+        latest_fact = conn.execute(
+            """
+            SELECT state, matched_size, remaining_size, source
+              FROM venue_order_facts
+             WHERE command_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        assert dict(latest_fact) == {
+            "state": "CANCEL_CONFIRMED",
+            "matched_size": "0",
+            "remaining_size": "0",
+            "source": "REST",
+        }
+
     def test_cancelled_terminal_no_fill_order_without_pending_projection_recovers_and_voids(
         self,
         conn,

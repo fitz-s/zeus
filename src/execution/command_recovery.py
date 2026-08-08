@@ -14200,9 +14200,20 @@ def _terminal_point_order_candidates(conn: sqlite3.Connection) -> list[dict]:
            AND (
                 (
                     cmd.intent_kind = 'ENTRY'
-                    AND pc.phase = 'pending_entry'
-                    AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
-                    AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
+                    AND (
+                        (
+                            pc.phase = 'pending_entry'
+                            AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
+                            AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
+                        )
+                        OR (
+                            pc.phase IN ('active', 'day0_window', 'pending_exit')
+                            AND (
+                                CAST(COALESCE(pc.shares, '0') AS REAL) > 0
+                                OR CAST(COALESCE(pc.chain_shares, '0') AS REAL) > 0
+                            )
+                        )
+                    )
                 )
                 OR (
                     cmd.intent_kind = 'EXIT'
