@@ -29,6 +29,7 @@ DAY0_LIVE_AUTHORITY_MATCHES = {
 
 DAY0_REMAINING_DAY_Q_SOURCE = "day0_remaining_day"
 DAY0_REMAINING_DAY_Q_MODE = "remaining_day"
+DAY0_REMAINING_DAY_GLOBAL_AUTHORITY = "day0_remaining_day_global_probability_v1"
 DAY0_DETERMINISTIC_BIN_PAYOFF_Q_SOURCE = "day0_deterministic_bin_payoff"
 DAY0_DETERMINISTIC_BIN_PAYOFF_Q_MODE = "deterministic_bin_payoff"
 DAY0_DETERMINISTIC_BIN_PAYOFF_GLOBAL_AUTHORITY = (
@@ -487,7 +488,11 @@ def _assert_replacement_global_day0_probability_authority(
 ) -> None:
     """Validate one current replacement posterior conditioned on current Day0 truth."""
 
-    authority = str(block.get("probability_authority") or "").strip()
+    authority = _matching_text(
+        "replacement_day0_probability_authority",
+        payload.get("probability_authority"),
+        block.get("probability_authority"),
+    )
     allowed_authorities = DAY0_REPLACEMENT_GLOBAL_AUTHORITIES_BY_Q_SOURCE.get(
         q_source,
         frozenset(),
@@ -1152,10 +1157,21 @@ def assert_live_day0_probability_authority(
     """
 
     block = _day0_probability_block(payload)
-    authority = _first_text(payload, block, "authority", "calibration_authority")
+    calibration_authority = _first_text(
+        payload,
+        block,
+        "authority",
+        "calibration_authority",
+    )
+    probability_authority = _first_text(payload, block, "probability_authority")
     calibration_method = _first_text(payload, block, "calibration_method")
     input_space = _first_text(payload, block, "input_space")
-    hard_fact_markers = {authority.upper(), calibration_method.lower(), input_space.lower()}
+    hard_fact_markers = {
+        calibration_authority.upper(),
+        probability_authority.upper(),
+        calibration_method.lower(),
+        input_space.lower(),
+    }
     if DAY0_OBSERVATION_HARD_FACT_AUTHORITY in hard_fact_markers or "day0_live_observation_hard_fact" in hard_fact_markers:
         raise Day0AuthorityError("day0 hard-fact calibration cannot authorize entry probability")
 
@@ -1186,6 +1202,22 @@ def assert_live_day0_probability_authority(
             "day0_probability_q_source required:"
             f"{q_source or 'missing'}"
         )
+    remaining_authority = _matching_text(
+        "remaining_day_probability_authority",
+        payload.get("probability_authority"),
+        block.get("probability_authority"),
+    )
+    if remaining_authority != DAY0_REMAINING_DAY_GLOBAL_AUTHORITY:
+        raise Day0AuthorityError(
+            "remaining_day_probability_authority required:"
+            f"{remaining_authority}"
+        )
+    _matching_text(
+        "remaining_day_q_source",
+        payload.get("_edli_q_source"),
+        payload.get("q_source"),
+        block.get("q_source"),
+    )
     q_mode = _first_text(payload, block, "_edli_day0_q_mode", "day0_q_mode", "q_mode")
     if q_mode != DAY0_REMAINING_DAY_Q_MODE:
         raise Day0AuthorityError(f"remaining_day_q_mode required:{q_mode or 'missing'}")

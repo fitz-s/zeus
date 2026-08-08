@@ -332,7 +332,16 @@ carrier; a changed point forces re-decision.
 **Statistical vs absolute honesty:**
 - Forecast superiority (bin-hit, MAE, bias) is settlement-graded, temporal holdout (TRAIN≤2026-05-10 / TEST 05-11..06-08), no look-ahead.
 - BACKTEST RESULT (wszeibgi0): de-bias is the dominant lever. Non-regional 39 cities: bin-hit +4.6 pt, MAE 1.435→1.305, bias −0.515→+0.071. Regional 12 cities: bin-hit +11.6 pt, MAE 1.101→0.850. Optimal = per-model de-bias then equal-weight.
-- Trading EV is proven ONLY by forward real fills. The strategy-selection settlement-2026-06-09 analysis showed in-sample EV was inflated; forward temporal holdout collapses to +1.2¢..−2.7¢ with large day-variance. **No promotion to live capital before forward fills license it.**
+- Realized trading EV is measured only from forward real fills. The
+  strategy-selection settlement-2026-06-09 analysis showed in-sample EV was
+  inflated; forward temporal holdout collapses to +1.2¢..−2.7¢ with large
+  day-variance. That result is learning and falsification evidence, not a
+  circular admission prerequisite: a current causal probability witness that
+  passes the live content, freshness, JIT book, portfolio, expected-log-growth,
+  and Fractional Kelly contracts may enter the capital auction before its first
+  fill. Forward fills then update walk-forward attribution and may reduce or
+  remove future authority; their absence cannot itself block every action that
+  could produce them.
 
 **Iron rules:** (1) coverage != currency — five instances fixed today, zero tolerance for recurrence. (2) source-identity — a model's live product must match its de-bias product. (3) no in-sample promotion. (4) buy_no derives from forecast YES bin — cold-bias corrupts the family. (5) operator promotion requires settlement-graded evidence at the same evidence class as icon_eu.
 

@@ -4574,6 +4574,7 @@ def test_global_day0_current_band_accepts_only_bound_absorbing_certainty():
     payload = {
         "condition_id": "condition-dead",
         "direction": "buy_no",
+        "probability_authority": "day0_remaining_day_global_probability_v1",
         "_edli_q_source": "day0_remaining_day",
         "_edli_day0_q_mode": "remaining_day",
         "_edli_day0_remaining_models": 2,
@@ -13883,9 +13884,14 @@ def _serialize(result) -> str:
     return "|".join(parts)
 
 
-def test_global_selected_proof_binds_exact_prepared_posterior_parent():
+def test_global_selected_proof_binds_exact_prepared_probability_parent():
     _family, proofs, _payload = _corpus()[0]
-    proof = replace(proofs[0], posterior_id=None, probability_authority=None)
+    proof = replace(
+        proofs[0],
+        posterior_id=None,
+        probability_authority=None,
+        q_source=None,
+    )
     event = SimpleNamespace(event_type="FORECAST_SNAPSHOT_READY")
     prepared = SimpleNamespace(
         posterior_id=42,
@@ -13900,12 +13906,22 @@ def test_global_selected_proof_binds_exact_prepared_posterior_parent():
 
     assert bound.posterior_id == 42
     assert bound.probability_authority == "replacement_0_1"
+    assert bound.q_source == "replacement_0_1"
     with pytest.raises(
         ValueError,
         match="GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH",
     ):
         era._bind_global_selected_probability_parent(
             replace(proof, posterior_id=41),
+            prepared_global_family=prepared,
+            event=event,
+        )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH",
+    ):
+        era._bind_global_selected_probability_parent(
+            replace(proof, q_source="other_probability"),
             prepared_global_family=prepared,
             event=event,
         )

@@ -4,6 +4,40 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-08 Current probability authority must have an executable action path
+
+The live global auction repeatedly produced current, identity-bound replacement
+and Day0 witnesses with positive posterior-mean expected log growth, then rejected
+them at preflight because a static probability-promotion allowlist contained only
+deterministic Day0 payoff. That gate required forward real-fill evidence while
+simultaneously preventing every probabilistic fill that could produce the
+evidence. It also exposed a separate forecast handoff gap: the selected global
+posterior parent rebound `posterior_id` and `probability_authority` but omitted its
+same-witness `q_source`.
+
+The correction removes the duplicate static promotion allowlist and dispatches
+each event directly to the owning replacement or Day0 authority validator. The
+closed grammar therefore lives with the producers' executable content contract,
+not in a second manually promoted registry. Grammar admission is not economic admission:
+every recognized payload still passes its existing causal posterior or Day0
+content validator, qkernel current-state economics, canonical q-source equality,
+JIT book/price, fees, depth, Kelly, wealth, and final submit recapture. The global
+forecast parent binder now carries `replacement_0_1` source and authority as one
+indivisible type and rejects a conflicting pre-existing source.
+
+SCOPE is the exact selected BUY probability witness. DRAIN is the next normal
+global auction/preflight using a current typed producer payload. RESET is every
+fresh re-decision, which reconstructs q, book, wealth, and the binding before any
+venue side effect. Held SELL, settlement, probability formulas, price bands,
+sizing, and the CASH alternative are unchanged.
+
+Acceptance requires current forecast and all declared Day0 producer bindings to
+reach their authority-specific content validators, unknown aliases and mixed
+canonical sources to remain fail-closed, missing forecast q-source to be rebound
+from the exact prepared replacement parent, focused and full auction tests to
+pass, and live verification to show the static promotion rejection disappears
+without bypassing downstream JIT/economic gates.
+
 ## 2026-08-02 FSR pause scope preserves posterior-carrier progression
 
 The global `entries_paused` containment correctly forbids new BUY actuation,

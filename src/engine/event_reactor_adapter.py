@@ -2914,15 +2914,6 @@ _FORECAST_DECISION_EVENT_TYPES: frozenset[str] = frozenset(
 # running extreme). Module-level so qkernel can feed the observed boundary into the
 # same family optimizer while the live adapter still applies Day0 authority guards.
 _DAY0_LANE_EVENT_TYPES: frozenset[str] = frozenset({"DAY0_EXTREME_UPDATED"})
-_QUALIFIED_LIVE_ENTRY_PROBABILITY_BINDINGS: frozenset[tuple[str, str, str]] = frozenset(
-    {
-        (
-            "DAY0_EXTREME_UPDATED",
-            "day0_deterministic_bin_payoff_v1",
-            "day0_deterministic_bin_payoff",
-        )
-    }
-)
 _DAY0_MAKER_ONLY_REST_POLICY = "REST_DAY0_MAKER_ONLY"
 _DAY0_MAKER_ONLY_TAKER_FORBIDDEN_REASON = "DAY0_MAKER_ONLY"
 
@@ -13122,6 +13113,8 @@ def _bind_global_selected_probability_parent(
     proof_authority = str(
         getattr(proof, "probability_authority", None) or ""
     ).strip()
+    proof_q_source = str(getattr(proof, "q_source", None) or "").strip()
+    q_source = "replacement_0_1"
     if proof_posterior_id not in (None, ""):
         try:
             proof_posterior_id = int(proof_posterior_id)
@@ -13131,10 +13124,13 @@ def _bind_global_selected_probability_parent(
             raise ValueError("GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH")
     if proof_authority and proof_authority != authority:
         raise ValueError("GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH")
+    if proof_q_source and proof_q_source != q_source:
+        raise ValueError("GLOBAL_ACTUATION_POSTERIOR_BINDING_MISMATCH")
     return dataclass_replace(
         proof,
         posterior_id=posterior_id,
         probability_authority=authority,
+        q_source=q_source,
     )
 
 
@@ -18820,22 +18816,14 @@ def _assert_live_entry_submit_authority(actionable_payload: Mapping[str, object]
         if isinstance(qkernel_economics, Mapping)
         else ""
     ).strip()
-    authority_binding = (event_type, probability_authority, q_source)
-    if (
-        authority_binding not in _QUALIFIED_LIVE_ENTRY_PROBABILITY_BINDINGS
-        or canonical_q_source != q_source
-    ):
+    def reject_binding() -> None:
         # INV-47:
-        # SCOPE = every new live entry except an exact typed event/authority/q_source
-        # binding with internally consistent canonical fields. Held monitor/SELL
-        # and settlement are outside this scope.
-        # DRAIN = recompute under a separately versioned causal posterior with
-        # persisted input/scenario identity, then qualify that exact version on
-        # independent target-day blocks using preregistered proper-score and
-        # executable-capital evidence, and add its exact typed binding here; an
-        # authority string, alias, elapsed time, or sample count never drains itself.
-        # RESET = a submit payload carries one listed binding and all canonical,
-        # nested, and observation fields pass that authority's content validator.
+        # SCOPE = one BUY whose event/source grammar is internally inconsistent.
+        # Held monitor/SELL and settlement are outside this scope.
+        # DRAIN = dispatch the next current producer payload to its owning
+        # forecast or Day0 content validator below; no second promotion registry
+        # exists here to ratchet independently of the producer contract.
+        # RESET = the next fresh re-decision rebuilds that exact typed payload.
         raise ValueError(
             "LIVE_ENTRY_PROBABILITY_AUTHORITY_UNQUALIFIED:"
             f"authority={probability_authority or 'missing'}:"
@@ -18844,13 +18832,24 @@ def _assert_live_entry_submit_authority(actionable_payload: Mapping[str, object]
             f"event_type={event_type or 'missing'}:"
             f"q_version={q_version or 'missing'}"
         )
-    if event_type in _FORECAST_DECISION_EVENT_TYPES or (
-        event_type in _DAY0_LANE_EVENT_TYPES
-        and _uses_replacement_probability_authority(actionable_payload)
-    ):
+
+    if canonical_q_source != q_source:
+        reject_binding()
+    if event_type in _FORECAST_DECISION_EVENT_TYPES:
+        if not (
+            probability_authority == "replacement_0_1"
+            and q_source == "replacement_0_1"
+        ):
+            reject_binding()
         _assert_forecast_entry_uses_qkernel_authority(actionable_payload)
         return
     if event_type in _DAY0_LANE_EVENT_TYPES:
+        if (
+            probability_authority == "replacement_0_1"
+            and q_source == "replacement_0_1"
+        ):
+            _assert_forecast_entry_uses_qkernel_authority(actionable_payload)
+            return
         _assert_day0_entry_uses_live_observation_authority(actionable_payload)
         return
     raise ValueError(f"LIVE_ENTRY_AUTHORITY_UNSUPPORTED_EVENT_TYPE:{event_type or 'missing'}")
