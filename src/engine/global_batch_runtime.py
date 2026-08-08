@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_FLOOR
@@ -54,6 +55,84 @@ from src.solve.solver import (
     family_payoff_q_samples,
 )
 from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
+
+
+@dataclass
+class _GlobalPreflightSqliteFence:
+    interrupt_reason: str | None = None
+
+
+@contextmanager
+def _global_preflight_sqlite_fence(
+    connections: Sequence[object],
+    *,
+    deadline_monotonic: float,
+    cancelled: Callable[[], bool] | None,
+):
+    """Make winner-preflight SQLite work yield to its epoch and monitor handoff."""
+
+    fence = _GlobalPreflightSqliteFence()
+    configured: list[tuple[sqlite3.Connection, int]] = []
+    seen: set[int] = set()
+    stopped = threading.Event()
+    reason_lock = threading.Lock()
+    watcher: threading.Thread | None = None
+
+    def interrupt(reason: str) -> None:
+        with reason_lock:
+            if fence.interrupt_reason is None:
+                fence.interrupt_reason = reason
+        for conn, _ in configured:
+            try:
+                conn.interrupt()
+            except Exception:  # noqa: BLE001 - the bounded busy timeout remains
+                pass
+
+    def watch_authority() -> None:
+        while not stopped.wait(0.005):
+            if time.monotonic() >= deadline_monotonic:
+                interrupt("deadline")
+                continue
+            if cancelled is not None:
+                try:
+                    if cancelled():
+                        interrupt("cancelled")
+                except Exception:  # noqa: BLE001 - hints cannot invent a veto
+                    pass
+
+    try:
+        for conn in connections:
+            if not isinstance(conn, sqlite3.Connection) or id(conn) in seen:
+                continue
+            seen.add(id(conn))
+            previous_busy_timeout = int(
+                conn.execute("PRAGMA busy_timeout").fetchone()[0]
+            )
+            remaining_ms = max(
+                1,
+                int((deadline_monotonic - time.monotonic()) * 1000.0),
+            )
+            conn.execute(
+                f"PRAGMA busy_timeout = {min(previous_busy_timeout, remaining_ms)}"
+            )
+            configured.append((conn, previous_busy_timeout))
+        if configured:
+            watcher = threading.Thread(
+                target=watch_authority,
+                name="global-preflight-sqlite-fence",
+                daemon=True,
+            )
+            watcher.start()
+        yield fence
+    finally:
+        stopped.set()
+        if watcher is not None:
+            watcher.join()
+        for conn, previous_busy_timeout in reversed(configured):
+            try:
+                conn.execute(f"PRAGMA busy_timeout = {previous_busy_timeout}")
+            except Exception:  # noqa: BLE001 - connection teardown is the backstop
+                pass
 
 
 @dataclass(frozen=True)
@@ -4041,6 +4120,7 @@ def process_current_global_batch(
     ]
     | None = None,
     selection_snapshot_connections: Sequence[sqlite3.Connection] = (),
+    preflight_sqlite_connections: Sequence[sqlite3.Connection] = (),
     current_capital_limit_resolver: Callable[[object, str, str], object]
     | None = None,
     candidate_policy_rejection_resolver: Callable[[object], str | None]
@@ -4053,6 +4133,7 @@ def process_current_global_batch(
     | None = None,
     epoch_superseded: Callable[[], bool] | None = None,
     selection_cancelled: Callable[[], bool] | None = None,
+    final_actuation_cancelled: Callable[[], bool] | None = None,
     restrict_to_family_keys: frozenset[str] | None = None,
     _probability_supersession_reauction_count: int = 0,
 ) -> GlobalBatchSubmitResult:
@@ -4238,6 +4319,28 @@ def process_current_global_batch(
         if changed:
             _LOG.info(
                 "global batch preempted by urgent input: stage=%s "
+                "elapsed_s=%.3f events=%d",
+                stage,
+                time.monotonic() - batch_started,
+                len(event_tuple),
+            )
+        return changed
+
+    def final_cancelled(stage: str) -> bool:
+        if final_actuation_cancelled is None:
+            return False
+        try:
+            changed = bool(final_actuation_cancelled())
+        except Exception as exc:  # noqa: BLE001 - hard authority failure is a veto
+            _LOG.error(
+                "global final-actuation cancellation probe failed: stage=%s error=%r",
+                stage,
+                exc,
+            )
+            return True
+        if changed:
+            _LOG.info(
+                "global final actuation revoked by newer authority: stage=%s "
                 "elapsed_s=%.3f events=%d",
                 stage,
                 time.monotonic() - batch_started,
@@ -5502,17 +5605,63 @@ def process_current_global_batch(
                     actuation_deadline=auction_deadline,
                 )
                 before_preflight = venue_submit_count()
-                preflight = preflight_winner(
-                    winner,
-                    selected.actuation,
-                    preflight_at,
-                    preflight_authority,
+                preflight_deadline_monotonic = time.monotonic() + max(
+                    0.0,
+                    (auction_deadline - preflight_at).total_seconds(),
                 )
+                preflight_fence = None
+                try:
+                    with _global_preflight_sqlite_fence(
+                        (
+                            world_conn,
+                            forecast_conn,
+                            trade_conn,
+                            *preflight_sqlite_connections,
+                        ),
+                        deadline_monotonic=preflight_deadline_monotonic,
+                        cancelled=selection_cancelled,
+                    ) as preflight_fence:
+                        preflight = preflight_winner(
+                            winner,
+                            selected.actuation,
+                            preflight_at,
+                            preflight_authority,
+                        )
+                except sqlite3.OperationalError:
+                    if (
+                        preflight_fence is None
+                        or preflight_fence.interrupt_reason is None
+                    ):
+                        raise
+                if (
+                    preflight_fence is not None
+                    and preflight_fence.interrupt_reason == "deadline"
+                ):
+                    _LOG.warning(
+                        "global winner preflight SQLite work exceeded epoch deadline: "
+                        "elapsed_s=%.3f event=%s",
+                        time.monotonic() - batch_started,
+                        winner_id,
+                    )
+                    return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")
+                if (
+                    preflight_fence is not None
+                    and preflight_fence.interrupt_reason == "cancelled"
+                ):
+                    return reject(
+                        "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
+                    )
                 if preflight.rejection_receipt is not None:
                     preflight_rejection_receipts[winner_id] = (
                         preflight.rejection_receipt
                     )
                 if cancelled("winner_preflight"):
+                    return reject(
+                        "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
+                    )
+                if current_time() > auction_deadline:
+                    return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")
+                if final_cancelled("preflight_receipt_before_store"):
                     return reject(
                         "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
                     )
@@ -5530,6 +5679,21 @@ def process_current_global_batch(
                     venue_submit_count_before=before_preflight,
                     venue_submit_count_after=after_preflight,
                 )
+                receipt_expired = current_time() > auction_deadline
+                receipt_revoked = final_cancelled(
+                    "preflight_receipt_before_commit"
+                )
+                if receipt_expired or receipt_revoked:
+                    if isinstance(trade_conn, sqlite3.Connection):
+                        trade_conn.rollback()
+                    return reject(
+                        "GLOBAL_REAUCTION_EPOCH_EXPIRED"
+                        if receipt_expired
+                        else (
+                            "GLOBAL_AUCTION_NO_TRADE:"
+                            "GLOBAL_SELECTION_CANCELLED"
+                        )
+                    )
                 if isinstance(trade_conn, sqlite3.Connection):
                     # A stable preflight is immediately followed by venue I/O;
                     # fallthrough may run another preflight. Neither may carry
@@ -5687,6 +5851,7 @@ def process_current_global_batch(
                         portfolio_state_provider=portfolio_state_provider,
                         current_book_epoch_provider=current_book_epoch_provider,
                         selection_snapshot_connections=selection_snapshot_connections,
+                        preflight_sqlite_connections=preflight_sqlite_connections,
                         current_capital_limit_resolver=current_capital_limit_resolver,
                         candidate_policy_rejection_resolver=(
                             candidate_policy_rejection_resolver
@@ -5696,6 +5861,7 @@ def process_current_global_batch(
                         claim_unpaged_winner=claim_unpaged_winner,
                         epoch_superseded=epoch_superseded,
                         selection_cancelled=selection_cancelled,
+                        final_actuation_cancelled=final_actuation_cancelled,
                         restrict_to_family_keys=restrict_to_family_keys,
                         _probability_supersession_reauction_count=(
                             _probability_supersession_reauction_count + 1
@@ -6049,6 +6215,11 @@ def process_current_global_batch(
             if event.event_id != winner_id
         }
         before_calls = venue_submit_count()
+        final_actuation_at = current_time()
+        if final_cancelled("final_actuation"):
+            return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
+        if preflight_winner is not None and final_actuation_at > auction_deadline:
+            return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")
         release_selection_snapshot()
         _invalidate_global_holding_coverage()
         actuation_started = True
@@ -6056,12 +6227,12 @@ def process_current_global_batch(
             actuate_preflighted_winner.consume(
                 winner,
                 selected.actuation,
-                actuation_at,
+                final_actuation_at,
                 binding_token,
                 preflight_authority,
             )
             if preflight_winner is not None
-            else actuate_winner(winner, selected.actuation, actuation_at)
+            else actuate_winner(winner, selected.actuation, final_actuation_at)
         )
         venue_delta = venue_submit_count() - before_calls
         if venue_delta not in {0, 1}:

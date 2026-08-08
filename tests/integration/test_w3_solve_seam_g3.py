@@ -21187,6 +21187,7 @@ def test_live_adapter_sell_preflight_skips_entry_checks_and_survives_monitor_han
     routine_monitor_pending = [True]
     wake_revision = [1]
     wake_reason = ["held_position_monitor_pending"]
+    wake_probe_unavailable = [False]
     monkeypatch.setattr(
         global_batch_runtime,
         "process_current_global_batch",
@@ -21196,7 +21197,11 @@ def test_live_adapter_sell_preflight_skips_entry_checks_and_survives_monitor_han
     monkeypatch.setattr(
         reactor_wake,
         "reactor_urgent_wake_revision",
-        lambda: wake_revision[0],
+        lambda: (
+            (_ for _ in ()).throw(RuntimeError("wake authority unavailable"))
+            if wake_probe_unavailable[0]
+            else wake_revision[0]
+        ),
     )
     monkeypatch.setattr(
         reactor_wake,
@@ -21229,18 +21234,20 @@ def test_live_adapter_sell_preflight_skips_entry_checks_and_survives_monitor_han
             "reduce-only SELL must not compare the BUY ASK curve"
         ),
     )
+    trade = sqlite3.connect(":memory:")
+    forecast = sqlite3.connect(":memory:")
+    topology = sqlite3.connect(":memory:")
+    calibration = sqlite3.connect(":memory:")
     adapter = era.event_bound_live_adapter_from_trade_conn(
-        sqlite3.connect(":memory:"),
+        trade,
         get_current_level=lambda: era.RiskLevel.GREEN,
-        forecast_conn=sqlite3.connect(":memory:"),
-        topology_conn=sqlite3.connect(":memory:"),
-        calibration_conn=sqlite3.connect(":memory:"),
+        forecast_conn=forecast,
+        topology_conn=topology,
+        calibration_conn=calibration,
         selection_cancelled=lambda: routine_monitor_pending[0],
     )
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
-    decision_at = _dt.datetime(
-        2026, 7, 27, 8, 0, tzinfo=_dt.timezone.utc
-    )
+    decision_at = _dt.datetime.now(_dt.timezone.utc)
     adapter.process_global_batch((event,), decision_at)
     cancelled = captured["selection_cancelled"]
     preflight = captured["preflight_winner"]
@@ -21264,7 +21271,14 @@ def test_live_adapter_sell_preflight_skips_entry_checks_and_survives_monitor_han
     )
     assert result.status == "STABLE"
     assert cancelled() is False
-    assert cancelled() is True
+    assert cancelled() is False
+    assert captured["preflight_sqlite_connections"] == (
+        forecast,
+        topology,
+        calibration,
+        trade,
+        trade,
+    )
 
     preflight(
         event,
@@ -21278,6 +21292,34 @@ def test_live_adapter_sell_preflight_skips_entry_checks_and_survives_monitor_han
     wake_revision[0] += 1
     wake_reason[0] = "day0_extreme_event_committed"
     assert cancelled() is True
+
+    wake_revision[0] = 1
+    wake_reason[0] = "held_position_monitor_pending"
+    actuation = SimpleNamespace(
+        actuation_identity="actuation-3",
+        wealth_witness_identity="wealth-1",
+        decision=SimpleNamespace(candidate=SimpleNamespace(action="SELL")),
+    )
+    stable = preflight(event, actuation, decision_at, authority)
+    monkeypatch.setattr(
+        era,
+        "_global_actuation_current_wealth_block_reason",
+        lambda *_args, **_kwargs: None,
+    )
+    wake_probe_unavailable[0] = True
+    receipt = captured["actuate_preflighted_winner"].consume(
+        event,
+        actuation,
+        _dt.datetime.now(_dt.timezone.utc),
+        stable.binding_token,
+        authority,
+    )
+    assert receipt.submitted is False
+    assert receipt.venue_call_started is False
+    assert receipt.side_effect_status == "NO_SUBMIT"
+    assert receipt.reason.startswith(
+        "GLOBAL_FINAL_AUTHORITY_UNAVAILABLE:RuntimeError:"
+    )
 
 
 def test_live_adapter_preflight_transports_rejected_entry_evidence(monkeypatch):
@@ -21371,8 +21413,9 @@ def test_live_adapter_preflight_transports_rejected_entry_evidence(monkeypatch):
     )
 
 
-def test_global_batch_stable_preflight_token_survives_later_unrelated_wake(
-    monkeypatch,
+@pytest.mark.parametrize("revoking_authority", (False, True))
+def test_global_batch_distinguishes_unrelated_wake_from_final_authority_revocation(
+    monkeypatch, revoking_authority,
 ):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
@@ -21399,6 +21442,18 @@ def test_global_batch_stable_preflight_token_survives_later_unrelated_wake(
     )
     cancelled = [False]
     calls = {"actuation": 0, "venue": 0}
+    trade = sqlite3.connect(":memory:")
+    trade.execute("CREATE TABLE preflight_marker(value TEXT NOT NULL)")
+    trade.commit()
+    monkeypatch.setattr(
+        "src.state.portfolio.load_runtime_open_portfolio",
+        lambda _conn: SimpleNamespace(positions=()),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_bind_selection_holdings",
+        lambda prepared_by_event, **_kwargs: dict(prepared_by_event),
+    )
     monkeypatch.setattr(
         global_batch_runtime,
         "scan_current_global_auction_scope",
@@ -21416,6 +21471,9 @@ def test_global_batch_stable_preflight_token_survives_later_unrelated_wake(
             spendable_cash_usd=Decimal("10"),
             witness_identity="wealth-1",
             economic_identity="wealth-economics-1",
+            ledger_snapshot_id="ledger-1",
+            native_holdings_micro=(),
+            pending_entry_endowments_micro=(),
         ),
     )
     monkeypatch.setattr(
@@ -21429,8 +21487,10 @@ def test_global_batch_stable_preflight_token_survives_later_unrelated_wake(
         lambda *_args, **_kwargs: None,
     )
 
-    def store_stable_preflight(*_args, **_kwargs):
+    def store_stable_preflight(conn, *_args, **_kwargs):
+        conn.execute("INSERT INTO preflight_marker VALUES ('stored')")
         cancelled[0] = True
+        return 1
 
     monkeypatch.setattr(
         global_batch_runtime,
@@ -21454,7 +21514,7 @@ def test_global_batch_stable_preflight_token_survives_later_unrelated_wake(
         decision_time=decision_at,
         world_conn=object(),
         forecast_conn=object(),
-        trade_conn=object(),
+        trade_conn=trade,
         payload_reader=lambda current: json.loads(current.payload_json),
         prepare_event=lambda current, _at: EventSubmissionReceipt(
             False,
@@ -21479,12 +21539,24 @@ def test_global_batch_stable_preflight_token_survives_later_unrelated_wake(
             _global_test_book("book-fence", price="0.40"),
         ),
         selection_cancelled=lambda: cancelled[0],
+        final_actuation_cancelled=lambda: cancelled[0] and revoking_authority,
     )
 
-    assert calls == {"actuation": 1, "venue": 1}
-    assert result.winner_event_id == event.event_id
-    assert result.venue_submit_count == 1
-    assert result.receipts[event.event_id].submitted is True
+    if revoking_authority:
+        assert calls == {"actuation": 0, "venue": 0}
+        assert result.winner_event_id is None
+        assert result.venue_submit_count == 0
+        assert result.receipts[event.event_id].reason == (
+            "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
+        )
+        assert trade.execute("SELECT COUNT(*) FROM preflight_marker").fetchone()[0] == 0
+    else:
+        assert calls == {"actuation": 1, "venue": 1}
+        assert result.winner_event_id == event.event_id
+        assert result.venue_submit_count == 1
+        assert result.receipts[event.event_id].submitted is True
+        assert trade.execute("SELECT COUNT(*) FROM preflight_marker").fetchone()[0] == 1
+    trade.close()
 
 
 def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
@@ -25942,6 +26014,200 @@ def test_global_batch_stable_preflight_cannot_cross_epoch_deadline(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("interrupt_reason", ("deadline", "cancelled"))
+def test_global_preflight_sqlite_fence_interrupts_and_restores_connection(
+    interrupt_reason,
+):
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA busy_timeout = 1234")
+    prior_handler_calls = 0
+
+    def prior_progress_handler():
+        nonlocal prior_handler_calls
+        prior_handler_calls += 1
+        return 0
+
+    conn.set_progress_handler(prior_progress_handler, 1_000)
+    deadline = (
+        time.monotonic() + 0.02
+        if interrupt_reason == "deadline"
+        else time.monotonic() + 10.0
+    )
+    cancel = interrupt_reason == "cancelled"
+    started = time.monotonic()
+
+    with global_batch_runtime._global_preflight_sqlite_fence(
+        (conn, conn),
+        deadline_monotonic=deadline,
+        cancelled=lambda: cancel,
+    ) as fence:
+        with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+            conn.execute(
+                """
+                WITH RECURSIVE scan(value) AS (
+                    SELECT 1
+                    UNION ALL
+                    SELECT value + 1 FROM scan WHERE value < 1000000000
+                )
+                SELECT SUM(value) FROM scan
+                """
+            ).fetchone()
+
+    assert fence.interrupt_reason == interrupt_reason
+    assert time.monotonic() - started < 1.0
+    assert not any(
+        thread.name == "global-preflight-sqlite-fence" and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 1234
+    calls_before_probe = prior_handler_calls
+    conn.execute(
+        """
+        WITH RECURSIVE scan(value) AS (
+            SELECT 1
+            UNION ALL
+            SELECT value + 1 FROM scan WHERE value < 10000
+        )
+        SELECT SUM(value) FROM scan
+        """
+    ).fetchone()
+    assert prior_handler_calls > calls_before_probe
+    conn.set_progress_handler(None, 0)
+    conn.close()
+
+
+def test_global_batch_interrupts_preflight_sql_before_book_epoch_expires(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    scope = current_global_auction_scope_from_events(
+        (event,), captured_at_utc=decision_at
+    )
+    witness = SimpleNamespace(
+        family_key=scope.family_keys[0],
+        captured_at_utc=decision_at,
+        posterior_identity_hash="run-a",
+        witness_identity="q-a",
+    )
+    prepared = SimpleNamespace(probability_witness=witness)
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(candidate=object(), no_trade_reason=None),
+        winner_event_id=event.event_id,
+        actuation=SimpleNamespace(
+            actuation_identity="actuation-a",
+            wealth_witness_identity="wealth",
+        ),
+    )
+    slow_conn = sqlite3.connect(":memory:", check_same_thread=False)
+    book = _global_test_book("book", price="0.40")
+    book.max_age = _dt.timedelta(seconds=0.05)
+    calls = {"preflight": 0, "venue": 0}
+    monkeypatch.setattr(
+        global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "replace",
+        lambda value, **changes: SimpleNamespace(**(vars(value) | changes)),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_portfolio_wealth_witness",
+        lambda *_, **__: SimpleNamespace(
+            spendable_cash_usd=Decimal("10"),
+            witness_identity="wealth",
+            economic_identity="wealth-economics",
+        ),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime, "select_prepared_global_auction", lambda *_, **__: selected
+    )
+
+    def preflight(*_):
+        calls["preflight"] += 1
+        slow_conn.execute(
+            """
+            WITH RECURSIVE scan(value) AS (
+                SELECT 1
+                UNION ALL
+                SELECT value + 1 FROM scan WHERE value < 1000000000
+            )
+            SELECT SUM(value) FROM scan
+            """
+        ).fetchone()
+        pytest.fail("expired book authority must interrupt preflight SQL")
+
+    started = time.monotonic()
+    try:
+        result = global_batch_runtime.process_current_global_batch(
+            (event,),
+            decision_time=decision_at,
+            world_conn=object(),
+            forecast_conn=object(),
+            trade_conn=object(),
+            payload_reader=lambda current: json.loads(current.payload_json),
+            prepare_event=lambda current, _at: EventSubmissionReceipt(
+                False,
+                current.event_id,
+                current.causal_snapshot_id,
+                prepared_global_family=prepared,
+            ),
+            actuate_winner=lambda *_: pytest.fail("must not actuate"),
+            preflight_winner=preflight,
+            actuate_preflighted_winner=global_batch_runtime.GlobalOneShotActuator(
+                lambda *_: pytest.fail("must not actuate")
+            ),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: calls["venue"],
+            current_execution=lambda *_: object(),
+            current_time_provider=lambda: decision_at,
+            current_book_epoch_provider=lambda probabilities, _at: (
+                probabilities,
+                book,
+            ),
+            preflight_sqlite_connections=(slow_conn,),
+        )
+    finally:
+        slow_conn.close()
+
+    assert time.monotonic() - started < 1.0
+    assert calls == {"preflight": 1, "venue": 0}
+    assert result.winner_event_id is None
+    assert result.venue_submit_count == 0
+    assert result.receipts[event.event_id].reason == "GLOBAL_REAUCTION_EPOCH_EXPIRED"
+
+
+@pytest.mark.parametrize(
+    ("deadline_delta", "probe", "expected"),
+    (
+        (-1, lambda: False, "GLOBAL_REAUCTION_EPOCH_EXPIRED"),
+        (
+            1,
+            lambda: True,
+            "GLOBAL_AUCTION_NO_TRADE:GLOBAL_HARD_AUTHORITY_REVOKED",
+        ),
+        (1, lambda: False, None),
+    ),
+)
+def test_global_final_actuation_gate_is_fail_closed(
+    deadline_delta, probe, expected,
+):
+    checked_at = _dt.datetime.now(_dt.timezone.utc)
+    assert era._global_final_actuation_block_reason(
+        deadline=checked_at + _dt.timedelta(seconds=deadline_delta),
+        hard_authority_cancelled=probe,
+        checked_at=checked_at,
+    ) == expected
+
+    def unavailable():
+        raise RuntimeError("wake authority unavailable")
+
+    assert era._global_final_actuation_block_reason(
+        deadline=checked_at + _dt.timedelta(seconds=1),
+        hard_authority_cancelled=unavailable,
+        checked_at=checked_at,
+    ).startswith("GLOBAL_FINAL_AUTHORITY_UNAVAILABLE:RuntimeError:")
+
+
 def test_global_batch_curve_reauction_requires_new_epoch_identity(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
@@ -27305,6 +27571,9 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         calibration_conn=object(),
         preflight_only=False,
         preflight_receipt=preflight,
+        final_authority_deadline=_dt.datetime.now(_dt.timezone.utc)
+        + _dt.timedelta(seconds=30),
+        hard_authority_cancelled=lambda: False,
         global_claimed_at=global_claimed_at,
         global_claim_attempt_count=global_claim_attempt_count,
     )
@@ -27373,6 +27642,9 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         calibration_conn=object(),
         preflight_only=False,
         preflight_receipt=preflight,
+        final_authority_deadline=_dt.datetime.now(_dt.timezone.utc)
+        + _dt.timedelta(seconds=30),
+        hard_authority_cancelled=lambda: False,
         global_claimed_at=global_claimed_at,
         global_claim_attempt_count=global_claim_attempt_count,
     )
@@ -27381,6 +27653,30 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     assert rejected.venue_call_started is False
     assert rejected.venue_ack_received is False
     assert rejected.reason.startswith("GLOBAL_SELL_EXECUTION_FAILED:RuntimeError:")
+
+    hard_probes = iter((False, True))
+    late_revoked = era._submit_current_global_sell(
+        event,
+        decision_time=at,
+        global_actuation=actuation,
+        trade_conn=conn,
+        global_claim_conn=global_claim_conn,
+        forecast_conn=object(),
+        topology_conn=object(),
+        calibration_conn=object(),
+        preflight_only=False,
+        preflight_receipt=preflight,
+        final_authority_deadline=_dt.datetime.now(_dt.timezone.utc)
+        + _dt.timedelta(seconds=30),
+        hard_authority_cancelled=lambda: next(hard_probes),
+        global_claimed_at=global_claimed_at,
+        global_claim_attempt_count=global_claim_attempt_count,
+    )
+    assert late_revoked.submitted is False
+    assert late_revoked.venue_call_started is False
+    assert late_revoked.reason == (
+        "GLOBAL_AUCTION_NO_TRADE:GLOBAL_HARD_AUTHORITY_REVOKED"
+    )
 
     def fail_after_unknown_call(*_args, **kwargs):
         evidence = kwargs["execution_evidence"]
@@ -27407,6 +27703,9 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         calibration_conn=object(),
         preflight_only=False,
         preflight_receipt=preflight,
+        final_authority_deadline=_dt.datetime.now(_dt.timezone.utc)
+        + _dt.timedelta(seconds=30),
+        hard_authority_cancelled=lambda: False,
         global_claimed_at=global_claimed_at,
         global_claim_attempt_count=global_claim_attempt_count,
     )
@@ -27444,6 +27743,9 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         calibration_conn=object(),
         preflight_only=False,
         preflight_receipt=preflight,
+        final_authority_deadline=_dt.datetime.now(_dt.timezone.utc)
+        + _dt.timedelta(seconds=30),
+        hard_authority_cancelled=lambda: False,
         global_claimed_at=global_claimed_at,
         global_claim_attempt_count=global_claim_attempt_count,
     )
@@ -27456,7 +27758,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         "GLOBAL_SELL_EXIT_REJECTED:RuntimeError:"
     )
     assert _is_global_reduce_only_exit_receipt(deterministic_reject) is False
-    assert fenced_connections == [global_claim_conn] * 3
+    assert fenced_connections == [global_claim_conn] * 4
     assert global_claim_conn.in_transaction is False
 
     source = inspect.getsource(era.event_bound_live_adapter_from_trade_conn)

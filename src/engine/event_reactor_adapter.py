@@ -2896,6 +2896,28 @@ def _global_preflight_token_window(
         actuation_deadline.astimezone(UTC),
     )
 
+
+def _global_final_actuation_block_reason(
+    *,
+    deadline: datetime,
+    hard_authority_cancelled: Callable[[], bool],
+    checked_at: datetime | None = None,
+) -> str | None:
+    """Linearize one preflighted action at its actual pre-venue boundary."""
+
+    now = (checked_at or datetime.now(UTC)).astimezone(UTC)
+    if now > deadline.astimezone(UTC):
+        return "GLOBAL_REAUCTION_EPOCH_EXPIRED"
+    try:
+        if hard_authority_cancelled():
+            return "GLOBAL_AUCTION_NO_TRADE:GLOBAL_HARD_AUTHORITY_REVOKED"
+    except Exception as exc:  # noqa: BLE001 - hard authority loss is fail closed
+        return (
+            "GLOBAL_FINAL_AUTHORITY_UNAVAILABLE:"
+            f"{type(exc).__name__}:{str(exc)[:160]}"
+        )
+    return None
+
 # Continuous re-decision resurrection (2026-06-12): EDLI_REDECISION_PENDING is a PRICE-DRIVEN
 # re-decision of a FORECAST family — it routes through the SAME forecast decision path (same
 # snapshot binding, same q/FDR/Kelly cert), differing only in trigger (a P2 cheap-screen edge,
@@ -6454,6 +6476,8 @@ def event_bound_live_adapter_from_trade_conn(
         global_actuation: Any,
         preflight_only: bool,
         preflight_receipt: EventSubmissionReceipt | None,
+        final_authority_deadline: datetime | None,
+        hard_authority_cancelled: Callable[[], bool] | None,
     ) -> EventSubmissionReceipt:
         receipt = _submit_current_global_sell(
             event,
@@ -6466,6 +6490,8 @@ def event_bound_live_adapter_from_trade_conn(
             calibration_conn=calibration_conn,
             preflight_only=preflight_only,
             preflight_receipt=preflight_receipt,
+            final_authority_deadline=final_authority_deadline,
+            hard_authority_cancelled=hard_authority_cancelled,
             global_claimed_at=_global_claim_generations.get(event.event_id),
             global_claim_attempt_count=_global_claim_attempt_counts.get(
                 event.event_id
@@ -6565,6 +6591,8 @@ def event_bound_live_adapter_from_trade_conn(
         global_actuation: "Any | None" = None,
         preflight_only: bool = False,
         preflight_receipt: EventSubmissionReceipt | None = None,
+        final_authority_deadline: datetime | None = None,
+        hard_authority_cancelled: Callable[[], bool] | None = None,
     ) -> EventSubmissionReceipt:
         # Both forecast and Day0 events continue into the one live candidate
         # proof/submit path; unknown event types are rejected.
@@ -6603,6 +6631,8 @@ def event_bound_live_adapter_from_trade_conn(
                 global_actuation=global_actuation,
                 preflight_only=preflight_only,
                 preflight_receipt=preflight_receipt,
+                final_authority_deadline=final_authority_deadline,
+                hard_authority_cancelled=hard_authority_cancelled,
             )
         if entry_submit_block_reason is not None:
             return EventSubmissionReceipt(
@@ -6887,10 +6917,36 @@ def event_bound_live_adapter_from_trade_conn(
                 command_certificates_persisted = True
                 _live_order_build_phase = "live_order_command_persisted"
                 assert executor_submit is not None
-                _live_order_build_phase = "calling_executor_submit"
-                submit_result = _normalize_event_bound_executor_submit_result(
-                    executor_submit(final_intent, command)
-                )
+                if preflight_receipt is None:
+                    final_block = None
+                elif (
+                    final_authority_deadline is None
+                    or hard_authority_cancelled is None
+                ):
+                    final_block = "GLOBAL_FINAL_ACTUATION_AUTHORITY_MISSING"
+                else:
+                    final_block = _global_final_actuation_block_reason(
+                        deadline=final_authority_deadline,
+                        hard_authority_cancelled=hard_authority_cancelled,
+                    )
+                if final_block is not None:
+                    submit_result = EventBoundExecutorSubmitResult(
+                        status="PRE_SUBMIT_ERROR",
+                        reason_code=final_block,
+                        submit_finished_at=datetime.now(UTC).isoformat(),
+                        raw_response={"final_authority_block": final_block},
+                        venue_call_started=False,
+                        venue_ack_received=False,
+                        side_effect_known=True,
+                    )
+                else:
+                    # This check is the causal linearization point: facts committed
+                    # after it belong to the next decision epoch, while this exact
+                    # command enters the sanctioned executor immediately.
+                    _live_order_build_phase = "calling_executor_submit"
+                    submit_result = _normalize_event_bound_executor_submit_result(
+                        executor_submit(final_intent, command)
+                    )
                 _live_order_build_phase = "executor_submit_completed"
                 if submit_result.venue_call_started:
                     _append_venue_submit_attempted_aggregate_event(
@@ -7375,18 +7431,33 @@ def event_bound_live_adapter_from_trade_conn(
 
         _stable_preflight_monitor_handoff = [False]
 
-        def _day0_selection_cancelled() -> bool:
+        def _hard_day0_authority_cancelled() -> bool:
             current = reactor_urgent_wake_revision()
-            if (
+            return bool(
                 current is not None
                 and current != _global_batch_urgent_wake_revision[0]
                 and reactor_urgent_wake_reason()
                 == "day0_extreme_event_committed"
-            ):
+            )
+
+        def _day0_selection_cancelled() -> bool:
+            try:
+                hard_cancelled = _hard_day0_authority_cancelled()
+            except Exception:  # noqa: BLE001 - unavailable hard truth is a veto
+                logging.getLogger(__name__).exception(
+                    "global hard Day0 authority probe failed"
+                )
+                _stable_preflight_monitor_handoff[0] = False
+                return True
+            if hard_cancelled:
                 _stable_preflight_monitor_handoff[0] = False
                 return True
             if _stable_preflight_monitor_handoff[0]:
-                _stable_preflight_monitor_handoff[0] = False
+                # A stable submit-time SELL proof owns the short final-actuation
+                # window. Periodic monitor pressure already has durable completion
+                # debt and cannot improve this exact globally ranked SELL. Keep
+                # probing above for a newer committed Day0 fact, which does revoke
+                # the capability before venue I/O.
                 return False
             if selection_cancelled is not None:
                 try:
@@ -7789,6 +7860,7 @@ def event_bound_live_adapter_from_trade_conn(
                 or now > token.actuation_deadline
                 or token.token_id in _consumed_global_preflight_tokens
             ):
+                _stable_preflight_monitor_handoff[0] = False
                 return _stamp_live_adapter_lane(
                     EventSubmissionReceipt(
                         False,
@@ -7804,6 +7876,7 @@ def event_bound_live_adapter_from_trade_conn(
                 decision_time=now,
             )
             if wealth_block is not None:
+                _stable_preflight_monitor_handoff[0] = False
                 return _stamp_live_adapter_lane(
                     EventSubmissionReceipt(
                         False,
@@ -7813,6 +7886,48 @@ def event_bound_live_adapter_from_trade_conn(
                         proof_accepted=False,
                     )
                 )
+            final_block = _global_final_actuation_block_reason(
+                deadline=token.expires_at,
+                hard_authority_cancelled=_hard_day0_authority_cancelled,
+                checked_at=now,
+            )
+            if final_block is not None:
+                _stable_preflight_monitor_handoff[0] = False
+                return _stamp_live_adapter_lane(
+                    EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason=final_block,
+                        proof_accepted=False,
+                    )
+                )
+            if (
+                not _stable_preflight_monitor_handoff[0]
+                and selection_cancelled is not None
+            ):
+                try:
+                    routine_cancelled = bool(selection_cancelled())
+                except Exception:  # noqa: BLE001 - routine fairness is fail-soft
+                    routine_cancelled = False
+                    logging.getLogger(__name__).exception(
+                        "global routine selection cancellation probe failed"
+                    )
+                if routine_cancelled:
+                    _stable_preflight_monitor_handoff[0] = False
+                    return _stamp_live_adapter_lane(
+                        EventSubmissionReceipt(
+                            False,
+                            event.event_id,
+                            event.causal_snapshot_id,
+                            reason=(
+                                "GLOBAL_AUCTION_NO_TRADE:"
+                                "GLOBAL_SELECTION_CANCELLED"
+                            ),
+                            proof_accepted=False,
+                        )
+                    )
+            _stable_preflight_monitor_handoff[0] = False
             _consumed_global_preflight_tokens[token.token_id] = token.expires_at
             return _stamp_live_adapter_lane(
                 _submit_inner(
@@ -7820,6 +7935,8 @@ def event_bound_live_adapter_from_trade_conn(
                     at,
                     global_actuation=actuation,
                     preflight_receipt=token.receipt,
+                    final_authority_deadline=token.expires_at,
+                    hard_authority_cancelled=_hard_day0_authority_cancelled,
                 )
             )
 
@@ -9414,8 +9531,16 @@ def event_bound_live_adapter_from_trade_conn(
                 selection_snapshot_connections=(
                     forecast_conn,
                 ),
+                preflight_sqlite_connections=(
+                    forecast_conn,
+                    topology_conn,
+                    calibration_conn,
+                    live_cap_conn or trade_conn,
+                    trade_conn,
+                ),
                 epoch_superseded=_epoch_superseded,
                 selection_cancelled=_day0_selection_cancelled,
+                final_actuation_cancelled=_hard_day0_authority_cancelled,
                 # Delta facts narrow refresh I/O, never the economic feasible set.
                 # The paused held-family restriction is the explicit reduce-only
                 # admission scope; otherwise leave the auction universe global.
@@ -11062,6 +11187,8 @@ def _submit_current_global_sell(
     calibration_conn: sqlite3.Connection | None,
     preflight_only: bool,
     preflight_receipt: EventSubmissionReceipt | None,
+    final_authority_deadline: datetime | None = None,
+    hard_authority_cancelled: Callable[[], bool] | None = None,
     global_claimed_at: str | None = None,
     global_claim_attempt_count: int | None = None,
 ) -> EventSubmissionReceipt:
@@ -11463,6 +11590,27 @@ def _submit_current_global_sell(
                 },
             )
             exit_evidence = ExitExecutionEvidence()
+            if (
+                final_authority_deadline is None
+                or hard_authority_cancelled is None
+            ):
+                return _global_sell_receipt(
+                    event,
+                    global_actuation=global_actuation,
+                    reason="GLOBAL_FINAL_ACTUATION_AUTHORITY_MISSING",
+                    proof_accepted=False,
+                )
+            final_block = _global_final_actuation_block_reason(
+                deadline=final_authority_deadline,
+                hard_authority_cancelled=hard_authority_cancelled,
+            )
+            if final_block is not None:
+                return _global_sell_receipt(
+                    event,
+                    global_actuation=global_actuation,
+                    reason=final_block,
+                    proof_accepted=False,
+                )
             _fence_global_target_claim_before_command(
                 global_claim_conn,
                 event,
@@ -11474,6 +11622,17 @@ def _submit_current_global_sell(
             # fence before opening the independent trade write unit; a write
             # transaction must never span the two canonical DBs.
             global_claim_conn.commit()
+            final_block = _global_final_actuation_block_reason(
+                deadline=final_authority_deadline,
+                hard_authority_cancelled=hard_authority_cancelled,
+            )
+            if final_block is not None:
+                return _global_sell_receipt(
+                    event,
+                    global_actuation=global_actuation,
+                    reason=final_block,
+                    proof_accepted=False,
+                )
             outcome = execute_exit(
                 portfolio,
                 position,
