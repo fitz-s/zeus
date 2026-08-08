@@ -28481,3 +28481,88 @@ def test_global_sell_gtc_reaches_exit_envelope_when_allocator_prefers_immediate(
     ).fetchone()
     assert dict(envelope) == {"order_type": "GTC"}
     conn.close()
+
+
+@pytest.mark.parametrize(
+    ("command_state", "legacy_order_id", "filled_ownership", "expected"),
+    (
+        (None, "", "NOT_GLOBAL", False),
+        (None, "legacy-order", "NOT_GLOBAL", True),
+        ("REJECTED", "", "COMMAND_OWNED", False),
+        ("CANCELLED", "", "COMMAND_OWNED", False),
+        ("CANCELED", "", "NOT_GLOBAL", True),
+        ("EXPIRED", "", "COMMAND_OWNED", False),
+        ("SUBMITTING", "", "NOT_GLOBAL", True),
+        ("ACKED", "", "NOT_GLOBAL", True),
+        ("UNKNOWN", "", "NOT_GLOBAL", True),
+        ("REVIEW_REQUIRED", "", "NOT_GLOBAL", True),
+        ("FILLED", "", "NOT_GLOBAL", True),
+        ("FILLED", "", "GLOBAL_NO_COMMAND", False),
+    ),
+)
+def test_global_sell_single_flight_is_command_truth_not_lifecycle_intent(
+    monkeypatch,
+    command_state,
+    legacy_order_id,
+    filled_ownership,
+    expected,
+):
+    from src.execution import exit_lifecycle
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_canonical_global_sell_command_ownership",
+        lambda *_args, **_kwargs: filled_ownership,
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            position_id TEXT,
+            token_id TEXT,
+            side TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            venue_order_id TEXT,
+            idempotency_key TEXT,
+            updated_at TEXT,
+            created_at TEXT
+        );
+        CREATE TABLE venue_command_events (
+            command_id TEXT,
+            event_type TEXT,
+            payload_json TEXT,
+            sequence_no INTEGER
+        );
+        CREATE TABLE position_events (
+            position_id TEXT,
+            event_type TEXT,
+            sequence_no INTEGER,
+            payload_json TEXT,
+            occurred_at TEXT
+        );
+        """
+    )
+    if command_state is not None:
+        conn.execute(
+            "INSERT INTO venue_commands VALUES "
+            "('command', ?, ?, 'SELL', 'EXIT', ?, NULL, 'idem', '2', '1')",
+            ("position", "token", command_state),
+        )
+
+    position = SimpleNamespace(
+        trade_id="position",
+        state="pending_exit",
+        direction="buy_yes",
+        token_id="token",
+        no_token_id="no-token",
+        effective_exposure=lambda: SimpleNamespace(shares=1.0),
+    )
+    assert era._global_sell_command_blocks_reauction(
+        conn,
+        position=position,
+        position_id="position",
+        token_id="token",
+        legacy_order_id=legacy_order_id,
+    ) is expected

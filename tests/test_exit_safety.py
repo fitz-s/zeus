@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-02
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-02; last_reused=2026-08-02
+# Last reused/audited: 2026-08-08
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-08; last_reused=2026-08-08
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.

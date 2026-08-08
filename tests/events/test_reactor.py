@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-06
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-06; last_reused=2026-08-06
+# Last reused/audited: 2026-08-08
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-08; last_reused=2026-08-08
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -157,6 +157,26 @@ def test_exact_completion_exposure_read_failure_stays_reduce_only(caplog):
     assert mode.fairness_reserved is True
     assert mode.reduce_only is True
     assert "retaining reduce-only scope" in caplog.text
+
+
+def test_durable_exact_completion_debt_gets_one_bounded_fairness_turn(monkeypatch):
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    queued = {"held-debt"}
+    monkeypatch.setattr(
+        reactor_wake,
+        "exact_held_sell_completion_wake_ids",
+        lambda **_kwargs: frozenset(queued),
+    )
+    reactor._DURABLE_EXACT_HELD_COMPLETION_SEEN.clear()
+    try:
+        assert reactor._claim_durable_exact_held_sell_completion_turn() is True
+        assert reactor._claim_durable_exact_held_sell_completion_turn() is False
+        queued.add("new-generation")
+        assert reactor._claim_durable_exact_held_sell_completion_turn() is True
+    finally:
+        reactor._DURABLE_EXACT_HELD_COMPLETION_SEEN.clear()
 
 
 def test_completion_risk_bypass_is_bound_to_reduce_only_mode():

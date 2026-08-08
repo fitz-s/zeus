@@ -7193,6 +7193,38 @@ def _global_auction_completion_mode(
     return _GlobalAuctionCompletionMode(True, row is not None)
 
 
+_DURABLE_EXACT_HELD_COMPLETION_SEEN: set[str] = set()
+_DURABLE_EXACT_HELD_COMPLETION_LOCK = threading.Lock()
+
+
+def _claim_durable_exact_held_sell_completion_turn() -> bool:
+    """Reserve one ordinary auction turn per durable exact-debt generation.
+
+    The queue survives a lost in-process hint, but an unfillable old request
+    must not turn every future BUY-capable auction into reduce-only. A replaced
+    V4 wake has a new wake id and earns one new bounded turn.
+    """
+
+    try:
+        from src.runtime.reactor_wake import exact_held_sell_completion_wake_ids
+
+        queued = set(exact_held_sell_completion_wake_ids(fail_on_error=True))
+    except (OSError, ValueError):
+        logging.getLogger("zeus.events.reactor").warning(
+            "durable held SELL completion queue unreadable; retaining ordinary "
+            "reactor scheduling",
+            exc_info=True,
+        )
+        return False
+    with _DURABLE_EXACT_HELD_COMPLETION_LOCK:
+        _DURABLE_EXACT_HELD_COMPLETION_SEEN.intersection_update(queued)
+        unserved = queued.difference(_DURABLE_EXACT_HELD_COMPLETION_SEEN)
+        if not unserved:
+            return False
+        _DURABLE_EXACT_HELD_COMPLETION_SEEN.update(unserved)
+        return True
+
+
 def _settle_global_auction_monitor_fairness(
     *, completion_due_at_start: bool, result: object
 ) -> bool:
@@ -7963,17 +7995,26 @@ def run_edli_event_reactor_cycle(
             if _live_entry_block_reason is None
             else None
         )
+        durable_exact_held_completion = (
+            _claim_durable_exact_held_sell_completion_turn()
+        )
         (
             _monitor_completion_due_at_start,
             _monitor_selection_cancelled,
         ) = _global_auction_monitor_cancellation_probe(
             held_position_monitor_pending,
-            completion_due=completion_wake,
+            completion_due=(
+                completion_wake
+                or durable_exact_held_completion
+            ),
         )
         _monitor_completion_mode = (
             _global_auction_completion_mode(
                 completion_due=_monitor_completion_due_at_start,
-                exact_held_completion=held_sell_completion_cycle,
+                exact_held_completion=(
+                    held_sell_completion_cycle
+                    or durable_exact_held_completion
+                ),
                 trade_conn=trade_conn,
             )
         )

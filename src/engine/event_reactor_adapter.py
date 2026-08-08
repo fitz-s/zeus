@@ -10995,15 +10995,74 @@ def _current_global_sell_position(
         or sellable != chain_sellable
     ):
         raise ValueError("GLOBAL_SELL_POSITION_SHARES_SUPERSEDED")
-    exit_state_raw = getattr(position, "exit_state", "")
-    exit_state = str(getattr(exit_state_raw, "value", exit_state_raw) or "")
-    if exit_state or str(getattr(position, "last_exit_order_id", "") or ""):
+    if _global_sell_command_blocks_reauction(
+        trade_conn,
+        position=position,
+        position_id=position_id,
+        token_id=token_id,
+        legacy_order_id=str(getattr(position, "last_exit_order_id", "") or ""),
+    ):
         raise ValueError("GLOBAL_SELL_POSITION_EXIT_ALREADY_ACTIVE")
     state_raw = getattr(position, "state", "")
     state = str(getattr(state_raw, "value", state_raw) or "")
-    if state not in {"entered", "holding", "day0_window"}:
+    if state not in {"entered", "holding", "day0_window", "pending_exit"}:
         raise ValueError(f"GLOBAL_SELL_POSITION_PHASE_INVALID:{state or 'missing'}")
     return portfolio, position
+
+
+def _global_sell_command_blocks_reauction(
+    trade_conn: sqlite3.Connection,
+    *,
+    position: object,
+    position_id: str,
+    token_id: str,
+    legacy_order_id: str = "",
+) -> bool:
+    """Return whether venue truth still owns this position's SELL single-flight.
+
+    Lifecycle intent is not venue ownership. A pending exit with no command, or
+    with only commands that the canonical replacement-SELL authority has
+    terminalized, remains eligible for a fresh globally-ranked SELL. In-flight,
+    filled-but-not-yet-reconciled, and unknown command states stay fail-closed.
+    """
+
+    rows = trade_conn.execute(
+        """
+        SELECT state
+          FROM venue_commands
+         WHERE position_id = ?
+           AND token_id = ?
+           AND side = 'SELL'
+           AND intent_kind = 'EXIT'
+        """,
+        (position_id, token_id),
+    ).fetchall()
+    if not rows and str(legacy_order_id or "").strip():
+        return True
+    from src.execution.exit_safety import can_submit_replacement_sell
+
+    allowed, _reason = can_submit_replacement_sell(
+        trade_conn,
+        position_id,
+        token_id,
+    )
+    if not allowed:
+        return True
+    if any(str(row[0] or "").strip().upper() == "FILLED" for row in rows):
+        from src.execution.exit_lifecycle import (
+            _canonical_global_sell_command_ownership,
+        )
+
+        ownership = _canonical_global_sell_command_ownership(
+            trade_conn,
+            position,
+            require_pending_exit=False,
+        )
+        # A terminal fill releases the replacement mutex, but the same shares
+        # stay owned until canonical recovery proves a positive residual and
+        # explicitly hands the command back to global reauction.
+        return ownership != "GLOBAL_NO_COMMAND"
+    return False
 
 
 def _global_sell_candidate_from_raw_book(
