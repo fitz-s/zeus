@@ -24619,6 +24619,7 @@ def _reconcile_passes_short_conn(
             )
             cancel_candidates = _capital_blocking_cancel_commands(conn)
             terminal_candidates = _terminal_point_order_candidates(conn)
+            terminal_fact_candidates = _latest_terminal_order_fact_candidates(conn)
             stale_terminal_finding_candidates = (
                 _stale_local_orphan_terminal_no_fill_candidates(conn)
             )
@@ -24662,6 +24663,41 @@ def _reconcile_passes_short_conn(
                     obligation_states,
                 ).fetchone()
             )
+        preexisting_terminal_result = None
+        if terminal_fact_candidates:
+            # User/REST ingest can persist VENUE_WIPED before this sweep reads
+            # the prior LIVE fact.  That removes the command from the point-read
+            # candidate set, so project the already-durable terminal truth before
+            # any venue I/O or historical fill maintenance can consume the tick.
+            terminal_fact_deadline = _bounded_recovery_deadline(
+                scheduler_deadline,
+                live_tick_budget,
+            )
+            terminal_fact_conn_factory = _recovery_apply_conn_factory(
+                conn_factory,
+                scope="live_tick",
+                deadline_monotonic=terminal_fact_deadline,
+            )
+            preexisting_terminal_result = _run_recovery_pass_with_lock_policy(
+                "terminal_order_facts_fast",
+                lambda: run_db_only_pass(
+                    lambda conn: reconcile_terminal_order_facts(
+                        conn,
+                        collect_continuations=True,
+                    ),
+                    conn_factory=terminal_fact_conn_factory,
+                    label="recovery.terminal_order_facts_fast",
+                ),
+                scope="live_tick",
+                summary=summary,
+                deadline_monotonic=terminal_fact_deadline,
+            )
+            if preexisting_terminal_result is not None:
+                _accumulate(
+                    summary,
+                    "terminal_order_facts",
+                    preexisting_terminal_result,
+                )
         stale_terminal_finding_result = None
         if stale_terminal_finding_candidates:
             # These findings already carry an identity-bound terminal no-fill
@@ -24796,9 +24832,17 @@ def _reconcile_passes_short_conn(
             # A bounded exact-order continuation is the live-tick contract.
             # Do not let unrelated cancel/terminal candidates re-enter the
             # account-wide snapshot or historical point sweep after it.
-            return identity_result or preexisting_obligation_result
+            return (
+                preexisting_terminal_result
+                or identity_result
+                or preexisting_obligation_result
+            )
         if not cancel_candidates and not terminal_candidates and not partial_candidates:
-            return stale_terminal_finding_result or preexisting_obligation_result
+            return (
+                preexisting_terminal_result
+                or stale_terminal_finding_result
+                or preexisting_obligation_result
+            )
         cancel_command_ids = {
             str(row.get("command_id") or "") for row in cancel_candidates
         }
@@ -24952,7 +24996,8 @@ def _reconcile_passes_short_conn(
                     terminal_result,
                 )
         return (
-            stale_terminal_finding_result
+            preexisting_terminal_result
+            or stale_terminal_finding_result
             or preexisting_obligation_result
             or cancel_result
             or partial_result
