@@ -1591,7 +1591,7 @@ def test_open_maker_rests_use_current_trade_fill_when_order_fact_is_stale():
     ) == []
 
 
-def test_open_maker_rests_resolve_token_from_latest_snapshot_mirror_without_append_scan():
+def test_open_maker_rests_use_exact_snapshot_for_minimum_without_append_scan():
     from src.events import reactor
 
     world = _mem_world()
@@ -1647,9 +1647,17 @@ def test_open_maker_rests_resolve_token_from_latest_snapshot_mirror_without_appe
 
     assert len(rests) == 1
     assert rests[0].side == "buy_no"
+    assert rests[0].min_order_size == pytest.approx(5.0)
     statements = "\n".join(captured_trade.statements)
     assert "FROM executable_market_snapshot_latest" in statements
-    assert "FROM executable_market_snapshots" not in statements
+    assert "FROM executable_market_snapshots" in statements
+    append_reads = [
+        statement
+        for statement in captured_trade.statements
+        if "FROM executable_market_snapshots\n" in statement
+    ]
+    assert len(append_reads) == 1
+    assert "WHERE snapshot_id IN" in append_reads[0]
 
 
 def test_open_maker_rests_avoids_full_order_fact_window_scan():

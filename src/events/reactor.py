@@ -10959,25 +10959,50 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
             cond_by_token = {}
             side_by_token = {}
             min_order_by_token = {}
-        tokens_with_partial_fill: set[str] = set()
-        for row in rows:
-            token = str(row[2] or "")
-            if not token:
-                continue
+        # The latest mirror may predate min_order_size. Recover the venue
+        # minimum from each rest's exact submit snapshot before screening: a
+        # fill can arrive after selection but before cancel, so waiting until
+        # matched_size is already positive leaves the cancel side effect blind.
+        snapshot_token = {
+            str(row[6] or ""): str(row[2] or "")
+            for row in rows
+            if row[6]
+            and row[2]
+            and min_order_by_token.get(str(row[2] or "")) in (None, "")
+        }
+        if snapshot_token:
             try:
-                matched = float(row[9]) if row[9] is not None else 0.0
-            except (TypeError, ValueError):
-                matched = 0.0
-            if matched > 0.0:
-                tokens_with_partial_fill.add(token)
+                snapshot_cols = {
+                    str(row[1])
+                    for row in trade_conn.execute(
+                        "PRAGMA table_info(executable_market_snapshots)"
+                    ).fetchall()
+                }
+                snapshot_min_order_select = (
+                    ", min_order_size"
+                    if "min_order_size" in snapshot_cols
+                    else ", NULL AS min_order_size"
+                )
+                sph = ",".join("?" for _ in snapshot_token)
+                for cr in trade_conn.execute(
+                    f"""
+                    SELECT snapshot_id, selected_outcome_token_id, condition_id,
+                           yes_token_id, no_token_id{snapshot_min_order_select}
+                      FROM executable_market_snapshots
+                     WHERE snapshot_id IN ({sph})
+                    """,
+                    tuple(snapshot_token),
+                ).fetchall():
+                    token = snapshot_token.get(str(cr[0] or ""), "")
+                    if token and token in {str(cr[1] or ""), str(cr[3] or ""), str(cr[4] or "")}:
+                        min_order_by_token[token] = cr[5]
+            except Exception:  # noqa: BLE001 — exact snapshot recovery is best-effort
+                pass
         fallback_token_ids = {
             token
             for token in token_ids
             if token not in cond_by_token
-            or (
-                token in tokens_with_partial_fill
-                and min_order_by_token.get(token) in (None, "")
-            )
+            or min_order_by_token.get(token) in (None, "")
         }
         if fallback_token_ids:
             try:
