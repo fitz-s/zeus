@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-04
-# Authority basis: EDLI v1 implementation prompt §10 online MarketChannelIngestor contract; background TRADE writer per-quote fairness hotfix.
+# Last reused/audited: 2026-08-08
+# Authority basis: EDLI v1 implementation prompt §10 online MarketChannelIngestor contract; bounded TRADE writer micro-batch hotfix.
 from __future__ import annotations
 
 import asyncio
@@ -1158,7 +1158,7 @@ def test_rest_seed_preserves_partial_batch_before_single_fetch_embargo():
     assert single_fetches == ["token-2"]
 
 
-def test_quote_projection_pump_commits_each_available_stream_quote():
+def test_quote_projection_pump_commits_bounded_stream_batches():
     conn, writer = _conn_writer()
     metadata = {
         f"token-{idx}": _metadata(f"token-{idx}")[f"token-{idx}"]
@@ -1208,7 +1208,7 @@ def test_quote_projection_pump_commits_each_available_stream_quote():
         )
     )
 
-    assert commits == list(range(2, 201, 2))
+    assert commits == list(range(8, 201, 8))
     assert ingestor._coalescer.pending_counts() == {"lossless": 0, "market": 0}
 
 
@@ -1294,7 +1294,7 @@ def test_quote_projection_pump_rate_limits_only_burst_commits(monkeypatch):
     ).fetchone() == (0.49, 0.53)
 
 
-def test_quote_projection_pump_yields_trade_gate_between_logical_quotes():
+def test_quote_projection_pump_yields_trade_gate_between_bounded_batches():
     total_quotes = 16
     token_ids = {f"token-{index}" for index in range(total_quotes)}
     metadata = {
@@ -1349,7 +1349,9 @@ def test_quote_projection_pump_yields_trade_gate_between_logical_quotes():
     def commit() -> None:
         nonlocal completed
         conn.commit()
-        completed += 1
+        completed = conn.execute(
+            "SELECT COUNT(*) FROM execution_feasibility_latest"
+        ).fetchone()[0] // 2
 
     service = MarketChannelOnlineService(ingestor, quote_flush_batch_size=total_quotes)
     wake = asyncio.Event()
@@ -1376,7 +1378,11 @@ def test_quote_projection_pump_yields_trade_gate_between_logical_quotes():
     asyncio.run(run())
 
     assert completed == total_quotes
-    assert gate_events == [event for _ in range(total_quotes) for event in ("enter", "exit")]
+    assert gate_events == [
+        event
+        for _ in range(total_quotes // service.quote_write_batch_size)
+        for event in ("enter", "exit")
+    ]
     assert background_windows and 0 < background_windows[0] < total_quotes
     assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0] == 32
 
@@ -1421,7 +1427,11 @@ def test_quote_projection_failure_requeues_unfinished_quotes_atomically(monkeypa
             raise sqlite3.OperationalError("database is locked")
         conn.commit()
 
-    service = MarketChannelOnlineService(ingestor, quote_flush_batch_size=3)
+    service = MarketChannelOnlineService(
+        ingestor,
+        quote_flush_batch_size=3,
+        quote_write_batch_size=2,
+    )
     wake = asyncio.Event()
     wake.set()
     connection_done = asyncio.Event()
@@ -1444,11 +1454,11 @@ def test_quote_projection_failure_requeues_unfinished_quotes_atomically(monkeypa
     asyncio.run(flush())
 
     assert sleep_calls == [0, pytest.approx(0.05)]
-    assert ingestor._coalescer.pending_counts() == {"lossless": 0, "market": 2}
-    assert len(ingestor._seen_quote_event_ids) == 1
-    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0] == 2
+    assert ingestor._coalescer.pending_counts() == {"lossless": 0, "market": 1}
+    assert len(ingestor._seen_quote_event_ids) == 2
+    assert conn.execute("SELECT COUNT(*) FROM execution_feasibility_latest").fetchone()[0] == 4
     assert conn.execute(
-        "SELECT COUNT(*) FROM execution_feasibility_latest WHERE token_id='token-2'"
+        "SELECT COUNT(*) FROM execution_feasibility_latest WHERE token_id='token-3'"
     ).fetchone()[0] == 0
 
     wake.set()

@@ -32,6 +32,7 @@ MARKET_CHANNEL_WS_ENDPOINT = "wss://ws-subscriptions-clob.polymarket.com/ws/mark
 REST_SEED_COMMIT_CHUNK_SIZE = 16
 REST_SEED_FETCH_BATCH_SIZE = 128
 MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE = 128
+MARKET_CHANNEL_QUOTE_WRITE_BATCH_SIZE = 4
 MARKET_CHANNEL_INITIAL_BOOK_GRACE_SECONDS = 1.0
 MARKET_CHANNEL_CONTINUITY_PUBLISH_INTERVAL_SECONDS = 0.25
 MARKET_CHANNEL_QUOTE_MIN_COMMIT_INTERVAL_SECONDS = 0.01
@@ -1670,6 +1671,7 @@ class MarketChannelOnlineService:
     universe_refresh_interval_seconds: float = 15.0
     continuity_sink: Callable[[dict[str, Any]], None] | None = None
     quote_flush_batch_size: int = MARKET_CHANNEL_QUOTE_FLUSH_BATCH_SIZE
+    quote_write_batch_size: int = MARKET_CHANNEL_QUOTE_WRITE_BATCH_SIZE
     connected: bool = False
     gap_start: str | None = None
     refresh_action_count: int = 0
@@ -1734,6 +1736,10 @@ class MarketChannelOnlineService:
 
     def __post_init__(self) -> None:
         self.quote_flush_batch_size = max(1, int(self.quote_flush_batch_size))
+        self.quote_write_batch_size = max(
+            1,
+            min(int(self.quote_write_batch_size), self.quote_flush_batch_size),
+        )
         self._replace_seed_first_token_ids(self.seed_first_token_ids)
         repair_tokens = (
             self.seed_first_token_ids
@@ -2340,20 +2346,25 @@ class MarketChannelOnlineService:
         commit: Callable[[], None] | None,
         rollback: Callable[[], None] | None,
     ) -> None:
-        """Commit each logical quote as one short TRADE writer unit.
+        """Commit bounded quote groups as short TRADE writer units.
 
-        A quote's direction rows stay together, while the coalesced batch does
-        not keep the TRADE lease across unrelated quotes. Only the unfinished
-        tail is requeued after a failed quote; committed quotes are finalized
-        before yielding to another writer.
+        One commit per quote multiplies lock and fsync work until the quote
+        projection cannot drain venue bursts. One commit for the whole flush
+        batch can instead delay held-position monitor writes. Bounded groups
+        preserve both properties: amortize commit cost, then release the TRADE
+        gate and yield before the next group. Only the unfinished tail is
+        requeued after a failed group.
         """
 
-        for index, quote in enumerate(prepared.quotes):
+        for offset in range(0, len(prepared.quotes), self.quote_write_batch_size):
+            quote_group = prepared.quotes[
+                offset : offset + self.quote_write_batch_size
+            ]
             with self.ingestor.defer_market_event_sink():
                 try:
                     with write_gate:
                         committed_quotes = self.ingestor.write_prepared_quote_events(
-                            (quote,)
+                            quote_group
                         )
                         if commit is not None:
                             commit()
@@ -2362,7 +2373,7 @@ class MarketChannelOnlineService:
                         if rollback is not None:
                             rollback()
                     finally:
-                        tail = prepared.quotes[index:]
+                        tail = prepared.quotes[offset:]
                         self.ingestor.requeue_prepared_coalesced_quotes(
                             _PreparedCoalescedQuotes(
                                 events=tuple(item.event for item in tail),
@@ -2375,7 +2386,11 @@ class MarketChannelOnlineService:
                 self.ingestor.flush_deferred_market_event_sink()
 
             queued = self.ingestor._coalescer.pending_counts()
-            if index + 1 < len(prepared.quotes) or queued["lossless"] or queued["market"]:
+            if (
+                offset + len(quote_group) < len(prepared.quotes)
+                or queued["lossless"]
+                or queued["market"]
+            ):
                 await asyncio.sleep(0)
 
     async def _repair_missing_depth_once(
