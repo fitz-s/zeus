@@ -4696,30 +4696,43 @@ def process_current_global_batch(
             return reject("GLOBAL_AUCTION_NO_REDUCE_ONLY_FAMILY")
         restricted_families = None
         if restrict_to_family_keys is not None:
-            restricted_families = frozenset(
-                (
+            held_family_keys = frozenset(
+                weather_family_id(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                )
+                for city, target_date, metric in held_families
+            )
+            if (
+                not buy_candidates_enabled
+                and held_family_keys != restrict_to_family_keys
+            ):
+                return reject("GLOBAL_AUCTION_RESTRICTED_CARRIER_MISSING")
+            carrier_families: set[tuple[str, str, str]] = set()
+            carrier_family_keys: set[str] = set()
+            for event in event_tuple:
+                payload = payload_reader(event)
+                family = (
                     str(payload.get("city") or "").strip(),
                     str(payload.get("target_date") or "").strip(),
                     str(payload.get("metric") or "").strip().lower(),
                 )
-                for event in event_tuple
-                for payload in (payload_reader(event),)
-                if _family_key(event, payload) in restrict_to_family_keys
-            )
-            if (
-                (not restricted_families and not held_families)
-                or (
-                    restricted_families
-                    and frozenset(
-                        weather_family_id(
-                            city=city,
-                            target_date=target_date,
-                            metric=metric,
-                        )
-                        for city, target_date, metric in restricted_families
-                    )
-                    != restrict_to_family_keys
+                if not family[0] or not family[1] or family[2] not in {
+                    "high",
+                    "low",
+                }:
+                    return reject("GLOBAL_AUCTION_RESTRICTED_CARRIER_MISSING")
+                family_key = weather_family_id(
+                    city=family[0], target_date=family[1], metric=family[2]
                 )
+                if family_key in restrict_to_family_keys:
+                    carrier_families.add(family)
+                    carrier_family_keys.add(family_key)
+            restricted_families = frozenset(carrier_families)
+            if (
+                buy_candidates_enabled
+                and carrier_family_keys != restrict_to_family_keys
             ):
                 return reject("GLOBAL_AUCTION_RESTRICTED_CARRIER_MISSING")
         day0_only_scope = bool(

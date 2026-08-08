@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-07
+# Last reused/audited: 2026-08-08
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -19648,11 +19648,11 @@ def test_global_batch_reduce_only_prefilters_scan_prepare_and_book_scope(
         select,
     )
 
-    def run(*, buy_candidates_enabled):
+    def run(*, events, buy_candidates_enabled, restrict_to_family_keys=None):
         prepared_seen.append(frozenset())
         book_seen.append(frozenset())
         return global_batch_runtime.process_current_global_batch(
-            (held_events[0],),
+            events,
             decision_time=decision_at,
             world_conn=object(),
             forecast_conn=object(),
@@ -19670,19 +19670,80 @@ def test_global_batch_reduce_only_prefilters_scan_prepare_and_book_scope(
             ),
             current_book_epoch_provider=provide_books,
             buy_candidates_enabled=buy_candidates_enabled,
+            restrict_to_family_keys=restrict_to_family_keys,
         )
 
-    reduce_only = run(buy_candidates_enabled=False)
-    buy_enabled = run(buy_candidates_enabled=True)
+    reduce_only_partial_carrier = run(
+        events=(held_events[0], all_events[4]),
+        buy_candidates_enabled=False,
+        restrict_to_family_keys=held_family_keys,
+    )
+    reduce_only_zero_carrier = run(
+        events=(),
+        buy_candidates_enabled=False,
+        restrict_to_family_keys=held_family_keys,
+    )
+    buy_enabled = run(events=(held_events[0],), buy_candidates_enabled=True)
 
-    assert reduce_only.winner_event_id is None
+    assert reduce_only_partial_carrier.winner_event_id is None
+    assert reduce_only_zero_carrier.winner_event_id is None
     assert buy_enabled.winner_event_id is None
     assert scan_seen == [
         (4, held_families),
+        (4, held_families),
         (142, None),
     ]
-    assert prepared_seen == [held_family_keys, frozenset(all_scope.family_keys)]
-    assert book_seen == [held_family_keys, frozenset(all_scope.family_keys)]
+    assert prepared_seen == [
+        held_family_keys,
+        held_family_keys,
+        frozenset(all_scope.family_keys),
+    ]
+    assert book_seen == [
+        held_family_keys,
+        held_family_keys,
+        frozenset(all_scope.family_keys),
+    ]
+
+
+def test_global_batch_rejects_restricted_held_scope_mismatch(monkeypatch):
+    decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
+    carrier = _global_scope_event(city="Kuala Lumpur", source_run_id="run-kl")
+    requested = era.weather_family_id(
+        city="Beta", target_date="2026-07-11", metric="high"
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_current_held_weather_families",
+        lambda _conn: (("Alpha", "2026-07-11", "high"),),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "scan_current_global_auction_scope",
+        lambda **_: pytest.fail("held/request mismatch must reject before scan"),
+    )
+
+    result = global_batch_runtime.process_current_global_batch(
+        (carrier,),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda event: json.loads(event.payload_json),
+        prepare_event=lambda *_: pytest.fail("mismatched held scope must not prepare"),
+        actuate_winner=lambda *_: pytest.fail("mismatched held scope must not actuate"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_: object(),
+        current_time_provider=lambda: decision_at,
+        buy_candidates_enabled=False,
+        restrict_to_family_keys=frozenset({requested}),
+    )
+
+    assert result.venue_submit_count == 0
+    assert result.winner_event_id is None
+    assert result.receipts[carrier.event_id].reason == (
+        "GLOBAL_AUCTION_RESTRICTED_CARRIER_MISSING"
+    )
 
 
 def test_global_batch_reduce_only_prepares_only_held_families(monkeypatch):
