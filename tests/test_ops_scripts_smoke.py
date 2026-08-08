@@ -1655,6 +1655,25 @@ def test_audit_rejected_probability_capital_grades_exact_q_without_inventing_mak
     trade.execute(
         """
         INSERT INTO decision_log (mode, started_at, artifact_json, timestamp)
+        VALUES ('global_single_order_auction_delta', ?, ?, ?)
+        """,
+        (
+            decision_at,
+            json.dumps(
+                {
+                    "summary": {
+                        "selection_epoch_identity": epoch,
+                        "winner_candidate_id": candidate_id,
+                        "legacy_undecodable": True,
+                    }
+                }
+            ),
+            decision_at,
+        ),
+    )
+    trade.execute(
+        """
+        INSERT INTO decision_log (mode, started_at, artifact_json, timestamp)
         VALUES ('global_single_order_auction_preflight', ?, ?, ?)
         """,
         (
@@ -1710,10 +1729,10 @@ def test_audit_rejected_probability_capital_grades_exact_q_without_inventing_mak
     )
     forecasts.commit()
     forecasts.close()
-    monkeypatch.setattr(
-        audit,
-        "_current_global_auction_candidate_payload",
-        lambda _conn, _summary: {
+    def candidate_payload(_conn, summary):
+        if summary.get("legacy_undecodable"):
+            raise ValueError("legacy receipt")
+        return {
             "detailed": [
                 {
                     "candidate_id": candidate_id,
@@ -1729,7 +1748,12 @@ def test_audit_rejected_probability_capital_grades_exact_q_without_inventing_mak
                     "expected_growth": {"expected_ev_usd": 6.0},
                 }
             ]
-        },
+        }
+
+    monkeypatch.setattr(
+        audit,
+        "_current_global_auction_candidate_payload",
+        candidate_payload,
     )
 
     report = audit.audit_selection_skew(
@@ -1750,6 +1774,26 @@ def test_audit_rejected_probability_capital_grades_exact_q_without_inventing_mak
     assert binding["mean_binary_brier"] == pytest.approx(0.04)
     assert binding["quoted_full_fill_pnl_usd"] == 10.0
     assert report["samples"][0]["fill_status"] == "fill_unknown_counterfactual"
+
+
+def test_audit_rejected_probability_capital_tolerates_partial_decision_log_schema(
+    tmp_path,
+):
+    audit = _load("audit_rejected_probability_partial_schema", "audit_yes_no_selection_skew.py")
+    trade_db = tmp_path / "zeus_trades.db"
+    trade = _init_yes_no_selection_db(trade_db)
+    trade.execute("CREATE TABLE decision_log (artifact_json TEXT NOT NULL)")
+    trade.commit()
+    trade.close()
+
+    report = audit.audit_selection_skew(
+        trade_db=trade_db,
+        forecast_db=None,
+        days=1.0,
+    )["rejected_probability_capital"]
+
+    assert report["preflight_rows"] == 0
+    assert report["verdict"] == "no_exact_q_version_rejected_decisions"
 
 
 def _init_live_probability_reality_trade_db(path: Path) -> sqlite3.Connection:

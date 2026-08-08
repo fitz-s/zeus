@@ -563,7 +563,7 @@ def _auction_winner_for_preflight(
         try:
             payload = _current_global_auction_candidate_payload(conn, summary)
         except (KeyError, TypeError, ValueError, sqlite3.Error):
-            return None
+            continue
         detailed = payload.get("detailed")
         candidates = detailed if isinstance(detailed, list) else []
         return next(
@@ -606,7 +606,10 @@ def _audit_rejected_probability_capital(
     exact_q_versions: set[str] = set()
     conn = _open_readonly(trade_db)
     try:
-        if not _table_has_column(conn, "decision_log", "artifact_json"):
+        if not all(
+            _table_has_column(conn, "decision_log", column)
+            for column in ("id", "mode", "timestamp", "artifact_json")
+        ):
             return report
         rows = conn.execute(
             """
