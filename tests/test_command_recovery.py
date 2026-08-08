@@ -10964,7 +10964,7 @@ class TestRecoveryResolutionTable:
         summary = reconcile_unresolved_commands(conn, mock_client)
 
         assert summary["matched_order_facts"]["advanced"] == 1
-        assert _get_state(conn, "cmd-001") == "PARTIAL"
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
         events = _get_events(conn, "cmd-001")
         assert events[-1]["event_type"] == "PARTIAL_FILL_OBSERVED"
         latest_order_fact = conn.execute(
@@ -13268,6 +13268,22 @@ class TestRecoveryResolutionTable:
             fill_price="0.5300001222000904",
         )
         _insert_decision_log_trade_case_for_recovery(conn)
+        _seed_pending_entry_projection(conn, order_id="ord-partial-canceled")
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active', chain_state = 'synced',
+                   shares = 2.127658, chain_shares = 2.127658,
+                   cost_basis_usd = 2.127658 * 0.5300001222000904,
+                   chain_cost_basis_usd = 2.127658 * 0.5300001222000904,
+                   entry_price = 0.5300001222000904,
+                   chain_avg_price = 0.5300001222000904,
+                   chain_seen_at = '2026-04-26T00:07:30Z',
+                   fill_authority = 'venue_confirmed_partial',
+                   order_status = 'partial'
+             WHERE position_id = 'pos-001'
+            """
+        )
         from src.state.venue_command_repo import append_event
 
         append_event(
@@ -13293,13 +13309,29 @@ class TestRecoveryResolutionTable:
                 },
             },
         )
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = [
+            {
+                "id": "trade-partial-canceled",
+                "status": "CONFIRMED",
+                "taker_order_id": "ord-partial-canceled",
+                "asset_id": "tok-001",
+                "side": "BUY",
+                "price": "0.5300001222000904",
+                "size": "2.127658",
+                "match_time": "2026-04-26T00:06:00Z",
+            }
+        ]
+        mock_client.get_open_orders.venue_reads_are_complete = True
+        mock_client.get_trades.venue_reads_are_complete = True
 
         from src.execution.command_recovery import reconcile_unresolved_commands
 
         summary = reconcile_unresolved_commands(conn, mock_client)
 
         assert summary["advanced"] >= 1
-        assert _get_state(conn, "cmd-001") == "PARTIAL"
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
         command_events = [
             row["event_type"]
             for row in conn.execute(
@@ -13311,7 +13343,7 @@ class TestRecoveryResolutionTable:
                 """
             ).fetchall()
         ]
-        assert command_events[-1] == "PARTIAL_FILL_OBSERVED"
+        assert command_events[-2:] == ["PARTIAL_FILL_OBSERVED", "EXPIRED"]
         from src.execution.command_recovery import (
             _latest_order_fact_for_command_order,
         )
@@ -13348,7 +13380,7 @@ class TestRecoveryResolutionTable:
         self,
         conn,
     ):
-        """DB-only boot recovery must clear already-canceled REVIEW_REQUIRED fills."""
+        """DB-only boot recovery must not guess a terminal partial remainder."""
         _insert(conn, size=9.3, price=0.53)
         _advance_to_acked(conn, venue_order_id="ord-partial-canceled")
         _append_trade_fact(
@@ -13394,12 +13426,10 @@ class TestRecoveryResolutionTable:
 
         summary = reconcile_matched_cancel_review_required_entries(conn)
 
-        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
-        assert _get_state(conn, "cmd-001") == "PARTIAL"
+        assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
         events = _get_events(conn, "cmd-001")
-        assert events[-1]["event_type"] == "PARTIAL_FILL_OBSERVED"
-        payload = json.loads(events[-1]["payload_json"])
-        assert payload["proof_class"] == "terminal_partial_order_fact"
+        assert events[-1]["event_type"] == "CANCEL_FAILED"
 
     def test_already_canceled_full_fill_aggregates_multiple_confirmed_trades(
         self,

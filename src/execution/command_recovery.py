@@ -20272,6 +20272,7 @@ def _review_required_no_venue_live_order_recovery(
 def _review_required_cancel_failed_already_canceled_fill_recovery(
     conn: sqlite3.Connection,
     cmd: VenueCommand,
+    client=None,
 ) -> str:
     """Clear a REVIEW_REQUIRED command when cancel failed after venue finality.
 
@@ -20370,6 +20371,60 @@ def _review_required_cancel_failed_already_canceled_fill_recovery(
         command.get("size"),
         side=command.get("side"),
     )
+    if not complete and intent_side == (IntentKind.ENTRY, "BUY"):
+        # "Already canceled or matched" proves only that the cancel response
+        # raced venue finality; it does not prove the cumulative fill or that
+        # no remainder is still live.  A partial ENTRY therefore uses the same
+        # exact terminal-remainder proof as CANCEL_UNKNOWN.  DB-only recovery
+        # deliberately stays REVIEW_REQUIRED until authenticated complete
+        # account reads are available.
+        if client is None:
+            return "stayed"
+        try:
+            point_order = _venue_order_payload(client.get_order(venue_order_id))
+            open_order_read = _client_read_items(client, "get_open_orders")
+            trade_read = _client_read_items(client, "get_trades")
+        except Exception as exc:
+            logger.warning(
+                "recovery: command %s REVIEW_REQUIRED already-canceled partial "
+                "account proof unavailable: %s",
+                cmd.command_id,
+                exc,
+            )
+            return "error"
+        point_order_no_live_record = _point_order_no_live_record(
+            point_order,
+            expected_order_id=venue_order_id,
+        )
+        point_order_terminal = bool(
+            point_order is not None
+            and _extract_order_id(point_order) == venue_order_id
+            and _terminal_fact_state_for_venue_status(
+                _order_status(point_order),
+                venue_resp_present=True,
+            )
+            is not None
+        )
+        matching_open_orders = _matching_open_orders_for_command(
+            client,
+            command,
+            open_orders=open_order_read.items,
+        )
+        return _review_required_cancel_unknown_terminal_partial_recovery(
+            conn,
+            command=command,
+            point_order=point_order,
+            point_order_no_live_record=point_order_no_live_record,
+            point_order_terminal=point_order_terminal,
+            matching_open_orders=matching_open_orders,
+            account_trade_items=trade_read.items,
+            venue_read_proof={
+                "open_orders_query_complete": open_order_read.query_complete,
+                "open_orders_pagination_scope": open_order_read.pagination_scope,
+                "trades_query_complete": trade_read.query_complete,
+                "trades_pagination_scope": trade_read.pagination_scope,
+            },
+        )
     aggregate_confirmed = all(
         str(fact.get("state") or "").upper() == "CONFIRMED"
         and str(fact.get("source") or "").upper() in {"REST", "WS_USER"}
@@ -22107,7 +22162,11 @@ def _reconcile_row(
         state = cmd.state
 
         if state == CommandState.REVIEW_REQUIRED:
-            outcome = _review_required_cancel_failed_already_canceled_fill_recovery(conn, cmd)
+            outcome = _review_required_cancel_failed_already_canceled_fill_recovery(
+                conn,
+                cmd,
+                client,
+            )
             if outcome != "stayed":
                 return outcome
             outcome = _review_required_cancel_failed_already_canceled_no_fill_recovery(
