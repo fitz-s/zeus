@@ -268,9 +268,7 @@ class EventStore:
             for target_id in superseded_target_ids
             if target_id not in preserve_processing_event_ids
         )
-        if terminalizable_target_ids and _table_exists(
-            self.conn, "edli_live_order_events"
-        ):
+        if terminalizable_target_ids:
             # SCOPE: only superseded global-winner main claims without a venue
             # submit attempt are terminalized, excluding claims owned by the
             # current reactor epoch. DRAIN: the epoch finalizes its preserved
@@ -278,9 +276,29 @@ class EventStore:
             # abandoned claims in this transaction. RESET: after finalization
             # the preserved generation leaves processing, while a carrier with
             # a durable venue attempt remains recovery-owned.
+            live_order_events_available = _table_exists(
+                self.conn,
+                "edli_live_order_events",
+            )
             for start in range(0, len(terminalizable_target_ids), 250):
                 chunk = terminalizable_target_ids[start : start + 250]
                 placeholders = ",".join("?" for _ in chunk)
+                durable_command_predicate = (
+                    """
+                       AND NOT EXISTS (
+                            SELECT 1
+                              FROM edli_live_order_events AS order_event
+                             WHERE order_event.event_type IN (
+                                       'ExecutionCommandCreated',
+                                       'VenueSubmitAttempted'
+                                   )
+                               AND order_event.aggregate_id
+                                   GLOB main.event_id || ':*'
+                       )
+                    """
+                    if live_order_events_available
+                    else ""
+                )
                 self.conn.execute(
                     f"""
                     UPDATE opportunity_event_processing AS main
@@ -292,16 +310,7 @@ class EventStore:
                      WHERE main.consumer_name = ?
                        AND main.processing_status IN ('pending', 'processing')
                        AND main.event_id IN ({placeholders})
-                       AND NOT EXISTS (
-                            SELECT 1
-                              FROM edli_live_order_events AS order_event
-                             WHERE order_event.event_type IN (
-                                       'ExecutionCommandCreated',
-                                       'VenueSubmitAttempted'
-                                   )
-                               AND order_event.aggregate_id
-                                   GLOB main.event_id || ':*'
-                       )
+                       {durable_command_predicate}
                     """,
                     (
                         updated_at,

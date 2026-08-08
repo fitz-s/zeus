@@ -8053,8 +8053,10 @@ def test_superseded_global_target_without_venue_attempt_cannot_starve_redecision
     ) == ("pending", GLOBAL_WINNER_TARGETED_CLAIM)
 
 
+@pytest.mark.parametrize("live_order_table_available", (False, True))
 def test_pointer_supersession_expires_pending_retry_carrier_without_command(
     monkeypatch,
+    live_order_table_available,
 ):
     import src.events.event_store as event_store
     from src.engine.global_batch_runtime import _next_claim_carrier
@@ -8088,6 +8090,8 @@ def test_pointer_supersession_expires_pending_retry_carrier_without_command(
         stale.event_id,
         last_error="WORLD_WRITE_LOCK_BUSY_POST_SUBMIT",
     )
+    if not live_order_table_available:
+        conn.execute("DROP TABLE edli_live_order_events")
     clock[0] = "2026-05-24T18:00:01+00:00"
     assert store.prioritize_global_winner(replacement)
 
@@ -8102,7 +8106,8 @@ def test_pointer_supersession_expires_pending_retry_carrier_without_command(
         None,
         "GLOBAL_WINNER_TARGET_SUPERSEDED",
     )
-    assert not store.claim(stale.event_id, claimed_at=clock[0])
+    if live_order_table_available:
+        assert not store.claim(stale.event_id, claimed_at=clock[0])
 
 
 def test_pointer_supersession_preserves_pending_retry_with_durable_command(
