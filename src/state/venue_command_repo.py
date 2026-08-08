@@ -395,7 +395,7 @@ def _terminal_partial_correction_proven(
               FROM venue_order_facts
              WHERE command_id = ?
                AND venue_order_id = ?
-               AND state = 'MATCHED'
+               AND state IN ('MATCHED', 'CANCEL_CONFIRMED')
              ORDER BY local_sequence DESC, fact_id DESC
              LIMIT 1
             """,
@@ -412,10 +412,11 @@ def _terminal_partial_correction_proven(
             """,
             (proof_fact_id, command_id, venue_order_id),
         ).fetchone()
+    proof_state = str(proof_fact["state"] or "") if proof_fact is not None else ""
     if (
         proof_fact is None
-        or str(proof_fact["state"] or "") != "MATCHED"
-        or not _decimal_text_is_zero(proof_fact["remaining_size"])
+        or proof_state not in {"MATCHED", "CANCEL_CONFIRMED"}
+        or (proof_state == "MATCHED" and not _decimal_text_is_zero(proof_fact["remaining_size"]))
         or not _decimal_text_equal(proof_fact["matched_size"], matched_size)
     ):
         return False
@@ -437,13 +438,36 @@ def _terminal_partial_correction_proven(
         """,
         (command_id,),
     ).fetchone()
+    command_state = str(command["state"] or "").upper() if command is not None else ""
     if (
         command is None
-        or str(command["state"] or "").upper() != "PARTIAL"
+        or command_state not in {"PARTIAL", "CANCELLED"}
         or str(command["intent_kind"] or "").upper() != "ENTRY"
         or str(command["side"] or "").upper() != "BUY"
         or str(command["venue_order_id"] or "") != venue_order_id
     ):
+        return False
+    if command_state == "CANCELLED":
+        cancel_ack = conn.execute(
+            """
+            SELECT 1
+              FROM venue_command_events
+             WHERE command_id = ?
+               AND event_type = 'CANCEL_ACKED'
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        cancel_predicates = {
+            "command_state_cancelled",
+            "cancel_acked",
+            "canonical_positive_trade_facts",
+        }
+        if proof_state != "CANCEL_CONFIRMED" or cancel_ack is None or any(
+            predicates.get(name) is not True for name in cancel_predicates
+        ):
+            return False
+    elif proof_state != "MATCHED":
         return False
     requested = _decimal_or_none(command["size"])
     matched = _decimal_or_none(matched_size)

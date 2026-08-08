@@ -2967,6 +2967,8 @@ def _append_cancelled_entry_terminal_partial_order_fact(
             "command_state_cancelled": True,
             "cancel_acked": True,
             "canonical_positive_trade_facts": True,
+            "terminal_order_remainder_zero": True,
+            "canonical_trade_facts_match_terminal_order_fact": True,
             "cumulative_fill_below_requested_size": True,
         },
     }
