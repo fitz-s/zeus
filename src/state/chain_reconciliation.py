@@ -66,6 +66,7 @@ _TERMINAL_ENTRY_COMMAND_STATES = frozenset(
     {
         "CANCELLED",
         "EXPIRED",
+        "FILLED",
         "REJECTED",
         "SUBMIT_REJECTED",
         "SUPERSEDED",
@@ -562,7 +563,9 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             return None
         sql = (
             "WITH "
-            + canonical_trade_fact_cte()
+            + canonical_trade_fact_cte(
+                source_clause_sql="WHERE fact.source IN ('REST', 'WS_USER')"
+            )
             + ", "
             + economic_trade_fact_cte()
             + """

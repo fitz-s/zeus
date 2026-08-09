@@ -13660,7 +13660,6 @@ class TestRecoveryResolutionTable:
         mock_client,
     ):
         from src.execution.command_recovery import (
-            ensure_live_entry_projection_for_command,
             reconcile_filled_entry_projection_repairs,
         )
 
@@ -13704,6 +13703,7 @@ class TestRecoveryResolutionTable:
             "UPDATE position_current SET phase='pending_exit', shares=11, "
             "cost_basis_usd=2.31, entry_price=.21, "
             "fill_authority='venue_confirmed_partial', "
+            "order_status='backoff_exhausted', "
             "exit_reason='BELIEF_REVERSAL_EXIT' WHERE position_id='pos-001'"
         )
         from src.state.db import log_execution_fact
@@ -13736,13 +13736,15 @@ class TestRecoveryResolutionTable:
 
         assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
         current = conn.execute(
-            "SELECT phase, shares, cost_basis_usd, exit_reason FROM position_current "
+            "SELECT phase, shares, cost_basis_usd, order_status, exit_reason "
+            "FROM position_current "
             "WHERE position_id='pos-001'"
         ).fetchone()
         assert dict(current) == {
             "phase": "pending_exit",
             "shares": pytest.approx(31.0),
             "cost_basis_usd": pytest.approx(6.51),
+            "order_status": "backoff_exhausted",
             "exit_reason": "BELIEF_REVERSAL_EXIT",
         }
 
@@ -13780,6 +13782,47 @@ class TestRecoveryResolutionTable:
         )
 
         assert recovery._latest_unprojected_filled_entry_candidates(conn) == []
+
+    def test_authenticated_revision_survives_later_untrusted_same_trade_id(
+        self,
+        conn,
+    ):
+        from src.execution import command_recovery as recovery
+
+        _insert(conn, size=31.0, price=0.21)
+        _advance_to_acked(conn, venue_order_id="ord-revision-fill")
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-001",
+            order_id="ord-revision-fill",
+        )
+        conn.execute(
+            "UPDATE venue_commands SET state='REVIEW_REQUIRED' WHERE command_id='cmd-001'"
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-revision-fill",
+            trade_id="trade-revision",
+            state="CONFIRMED",
+            filled_size="31",
+            fill_price="0.21",
+            source="REST",
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-revision-fill",
+            trade_id="trade-revision",
+            state="CONFIRMED",
+            filled_size="99",
+            fill_price="0.99",
+            source="OPERATOR",
+        )
+
+        candidates = recovery._latest_unprojected_filled_entry_candidates(conn)
+        assert len(candidates) == 1
+        assert candidates[0]["fill_filled_size"] == pytest.approx(31.0)
+        assert candidates[0]["fill_price"] == pytest.approx(0.21)
 
     def test_partial_entry_repair_promotes_zero_share_pending_projection(
         self,

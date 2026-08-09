@@ -617,7 +617,11 @@ def _canonical_order_truth_cte(
     """
 
 
-def _canonical_trade_fact_cte(cte_name: str = "canonical_trade_fact") -> str:
+def _canonical_trade_fact_cte(
+    cte_name: str = "canonical_trade_fact",
+    *,
+    source_clause_sql: str = "",
+) -> str:
     """SQL CTE that prevents weaker later trade facts from hiding fills."""
 
     return f"""
@@ -646,6 +650,7 @@ def _canonical_trade_fact_cte(cte_name: str = "canonical_trade_fact") -> str:
                                        ELSE 100
                                    END AS proof_rank
                               FROM venue_trade_facts fact
+                              {source_clause_sql}
                            ) scored
                    ) ranked
              WHERE ranked.canonical_rank = 1
@@ -3256,7 +3261,9 @@ def _confirmed_bound_trade_fact_summary(
 
     rows = conn.execute(
         "WITH "
-        + _canonical_trade_fact_cte()
+        + _canonical_trade_fact_cte(
+            source_clause_sql="WHERE fact.source IN ('REST', 'WS_USER')"
+        )
         + ", "
         + _economic_trade_fact_cte()
         + """
@@ -3704,7 +3711,9 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
         return []
     sql = (
         "WITH "
-        + _canonical_trade_fact_cte()
+        + _canonical_trade_fact_cte(
+            source_clause_sql="WHERE fact.source IN ('REST', 'WS_USER')"
+        )
         + ",\n"
         + _economic_trade_fact_cte()
         + """,
@@ -3723,7 +3732,6 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                    MAX(fact.trade_fact_id) AS trade_fact_id
              FROM economic_trade_fact fact
              WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
-               AND fact.source IN ('REST', 'WS_USER')
                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
                AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
              GROUP BY fact.command_id

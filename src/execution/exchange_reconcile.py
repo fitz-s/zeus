@@ -5246,12 +5246,26 @@ def _ensure_entry_fill_position_event(
         projection_order_id = str(current.get("order_id") or venue_order_id)
         projection_order_status = str(current.get("order_status") or "filled")
         projection_size_usd = _decimal_text(projection_cost)
+    if phase == "pending_exit":
+        projection_order_status = str(
+            current.get("order_status") or projection_order_status
+        )
+    projection_exit_state = str(current.get("exit_state") or "")
+    if (
+        phase == "pending_exit"
+        and projection_order_status == "backoff_exhausted"
+        and not projection_exit_state
+    ):
+        # position_current persists terminal exit backoff through order_status;
+        # rehydrate that proxy before rebuilding a projection for a later
+        # entry-fill observation so the active SELL lifecycle is not erased.
+        projection_exit_state = projection_order_status
     position = SimpleNamespace(
         **{
             **current,
             "trade_id": position_id,
             "state": runtime_state,
-            "exit_state": current.get("exit_state") or "",
+            "exit_state": projection_exit_state,
             "chain_state": chain_state_after,
             "env": current.get("env") or "live",
             "order_id": projection_order_id,
