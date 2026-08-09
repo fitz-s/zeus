@@ -265,7 +265,9 @@ def _wealth_reauction_changed_fields(
 
 
 def _strategy_capital_allocation_receipt(wealth_witness: object) -> dict[str, object]:
-    allocation = wealth_witness.strategy_capital_allocation
+    allocation = getattr(wealth_witness, "strategy_capital_allocation", None)
+    if allocation is None:
+        raise ValueError("GLOBAL_AUCTION_STRATEGY_CAPITAL_ALLOCATION_MISSING")
     return {
         "allocation_version": allocation.allocation_version,
         "capital_basis_semantics": allocation.capital_basis_semantics,

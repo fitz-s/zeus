@@ -522,7 +522,7 @@ def resolve_zeus_equity_base(
         if allocation is not None
         else _load_zeus_capital_allocation_setting()
     )
-    mode = str(resolved_allocation.get("mode") or "wallet_total")
+    mode = str(resolved_allocation.get("mode") or "wallet_total").strip()
     allocated = resolve_allocated_equity_usd(
         wallet_equity_usd,
         allocation=resolved_allocation,

@@ -1,5 +1,5 @@
 # Created: 2026-07-13
-# Last reused or audited: 2026-07-13
+# Last reused or audited: 2026-08-09
 # Authority basis: docs/rebuild/local_ledger_excision_2026-07-12.md
 #   "Bankroll/Kelly 三量分立" (2026-07-13 operator fork resolution);
 #   src/runtime/bankroll_provider.py::resolve_zeus_equity_base
@@ -35,6 +35,16 @@ def test_wallet_total_mode_is_byte_equal_passthrough(caplog):
     with caplog.at_level("WARNING"):
         result = resolve_zeus_equity_base(wallet_equity, allocation={"mode": "wallet_total"})
     assert result == wallet_equity
+    assert "ZEUS_EQUITY_DEGRADED_ATTRIBUTION" in caplog.text
+
+
+def test_wallet_total_mode_whitespace_preserves_degraded_warning(caplog):
+    with caplog.at_level("WARNING"):
+        result = resolve_zeus_equity_base(
+            123.0,
+            allocation={"mode": "wallet_total "},
+        )
+    assert result == 123.0
     assert "ZEUS_EQUITY_DEGRADED_ATTRIBUTION" in caplog.text
 
 

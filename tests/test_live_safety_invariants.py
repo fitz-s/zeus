@@ -8148,6 +8148,36 @@ def test_global_holding_coverage_materializes_typed_q_missing_obligation():
     )
 
 
+def _global_auction_receipt_wealth_witness() -> SimpleNamespace:
+    from src.contracts.strategy_capital_allocation import (
+        StrategyCapitalAllocationWitness,
+    )
+
+    return SimpleNamespace(
+        witness_identity="wealth-witness-current",
+        economic_identity="wealth-current",
+        ledger_snapshot_id="ledger-current",
+        strategy_capital_allocation=StrategyCapitalAllocationWitness.build(
+            capital_basis_usd="100",
+            committed_capital_usd="0",
+            venue_spendable_cash_usd="100",
+            allocation={"mode": "wallet_total"},
+        ),
+    )
+
+
+def test_global_auction_receipt_rejects_missing_strategy_allocation():
+    from src.engine import global_batch_runtime
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_STRATEGY_CAPITAL_ALLOCATION_MISSING",
+    ):
+        global_batch_runtime._strategy_capital_allocation_receipt(
+            SimpleNamespace()
+        )
+
+
 def test_holding_coverage_receipt_compresses_and_references_exact_payload(
     tmp_path,
     monkeypatch,
@@ -8220,11 +8250,7 @@ def test_holding_coverage_receipt_compresses_and_references_exact_payload(
         book_epoch_identity="book-unavailable-current",
         book_asset_count=None,
         book_asset_states=(),
-        wealth_witness=SimpleNamespace(
-            witness_identity="wealth-witness-current",
-            economic_identity="wealth-current",
-            ledger_snapshot_id="ledger-current",
-        ),
+        wealth_witness=_global_auction_receipt_wealth_witness(),
         fractional_kelly_multiplier=Decimal("0.25"),
         expected_holding_obligations=(obligation,),
         holding_probability_witnesses={},
@@ -8249,16 +8275,12 @@ def test_holding_coverage_receipt_compresses_and_references_exact_payload(
     raw = zlib.decompress(
         base64.b64decode(first["holding_auction_coverage_zlib_b64"])
     )
-    assert first["schema_version"] == 20
+    assert first["schema_version"] == 21
     assert "holding_auction_coverage" not in first
-    assert json.loads(raw) == [
-        {
-            key: str(value) if isinstance(value, (Decimal, datetime)) else value
-            for key, value in {
-                **coverage.__dict__,
-            }.items()
-        }
-    ]
+    expected_coverage = json.loads(
+        json.dumps(coverage.__dict__, default=str)
+    )
+    assert json.loads(raw) == [expected_coverage]
     assert second["payload_compacted"] is True
     assert "holding_auction_coverage_zlib_b64" not in second
     assert "holding_auction_coverage_zlib_b64" in second[
@@ -8360,11 +8382,7 @@ def test_receipt_rejects_uniform_coverage_deadline_beyond_authoritative_book(
             book_epoch_identity="book-unavailable-current",
             book_asset_count=0 if book_present else None,
             book_asset_states=(),
-            wealth_witness=SimpleNamespace(
-                witness_identity="wealth-witness-current",
-                economic_identity="wealth-current",
-                ledger_snapshot_id="ledger-current",
-            ),
+            wealth_witness=_global_auction_receipt_wealth_witness(),
             fractional_kelly_multiplier=Decimal("0.25"),
             book_captured_at_utc=at if book_present else None,
             book_max_age=(
@@ -8430,6 +8448,7 @@ def test_receipt_rejects_coverage_q_absent_from_authoritative_manifest(tmp_path)
         selection_cut_at_utc=at,
         decision_at_utc=at,
         book_deadline_at_utc=at,
+        book_state="EXECUTABLE",
         status="EVALUATED",
         candidate_id="sell-current",
         sell_book_witness_identity="sell-book-current",
@@ -8482,11 +8501,7 @@ def test_receipt_rejects_coverage_q_absent_from_authoritative_manifest(tmp_path)
             book_epoch_identity="book-unavailable-current",
             book_asset_count=None,
             book_asset_states=(),
-            wealth_witness=SimpleNamespace(
-                witness_identity="wealth-witness-current",
-                economic_identity="wealth-current",
-                ledger_snapshot_id="ledger-current",
-            ),
+            wealth_witness=_global_auction_receipt_wealth_witness(),
             fractional_kelly_multiplier=Decimal("0.25"),
             expected_holding_obligations=(obligation,),
             holding_probability_witnesses={obligation.family_key: probability},
