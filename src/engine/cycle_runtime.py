@@ -5666,6 +5666,7 @@ def execute_monitoring_phase(
     defer_partial_orderbook_gaps: bool = False,
 ):
     from src.engine.monitor_refresh import (
+        HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
         _GLOBAL_MONITOR_SAMPLES_ATTR,
         _HELD_MONITOR_DEADLINE_ATTR,
         install_monitor_day0_family_cache,
@@ -6535,6 +6536,27 @@ def execute_monitoring_phase(
             and getattr(deadline_rescue_hard_fact, "action", None)
             == "EXIT_DEAD_BIN"
         )
+        primary_belief_required = getattr(
+            deadline_rescue_hard_fact,
+            "action",
+            None,
+        ) not in {"EXIT_DEAD_BIN", "HOLD_STRUCTURAL_WIN"}
+        if (
+            not deadline_rescue
+            and primary_belief_required
+            and monitor_deadline - time.monotonic()
+            < HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+        ):
+            deferred_count = len(monitor_positions) - position_index
+            summary["held_monitor_positions_deferred"] = deferred_count
+            summary["held_monitor_defer_reason"] = (
+                "primary_belief_budget_reserve"
+            )
+            summary["held_monitor_deadline_deferred_positions"] = deferred_count
+            summary["held_monitor_deadline_defer_reason"] = (
+                "PRIMARY_BELIEF_BUDGET_UNAVAILABLE"
+            )
+            break
         summary["held_monitor_positions_scanned"] = (
             summary.get("held_monitor_positions_scanned", 0) + 1
         )

@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-08-02; last_reused=2026-08-02
+# Lifecycle: created=2026-03-31; last_reviewed=2026-08-09; last_reused=2026-08-09
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-08-02
+# Last reused/audited: 2026-08-09
 # Authority basis: finite-evidence single-q global SELL ownership; 7-day capital-loop audit
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -362,11 +362,11 @@ def test_open_portfolio_loader_marks_runtime_exposure_without_family_filter(
 
 
 @pytest.mark.parametrize(
-    ("advance_after_first", "expected_count", "expected_reason"),
-    (
-        (True, 1, "cycle_budget_exhausted"),
-        (False, 3, ""),
-    ),
+        ("advance_after_first", "expected_count", "expected_reason"),
+        (
+            (True, 1, "primary_belief_budget_reserve"),
+            (False, 3, ""),
+        ),
 )
 def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
     monkeypatch,
@@ -374,7 +374,7 @@ def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
     expected_count,
     expected_reason,
 ):
-    """Only the elapsed deadline, not successful progress, may truncate a sweep."""
+    """A sweep admits the next q read only while its full reserve remains."""
     from src.engine import cycle_runtime
 
     first = _make_position(
@@ -423,7 +423,7 @@ def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
         position.last_monitor_market_price = 0.49
         position.last_monitor_market_price_is_fresh = True
         if advance_after_first and position is first:
-            clock[0] = 1.0
+            clock[0] = 2.0
         return SimpleNamespace(
             p_market=np.array([0.49]),
             p_posterior=0.61,
@@ -481,7 +481,7 @@ def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
         summary,
         deps=deps,
         run_exit_preflight=False,
-        held_position_monitor_budget_seconds=0.5,
+        held_position_monitor_budget_seconds=6.0,
     )
 
     assert len(visited) == expected_count
@@ -490,17 +490,67 @@ def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
     assert tracker_dirty is False
     assert summary["held_monitor_candidates"] == 3
     assert summary["held_monitor_budget_reserved_positions"] == 2
-    assert summary["held_monitor_budget_seconds"] == pytest.approx(0.5)
+    assert summary["held_monitor_budget_seconds"] == pytest.approx(6.0)
     assert summary["held_monitor_positions_scanned"] == expected_count
     assert summary.get("held_monitor_positions_deferred", 0) == 3 - expected_count
     assert summary.get("held_monitor_defer_reason", "") == expected_reason
     assert summary["monitors"] == expected_count
     assert len(monitor_results) == expected_count
-    assert readthrough_deadlines == [pytest.approx(0.5)] * expected_count
+    assert readthrough_deadlines == [pytest.approx(6.0)] * expected_count
     assert all(
         not hasattr(position, "_zeus_held_monitor_deadline_monotonic")
         for position in (first, second, third)
     )
+
+
+def test_monitor_defers_before_primary_belief_read_when_reserve_is_unavailable(
+    monkeypatch,
+):
+    from src.engine import cycle_runtime
+
+    position = _make_position(
+        trade_id="primary-belief-reserve",
+        city="Chicago",
+        target_date="2026-07-04",
+        direction="buy_yes",
+        state="day0_window",
+        shares=10.0,
+        chain_shares=10.0,
+        chain_state="synced",
+    )
+    calls = []
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *_args: calls.append("refresh"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: calls.append("canonical"),
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        type("Artifact", (), {"add_monitor_result": lambda *_args: None})(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_primary_belief_reserve"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=4.9,
+    )
+
+    assert calls == []
+    assert summary.get("held_monitor_positions_scanned", 0) == 0
+    assert summary["held_monitor_positions_deferred"] == 1
+    assert summary["held_monitor_defer_reason"] == "primary_belief_budget_reserve"
+    assert summary["held_monitor_deadline_defer_reason"] == (
+        "PRIMARY_BELIEF_BUDGET_UNAVAILABLE"
+    )
+    assert not hasattr(position, "_zeus_held_monitor_deadline_monotonic")
 
 
 def test_live_monitor_deadline_defers_stale_fusion_and_dispatches_reseed(monkeypatch):

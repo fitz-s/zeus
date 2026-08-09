@@ -103,7 +103,7 @@ _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR = (
     "_zeus_monitor_prefetch_attempted_tokens"
 )
 _HELD_MONITOR_DEADLINE_ATTR = "_zeus_held_monitor_deadline_monotonic"
-_HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS = 5.0
+HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS = 5.0
 _MONITOR_DAY0_FAMILY_CACHE_ATTR = "_zeus_monitor_day0_family_cache"
 _DAY0_MATERIALIZATION_VISIBILITY_RETRY_SECONDS = 0.1
 _DAY0_MATERIALIZATION_VISIBILITY_RETRY_BUDGET_SECONDS = 0.35
@@ -195,7 +195,7 @@ def _day0_primary_snapshot_read_deadline(
 ) -> float:
     """Bound the primary authority read without borrowing the retry budget."""
     primary_deadline = (
-        time.monotonic() + _HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+        time.monotonic() + HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
     )
     if deadline_monotonic is not None:
         primary_deadline = min(primary_deadline, deadline_monotonic)
@@ -4861,7 +4861,7 @@ def _build_current_global_day0_family_snapshot(
                     raw_input_hwm_conn=hwm_forecasts,
                     raw_input_hwm_deadline_monotonic=hwm_deadline_monotonic,
                     raw_input_hwm_read_max_seconds=(
-                        _HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+                        HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
                     ),
                 )
             except ValueError as exc:
@@ -5108,7 +5108,7 @@ def _refresh_day0_unobserved_prefix_probability(
             else min(
                 float(deadline_monotonic),
                 time.monotonic()
-                + _HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
+                + HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
             )
         )
         belief = load_replacement_belief(
@@ -5394,7 +5394,7 @@ def monitor_probability_refresh(
             else min(
                 float(deadline_monotonic),
                 time.monotonic()
-                + _HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
+                + HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
             )
         )
         belief = load_replacement_belief(
