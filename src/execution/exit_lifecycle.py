@@ -5436,7 +5436,12 @@ def _execute_live_exit(
                 marketable_certificate_hash
             ),
             marketable_sell_execution_authority=(
-                global_sell_authority if marketable_certificate is not None else None
+                global_sell_authority
+                if global_authorized
+                and global_sell_authority is not None
+                and global_sell_authority.jit_candidate.execution_mode
+                == "TAKER_LIMIT"
+                else None
             ),
             **submit_snapshot_context,
         )

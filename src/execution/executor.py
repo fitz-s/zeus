@@ -5060,18 +5060,13 @@ def _marketable_sell_certificate_error(
     limit_price: float,
     shares: float,
 ) -> str | None:
-    """Rebind a FAK SELL to its typed global-auction and JIT book proof."""
+    """Rebind a FAK SELL to its typed global-auction and JIT book proof.
 
-    certificate = intent.marketable_sell_certificate
-    identity = str(intent.marketable_sell_certificate_identity or "").strip()
-    if not isinstance(certificate, Mapping) or len(identity) != 64:
-        return "marketable_sell_certificate_required"
-    try:
-        int(identity, 16)
-    except ValueError:
-        return "marketable_sell_certificate_identity_invalid"
-    if identity != marketable_sell_certificate_identity(certificate):
-        return "marketable_sell_certificate_identity_mismatch"
+    ``GlobalSellExecutionAuthority`` is the immutable economic authority.  The
+    mapping certificate is an audit projection of that same object, not a
+    second authority: requiring both let an omitted projection veto a valid
+    reduce-only exit.  When supplied it remains hash- and field-checked.
+    """
 
     from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
 
@@ -5083,61 +5078,86 @@ def _marketable_sell_certificate_error(
     except (TypeError, ValueError):
         return "marketable_sell_execution_authority_invalid"
     candidate = authority.jit_candidate
-
-    required_text = {
-        "action": "SELL",
-        "position_id": intent.trade_id,
-        "token_id": intent.token_id,
-        "execution_mode": "TAKER_LIMIT",
-        "submit_order_type": "FAK",
-    }
-    if any(
-        str(certificate.get(field) or "") != expected
-        for field, expected in required_text.items()
-    ) or (
+    decision = authority.actuation.decision
+    if (
         str(candidate.position_id) != intent.trade_id
         or str(candidate.token_id) != intent.token_id
-        or str(candidate.condition_id)
-        != str(certificate.get("condition_id") or "")
         or str(candidate.execution_mode) != "TAKER_LIMIT"
     ):
-        return "marketable_sell_certificate_binding_mismatch"
-    for field in (
-        "candidate_id",
-        "condition_id",
-        "execution_authority_identity",
-        "jit_book_hash",
-        "jit_curve_identity",
-        "probability_witness_identity",
-        "book_snapshot_id",
-    ):
-        if not str(certificate.get(field) or "").strip():
-            return f"marketable_sell_certificate_missing:{field}"
-    authority_identity = str(
-        certificate.get("execution_authority_identity") or ""
-    ).strip()
-    if (
-        len(authority_identity) != 64
-        or authority_identity != authority.authority_identity
-        or str(certificate.get("book_snapshot_id") or "")
-        != str(candidate.book_snapshot_id)
-        or str(certificate.get("jit_book_hash") or "")
-        != str(candidate.executable_sell_curve.book_hash)
-        or str(certificate.get("jit_curve_identity") or "")
-        != str(candidate.execution_curve_identity)
-    ):
-        return "marketable_sell_execution_authority_identity_invalid"
+        return "marketable_sell_execution_authority_binding_mismatch"
     try:
-        int(authority_identity, 16)
-        certified_limit = Decimal(str(certificate.get("exact_limit_price")))
-        certified_shares = Decimal(str(certificate.get("selected_shares")))
+        authority_limit = authority.limit_price()
+        authority_shares = Decimal(str(decision.shares))
     except (InvalidOperation, TypeError, ValueError):
-        return "marketable_sell_certificate_economics_invalid"
+        return "marketable_sell_execution_authority_economics_invalid"
     if (
-        certified_limit != Decimal(str(limit_price))
-        or certified_shares != Decimal(str(shares))
+        authority_limit != Decimal(str(limit_price))
+        or authority_shares != Decimal(str(shares))
     ):
-        return "marketable_sell_certificate_economics_mismatch"
+        return "marketable_sell_execution_authority_economics_mismatch"
+
+    certificate = intent.marketable_sell_certificate
+    identity = str(intent.marketable_sell_certificate_identity or "").strip()
+    if certificate is not None:
+        if not isinstance(certificate, Mapping):
+            return "marketable_sell_certificate_invalid"
+        if len(identity) != 64:
+            return "marketable_sell_certificate_identity_invalid"
+        try:
+            int(identity, 16)
+        except ValueError:
+            return "marketable_sell_certificate_identity_invalid"
+        if identity != marketable_sell_certificate_identity(certificate):
+            return "marketable_sell_certificate_identity_mismatch"
+
+        required_text = {
+            "action": "SELL",
+            "position_id": intent.trade_id,
+            "condition_id": str(candidate.condition_id),
+            "token_id": intent.token_id,
+            "execution_mode": "TAKER_LIMIT",
+            "submit_order_type": "FAK",
+        }
+        if any(
+            str(certificate.get(field) or "") != expected
+            for field, expected in required_text.items()
+        ):
+            return "marketable_sell_certificate_binding_mismatch"
+        for field in (
+            "candidate_id",
+            "execution_authority_identity",
+            "jit_book_hash",
+            "jit_curve_identity",
+            "probability_witness_identity",
+            "book_snapshot_id",
+        ):
+            if not str(certificate.get(field) or "").strip():
+                return f"marketable_sell_certificate_missing:{field}"
+        authority_identity = str(
+            certificate.get("execution_authority_identity") or ""
+        ).strip()
+        if (
+            len(authority_identity) != 64
+            or authority_identity != authority.authority_identity
+            or str(certificate.get("book_snapshot_id") or "")
+            != str(candidate.book_snapshot_id)
+            or str(certificate.get("jit_book_hash") or "")
+            != str(candidate.executable_sell_curve.book_hash)
+            or str(certificate.get("jit_curve_identity") or "")
+            != str(candidate.execution_curve_identity)
+        ):
+            return "marketable_sell_execution_authority_identity_invalid"
+        try:
+            int(authority_identity, 16)
+            certified_limit = Decimal(str(certificate.get("exact_limit_price")))
+            certified_shares = Decimal(str(certificate.get("selected_shares")))
+        except (InvalidOperation, TypeError, ValueError):
+            return "marketable_sell_certificate_economics_invalid"
+        if (
+            certified_limit != Decimal(str(limit_price))
+            or certified_shares != Decimal(str(shares))
+        ):
+            return "marketable_sell_certificate_economics_mismatch"
 
     from src.state.snapshot_repo import get_snapshot
 
@@ -5147,9 +5167,9 @@ def _marketable_sell_certificate_error(
     if (
         str(snapshot.selected_outcome_token_id) != intent.token_id
         or str(snapshot.condition_id)
-        != str(certificate.get("condition_id") or "")
+        != str(candidate.condition_id)
         or str(snapshot.raw_orderbook_hash)
-        != str(certificate.get("jit_book_hash") or "")
+        != str(candidate.executable_sell_curve.book_hash)
         or Decimal(str(snapshot.orderbook_top_bid))
         != Decimal(str(intent.best_bid))
     ):

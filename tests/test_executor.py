@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-01; last_reused=2026-08-01
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-01; last_reused=2026-08-08
 # Purpose: Regression coverage for executor and portfolio mechanics under R3 cutover preflight opt-outs.
 # Reuse: Run when executor order submission or portfolio save/load mechanics change.
 # Created: 2026-04-27
@@ -2199,12 +2199,18 @@ class TestExecutor:
         ("best_bid", "min_tick", "expected_limit"),
         (("0.94", "0.01", "0.94"), ("0.999", "0.001", "0.95")),
     )
+    @pytest.mark.parametrize(
+        "include_certificate_projection",
+        (False, True),
+        ids=("typed-authority-only", "typed-authority-with-audit-projection"),
+    )
     def test_taker_exit_revalidates_real_typed_authority_at_final_sdk_seam(
         self,
         monkeypatch,
         best_bid,
         min_tick,
         expected_limit,
+        include_certificate_projection,
     ):
         from src.engine import event_reactor_adapter as era
         from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
@@ -2214,7 +2220,12 @@ class TestExecutor:
             _global_scope_event,
         )
 
-        slug = best_bid.replace(".", "-")
+        projection_slug = (
+            "with-projection"
+            if include_certificate_projection
+            else "authority-only"
+        )
+        slug = f"{best_bid.replace('.', '-')}-{projection_slug}"
         event = _global_scope_event(
             city="Executor",
             source_run_id=f"real-typed-taker-authority-{slug}",
@@ -2326,25 +2337,34 @@ class TestExecutor:
             },
         )
 
-        result = execute_exit_order(
-            create_exit_order_intent(
-                trade_id=candidate.position_id,
-                token_id=candidate.token_id,
-                shares=float(actuation.decision.shares),
-                current_price=float(best_bid),
-                best_bid=float(best_bid),
-                exact_limit_price=float(expected_limit),
-                submit_order_type="FAK",
-                executable_snapshot_id=snapshot_id,
-                executable_snapshot_min_tick_size=Decimal(min_tick),
-                executable_snapshot_min_order_size=Decimal("0.01"),
-                executable_snapshot_neg_risk=False,
-                marketable_sell_execution_authority=authority,
-                marketable_sell_certificate=certificate,
-                marketable_sell_certificate_identity=(
+        projection_kwargs = (
+            {
+                "marketable_sell_certificate": certificate,
+                "marketable_sell_certificate_identity": (
                     marketable_sell_certificate_identity(certificate)
                 ),
-            ),
+            }
+            if include_certificate_projection
+            else {}
+        )
+        executor_intent = create_exit_order_intent(
+            trade_id=candidate.position_id,
+            token_id=candidate.token_id,
+            shares=float(actuation.decision.shares),
+            current_price=float(best_bid),
+            best_bid=float(best_bid),
+            exact_limit_price=float(expected_limit),
+            submit_order_type="FAK",
+            executable_snapshot_id=snapshot_id,
+            executable_snapshot_min_tick_size=Decimal(min_tick),
+            executable_snapshot_min_order_size=Decimal("0.01"),
+            executable_snapshot_neg_risk=False,
+            marketable_sell_execution_authority=authority,
+            **projection_kwargs,
+        )
+
+        result = execute_exit_order(
+            executor_intent,
             conn=_TEST_CONN,
             decision_id=f"decision-real-typed-taker-authority-{slug}",
         )
