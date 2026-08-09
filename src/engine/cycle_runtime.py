@@ -4783,6 +4783,7 @@ def _prefetch_held_monitor_orderbooks(
     from src.engine.monitor_refresh import (
         install_monitor_orderbook_prefetch,
         monitor_orderbook_prefetch_attempted,
+        publish_current_monitor_orderbook_batch,
         prefetched_monitor_orderbook,
     )
 
@@ -4807,7 +4808,9 @@ def _prefetch_held_monitor_orderbooks(
         # A client may survive across cycles. Clear the prior cycle before any
         # return or failed fetch so stale executable truth cannot be reused.
         install_monitor_orderbook_prefetch(clob, {})
+        publish_current_monitor_orderbook_batch({}, captured_at_utc=None)
     summary["held_monitor_orderbooks_requested"] = len(token_ids)
+    summary["held_monitor_orderbooks_published_for_global_sell"] = 0
     local_books = _fresh_local_held_monitor_orderbooks(
         conn,
         positions,
@@ -4879,6 +4882,11 @@ def _prefetch_held_monitor_orderbooks(
         batch_transport_failed
     )
     books = {**local_books, **network_books}
+    published = publish_current_monitor_orderbook_batch(
+        network_books,
+        captured_at_utc=datetime.now(timezone.utc),
+    )
+    summary["held_monitor_orderbooks_published_for_global_sell"] = published
     installed = install_monitor_orderbook_prefetch(
         clob,
         books,
