@@ -3075,6 +3075,7 @@ def _is_non_executable_dust_hold(
     position: Position,
     *,
     conn: sqlite3.Connection | None = None,
+    current_min_order_size: object = None,
 ) -> bool:
     """True for dust/min-size holds that redecision cannot make executable."""
 
@@ -3088,7 +3089,9 @@ def _is_non_executable_dust_hold(
     # below min_order -> dust hold; if it proves the size is executable -> NOT
     # dust, and a stale "[DUST:...]" reason string may not suppress re-decision.
     # Historical dust text is a fallback ONLY when no fresh snapshot exists.
-    fresh_min = _latest_fresh_snapshot_min_order(position, conn=conn)
+    fresh_min = _positive_decimal(current_min_order_size)
+    if fresh_min is None:
+        fresh_min = _latest_fresh_snapshot_min_order(position, conn=conn)
     if fresh_min is not None:
         shares = _positive_decimal(getattr(position, "effective_shares", None))
         if shares is None:
@@ -3258,6 +3261,7 @@ def release_backoff_exhausted_pending_exit_for_redecision(
     position: Position,
     *,
     conn: sqlite3.Connection | None = None,
+    current_min_order_size: object = None,
 ) -> bool:
     """Release a still-held exhausted exit attempt back to live redecision.
 
@@ -3274,7 +3278,11 @@ def release_backoff_exhausted_pending_exit_for_redecision(
     exit_state = getattr(exit_state, "value", exit_state)
     if str(exit_state or "") != "backoff_exhausted":
         return False
-    if _is_non_executable_dust_hold(position, conn=conn):
+    if _is_non_executable_dust_hold(
+        position,
+        conn=conn,
+        current_min_order_size=current_min_order_size,
+    ):
         return False
     chain_shares = _positive_decimal(getattr(position, "chain_shares", None))
     shares = _positive_decimal(getattr(position, "effective_shares", None))

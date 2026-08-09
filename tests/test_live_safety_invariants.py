@@ -8602,8 +8602,9 @@ def test_receipt_rejects_coverage_q_absent_from_authoritative_manifest(tmp_path)
 
 
 def test_pending_exit_backoff_exhausted_dust_hold_does_not_emit_exit_intent(monkeypatch):
-    """Non-executable dust holds must not re-enter monitor and spam EXIT_INTENT."""
-    from src.engine import cycle_runtime
+    """Dust remains monitored without re-entering the impossible SELL lane."""
+    from src.contracts import EdgeContext, EntryMethod
+    from src.engine import cycle_runtime, monitor_refresh
 
     pos = _make_position(
         trade_id="backoff-exhausted-dust-hold",
@@ -8631,20 +8632,80 @@ def test_pending_exit_backoff_exhausted_dust_hold_does_not_emit_exit_intent(monk
 
     class LiveClob:
         def get_best_bid_ask(self, token_id):
-            raise AssertionError("dust hold must not request fresh exit quote")
+            raise AssertionError("test refresh owns the current quote")
 
     class Tracker:
         def record_exit(self, position):
             raise AssertionError("dust hold must not record an exit")
 
-    def refresh_must_not_run(conn, clob, position):
-        raise AssertionError("dust hold must not refresh into evaluate_exit")
+    def refresh_current_dust(_conn, _clob, position):
+        position.last_monitor_prob = 0.0
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_edge = -0.49
+        position.last_monitor_market_price = 0.49
+        position.last_monitor_market_price_is_fresh = True
+        position.last_monitor_best_bid = 0.49
+        position.last_monitor_best_ask = 0.50
+        position.last_monitor_at = "2026-07-08T09:30:00+00:00"
+        setattr(position, monitor_refresh._HELD_MONITOR_MIN_ORDER_SIZE_ATTR, 5.0)
+        setattr(
+            position,
+            monitor_refresh._GLOBAL_MONITOR_SAMPLES_ATTR,
+            np.array([0.0, 0.0]),
+        )
+        return EdgeContext(
+            p_raw=np.array([]),
+            p_cal=np.array([]),
+            p_market=np.array([0.49]),
+            p_posterior=0.0,
+            forward_edge=-0.49,
+            alpha=0.1,
+            confidence_band_upper=-0.49,
+            confidence_band_lower=-0.49,
+            entry_provenance=EntryMethod.QKERNEL_SPINE,
+            decision_snapshot_id="dust-current-cut",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+        )
 
-    def evaluate_must_not_run(self, exit_context):
-        raise AssertionError("dust hold must not evaluate or emit exit intent")
-
-    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", refresh_must_not_run)
-    monkeypatch.setattr(Position, "evaluate_exit", evaluate_must_not_run)
+    monkeypatch.setattr(monitor_refresh, "refresh_position", refresh_current_dust)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _context: ExitDecision(
+            True,
+            "SELL_REVERSAL",
+            trigger="SELL_REVERSAL",
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=["current_dust_sell_signal"],
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_closed_non_accepting_market_info",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_entry_selection_guard_exit_decision",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_apply_family_monitor_overlay",
+        lambda **kwargs: (kwargs["should_exit"], kwargs["exit_reason"]),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_day0_hard_fact_position_eligible",
+        lambda _position: False,
+    )
+    monkeypatch.setattr(
+        "src.events.reactor.request_global_auction_completion",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("current dust must not request global reauction")
+        ),
+    )
 
     monitor_results = []
     artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: monitor_results.append(result)})()
@@ -8674,12 +8735,46 @@ def test_pending_exit_backoff_exhausted_dust_hold_does_not_emit_exit_intent(monk
     assert pos.state == "pending_exit"
     assert pos.exit_state == "backoff_exhausted"
     assert pos.order_status == "backoff_exhausted"
-    assert portfolio_dirty is False
+    assert portfolio_dirty is True
     assert tracker_dirty is False
-    assert summary["monitor_skipped_pending_exit_phase"] == 1
-    assert summary["monitors"] == 0
+    assert summary["monitor_pending_exit_dust_redecisions"] == 1
+    assert summary["monitor_statistical_sell_dust_holds"] == 1
+    assert summary["monitors"] == 1
     assert summary["exits"] == 0
-    assert monitor_results == []
+    assert len(monitor_results) == 1
+    assert monitor_results[0].should_exit is False
+    assert "[DUST:" in monitor_results[0].exit_reason
+
+
+def test_current_book_min_decrease_releases_dust_back_to_redecision():
+    from src.execution.exit_lifecycle import (
+        release_backoff_exhausted_pending_exit_for_redecision,
+    )
+
+    pos = _make_position(
+        trade_id="dust-min-decreased",
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        chain_state="synced",
+        shares=3.0,
+        chain_shares=3.0,
+        exit_state="backoff_exhausted",
+        order_status="backoff_exhausted",
+        exit_reason="SELL_REVERSAL [DUST: size 3 below min_order_size 5]",
+        last_exit_error="size 3 below min_order_size 5",
+    )
+
+    assert not release_backoff_exhausted_pending_exit_for_redecision(
+        pos,
+        current_min_order_size="5",
+    )
+    assert release_backoff_exhausted_pending_exit_for_redecision(
+        pos,
+        current_min_order_size="1",
+    )
+    assert pos.state == "day0_window"
+    assert pos.exit_state == ""
+    assert pos.order_status == "filled"
 
 
 # ---- Test 7: Collateral check blocks underfunded sell ----

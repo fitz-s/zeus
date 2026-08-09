@@ -5719,6 +5719,7 @@ def execute_monitoring_phase(
         check_pending_retries,
         execute_exit,
         has_global_sell_snapshot_reauction_retry,
+        _is_non_executable_dust_hold,
         handle_exit_pending_missing,
         is_exit_cooldown_active,
         latest_held_sell_reauction_obligation,
@@ -6639,6 +6640,7 @@ def execute_monitoring_phase(
             summary["monitor_skipped_admin_close"] = summary.get("monitor_skipped_admin_close", 0) + 1
             continue
         pending_exit_monitor_only = False
+        monitoring_non_executable_dust = False
         pending_exit_retry_identity_seed_allowed = (
             id(pos) in retry_quote_identity_seed_position_ids
             or (
@@ -6653,6 +6655,12 @@ def execute_monitoring_phase(
                     portfolio_dirty = True
                     summary["monitor_repaired_market_closed_pending_exit_hold"] = (
                         summary.get("monitor_repaired_market_closed_pending_exit_hold", 0) + 1
+                    )
+                elif _is_non_executable_dust_hold(pos, conn=conn):
+                    pending_exit_monitor_only = True
+                    monitoring_non_executable_dust = True
+                    summary["monitor_pending_exit_dust_redecisions"] = (
+                        summary.get("monitor_pending_exit_dust_redecisions", 0) + 1
                     )
                 elif release_backoff_exhausted_pending_exit_for_redecision(pos, conn=conn):
                     portfolio_dirty = True
@@ -6701,7 +6709,7 @@ def execute_monitoring_phase(
                 counter="monitor_exit_order_in_flight_holds",
             )
             continue
-        if pos.exit_state == "backoff_exhausted":
+        if pos.exit_state == "backoff_exhausted" and not monitoring_non_executable_dust:
             _record_monitor_hold_decision(
                 conn,
                 pos,
@@ -7293,6 +7301,23 @@ def execute_monitoring_phase(
                         delattr(pos, _HELD_MONITOR_DEADLINE_ATTR)
                     except AttributeError:
                         pass
+            if monitoring_non_executable_dust:
+                current_min_order_size = getattr(
+                    pos,
+                    _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
+                    None,
+                )
+                if release_backoff_exhausted_pending_exit_for_redecision(
+                    pos,
+                    conn=conn,
+                    current_min_order_size=current_min_order_size,
+                ):
+                    monitoring_non_executable_dust = False
+                    pending_exit_monitor_only = False
+                    portfolio_dirty = True
+                    summary["monitor_released_dust_after_current_book"] = (
+                        summary.get("monitor_released_dust_after_current_book", 0) + 1
+                    )
             # === DAY0 HARD-FACT verdict — computed before the exit decision and
             # before closed-market pre-emption above. Settlement-authority hard
             # facts must not depend on estimator evidence.
@@ -7474,13 +7499,10 @@ def execute_monitoring_phase(
                 summary["monitor_branchwise_dominant_direct_sells"] = (
                     summary.get("monitor_branchwise_dominant_direct_sells", 0) + 1
                 )
-            if statistical_sell_requires_global:
-                # Global selection cannot make a sub-minimum holding sellable.
-                # Re-auctioning it every monitor tick only appends debt and
-                # spends the money-path budget on an impossible command.  Use
-                # the existing canonical dust state, backed by the latest fresh
-                # executable snapshot; a later venue-minimum decrease makes
-                # this check false and normal redecision resumes automatically.
+            if should_exit:
+                # No SELL actuator can make a sub-minimum holding executable.
+                # Apply the same current-book size law before global, direct,
+                # hard-fact, and RED paths so no route can mint impossible debt.
                 from src.execution.exit_lifecycle import (
                     _latest_fresh_snapshot_min_order,
                     _mark_exit_dust_hold,
@@ -7550,6 +7572,27 @@ def execute_monitoring_phase(
                     )
                     summary["monitor_statistical_sell_dust_holds"] = (
                         summary.get("monitor_statistical_sell_dust_holds", 0) + 1
+                    )
+                elif monitoring_non_executable_dust and fresh_min_order is None:
+                    should_exit = False
+                    statistical_sell_requires_global = False
+                    exit_reason = "CANONICAL_DUST_HOLD_MIN_ORDER_UNAVAILABLE"
+                    local_exit_trigger = exit_reason
+                    pos.applied_validations = list(
+                        dict.fromkeys(
+                            [
+                                *(pos.applied_validations or []),
+                                "current_min_order_size_unavailable",
+                                "canonical_dust_hold_preserved_fail_closed",
+                            ]
+                        )
+                    )
+                    summary["monitor_statistical_sell_dust_min_unavailable_holds"] = (
+                        summary.get(
+                            "monitor_statistical_sell_dust_min_unavailable_holds",
+                            0,
+                        )
+                        + 1
                     )
             probability_receipt = getattr(
                 pos,
