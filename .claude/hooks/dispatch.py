@@ -1238,6 +1238,7 @@ def _run_advisory_check_worktree_create_advisor(
             "[worktree_doctor] WorktreeCreate advisory:",
             "  role: assign one owner and one task role (data, strategy, execution, governance, or hot-fix)",
             "  scope: one writer and one task per worktree; branch from live",
+            "  provisioning: host-managed creation is routine task setup; never ask the operator to allow a managed fork",
             "  lifecycle: do not create a sentinel or any other untracked worktree-local metadata",
             "  isolation: do not touch other worktrees from this session",
             "  capability: cross_worktree_visibility (architecture/capabilities.yaml)",

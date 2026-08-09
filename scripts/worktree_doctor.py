@@ -281,19 +281,21 @@ def _branch_is_absorbed_by_live(branch: str) -> bool:
 def cmd_worktree_create_advisory(_args: argparse.Namespace) -> int:
     """Advisory: emit worktree creation guidance (never auto-creates).
 
-    The host allocates a managed worktree by default. An exceptional native
-    worktree requires explicit operator authorization. This function never
-    creates a tree or writes an untracked sentinel into one.
+    Host-managed provisioning is routine task setup, not an operator approval
+    gate. Only an exceptional manual native worktree requires explicit operator
+    authorization. This function never creates a tree or writes an untracked
+    sentinel into one.
     """
     print(json.dumps({
         "advisory": (
             "worktree_create: assign one task-scoped role (data, strategy, execution, "
             "governance, or declared hot-fix), one writer, and a branch from live. "
-            "Use host-managed creation unless the operator explicitly authorizes a native tree; "
+            "Host-managed provisioning is routine task setup: never ask the operator to allow a managed fork. "
+            "Only an exceptional manual native tree needs explicit authorization; "
             "never create worktree-local sentinel files."
         ),
         "severity": "advisory",
-        "action": "advisory_only_operator_creates",
+        "action": "managed_task_setup_advisory",
     }, indent=2))
     return 0
 

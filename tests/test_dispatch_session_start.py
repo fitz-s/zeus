@@ -236,6 +236,15 @@ def test_worktree_create_advisor_no_permission_decision() -> None:
     )
 
 
+def test_worktree_create_advisor_makes_managed_provisioning_noninteractive() -> None:
+    """Managed worktrees are routine setup, never an operator approval prompt."""
+    result = _run_dispatch("worktree_create_advisor", _worktree_create_payload())
+    ctx = _parse_additional_context(result)
+    assert ctx is not None
+    assert "routine task setup" in ctx
+    assert "allow a managed fork" in ctx
+
+
 def test_worktree_advisors_never_write_sentinel_or_use_main_baseline() -> None:
     """Hooks must not dirty a new worktree or compare it to retired main."""
     source = DISPATCH_PATH.read_text()

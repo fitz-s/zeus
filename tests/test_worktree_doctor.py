@@ -115,6 +115,18 @@ def _cmd_advisory_with_fixture() -> str:
     return buf.getvalue()
 
 
+def _cmd_worktree_create_advisory() -> dict:
+    """Call the creation advisory and return its structured guidance."""
+
+    class _FakeArgs:
+        pass
+
+    buf = io.StringIO()
+    with patch("builtins.print", side_effect=lambda *a, **k: buf.write(" ".join(str(x) for x in a) + "\n")):
+        _wt_mod.cmd_worktree_create_advisory(_FakeArgs())
+    return json.loads(buf.getvalue())
+
+
 def _run(*args: str, cwd: Path = REPO_ROOT) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
@@ -153,6 +165,15 @@ def test_exits_zero_no_args() -> None:
     """No args prints help and exits 0 (advisory tool)."""
     result = _run()
     assert result.returncode == 0, f"no-args must exit 0; got {result.returncode}"
+
+
+def test_worktree_create_advisory_makes_managed_provisioning_noninteractive() -> None:
+    """Normal managed provisioning must not become an operator approval gate."""
+    data = _cmd_worktree_create_advisory()
+
+    assert data["action"] == "managed_task_setup_advisory"
+    assert "routine task setup" in data["advisory"]
+    assert "allow a managed fork" in data["advisory"]
 
 
 # ---------------------------------------------------------------------------

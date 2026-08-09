@@ -523,10 +523,12 @@ capabilities:
     intent: >
       Allocate one exclusive, task-scoped role worktree for a writing agent.
       Role and task identity stay in the agent/task branch context; no hook may
-      write a worktree-local sentinel. Creating a repository-owned worktree is
-      a structural git op requiring explicit operator authorization;
-      Codex-managed paths are snapshot-reclaimed by Codex when their completed
-      worker archives its own thread, never by a repository raw-removal hook.
+      write a worktree-local sentinel. Codex-managed provisioning is ordinary
+      task routing and must not ask an operator to “allow fork”; only an
+      exceptional manual repository-owned worktree requires explicit operator
+      authorization. Codex-managed paths are snapshot-reclaimed by Codex when
+      their completed worker archives its own thread, never by a repository
+      raw-removal hook.
     relationships:
       protects_invariants: []
       blocked_when: []
