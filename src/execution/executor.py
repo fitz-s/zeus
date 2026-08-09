@@ -5073,12 +5073,6 @@ def _marketable_sell_certificate_error(
     )
 
     authority = intent.marketable_sell_execution_authority
-    if authority is None:
-        logger.warning(
-            "GLOBAL_TAKER_EXECUTOR_AUTHORITY_MISSING trade_id=%s certificate=%s",
-            intent.trade_id,
-            intent.marketable_sell_certificate is not None,
-        )
     authority_error = _global_sell_execution_authority_shape_error(authority)
     if authority_error is not None:
         return authority_error.replace("global_sell_", "marketable_sell_", 1)

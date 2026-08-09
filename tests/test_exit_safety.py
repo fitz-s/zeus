@@ -10588,9 +10588,11 @@ def test_persisted_exit_envelope_rejects_non_maker_non_fak_mode(conn):
             created_at=_NOW.isoformat(),
         )
 
+@pytest.mark.parametrize("position_env", ("live", "unknown_env"))
 def test_live_global_sell_rejects_fak_for_maker_authority_before_snapshot_or_venue(
     conn,
     monkeypatch,
+    position_env,
 ):
     from types import SimpleNamespace
 
@@ -10617,7 +10619,7 @@ def test_live_global_sell_rejects_fak_for_maker_authority_before_snapshot_or_ven
         chain_shares=10.0,
         cost_basis_usd=6.0,
         strategy_key="forecast_qkernel_entry",
-        env="live",
+        env=position_env,
         entered_at="2026-07-31T10:00:00+00:00",
     )
     upsert_position_current(conn, build_position_current_projection(position))

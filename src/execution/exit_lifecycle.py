@@ -5035,10 +5035,15 @@ def _execute_live_exit(
                 reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_IN_FLIGHT]",
             )
 
-    live_non_red = (
-        not is_red_force_exit
-        and str(getattr(position, "env", "live") or "live").lower() == "live"
-    )
+    # ``Position.env`` is creation provenance, not runtime authority; canonical
+    # open-position projections legitimately reload it as ``unknown_env``.
+    # Only an explicit non-live lane may bypass live submit authority checks.
+    position_env = str(getattr(position, "env", "") or "").strip().lower()
+    live_non_red = not is_red_force_exit and position_env not in {
+        "test",
+        "replay",
+        "backtest",
+    }
     hard_fact_authorized = bool(
         live_non_red
         and str(exit_intent.reason or "").startswith("DAY0_HARD_FACT_BIN_DEAD")
@@ -5482,12 +5487,6 @@ def _execute_live_exit(
             == "TAKER_LIMIT"
         ):
             executor_intent = create_exit_order_intent(**executor_kwargs)
-            logger.warning(
-                "GLOBAL_TAKER_AUTHORITY_TRACE trade_id=%s present=%s type=%s",
-                position.trade_id,
-                executor_intent.marketable_sell_execution_authority is not None,
-                type(executor_intent.marketable_sell_execution_authority).__name__,
-            )
             deadline_error = _exit_execution_authority_deadline_error(
                 executor_intent
             )
