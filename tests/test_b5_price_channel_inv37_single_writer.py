@@ -1,6 +1,6 @@
 # Created: 2026-06-20
 # Last audited: 2026-07-30
-# Last reused/audited: 2026-07-30
+# Last reused/audited: 2026-08-08
 # Authority basis: PR415 ChatGPT deep-review blocker B5 (INV-37). Quote projection
 #   writes TRADE only; derived redecision and NEW_MARKET_DISCOVERED facts write WORLD
 #   through independently coordinated lanes. TRADE quote refresh must never acquire
@@ -659,7 +659,7 @@ def test_submit_ack_and_monitor_keep_their_own_foreground_write_opportunity():
 
 
 def test_price_channel_writer_roles_reach_coordinator_priority(monkeypatch):
-    """Held evidence outranks replayable quote and invalidation producers."""
+    """Replayable quote writers yield to canonical lifecycle monitoring."""
     from src.ingest import price_channel_ingest as lane
     from src.state import write_coordinator
     from src.state.write_coordinator import WritePriority
@@ -680,7 +680,7 @@ def test_price_channel_writer_roles_reach_coordinator_priority(monkeypatch):
 
     with lane._edli_price_channel_trade_write_gate(
         owner="price_channel_held_quote_refresh",
-        priority="monitor",
+        priority="background_recovery",
     ):
         pass
     with lane._edli_price_channel_trade_write_gate(
@@ -694,7 +694,7 @@ def test_price_channel_writer_roles_reach_coordinator_priority(monkeypatch):
         pass
 
     assert observed == [
-        ("price_channel_held_quote_refresh", "monitor"),
+        ("price_channel_held_quote_refresh", "background_recovery"),
         ("price_channel_market_quote", "background_recovery"),
         (
             "price_channel_snapshot_invalidate",
@@ -703,6 +703,7 @@ def test_price_channel_writer_roles_reach_coordinator_priority(monkeypatch):
     ]
 
     lane_source = _PRICE_CHANNEL_MODULE.read_text(encoding="utf-8")
+    assert 'owner="price_channel_held_quote_refresh",\n                    priority="background_recovery"' in lane_source
     assert 'owner="price_channel_candidate_quote_refresh",\n                    priority="background_recovery"' in lane_source
     assert 'owner="price_channel_market_quote",\n                        priority="background_recovery"' in lane_source
 
