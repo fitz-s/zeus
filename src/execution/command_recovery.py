@@ -24991,6 +24991,11 @@ def _reconcile_passes_short_conn(
     )
 
     conn_factory = default_trade_conn_factory
+    capital_conn_factory = getattr(
+        conn_factory,
+        "trade_only_factory",
+        conn_factory,
+    )
     read_conn_factory = (
         default_trade_read_conn_factory
         if getattr(conn_factory, "requires_writer_flocks", False)
@@ -25027,6 +25032,11 @@ def _reconcile_passes_short_conn(
     apply_deadline = live_tick_deadline or full_deadline
     conn_factory = _recovery_priority_conn_factory(
         conn_factory,
+        scope=scope,
+        deadline_monotonic=apply_deadline,
+    )
+    capital_conn_factory = _recovery_priority_conn_factory(
+        capital_conn_factory,
         scope=scope,
         deadline_monotonic=apply_deadline,
     )
@@ -25412,7 +25422,7 @@ def _reconcile_passes_short_conn(
         )
         fast_deadline = _capital_deadline()
         fast_conn_factory = _recovery_apply_conn_factory(
-            conn_factory,
+            capital_conn_factory,
             scope="live_tick",
             deadline_monotonic=fast_deadline,
         )

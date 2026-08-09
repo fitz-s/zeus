@@ -352,6 +352,43 @@ default_trade_conn_factory.requires_writer_flocks = True  # type: ignore[attr-de
 default_trade_conn_factory.supports_nonblocking_flocks = True  # type: ignore[attr-defined]
 
 
+def default_trade_only_conn_factory(
+    *,
+    blocking: bool = True,
+    busy_timeout_ms: int | None = None,
+) -> sqlite3.Connection:
+    """Open the canonical TRADE DB without attaching unrelated WORLD truth.
+
+    The caller must already own the unified TRADE ``WriteCoordinator`` lease.
+    This factory exists for exact recovery passes whose full read/write set is
+    trade-owned; it must not replace the cross-DB factory for general recovery.
+    ``blocking`` is accepted for the shared factory protocol.  Admission has
+    already been decided by the outer coordinator before this function runs.
+    """
+
+    _ = blocking
+    from src.state.db import get_trade_connection
+
+    conn = get_trade_connection(write_class="live")
+    try:
+        if busy_timeout_ms is not None:
+            conn.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
+    except BaseException:
+        conn.close()
+        raise
+    return conn
+
+
+default_trade_only_conn_factory.requires_writer_flocks = True  # type: ignore[attr-defined]
+default_trade_only_conn_factory.supports_nonblocking_flocks = (  # type: ignore[attr-defined]
+    True
+)
+# Test/fake factories without this explicit equivalent keep their existing seam.
+default_trade_conn_factory.trade_only_factory = (  # type: ignore[attr-defined]
+    default_trade_only_conn_factory
+)
+
+
 def default_trade_read_conn_factory() -> sqlite3.Connection:
     """Bounded read-only recovery connection without cutover/writer flocks."""
 

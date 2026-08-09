@@ -6,7 +6,7 @@
 #   byte-identical reconciliation events vs the legacy long-connection path.
 # Reuse: Run when command_recovery orchestration, venue_sync_contract, or the
 #   scheduled _edli_command_recovery_cycle connection topology changes.
-# Last reused/audited: 2026-08-02
+# Last reused/audited: 2026-08-09
 # Authority basis: operator directive 2026-06-11 ("cleanest STRUCTURAL fix") +
 #   the dependency_db_locked live incident (riskguard DATA_DEGRADED since ~03:36Z).
 """Relationship tests for the three-phase venue/DB sync contract.
@@ -3126,6 +3126,44 @@ def test_default_factory_can_yield_without_flock_or_sqlite_wait(monkeypatch):
 
     assert calls == [("live", False)]
     assert busy_timeout_ms == 0
+
+
+def test_trade_only_factory_skips_world_attach_and_preserves_nowait_protocol(
+    monkeypatch,
+):
+    from src.execution import venue_sync_contract as vsc
+    from src.state import db
+
+    calls = []
+    conn = sqlite3.connect(":memory:")
+
+    def _trade(*, write_class):
+        calls.append(("trade", write_class))
+        return conn
+
+    def _cross_db(**_kwargs):
+        raise AssertionError("exact capital recovery must not attach WORLD")
+
+    monkeypatch.setattr(db, "get_trade_connection", _trade)
+    monkeypatch.setattr(db, "trade_connection_with_world_flocked", _cross_db)
+
+    opened = vsc.default_trade_only_conn_factory(
+        blocking=False,
+        busy_timeout_ms=0,
+    )
+    try:
+        assert opened.execute("PRAGMA database_list").fetchall() == [
+            (0, "main", ""),
+        ]
+        assert opened.execute("PRAGMA busy_timeout").fetchone()[0] == 0
+    finally:
+        opened.close()
+
+    assert calls == [("trade", "live")]
+    assert (
+        vsc.default_trade_conn_factory.trade_only_factory
+        is vsc.default_trade_only_conn_factory
+    )
 
 
 def test_default_read_factory_does_not_take_writer_flocks(monkeypatch):

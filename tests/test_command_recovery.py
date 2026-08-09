@@ -50,7 +50,21 @@ def conn():
 
 @pytest.fixture
 def mock_client():
-    return MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info", "v2_preflight"])
+    client = MagicMock(
+        spec_set=[
+            "get_account_truth",
+            "get_order",
+            "get_open_orders",
+            "get_trades",
+            "get_clob_market_info",
+            "v2_preflight",
+        ]
+    )
+    client.get_account_truth.return_value = SimpleNamespace(
+        open_orders=[],
+        trades=[],
+    )
+    return client
 
 
 def test_terminal_order_fact_snapshot_scopes_append_only_history_before_ranking(
@@ -16490,6 +16504,14 @@ class TestRecoveryResolutionTable:
             conn.row_factory = sqlite3.Row
             return conn
 
+        capital_apply_calls = []
+
+        def _trade_only_conn_factory(**_kwargs):
+            capital_apply_calls.append("trade_only")
+            return _conn_factory()
+
+        _conn_factory.trade_only_factory = _trade_only_conn_factory
+
         monkeypatch.setattr(
             venue_sync_contract,
             "default_trade_conn_factory",
@@ -16516,6 +16538,7 @@ class TestRecoveryResolutionTable:
             "stayed": 0,
             "errors": 0,
         }
+        assert capital_apply_calls
         verified = _conn_factory()
         try:
             assert _get_state(verified, "cmd-001") == "EXPIRED"
