@@ -337,6 +337,46 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
         _held_position_monitor_bootstrap_check_lock.release()
 
 
+def _held_position_monitor_entry_block_reason() -> str | None:
+    """Return why current held-capital redecision truth cannot admit a BUY."""
+
+    # SCOPE: BUY/new-entry authority only; held SELL, monitoring, command
+    # recovery, and settlement continue. DRAIN: the 30-second durable monitor
+    # recovery re-evaluates every current positive exposure and appends fresh
+    # canonical MONITOR_REFRESHED evidence. RESET: zero overdue/future current
+    # exposures automatically removes this reason on the next reactor cycle.
+    from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+    from src.state.db import get_trade_connection_read_only
+
+    conn = None
+    try:
+        conn = get_trade_connection_read_only()
+        evidence = collect_monitor_cadence_evidence(
+            conn,
+            now=datetime.now(timezone.utc),
+            max_age_seconds=HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS,
+            monitor_refreshed_only=True,
+            require_fresh_inputs=True,
+            sample_limit=0,
+        )
+    except Exception as exc:  # noqa: BLE001 - missing authority fails closed.
+        logger.warning(
+            "held-position monitor entry authority unavailable: %s",
+            exc,
+            exc_info=True,
+        )
+        return "held_position_monitor_cadence_unavailable"
+    finally:
+        if conn is not None:
+            conn.close()
+
+    if int(evidence.get("future_monitor_event_count") or 0) > 0:
+        return "held_position_monitor_future_evidence"
+    if int(evidence.get("stale_or_missing_position_count") or 0) > 0:
+        return "held_position_monitor_cadence_overdue"
+    return None
+
+
 def _defer_for_held_position_monitor(job_name: str) -> bool:
     """Give initial held monitoring first access to DB I/O and reactor work.
 
@@ -4206,6 +4246,9 @@ def _edli_event_reactor_cycle(
     _global_block_reason, _family_block_reasons = _edli_live_entry_readiness_block(
         _settings_section("edli", {})
     )
+    monitor_entry_block = _held_position_monitor_entry_block_reason()
+    if _global_block_reason is None and monitor_entry_block is not None:
+        _global_block_reason = monitor_entry_block
     if allow_paused_forecast_snapshot_completion:
         # SCOPE: this already-selected targeted forecast cycle only; freeze its
         # BUY/submit lane as no-submit even if the durable pause is cleared

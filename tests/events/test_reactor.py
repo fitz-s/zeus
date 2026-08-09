@@ -672,6 +672,11 @@ def test_main_threads_pause_carrier_qualification_to_reactor(monkeypatch):
     )
     monkeypatch.setattr(
         main,
+        "_held_position_monitor_entry_block_reason",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        main,
         "_unowned_day0_urgent_wake_pending",
         lambda: False,
     )
@@ -725,6 +730,11 @@ def test_main_drains_control_commands_before_edli_readiness(monkeypatch):
         return (None, {})
 
     monkeypatch.setattr(main, "_edli_live_entry_readiness_block", readiness)
+    monkeypatch.setattr(
+        main,
+        "_held_position_monitor_entry_block_reason",
+        lambda: None,
+    )
 
     def run_cycle(**kwargs):
         captured.update(kwargs)
@@ -760,6 +770,11 @@ def test_main_control_drain_failure_blocks_entries_but_runs_reactor(monkeypatch)
         "_edli_live_entry_readiness_block",
         lambda _cfg: (None, {}),
     )
+    monkeypatch.setattr(
+        main,
+        "_held_position_monitor_entry_block_reason",
+        lambda: None,
+    )
 
     def run_cycle(**kwargs):
         captured.update(kwargs)
@@ -772,6 +787,75 @@ def test_main_control_drain_failure_blocks_entries_but_runs_reactor(monkeypatch)
         "control_plane_command_drain_failed"
     )
     assert pauses == ["control_plane_command_drain_failed"]
+
+
+def test_main_monitor_cadence_debt_blocks_buy_but_keeps_reactor_live(monkeypatch):
+    import src.events.reactor as reactor_module
+    import src.main as main
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(main, "_start_edli_reactor_wake_listener", lambda: None)
+    monkeypatch.setattr(
+        main,
+        "_edli_live_entry_readiness_block",
+        lambda _cfg: (None, {}),
+    )
+    monkeypatch.setattr(
+        main,
+        "_held_position_monitor_entry_block_reason",
+        lambda: "held_position_monitor_cadence_overdue",
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "run_edli_event_reactor_cycle",
+        lambda **kwargs: captured.update(kwargs) or True,
+    )
+
+    assert main._edli_event_reactor_cycle() is True
+    assert captured["live_entry_block_reason"] == (
+        "held_position_monitor_cadence_overdue"
+    )
+
+
+@pytest.mark.parametrize(
+    ("evidence", "expected"),
+    (
+        ({"future_monitor_event_count": 1}, "held_position_monitor_future_evidence"),
+        (
+            {"future_monitor_event_count": 0, "stale_or_missing_position_count": 2},
+            "held_position_monitor_cadence_overdue",
+        ),
+        (
+            {"future_monitor_event_count": 0, "stale_or_missing_position_count": 0},
+            None,
+        ),
+    ),
+)
+def test_held_position_monitor_entry_block_tracks_current_canonical_debt(
+    monkeypatch,
+    evidence,
+    expected,
+):
+    import src.main as main
+    import src.ops.monitor_cadence as cadence
+    import src.state.db as db
+
+    class _ReadConn:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    conn = _ReadConn()
+    monkeypatch.setattr(db, "get_trade_connection_read_only", lambda: conn)
+    monkeypatch.setattr(
+        cadence,
+        "collect_monitor_cadence_evidence",
+        lambda actual, **_kwargs: evidence if actual is conn else {},
+    )
+
+    assert main._held_position_monitor_entry_block_reason() == expected
+    assert conn.closed is True
 
 
 def test_wake_listener_drains_control_before_recurring_work():
