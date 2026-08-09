@@ -11489,11 +11489,23 @@ def _submit_current_global_sell(
                 candidate.executable_sell_curve.fee_model.fee_rate
             ):
                 raise ValueError("GLOBAL_SELL_JIT_FEE_SUPERSEDED")
-            current_candidate = _global_sell_candidate_from_raw_book(
-                candidate,
-                raw_book,
-                captured_at_utc=book_captured_at_utc,
-            )
+            try:
+                current_candidate = _global_sell_candidate_from_raw_book(
+                    candidate,
+                    raw_book,
+                    captured_at_utc=book_captured_at_utc,
+                )
+            except ValueError as exc:
+                if not str(exc).startswith(
+                    "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:"
+                ):
+                    raise
+                return _global_sell_receipt(
+                    event,
+                    global_actuation=global_actuation,
+                    reason=str(exc),
+                    proof_accepted=False,
+                )
             drift = _global_sell_execution_economics_drift(
                 decision=decision,
                 current_candidate=current_candidate,
@@ -12022,6 +12034,7 @@ def _global_preflight_block_status(reason: str) -> str:
         (
             "GLOBAL_SELL_LEGAL_PRICE_UNAVAILABLE:",
             "GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:",
+            "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:",
         )
     ):
         return "CANDIDATE_BLOCKED"

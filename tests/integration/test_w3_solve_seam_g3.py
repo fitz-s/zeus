@@ -28594,6 +28594,12 @@ def test_global_sell_selected_maker_mode_cannot_drift_to_taker_at_jit(
     ) == "BATCH_BLOCKED"
 
 
+def test_global_sell_current_mode_unavailable_excludes_only_selected_candidate():
+    assert era._global_preflight_block_status(
+        "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:TAKER_LIMIT"
+    ) == "CANDIDATE_BLOCKED"
+
+
 def test_global_sell_high_bid_binds_legal_fak_floor():
     from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
     from src.events.reactor import _is_global_reduce_only_exit_receipt
