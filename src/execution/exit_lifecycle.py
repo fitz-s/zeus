@@ -5486,7 +5486,16 @@ def _execute_live_exit(
             and global_sell_authority.jit_candidate.execution_mode
             == "TAKER_LIMIT"
         ):
-            executor_intent = create_exit_order_intent(**executor_kwargs)
+            direct_executor_kwargs = dict(executor_kwargs)
+            direct_executor_kwargs.pop(
+                "executable_snapshot_orderbook_top_bid", None
+            )
+            direct_executor_kwargs.pop(
+                "executable_snapshot_orderbook_top_ask", None
+            )
+            executor_intent = create_exit_order_intent(
+                **direct_executor_kwargs
+            )
             deadline_error = _exit_execution_authority_deadline_error(
                 executor_intent
             )
