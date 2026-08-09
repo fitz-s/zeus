@@ -2048,8 +2048,14 @@ def held_sell_reauction_requests_completed(
     requests: tuple[HeldSellReauctionRequest, ...],
     *,
     path: Path | None = None,
+    allow_structural_win_supersession: bool = False,
 ) -> bool:
-    """A request completes only with its own durable actuation/reject receipt."""
+    """A request completes only with its own durable terminal receipt.
+
+    Structural-win supersession additionally requires an ack-time canonical DB
+    revalidation under the trade writer transaction. Only that caller may set
+    ``allow_structural_win_supersession``.
+    """
 
     if not requests:
         return False
@@ -2091,6 +2097,11 @@ def held_sell_reauction_requests_completed(
             or receipt.material_identity != request.material_identity
             or receipt.generation != request.generation
             or receipt.schema_version != request.schema_version
+            or (
+                receipt.status
+                == SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN
+                and not allow_structural_win_supersession
+            )
             or (
                 request.schema_version in {
                     HELD_SELL_REAUCTION_V2,

@@ -365,7 +365,7 @@ def _install_structural_win_reader(
     monitor_overrides: dict[str, object] | None = None,
     debt_sequence: int = 10,
     monitor_sequence: int = 11,
-) -> None:
+) -> Path:
     db_path = tmp_path / "structural-win-trades.db"
     conn = sqlite3.connect(db_path)
     try:
@@ -422,6 +422,7 @@ def _install_structural_win_reader(
             """
         )
         obligation = {
+            "schema_version": 4,
             "request_id": request.request_id,
             "material_identity": request.material_identity,
             "scope_identity": request.scope_identity,
@@ -538,6 +539,7 @@ def _install_structural_win_reader(
         "src.state.db.get_trade_connection_read_only",
         lambda: sqlite3.connect(f"file:{db_path}?mode=ro", uri=True),
     )
+    return db_path
 
 
 def test_structural_win_supersedes_exact_v4_debt_after_terminal_command(
@@ -576,8 +578,13 @@ def test_structural_win_supersedes_exact_v4_debt_after_terminal_command(
     assert reactor_wake.persist_held_sell_reauction_receipts(
         receipts, path=wake_path
     )
-    assert reactor_wake.held_sell_reauction_requests_completed(
+    assert not reactor_wake.held_sell_reauction_requests_completed(
         (request,), path=wake_path
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        (request,),
+        path=wake_path,
+        allow_structural_win_supersession=True,
     )
 
 
@@ -648,6 +655,8 @@ def test_structural_win_cannot_supersede_nonterminal_or_unknown_command(
         ({"exit_decision_should_exit": True}, None, 10, 11),
         ({"exit_decision_trigger": "SELL_REVERSAL"}, None, 10, 11),
         (None, {"attempt_identity": "stale-attempt"}, 10, 11),
+        (None, {"schema_version": 3}, 10, 11),
+        (None, {"schema_version": None}, 10, 11),
         (None, None, 11, 11),
     ),
 )
@@ -705,13 +714,151 @@ def test_structural_win_supersession_is_exact_and_leaves_sibling_bytes_unchanged
     assert reactor_wake.persist_held_sell_reauction_receipts(
         receipts, path=wake_path
     )
-    assert reactor_wake.held_sell_reauction_requests_completed(
+    assert not reactor_wake.held_sell_reauction_requests_completed(
         (matched,), path=wake_path
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        (matched,),
+        path=wake_path,
+        allow_structural_win_supersession=True,
     )
     assert not reactor_wake.held_sell_reauction_requests_completed(
         (sibling,), path=wake_path
     )
     assert sibling_file.read_bytes() == sibling_bytes
+
+
+def _structural_win_coordinator(db_path: Path):
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator
+
+    return WriteCoordinator({DBIdentity.TRADE: db_path})
+
+
+def test_structural_win_atomic_revalidation_persists_and_acks_under_writer_lock(
+    monkeypatch, tmp_path: Path
+) -> None:
+    request = _request(position_id="atomic-structural-win", schema_version=4)
+    db_path = _install_structural_win_reader(monkeypatch, tmp_path, request)
+    wake_path = tmp_path / "wake.json"
+    wake = reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=wake_path,
+        wake_id="wake-atomic-structural-win",
+        held_sell_reauction_requests=(request,),
+    )
+    queue_file = reactor_wake._wake_queue_target(wake, path=wake_path)
+
+    completed = main._atomically_ack_structural_win_wakes(
+        (wake,),
+        wake_path=wake_path,
+        coordinator=_structural_win_coordinator(db_path),
+    )
+
+    assert completed == (wake,)
+    assert not queue_file.exists()
+    assert not reactor_wake.held_sell_reauction_requests_completed(
+        (request,), path=wake_path
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        (request,),
+        path=wake_path,
+        allow_structural_win_supersession=True,
+    )
+
+
+@pytest.mark.parametrize("race", ("unknown_command", "newer_monitor_reversal"))
+def test_structural_win_atomic_revalidation_closes_snapshot_to_ack_race(
+    monkeypatch,
+    tmp_path: Path,
+    race: str,
+) -> None:
+    request = _request(position_id=f"race-{race}", schema_version=4)
+    db_path = _install_structural_win_reader(monkeypatch, tmp_path, request)
+    wake_path = tmp_path / "wake.json"
+    wake = reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=wake_path,
+        wake_id=f"wake-race-{race}",
+        held_sell_reauction_requests=(request,),
+    )
+    queue_file = reactor_wake._wake_queue_target(wake, path=wake_path)
+    queue_bytes = queue_file.read_bytes()
+    assert main._terminal_held_sell_reauction_receipts((request,))
+
+    conn = sqlite3.connect(db_path)
+    try:
+        if race == "unknown_command":
+            conn.execute(
+                "INSERT INTO venue_commands VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "racing-unknown-command",
+                    "UNKNOWN",
+                    None,
+                    "racing-unknown-key",
+                    request.position_id,
+                    request.held_token_id,
+                    "SELL",
+                    "EXIT",
+                    "2026-07-30T12:02:00+00:00",
+                    "2026-07-30T12:02:00+00:00",
+                ),
+            )
+            conn.execute(
+                "INSERT INTO venue_command_events VALUES (?, ?, ?, ?, ?)",
+                (
+                    "racing-unknown-event",
+                    "racing-unknown-command",
+                    1,
+                    "SUBMIT_UNKNOWN_SIDE_EFFECT",
+                    "{}",
+                ),
+            )
+        else:
+            prior = conn.execute(
+                """
+                SELECT payload_json FROM position_events
+                 WHERE position_id = ? AND event_type = 'MONITOR_REFRESHED'
+                """,
+                (request.position_id,),
+            ).fetchone()
+            payload = json.loads(prior[0])
+            payload.update(
+                {
+                    "last_monitor_prob": 0.4,
+                    "selected_method": "model_only_v1",
+                    "exit_decision_selected_method": "model_only_v1",
+                    "exit_decision_should_exit": True,
+                    "exit_decision_trigger": "SELL_REVERSAL",
+                }
+            )
+            conn.execute(
+                "INSERT INTO position_events VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    f"{request.position_id}:monitor_refreshed:12",
+                    request.position_id,
+                    12,
+                    "MONITOR_REFRESHED",
+                    "2026-07-30T12:02:00+00:00",
+                    json.dumps(payload, sort_keys=True),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    completed = main._atomically_ack_structural_win_wakes(
+        (wake,),
+        wake_path=wake_path,
+        coordinator=_structural_win_coordinator(db_path),
+    )
+
+    assert completed == ()
+    assert queue_file.read_bytes() == queue_bytes
+    assert not reactor_wake.held_sell_reauction_requests_completed(
+        (request,), path=wake_path
+    )
 
 
 def _wake(*requests: reactor_wake.HeldSellReauctionRequest) -> reactor_wake.ReactorWake:

@@ -5151,6 +5151,8 @@ def _acknowledge_edli_reactor_wake_batch(
 
 def _terminal_held_sell_reauction_receipts(
     requests: tuple[object, ...],
+    *,
+    trade_connection: sqlite3.Connection | None = None,
 ) -> tuple[object, ...]:
     """Read one canonical snapshot and prove exact SELL obligations done or stale.
 
@@ -5182,14 +5184,16 @@ def _terminal_held_sell_reauction_receipts(
     if not by_position:
         return ()
 
-    trade_ro = None
+    trade_ro = trade_connection
+    owns_trade_connection = trade_connection is None
     structural_proof_enabled = False
     proof_by_position: dict[str, tuple[object, ...]] = {}
     event_by_position: dict[tuple[str, str], tuple[object, ...]] = {}
     replacement_allowed: dict[tuple[str, str], bool] = {}
     try:
-        trade_ro = get_trade_connection_read_only()
-        trade_ro.execute("BEGIN")
+        if trade_ro is None:
+            trade_ro = get_trade_connection_read_only()
+            trade_ro.execute("BEGIN")
         columns = {
             str(row[1])
             for row in trade_ro.execute("PRAGMA table_info(position_current)").fetchall()
@@ -5302,7 +5306,7 @@ def _terminal_held_sell_reauction_receipts(
         )
         return ()
     finally:
-        if trade_ro is not None:
+        if owns_trade_connection and trade_ro is not None:
             try:
                 trade_ro.close()
             except Exception:  # noqa: BLE001 - read-only close cannot prove completion
@@ -5439,6 +5443,7 @@ def _terminal_held_sell_reauction_receipts(
             or debt_payload.get("release_reason")
             != "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
             or debt_payload.get("status") != "durable_wake_reserved"
+            or obligation.get("schema_version") != HELD_SELL_REAUCTION_V4
             or obligation.get("state") != "ARMED"
             or monitor_payload.get("city") != city
             or str(monitor_payload.get("target_date") or "")[:10]
@@ -5542,6 +5547,147 @@ def _terminal_held_sell_reauction_receipts(
                 )
             )
     return tuple(receipts)
+
+
+def _atomically_ack_structural_win_wakes(
+    wakes: tuple[object, ...],
+    *,
+    wake_path: Path | None = None,
+    coordinator: object | None = None,
+) -> tuple[object, ...]:
+    """Revalidate and ack V4 structural-win debt under one trade writer lock.
+
+    SCOPE: exact global-completion wakes containing a V4 supersession candidate.
+    DRAIN: a recovery-critical single-trade-DB transaction fences command/event
+    writers while current receipts are rebuilt, persisted, matched byte-for-byte,
+    and exact wake files are acknowledged. RESET: any newer command, monitor,
+    attempt, or lineage mismatch produces no ack and the durable wake retries.
+    """
+
+    from src.runtime.reactor_wake import (
+        GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
+        _read_held_sell_reauction_receipt,
+        acknowledge_reactor_wakes,
+        held_sell_reauction_requests_completed,
+        persist_held_sell_reauction_receipts,
+    )
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WritePriority,
+        default_runtime_write_coordinator,
+    )
+
+    exact_wakes = tuple(
+        wake
+        for wake in wakes
+        if str(getattr(wake, "reason", "") or "")
+        == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+        and not tuple(getattr(wake, "event_ids", ()) or ())
+        and tuple(getattr(wake, "held_sell_reauction_requests", ()) or ())
+    )
+    if not exact_wakes:
+        return ()
+    runtime_coordinator = coordinator or default_runtime_write_coordinator()
+    try:
+        with runtime_coordinator.transaction(
+            (DBIdentity.TRADE,),
+            owner="held_sell_structural_win_ack",
+            priority=WritePriority.RECOVERY_CRITICAL,
+            deadline_ms=1_000,
+            max_hold_ms=1_000,
+        ) as transaction:
+            requests = tuple(
+                dict.fromkeys(
+                    request
+                    for wake in exact_wakes
+                    for request in tuple(
+                        getattr(wake, "held_sell_reauction_requests", ()) or ()
+                    )
+                )
+            )
+            current_receipts = _terminal_held_sell_reauction_receipts(
+                requests,
+                trade_connection=transaction.connection,
+            )
+            structural_receipts = tuple(
+                receipt
+                for receipt in current_receipts
+                if getattr(receipt, "status", "")
+                == SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN
+            )
+            if not structural_receipts:
+                transaction.connection.rollback()
+                return ()
+            if not persist_held_sell_reauction_receipts(
+                structural_receipts,
+                path=wake_path,
+            ):
+                transaction.connection.rollback()
+                return ()
+            current_by_attempt = {
+                (
+                    str(getattr(receipt, "request_id", "") or ""),
+                    str(getattr(receipt, "attempt_identity", "") or ""),
+                ): receipt
+                for receipt in structural_receipts
+            }
+            completed: list[object] = []
+            for wake in exact_wakes:
+                saw_current_supersession = False
+                wake_completed = True
+                for request in tuple(
+                    getattr(wake, "held_sell_reauction_requests", ()) or ()
+                ):
+                    if held_sell_reauction_requests_completed(
+                        (request,),
+                        path=wake_path,
+                    ):
+                        continue
+                    candidate = current_by_attempt.get(
+                        (
+                            str(getattr(request, "request_id", "") or ""),
+                            str(getattr(request, "attempt_identity", "") or ""),
+                        )
+                    )
+                    if candidate is None:
+                        wake_completed = False
+                        break
+                    persisted = _read_held_sell_reauction_receipt(
+                        str(getattr(request, "request_id", "") or ""),
+                        path=wake_path,
+                        attempt_identity=str(
+                            getattr(request, "attempt_identity", "") or ""
+                        ),
+                    )
+                    if (
+                        persisted != candidate
+                        or not held_sell_reauction_requests_completed(
+                            (request,),
+                            path=wake_path,
+                            allow_structural_win_supersession=True,
+                        )
+                    ):
+                        wake_completed = False
+                        break
+                    saw_current_supersession = True
+                if wake_completed and saw_current_supersession:
+                    completed.append(wake)
+            completed_wakes = tuple(completed)
+            if not completed_wakes or not acknowledge_reactor_wakes(
+                completed_wakes,
+                path=wake_path,
+            ):
+                transaction.connection.rollback()
+                return ()
+            transaction.connection.rollback()
+            return completed_wakes
+    except Exception:  # noqa: BLE001 - any fence failure retains durable debt
+        logger.warning(
+            "held SELL structural-win atomic completion deferred",
+            exc_info=True,
+        )
+        return ()
 
 
 def _yield_incomplete_global_completion_once(
@@ -5648,6 +5794,7 @@ def _edli_reactor_wake_poll_once() -> bool:
 
     from src.runtime.reactor_wake import (
         GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
         acknowledge_reactor_wakes,
         coalescible_reactor_wakes,
         exact_held_sell_completion_wake_ids,
@@ -5760,11 +5907,43 @@ def _edli_reactor_wake_poll_once() -> bool:
     terminal_receipts = _terminal_held_sell_reauction_receipts(
         held_sell_reauction_requests
     )
-    if terminal_receipts and not persist_held_sell_reauction_receipts(
-        terminal_receipts
+    ordinary_terminal_receipts = tuple(
+        receipt
+        for receipt in terminal_receipts
+        if getattr(receipt, "status", "")
+        != SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN
+    )
+    if ordinary_terminal_receipts and not persist_held_sell_reauction_receipts(
+        ordinary_terminal_receipts
     ):
         logger.warning(
             "held SELL terminal receipts could not persist; wake remains pending"
+        )
+    structural_completed_wakes = _atomically_ack_structural_win_wakes(wakes)
+    if structural_completed_wakes:
+        completed_ids = {
+            str(getattr(queued, "wake_id", "") or "")
+            for queued in structural_completed_wakes
+        }
+        wakes = tuple(
+            queued
+            for queued in wakes
+            if str(getattr(queued, "wake_id", "") or "") not in completed_ids
+        )
+        logger.info(
+            "EDLI reactor atomically retired %d structural-win held SELL wakes",
+            len(structural_completed_wakes),
+        )
+        if not wakes:
+            _edli_last_reactor_wake_id = wake.wake_id
+            return True
+        wake = wakes[0]
+        held_sell_reauction_requests = tuple(
+            dict.fromkeys(
+                request
+                for queued in wakes
+                for request in queued.held_sell_reauction_requests
+            )
         )
     durably_completed_wakes = tuple(
         queued
