@@ -2157,6 +2157,36 @@ class GlobalSellExecutionAuthority:
         return self.limit_price()
 
 
+def _global_sell_execution_authority_shape_error(
+    authority: object | None,
+) -> str | None:
+    """Validate immutable SELL authority without relying on module object identity."""
+
+    if authority is None:
+        return "global_sell_execution_authority_required"
+    authority_type = type(authority)
+    dataclass_fields = getattr(authority_type, "__dataclass_fields__", None)
+    dataclass_params = getattr(authority_type, "__dataclass_params__", None)
+    if (
+        not isinstance(dataclass_fields, dict)
+        or tuple(dataclass_fields) != (
+            "actuation",
+            "jit_candidate",
+            "authority_identity",
+        )
+        or dataclass_params is None
+        or not bool(getattr(dataclass_params, "frozen", False))
+        or not callable(getattr(authority, "__post_init__", None))
+        or not callable(getattr(authority, "limit_price", None))
+    ):
+        return "global_sell_execution_authority_invalid"
+    try:
+        authority.__post_init__()
+    except (AttributeError, TypeError, ValueError):
+        return "global_sell_execution_authority_invalid"
+    return None
+
+
 def place_sell_order(
     *,
     trade_id: str,
@@ -5024,27 +5054,28 @@ def _execute_live_exit(
         str(getattr(position, "last_exit_order_id", "") or "")
     )
     if live_non_red and not hard_fact_authorized:
-        if isinstance(global_sell_authority, GlobalSellExecutionAuthority):
-            try:
-                global_sell_authority.__post_init__()
-            except (TypeError, ValueError):
-                preliminary_error = "global_sell_execution_authority_invalid"
-            else:
-                global_authorized = (
-                    str(exit_intent.reason or "") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
-                )
-                preliminary_error = (
-                    None
-                    if global_authorized
-                    else "global_capital_optimal_sell_intent_required"
-                )
+        preliminary_error = _global_sell_execution_authority_shape_error(
+            global_sell_authority
+        )
+        if preliminary_error is None:
+            global_authorized = (
+                str(exit_intent.reason or "") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
+            )
+            preliminary_error = (
+                None
+                if global_authorized
+                else "global_capital_optimal_sell_intent_required"
+            )
         else:
             preliminary_error = (
-                "global_sell_execution_authority_required"
+                preliminary_error
                 if str(exit_intent.reason or "") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
                 else "global_capital_optimal_sell_intent_required"
             )
-        if preliminary_error is not None and not continuing_existing_exit:
+        if preliminary_error is not None and (
+            not continuing_existing_exit
+            or str(exit_intent.reason or "") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
+        ):
             logger.warning(
                 "EXIT_SUBMIT_BLOCKED_CAPITAL_AUTHORITY trade_id=%s reason=%s",
                 position.trade_id,

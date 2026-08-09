@@ -28138,6 +28138,7 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
         ExitIntent,
         GlobalSellExecutionAuthority,
         _global_sell_capital_certificate_error,
+        _global_sell_execution_authority_shape_error,
     )
 
     event = _global_scope_event(city="Alpha", source_run_id="run-sell-authority")
@@ -28164,6 +28165,11 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
     authority = GlobalSellExecutionAuthority.from_current(
         actuation=actuation,
         jit_candidate=jit,
+    )
+    assert _global_sell_execution_authority_shape_error(authority) is None
+    assert (
+        _global_sell_execution_authority_shape_error(object())
+        == "global_sell_execution_authority_invalid"
     )
     decision = actuation.decision
     candidate = decision.candidate

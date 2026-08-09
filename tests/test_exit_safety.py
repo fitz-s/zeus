@@ -10689,6 +10689,23 @@ def test_live_global_sell_rejects_fak_for_maker_authority_before_snapshot_or_ven
     assert position.state == "holding"
     assert position.exit_retry_count == 0
 
+    position.last_exit_order_id = "stale-prior-exit"
+    result = exit_lifecycle._execute_live_exit(
+        PortfolioState(positions=[position]),
+        position,
+        exit_context,
+        exit_intent,
+        object(),
+        conn=conn,
+        execution_evidence=exit_lifecycle.ExitExecutionEvidence(),
+        is_red_force_exit=False,
+        global_sell_authority=object(),
+        hard_fact_authority=None,
+    )
+
+    assert result == "exit_blocked: global_sell_execution_authority_invalid"
+    assert position.exit_retry_count == 0
+
 def test_no_bid_retry_waits_for_fresh_positive_bid_before_release(conn):
     from src.engine.lifecycle_events import build_position_current_projection
     from src.execution.exit_lifecycle import check_pending_retries

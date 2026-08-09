@@ -5068,29 +5068,14 @@ def _marketable_sell_certificate_error(
     reduce-only exit.  When supplied it remains hash- and field-checked.
     """
 
+    from src.execution.exit_lifecycle import (
+        _global_sell_execution_authority_shape_error,
+    )
+
     authority = intent.marketable_sell_execution_authority
-    if authority is None:
-        return "marketable_sell_execution_authority_required"
-    authority_type = type(authority)
-    dataclass_fields = getattr(authority_type, "__dataclass_fields__", None)
-    dataclass_params = getattr(authority_type, "__dataclass_params__", None)
-    if (
-        not isinstance(dataclass_fields, dict)
-        or tuple(dataclass_fields) != (
-            "actuation",
-            "jit_candidate",
-            "authority_identity",
-        )
-        or dataclass_params is None
-        or not bool(getattr(dataclass_params, "frozen", False))
-        or not callable(getattr(authority, "__post_init__", None))
-        or not callable(getattr(authority, "limit_price", None))
-    ):
-        return "marketable_sell_execution_authority_invalid"
-    try:
-        authority.__post_init__()
-    except (AttributeError, TypeError, ValueError):
-        return "marketable_sell_execution_authority_invalid"
+    authority_error = _global_sell_execution_authority_shape_error(authority)
+    if authority_error is not None:
+        return authority_error.replace("global_sell_", "marketable_sell_", 1)
     candidate = authority.jit_candidate
     decision = authority.actuation.decision
     if (
