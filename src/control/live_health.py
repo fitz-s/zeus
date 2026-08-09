@@ -5771,9 +5771,33 @@ def _global_auction_holding_authority_matches(
         or any(not str(row.get("reason") or "").strip() for row in excluded_rows)
     ):
         return False
-    evaluated_by_candidate = {
-        str(row.get("candidate_id") or ""): row for row in evaluated_rows
-    }
+    evaluated_by_candidate: dict[str, dict[str, object]] = {}
+    for row in evaluated_rows:
+        raw_candidate_ids = row.get("candidate_ids")
+        if raw_candidate_ids is None:
+            candidate_ids = (str(row.get("candidate_id") or ""),)
+        elif isinstance(raw_candidate_ids, list):
+            candidate_ids = tuple(str(value or "") for value in raw_candidate_ids)
+        else:
+            return False
+        primary_candidate_id = str(row.get("candidate_id") or "")
+        if (
+            not candidate_ids
+            or any(not candidate_id for candidate_id in candidate_ids)
+            or len(set(candidate_ids)) != len(candidate_ids)
+            or (
+                primary_candidate_id
+                and primary_candidate_id not in candidate_ids
+            )
+            or any(
+                candidate_id in evaluated_by_candidate
+                for candidate_id in candidate_ids
+            )
+        ):
+            return False
+        evaluated_by_candidate.update(
+            (candidate_id, row) for candidate_id in candidate_ids
+        )
     sell_by_candidate = {
         str(row.get("candidate_id") or ""): row
         for row in detailed
@@ -5782,7 +5806,6 @@ def _global_auction_holding_authority_matches(
     if (
         "" in evaluated_by_candidate
         or "" in sell_by_candidate
-        or len(evaluated_by_candidate) != len(evaluated_rows)
         or len(sell_by_candidate)
         != sum(
             isinstance(row, dict) and row.get("action") == "SELL"

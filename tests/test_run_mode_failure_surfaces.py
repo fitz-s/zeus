@@ -5117,6 +5117,60 @@ def test_high_yes_edge_accepts_current_global_auction_candidate(
     assert evidence["yes_condition_count"] == 1
 
 
+def test_global_auction_holding_authority_accepts_all_fixed_sell_modes() -> None:
+    authority = {
+        "sell_exit_authority_status": "mature",
+        "sell_exit_authority_reason": "day0_high_extreme_post_peak",
+        "sell_action_authority_identity": "authority-1",
+    }
+    holding_payload = [
+        {
+            "position_id": "position-1",
+            "candidate_id": "sell-taker",
+            "candidate_ids": ["sell-taker", "sell-maker"],
+            "status": "EVALUATED",
+            **authority,
+        }
+    ]
+    candidate_payload = {
+        "detailed": [
+            {
+                "candidate_id": "sell-taker",
+                "position_id": "position-1",
+                "action": "SELL",
+                "execution_mode": "TAKER_LIMIT",
+                **authority,
+            },
+            {
+                "candidate_id": "sell-maker",
+                "position_id": "position-1",
+                "action": "SELL",
+                "execution_mode": "MAKER_REST",
+                **authority,
+            },
+        ]
+    }
+    summary = {
+        "held_position_coverage_complete": True,
+        "held_position_expected_count": 1,
+        "held_position_evaluated_count": 1,
+        "held_position_excluded_count": 0,
+    }
+
+    assert live_health._global_auction_holding_authority_matches(
+        candidate_payload,
+        holding_payload,
+        summary,
+    )
+
+    holding_payload[0]["candidate_ids"] = ["sell-taker"]
+    assert not live_health._global_auction_holding_authority_matches(
+        candidate_payload,
+        holding_payload,
+        summary,
+    )
+
+
 @pytest.mark.parametrize(
     ("authority_identity", "expected_issue"),
     (

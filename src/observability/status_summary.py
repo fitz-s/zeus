@@ -861,6 +861,42 @@ def _terminal_event_supersedes_nonterminal_fact(row) -> bool:
     return True
 
 
+def _terminal_partial_order_fact_confirms_closed_remainder(row) -> bool:
+    """Recognize the typed terminal proof for a cancelled partial entry."""
+
+    payload = _payload_mapping(row["venue_fact_raw_payload_json"])
+    predicates = payload.get("required_predicates")
+    required = {
+        "cancel_acked",
+        "canonical_positive_trade_facts",
+        "canonical_trade_facts_match_terminal_order_fact",
+        "command_state_cancelled",
+        "cumulative_fill_below_requested_size",
+        "terminal_order_remainder_zero",
+    }
+    try:
+        remainder_zero = float(row["remaining_size"]) == 0.0
+        payload_remainder_zero = float(payload.get("remaining_size")) == 0.0
+        matched_size = float(row["matched_size"])
+        submitted_size = float(row["submitted_size"])
+    except (TypeError, ValueError):
+        return False
+    return (
+        payload.get("proof_class") == "terminal_partial_order_fact"
+        and str(row["command_state"] or "").upper() in {"CANCELED", "CANCELLED"}
+        and str(row["venue_state"] or "").upper()
+        in {"PARTIAL", "PARTIALLY_MATCHED"}
+        and str(payload.get("command_id") or "") == str(row["command_id"] or "")
+        and str(payload.get("venue_order_id") or "")
+        == str(row["venue_order_id"] or "")
+        and remainder_zero
+        and payload_remainder_zero
+        and 0.0 < matched_size < submitted_size
+        and isinstance(predicates, dict)
+        and all(predicates.get(name) is True for name in required)
+    )
+
+
 def _get_risk_level() -> str:
     """Read actual RiskGuard level instead of hardcoding GREEN."""
     try:
@@ -1077,6 +1113,7 @@ def _terminal_entry_command_conflict_empty() -> dict:
         ),
         "count": 0,
         "superseded_by_terminal_event_count": 0,
+        "terminal_partial_order_fact_count": 0,
         "by_command_state": {},
         "by_venue_state": {},
         "by_position_phase": {},
@@ -1097,6 +1134,16 @@ def _query_terminal_entry_command_venue_fact_conflicts(conn) -> dict:
 
     has_position_current = _table_exists(conn, "main", "position_current")
     has_command_events = _table_exists(conn, "main", "venue_command_events")
+    venue_fact_columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA main.table_info(venue_order_facts)").fetchall()
+        if len(row) > 1
+    }
+    venue_fact_payload_select = (
+        "lof.raw_payload_json AS venue_fact_raw_payload_json"
+        if "raw_payload_json" in venue_fact_columns
+        else "NULL AS venue_fact_raw_payload_json"
+    )
     pc_select = (
         "pc.position_id, pc.phase, pc.order_status, pc.chain_state, pc.city, "
         "pc.target_date, pc.strategy_key"
@@ -1144,6 +1191,7 @@ def _query_terminal_entry_command_venue_fact_conflicts(conn) -> dict:
                vc.updated_at, {pc_select},
                lof.state AS venue_state, lof.remaining_size, lof.matched_size,
                lof.observed_at AS venue_observed_at,
+               {venue_fact_payload_select},
                {event_select}
           FROM venue_commands vc
           JOIN venue_order_facts lof
@@ -1175,8 +1223,12 @@ def _query_terminal_entry_command_venue_fact_conflicts(conn) -> dict:
     by_venue_state: dict[str, int] = {}
     by_position_phase: dict[str, int] = {}
     superseded_by_terminal_event_count = 0
+    terminal_partial_order_fact_count = 0
     orders: list[dict] = []
     for row in rows:
+        if _terminal_partial_order_fact_confirms_closed_remainder(row):
+            terminal_partial_order_fact_count += 1
+            continue
         if _terminal_event_supersedes_nonterminal_fact(row):
             superseded_by_terminal_event_count += 1
             continue
@@ -1217,6 +1269,7 @@ def _query_terminal_entry_command_venue_fact_conflicts(conn) -> dict:
         "status": "ok",
         "count": len(orders),
         "superseded_by_terminal_event_count": superseded_by_terminal_event_count,
+        "terminal_partial_order_fact_count": terminal_partial_order_fact_count,
         "by_command_state": by_command_state,
         "by_venue_state": by_venue_state,
         "by_position_phase": by_position_phase,

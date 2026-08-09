@@ -982,6 +982,7 @@ class TestRCPV2RowCountSensor:
                 ),
                 "count": 0,
                 "superseded_by_terminal_event_count": 0,
+                "terminal_partial_order_fact_count": 0,
                 "by_command_state": {},
                 "by_venue_state": {},
                 "by_position_phase": {},
@@ -1650,6 +1651,123 @@ class TestRCPV2RowCountSensor:
         assert conflicts["count"] == 0
         assert conflicts["orders"] == []
         assert conflicts["superseded_by_terminal_event_count"] == 1
+
+    def test_terminal_partial_order_fact_closes_cancelled_remainder_conflict(self):
+        """Typed zero-remainder repair proof is terminal despite partial-fill state."""
+        from src.observability import status_summary as status_summary_module
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                venue_order_id TEXT,
+                intent_kind TEXT,
+                state TEXT,
+                side TEXT,
+                size REAL,
+                price REAL,
+                position_id TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT,
+                order_status TEXT,
+                chain_state TEXT,
+                city TEXT,
+                target_date TEXT,
+                strategy_key TEXT
+            );
+            CREATE TABLE venue_order_facts (
+                fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                venue_order_id TEXT,
+                command_id TEXT,
+                state TEXT,
+                remaining_size TEXT,
+                matched_size TEXT,
+                source TEXT,
+                observed_at TEXT,
+                ingested_at TEXT,
+                local_sequence INTEGER,
+                raw_payload_json TEXT
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, venue_order_id, intent_kind, state, side, size, price,
+                position_id, created_at, updated_at
+            ) VALUES (
+                'cmd-terminal-partial', 'ord-terminal-partial', 'ENTRY', 'CANCELLED',
+                'BUY', 19.0, 0.13, 'pos-terminal-partial',
+                '2026-08-08T20:16:42+00:00', '2026-08-08T20:40:00+00:00'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO position_current (
+                position_id, phase, order_status, chain_state, city, target_date, strategy_key
+            ) VALUES (
+                'pos-terminal-partial', 'pending_exit', 'retry_pending', 'synced',
+                'Shanghai', '2026-08-09', 'day0_nowcast_entry'
+            )
+            """
+        )
+        payload = {
+            "command_id": "cmd-terminal-partial",
+            "venue_order_id": "ord-terminal-partial",
+            "proof_class": "terminal_partial_order_fact",
+            "reason": "cancelled_entry_confirmed_partial_fill_projection_repair",
+            "remaining_size": "0",
+            "required_predicates": {
+                "cancel_acked": True,
+                "canonical_positive_trade_facts": True,
+                "canonical_trade_facts_match_terminal_order_fact": True,
+                "command_state_cancelled": True,
+                "cumulative_fill_below_requested_size": True,
+                "terminal_order_remainder_zero": True,
+            },
+        }
+        conn.execute(
+            """
+            INSERT INTO venue_order_facts (
+                venue_order_id, command_id, state, remaining_size, matched_size,
+                source, observed_at, ingested_at, local_sequence, raw_payload_json
+            ) VALUES (
+                'ord-terminal-partial', 'cmd-terminal-partial', 'PARTIALLY_MATCHED',
+                '0', '18.55', 'WS_USER', '2026-08-08T20:40:00+00:00',
+                '2026-08-08T21:57:34+00:00', 4, ?
+            )
+            """,
+            (json.dumps(payload),),
+        )
+        conn.commit()
+
+        conflicts = status_summary_module._query_terminal_entry_command_venue_fact_conflicts(conn)
+
+        assert conflicts["status"] == "ok"
+        assert conflicts["count"] == 0
+        assert conflicts["orders"] == []
+        assert conflicts["terminal_partial_order_fact_count"] == 1
+
+        payload["required_predicates"][
+            "canonical_trade_facts_match_terminal_order_fact"
+        ] = False
+        conn.execute(
+            "UPDATE venue_order_facts SET raw_payload_json = ?",
+            (json.dumps(payload),),
+        )
+        conn.commit()
+
+        conflicts = status_summary_module._query_terminal_entry_command_venue_fact_conflicts(conn)
+
+        assert conflicts["count"] == 1
+        assert conflicts["terminal_partial_order_fact_count"] == 0
 
     def test_ambiguous_not_canceled_matched_terminal_event_remains_conflict(self):
         """NOT_CANCELED with matched ambiguity is not terminal venue proof."""
