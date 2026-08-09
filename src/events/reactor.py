@@ -719,6 +719,7 @@ def _paused_entry_wake_should_park(
         Callable[[], frozenset[tuple[str, tuple[str, str, str]]]] | None
     ) = None,
     allow_forecast_carrier_progress: bool = False,
+    durable_exact_held_completion: bool = False,
 ) -> bool:
     """Park paused BUY work unless this wake has protected non-BUY progress."""
 
@@ -736,6 +737,8 @@ def _paused_entry_wake_should_park(
     ):
         return False
     if allow_forecast_carrier_progress:
+        return False
+    if durable_exact_held_completion:
         return False
     if not held_sell_reauction_requests:
         return True
@@ -7226,6 +7229,22 @@ _DURABLE_EXACT_HELD_COMPLETION_SEEN: set[str] = set()
 _DURABLE_EXACT_HELD_COMPLETION_LOCK = threading.Lock()
 
 
+def _durable_exact_held_sell_completion_pending() -> bool:
+    """Read durable exact held-SELL debt without claiming its auction turn."""
+
+    try:
+        from src.runtime.reactor_wake import exact_held_sell_completion_wake_ids
+
+        return bool(exact_held_sell_completion_wake_ids(fail_on_error=True))
+    except (OSError, ValueError):
+        logging.getLogger("zeus.events.reactor").warning(
+            "durable held SELL completion queue unreadable; retaining ordinary "
+            "reactor scheduling",
+            exc_info=True,
+        )
+        return False
+
+
 def _claim_durable_exact_held_sell_completion_turn() -> bool:
     """Reserve one ordinary auction turn per durable exact-debt generation.
 
@@ -7412,15 +7431,23 @@ def run_edli_event_reactor_cycle(
     from src.riskguard.risk_level import RiskLevel
     from src.riskguard.riskguard import get_current_level
 
+    durable_exact_held_completion_pending = (
+        _durable_exact_held_sell_completion_pending()
+    )
     held_sell_completion_cycle = bool(
-        completion_wake and producer_held_sell_reauction_requests
+        (completion_wake and producer_held_sell_reauction_requests)
+        or durable_exact_held_completion_pending
+    )
+    completion_recovery_cycle = bool(
+        held_sell_completion_cycle
+        or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
     )
     paused_forecast_carrier = (
         allow_paused_forecast_snapshot_completion and forecast_posterior_wake
     )
     if (
         get_current_level() != RiskLevel.GREEN
-        and not held_sell_completion_cycle
+        and not completion_recovery_cycle
         and not paused_forecast_carrier
     ):
         # SCOPE: BUY-capable reactor work only. A main-qualified paused forecast
@@ -7443,6 +7470,7 @@ def run_edli_event_reactor_cycle(
         ),
         held_sell_request_exposure_provider=held_sell_request_exposure_provider,
         allow_forecast_carrier_progress=forecast_posterior_wake,
+        durable_exact_held_completion=held_sell_completion_cycle,
     ):
         if active_lock.acquire(blocking=False):
             try:
@@ -8032,6 +8060,10 @@ def run_edli_event_reactor_cycle(
         durable_exact_held_completion = (
             _claim_durable_exact_held_sell_completion_turn()
         )
+        active_held_sell_completion_cycle = bool(
+            (completion_wake and producer_held_sell_reauction_requests)
+            or durable_exact_held_completion
+        )
         (
             _monitor_completion_due_at_start,
             _monitor_selection_cancelled,
@@ -8047,8 +8079,7 @@ def run_edli_event_reactor_cycle(
             _global_auction_completion_mode(
                 completion_due=_monitor_completion_due_at_start,
                 exact_held_completion=(
-                    held_sell_completion_cycle
-                    or durable_exact_held_completion
+                    active_held_sell_completion_cycle
                 ),
                 trade_conn=trade_conn,
             )
@@ -8133,6 +8164,9 @@ def run_edli_event_reactor_cycle(
                     held_sell_request_exposure_provider
                 ),
                 allow_forecast_carrier_progress=forecast_posterior_wake,
+                durable_exact_held_completion=(
+                    active_held_sell_completion_cycle
+                ),
             ),
             final_intent_submit=submit_adapter,
             reject=lambda _event, _stage, _reason: None,

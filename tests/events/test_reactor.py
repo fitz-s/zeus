@@ -403,6 +403,10 @@ def test_paused_entry_park_requires_exact_canonical_held_sell_work():
         held_sell_request_exposure_provider=lambda: frozenset(),
         allow_forecast_carrier_progress=True,
     ) is False
+    assert _paused_entry_wake_should_park(
+        pause_reason="operator",
+        durable_exact_held_completion=True,
+    ) is False
 
 
 def test_paused_targeted_forecast_carrier_redecides_without_touching_ordinary_queue():
@@ -1483,6 +1487,42 @@ def test_paused_exact_canonical_held_sell_request_reaches_reduce_only_cycle(monk
             producer_wake_reason="held_sell_global_auction_completion_requested",
             producer_held_sell_reauction_requests=(request,),
         )
+    assert lock.locked() is False
+
+
+def test_degraded_durable_held_sell_debt_reaches_reduce_only_setup(monkeypatch):
+    import src.engine.event_reactor_adapter as adapter_module
+    import src.events.reactor as reactor_module
+    import src.main as main
+    import src.state.db as db
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    class ReduceOnlySetupReached(RuntimeError):
+        pass
+
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.YELLOW)
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_pending",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        adapter_module,
+        "_entry_pause_blocks_live_submit",
+        lambda _conn: "restart_guard",
+    )
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: (_ for _ in ()).throw(ReduceOnlySetupReached()),
+    )
+
+    lock = threading.Lock()
+    with pytest.raises(ReduceOnlySetupReached):
+        reactor_module.run_edli_event_reactor_cycle(active_lock=lock)
     assert lock.locked() is False
 
 
