@@ -1,6 +1,6 @@
-# Created: 2026-05-07
-# Last reused or audited: 2026-08-08
-# Authority basis: hook output-schema and non-dirty worktree lifecycle contract
+# Lifecycle: created=2026-05-07; last_reviewed=2026-08-08; last_reused=2026-08-08
+# Purpose: Regress hook advisory output and preserve clean worktree lifecycle behavior.
+# Reuse: Inspect the hook output contract and `architecture/test_topology.yaml` before relying on this coverage.
 
 """
 Tests for .claude/hooks/dispatch.py Phase 3 event handlers:

@@ -1,6 +1,6 @@
-# Created: 2026-05-07
-# Last reused or audited: 2026-08-08
-# Authority basis: live worktree lifecycle and branch-cleanup regression coverage
+# Lifecycle: created=2026-05-07; last_reviewed=2026-08-08; last_reused=2026-08-08
+# Purpose: Regress `worktree_doctor` live-branch hygiene and non-destructive closeout advice.
+# Reuse: Inspect the doctor contract and `architecture/test_topology.yaml` before relying on this coverage.
 
 """
 Tests for scripts/worktree_doctor.py.
