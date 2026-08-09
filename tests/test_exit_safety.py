@@ -12457,7 +12457,18 @@ def test_pending_exit_incomplete_order_truth_defers_without_state_mutation(conn)
     ) == before
 
 
-@pytest.mark.parametrize("incomplete_payload", [None, {}, {"reason": "missing status"}])
+@pytest.mark.parametrize(
+    "incomplete_payload",
+    [
+        None,
+        {},
+        {"reason": "missing status"},
+        [],
+        ["MALFORMED"],
+        7,
+        False,
+    ],
+)
 def test_pending_exit_empty_order_truth_never_accumulates_retry_or_reprices(
     conn,
     incomplete_payload,

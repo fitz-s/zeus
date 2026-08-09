@@ -345,6 +345,8 @@ class PolymarketV2AdapterProtocol(Protocol):
         deadline_monotonic: float | None = None,
     ) -> OrderState: ...
 
+    def prepare_order_truth_reader(self) -> None: ...
+
     def get_account_truth(
         self,
         *,
@@ -564,6 +566,11 @@ class PolymarketV2Adapter:
                 network_timeout_seconds=self.network_timeout_seconds,
             )
         return self._client
+
+    def prepare_order_truth_reader(self) -> None:
+        """Initialize authenticated order truth outside monitor deadlines."""
+
+        self._sdk_client()
 
     def _refresh_signer_bound_l2_api_creds(self, client: Any) -> None:
         set_api_creds = getattr(client, "set_api_creds", None)

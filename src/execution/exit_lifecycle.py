@@ -154,11 +154,12 @@ def warm_held_monitor_clob_client() -> bool:
     """Warm the reduce-only transport outside an observation-triggered exit."""
 
     try:
-        return bool(
-            _held_monitor_clob_client().warm_public_connection(
-                timeout=_held_monitor_clob_warmup_timeout()
-            )
+        client = _held_monitor_clob_client()
+        public_ready = bool(
+            client.warm_public_connection(timeout=_held_monitor_clob_warmup_timeout())
         )
+        client.prepare_order_truth_reader()
+        return public_ready
     except Exception:  # noqa: BLE001 - keepalive is advisory; monitor fails closed.
         return False
 
@@ -9439,7 +9440,9 @@ def _check_order_fill(
                     f"pending-exit order truth unavailable: {normalized}"
                 )
             return normalized, payload
-        return "", payload
+        raise _PendingExitOrderTruthIncomplete(
+            "pending-exit order truth unavailable: malformed response"
+        )
     except _PendingExitOrderTruthIncomplete:
         raise
     except Exception as exc:

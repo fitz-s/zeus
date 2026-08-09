@@ -1205,6 +1205,11 @@ class PolymarketClient:
 
         return result
 
+    def prepare_order_truth_reader(self) -> None:
+        """Prepare the authenticated V2 order reader before monitor deadlines."""
+
+        self._ensure_v2_adapter().prepare_order_truth_reader()
+
     def cancel_order(self, order_id: str) -> Optional[dict]:
         """Cancel a pending order."""
         from src.control.cutover_guard import CutoverPending, gate_for_intent

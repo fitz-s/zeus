@@ -8206,6 +8206,7 @@ def test_held_monitor_reuses_warm_bounded_clob_transport(monkeypatch) -> None:
 
     created = []
     warm_timeouts = []
+    prepared = []
 
     class Client:
         def __init__(self, **kwargs):
@@ -8220,6 +8221,9 @@ def test_held_monitor_reuses_warm_bounded_clob_transport(monkeypatch) -> None:
             warm_timeouts.append(timeout)
             return True
 
+        def prepare_order_truth_reader(self) -> None:
+            prepared.append(self)
+
     exit_module._reset_held_monitor_clob_client()
     monkeypatch.setattr(polymarket_module, "PolymarketClient", Client)
     try:
@@ -8233,6 +8237,7 @@ def test_held_monitor_reuses_warm_bounded_clob_transport(monkeypatch) -> None:
         assert first.kwargs["public_http_limits"].keepalive_expiry == 180.0
         assert exit_module.warm_held_monitor_clob_client() is True
         assert warm_timeouts[-1].connect == 4.5
+        assert prepared == [first]
     finally:
         exit_module._reset_held_monitor_clob_client()
 

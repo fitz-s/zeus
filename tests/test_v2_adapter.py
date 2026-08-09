@@ -4534,3 +4534,37 @@ def test_deadline_order_read_never_invokes_lazy_client_factory(tmp_path):
 
     assert factory_calls == []
     assert time.monotonic() - started < 0.10
+
+
+def test_polymarket_client_prepares_same_adapter_used_by_deadline_order_read():
+    from src.data.polymarket_client import PolymarketClient
+    from src.venue.polymarket_v2_adapter import OrderState
+
+    class FakeAdapter:
+        def __init__(self):
+            self.prepared = False
+            self.deadlines = []
+
+        def prepare_order_truth_reader(self):
+            self.prepared = True
+
+        def get_order(self, order_id, *, deadline_monotonic):
+            assert self.prepared
+            self.deadlines.append(deadline_monotonic)
+            return OrderState(
+                order_id=order_id,
+                status="LIVE",
+                raw={"orderID": order_id, "status": "LIVE"},
+            )
+
+    client = PolymarketClient()
+    adapter = FakeAdapter()
+    client._v2_adapter = adapter
+    client.prepare_order_truth_reader()
+    deadline = time.monotonic() + 1.0
+
+    assert client.get_order("ord-prepared", deadline_monotonic=deadline) == {
+        "orderID": "ord-prepared",
+        "status": "LIVE",
+    }
+    assert adapter.deadlines == [deadline]
