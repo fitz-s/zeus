@@ -540,6 +540,65 @@ def test_no_regression_order_runtime_keeps_boot_fill_bridge_recovery():
     )
 
 
+def test_boot_fill_bridge_skips_cross_db_writer_when_read_only_probe_is_clean(monkeypatch):
+    """Healthy boot must not serialize canonical writers to rediscover no debt."""
+    import src.ingest.price_channel_ingest as pci
+    import src.main as main_mod
+    import src.state.db as db
+
+    monkeypatch.setattr(
+        pci,
+        "_edli_durable_fill_bridge_work_exists_read_only",
+        lambda: False,
+    )
+
+    def _writer_must_not_open(*args, **kwargs):
+        raise AssertionError("clean fill-bridge admission must not open a writer")
+
+    monkeypatch.setattr(db, "get_trade_connection_with_world_required", _writer_must_not_open)
+
+    main_mod._edli_boot_fill_bridge_recovery()
+
+
+def test_boot_fill_bridge_probe_uncertainty_preserves_canonical_recovery(monkeypatch):
+    """Admission uncertainty must fail toward durable recovery, never lost fills."""
+    import src.ingest.price_channel_ingest as pci
+    import src.main as main_mod
+    import src.state.db as db
+
+    class _Conn:
+        committed = False
+        closed = False
+
+        def commit(self):
+            self.committed = True
+
+        def close(self):
+            self.closed = True
+
+    conn = _Conn()
+    monkeypatch.setattr(
+        pci,
+        "_edli_durable_fill_bridge_work_exists_read_only",
+        lambda: (_ for _ in ()).throw(RuntimeError("probe uncertain")),
+    )
+    monkeypatch.setattr(
+        pci,
+        "_edli_durable_fill_bridge_scan",
+        lambda actual_conn, *, now: 0 if actual_conn is conn else -1,
+    )
+    monkeypatch.setattr(
+        db,
+        "get_trade_connection_with_world_required",
+        lambda *, write_class: conn,
+    )
+
+    main_mod._edli_boot_fill_bridge_recovery()
+
+    assert conn.committed is True
+    assert conn.closed is True
+
+
 def test_no_regression_order_runtime_reads_current_feasibility_projection():
     """P1's pre-submit witness reads the current feasibility projection.
 

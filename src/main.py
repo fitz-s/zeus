@@ -8527,7 +8527,28 @@ def _edli_boot_fill_bridge_recovery() -> None:
         bridge_conn = None
         bridged = 0
         try:
-            from src.ingest.price_channel_ingest import _edli_durable_fill_bridge_scan
+            from src.ingest.price_channel_ingest import (
+                _edli_durable_fill_bridge_scan,
+                _edli_durable_fill_bridge_work_exists_read_only,
+            )
+
+            try:
+                bridge_work_exists = (
+                    _edli_durable_fill_bridge_work_exists_read_only()
+                )
+            except Exception as exc:  # noqa: BLE001
+                bridge_work_exists = True
+                logger.warning(
+                    "EDLI boot fill-bridge read-only admission failed; "
+                    "falling back to canonical recovery: %s",
+                    exc,
+                    exc_info=True,
+                )
+            if not bridge_work_exists:
+                logger.info(
+                    "EDLI boot fill-bridge recovery: no orphaned confirmed fills"
+                )
+                return
 
             bridge_conn = get_trade_connection_with_world_required(write_class="live")
             bridged = _edli_durable_fill_bridge_scan(bridge_conn, now=now)
