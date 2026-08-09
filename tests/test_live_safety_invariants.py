@@ -6284,6 +6284,7 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
         ("RED_FORCE_EXIT", True, True, "direct", False, False),
         ("EDGE_REVERSAL", False, True, "blocked", True, False),
         ("SELL_REVERSAL", False, True, "direct", False, True),
+        ("EDGE_REVERSAL", False, True, "dust", False, False),
     ),
 )
 def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_red(
@@ -6317,8 +6318,8 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         entered_at="2026-07-14T17:00:00+00:00",
         order_posted_at="2026-07-14T16:59:00+00:00",
         fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
-        shares=500.0,
-        shares_filled=500.0,
+        shares=3.0 if outcome == "dust" else 500.0,
+        shares_filled=3.0 if outcome == "dust" else 500.0,
         chain_state="synced",
         chain_shares=500.0,
         token_id="paris-yes",
@@ -6411,6 +6412,13 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         lambda **kwargs: (kwargs["should_exit"], kwargs["exit_reason"]),
     )
     from src.engine import global_batch_runtime
+    from src.execution import exit_lifecycle
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_fresh_snapshot_min_order",
+        lambda *args, **kwargs: Decimal("5"),
+    )
 
     monkeypatch.setattr(
         cycle_runtime,
@@ -6529,6 +6537,12 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         fake_execute_exit,
     )
 
+    monitor_now = (
+        (lambda: datetime.now(timezone.utc))
+        if outcome == "dust"
+        else (lambda: datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc))
+    )
+
     results = []
     artifact = type(
         "Artifact",
@@ -6546,9 +6560,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             ),
             "logger": logging.getLogger("test_global_auction_owned_monitor_sell"),
             "cities_by_name": {},
-            "_utcnow": staticmethod(
-                lambda: datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
-            ),
+            "_utcnow": staticmethod(monitor_now),
         },
     )
     summary = {"monitors": 0, "exits": 0}
@@ -6574,6 +6586,15 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert conn.execute(
             "SELECT COUNT(*) FROM venue_commands WHERE intent_kind = 'EXIT'"
         ).fetchone()[0] == 0
+    elif outcome == "dust":
+        assert summary["monitor_statistical_sell_dust_holds"] == 1
+        assert summary["exits"] == 0
+        assert results[0].should_exit is False
+        assert "[DUST:" in results[0].exit_reason
+        assert pos.order_status == "backoff_exhausted"
+        assert "fresh_snapshot_sub_minimum_dust_hold" in pos.applied_validations
+        assert execute_calls == []
+        assert auction_completion_requests == []
     elif outcome in {"blocked", "request_failed"}:
         completion_accepted = request_accepted and not malformed_request
         assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
@@ -6736,7 +6757,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             assert summary["monitor_branchwise_dominant_direct_sells"] == 1
             assert "posterior_support_zero_sell_dominates" in pos.applied_validations
         assert execute_calls == [pos]
-    if outcome not in {"blocked", "request_failed"}:
+    if outcome not in {"blocked", "request_failed", "dust"}:
         assert auction_completion_requests == []
     assert invalidations == ([] if outcome != "direct" else ["venue_side_effect"])
     conn.close()

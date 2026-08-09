@@ -7473,6 +7473,69 @@ def execute_monitoring_phase(
                 summary["monitor_branchwise_dominant_direct_sells"] = (
                     summary.get("monitor_branchwise_dominant_direct_sells", 0) + 1
                 )
+            if statistical_sell_requires_global:
+                # Global selection cannot make a sub-minimum holding sellable.
+                # Re-auctioning it every monitor tick only appends debt and
+                # spends the money-path budget on an impossible command.  Use
+                # the existing canonical dust state, backed by the latest fresh
+                # executable snapshot; a later venue-minimum decrease makes
+                # this check false and normal redecision resumes automatically.
+                from src.execution.exit_lifecycle import (
+                    _latest_fresh_snapshot_min_order,
+                    _mark_exit_dust_hold,
+                )
+
+                try:
+                    held_shares = Decimal(
+                        str(
+                            getattr(pos, "effective_shares", None)
+                            or getattr(pos, "shares", 0)
+                        )
+                    )
+                except (InvalidOperation, TypeError, ValueError):
+                    held_shares = Decimal("0")
+                fresh_min_order = _latest_fresh_snapshot_min_order(
+                    pos,
+                    conn=conn,
+                    now=(
+                        deps._utcnow()
+                        if hasattr(deps, "_utcnow")
+                        else datetime.now(timezone.utc)
+                    ),
+                )
+                if (
+                    fresh_min_order is not None
+                    and held_shares > 0
+                    and held_shares < fresh_min_order
+                ):
+                    dust_error = (
+                        "executable_snapshot_gate: size "
+                        f"{held_shares} is below snapshot min_order_size "
+                        f"{fresh_min_order}"
+                    )
+                    dust_reason = f"{exit_reason} [DUST: {dust_error}]"
+                    _mark_exit_dust_hold(
+                        pos,
+                        reason=dust_reason,
+                        error=dust_error,
+                        conn=conn,
+                    )
+                    should_exit = False
+                    statistical_sell_requires_global = False
+                    exit_reason = dust_reason
+                    local_exit_trigger = "CANONICAL_DUST_HOLD"
+                    pos.applied_validations = list(
+                        dict.fromkeys(
+                            [
+                                *(pos.applied_validations or []),
+                                "fresh_snapshot_sub_minimum_dust_hold",
+                                "global_auction_inapplicable:venue_minimum",
+                            ]
+                        )
+                    )
+                    summary["monitor_statistical_sell_dust_holds"] = (
+                        summary.get("monitor_statistical_sell_dust_holds", 0) + 1
+                    )
             probability_receipt = getattr(
                 pos,
                 "_day0_monitor_probability_receipt",
