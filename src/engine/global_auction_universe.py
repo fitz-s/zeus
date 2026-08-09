@@ -26,6 +26,9 @@ from src.contracts.executable_market_snapshot import (
     fee_rate_fraction_from_details,
 )
 from src.contracts.fee_authority import resolve_taker_fee_fraction
+from src.contracts.strategy_capital_allocation import (
+    StrategyCapitalAllocationWitness,
+)
 from src.events.candidate_binding import weather_family_id
 from src.events.event_writer import EventWriter
 from src.events.opportunity_event import OpportunityEvent
@@ -2992,6 +2995,7 @@ def current_portfolio_wealth_witness(
     decision_at_utc: datetime,
     max_age: timedelta,
     portfolio_state: object | None = None,
+    capital_allocation: Mapping[str, object] | None = None,
 ) -> PortfolioWealthWitness:
     """Build one current terminal-wealth bound from chain collateral and positions.
 
@@ -3309,6 +3313,35 @@ def current_portfolio_wealth_witness(
         )
         spendable = Decimal(spendable_micro) / Decimal("1000000")
         reservations = Decimal(cash_at_risk_micro) / Decimal("1000000")
+        committed_capital = sum(
+            (
+                Decimal(amount) / Decimal("1000000")
+                for amount in native_commitments_micro.values()
+            ),
+            Decimal("0"),
+        )
+        if capital_allocation is None:
+            from src.runtime.bankroll_provider import (
+                current_zeus_capital_allocation_setting,
+            )
+
+            active_capital_allocation = (
+                current_zeus_capital_allocation_setting()
+            )
+        else:
+            active_capital_allocation = capital_allocation
+        # Fail-closed allocation gate (INV-47):
+        # SCOPE — only new BUY capacity for this complete auction epoch.
+        # DRAIN — every selection/preflight/final executor recapture rebuilds
+        # this witness and a changed identity supersedes the full ranking.
+        # RESET — a valid active setting plus current collateral/commitments
+        # rebuilds a coherent witness; SELL/HOLD never depend on positive room.
+        strategy_capital_allocation = StrategyCapitalAllocationWitness.build(
+            capital_basis_usd=floor + committed_capital,
+            committed_capital_usd=committed_capital,
+            venue_spendable_cash_usd=spendable,
+            allocation=active_capital_allocation,
+        )
 
         ledger_snapshot_id = hashlib.sha256(
             repr(
@@ -3345,6 +3378,9 @@ def current_portfolio_wealth_witness(
             spendable_cash_usd=spendable,
             reservations_usd=reservations,
             collateral_authority=authority,
+            strategy_capital_allocation_identity=(
+                strategy_capital_allocation.witness_identity
+            ),
             captured_at_utc=captured_at,
         )
         return PortfolioWealthWitness(
@@ -3355,6 +3391,7 @@ def current_portfolio_wealth_witness(
             spendable_cash_usd=spendable,
             reservations_usd=reservations,
             collateral_authority=authority,
+            strategy_capital_allocation=strategy_capital_allocation,
             captured_at_utc=captured_at,
             max_age=max_age,
             witness_identity=identity,

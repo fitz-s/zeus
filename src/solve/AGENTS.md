@@ -106,8 +106,19 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
   `LegacyDecisionProjection` re-scoring the primary leg STANDALONE at its post-haircut size;
   if that ΔU ≤ 0 → no-trade in phase 1. Promotion evidence NEVER grades
   `SolutionPlan.expected_delta_log_wealth`.
-- **Log-domain safety.** A non-positive endowment atom is refused up front
-  (`ZeroWealthOutcomeError`); coordinate feasibility bounds keep `W_end(a) > 0` strictly.
+- **Log-domain safety.** The general optimiser and every BUY refuse a
+  non-positive endowment atom up front (`ZeroWealthOutcomeError`); coordinate
+  feasibility bounds keep `W_end(a) > 0` strictly. A global reduce-only SELL is
+  the sole typed exception: exact zero atoms use the `epsilon -> 0` extended-log
+  limit, with raw ruin-probability reduction as the first lexicographic key and
+  finite expected log growth per capital-hour only after exact equality. Never
+  round, tolerance-collapse, or time-normalize the ruin key. Negative or
+  non-finite terminal wealth always fails closed; maker zero-atom SELL requires
+  a current partial-fill distribution and otherwise remains unavailable.
+- **Capital ownership.** Venue cash proves affordability, not utility ownership.
+  BUY and SELL share the Zeus-owned endowment `U + H[a]`, where
+  `U=max(E-K,0)` and `H[a]` is the exact same-family payoff. BUY capacity is
+  `min(C,max(L-K,0))`; co-tenant wallet cash never enters Zeus log utility.
 - **Coherence lockstep (§4 decision 1).** The shim emits `coherence_allows=True`; the
   overlay's COHERENCE_BLOCKED guard retires in the flag-ON packet. Do not add a coherence
   veto here.

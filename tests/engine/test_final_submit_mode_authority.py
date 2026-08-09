@@ -1,7 +1,8 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-07-22
-# Authority basis: live redecision repair — either valid proof mode may be rebuilt
-#   under the same fresh rest-then-cross policy; missing/unknown modes still abort.
+# Last reused/audited: 2026-08-09
+# Authority basis: live redecision repair plus the current maker-fill authority
+#   wall. Mode reconciliation remains pure, but no maker-dependent proposal may
+#   reach a command until a typed current partial-fill witness exists.
 """Relationship tests (P0 mode-authority, operator review 2026-06-10).
 
 The cross-module invariant under test spans the boundary
@@ -165,6 +166,50 @@ class TestModeRevalidation:
             "a literal order_mode=\"TAKER\" final-intent re-build is back — that is the "
             "validator-bypassing mode-flip hole this P0 closed"
         )
+
+
+class TestCurrentMakerFillAuthority:
+    @pytest.mark.parametrize(
+        ("proof_mode", "fresh_mode"),
+        (("MAKER", "TAKER"), ("TAKER", "MAKER"), ("MAKER", "MAKER")),
+    )
+    def test_any_maker_dependency_fails_closed(self, proof_mode, fresh_mode):
+        from src.engine.event_reactor_adapter import (
+            _current_maker_fill_authority_rejection_reason,
+        )
+
+        assert _current_maker_fill_authority_rejection_reason(
+            proof_mode=proof_mode,
+            fresh_mode=fresh_mode,
+        ) == "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
+
+    def test_taker_to_taker_has_no_maker_authority_dependency(self):
+        from src.engine.event_reactor_adapter import (
+            _current_maker_fill_authority_rejection_reason,
+        )
+
+        assert _current_maker_fill_authority_rejection_reason(
+            proof_mode="TAKER",
+            fresh_mode="TAKER",
+        ) is None
+
+    def test_command_builder_applies_maker_wall_before_mode_reconciliation(self):
+        from src.engine.event_reactor_adapter import (
+            _build_live_execution_command_certificates,
+        )
+
+        source = inspect.getsource(_build_live_execution_command_certificates)
+        assert source.index("_current_maker_fill_authority_rejection_reason") < (
+            source.index("_validate_final_order_mode_or_abort")
+        )
+
+    def test_local_proof_generation_cannot_admit_fixed_maker_prior(self):
+        from src.engine.event_reactor_adapter import _generate_candidate_proofs
+
+        source = inspect.getsource(_generate_candidate_proofs)
+        assert "maker_fill_authority_reason" in source
+        assert "or maker_fill_authority_reason is not None" in source
+        assert "passed_prefilter = False" in source
 
 
 # ---------------------------------------------------------------------------

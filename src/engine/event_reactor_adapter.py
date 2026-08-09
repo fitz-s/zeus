@@ -183,6 +183,7 @@ from src.contracts.day0_payoff_truth import (
 )
 from src.contracts.execution_intent import ExecutableCostBasis
 from src.contracts.execution_price import ExecutionPrice, ExecutionPriceContractError
+from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.contracts.venue_submission_envelope import assert_live_order_unit_price
 from src.contracts.executable_cost_curve import (
     BookLevel,
@@ -1467,7 +1468,7 @@ def _global_book_receipt_token_pairs(
             compressed_b64,
         ) = receipt_row
         if (
-            schema_version not in {12, 13, 14, 15, 16, 17, 18, 19, 20}
+            schema_version not in {12, 13, 14, 15, 16, 17, 18, 19, 20, 21}
             or coverage_status != "COMPLETE"
             or coverage_complete != 1
             or encoding != "zlib+base64+canonical-json-v1"
@@ -11532,6 +11533,8 @@ def _submit_current_global_sell(
             )
             if expected_growth is None:
                 raise ValueError("GLOBAL_SELL_EXPECTED_COMPARISON_MISSING")
+            if expected_growth.utility_basis != STRATEGY_LOG_UTILITY_BASIS:
+                raise ValueError("GLOBAL_SELL_UTILITY_BASIS_INVALID")
             if candidate.probability_functional == "POSTERIOR_PREDICTIVE_MEAN":
                 if expected_terminal is None:
                     raise ValueError("GLOBAL_SELL_EXPECTED_ECONOMICS_MISSING")
@@ -11549,6 +11552,9 @@ def _submit_current_global_sell(
                     "expected_sell_ev_usd": float(
                         expected_terminal.expected_ev_usd
                     ),
+                    "sell_ruin_probability_reduction": float(
+                        expected_terminal.ruin_probability_reduction
+                    ),
                 }
             else:
                 capital_economics = {
@@ -11559,6 +11565,9 @@ def _submit_current_global_sell(
                         getattr(decision, "robust_delta_log_wealth")
                     ),
                     "robust_ev_usd": float(getattr(decision, "robust_ev_usd")),
+                    "sell_ruin_probability_reduction": float(
+                        getattr(decision, "ruin_probability_reduction")
+                    ),
                 }
             capital_economics.update(
                 {
@@ -11571,6 +11580,16 @@ def _submit_current_global_sell(
                     "expected_comparison_log_growth_per_hour": float(
                         expected_growth.expected_log_growth_per_hour
                     ),
+                    "expected_comparison_capital_efficiency": float(
+                        expected_growth.expected_capital_efficiency
+                    ),
+                    "expected_comparison_capital_lock_hours": float(
+                        expected_growth.capital_lock_hours
+                    ),
+                    "ruin_probability_reduction": float(
+                        expected_growth.ruin_probability_reduction
+                    ),
+                    "utility_basis": expected_growth.utility_basis,
                 }
             )
             exit_context = ExitContext(
@@ -13640,6 +13659,8 @@ def _global_actuation_selected_proof(
     if global_execution_mode == "MAKER_REST" and expected_growth is None:
         raise ValueError("GLOBAL_MAKER_REST_COMPARISON_MISSING")
     if expected_growth is not None:
+        if expected_growth.utility_basis != STRATEGY_LOG_UTILITY_BASIS:
+            raise ValueError("GLOBAL_EXPECTED_GROWTH_UTILITY_BASIS_INVALID")
         cert.update(
             {
                 "global_proposal_expected_delta_log_wealth": (
@@ -13654,6 +13675,10 @@ def _global_actuation_selected_proof(
                 "global_proposal_expected_capital_efficiency": (
                     expected_growth.expected_capital_efficiency
                 ),
+                "global_ruin_probability_reduction": (
+                    expected_growth.ruin_probability_reduction
+                ),
+                "global_utility_basis": expected_growth.utility_basis,
                 "global_proposal_capital_lock_hours": (
                     expected_growth.capital_lock_hours
                 ),
@@ -13675,6 +13700,9 @@ def _global_actuation_selected_proof(
                     expected_terminal.expected_delta_log_wealth
                 ),
                 "global_expected_ev_usd": expected_terminal.expected_ev_usd,
+                "global_terminal_ruin_probability_reduction": (
+                    expected_terminal.ruin_probability_reduction
+                ),
                 "global_expected_capital_efficiency": (
                     expected_terminal.expected_delta_log_wealth
                     / float(decision.cost_usd)
@@ -13692,6 +13720,9 @@ def _global_actuation_selected_proof(
                 ),
                 "global_robust_ev_usd": decision.robust_ev_usd,
                 "global_capital_efficiency": decision.capital_efficiency,
+                "global_terminal_ruin_probability_reduction": (
+                    decision.ruin_probability_reduction
+                ),
             }
         )
     prefix = _global_buy_prefix_certificate_for_proof(
@@ -17216,6 +17247,27 @@ def _execution_command_id_from_command_certificate(command: DecisionCertificate)
 # source of truth for the reason string is _SUBMIT_ABORT_RECEIPT_REASON keyed on
 # CandidateLifecycleState.SUBMIT_ABORTED_MODE_FLIPPED.
 _MODE_FLIPPED_ABORT_PREFIX = "SUBMIT_ABORTED_MODE_FLIPPED"
+_CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE = (
+    "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
+)
+
+
+def _current_maker_fill_authority_rejection_reason(
+    *,
+    proof_mode: str | None,
+    fresh_mode: str | None,
+) -> str | None:
+    """Reject any maker-dependent submit until a typed current witness exists."""
+
+    modes = {
+        str(value or "").strip().upper()
+        for value in (proof_mode, fresh_mode)
+    }
+    return (
+        _CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+        if "MAKER" in modes
+        else None
+    )
 _PRICE_MOVED_ABORT_PREFIX = "SUBMIT_ABORTED_PRICE_MOVED"
 
 
@@ -18338,6 +18390,16 @@ def _build_live_execution_command_certificates(
             str(actionable.payload.get("proof_execution_mode_intent") or "").strip().upper()
             or None
         )
+        maker_fill_rejection = _current_maker_fill_authority_rejection_reason(
+            proof_mode=proof_order_mode,
+            fresh_mode=_fresh_mode,
+        )
+        if maker_fill_rejection is not None:
+            # SCOPE — this new maker-dependent entry only; taker candidates and
+            # held-position monitoring continue. DRAIN — the next full decision
+            # cut rebuilds the candidate and fresh book. RESET — only a reviewed,
+            # candidate-bound current maker-fill witness can remove this wall.
+            raise ValueError(maker_fill_rejection)
         order_mode = _validate_final_order_mode_or_abort(
             proof_mode=proof_order_mode,
             fresh_mode=_fresh_mode,
@@ -26782,6 +26844,15 @@ def _generate_candidate_proofs(
                 unexpired_family_rest=_rtc_unexpired_rest,
                 escalated_after_rest=_rtc_escalated,
             )
+            maker_fill_authority_reason = (
+                _CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+                if mode_ev is not None
+                and (
+                    str(mode_ev.chosen_mode).strip().upper() == "MAKER"
+                    or _day0_proof_maker_only
+                )
+                else None
+            )
             if mode_ev is not None:
                 if _day0_proof_maker_only:
                     try:
@@ -26799,6 +26870,10 @@ def _generate_candidate_proofs(
                     c_cost_95pct=c_cost_95pct,
                     p_fill_lcb=p_fill_lcb,
                 )
+            if maker_fill_authority_reason is not None:
+                score = 0.0
+                if missing_reason is None:
+                    missing_reason = maker_fill_authority_reason
             # REMOVED 2026-06-08 (S4; "bin selection.md" §6/§9 Hidden #3/#10/§13 +
             # operator directive): the scalar market-disagreement buy_no demotion
             # (cheap-NO-overconfidence -> score=0) is GONE. It is SUBSUMED by the
@@ -26876,6 +26951,7 @@ def _generate_candidate_proofs(
                 capital_efficiency_reason is not None
                 or buy_no_conservative_evidence_reason is not None
                 or direction_law_reason is not None
+                or maker_fill_authority_reason is not None
             ):
                 passed_prefilter = False
             proof_execution_mode_intent = (

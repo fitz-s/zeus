@@ -18,11 +18,16 @@ Covers:
 from __future__ import annotations
 
 import importlib
+from dataclasses import replace
 
 import pytest
 
 from src.runtime import bankroll_provider
-from src.runtime.bankroll_provider import resolve_zeus_equity_base
+from src.runtime.bankroll_provider import (
+    current_zeus_capital_allocation_setting,
+    resolve_zeus_equity_base,
+)
+from src.contracts.strategy_capital_allocation import StrategyCapitalAllocationWitness
 
 
 def test_wallet_total_mode_is_byte_equal_passthrough(caplog):
@@ -79,6 +84,183 @@ def test_missing_value_raises_for_fraction_and_absolute():
 def test_invalid_mode_raises():
     with pytest.raises(ValueError, match="mode must be one of"):
         resolve_zeus_equity_base(1000.0, allocation={"mode": "bogus"})
+
+
+@pytest.mark.parametrize(
+    ("allocation", "expected_equity", "expected_utility", "expected_limit", "expected_remaining"),
+    [
+        ({"mode": "wallet_total"}, 90.0, 80.0, 90.0, 80.0),
+        ({"mode": "fraction", "value": 0.5}, 45.0, 35.0, 45.0, 35.0),
+        ({"mode": "absolute", "value": 40.0}, 40.0, 30.0, 40.0, 30.0),
+    ],
+)
+def test_strategy_capital_witness_exact_dual_bankroll_math(
+    allocation, expected_equity, expected_utility, expected_limit, expected_remaining
+):
+    witness = StrategyCapitalAllocationWitness.build(
+        capital_basis_usd=90,
+        committed_capital_usd=10,
+        venue_spendable_cash_usd=80,
+        allocation=allocation,
+    )
+    assert float(witness.allocated_equity_usd) == expected_equity
+    assert float(witness.utility_liquid_cash_usd) == expected_utility
+    assert float(witness.buy_commitment_limit_usd) == expected_limit
+    assert float(witness.remaining_buy_capacity_usd) == expected_remaining
+    assert witness.venue_spendable_cash_usd == 80
+
+
+def test_wallet_total_has_exact_cash_commitment_parity():
+    witness = StrategyCapitalAllocationWitness.build(
+        capital_basis_usd=90,
+        committed_capital_usd=10,
+        venue_spendable_cash_usd=80,
+        allocation={"mode": "wallet_total"},
+    )
+    assert witness.allocated_equity_usd == witness.capital_basis_usd
+    assert witness.allocated_equity_usd == witness.venue_spendable_cash_usd + witness.committed_capital_usd
+    assert witness.utility_liquid_cash_usd == witness.venue_spendable_cash_usd
+    assert witness.buy_commitment_limit_usd == witness.allocated_equity_usd
+    assert witness.remaining_buy_capacity_usd == witness.venue_spendable_cash_usd
+
+
+@pytest.mark.parametrize(
+    ("allocation", "expected_equity", "expected_utility", "expected_remaining"),
+    (
+        ({"mode": "wallet_total"}, 130, 110, 80),
+        ({"mode": "fraction", "value": 0.5}, 65, 45, 45),
+        ({"mode": "absolute", "value": 40}, 40, 20, 20),
+    ),
+)
+def test_nonvenue_owned_basis_is_retained_for_equity_allocation(
+    allocation, expected_equity, expected_utility, expected_remaining
+):
+    """C is spendable pUSD; legacy/non-venue wealth remains in E's basis."""
+    witness = StrategyCapitalAllocationWitness.build(
+        capital_basis_usd=130,
+        committed_capital_usd=20,
+        venue_spendable_cash_usd=80,
+        allocation=allocation,
+    )
+    assert witness.allocated_equity_usd == expected_equity
+    assert witness.utility_liquid_cash_usd == expected_utility
+    assert witness.remaining_buy_capacity_usd == expected_remaining
+
+
+@pytest.mark.parametrize(
+    ("configured_limit", "expected_limit", "expected_remaining"),
+    ((25, 25, 15), (999, 90, 80)),
+)
+def test_buy_commitment_limit_defaults_and_caps_to_equity(
+    configured_limit, expected_limit, expected_remaining
+):
+    witness = StrategyCapitalAllocationWitness.build(
+        capital_basis_usd=90,
+        committed_capital_usd=10,
+        venue_spendable_cash_usd=80,
+        allocation={
+            "mode": "wallet_total",
+            "buy_commitment_limit_usd": configured_limit,
+        },
+    )
+    assert witness.configured_buy_commitment_limit_usd == configured_limit
+    assert witness.buy_commitment_limit_usd == expected_limit
+    assert witness.remaining_buy_capacity_usd == expected_remaining
+
+
+def test_commitments_above_equity_and_limit_have_zero_capacity():
+    witness = StrategyCapitalAllocationWitness.build(
+        capital_basis_usd=30,
+        committed_capital_usd=20,
+        venue_spendable_cash_usd=10,
+        allocation={
+            "mode": "fraction",
+            "value": 0.25,
+            "buy_commitment_limit_usd": 5,
+        },
+    )
+    assert witness.allocated_equity_usd == pytest.approx(7.5)
+    assert witness.buy_commitment_limit_usd == pytest.approx(5)
+    assert witness.utility_liquid_cash_usd == 0
+    assert witness.remaining_buy_capacity_usd == 0
+
+
+def test_strategy_allocation_change_changes_identity_without_changing_wallet_total():
+    wallet = StrategyCapitalAllocationWitness.build(
+        capital_basis_usd=80,
+        committed_capital_usd=0,
+        venue_spendable_cash_usd=80,
+        allocation={"mode": "wallet_total"},
+    )
+    fraction = StrategyCapitalAllocationWitness.build(
+        capital_basis_usd=80,
+        committed_capital_usd=0,
+        venue_spendable_cash_usd=80,
+        allocation={"mode": "fraction", "value": 0.5},
+    )
+    assert wallet.venue_spendable_cash_usd == fraction.venue_spendable_cash_usd
+    assert wallet.witness_identity != fraction.witness_identity
+
+
+def test_buy_commitment_limit_change_changes_identity():
+    low = StrategyCapitalAllocationWitness.build(
+        capital_basis_usd=90,
+        committed_capital_usd=10,
+        venue_spendable_cash_usd=80,
+        allocation={"mode": "wallet_total", "buy_commitment_limit_usd": 20},
+    )
+    high = StrategyCapitalAllocationWitness.build(
+        capital_basis_usd=90,
+        committed_capital_usd=10,
+        venue_spendable_cash_usd=80,
+        allocation={"mode": "wallet_total", "buy_commitment_limit_usd": 30},
+    )
+    assert low.witness_identity != high.witness_identity
+
+
+def test_witness_identity_drift_is_rejected_by_exact_rederivation():
+    witness = StrategyCapitalAllocationWitness.build(
+        capital_basis_usd=90,
+        committed_capital_usd=10,
+        venue_spendable_cash_usd=80,
+        allocation={"mode": "wallet_total", "buy_commitment_limit_usd": 25},
+    )
+    with pytest.raises(ValueError, match="inconsistent|invalid"):
+        replace(witness, remaining_buy_capacity_usd=0)
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    (
+        None,
+        {"value": 0.5},
+        {"mode": None},
+        {"mode": ""},
+        {"mode": "wallet_total", "buy_commitment_limit_usd": None},
+        {"mode": "wallet_total", "buy_commitment_limit_usd": "NaN"},
+        {"mode": "wallet_total", "buy_commitment_limit_usd": -1},
+        {"mode": "wallet_total", "value": -1},
+        {"mode": "wallet_total", "value": "NaN"},
+        {"mode": "wallet_total", "unexpected": 1},
+    ),
+)
+def test_current_allocation_setting_rejects_present_malformed_config(monkeypatch, malformed):
+    from src.config import settings
+
+    monkeypatch.setitem(settings._data, "zeus_capital_allocation", malformed)
+    with pytest.raises(
+        ValueError,
+        match="malformed|mode|buy_commitment_limit_usd|unsupported",
+    ):
+        current_zeus_capital_allocation_setting()
+
+
+def test_legacy_allocation_loader_does_not_restore_malformed_fallback(monkeypatch):
+    from src.config import settings
+
+    monkeypatch.setitem(settings._data, "zeus_capital_allocation", {"value": 0.5})
+    with pytest.raises(ValueError, match="malformed"):
+        bankroll_provider._load_zeus_capital_allocation_setting()
 
 
 class _FakeClient:

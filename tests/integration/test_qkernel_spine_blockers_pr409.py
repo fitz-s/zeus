@@ -365,10 +365,17 @@ def _drive(
     selection_proofs=None,
 ):
     from src.solve.solver import PortfolioWealthWitness, portfolio_wealth_identity
+    from src.contracts.strategy_capital_allocation import StrategyCapitalAllocationWitness
 
     ledger_snapshot_id = "pr409-current-ledger"
     position_set_hash = "pr409-empty-positions"
     captured_at = decision_time.astimezone(_dt.timezone.utc)
+    allocation = StrategyCapitalAllocationWitness.build(
+        capital_basis_usd=Decimal("1000"),
+        committed_capital_usd=Decimal("0"),
+        venue_spendable_cash_usd=Decimal("1000"),
+        allocation={"mode": "wallet_total"},
+    )
     wealth_identity = portfolio_wealth_identity(
         ledger_snapshot_id=ledger_snapshot_id,
         position_set_hash=position_set_hash,
@@ -377,6 +384,7 @@ def _drive(
         spendable_cash_usd=Decimal("1000"),
         reservations_usd=Decimal("0"),
         collateral_authority="CHAIN",
+        strategy_capital_allocation_identity=allocation.witness_identity,
         captured_at_utc=captured_at,
     )
     wealth = PortfolioWealthWitness(
@@ -387,6 +395,7 @@ def _drive(
         spendable_cash_usd=Decimal("1000"),
         reservations_usd=Decimal("0"),
         collateral_authority="CHAIN",
+        strategy_capital_allocation=allocation,
         captured_at_utc=captured_at,
         max_age=_dt.timedelta(seconds=5),
         witness_identity=wealth_identity,

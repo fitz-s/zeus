@@ -255,12 +255,47 @@ def _wealth_reauction_changed_fields(
         "native_holdings_micro",
         "pending_entry_endowments_micro",
         "native_commitments_micro",
+        "strategy_capital_allocation",
     )
     return tuple(
         field
         for field in fields
         if getattr(previous, field, None) != getattr(current, field, None)
     )
+
+
+def _strategy_capital_allocation_receipt(wealth_witness: object) -> dict[str, object]:
+    allocation = wealth_witness.strategy_capital_allocation
+    return {
+        "allocation_version": allocation.allocation_version,
+        "capital_basis_semantics": allocation.capital_basis_semantics,
+        "source": allocation.source,
+        "mode": allocation.mode,
+        "configured_value": (
+            str(allocation.configured_value)
+            if allocation.configured_value is not None
+            else None
+        ),
+        "capital_basis_usd": str(allocation.capital_basis_usd),
+        "allocated_equity_usd": str(allocation.allocated_equity_usd),
+        "configured_buy_commitment_limit_usd": (
+            str(allocation.configured_buy_commitment_limit_usd)
+            if allocation.configured_buy_commitment_limit_usd is not None
+            else None
+        ),
+        "buy_commitment_limit_usd": str(
+            allocation.buy_commitment_limit_usd
+        ),
+        "committed_capital_usd": str(allocation.committed_capital_usd),
+        "utility_liquid_cash_usd": str(
+            allocation.utility_liquid_cash_usd
+        ),
+        "venue_spendable_cash_usd": str(allocation.venue_spendable_cash_usd),
+        "remaining_buy_capacity_usd": str(
+            allocation.remaining_buy_capacity_usd
+        ),
+        "witness_identity": allocation.witness_identity,
+    }
 
 
 _GLOBAL_AUCTION_PAYLOAD_REFS: dict[str, _GlobalAuctionPayloadRef] = {}
@@ -2776,7 +2811,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 20,
+        "schema_version": 21,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -2824,6 +2859,9 @@ def _store_global_auction_receipt(
         ),
         "wealth_economic_identity": str(
             getattr(wealth_witness, "economic_identity", "") or ""
+        ),
+        "strategy_capital_allocation": (
+            _strategy_capital_allocation_receipt(wealth_witness)
         ),
         "wealth_reauction": (
             asdict(wealth_reauction_audit)
@@ -2891,7 +2929,7 @@ def _store_global_auction_receipt(
         "buy_condition_membership_count": sum(
             1 + (mask == 3) for mask in buy_condition_masks.values()
         ),
-        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v12",
+        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v13",
         "candidate_evaluations_sha256": hashlib.sha256(
             evaluation_json
         ).hexdigest(),
@@ -5303,7 +5341,10 @@ def process_current_global_batch(
                 current_execution_resolver=execution_resolver,
                 current_wealth_identity_resolver=lambda: selection_wealth.economic_identity,
                 wealth_witness=selection_wealth,
-                capital_limit_usd=selection_wealth.spendable_cash_usd,
+                capital_limit_usd=(
+                    selection_wealth.strategy_capital_allocation
+                    .remaining_buy_capacity_usd
+                ),
                 fractional_kelly_multiplier=fractional_kelly_multiplier,
                 decision_at_utc=selection_at,
                 book_epoch=attempt_book_epoch,

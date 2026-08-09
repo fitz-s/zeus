@@ -363,6 +363,15 @@ files:
     - src/events/reactor.py
     - src/engine/event_reactor_adapter.py
     - src/engine/monitor_refresh.py
+  src/data/replacement_current_value_serving.py:
+    zone: K2_runtime
+    authority_role: replacement_current_value_serving_selector
+    why: Single read-time authority for the deterministic provider value possessed at one carrier-bound or source-clock decision cut. It prefers current same-product single-runs evidence, admits only explicitly branded eligible previous-runs substitution, rejects future, over-age, and ECMWF ifs025-to-9km product mismatch, and keeps provider-value time separate from the ENS shape-carrier clock.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/data/replacement_forecast_materializer.py
+    - src/data/replacement_forecast_production.py
   src/data/replacement_forecast_materializer.py:
     zone: K2_runtime
     authority_role: replacement_forecast_posterior_writer
@@ -431,10 +440,11 @@ files:
   src/runtime/bankroll_provider.py:
     zone: K2_runtime
     authority_role: wallet_bankroll_provider
-    why: Preserves wallet-equity identity for runtime/reporting consumers and rejects retired config-literal capital as bankroll authority.
+    why: Preserves wallet-equity identity for runtime/reporting consumers, rejects retired config-literal capital as bankroll authority, and exposes the active explicit Zeus strategy-allocation setting through the same pure K0 allocation law consumed by the global auction wealth witness.
     downstream:
     - src/observability/status_summary.py
     - src/riskguard/riskguard.py
+    - src/engine/global_auction_universe.py
   src/runtime/reactor_wake.py:
     zone: K2_runtime
     authority_role: event_reactor_wake_hint
@@ -724,6 +734,18 @@ files:
     - src/state/schema/review_work_items_schema.py
     - src/contracts/entry_exposure_obligation.py
     - src/execution/fill_tracker.py
+  src/contracts/strategy_capital_allocation.py:
+    zone: K0_frozen_kernel
+    authority_role: strategy_capital_allocation_contract
+    why: Separates venue spendable cash C, Zeus-owned utility equity E, BUY commitment ceiling L, current cost commitments K, and utility cash U=max(E-K,0); freezes their exact active policy and min(C,max(L-K,0)) BUY capacity into one immutable identity without suppressing HOLD or reducing SELL actions.
+    downstream:
+    - src/runtime/bankroll_provider.py
+    - src/solve/solver.py
+    - src/decision_kernel/canonicalization.py
+    - src/engine/global_auction_universe.py
+    - src/engine/global_single_order_auction.py
+    - src/engine/global_batch_runtime.py
+    - src/control/live_health.py
   src/contracts/semantic_types.py:
     zone: K0_frozen_kernel
     authority_role: semantic_atom_contracts
@@ -1674,6 +1696,8 @@ files:
       current BID depth is price provenance, never fictitious immediate-fill capacity.
       BUY and SELL branch wealth use one shared spendable-cash floor plus exact same-family lower
       payoffs; unrelated held-token upside cannot be coupled only to one candidate branch. A global
+      BUY's capital ceiling is the allocation witness's remaining BUY capacity, distinct from venue
+      cash, while SELL/HOLD remain feasible after that allocation is exhausted. A global
       BUY candidate also carries the same captured native bid levels as its executable ask curve;
       bids are execution-policy provenance, never a second probability or objective authority.
       SELL scoring rejects any maker proposal whose exact unit price is outside the absolute live
@@ -1835,14 +1859,14 @@ files:
   src/engine/global_single_order_auction.py:
     zone: K2_K3_coordination
     authority_role: global_single_order_auction_coordinator
-    why: Pure cross-family coordinator that refuses partial or malformed family sets, binds every prepared full-simplex family and native full-depth YES/NO order to one current portfolio witness, preserves each current asset's native bid levels for later execution-policy proof, binds SELL maker-rest terms into both economic and actuation identities, and returns at most one terminal-wealth-optimal winner; it performs no DB or venue I/O.
+    why: Pure cross-family coordinator that refuses partial or malformed family sets, binds every prepared full-simplex family and native full-depth YES/NO order to one current portfolio and strategy-capital-allocation witness, preserves each current asset's native bid levels for later execution-policy proof, binds SELL maker-rest terms into both economic and actuation identities, and returns at most one terminal-wealth-optimal winner; it performs no DB or venue I/O.
     downstream:
     - src/engine/event_reactor_adapter.py
     - src/events/reactor.py
   src/engine/global_auction_universe.py:
     zone: K2_K3_coordination
     authority_role: current_global_auction_scope_reader
-    why: Read-only independent enumeration of every current posterior-ready family plus every canonical runtime-open held-family probability obligation; binds full condition/native-token probability witnesses to current Gamma tradeability and captures each BUY asset's native ask curve together with the same book's bid levels, so neither a reactor queue page, local-date rollover, a closed sibling, nor an ask-only projection can silently erase a feasible action or falsify maker availability.
+    why: Read-only independent enumeration of every current posterior-ready family plus every canonical runtime-open held-family probability obligation; binds full condition/native-token probability witnesses to current Gamma tradeability, freezes current venue cash, cost commitments, and active strategy allocation into the portfolio wealth identity, and captures each BUY asset's native ask curve together with the same book's bid levels, so neither a reactor queue page, local-date rollover, a closed sibling, an allocation drift, nor an ask-only projection can silently erase or falsify the feasible action set.
     hazards:
     - NO_WRITE_PATH
     downstream:

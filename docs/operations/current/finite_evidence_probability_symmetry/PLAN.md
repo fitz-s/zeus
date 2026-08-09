@@ -4,6 +4,102 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-09 Current-value serving authority matches executable law
+
+The active replacement authority still describes `previous_runs` as a
+GEM-only, exact-cycle exception.  The executable single-builder has since
+generalized that rule: carrier-bound reads prefer the selected-cycle
+`single_runs` row, then the selected-cycle `previous_runs` row, then the newest
+eligible prior-cycle row; source-clock live reads instead use each provider's
+newest same-product row possessed by decision time while ENS retains only the
+shape carrier clock.  Future rows, over-age captures, and the product-mismatched
+ECMWF `ifs025` history remain inadmissible, and every substitution is branded by
+`served_via` and `served_cycle`.
+
+This slice changes no selector behavior.  It aligns the active authority doc
+and the serving module's stale exact-cycle commentary with the already-tested
+single-builder, and registers that existing high-risk choke point in the source
+rationale/module manifest.  Acceptance is the existing generalized
+substitution, future-row, product-mismatch, provenance, and source-clock test
+suite passing without a runtime diff.
+
+## 2026-08-09 Current-cut global capital auction and strategy ownership
+
+The global selector previously collapsed venue affordability and Zeus utility
+ownership into one pUSD balance. That let co-tenant wallet cash change Zeus
+Kelly sizing and BUY/SELL ordering even when the operator's Zeus allocation was
+unchanged. It also left the new zero-wealth SELL case outside ordinary log
+utility and treated a fixed maker-fill prior as if it were current executable
+truth.
+
+One frozen allocation witness now names the distinct quantities used by every
+decision cut:
+
+- `C`: current venue-spendable cash;
+- `E`: Zeus-owned utility equity from `zeus_capital_allocation`;
+- `L`: effective BUY commitment ceiling, defaulting and capped to `E`;
+- `K`: active-position cost basis plus unresolved entry commitments;
+- `U=max(E-K,0)`: Zeus-owned liquid utility cash.
+
+Executable BUY capacity is `min(C,max(L-K,0))`. BUY and reduce-only SELL use the
+same portfolio endowment `U + H[a]`, with `H[a]` the exact current/pending
+same-family payoff in settlement atom `a`; venue cash is an affordability fact,
+never hidden utility wealth. `wallet_total` preserves historical parity when
+the complete owned basis is `C+K`. Allocation policy, all five values, remaining
+capacity, and their versioned identity are bound into the immutable wealth
+witness, its economic identity, the selection receipt, JIT certificate, and
+executor rebuild.
+
+CASH/HOLD remain the zero-action baseline. Every independently admitted BUY or
+SELL fixed proposal competes on one posterior-predictive-mean expected-log
+capital-growth basis after its own fees, depth, tick, price-band, Kelly, and
+direction law. Capital lock time determines the finite growth rate. A
+reduce-only SELL that improves an exact positive-probability zero-wealth atom
+uses the epsilon-free extended-log limit: raw ruin-probability reduction is the
+first lexicographic key, without rounding, tolerance collapse, or division by
+time; finite expected log growth per hour is considered only when ruin reduction
+is exactly equal. Negative or non-finite terminal wealth remains invalid, BUY
+may not introduce a zero atom, and positive EV remains an explicit independent
+policy gate.
+
+A scalar maker-fill prior is not current decision-time truth and partial fills
+change both terminal atoms and capital-release time. Until a typed,
+candidate-bound current partial-fill distribution exists, every `MAKER_REST`
+BUY/SELL proposal is excluded with
+`CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE`; its taker sibling remains eligible.
+The same wall exists in the local reactor and the final command builder, so the
+legacy fixed prior cannot reach the venue. This is an executable-set decision,
+not a preference for taker orders.
+
+At submit, the selected mode is preserved and probability, executable book,
+fees, wealth/allocation, position, terminal ruin reduction, utility basis,
+proposal growth, and capital horizon are canonically sealed and revalidated.
+The current receipt shape is schema 21 / canonical candidate encoding v13.
+Settlement skill attribution does not grade that selection-log schema directly:
+an executed ENTRY persists the exact `ActionableTradeCertificate` hash, and the
+settlement grader resolves its frozen `q_live`, `q_lcb_5pct`, and `posterior_id`
+or records `UNATTRIBUTABLE_Q_MISSING`. This keeps decision-time probability
+immutable without pretending the schema-21 diagnostic receipt is settlement
+authority.
+
+SCOPE is one candidate or one complete q/book/wealth auction cut: malformed or
+stale allocation blocks new BUY authority; unavailable maker-fill evidence
+blocks only maker-dependent proposals; a drifted selected identity blocks only
+that actuation. Taker siblings, CASH/HOLD, held monitoring, and unrelated
+families continue. DRAIN is the next normal complete auction and submit-time
+rebuild from current config, canonical commitments, probability and book.
+RESET is a fresh coherent witness or, for maker, a reviewed typed current
+partial-fill authority. Probability formulas, settlement, absolute order-price
+bands, RiskAllocator exposure caps, and lifecycle law are unchanged.
+
+Acceptance requires E/L/K/U math and co-tenant isolation, allocation-zero
+SELL/HOLD/CASH preservation, exact sub-femtoscale ruin ordering, negative-wealth
+rejection, malformed-config rejection, maker rejection with taker-sibling
+survival, allocation and comparison-field identity drift rejection at JIT and
+submit, schema-21/v13 health validation, and focused global-auction/runtime
+regressions, plus the existing exact certificate-to-settlement attribution
+antibodies.
+
 ## 2026-08-08 Day0 probability authority survives certificate compilation
 
 The live global auction produced a current Shanghai Day0 remaining-day witness,

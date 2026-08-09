@@ -11,6 +11,8 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Mapping
 
+from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
+
 CANONICALIZATION_VERSION = "decision-kernel-json-v1"
 _EXPECTED_IDENTITY_UNSET = object()
 
@@ -120,6 +122,15 @@ _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS: tuple[str, ...] = (
     "global_expected_delta_log_wealth",
     "global_expected_ev_usd",
     "global_expected_capital_efficiency",
+    "global_ruin_probability_reduction",
+    "global_terminal_ruin_probability_reduction",
+    "global_utility_basis",
+    "global_proposal_expected_delta_log_wealth",
+    "global_proposal_expected_ev_usd",
+    "global_proposal_expected_log_growth_per_hour",
+    "global_proposal_expected_capital_efficiency",
+    "global_proposal_capital_lock_hours",
+    "global_proposal_fill_semantics",
     "global_robust_delta_log_wealth",
     "global_robust_ev_usd",
     "global_capital_efficiency",
@@ -163,12 +174,6 @@ _QKERNEL_MAKER_REST_IDENTITY_FIELDS: tuple[str, ...] = (
     "global_fill_probability",
     "global_fill_probability_source",
     "global_rest_deadline_minutes",
-    "global_proposal_expected_delta_log_wealth",
-    "global_proposal_expected_ev_usd",
-    "global_proposal_expected_log_growth_per_hour",
-    "global_proposal_expected_capital_efficiency",
-    "global_proposal_capital_lock_hours",
-    "global_proposal_fill_semantics",
 )
 
 
@@ -390,6 +395,60 @@ def qkernel_global_current_state_rejection_reason(
         "MAKER_REST",
     }:
         return "global_execution_mode"
+    if economics.get("global_utility_basis") != STRATEGY_LOG_UTILITY_BASIS:
+        return "global_utility_basis"
+    try:
+        ruin_reduction = float(
+            economics.get("global_ruin_probability_reduction")
+        )
+        terminal_ruin_reduction = float(
+            economics.get("global_terminal_ruin_probability_reduction")
+        )
+        proposal_du = float(
+            economics.get("global_proposal_expected_delta_log_wealth")
+        )
+        proposal_ev = float(economics.get("global_proposal_expected_ev_usd"))
+        proposal_lock = float(
+            economics.get("global_proposal_capital_lock_hours")
+        )
+        proposal_rate = float(
+            economics.get("global_proposal_expected_log_growth_per_hour")
+        )
+        proposal_efficiency = float(
+            economics.get("global_proposal_expected_capital_efficiency")
+        )
+    except (TypeError, ValueError):
+        return "global_expected_growth_invalid"
+    if not all(
+        math.isfinite(value)
+        for value in (
+            ruin_reduction,
+            terminal_ruin_reduction,
+            proposal_du,
+            proposal_ev,
+            proposal_lock,
+            proposal_rate,
+            proposal_efficiency,
+        )
+    ):
+        return "global_expected_growth_non_finite"
+    if (
+        not 0.0 <= ruin_reduction <= 1.0
+        or not 0.0 <= terminal_ruin_reduction <= 1.0
+        or ruin_reduction != terminal_ruin_reduction
+        or proposal_lock <= 0.0
+        or proposal_rate != proposal_du / proposal_lock
+    ):
+        return "global_expected_growth_identity"
+    if direction_text.startswith("buy_") and ruin_reduction != 0.0:
+        return "global_buy_ruin_probability_reduction"
+    if (
+        execution_mode == "TAKER_LIMIT"
+        and economics.get("global_proposal_fill_semantics") != "IMMEDIATE_FILL"
+    ):
+        return "global_proposal_fill_semantics"
+    if execution_mode == "MAKER_REST":
+        return _qkernel_global_maker_rest_rejection_reason(economics)
     functional = str(
         economics.get("global_probability_functional")
         or "LOWER_CVAR_PARAMETER_DRAWS"
@@ -401,8 +460,20 @@ def qkernel_global_current_state_rejection_reason(
         )
         if mean_reason is not None:
             return mean_reason
-        if execution_mode == "MAKER_REST":
-            return _qkernel_global_maker_rest_rejection_reason(economics)
+        try:
+            mean_du = float(economics.get("global_expected_delta_log_wealth"))
+            mean_ev = float(economics.get("global_expected_ev_usd"))
+            mean_efficiency = float(
+                economics.get("global_expected_capital_efficiency")
+            )
+        except (TypeError, ValueError):
+            return "global_mean_proposal_identity"
+        if not (
+            proposal_du == mean_du
+            and proposal_ev == mean_ev
+            and proposal_efficiency == mean_efficiency
+        ):
+            return "global_mean_proposal_identity"
         return None
     if functional != "LOWER_CVAR_PARAMETER_DRAWS":
         return "global_probability_functional"
@@ -548,86 +619,15 @@ def qkernel_global_current_state_rejection_reason(
 
 
 def _qkernel_global_maker_rest_rejection_reason(
-    economics: Mapping[str, Any],
+    _economics: Mapping[str, Any],
 ) -> str | None:
-    """Bind a passive proposal to its fill-weighted capital objective."""
+    """Fail closed until a typed current partial-fill witness exists."""
 
-    fields = (
-        "global_fill_probability",
-        "global_rest_deadline_minutes",
-        "global_limit_price",
-        "global_expected_fill_price_before_fee",
-        "global_expected_delta_log_wealth",
-        "global_expected_ev_usd",
-        "global_expected_capital_efficiency",
-        "global_proposal_expected_delta_log_wealth",
-        "global_proposal_expected_ev_usd",
-        "global_proposal_expected_log_growth_per_hour",
-        "global_proposal_expected_capital_efficiency",
-        "global_proposal_capital_lock_hours",
-    )
-    try:
-        numeric = {field: float(economics.get(field)) for field in fields}
-    except (TypeError, ValueError):
-        return "maker_numeric_field_invalid"
-    if not all(math.isfinite(value) for value in numeric.values()):
-        return "maker_numeric_field_non_finite"
-    fill_probability = numeric["global_fill_probability"]
-    deadline = numeric["global_rest_deadline_minutes"]
-    limit = numeric["global_limit_price"]
-    fill_price = numeric["global_expected_fill_price_before_fee"]
-    proposal_du = numeric["global_proposal_expected_delta_log_wealth"]
-    proposal_ev = numeric["global_proposal_expected_ev_usd"]
-    proposal_growth = numeric["global_proposal_expected_log_growth_per_hour"]
-    proposal_efficiency = numeric["global_proposal_expected_capital_efficiency"]
-    proposal_lock = numeric["global_proposal_capital_lock_hours"]
-    if not str(economics.get("global_fill_probability_source") or "").strip():
-        return "global_fill_probability_source"
-    if economics.get("global_proposal_fill_semantics") != (
-        "FILL_WEIGHTED_ZERO_CONTINUATION_LOWER_BOUND"
-    ):
-        return "global_proposal_fill_semantics"
-    if not (
-        0.0 < fill_probability <= 1.0
-        and deadline > 0.0
-        and 0.05 <= limit <= 0.95
-        and math.isclose(fill_price, limit, rel_tol=0.0, abs_tol=1e-12)
-        and float(economics["cost"]) + 1e-12 >= limit
-        and proposal_du > 0.0
-        and proposal_ev > 0.0
-        and proposal_growth > 0.0
-        and proposal_efficiency > 0.0
-        and proposal_lock > 0.0
-    ):
-        return "maker_execution_envelope"
-    if not (
-        math.isclose(
-            proposal_du,
-            numeric["global_expected_delta_log_wealth"] * fill_probability,
-            rel_tol=0.0,
-            abs_tol=1e-12,
-        )
-        and math.isclose(
-            proposal_ev,
-            numeric["global_expected_ev_usd"] * fill_probability,
-            rel_tol=0.0,
-            abs_tol=1e-12,
-        )
-        and math.isclose(
-            proposal_growth,
-            proposal_du / proposal_lock,
-            rel_tol=0.0,
-            abs_tol=1e-12,
-        )
-        and math.isclose(
-            proposal_efficiency,
-            numeric["global_expected_capital_efficiency"],
-            rel_tol=0.0,
-            abs_tol=1e-12,
-        )
-    ):
-        return "maker_objective_identity"
-    return None
+    # SCOPE — one MAKER_REST certificate; taker, HOLD, and CASH remain valid.
+    # DRAIN — every current auction/JIT rebuild re-runs this certificate gate.
+    # RESET — only reviewed code consuming a typed candidate-bound current
+    # partial-fill distribution may replace this unconditional rejection.
+    return "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
 
 
 def _qkernel_global_mean_buy_rejection_reason(

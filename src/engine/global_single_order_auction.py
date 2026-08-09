@@ -254,6 +254,7 @@ def _global_decision_economics_identity(
                 terminal.wealth_after_win_usd,
                 repr(terminal.expected_delta_log_wealth),
                 repr(terminal.expected_ev_usd),
+                repr(terminal.ruin_probability_reduction),
             )
         else:
             action_economics = (
@@ -267,6 +268,7 @@ def _global_decision_economics_identity(
                 terminal.wealth_after_win_usd,
                 repr(terminal.expected_delta_log_wealth),
                 repr(terminal.expected_ev_usd),
+                repr(terminal.ruin_probability_reduction),
             )
     elif decision.terminal_wealth is not None:
         terminal = decision.terminal_wealth
@@ -291,6 +293,8 @@ def _global_decision_economics_identity(
         "COMMON_EXPECTED_GROWTH",
         growth.probability_basis,
         growth.probability_witness_identity,
+        growth.utility_basis,
+        repr(growth.ruin_probability_reduction),
         repr(growth.expected_delta_log_wealth),
         repr(growth.expected_ev_usd),
         repr(growth.capital_lock_hours),
@@ -611,12 +615,15 @@ def _candidate_portfolio_endowment(
     )
     if not loss_payouts or not win_payouts:
         raise ValueError("candidate payoff branches are incomplete")
+    utility_liquid = (
+        wealth_witness.strategy_capital_allocation.utility_liquid_cash_usd
+    )
     return CandidatePortfolioEndowment(
         loss_wealth_floor_usd=(
-            wealth_witness.wealth_floor_usd + min(loss_payouts)
+            utility_liquid + min(loss_payouts)
         ),
         win_wealth_floor_usd=(
-            wealth_witness.wealth_floor_usd + min(win_payouts)
+            utility_liquid + min(win_payouts)
         ),
         current_token_shares=current_token_shares,
         ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
@@ -680,17 +687,14 @@ def _family_portfolio_endowment(
         (commitments.get(token, Decimal("0")) for token in family_tokens),
         Decimal("0"),
     )
-    portfolio_capital = wealth_witness.spendable_cash_usd + sum(
-        commitments.values(),
-        Decimal("0"),
-    )
+    capital_allocation = wealth_witness.strategy_capital_allocation
     return FamilyPortfolioEndowment(
         family_key=family_key,
         payout_by_bin_usd=tuple((outcome, payout[outcome]) for outcome in outcomes),
         current_token_shares=tuple(sorted(shares_by_token.items())),
-        wealth_floor_usd=wealth_witness.wealth_floor_usd,
-        spendable_cash_usd=wealth_witness.spendable_cash_usd,
-        portfolio_capital_usd=portfolio_capital,
+        wealth_floor_usd=capital_allocation.utility_liquid_cash_usd,
+        spendable_cash_usd=capital_allocation.remaining_buy_capacity_usd,
+        portfolio_capital_usd=capital_allocation.allocated_equity_usd,
         committed_capital_usd=family_committed,
         ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
     )
@@ -1180,9 +1184,9 @@ def select_prepared_global_auction(
         # single-position fraction must constrain this same capital envelope.
         # Leaving it only in the retired local sizing path let the global solver
         # spend well above max_single_position_pct while every upstream receipt
-        # still advertised that setting.  Use the exact wealth floor that the
-        # solver's loss branch uses; this keeps sizing and the constraint on one
-        # current wealth witness.  Zero retains the documented disabled posture.
+        # still advertised that setting. Use Zeus-owned utility equity, never
+        # shared-wallet cash, as the fraction basis. Zero retains the documented
+        # disabled posture.
         from src.config import sizing_defaults
 
         single_position_pct = Decimal(
@@ -1195,13 +1199,15 @@ def select_prepared_global_auction(
         ):
             raise ValueError("GLOBAL_SINGLE_POSITION_FRACTION_INVALID")
         if single_position_pct > 0:
+            capital_allocation = wealth_witness.strategy_capital_allocation
             committed_micro = dict(
                 wealth_witness.native_commitments_micro
             ).get(candidate.token_id, 0)
             committed_usd = Decimal(committed_micro) / Decimal("1000000")
             remaining_position_budget = max(
                 Decimal("0"),
-                single_position_pct * Decimal(wealth_witness.wealth_floor_usd)
+                single_position_pct
+                * capital_allocation.allocated_equity_usd
                 - committed_usd,
             )
             allocator_limit = min(
@@ -1229,6 +1235,15 @@ def select_prepared_global_auction(
     def _candidate_policy_rejection(
         candidate: GlobalSingleOrderAnyCandidate,
     ) -> str | None:
+        # Current maker fill probability is a historical scalar, not a
+        # decision-time cohort/provenance witness. Until that typed witness is
+        # present, maker proposals are not in the executable feasible set.
+        # SCOPE — MAKER_REST BUY/SELL only; taker, HOLD, and CASH remain live.
+        # DRAIN — each complete auction rebuilds candidates and policy evidence.
+        # RESET — none in this revision; only a reviewed candidate-bound maker
+        # witness contract may replace this fail-closed policy in new code.
+        if candidate.execution_mode == "MAKER_REST":
+            return "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
         if (
             str(getattr(candidate, "action", "BUY") or "BUY").upper() == "BUY"
             and candidate.family_key in buy_disabled

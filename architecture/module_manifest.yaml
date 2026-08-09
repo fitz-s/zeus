@@ -226,6 +226,7 @@ modules:
       - src/data/polymarket_client.py
       - src/data/openmeteo_model_updates.py
       - src/data/source_clock_update_probe.py
+      - src/data/replacement_current_value_serving.py
       - src/data/replacement_forecast_materializer.py
       - src/data/replacement_forecast_bundle_reader.py
       - src/data/replacement_input_hwm.py
@@ -242,6 +243,7 @@ modules:
       - src/data/polymarket_client.py
       - src/data/openmeteo_model_updates.py
       - src/data/source_clock_update_probe.py
+      - src/data/replacement_current_value_serving.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/city_truth_contract.yaml
@@ -621,6 +623,7 @@ modules:
       - src/contracts/fx_classification.py
       - src/contracts/provenance_registry.py
       - src/contracts/reality_contract.py
+      - src/contracts/strategy_capital_allocation.py
     public_entry_files:
       - src/contracts/settlement_semantics.py
       - src/contracts/calibration_bins.py
@@ -629,6 +632,7 @@ modules:
       - src/contracts/fx_classification.py
       - src/contracts/semantic_types.py
       - src/contracts/execution_intent.py
+      - src/contracts/strategy_capital_allocation.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/invariants.yaml
@@ -642,6 +646,7 @@ modules:
       - tests/test_collateral_ledger.py
       - tests/test_executable_market_snapshot.py
       - tests/test_risk_allocator.py
+      - tests/runtime/test_resolve_zeus_equity_base.py
     graph_appendix_status: LOCAL_GRAPH_QUERY_REQUIRED
     archive_extraction_status: partial
   control:

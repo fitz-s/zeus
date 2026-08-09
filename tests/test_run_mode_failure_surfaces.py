@@ -548,9 +548,13 @@ def _write_high_yes_edge_dbs(
             v12 = global_auction_encoding == (
                 "zlib+base64+canonical-json-v12"
             )
+            v13 = global_auction_encoding == (
+                "zlib+base64+canonical-json-v13"
+            )
+            indexed = v12 or v13
             rejection_identity = (
                 {"candidate_indexes": [0]}
-                if v12
+                if indexed
                 else {"candidate_ids": ["candidate-high-yes-1"]}
             )
             evaluation_payload = {
@@ -565,7 +569,7 @@ def _write_high_yes_edge_dbs(
                 "detailed": [],
                 "buy_condition_side_masks": [[condition_id, 1]],
             }
-            if v12:
+            if indexed:
                 evaluation_payload["buy_candidate_index"] = [
                     [
                         "candidate-high-yes-1",
@@ -585,12 +589,14 @@ def _write_high_yes_edge_dbs(
             v11 = global_auction_encoding == (
                 "zlib+base64+canonical-json-v11"
             )
-            current_encoding = v11 or v12
+            current_encoding = v11 or indexed
             holding_json = b"[]"
             decision_at = (now - timedelta(minutes=1)).isoformat()
             artifact = {
                 "summary": {
-                    "schema_version": 20 if v12 else (18 if v11 else 5),
+                    "schema_version": (
+                        21 if v13 else 20 if v12 else 18 if v11 else 5
+                    ),
                     "decision_at_utc": decision_at,
                     "candidate_coverage_complete": True,
                     "candidate_condition_index_complete": True,
@@ -620,6 +626,27 @@ def _write_high_yes_edge_dbs(
                     ).decode(),
                 }
             }
+            if v13:
+                from types import SimpleNamespace
+
+                from src.contracts.strategy_capital_allocation import (
+                    StrategyCapitalAllocationWitness,
+                )
+                from src.engine.global_batch_runtime import (
+                    _strategy_capital_allocation_receipt,
+                )
+
+                allocation = StrategyCapitalAllocationWitness.build(
+                    capital_basis_usd="1",
+                    committed_capital_usd="0",
+                    venue_spendable_cash_usd="1",
+                    allocation={"mode": "wallet_total"},
+                )
+                artifact["summary"]["strategy_capital_allocation"] = (
+                    _strategy_capital_allocation_receipt(
+                        SimpleNamespace(strategy_capital_allocation=allocation)
+                    )
+                )
             trade_conn.execute(
                 "INSERT INTO decision_log VALUES "
                 "(1, 'global_single_order_auction', ?, ?)",
@@ -5124,6 +5151,7 @@ def test_high_yes_edge_accepts_canonical_global_entry_pause(
         "zlib+base64+canonical-json-v10",
         "zlib+base64+canonical-json-v11",
         "zlib+base64+canonical-json-v12",
+        "zlib+base64+canonical-json-v13",
     ),
 )
 def test_high_yes_edge_accepts_current_global_auction_candidate(
@@ -5153,6 +5181,52 @@ def test_high_yes_edge_accepts_current_global_auction_candidate(
     assert evidence["receipt_id"] == 1
     assert evidence["candidate_evaluation_count"] == 1
     assert evidence["yes_condition_count"] == 1
+
+
+def test_v13_global_auction_rejects_tampered_strategy_allocation(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(
+        sd,
+        with_global_auction_candidate=True,
+        global_auction_encoding="zlib+base64+canonical-json-v13",
+    )
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        artifact = json.loads(
+            conn.execute(
+                "SELECT artifact_json FROM decision_log WHERE id = 1"
+            ).fetchone()[0]
+        )
+        artifact["summary"]["strategy_capital_allocation"][
+            "utility_liquid_cash_usd"
+        ] = "2"
+        conn.execute(
+            "UPDATE decision_log SET artifact_json = ? WHERE id = 1",
+            (json.dumps(artifact),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    conn.row_factory = sqlite3.Row
+    try:
+        yes, no, evidence = live_health._latest_global_auction_candidate_counts(
+            conn,
+            cutoff=_now_iso(-48 * 3600),
+        )
+    finally:
+        conn.close()
+
+    assert yes == {}
+    assert no == {}
+    assert evidence["issue"] == (
+        "GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:"
+        "STRATEGY_CAPITAL_ALLOCATION"
+    )
 
 
 def test_global_auction_holding_authority_accepts_all_fixed_sell_modes() -> None:
