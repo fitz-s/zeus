@@ -1,7 +1,7 @@
 # Created: 2026-04-19
-# Last reused/audited: 2026-08-02
-# Authority basis: Phase 10B DT-Seam Cleanup, 2026-04-29 design simplification audit F4, 2026-05-01 stale live-state artifact tracking, and 2026-05-15 K1 forecast DB split status-summary false-flag repair.
-# Lifecycle: created=2026-04-19; last_reviewed=2026-08-02; last_reused=2026-08-02
+# Last reused/audited: 2026-08-09
+# Authority basis: Phase 10B DT-Seam Cleanup, 2026-04-29 design simplification audit F4, 2026-05-01 stale live-state artifact tracking, 2026-05-15 K1 forecast DB split status-summary false-flag repair, and 2026-08-09 terminal-partial proof convergence.
+# Lifecycle: created=2026-04-19; last_reviewed=2026-08-09; last_reused=2026-08-09
 # Purpose: Phase 10B "DT-Seam Cleanup" antibodies (R-CL..R-CP).
 #          Dedicated test file per critic-carol cycle-3 L2 convention.
 #          Do NOT co-locate with test_phase10a_hygiene.py.
@@ -1768,6 +1768,28 @@ class TestRCPV2RowCountSensor:
 
         assert conflicts["count"] == 1
         assert conflicts["terminal_partial_order_fact_count"] == 0
+
+        reducer_payload = {
+            "command_id": "cmd-terminal-partial",
+            "venue_order_id": "ord-terminal-partial",
+            "reason": "m5_exchange_reconcile_entry_fill_order_fact",
+            "source_module": "src.execution.exchange_reconcile",
+            "remaining_size": "0",
+            "matched_size": "18.55",
+            "order_truth_proof_class": "TERMINAL_PARTIAL",
+            "order_truth_source_state": "PARTIALLY_MATCHED",
+        }
+        conn.execute(
+            "UPDATE venue_order_facts SET raw_payload_json = ?",
+            (json.dumps(reducer_payload),),
+        )
+        conn.commit()
+
+        conflicts = status_summary_module._query_terminal_entry_command_venue_fact_conflicts(conn)
+
+        assert conflicts["count"] == 0
+        assert conflicts["orders"] == []
+        assert conflicts["terminal_partial_order_fact_count"] == 1
 
     def test_ambiguous_not_canceled_matched_terminal_event_remains_conflict(self):
         """NOT_CANCELED with matched ambiguity is not terminal venue proof."""

@@ -862,7 +862,14 @@ def _terminal_event_supersedes_nonterminal_fact(row) -> bool:
 
 
 def _terminal_partial_order_fact_confirms_closed_remainder(row) -> bool:
-    """Recognize the typed terminal proof for a cancelled partial entry."""
+    """Recognize either canonical terminal-partial proof emitted by recovery.
+
+    Command recovery writes the predicate-complete ``terminal_partial_order_fact``
+    shape. Exchange reconciliation reaches the same canonical
+    ``OrderProofClass.TERMINAL_PARTIAL`` conclusion through the order-truth reducer
+    and records the reducer inputs instead. Both prove a closed remainder; treating
+    the latter's ``PARTIALLY_MATCHED`` source state as a live order fabricates debt.
+    """
 
     payload = _payload_mapping(row["venue_fact_raw_payload_json"])
     predicates = payload.get("required_predicates")
@@ -881,20 +888,39 @@ def _terminal_partial_order_fact_confirms_closed_remainder(row) -> bool:
         submitted_size = float(row["submitted_size"])
     except (TypeError, ValueError):
         return False
-    return (
+    identities_match = (
+        str(payload.get("command_id") or "") == str(row["command_id"] or "")
+        and str(payload.get("venue_order_id") or "")
+        == str(row["venue_order_id"] or "")
+    )
+    predicate_complete_proof = (
         payload.get("proof_class") == "terminal_partial_order_fact"
         and str(row["command_state"] or "").upper() in {"CANCELED", "CANCELLED"}
         and str(row["venue_state"] or "").upper()
         in {"PARTIAL", "PARTIALLY_MATCHED"}
-        and str(payload.get("command_id") or "") == str(row["command_id"] or "")
-        and str(payload.get("venue_order_id") or "")
-        == str(row["venue_order_id"] or "")
+        and identities_match
         and remainder_zero
         and payload_remainder_zero
         and 0.0 < matched_size < submitted_size
         and isinstance(predicates, dict)
         and all(predicates.get(name) is True for name in required)
     )
+    reducer_proof = (
+        payload.get("order_truth_proof_class") == "TERMINAL_PARTIAL"
+        and str(payload.get("source_module") or "")
+        == "src.execution.exchange_reconcile"
+        and payload.get("reason") == "m5_exchange_reconcile_entry_fill_order_fact"
+        and str(payload.get("order_truth_source_state") or "").upper()
+        == str(row["venue_state"] or "").upper()
+        and str(row["command_state"] or "").upper() in {"CANCELED", "CANCELLED"}
+        and str(row["venue_state"] or "").upper()
+        in {"PARTIAL", "PARTIALLY_MATCHED"}
+        and identities_match
+        and remainder_zero
+        and payload_remainder_zero
+        and 0.0 < matched_size < submitted_size
+    )
+    return predicate_complete_proof or reducer_proof
 
 
 def _get_risk_level() -> str:
