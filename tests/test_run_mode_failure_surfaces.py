@@ -78,6 +78,19 @@ def test_day0_edge_trace_matches_causal_observation_before_posterior_clock():
                 processing_status TEXT,
                 last_error TEXT
             );
+            CREATE INDEX idx_opportunity_events_day0_family_extreme
+                ON opportunity_events(
+                    event_type,
+                    json_extract(payload_json, '$.city'),
+                    json_extract(payload_json, '$.target_date'),
+                    json_extract(payload_json, '$.metric'),
+                    CAST(COALESCE(
+                        json_extract(payload_json, '$.rounded_value'),
+                        json_extract(payload_json, '$.high_so_far'),
+                        json_extract(payload_json, '$.low_so_far')
+                    ) AS REAL),
+                    available_at
+                );
             """
         )
         family = {
@@ -216,6 +229,8 @@ def test_day0_edge_trace_matches_causal_observation_before_posterior_clock():
             "day0_observation_source": "wu_icao_history",
             "day0_observation_identity": "2026-07-28T17:00:00+00:00",
         }
+        statements = []
+        conn.set_trace_callback(statements.append)
         counts = live_health._forecast_snapshot_status_counts_for_edges(
             conn,
             edges=[edge],
@@ -230,6 +245,16 @@ def test_day0_edge_trace_matches_causal_observation_before_posterior_clock():
     assert status["day0_pending"] == 1
     assert status["global_entry_suppressed"] == 1
     assert status["global_preflight_batch_blocked"] == 1
+    event_queries = [
+        statement
+        for statement in statements
+        if "FROM opportunity_events e" in statement
+    ]
+    assert len(event_queries) == 1
+    assert "INDEXED BY idx_opportunity_events_day0_family_extreme" in event_queries[0]
+    assert "json_extract(e.payload_json, '$.city') = 'Sao Paulo'" in event_queries[0]
+    assert "json_extract(e.payload_json, '$.target_date') = '2026-07-28'" in event_queries[0]
+    assert "json_extract(e.payload_json, '$.metric') = 'high'" in event_queries[0]
 
 
 def _write_forecast_event_bridge_dbs(
@@ -640,6 +665,19 @@ def _write_high_yes_edge_dbs(
         world_conn.execute(
             "CREATE TABLE opportunity_event_processing ("
             "event_id TEXT, consumer_name TEXT, processing_status TEXT)"
+        )
+        world_conn.execute(
+            "CREATE INDEX idx_opportunity_events_day0_family_extreme ON "
+            "opportunity_events("
+            "event_type, "
+            "json_extract(payload_json, '$.city'), "
+            "json_extract(payload_json, '$.target_date'), "
+            "json_extract(payload_json, '$.metric'), "
+            "CAST(COALESCE("
+            "json_extract(payload_json, '$.rounded_value'), "
+            "json_extract(payload_json, '$.high_so_far'), "
+            "json_extract(payload_json, '$.low_so_far')"
+            ") AS REAL), available_at)"
         )
         world_conn.execute(
             "CREATE TABLE decision_certificates ("

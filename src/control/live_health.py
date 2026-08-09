@@ -4956,30 +4956,38 @@ def _forecast_snapshot_status_counts_for_edges(
         if "last_error" in processing_columns
         else "NULL AS last_error"
     )
+    rows: list[object] = []
     try:
-        rows = conn.execute(
-            f"""
-            SELECT e.event_id,
-                   e.event_type,
-                   e.available_at,
-                   e.created_at,
-                   e.payload_json,
-                   p.processing_status,
-                   {last_error_select}
-              FROM opportunity_events e
-              LEFT JOIN opportunity_event_processing p
-                ON p.event_id = e.event_id
-               AND p.consumer_name = 'edli_reactor_v1'
-             WHERE e.event_type IN (
-                       'FORECAST_SNAPSHOT_READY',
-                       'EDLI_REDECISION_PENDING',
-                       'DAY0_EXTREME_UPDATED'
-                   )
-               AND e.available_at <= ?
-               AND e.available_at >= ?
-            """,
-            (latest_edge_time, cutoff),
-        ).fetchall()
+        for city, target_date, metric in sorted({key[:3] for key in wanted}):
+            rows.extend(
+                conn.execute(
+                    f"""
+                    SELECT e.event_id,
+                           e.event_type,
+                           e.available_at,
+                           e.created_at,
+                           e.payload_json,
+                           p.processing_status,
+                           {last_error_select}
+                      FROM opportunity_events e
+                           INDEXED BY idx_opportunity_events_day0_family_extreme
+                      LEFT JOIN opportunity_event_processing p
+                        ON p.event_id = e.event_id
+                       AND p.consumer_name = 'edli_reactor_v1'
+                     WHERE e.event_type IN (
+                               'FORECAST_SNAPSHOT_READY',
+                               'EDLI_REDECISION_PENDING',
+                               'DAY0_EXTREME_UPDATED'
+                           )
+                       AND json_extract(e.payload_json, '$.city') = ?
+                       AND json_extract(e.payload_json, '$.target_date') = ?
+                       AND json_extract(e.payload_json, '$.metric') = ?
+                       AND e.available_at <= ?
+                       AND e.available_at >= ?
+                    """,
+                    (city, target_date, metric, latest_edge_time, cutoff),
+                ).fetchall()
+            )
     except Exception:  # noqa: BLE001 - optional trace detail must not mask the edge alarm
         return {}
     counts: dict[tuple[str, str, str, str], dict[str, int]] = {}
