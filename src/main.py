@@ -2193,9 +2193,12 @@ def _start_venue_background_maintenance_async(adapter=None) -> str:
 
 
 def _start_venue_background_maintenance_after_reactor_if_required() -> str:
-    """Deterministically retry M5 venue maintenance after the reactor releases."""
+    """Start required M5/finding maintenance from a recurring control tick."""
 
-    if not _ws_gap_m5_reconcile_required():
+    if (
+        not _ws_gap_m5_reconcile_required()
+        and not _unresolved_reconcile_findings_exist()
+    ):
         return "not_required"
     try:
         adapter = _ensure_venue_read_side_adapter()
@@ -2443,6 +2446,7 @@ def _start_venue_heartbeat_loop_if_needed() -> None:
     global _venue_heartbeat_thread
     if _external_venue_heartbeat_enabled():
         _configure_external_venue_heartbeat_supervisor_if_needed()
+        _start_venue_background_maintenance_after_reactor_if_required()
         return
     if _venue_heartbeat_thread is not None and _venue_heartbeat_thread.is_alive():
         return

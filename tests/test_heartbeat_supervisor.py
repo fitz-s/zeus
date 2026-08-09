@@ -2144,6 +2144,7 @@ def test_post_reactor_maintenance_starts_only_when_m5_required(monkeypatch):
         "_start_venue_background_maintenance_async",
         lambda active_adapter: calls.append(active_adapter) or "started",
     )
+    monkeypatch.setattr(main, "_unresolved_reconcile_findings_exist", lambda: False)
 
     monkeypatch.setattr(main, "_ws_gap_m5_reconcile_required", lambda: False)
     assert main._start_venue_background_maintenance_after_reactor_if_required() == "not_required"
@@ -2152,6 +2153,11 @@ def test_post_reactor_maintenance_starts_only_when_m5_required(monkeypatch):
     monkeypatch.setattr(main, "_ws_gap_m5_reconcile_required", lambda: True)
     assert main._start_venue_background_maintenance_after_reactor_if_required() == "started"
     assert calls == [adapter]
+
+    monkeypatch.setattr(main, "_ws_gap_m5_reconcile_required", lambda: False)
+    monkeypatch.setattr(main, "_unresolved_reconcile_findings_exist", lambda: True)
+    assert main._start_venue_background_maintenance_after_reactor_if_required() == "started"
+    assert calls == [adapter, adapter]
 
 
 def test_collateral_background_refresh_defers_when_edli_pending_backlog_exists(monkeypatch):
@@ -2279,6 +2285,8 @@ def test_external_heartbeat_defers_background_db_work_while_cycle_runs(monkeypat
         "_start_venue_background_maintenance_async",
         lambda adapter: calls.append("venue_background"),
     )
+    monkeypatch.setattr(main, "_unresolved_reconcile_findings_exist", lambda: False)
+    monkeypatch.setattr(main, "_ws_gap_m5_reconcile_required", lambda: False)
 
     assert main._cycle_lock.acquire(blocking=False)
     try:
@@ -2318,6 +2326,8 @@ def test_external_heartbeat_defers_background_db_work_while_edli_reactor_runs(mo
         "_start_venue_background_maintenance_async",
         lambda adapter: calls.append("venue_background"),
     )
+    monkeypatch.setattr(main, "_unresolved_reconcile_findings_exist", lambda: False)
+    monkeypatch.setattr(main, "_ws_gap_m5_reconcile_required", lambda: False)
 
     assert main._edli_reactor_active_lock.acquire(blocking=False)
     try:
@@ -2326,6 +2336,39 @@ def test_external_heartbeat_defers_background_db_work_while_edli_reactor_runs(mo
         main._edli_reactor_active_lock.release()
 
     assert calls == ["configure_supervisor"]
+
+
+def test_external_heartbeat_triggers_reconcile_drain_during_active_reactor(monkeypatch):
+    from src import main
+
+    calls = []
+    adapter = object()
+    monkeypatch.setattr(main, "_external_venue_heartbeat_enabled", lambda: True)
+    monkeypatch.setattr(
+        main,
+        "_configure_external_venue_heartbeat_supervisor_if_needed",
+        lambda: calls.append("configure_supervisor"),
+    )
+    monkeypatch.setattr(
+        main,
+        "_ensure_venue_read_side_adapter",
+        lambda: calls.append("ensure_adapter") or adapter,
+    )
+    monkeypatch.setattr(main, "_ws_gap_m5_reconcile_required", lambda: False)
+    monkeypatch.setattr(main, "_unresolved_reconcile_findings_exist", lambda: True)
+    monkeypatch.setattr(
+        main,
+        "_start_venue_background_maintenance_async",
+        lambda active_adapter: calls.append("venue_background") or "started",
+    )
+
+    assert main._edli_reactor_active_lock.acquire(blocking=False)
+    try:
+        main._start_venue_heartbeat_loop_if_needed()
+    finally:
+        main._edli_reactor_active_lock.release()
+
+    assert calls == ["configure_supervisor", "ensure_adapter", "venue_background"]
 
 
 def test_venue_background_maintenance_defers_while_cycle_runs(monkeypatch):
