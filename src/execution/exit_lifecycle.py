@@ -5440,7 +5440,19 @@ def _execute_live_exit(
             )
         else:
             marketable_certificate_hash = ""
-        raw_sell_result = place_sell_order(
+        q_version = str(
+            (
+                exit_intent.probability_receipt.get("q_version")
+                or exit_intent.probability_receipt.get(
+                    "probability_content_identity"
+                )
+                or exit_intent.probability_receipt.get("posterior_id")
+                or ""
+            )
+            if exit_intent.probability_receipt is not None
+            else ""
+        )
+        executor_kwargs = dict(
             trade_id=position.trade_id,
             token_id=token_id,
             shares=exit_intent.shares,
@@ -5448,20 +5460,6 @@ def _execute_live_exit(
             best_bid=best_bid,
             exact_limit_price=exit_intent.exact_limit_price,
             submit_order_type=exit_intent.submit_order_type,
-            decision_id=exit_intent.decision_id or f"exit:{position.trade_id}",
-            q_version=str(
-                (
-                    exit_intent.probability_receipt.get("q_version")
-                    or exit_intent.probability_receipt.get(
-                        "probability_content_identity"
-                    )
-                    or exit_intent.probability_receipt.get("posterior_id")
-                    or ""
-                )
-                if exit_intent.probability_receipt is not None
-                else ""
-            ),
-            execution_proof_verified=True,
             marketable_sell_certificate=marketable_certificate,
             marketable_sell_certificate_identity=(
                 marketable_certificate_hash
@@ -5476,6 +5474,37 @@ def _execute_live_exit(
             ),
             **submit_snapshot_context,
         )
+        decision_id = exit_intent.decision_id or f"exit:{position.trade_id}"
+        if (
+            global_authorized
+            and global_sell_authority is not None
+            and global_sell_authority.jit_candidate.execution_mode
+            == "TAKER_LIMIT"
+        ):
+            executor_intent = create_exit_order_intent(**executor_kwargs)
+            deadline_error = _exit_execution_authority_deadline_error(
+                executor_intent
+            )
+            raw_sell_result = (
+                OrderResult(
+                    trade_id=position.trade_id,
+                    status="rejected",
+                    reason=deadline_error,
+                )
+                if deadline_error is not None
+                else execute_exit_order(
+                    executor_intent,
+                    decision_id=decision_id,
+                    q_version=q_version,
+                )
+            )
+        else:
+            raw_sell_result = place_sell_order(
+                decision_id=decision_id,
+                q_version=q_version,
+                execution_proof_verified=True,
+                **executor_kwargs,
+            )
         sell_result = _coerce_sell_result(position.trade_id, raw_sell_result)
         if execution_evidence is not None:
             execution_evidence.observe(sell_result)
