@@ -87,6 +87,126 @@ def test_terminal_order_fact_snapshot_scopes_append_only_history_before_ranking(
     assert len(captured["params"]) == 13
 
 
+def test_persistence_failure_keeps_typed_pre_sdk_rejection_witness(conn):
+    from src.execution.executor import _mark_post_submit_persistence_failure
+
+    _insert(
+        conn,
+        command_id="cmd-pre-sdk-witness",
+        intent_kind="EXIT",
+        side="SELL",
+    )
+    conn.commit()
+
+    state = _mark_post_submit_persistence_failure(
+        conn,
+        command_id="cmd-pre-sdk-witness",
+        order_id=None,
+        occurred_at="2026-04-26T00:01:00Z",
+        reason="terminal_rejection_persistence_failed_after_side_effect",
+        detail="database is locked",
+        idempotency_key="b" * 32,
+        order_role="exit",
+        terminal_rejection_code="V2_PRE_SUBMIT_EXCEPTION",
+        terminal_rejection_detail="fee snapshot unavailable",
+        terminal_rejection_status="rejected",
+    )
+
+    assert state == "REVIEW_REQUIRED"
+    payload = json.loads(_get_events(conn, "cmd-pre-sdk-witness")[-1]["payload_json"])
+    assert payload["side_effect_boundary_crossed"] is False
+    assert payload["sdk_submit_attempted"] is False
+    assert payload["terminal_rejection_witness"] == {
+        "schema_version": 1,
+        "error_code": "V2_PRE_SUBMIT_EXCEPTION",
+        "error_message": "fee snapshot unavailable",
+        "result_status": "rejected",
+        "pre_sdk_no_side_effect": True,
+    }
+
+
+def test_typed_pre_sdk_rejection_recovers_without_account_snapshot(conn, mock_client):
+    from src.execution.command_recovery import reconcile_unresolved_commands
+    from src.state.venue_command_repo import append_event
+
+    _insert(
+        conn,
+        command_id="cmd-pre-sdk-recovery",
+        intent_kind="EXIT",
+        side="SELL",
+    )
+    append_event(
+        conn,
+        command_id="cmd-pre-sdk-recovery",
+        event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:01:00Z",
+        payload={
+            "reason": "terminal_rejection_persistence_failed_after_side_effect",
+            "side_effect_boundary_crossed": False,
+            "sdk_submit_attempted": False,
+            "terminal_rejection_witness": {
+                "schema_version": 1,
+                "error_code": "V2_PRE_SUBMIT_EXCEPTION",
+                "error_message": "fee snapshot unavailable",
+                "result_status": "rejected",
+                "pre_sdk_no_side_effect": True,
+            },
+        },
+    )
+
+    summary = reconcile_unresolved_commands(conn, mock_client)
+
+    assert summary["advanced"] == 1
+    assert _get_state(conn, "cmd-pre-sdk-recovery") == "REJECTED"
+    event = _get_events(conn, "cmd-pre-sdk-recovery")[-1]
+    assert event["event_type"] == "REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT"
+    payload = json.loads(event["payload_json"])
+    assert payload["proof_class"] == "typed_adapter_pre_sdk_rejection"
+    mock_client.get_order.assert_not_called()
+    mock_client.get_open_orders.assert_not_called()
+    mock_client.get_trades.assert_not_called()
+
+
+def test_typed_pre_sdk_rejection_rejects_unallowlisted_witness(conn):
+    from src.execution.command_recovery import (
+        clear_review_required_typed_pre_sdk_rejection,
+    )
+    from src.state.venue_command_repo import append_event
+
+    _insert(
+        conn,
+        command_id="cmd-unsafe-pre-sdk-witness",
+        intent_kind="EXIT",
+        side="SELL",
+    )
+    append_event(
+        conn,
+        command_id="cmd-unsafe-pre-sdk-witness",
+        event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:01:00Z",
+        payload={
+            "reason": "terminal_rejection_persistence_failed_after_side_effect",
+            "side_effect_boundary_crossed": False,
+            "sdk_submit_attempted": False,
+            "terminal_rejection_witness": {
+                "schema_version": 1,
+                "error_code": "VENUE_TIMEOUT",
+                "error_message": "unknown submit boundary",
+                "result_status": "rejected",
+                "pre_sdk_no_side_effect": True,
+            },
+        },
+    )
+
+    with pytest.raises(ValueError, match="typed_rejection_code_pre_sdk"):
+        clear_review_required_typed_pre_sdk_rejection(
+            conn,
+            "cmd-unsafe-pre-sdk-witness",
+        )
+
+    assert _get_state(conn, "cmd-unsafe-pre-sdk-witness") == "REVIEW_REQUIRED"
+
+
 def test_edli_recovery_refs_prefer_world_authority_over_trade_ghosts():
     from src.execution.command_recovery import (
         _edli_live_cap_ref,

@@ -69,6 +69,7 @@ from src.state.fact_revocation import (
     is_certificate_revoked as _certificate_is_revoked,
 )
 from src.state.lifecycle_manager import LifecyclePhase, TERMINAL_STATES
+from src.venue.response_contracts import is_pre_sdk_no_side_effect_rejection
 
 logger = logging.getLogger(__name__)
 
@@ -4917,6 +4918,9 @@ def _mark_post_submit_persistence_failure(
     detail: str,
     idempotency_key: str,
     order_role: str,
+    terminal_rejection_code: str | None = None,
+    terminal_rejection_detail: str | None = None,
+    terminal_rejection_status: str | None = None,
 ) -> str | None:
     """Persist REVIEW_REQUIRED after SDK success but ACK facts failed.
 
@@ -4938,6 +4942,21 @@ def _mark_post_submit_persistence_failure(
             order_id,
             rollback_exc,
         )
+    typed_pre_sdk_rejection = bool(
+        not order_id
+        and is_pre_sdk_no_side_effect_rejection(terminal_rejection_code)
+    )
+    terminal_rejection_witness = (
+        {
+            "schema_version": 1,
+            "error_code": str(terminal_rejection_code),
+            "error_message": str(terminal_rejection_detail or ""),
+            "result_status": str(terminal_rejection_status or ""),
+            "pre_sdk_no_side_effect": typed_pre_sdk_rejection,
+        }
+        if terminal_rejection_code
+        else None
+    )
     try:
         append_event(
             conn,
@@ -4949,9 +4968,15 @@ def _mark_post_submit_persistence_failure(
                 "detail": detail,
                 "venue_order_id": order_id or "",
                 "idempotency_key": idempotency_key,
-                "side_effect_boundary_crossed": True,
+                "side_effect_boundary_crossed": not typed_pre_sdk_rejection,
+                "sdk_submit_attempted": not typed_pre_sdk_rejection,
                 "sdk_submit_returned_order_id": bool(order_id),
                 "requires_recovery": True,
+                **(
+                    {"terminal_rejection_witness": terminal_rejection_witness}
+                    if terminal_rejection_witness
+                    else {}
+                ),
             },
         )
         conn.commit()
@@ -7336,6 +7361,13 @@ def execute_exit_order(
                     detail=str(inner),
                     idempotency_key=idem.value,
                     order_role="exit",
+                    terminal_rejection_code=str(rejection_reason),
+                    terminal_rejection_detail=(
+                        result.get("errorMessage")
+                        or result.get("error_message")
+                        or ""
+                    ),
+                    terminal_rejection_status=str(result.get("status") or ""),
                 )
                 return _with_venue_boundary(OrderResult(
                     trade_id=intent.trade_id,
@@ -9088,6 +9120,13 @@ def _live_order(
                     detail=str(inner),
                     idempotency_key=idem.value,
                     order_role="entry",
+                    terminal_rejection_code=str(rejection_reason),
+                    terminal_rejection_detail=(
+                        result.get("errorMessage")
+                        or result.get("error_message")
+                        or ""
+                    ),
+                    terminal_rejection_status=str(result.get("status") or ""),
                 )
                 return OrderResult(
                     trade_id=trade_id,

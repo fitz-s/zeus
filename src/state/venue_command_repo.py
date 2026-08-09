@@ -41,6 +41,7 @@ from typing import Any, Iterable, Iterator, Mapping, Optional
 
 from src.architecture.decorators import capability, protects
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
+from src.venue.response_contracts import is_pre_sdk_no_side_effect_rejection
 
 UNRESOLVED_SIDE_EFFECT_STATES: tuple[str, ...] = (
     "SUBMIT_UNKNOWN_SIDE_EFFECT",
@@ -2102,6 +2103,77 @@ def _validate_review_clearance_payload(
     if payload.get("sdk_submit_attempted") is not False:
         raise ValueError("review clearance requires sdk_submit_attempted=false")
     proof_class = payload.get("proof_class")
+    if proof_class == "typed_adapter_pre_sdk_rejection":
+        required_predicates = payload.get("required_predicates")
+        if not isinstance(required_predicates, dict):
+            raise ValueError("typed pre-SDK clearance requires required_predicates")
+        required_true = (
+            "no_venue_order_id",
+            "no_final_submission_envelope",
+            "no_raw_response",
+            "no_signed_order",
+            "no_order_facts",
+            "no_trade_facts",
+            "no_submit_side_effect_events",
+            "review_reason_is_terminal_rejection_persistence_failure",
+            "typed_rejection_witness_schema",
+            "typed_rejection_code_pre_sdk",
+            "typed_rejection_declares_no_side_effect",
+            "review_declares_no_side_effect",
+            "review_declares_sdk_submit_not_attempted",
+            "typed_rejection_status_rejected",
+        )
+        missing = [
+            name for name in required_true
+            if required_predicates.get(name) is not True
+        ]
+        if missing:
+            raise ValueError(
+                f"typed pre-SDK clearance predicates are not proven true: {missing}"
+            )
+        actual_predicates = _actual_review_clearance_predicates(conn, command_id)
+        actual_failures = [
+            name
+            for name, ok in actual_predicates.items()
+            if name != "review_required_reason_pre_sdk" and not ok
+        ]
+        if actual_failures:
+            raise ValueError(
+                f"typed pre-SDK clearance DB predicates failed: {actual_failures}"
+            )
+        actual_review = _actual_review_required_payload(conn, command_id)
+        if actual_review.get("reason") != (
+            "terminal_rejection_persistence_failed_after_side_effect"
+        ):
+            raise ValueError("typed pre-SDK clearance review reason does not match")
+        witness = payload.get("terminal_rejection_witness")
+        actual_witness = actual_review.get("terminal_rejection_witness")
+        if not isinstance(witness, dict) or witness != actual_witness:
+            raise ValueError("typed pre-SDK clearance witness does not match DB")
+        if witness.get("schema_version") != 1:
+            raise ValueError("typed pre-SDK clearance witness schema is unsupported")
+        if not is_pre_sdk_no_side_effect_rejection(witness.get("error_code")):
+            raise ValueError("typed pre-SDK clearance rejection code is not authoritative")
+        if witness.get("pre_sdk_no_side_effect") is not True:
+            raise ValueError("typed pre-SDK clearance witness is not no-side-effect")
+        if str(witness.get("result_status") or "").lower() != "rejected":
+            raise ValueError("typed pre-SDK clearance result status is not rejected")
+        source = payload.get("source_proof")
+        if not isinstance(source, dict):
+            raise ValueError("typed pre-SDK clearance requires source_proof")
+        for key in ("source_commit", "source_function", "source_reason", "decision_id"):
+            if not str(source.get(key) or "").strip():
+                raise ValueError(
+                    f"typed pre-SDK clearance source_proof missing {key}"
+                )
+        if source.get("source_reason") != witness.get("error_code"):
+            raise ValueError("typed pre-SDK clearance source reason does not match")
+        if source.get("decision_id") != _actual_command_decision_id(conn, command_id):
+            raise ValueError("typed pre-SDK clearance decision_id does not match")
+        review_proof = payload.get("review_required_proof")
+        if not isinstance(review_proof, dict) or review_proof.get("reason") != actual_review.get("reason"):
+            raise ValueError("typed pre-SDK clearance review proof does not match")
+        return
     if proof_class != "pre_sdk_no_side_effect":
         raise ValueError("review clearance proof_class is not supported")
     required_predicates = payload.get("required_predicates")
@@ -3225,6 +3297,31 @@ def _actual_review_required_reason(
     if not isinstance(payload, dict):
         return ""
     return str(payload.get("reason") or "").strip()
+
+
+def _actual_review_required_payload(
+    conn: sqlite3.Connection,
+    command_id: str,
+) -> dict:
+    with _row_factory_as(conn, sqlite3.Row):
+        row = conn.execute(
+            """
+            SELECT payload_json
+            FROM venue_command_events
+            WHERE command_id = ?
+              AND event_type = 'REVIEW_REQUIRED'
+            ORDER BY sequence_no DESC
+            LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+    if row is None or not row["payload_json"]:
+        return {}
+    try:
+        payload = json.loads(str(row["payload_json"]))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _actual_review_confirmed_fill_predicates(

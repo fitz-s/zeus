@@ -75,6 +75,7 @@ from src.state.venue_command_repo import (
     UNRESOLVED_SIDE_EFFECT_STATES,
 )
 from src.state.write_coordinator import WriteLeaseTimeout
+from src.venue.response_contracts import is_pre_sdk_no_side_effect_rejection
 
 logger = logging.getLogger(__name__)
 _RECOVERY_MONITOR_PREEMPTION = threading.local()
@@ -16516,6 +16517,118 @@ def _review_no_side_effect_predicates(
     return predicates, failures
 
 
+def _typed_pre_sdk_rejection_predicates(
+    conn: sqlite3.Connection,
+    command: dict,
+) -> tuple[dict, list[str], dict]:
+    events = _command_events(conn, str(command["command_id"]))
+    review_payload = _latest_review_required_payload(events)
+    witness = _json_dict(review_payload.get("terminal_rejection_witness"))
+    predicates, _ = _review_no_side_effect_predicates(conn, command)
+    predicates.pop("review_required_reason_pre_sdk", None)
+    predicates.update(
+        {
+            "review_reason_is_terminal_rejection_persistence_failure": (
+                review_payload.get("reason")
+                == "terminal_rejection_persistence_failed_after_side_effect"
+            ),
+            "typed_rejection_witness_schema": witness.get("schema_version") == 1,
+            "typed_rejection_code_pre_sdk": is_pre_sdk_no_side_effect_rejection(
+                witness.get("error_code")
+            ),
+            "typed_rejection_declares_no_side_effect": (
+                witness.get("pre_sdk_no_side_effect") is True
+            ),
+            "review_declares_no_side_effect": (
+                review_payload.get("side_effect_boundary_crossed") is False
+            ),
+            "review_declares_sdk_submit_not_attempted": (
+                review_payload.get("sdk_submit_attempted") is False
+            ),
+            "typed_rejection_status_rejected": (
+                str(witness.get("result_status") or "").lower() == "rejected"
+            ),
+        }
+    )
+    failures = [name for name, ok in predicates.items() if not ok]
+    return predicates, failures, witness
+
+
+def clear_review_required_typed_pre_sdk_rejection(
+    conn: sqlite3.Connection,
+    command_id: str,
+    *,
+    occurred_at: str | None = None,
+) -> dict:
+    """Terminalize only an adapter-certified rejection before venue POST."""
+
+    command = _review_required_command(conn, command_id)
+    predicates, failures, witness = _typed_pre_sdk_rejection_predicates(
+        conn,
+        command,
+    )
+    if failures:
+        raise ValueError(
+            "typed pre-SDK rejection predicates failed: "
+            + ", ".join(sorted(failures))
+        )
+    now = occurred_at or _now_iso()
+    decision_id = str(command.get("decision_id") or "")
+    review_reason = _latest_review_required_payload(
+        _command_events(conn, command_id)
+    ).get("reason")
+    payload = {
+        "schema_version": 1,
+        "reason": "review_cleared_no_venue_side_effect",
+        "command_id": command_id,
+        "decision_id": decision_id,
+        "proof_class": "typed_adapter_pre_sdk_rejection",
+        "side_effect_boundary_crossed": False,
+        "sdk_submit_attempted": False,
+        "required_predicates": predicates,
+        "terminal_rejection_witness": witness,
+        "source_proof": {
+            "source_commit": "runtime",
+            "source_function": "command_recovery._reconcile_row",
+            "source_reason": str(witness.get("error_code") or ""),
+            "decision_id": decision_id,
+        },
+        "review_required_proof": {"reason": review_reason},
+        "reviewed_by": "command_recovery",
+        "cleared_at": now,
+    }
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type=CommandEventType.REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT.value,
+        occurred_at=now,
+        payload=payload,
+    )
+    return payload
+
+
+def _review_required_typed_pre_sdk_rejection_recovery(
+    conn: sqlite3.Connection,
+    cmd: VenueCommand,
+) -> str:
+    try:
+        clear_review_required_typed_pre_sdk_rejection(conn, cmd.command_id)
+    except ValueError:
+        return "stayed"
+    except Exception as exc:  # noqa: BLE001 - recovery must stay fail-closed.
+        logger.warning(
+            "recovery: command %s typed pre-SDK rejection clearance failed: %s",
+            cmd.command_id,
+            exc,
+        )
+        return "error"
+    logger.info(
+        "recovery: command %s typed pre-SDK rejection -> REJECTED",
+        cmd.command_id,
+    )
+    return "advanced"
+
+
 def _submit_unknown_command(conn: sqlite3.Connection, command_id: str) -> dict:
     row = conn.execute(
         "SELECT * FROM venue_commands WHERE command_id = ?",
@@ -22772,6 +22885,9 @@ def _reconcile_row(
         state = cmd.state
 
         if state == CommandState.REVIEW_REQUIRED:
+            outcome = _review_required_typed_pre_sdk_rejection_recovery(conn, cmd)
+            if outcome != "stayed":
+                return outcome
             outcome = _review_required_cancel_failed_already_canceled_fill_recovery(
                 conn,
                 cmd,
