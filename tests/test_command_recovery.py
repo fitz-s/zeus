@@ -13918,6 +13918,99 @@ class TestRecoveryResolutionTable:
             },
         ]
 
+    def test_cancelled_partial_backfills_missing_command_bound_fill_event(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Exact bridged economics do not replace command-bound fill provenance."""
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_projection_repairs,
+            reconcile_terminal_entry_exposure_obligations,
+        )
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=13.5, price=0.94)
+        _open_test_entry_obligation(conn, "cmd-001")
+        _advance_to_acked(conn, venue_order_id="ord-bridged-partial")
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-001",
+            order_id="ord-bridged-partial",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-bridged-partial",
+            state="PARTIALLY_MATCHED",
+            matched_size="5.53",
+            remaining_size="7.97",
+            source="WS_USER",
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-bridged-partial",
+            trade_id="trade-bridged-partial",
+            state="CONFIRMED",
+            filled_size="5.53",
+            fill_price="0.94",
+            source="WS_USER",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'day0_window', shares = 5.53,
+                   cost_basis_usd = 5.1982, size_usd = 5.1982,
+                   entry_price = 0.94, fill_authority = 'venue_confirmed_partial',
+                   chain_state = 'synced', chain_shares = 5.53,
+                   chain_cost_basis_usd = 5.1982, chain_avg_price = 0.94
+             WHERE position_id = 'pos-001'
+            """
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-bridged-partial"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-bridged-partial"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={"venue_order_id": "ord-bridged-partial"},
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        assert reconcile_filled_entry_projection_repairs(conn, mock_client)[
+            "advanced"
+        ] == 1
+        event = conn.execute(
+            """
+            SELECT command_id, order_id
+              FROM position_events
+             WHERE position_id = 'pos-001'
+               AND event_type = 'ENTRY_ORDER_FILLED'
+            """
+        ).fetchone()
+        assert dict(event) == {
+            "command_id": "cmd-001",
+            "order_id": "ord-bridged-partial",
+        }
+        assert reconcile_terminal_entry_exposure_obligations(conn)["advanced"] == 0
+        obligation = conn.execute(
+            "SELECT status FROM entry_exposure_obligations WHERE command_id = 'cmd-001'"
+        ).fetchone()
+        assert obligation["status"] == "RESOLVED"
+
     def test_cancelled_partial_fill_promotes_zero_projection_and_closes_remainder(
         self,
         conn,

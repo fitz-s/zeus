@@ -3931,6 +3931,34 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                         entry_fill.filled_size
                 )
                 OR (
+                    -- A chain/venue bridge may materialize the exact current
+                    -- economics before the command-bound lifecycle event.
+                    -- Replaying the same fill is then an event/provenance
+                    -- repair, not an exposure increment.
+                    cmd.state IN ('FILLED', 'PARTIAL', 'CANCELLED', 'REVIEW_REQUIRED')
+                    AND entry_fill.has_confirmed_fill = 1
+                    AND pc.phase IN ('active', 'day0_window', 'pending_exit')
+                    AND lower(COALESCE(pc.order_id, '')) =
+                        lower(cmd.venue_order_id)
+                    AND ABS(COALESCE(pc.shares, 0) - entry_fill.filled_size)
+                        <= 0.000001
+                    AND ABS(
+                        COALESCE(pc.cost_basis_usd, 0)
+                        - (entry_fill.filled_size * entry_fill.fill_price)
+                    ) <= 0.000001
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM position_events pe
+                         WHERE pe.position_id = cmd.position_id
+                           AND pe.event_type = 'ENTRY_ORDER_FILLED'
+                           AND (
+                                pe.command_id = cmd.command_id
+                                OR lower(COALESCE(pe.order_id, '')) =
+                                   lower(cmd.venue_order_id)
+                           )
+                    )
+                )
+                OR (
                     (
                         cmd.state = 'PARTIAL'
                         OR (
