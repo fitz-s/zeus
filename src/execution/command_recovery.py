@@ -3764,6 +3764,10 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
            AND (
                 cmd.state IN ('FILLED', 'PARTIAL')
                 OR (
+                    cmd.state = 'REVIEW_REQUIRED'
+                    AND entry_fill.has_confirmed_fill = 1
+                )
+                OR (
                     cmd.state = 'CANCELLED'
                     AND CAST(entry_fill.filled_size AS REAL)
                         < CAST(cmd.size AS REAL) - 0.01
@@ -3786,12 +3790,13 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                     AND COALESCE(pc.fill_authority, '') IN ('', 'none')
                 )
                 OR (
-                    -- CANCELLED terminates only the unfilled remainder.  A
-                    -- later authenticated trade fact must still advance the
-                    -- already-open position from its strict fill prefix.
-                    cmd.state = 'CANCELLED'
+                    -- Command control state cannot veto authenticated fill
+                    -- economics.  A later confirmed fact must advance an
+                    -- already-open position from its strict fill prefix,
+                    -- including when the command remains REVIEW_REQUIRED.
+                    cmd.state IN ('FILLED', 'PARTIAL', 'CANCELLED', 'REVIEW_REQUIRED')
                     AND entry_fill.has_confirmed_fill = 1
-                    AND pc.phase IN ('active', 'day0_window')
+                    AND pc.phase IN ('active', 'day0_window', 'pending_exit')
                     AND lower(COALESCE(pc.order_id, '')) =
                         lower(cmd.venue_order_id)
                     AND COALESCE(pc.shares, 0) + 0.000001 <
@@ -3801,29 +3806,12 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                     (
                         cmd.state = 'PARTIAL'
                         OR (
-                            cmd.state = 'FILLED'
-                            AND pc.fill_authority = 'venue_position_observed'
-                            AND pc.chain_state = 'synced'
-                            AND ABS(
-                                COALESCE(pc.shares, 0)
-                                - entry_fill.filled_size
-                            ) <= 0.001
-                            AND ABS(
-                                COALESCE(pc.chain_shares, 0)
-                                - entry_fill.filled_size
-                            ) <= 0.001
-                            AND ABS(
-                                COALESCE(pc.chain_cost_basis_usd, 0)
-                                - (
-                                    entry_fill.filled_size
-                                    * entry_fill.fill_price
-                                )
-                            ) <= 0.02
+                            cmd.state IN ('FILLED', 'REVIEW_REQUIRED')
+                            AND entry_fill.has_confirmed_fill = 1
                         )
                     )
-                    AND pc.phase IN ('active', 'day0_window')
-                    AND COALESCE(pc.order_id, '') != ''
-                    AND lower(pc.order_id) != lower(cmd.venue_order_id)
+                    AND pc.phase IN ('active', 'day0_window', 'pending_exit')
+                    AND lower(COALESCE(pc.order_id, '')) != lower(cmd.venue_order_id)
                     AND NOT EXISTS (
                         SELECT 1
                           FROM position_events pe
@@ -5351,7 +5339,7 @@ def _append_filled_entry_projection_repair(
     from src.state.projection import upsert_position_current
 
     projected_phase = str(candidate.get("projected_phase") or "")
-    if projected_phase in {"active", "day0_window"}:
+    if projected_phase in {"active", "day0_window", "pending_exit"}:
         command_id = str(candidate.get("command_id") or "")
         position_id = str(candidate.get("position_id") or "")
         venue_order_id = str(candidate.get("venue_order_id") or "")

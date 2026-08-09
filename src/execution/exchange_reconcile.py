@@ -116,7 +116,9 @@ _CONFIRMED_POSITION_FACT_STATES = frozenset({"CONFIRMED"})
 _OPTIMISTIC_POSITION_FACT_STATES = frozenset({"MATCHED", "MINED"})
 _POSITION_DRIFT_ABS_TOLERANCE = Decimal("0.0001")
 _POSITION_API_VISIBILITY_FLOOR = Decimal("0.01")
-_ENTRY_FILL_PROJECTION_PHASES = frozenset({"pending_entry", "active", "day0_window"})
+_ENTRY_FILL_PROJECTION_PHASES = frozenset(
+    {"pending_entry", "active", "day0_window", "pending_exit"}
+)
 _TERMINAL_ENTRY_COMMAND_STATES = frozenset(
     {"CANCELLED", "CANCELED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED", "FILLED"}
 )
@@ -5029,7 +5031,7 @@ def _ensure_entry_fill_position_event(
     current_cost = _positive_decimal_or_none(current.get("cost_basis_usd"))
     incremental_fill = bool(
         not missing_projection
-        and phase in {"active", "day0_window"}
+        and phase in {"active", "day0_window", "pending_exit"}
         and current_shares is not None
         and current_cost is not None
         and str(current.get("order_id") or "").strip() != venue_order_id
@@ -5037,7 +5039,7 @@ def _ensure_entry_fill_position_event(
     cumulative_reobservation = bool(
         existing is not None
         and not missing_projection
-        and phase in {"active", "day0_window"}
+        and phase in {"active", "day0_window", "pending_exit"}
         and current_shares is not None
         and current_cost is not None
         and str(current.get("order_id") or "").strip() == venue_order_id

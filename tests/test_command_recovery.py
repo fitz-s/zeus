@@ -13296,12 +13296,17 @@ class TestRecoveryResolutionTable:
         }
         assert _get_state(conn, "cmd-001") == "PARTIAL"
 
-    def test_immediate_filled_increment_folds_cumulative_position_economics(
+    @pytest.mark.parametrize("repair_owner", ["immediate", "periodic"])
+    def test_filled_increment_folds_cumulative_position_economics(
         self,
         conn,
         mock_client,
+        repair_owner,
     ):
-        from src.execution.command_recovery import ensure_live_entry_projection_for_command
+        from src.execution.command_recovery import (
+            ensure_live_entry_projection_for_command,
+            reconcile_filled_entry_projection_repairs,
+        )
         from src.state.venue_command_repo import append_event
 
         _insert(conn, size=5.0, price=0.34)
@@ -13350,15 +13355,19 @@ class TestRecoveryResolutionTable:
             command_id="cmd-002",
             order_id="ord-second",
             trade_id="trade-second",
-            state="MATCHED",
+            state="CONFIRMED",
             filled_size="3",
             fill_price="0.40",
         )
 
-        summary = ensure_live_entry_projection_for_command(
-            conn,
-            command_id="cmd-002",
-            client=mock_client,
+        summary = (
+            ensure_live_entry_projection_for_command(
+                conn,
+                command_id="cmd-002",
+                client=mock_client,
+            )
+            if repair_owner == "immediate"
+            else reconcile_filled_entry_projection_repairs(conn, client=mock_client)
         )
 
         assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
@@ -13400,13 +13409,26 @@ class TestRecoveryResolutionTable:
         ).fetchall()
         assert [dict(row) for row in facts] == [
             {"command_id": "cmd-001", "shares": 5.0, "fill_price": 0.34},
-            {"command_id": "cmd-002", "shares": 3.0, "fill_price": 0.4},
+            {
+                "command_id": "cmd-002",
+                "shares": 3.0,
+                "fill_price": pytest.approx(0.4),
+            },
         ]
-        assert ensure_live_entry_projection_for_command(
-            conn,
-            command_id="cmd-002",
-            client=mock_client,
-        ) == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        repeated = (
+            ensure_live_entry_projection_for_command(
+                conn,
+                command_id="cmd-002",
+                client=mock_client,
+            )
+            if repair_owner == "immediate"
+            else reconcile_filled_entry_projection_repairs(conn, client=mock_client)
+        )
+        assert repeated == (
+            {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+            if repair_owner == "immediate"
+            else {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        )
 
     @pytest.mark.parametrize("repair_owner", ["immediate", "periodic"])
     def test_partial_increment_folds_only_confirmed_cumulative_fill(
@@ -13534,6 +13556,103 @@ class TestRecoveryResolutionTable:
         assert conn.execute(
             "SELECT shares FROM position_current WHERE position_id='pos-001'"
         ).fetchone()[0] == 16.0
+
+    def test_review_required_fill_repairs_pending_exit_strict_prefix(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Control-state ambiguity cannot hide authenticated open exposure."""
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_projection_repairs,
+        )
+        from src.state.db import log_execution_fact
+
+        _insert(conn, size=31.0, price=0.21)
+        _advance_to_acked(conn, venue_order_id="ord-review-fill")
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-001",
+            order_id="ord-review-fill",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 11.7578,
+                   cost_basis_usd = 2.469138,
+                   entry_price = 0.21,
+                   order_id = NULL,
+                   order_status = 'filled',
+                   fill_authority = 'venue_confirmed_full',
+                   exit_reason = 'BELIEF_REVERSAL_EXIT'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        conn.execute(
+            "UPDATE venue_commands SET state = 'REVIEW_REQUIRED' "
+            "WHERE command_id = 'cmd-001'"
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-review-fill",
+            trade_id="trade-review-prefix",
+            state="CONFIRMED",
+            filled_size="11.7578",
+            fill_price="0.21",
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-review-fill",
+            trade_id="trade-review-remainder",
+            state="CONFIRMED",
+            filled_size="19.230042",
+            fill_price="0.21",
+        )
+        log_execution_fact(
+            conn,
+            intent_id="pos-001:entry",
+            position_id="pos-001",
+            decision_id="dec-001",
+            command_id="cmd-001",
+            order_role="entry",
+            posted_at="2026-04-26T00:00:00Z",
+            filled_at="2026-04-26T00:06:00Z",
+            submitted_price=0.21,
+            fill_price=0.21,
+            shares=30.987842,
+            venue_status="REVIEW_REQUIRED",
+            terminal_exec_status="partial",
+        )
+
+        summary = reconcile_filled_entry_projection_repairs(conn, client=mock_client)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, exit_reason FROM position_current "
+            "WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "shares": pytest.approx(30.987842),
+            "cost_basis_usd": pytest.approx(6.50744682),
+            "exit_reason": "BELIEF_REVERSAL_EXIT",
+        }
+        event = conn.execute(
+            "SELECT command_id, order_id FROM position_events "
+            "WHERE position_id = 'pos-001' AND event_type = 'ENTRY_ORDER_FILLED'"
+        ).fetchone()
+        assert dict(event) == {
+            "command_id": "cmd-001",
+            "order_id": "ord-review-fill",
+        }
+        assert reconcile_filled_entry_projection_repairs(conn, client=mock_client) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
 
     def test_partial_entry_repair_promotes_zero_share_pending_projection(
         self,
@@ -19980,6 +20099,8 @@ class TestRecoveryResolutionTable:
         }
         portfolio, after = _load_riskguard_portfolio_truth(conn)
         assert len(portfolio.positions) == 1
+        assert portfolio.positions[0].fill_authority == "venue_confirmed_partial"
+        assert portfolio.positions[0].entry_fill_verified is False
         assert after["unloadable_count"] == 0
         assert after["consistency_lock"] == "pass"
 

@@ -846,9 +846,9 @@ def build_entry_increment_canonical_write(
     event/idempotency identity and self-fold the current open phase.
     """
 
-    if phase_after not in {ACTIVE, DAY0_WINDOW}:
+    if phase_after not in {ACTIVE, DAY0_WINDOW, PENDING_EXIT}:
         raise ValueError(
-            "entry increment requires an active/day0 position, "
+            "entry increment requires an exposure-bearing position, "
             f"got phase_after={phase_after!r}"
         )
     order_id = str(order_id or "").strip()

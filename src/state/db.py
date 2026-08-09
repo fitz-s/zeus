@@ -13189,6 +13189,7 @@ def _query_entry_execution_fill_hints(
             {
                 "_shares": Decimal("0"),
                 "_cost": Decimal("0"),
+                "_has_partial": False,
                 "_latest_at": "",
                 "_latest_intent_id": "",
                 "_latest_venue_status": "",
@@ -13197,6 +13198,10 @@ def _query_entry_execution_fill_hints(
         )
         hint["_shares"] += shares
         hint["_cost"] += filled_cost_basis_usd
+        hint["_has_partial"] = bool(
+            hint["_has_partial"]
+            or str(row["terminal_exec_status"] or "").lower() == "partial"
+        )
         if command_id:
             hint["_command_ids"].append(command_id)
         filled_at = str(row["filled_at"] or "")
@@ -13208,6 +13213,7 @@ def _query_entry_execution_fill_hints(
     for trade_id, hint in hints.items():
         total_shares = hint.pop("_shares")
         total_cost = hint.pop("_cost")
+        has_partial = bool(hint.pop("_has_partial"))
         latest_at = hint.pop("_latest_at")
         latest_intent_id = hint.pop("_latest_intent_id")
         latest_venue_status = hint.pop("_latest_venue_status")
@@ -13217,8 +13223,12 @@ def _query_entry_execution_fill_hints(
             "shares_filled": float(total_shares),
             "filled_cost_basis_usd": float(total_cost),
             "entry_economics_authority": ENTRY_ECONOMICS_AVG_FILL_PRICE,
-            "fill_authority": FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
-            "entry_fill_verified": True,
+            "fill_authority": (
+                FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL
+                if has_partial
+                else FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+            ),
+            "entry_fill_verified": not has_partial,
             "entry_economics_source": "execution_fact",
             "execution_fact_intent_id": latest_intent_id,
             "execution_fact_filled_at": latest_at,
@@ -13322,6 +13332,10 @@ def _position_current_effective_entry_economics(
         effective_entry_price = avg_fill_price
         if effective_entry_price <= 0.0 and effective_cost_basis_usd > 0.0 and effective_shares > 0.0:
             effective_entry_price = effective_cost_basis_usd / effective_shares
+        fill_hint_authority = str(
+            fill_hint.get("fill_authority")
+            or FILL_AUTHORITY_VENUE_CONFIRMED_FULL
+        )
         return {
             "submitted_size_usd": submitted_size_usd,
             "projection_cost_basis_usd": projection_cost_basis_usd,
@@ -13333,9 +13347,14 @@ def _position_current_effective_entry_economics(
             "shares_filled": filled_shares,
             "filled_cost_basis_usd": filled_cost_basis_usd,
             "entry_economics_authority": ENTRY_ECONOMICS_AVG_FILL_PRICE,
-            "fill_authority": FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
+            "fill_authority": fill_hint_authority,
             "entry_economics_source": str(fill_hint.get("entry_economics_source") or "execution_fact"),
-            "entry_fill_verified": True,
+            "entry_fill_verified": bool(
+                fill_hint.get(
+                    "entry_fill_verified",
+                    fill_hint_authority != FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
+                )
+            ),
             "execution_fact_intent_id": str(fill_hint.get("execution_fact_intent_id") or ""),
             "execution_fact_filled_at": str(fill_hint.get("execution_fact_filled_at") or ""),
             "execution_fact_venue_status": str(fill_hint.get("execution_fact_venue_status") or ""),

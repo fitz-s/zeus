@@ -5537,6 +5537,108 @@ def test_chain_reconciliation_rescues_commanded_pending_entry_with_trade_fact(tm
     assert pos.order_status == "filled"
 
 
+def test_chain_reconciliation_partial_fill_rescue_preserves_exact_exposure_and_remainder(
+    tmp_path,
+):
+    """A chain-visible partial match is exposure, not a completed entry order."""
+    from src.state.chain_reconciliation import ChainPosition, reconcile
+    from src.state.db import get_connection, init_schema, query_portfolio_loader_view
+    from src.state.venue_command_repo import append_trade_fact
+
+    conn = get_connection(tmp_path / "rescue_partial_trade_fact.db")
+    init_schema(conn)
+    pos = _make_position(
+        trade_id="rescue-partial-1",
+        state="pending_tracked",
+        direction="buy_yes",
+        token_id="tok_yes_partial_001",
+        no_token_id="tok_no_partial_001",
+        order_id="order-partial-1",
+        entry_order_id="order-partial-1",
+        entry_fill_verified=False,
+        entered_at="",
+        order_status="pending",
+        order_posted_at="2026-04-03T00:00:00Z",
+        strategy_key="center_buy",
+        strategy="center_buy",
+        entry_method="ens_member_counting",
+        decision_snapshot_id="snap-partial-1",
+    )
+    pos.shares = 0.0
+    pos.size_usd = 0.0
+    pos.cost_basis_usd = 0.0
+    pos.entry_price = 0.0
+    pos.shares_submitted = 95.0
+    pos.entry_price_submitted = 0.07
+    pos.corrected_executable_economics_eligible = True
+    _seed_canonical_entry_baseline(conn, pos)
+    _seed_acked_entry_command(conn, pos, command_id="cmd-rescue-partial-1")
+    conn.execute(
+        "UPDATE venue_commands SET state = 'PARTIAL' WHERE command_id = ?",
+        ("cmd-rescue-partial-1",),
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-partial-1",
+        venue_order_id="order-partial-1",
+        command_id="cmd-rescue-partial-1",
+        state="CONFIRMED",
+        filled_size="1.505371",
+        fill_price="0.0700000199286422",
+        source="WS_USER",
+        observed_at="2026-04-03T00:00:01+00:00",
+        raw_payload_hash="b" * 64,
+        raw_payload_json={
+            "order_id": "order-partial-1",
+            "trade_id": "trade-partial-1",
+        },
+    )
+
+    stats = reconcile(
+        _make_portfolio(pos),
+        [
+            ChainPosition(
+                token_id="tok_yes_partial_001",
+                size=1.505371,
+                avg_price=0.0700000199286422,
+                cost=0.105375,
+                condition_id="cond-1",
+            )
+        ],
+        conn=conn,
+    )
+
+    row = conn.execute(
+        """
+        SELECT phase, shares, cost_basis_usd, entry_price, fill_authority,
+               order_status
+          FROM position_current
+         WHERE position_id = 'rescue-partial-1'
+        """
+    ).fetchone()
+    runtime = query_portfolio_loader_view(conn, runtime_exposure_only=True)
+    conn.close()
+
+    assert stats["rescued_pending"] == 1
+    assert pos.state == "entered"
+    assert pos.entry_fill_verified is False
+    assert pos.fill_authority == "venue_confirmed_partial"
+    assert pos.order_status == "partial"
+    assert pos.shares == pytest.approx(1.505371)
+    assert pos.cost_basis_usd == pytest.approx(1.505371 * 0.0700000199286422)
+    assert pos.entry_price == pytest.approx(0.0700000199286422)
+    assert pos.shares_remaining == pytest.approx(95.0 - 1.505371)
+    assert row["phase"] == "active"
+    assert row["fill_authority"] == "venue_confirmed_partial"
+    assert row["order_status"] == "partial"
+    assert row["shares"] == pytest.approx(1.505371)
+    assert row["cost_basis_usd"] == pytest.approx(1.505371 * 0.0700000199286422)
+    assert runtime["status"] == "ok"
+    assert [item["position_id"] for item in runtime["positions"]] == [
+        "rescue-partial-1"
+    ]
+
+
 def test_lifecycle_kernel_rescues_pending_runtime_state_to_entered():
     from src.state.lifecycle_manager import rescue_pending_runtime_state
 
