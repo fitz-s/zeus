@@ -254,7 +254,7 @@ def _utc_run_time_after(seconds: float) -> datetime:
 
 
 def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
-    """Release bootstrap after one post-boot full-book coverage tranche."""
+    """Release entry work only after every held position has fresh coverage."""
 
     global _held_position_monitor_bootstrap_last_check
     if _held_position_monitor_bootstrap_complete.is_set():
@@ -303,12 +303,9 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
             return False
         open_count = int(evidence.get("open_position_count") or 0)
         fresh = int(evidence.get("fresh_position_count") or 0)
-        if open_count == 0:
-            required = 0
-        else:
-            required = min(open_count, max(2, (open_count + 2) // 3))
-            if fresh <= 0 or fresh < required:
-                return False
+        required = open_count
+        if fresh < required:
+            return False
         _held_position_monitor_bootstrap_complete.set()
         logger.info(
             "held-position monitor bootstrap coverage verified: "

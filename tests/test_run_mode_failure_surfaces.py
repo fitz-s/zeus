@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-08-08
+# Last reused or audited: 2026-08-09
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-08-08; last_reused=2026-08-08
+# Lifecycle: created=2026-05-19; last_reviewed=2026-08-09; last_reused=2026-08-09
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -7669,7 +7669,7 @@ def test_reactor_bootstrap_releases_after_canonical_monitor_coverage(
         "collect_monitor_cadence_evidence",
         lambda *_args, **kwargs: observed_kwargs.update(kwargs) or {
             "open_position_count": 20,
-            "fresh_position_count": 7,
+            "fresh_position_count": 20,
             "future_monitor_event_count": 0,
         },
     )
@@ -7695,7 +7695,7 @@ def test_reactor_bootstrap_releases_after_canonical_monitor_coverage(
         },
         {
             "open_position_count": 20,
-            "fresh_position_count": 6,
+            "fresh_position_count": 19,
             "future_monitor_event_count": 0,
         },
     ),
