@@ -1621,6 +1621,26 @@ def _apply_candidate_evaluations_delta(
         patches = indexed_delta.get("patches", ())
         if not isinstance(patches, Sequence) or isinstance(patches, (str, bytes)):
             raise ValueError("GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID")
+        packed_candidate_ids = indexed_delta.get("candidate_ids_b64")
+        if packed_candidate_ids is not None:
+            if (
+                indexed_delta.get("candidate_ids_encoding")
+                != "base64+sha256-bytes-v1"
+                or indexed_delta.get("candidate_ids_order") != "sorted-key-v1"
+            ):
+                raise ValueError(
+                    "GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID"
+                )
+            try:
+                candidate_id_count = int(indexed_delta["candidate_ids_count"])
+                packed = base64.b64decode(
+                    str(packed_candidate_ids),
+                    validate=True,
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    "GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID"
+                ) from exc
         patched_buy_keys: set[tuple[str, ...]] = set()
         for patch in patches:
             if not isinstance(patch, Mapping):
@@ -1633,12 +1653,29 @@ def _apply_candidate_evaluations_delta(
                 error="GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID",
             )
             candidate_id = str(patch.get("candidate_id") or "")
-            if not candidate_id or key in patched_buy_keys:
+            if (
+                not candidate_id
+                or key in patched_buy_keys
+                or (packed_candidate_ids is not None and key in buy_rows)
+            ):
                 raise ValueError(
                     "GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID"
                 )
             patched_buy_keys.add(key)
             buy_rows[key] = candidate_id
+        if packed_candidate_ids is not None:
+            ordered_keys = sorted(buy_rows)
+            if (
+                candidate_id_count != len(ordered_keys)
+                or len(packed) != candidate_id_count * 32
+            ):
+                raise ValueError(
+                    "GLOBAL_AUCTION_RECEIPT_BUY_INDEX_DELTA_INVALID"
+                )
+            buy_rows = {
+                key: packed[index * 32 : (index + 1) * 32].hex()
+                for index, key in enumerate(ordered_keys)
+            }
         reconstructed_buy_index = sorted(
             [[candidate_id, *key] for key, candidate_id in buy_rows.items()]
         )
@@ -1797,6 +1834,61 @@ def _candidate_evaluations_delta_receipt(
         for key, value in current.items()
         if key not in indexed_fields
     }
+    buy_index_patches = [
+        {
+            "key": list(key),
+            "candidate_id": current_buy_index[key],
+        }
+        for key in sorted(current_buy_index)
+        if key not in base_buy_index
+        or base_buy_index[key] != current_buy_index[key]
+    ]
+    buy_index_delta: dict[str, object] = {
+        "key_fields": list(_BUY_CANDIDATE_INDEX_KEY_FIELDS),
+        "removed_keys": [
+            list(key)
+            for key in sorted(
+                key for key in base_buy_index if key not in current_buy_index
+            )
+        ],
+        "patches": buy_index_patches,
+    }
+    if (
+        current_buy_index
+        and len(buy_index_patches) * 4 >= len(current_buy_index)
+    ):
+        ordered_candidate_ids = [
+            current_buy_index[key] for key in sorted(current_buy_index)
+        ]
+        try:
+            packed_candidate_ids = b"".join(
+                bytes.fromhex(candidate_id)
+                for candidate_id in ordered_candidate_ids
+            )
+        except ValueError:
+            packed_candidate_ids = b""
+        packed_delta = {
+            "key_fields": list(_BUY_CANDIDATE_INDEX_KEY_FIELDS),
+            "removed_keys": buy_index_delta["removed_keys"],
+            "patches": [
+                patch
+                for patch in buy_index_patches
+                if tuple(patch["key"]) not in base_buy_index
+            ],
+            "candidate_ids_encoding": "base64+sha256-bytes-v1",
+            "candidate_ids_order": "sorted-key-v1",
+            "candidate_ids_count": len(ordered_candidate_ids),
+            "candidate_ids_b64": base64.b64encode(packed_candidate_ids).decode(
+                "ascii"
+            ),
+        }
+        if (
+            len(packed_candidate_ids) == len(ordered_candidate_ids) * 32
+            and len(_canonical_json_bytes(packed_delta))
+            < len(_canonical_json_bytes(buy_index_delta))
+        ):
+            buy_index_delta = packed_delta
+
     delta = {
         "top_level": {
             "removed_keys": sorted(
@@ -1816,24 +1908,7 @@ def _candidate_evaluations_delta_receipt(
             ),
             "patches": patches,
         },
-        "buy_candidate_index": {
-            "key_fields": list(_BUY_CANDIDATE_INDEX_KEY_FIELDS),
-            "removed_keys": [
-                list(key)
-                for key in sorted(
-                    key for key in base_buy_index if key not in current_buy_index
-                )
-            ],
-            "patches": [
-                {
-                    "key": list(key),
-                    "candidate_id": current_buy_index[key],
-                }
-                for key in sorted(current_buy_index)
-                if key not in base_buy_index
-                or base_buy_index[key] != current_buy_index[key]
-            ],
-        },
+        "buy_candidate_index": buy_index_delta,
         "buy_condition_side_masks": {
             "removed_keys": sorted(
                 key
@@ -1857,9 +1932,12 @@ def _candidate_evaluations_delta_receipt(
     ):
         raise ValueError("GLOBAL_AUCTION_RECEIPT_CANDIDATE_DELTA_HASH_MISMATCH")
     encoded = _canonical_json_bytes(delta)
+    buy_index_packed = "candidate_ids_b64" in buy_index_delta
     return {
         "candidate_evaluations_delta_encoding": (
-            "zlib+base64+semantic-keyed-canonical-json-delta-v3"
+            "zlib+base64+semantic-keyed-canonical-json-delta-v4"
+            if buy_index_packed
+            else "zlib+base64+semantic-keyed-canonical-json-delta-v3"
         ),
         "candidate_evaluations_delta_sha256": hashlib.sha256(encoded).hexdigest(),
         "candidate_evaluations_delta_zlib_b64": base64.b64encode(
@@ -1879,8 +1957,9 @@ def _candidate_evaluations_delta_receipt(
             delta["buy_candidate_index"]["removed_keys"]
         ),
         "candidate_evaluations_delta_buy_index_patch_count": len(
-            delta["buy_candidate_index"]["patches"]
+            buy_index_patches
         ),
+        "candidate_evaluations_delta_buy_index_packed": buy_index_packed,
         "candidate_evaluations_delta_condition_mask_removed_count": len(
             delta["buy_condition_side_masks"]["removed_keys"]
         ),
