@@ -1280,7 +1280,7 @@ scripts:
 
   worktree_doctor.py:
     # Created: 2026-05-07
-    # Last reused or audited: 2026-07-28
+    # Last reused or audited: 2026-08-08
     # Authority basis: Navigation Topology v2 PLAN §2.8; sunset 2027-05-07
     class: runtime_support
     lifecycle: long_lived
@@ -1289,12 +1289,14 @@ scripts:
     canonical_command: "python3 scripts/worktree_doctor.py <subcommand>"
     reason: >
       ADVISORY-only worktree lifecycle helper. Subcommands: status (JSON of all
-      worktrees, branches, ahead/behind vs origin/main, dirty state, PR state,
-      sentinels), advisory (cross-worktree visibility map for SessionStart),
+      worktrees, branches, ahead/behind vs live, dirty/lock state, verified PR
+      state, and patch absorption), advisory (cross-worktree role visibility
+      map for SessionStart),
       branch-keepup (ff/rebase/merge/close recommendation; NEVER auto-executes),
       hygiene (workspace clutter list; NEVER deletes). Codex-managed paths are
       directed to their owning completed worker's thread archive rather than a
-      raw worktree remove. Exit code 0 always. Invoked by
+      raw worktree remove. It never writes worktree-local sentinels and fails
+      closed when PR state is unavailable. Exit code 0 always. Invoked by
       .claude/hooks/dispatch.py session_start_visibility hook at session start.
       Flag aliases: --status, --hygiene-audit, --cross-worktree-visibility.
     read_targets: [repo, .git/worktrees]

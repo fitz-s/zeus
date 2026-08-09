@@ -230,8 +230,9 @@ hooks:
     event: WorktreeCreate
     matcher: "*"
     intent: >
-      After WorktreeCreate event, emit naming policy, scope, and sentinel write
-      advisory as additionalContext. ADVISORY only - never blocks.
+      After WorktreeCreate event, emit role and one-task ownership policy as
+      additionalContext. It never writes a worktree-local sentinel. ADVISORY
+      only - never blocks.
     blocked_when: []
     severity: ADVISORY
     sunset_date: 2026-11-07
@@ -243,8 +244,8 @@ hooks:
     event: WorktreeRemove
     matcher: "*"
     intent: >
-      Before WorktreeRemove, emit pre-remove dirty/uncommitted check +
-      branch closure suggestion as additionalContext. ADVISORY only.
+      Before WorktreeRemove, emit the patch-absorption, no-PR, inactivity, and
+      Codex-owner closeout evidence requirements. ADVISORY only.
     blocked_when: []
     severity: ADVISORY
     sunset_date: 2026-11-07

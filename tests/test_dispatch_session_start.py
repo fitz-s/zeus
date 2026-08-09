@@ -1,6 +1,6 @@
 # Created: 2026-05-07
-# Last reused or audited: 2026-05-07
-# Authority basis: Navigation Topology v2 PLAN §3 Phase 3 + C2 amendment; sunset 2027-05-07
+# Last reused or audited: 2026-08-08
+# Authority basis: hook output-schema and non-dirty worktree lifecycle contract
 
 """
 Tests for .claude/hooks/dispatch.py Phase 3 event handlers:
@@ -82,14 +82,19 @@ def _worktree_remove_payload(path: str = "/tmp/test-worktree") -> dict:
 
 
 def _parse_additional_context(result: subprocess.CompletedProcess) -> str | None:
+    """Read the event-appropriate advisory channel used by dispatch.py."""
     stdout = result.stdout.strip()
-    if not stdout:
-        return None
-    try:
-        parsed = json.loads(stdout)
-        return parsed.get("hookSpecificOutput", {}).get("additionalContext")
-    except json.JSONDecodeError:
-        return None
+    if stdout:
+        try:
+            parsed = json.loads(stdout)
+            return (
+                parsed.get("hookSpecificOutput", {}).get("additionalContext")
+                or parsed.get("systemMessage")
+            )
+        except json.JSONDecodeError:
+            pass
+    stderr = result.stderr.strip()
+    return stderr or None
 
 
 def _parse_hook_event_name(result: subprocess.CompletedProcess) -> str | None:
@@ -229,6 +234,14 @@ def test_worktree_create_advisor_no_permission_decision() -> None:
     assert not _has_permission_decision(result), (
         "worktree_create_advisor must NOT emit permissionDecision"
     )
+
+
+def test_worktree_advisors_never_write_sentinel_or_use_main_baseline() -> None:
+    """Hooks must not dirty a new worktree or compare it to retired main."""
+    source = DISPATCH_PATH.read_text()
+    assert "_write_worktree_sentinel_from_payload" not in source
+    assert 'target_branch = "origin/live"' in source
+    assert "origin/main" not in source
 
 
 # ---------------------------------------------------------------------------

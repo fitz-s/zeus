@@ -106,7 +106,7 @@
           {
             "type": "command",
             "command": "python3 .claude/hooks/dispatch.py worktree_create_advisor",
-            "description": "After WorktreeCreate, emit naming policy + scope + sentinel write advisory"
+            "description": "After WorktreeCreate, emit role + one-task scope advisory without writing the worktree"
           }
         ]
       }

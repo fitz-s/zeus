@@ -521,20 +521,19 @@ capabilities:
   - id: worktree_create
     owner_module: scripts/worktree_doctor.py
     intent: >
-      Create a new git worktree with a per-worktree YAML sentinel declaring
-      intent / agent / mode / base / created_at. The sentinel is read by
-      SessionStart for cross-worktree visibility and by post-merge cleanup
-      for ownership lookup. Creating a repository-owned worktree is a
-      structural git op; Codex-managed paths are instead snapshot-reclaimed by
-      Codex when their completed worker archives its own thread, never by a
-      repository raw-removal hook.
+      Allocate one exclusive, task-scoped role worktree for a writing agent.
+      Role and task identity stay in the agent/task branch context; no hook may
+      write a worktree-local sentinel. Creating a repository-owned worktree is
+      a structural git op requiring explicit operator authorization;
+      Codex-managed paths are snapshot-reclaimed by Codex when their completed
+      worker archives its own thread, never by a repository raw-removal hook.
     relationships:
       protects_invariants: []
       blocked_when: []
     hard_kernel_paths:
       - scripts/worktree_doctor.py
     original_intent:
-      intent_test: "task creates a new worktree (git worktree add invocation)"
+      intent_test: "task receives an isolated writing worktree"
       does_not_fit: log_and_advisory
       scope_keywords: [worktree, create, new, parallel, agent, isolation]
       out_of_scope_keywords: [delete, remove, switch, checkout, prune]
@@ -550,7 +549,7 @@ capabilities:
     owner_module: scripts/worktree_doctor.py
     intent: >
       Recommend (NOT auto-execute) the appropriate ff/rebase/merge/close
-      decision after origin/main advances. Decision matrix is encoded as
+      decision after live advances. Decision matrix is encoded as
       ADVISORY output; the agent reads and decides. Operator's draft
       proposal §D enumerates the 5 cases; this capability owns the
       structured recommendation. Does NOT mutate git state; pure read.
@@ -560,7 +559,7 @@ capabilities:
     hard_kernel_paths:
       - scripts/worktree_doctor.py
     original_intent:
-      intent_test: "main has advanced AND current branch is not main"
+      intent_test: "live has advanced AND current branch is not live"
       does_not_fit: log_and_advisory
       scope_keywords: [keepup, rebase, merge, fast-forward, stale, branch]
       out_of_scope_keywords: [auto-merge, force, push]
@@ -628,14 +627,13 @@ capabilities:
   - id: cross_worktree_visibility
     owner_module: scripts/worktree_doctor.py
     intent: >
-      ADVISORY one-line summary of active worktrees + branches + last-commit
-      timestamp + sentinel intent. Injected into agent context via
+      ADVISORY one-line summary of active worktrees + branches + role +
+      last-commit timestamp. Injected into agent context via
       SessionStart additionalContext. Read-only; never mutates worktree state.
       Solves the "agent in worktree A doesn't know agent in worktree B is
       mid-phase on the same surface" problem without a mutable lock service.
-      Includes stale worktree advisory: worktrees where last_commit_ts > 30 days
-      and sentinel intent is unfulfilled emit an advisory staleness signal
-      (M2 amendment: staleness audit is part of cross-worktree visibility scope).
+      It reports facts only; cleanup eligibility is evaluated separately with
+      clean-state, patch-absorption, and verified-open-PR evidence.
     relationships:
       protects_invariants: []
       blocked_when: []

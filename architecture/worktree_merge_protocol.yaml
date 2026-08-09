@@ -17,7 +17,7 @@ trigger_commands:
 
 trigger_conditions:
   - any_command_in_trigger_commands
-  - working_branch in [main, plan-pre5, "plan-*", "release-*"]
+  - working_branch in [live, plan-pre5, "plan-*", "release-*"]
 
 default_flow:
   mode: conflict_first_advisory

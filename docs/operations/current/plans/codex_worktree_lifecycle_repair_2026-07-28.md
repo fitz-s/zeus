@@ -15,12 +15,20 @@ remove a worktree that Codex still associates with a live chat.
 
 Codex owns removal of Codex-managed worktrees. The lifecycle is:
 
-1. Work only in a disposable Codex-managed worktree; do not create a permanent
-   or pinned worktree unless the operator explicitly needs a long-lived project.
+1. Each writing agent holds one disposable, exclusive role worktree for one
+   task (`data`, `strategy`, `execution`, `governance`, or the declared
+   hot-fix slice). The role is a lease, not a permanent directory or branch
+   pool; do not pre-create idle worktrees. At most two code-writing leases may
+   exist concurrently.
 2. Commit and land changes only through the existing PR or hot-pick lanes.
 3. Once the landing is verified and no PR monitoring remains, the worker archives
    its own Codex thread. Codex snapshots the worktree before removing it.
 4. Branches and open-PR work remain intact; no hook or cleanup job deletes them.
+
+No lifecycle hook may write an untracked sentinel into a new worktree. Such a
+file makes a completed tree dirty, prevents safe closeout, and defeats the
+retention policy it claims to support. Role and task identity belong in the
+agent/task branch context, not a worktree-local artifact.
 
 The host retention cap is reduced from eight to two completed managed worktrees.
 Active, pinned, and permanent worktrees stay protected by Codex.
@@ -30,8 +38,9 @@ Active, pinned, and permanent worktrees stay protected by Codex.
 - Remove unsupported `WorktreeCreate` and `WorktreeRemove` entries from the
   project Codex hook configuration so the repository no longer claims a
   lifecycle it cannot enforce.
-- Make the existing manual hygiene/post-merge advisor give the same
-  snapshot-aware closeout advice for Codex-managed paths.
+- Make the existing manual hygiene/post-merge advisor compare against `live`,
+  fail closed when PR status is unavailable, and give the same snapshot-aware
+  closeout advice for Codex-managed paths.
 - Retire both legacy helpers that could fast-forward a live checkout or force
   remove a worktree. They now fail closed and instruct the worker to hand off
   its committed SHA for the hot-pick/PR lanes.
@@ -42,6 +51,8 @@ Active, pinned, and permanent worktrees stay protected by Codex.
   Zeus live-branch workflow. It explicitly prohibits raw `git worktree remove`
   for `$CODEX_HOME/worktrees`.
 - Add a regression test that rejects reintroducing those unsupported hook events.
+- Remove automatic worktree-local sentinel writes and regression-test that the
+  advisor uses `live`, never `origin/main`, as its branch baseline.
 
 ## Acceptance
 

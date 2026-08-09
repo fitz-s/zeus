@@ -590,7 +590,7 @@ test_trust_policy:
     tests/test_daemon_ingest_acquires_bulk_lock.py: {created: "2026-05-08", last_used: "2026-05-08"}
     tests/test_db_writer_lock_k3_live_yield.py: {created: "2026-05-12", last_used: "2026-07-16"}
     tests/test_db_writer_lock.py: {created: "2026-05-07", last_used: "2026-07-15", note: "Canonical writer-lock law, including forwarding nonblocking acquisition to both WORLD and TRADE flocks."}
-    tests/test_dispatch_session_start.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_dispatch_session_start.py: {created: "2026-05-07", last_used: "2026-08-08"}
     tests/test_doc_citation_lint.py: {created: "2026-05-17", last_used: "2026-05-17"}
     tests/test_ecmwf_open_data_collect_cycle.py: {created: "2026-05-11", last_used: "2026-05-11"}
     tests/test_ecmwf_open_data_hang_antibodies_2026_05_13.py: {created: "2026-05-13", last_used: "2026-05-13"}
@@ -653,7 +653,7 @@ test_trust_policy:
     tests/test_untyped_for_compat_expiry.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_user_channel_ws_auto_derive.py: {created: "2026-05-01", last_used: "2026-05-01"}
     tests/test_verify_truth_surfaces_phase2_gate.py: {created: "2026-05-04", last_used: "2026-05-04"}
-    tests/test_worktree_doctor.py: {created: "2026-05-07", last_used: "2026-05-07"}
+    tests/test_worktree_doctor.py: {created: "2026-05-07", last_used: "2026-08-08"}
     tests/test_zeus_risk_halt_e2e.py: {created: "2026-05-06", last_used: "2026-05-06"}
     # PR #137 — post-Karachi remediation wave antibodies (2026-05-17).
     # E: WorktreeCreate hook stdout protocol — moved from tests/.claude/hooks/

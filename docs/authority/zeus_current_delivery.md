@@ -112,6 +112,29 @@ Machine check:
 No broad autopilot, no packet-less architecture editing, and no authority
 rewrite by momentum.
 
+### 5.1 Worktree Ownership And Landing
+
+A writing agent receives one exclusive, task-scoped role worktree. Use a
+truthful role (`data`, `strategy`, `execution`, `governance`, or `hotfix`) and
+record it as the branch prefix `<role>/<task-slug>`; legacy prefixes do not
+assign a new role. Keep one owner per file slice: a role is not a permanent
+checkout or a branch pool. Do not pre-create idle worktrees. Zeus permits at most two
+concurrent code-writing agents; additional investigation is read-only.
+
+Every role worktree starts from current `live` and lands by one of two lanes:
+
+- A verified money-path hot-fix is handed to the landing authority for
+  `git cherry-pick` onto `live`.
+- Every other change that belongs in `live`, including governance, lands by a
+  reviewed PR whose base is `live`.
+
+After landing, prove patch absorption with `git cherry live <branch>` (no `+`
+entries). A clean, inactive native tree with verified no-PR status may be
+removed with its local branch. A Codex-managed tree is closed only when its
+own completed worker archives its thread; Codex snapshots and reclaims it.
+Never convert a missing PR check, a dirty tree, a lock, or a stale timestamp
+into cleanup permission.
+
 ---
 
 ## 6. Packet Doctrine

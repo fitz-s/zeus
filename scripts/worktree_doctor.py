@@ -7,7 +7,7 @@
 
 Subcommands (positional):
   status                  — JSON summary of all active worktrees + sentinels
-                            + ahead/behind vs origin/main + PR state
+                            + ahead/behind vs live + PR state
   advisory                — additionalContext-formatted cross-worktree map for SessionStart
   branch-keepup           — recommend ff/rebase/merge/close for current branch
   hygiene                 — list workspace clutter (NEVER deletes)
@@ -47,6 +47,8 @@ CODEX_MANAGED_WORKTREE_ROOT = (
 ).resolve()
 
 SENTINEL_FILENAME = "zeus_worktree.yaml"
+LIVE_BRANCH = "live"
+WORKTREE_ROLES = frozenset({"data", "strategy", "execution", "governance", "hotfix"})
 
 # ---------------------------------------------------------------------------
 # Git helpers
@@ -111,7 +113,14 @@ def _parse_worktree_list(porcelain: str) -> list[dict[str, Any]]:
         if line.startswith("worktree "):
             if current:
                 worktrees.append(current)
-            current = {"path": line[len("worktree "):].strip(), "branch": "", "head": "", "bare": False}
+            current = {
+                "path": line[len("worktree "):].strip(),
+                "branch": "",
+                "head": "",
+                "bare": False,
+                "locked": False,
+                "prunable": False,
+            }
         elif line.startswith("HEAD "):
             current["head"] = line[len("HEAD "):].strip()
         elif line.startswith("branch "):
@@ -120,6 +129,12 @@ def _parse_worktree_list(porcelain: str) -> list[dict[str, Any]]:
             current["branch"] = ref.replace("refs/heads/", "")
         elif line.strip() == "bare":
             current["bare"] = True
+        elif line.startswith("locked"):
+            current["locked"] = True
+            current["lock_reason"] = line[len("locked"):].strip()
+        elif line.startswith("prunable"):
+            current["prunable"] = True
+            current["prunable_reason"] = line[len("prunable"):].strip()
     if current:
         worktrees.append(current)
     return worktrees
@@ -166,54 +181,41 @@ def _read_sentinel(worktree_path: str) -> dict[str, Any] | None:
     return None
 
 
-def _write_worktree_sentinel(worktree_path: str, payload: dict[str, Any]) -> None:
-    """Write zeus_worktree.yaml sentinel post-worktree-add success (M3).
-
-    Race delegated to git atomicity — only called after `git worktree add` succeeds.
-    """
-    try:
-        import yaml as _yaml
-        from datetime import datetime, timezone
-    except ImportError:
-        return
-
-    sentinel_path = Path(worktree_path) / SENTINEL_FILENAME
-    branch = payload.get("branch", "unknown")
-    base = _git("rev-parse", "--short", "HEAD").strip()
-    data = {
-        "schema_version": 1,
-        "worktree": {
-            "name": Path(worktree_path).name,
-            "path": worktree_path,
-            "branch": branch,
-            "base": f"main@{base}",
-            "agent_class": payload.get("agent_class", "claude_code"),
-            "mode": payload.get("mode", "write"),
-            "task_slug": payload.get("task_slug", "unknown"),
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "intent": payload.get("intent", ""),
-        },
-        "sunset_date": "2026-08-07",
-    }
-    try:
-        sentinel_path.write_text(_yaml.dump(data, default_flow_style=False))
-    except OSError:
-        pass
-
-
 # ---------------------------------------------------------------------------
 # Ahead/behind + PR state helpers
 # ---------------------------------------------------------------------------
 
 
-def _ahead_behind(branch: str) -> tuple[int, int]:
-    """Return (ahead, behind) vs origin/main."""
+def _live_base_ref() -> str:
+    """Return the local live checkout ref, with remote only as a fallback."""
+    if _git("rev-parse", "--verify", "--quiet", "live^{commit}").strip():
+        return LIVE_BRANCH
+    if _git("rev-parse", "--verify", "--quiet", "origin/live^{commit}").strip():
+        return "origin/live"
+    return ""
+
+
+def _ahead_behind(branch: str) -> tuple[int, int, str]:
+    """Return (ahead, behind, baseline) against the verified live ref."""
+    baseline = _live_base_ref()
+    if not baseline:
+        return 0, 0, ""
     try:
-        ahead = int(_git("rev-list", "--count", f"origin/main..{branch}").strip() or "0")
-        behind = int(_git("rev-list", "--count", f"{branch}..origin/main").strip() or "0")
+        ahead = int(_git("rev-list", "--count", f"{baseline}..{branch}").strip() or "0")
+        behind = int(_git("rev-list", "--count", f"{branch}..{baseline}").strip() or "0")
     except (ValueError, TypeError):
         ahead, behind = 0, 0
-    return ahead, behind
+    return ahead, behind, baseline
+
+
+def _role_for_branch(branch: str) -> str:
+    """Expose a task role from the branch prefix without creating metadata."""
+    if not branch:
+        return "detached"
+    prefix = branch.split("/", 1)[0]
+    if prefix in WORKTREE_ROLES or branch == LIVE_BRANCH:
+        return prefix
+    return f"legacy:{prefix}"
 
 
 def _pr_state_for_branch(branch: str, pr_list_json: list[dict]) -> dict[str, Any] | None:
@@ -224,16 +226,16 @@ def _pr_state_for_branch(branch: str, pr_list_json: list[dict]) -> dict[str, Any
     return None
 
 
-def _fetch_pr_list() -> list[dict[str, Any]]:
-    """Fetch open PRs via gh pr list --json. Returns [] on failure."""
+def _fetch_pr_list() -> list[dict[str, Any]] | None:
+    """Fetch open PRs, returning None when the check cannot be verified."""
     raw = _gh("pr", "list", "--json", "number,state,title,headRefName", "--limit", "50")
     if not raw:
-        return []
+        return None
     try:
         data = json.loads(raw)
-        return data if isinstance(data, list) else []
+        return data if isinstance(data, list) else None
     except json.JSONDecodeError:
-        return []
+        return None
 
 
 def _dirty_state(worktree_path: str) -> bool:
@@ -279,16 +281,16 @@ def _branch_is_absorbed_by_live(branch: str) -> bool:
 def cmd_worktree_create_advisory(_args: argparse.Namespace) -> int:
     """Advisory: emit worktree creation guidance (never auto-creates).
 
-    worktree_create capability owner. Creation is always an explicit operator
-    or agent action (git worktree add). This function emits a structured
-    advisory reminding callers to write a sentinel file after creation.
-    Called by WorktreeCreate hook handler via dispatch.py.
+    The host allocates a managed worktree by default. An exceptional native
+    worktree requires explicit operator authorization. This function never
+    creates a tree or writes an untracked sentinel into one.
     """
     print(json.dumps({
         "advisory": (
-            "worktree_create: create via `git worktree add -b <branch> <path> <base>`, "
-            "then write a zeus_worktree.yaml sentinel with intent/agent/mode/base/created_at. "
-            "Sentinel is read by SessionStart for cross-worktree visibility."
+            "worktree_create: assign one task-scoped role (data, strategy, execution, "
+            "governance, or declared hot-fix), one writer, and a branch from live. "
+            "Use host-managed creation unless the operator explicitly authorizes a native tree; "
+            "never create worktree-local sentinel files."
         ),
         "severity": "advisory",
         "action": "advisory_only_operator_creates",
@@ -301,6 +303,8 @@ def cmd_status(_args: argparse.Namespace) -> int:
     porcelain = _git("worktree", "list", "--porcelain")
     worktrees = _parse_worktree_list(porcelain)
     pr_list = _fetch_pr_list()
+    pr_check_verified = pr_list is not None
+    verified_prs = pr_list or []
 
     current_path = str(REPO_ROOT)
 
@@ -310,10 +314,10 @@ def cmd_status(_args: argparse.Namespace) -> int:
         wt_path = wt.get("path", "")
         is_current = os.path.realpath(wt_path) == os.path.realpath(current_path)
 
-        ahead, behind = _ahead_behind(branch) if branch else (0, 0)
+        ahead, behind, baseline = _ahead_behind(branch) if branch else (0, 0, "")
         dirty = _dirty_state(wt_path) if wt_path else False
         sentinel = _read_sentinel(wt_path)
-        pr = _pr_state_for_branch(branch, pr_list)
+        pr = _pr_state_for_branch(branch, verified_prs)
         absorbed_by_live = _branch_is_absorbed_by_live(branch)
 
         result_wts.append({
@@ -321,11 +325,16 @@ def cmd_status(_args: argparse.Namespace) -> int:
             "branch": branch,
             "head": wt.get("head", ""),
             "is_current": is_current,
-            "ahead_of_origin_main": ahead,
-            "behind_origin_main": behind,
+            "role": _role_for_branch(branch),
+            "ahead_of_live": ahead,
+            "behind_live": behind,
+            "baseline_ref": baseline,
             "dirty": dirty,
+            "locked": bool(wt.get("locked")),
+            "prunable": bool(wt.get("prunable")),
             "last_commit_ts": _last_commit_ts(branch) if branch else "",
             "pr_state": pr,
+            "pr_check_verified": pr_check_verified,
             "absorbed_by_live": absorbed_by_live,
             "sentinel": sentinel,
             "severity": "advisory",
@@ -350,30 +359,14 @@ def cmd_advisory(_args: argparse.Namespace) -> int:
     for wt in worktrees:
         branch = wt.get("branch", "(detached)")
         wt_path = wt.get("path", "")
-        sentinel = _read_sentinel(wt_path) or {}
-        wt_data = sentinel.get("worktree", {})
-        intent = (wt_data.get("intent") or "no sentinel")[:80]
-        task_slug = wt_data.get("task_slug", "")
-        agent_class = wt_data.get("agent_class", "")
+        sentinel = _read_sentinel(wt_path)
         ts = _last_commit_ts(branch) if branch else ""
 
-        meta = ", ".join(filter(None, [task_slug, agent_class]))
-        lines.append(f"  [{branch}] {wt_path}")
-        lines.append(f"    intent: {intent}")
-        if meta:
-            lines.append(f"    meta: {meta}")
+        lines.append(f"  [role={_role_for_branch(branch)} branch={branch}] {wt_path}")
+        if sentinel:
+            lines.append("    legacy_sentinel: present (not required for lifecycle)")
         if ts:
             lines.append(f"    last_commit_ts: {ts}")
-
-        # Staleness advisory: >7d without commits
-        if ts:
-            try:
-                import time
-                age_days = (time.time() - float(ts)) / 86400
-                if age_days > 7:
-                    lines.append(f"    ADVISORY: stale (>{age_days:.0f}d since last commit)")
-            except (ValueError, TypeError):
-                pass
 
     print("\n".join(lines))
     return 0
@@ -385,41 +378,41 @@ def cmd_advisory(_args: argparse.Namespace) -> int:
 
 
 def _decision_matrix(*, ahead: int, behind: int, merged: bool, dirty: bool) -> str:
-    """Encode operator's draft §D: 5 cases."""
+    """Encode the advisory keep-up decision against live."""
     if merged:
-        return "branch_already_merged_close" if not dirty else "checkpoint_first_then_close"
+        return "branch_absorbed_close" if not dirty else "checkpoint_first_then_close"
     if ahead == 0 and behind > 0:
-        return "fresh_branch_or_ff_only" if not dirty else "checkpoint_first"
+        return "fast_forward_to_live" if not dirty else "checkpoint_first"
     if ahead > 0 and behind > 0:
-        return "rebase_if_private_else_merge_origin_main" if not dirty else "checkpoint_first_then_choose"
+        return "rebase_onto_live_or_refresh_pr" if not dirty else "checkpoint_first_then_choose"
     if ahead == 0 and behind == 0:
-        return "current_with_main_proceed"
-    return "uncertain_block_and_report"
+        return "current_with_live_proceed"
+    return "ahead_of_live_continue_or_land"
 
 
 @capability("worktree_branch_keepup", lease=False)
 def cmd_branch_keepup(_args: argparse.Namespace) -> int:
-    """Decision matrix recommendation for current branch vs origin/main."""
+    """Decision matrix recommendation for current branch versus live."""
     current = _git("branch", "--show-current").strip()
-    if not current or current == "main":
+    if not current or current == LIVE_BRANCH:
         print(json.dumps({
             "recommendation": "no-action",
-            "reason": "on main or detached HEAD",
+            "reason": "on live or detached HEAD",
             "severity": "advisory",
         }, indent=2))
         return 0
 
-    ahead, behind = _ahead_behind(current)
-    merged_output = _git("branch", "--merged", "origin/main")
-    merged = any(b.strip().lstrip("* ") == current for b in merged_output.splitlines())
+    ahead, behind, baseline = _ahead_behind(current)
+    merged = _branch_is_absorbed_by_live(current)
     dirty = _dirty_state(str(REPO_ROOT))
     rec = _decision_matrix(ahead=ahead, behind=behind, merged=merged, dirty=dirty)
 
     print(json.dumps({
         "branch": current,
-        "ahead_of_origin_main": ahead,
-        "behind_origin_main": behind,
-        "merged_into_origin_main": merged,
+        "ahead_of_live": ahead,
+        "behind_live": behind,
+        "baseline_ref": baseline,
+        "absorbed_by_live": merged,
         "dirty": dirty,
         "recommendation": rec,
         "severity": "advisory",
@@ -489,7 +482,15 @@ def _collect_clutter() -> list[dict[str, Any]]:
     porcelain = _git("worktree", "list", "--porcelain")
     worktrees = _parse_worktree_list(porcelain)
     pr_list = _fetch_pr_list()
-    for wt in worktrees[1:]:  # skip main worktree
+    if pr_list is None:
+        return clutter
+    current_path = os.path.realpath(REPO_ROOT)
+    attached_branches = {wt.get("branch", "") for wt in worktrees}
+    for wt in worktrees:
+        if os.path.realpath(wt.get("path", "")) == current_path:
+            continue
+        if wt.get("locked") or wt.get("prunable"):
+            continue
         branch = wt.get("branch", "")
         ts = _last_commit_ts(branch) if branch else ""
         if ts:
@@ -498,7 +499,7 @@ def _collect_clutter() -> list[dict[str, Any]]:
                 has_pr = bool(_pr_state_for_branch(branch, pr_list))
                 dirty = _dirty_state(wt.get("path", ""))
                 absorbed_by_live = _branch_is_absorbed_by_live(branch)
-                if (age_days > 7 or absorbed_by_live) and not has_pr and not dirty:
+                if age_days > 7 and absorbed_by_live and not has_pr and not dirty:
                     path = wt.get("path", "")
                     advisory = (
                         "Codex-managed worktree: its branch is patch-equivalent to live; only "
@@ -508,10 +509,10 @@ def _collect_clutter() -> list[dict[str, Any]]:
                         else "Codex-managed worktree: only its owning completed clean worker may "
                         "archive its own thread with set_thread_archived; never raw-remove it"
                         if _is_codex_managed_worktree(path)
-                        else "worktree branch is patch-equivalent to live; archive or remove only "
-                        "after verifying the owner and branch policy"
+                        else "native worktree is clean, inactive, and patch-equivalent to live; "
+                        "manual removal still requires owner and process-idle verification"
                         if absorbed_by_live
-                        else "stale worktree (>7d no commits, no open PR); consider `git worktree remove` after verifying"
+                        else "unreachable"
                     )
                     clutter.append({
                         "path": path,
@@ -524,16 +525,20 @@ def _collect_clutter() -> list[dict[str, Any]]:
             except (ValueError, TypeError):
                 pass
 
-    # Stale branches: PR merged (branch merged into origin/main)
-    merged_output = _git("branch", "--merged", "origin/main")
-    for line in merged_output.splitlines():
-        b = line.strip().lstrip("* ")
-        if b and b not in ("main", "HEAD"):
+    # Local branches that are patch-absorbed, un-attached, and have no open PR.
+    for b in _git("for-each-ref", "--format=%(refname:short)", "refs/heads").splitlines():
+        if (
+            b
+            and b != LIVE_BRANCH
+            and b not in attached_branches
+            and not _pr_state_for_branch(b, pr_list)
+            and _branch_is_absorbed_by_live(b)
+        ):
             clutter.append({
                 "path": f"branch:{b}",
                 "type": "branch",
                 "severity": "advisory",
-                "advisory": "branch merged into origin/main; consider `git branch -d` after confirming",
+                "advisory": "branch patch-equivalent to live with no attached worktree or open PR; consider local deletion after confirming",
             })
 
     return clutter

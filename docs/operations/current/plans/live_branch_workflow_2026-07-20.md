@@ -1,6 +1,6 @@
 # Live-branch workflow (`live`)
 
-Status: ACTIVE — established 2026-07-20. Promote the binding clauses into `AGENTS.md` §5 (Change control) at the operator's discretion; until then this doc is the workflow of record.
+Status: ACTIVE — `AGENTS.md` §5 and `docs/authority/zeus_current_delivery.md` §5.1 carry the binding summary; this document supplies the operating detail.
 
 ## What `live` is now
 
@@ -9,10 +9,10 @@ Status: ACTIVE — established 2026-07-20. Promote the binding clauses into `AGE
 ## The law
 
 1. **`live` accepts commits by exactly two lanes — hot-fix `git cherry-pick` or merged PR — and no third lane. A direct commit, amend, or in-place edit to the live checkout is forbidden.** The live daemons run from `/Users/leofitz/zeus` on the live branch; directly committing to it or force-moving that checkout out from under them is the 2026-06-12 hijack incident. `maintree_git_state_guard` has no agent bypass; a verified cherry-pick is the only local landing command.
-2. **All work happens in a worktree.** For Codex, use a disposable Codex-managed worktree by default; it is detached until a branch is explicitly created for the committed change. Do not pin or make it permanent unless the operator explicitly needs a long-lived project. Make and prove the change there.
+2. **Every writing agent owns one task-scoped role worktree.** Assign the role before editing: `data`, `strategy`, `execution`, `governance`, or `hotfix`, and name its branch `<role>/<task-slug>`. The role gives one agent exclusive write ownership of its file slice; it does not justify a permanent directory, a reusable branch, or a pre-created pool. Use a disposable Codex-managed worktree by default, start from current `live`, and run no more than two code-writing agents concurrently. Read-only investigators do not take a writer tree.
 3. **Landing on live is cherry-pick or PR only.**
-   - Small, isolated, reviewed change → the landing authority runs verified `git cherry-pick` onto live.
-   - Anything larger, or anything that wants review → open a **PR into `live`** and merge after review.
+   - Verified live money-path hot-fix → the landing authority runs verified `git cherry-pick` onto `live`.
+   - Every non-hot-fix change that belongs in `live` → open a **PR into `live`** and merge after review.
    - Nothing reaches live without passing review. Opening a PR fires paid auto-reviewers; bundle related work into one PR (≥300 self-authored LOC) per `architecture/agent_pr_discipline_2026_05_09.md`.
 4. **Freshness and fail-closed gates are never weakened to land faster.** The alpha-clock and failure-isolation invariants in `docs/operations/current/GOAL.md` bind every change that touches the money path.
 
@@ -27,16 +27,19 @@ the integration thread merely because it landed another worker's change.
 
 The host retention cap keeps only two completed managed worktrees. Dirty work,
 open PRs, active chats, pinned chats, and permanent worktrees are deliberately
-outside automatic closeout.
+outside automatic closeout. No hook may write an untracked sentinel into a
+new worktree: that would make a clean completed tree appear dirty and block its
+own lifecycle.
 
 ## Branch hygiene
 
 A branch is absorbed only when its commits are ancestors of `live` **or** its
 patches are demonstrably equivalent to `live` after a hot-pick (`git cherry
 live <branch>` has no `+` entries). A branch with unreconciled patches is kept;
-never delete a branch that backs an open PR. The Codex worktree can be reclaimed
-without deleting its branch. Remote pruning of absorbed branches is
-operator-directed:
+never delete a branch that backs an open PR. A clean, inactive native worktree
+may be removed only after patch absorption and verified no-PR status; its local
+branch can then be deleted. The Codex worktree can be reclaimed without deleting
+its branch. Remote pruning of absorbed branches is operator-directed:
 
 ```
 git push origin --delete <absorbed-branch>   # only if merged into live and no open PR

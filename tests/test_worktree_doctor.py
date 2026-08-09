@@ -1,6 +1,6 @@
 # Created: 2026-05-07
-# Last reused or audited: 2026-07-28
-# Authority basis: Navigation Topology v2 PLAN §3 Phase 3 exit criteria; sunset 2027-05-07
+# Last reused or audited: 2026-08-08
+# Authority basis: live worktree lifecycle and branch-cleanup regression coverage
 
 """
 Tests for scripts/worktree_doctor.py.
@@ -45,7 +45,7 @@ import worktree_doctor as _wt_mod  # noqa: E402
 _FAKE_PORCELAIN = """\
 worktree /fake/zeus
 HEAD aabbccdd00000000000000000000000000000000
-branch refs/heads/main
+branch refs/heads/live
 
 worktree /fake/worktrees/zeus-cleanup-debt
 HEAD 1122334400000000000000000000000000000000
@@ -67,6 +67,8 @@ def _fake_git(*args: str, cwd: Path = REPO_ROOT) -> str:  # noqa: ARG001
         return _FAKE_PORCELAIN
     if cmd[:2] == ["rev-list", "--count"]:
         return _FAKE_AHEAD_BEHIND
+    if cmd[:3] == ["rev-parse", "--verify", "--quiet"]:
+        return "aabbccdd\n"
     if cmd[:2] == ["status", "--short"]:
         return ""  # clean
     if cmd[:2] == ["log", "-1"]:
@@ -197,13 +199,13 @@ def test_status_shows_three_worktrees() -> None:
 
 
 def test_status_ahead_behind_present() -> None:
-    """Each worktree entry includes ahead_of_origin_main and behind_origin_main (fixture)."""
+    """Each worktree entry includes ahead_of_live and behind_live (fixture)."""
     data = _cmd_status_with_fixture()
     for wt in data["worktrees"]:
-        assert "ahead_of_origin_main" in wt, f"ahead_of_origin_main missing: {wt}"
-        assert "behind_origin_main" in wt, f"behind_origin_main missing: {wt}"
-        assert isinstance(wt["ahead_of_origin_main"], int)
-        assert isinstance(wt["behind_origin_main"], int)
+        assert "ahead_of_live" in wt, f"ahead_of_live missing: {wt}"
+        assert "behind_live" in wt, f"behind_live missing: {wt}"
+        assert isinstance(wt["ahead_of_live"], int)
+        assert isinstance(wt["behind_live"], int)
 
 
 def test_status_current_worktree_dirty_is_bool() -> None:
@@ -345,6 +347,7 @@ def test_codex_managed_stale_worktree_requires_owner_archive(monkeypatch: pytest
     with (
         patch.object(_wt_mod, "_git", side_effect=_fake_git),
         patch.object(_wt_mod, "_gh", side_effect=_fake_gh),
+        patch.object(_wt_mod, "_branch_is_absorbed_by_live", return_value=True),
     ):
         clutter = _wt_mod._collect_clutter()
 
@@ -413,6 +416,29 @@ def test_empty_successful_git_cherry_output_means_ancestor_absorbed() -> None:
         assert _wt_mod._branch_is_absorbed_by_live("fix/ancestor")
 
 
+def test_worktree_doctor_uses_live_and_never_writes_sentinels() -> None:
+    """Role visibility must not reintroduce main-baseline or dirty-tree behavior."""
+    source = SCRIPT.read_text()
+    assert "origin/main" not in source
+    assert 'return LIVE_BRANCH' in source
+    assert "def _write_worktree_sentinel" not in source
+
+
+def test_role_visibility_distinguishes_new_roles_from_legacy_branches() -> None:
+    """A branch prefix is visible without upgrading legacy branches into roles."""
+    assert _wt_mod._role_for_branch("data/ens-backfill") == "data"
+    assert _wt_mod._role_for_branch("fix/old-branch") == "legacy:fix"
+
+
+def test_hygiene_fails_closed_when_open_pr_status_is_unverified(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Missing GitHub evidence must not produce a removal candidate."""
+    monkeypatch.setattr(_wt_mod, "_fetch_pr_list", lambda: None)
+    monkeypatch.setattr(_wt_mod, "_branch_is_absorbed_by_live", lambda _branch: True)
+    monkeypatch.setattr(_wt_mod, "_git", _fake_git)
+    clutter = _wt_mod._collect_clutter()
+    assert not any(entry["type"] in {"worktree", "branch"} for entry in clutter)
+
+
 @pytest.mark.parametrize("script", RETIRED_INTEGRATORS)
 def test_live_mutating_integrators_fail_closed(script: Path) -> None:
     """Legacy helpers cannot directly advance live or delete a worktree."""
@@ -463,12 +489,12 @@ def test_branch_keepup_action_is_advisory() -> None:
 
 
 @pytest.mark.parametrize("ahead,behind,merged,dirty,expected_substring", [
-    (0, 0, False, False, "current_with_main_proceed"),
-    (0, 5, False, False, "fresh_branch_or_ff_only"),
+    (0, 0, False, False, "current_with_live_proceed"),
+    (0, 5, False, False, "fast_forward_to_live"),
     (0, 5, False, True, "checkpoint_first"),
-    (3, 5, False, False, "rebase_if_private_else_merge_origin_main"),
+    (3, 5, False, False, "rebase_onto_live_or_refresh_pr"),
     (3, 5, False, True, "checkpoint_first_then_choose"),
-    (3, 0, True, False, "branch_already_merged_close"),
+    (3, 0, True, False, "branch_absorbed_close"),
     (0, 0, True, True, "checkpoint_first_then_close"),
 ])
 def test_decision_matrix_cases(
