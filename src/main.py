@@ -4952,10 +4952,12 @@ def _position_fill_wake_held_families(
         "admin_closed",
     }
     families: set[tuple[str, str, str]] = set()
+    observed_position_ids: set[str] = set()
     for row in rows:
         position_id = str(row[0] or "").strip()
         if position_id not in position_ids:
             return None
+        observed_position_ids.add(position_id)
         phase = str(row[1] or "").strip()
         if phase in terminal_phases:
             continue
@@ -4981,6 +4983,11 @@ def _position_fill_wake_held_families(
         if not city or not target_date or metric not in {"high", "low"}:
             return None
         families.add((city, target_date, metric))
+    if observed_position_ids != position_ids:
+        logger.warning(
+            "position-fill wake position identity incomplete; using full exit monitor"
+        )
+        return None
     return frozenset(families)
 
 

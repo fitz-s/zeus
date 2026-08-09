@@ -502,6 +502,35 @@ def test_position_fill_scope_uses_current_local_only_position_family(
     )
 
 
+def test_position_fill_scope_missing_current_identity_requires_full_book(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _install_position_fill_scope_readers(
+        monkeypatch,
+        tmp_path,
+        event_rows=(
+            (
+                "event-position-fill",
+                "EDLI_REDECISION_PENDING",
+                _position_fill_event_payload("present", "missing"),
+            ),
+        ),
+        position_rows=(
+            (
+                "present",
+                "active",
+                2.0,
+                0.40,
+                "Paris",
+                "2026-08-08",
+                "low",
+            ),
+        ),
+    )
+
+    assert main._position_fill_wake_held_families(("event-position-fill",)) is None
+
+
 def test_finished_position_fill_wake_monitors_before_reactor_and_ack(
     monkeypatch, tmp_path: Path
 ) -> None:
