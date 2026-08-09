@@ -1652,6 +1652,43 @@ class TestRCPV2RowCountSensor:
         assert conflicts["orders"] == []
         assert conflicts["superseded_by_terminal_event_count"] == 1
 
+    def test_authenticated_full_fill_sequence_supersedes_later_observed_partial_fact(self):
+        """Canonical sequence, not a source timestamp, orders authenticated fill repair."""
+        from src.observability import status_summary as status_summary_module
+
+        row = {
+            "terminal_event_type": "FILL_CONFIRMED",
+            "terminal_event_at": "2026-08-09T17:15:10+00:00",
+            "terminal_event_payload_json": json.dumps(
+                {
+                    "command_id": "cmd-full-fill",
+                    "venue_order_id": "ord-full-fill",
+                    "filled_size": "20.999023",
+                    "proof_class": "authenticated_trade_fact_full_fill",
+                    "required_predicates": {
+                        "authenticated_confirmed_trade_facts": True,
+                        "bound_venue_order_id_matches_trade": True,
+                        "command_state_review_required": True,
+                        "latest_event_is_review_boundary": True,
+                        "source_fill_time_valid": True,
+                        "trade_facts_cover_command_or_leave_only_dust": True,
+                    },
+                }
+            ),
+            "venue_observed_at": "2026-08-09T17:15:10.736000+00:00",
+            "command_id": "cmd-full-fill",
+            "venue_order_id": "ord-full-fill",
+            "command_state": "FILLED",
+            "matched_size": "20.999023",
+        }
+
+        assert status_summary_module._terminal_event_supersedes_nonterminal_fact(row)
+
+        payload = json.loads(row["terminal_event_payload_json"])
+        payload["required_predicates"]["authenticated_confirmed_trade_facts"] = False
+        row["terminal_event_payload_json"] = json.dumps(payload)
+        assert not status_summary_module._terminal_event_supersedes_nonterminal_fact(row)
+
     def test_terminal_partial_order_fact_closes_cancelled_remainder_conflict(self):
         """Typed zero-remainder repair proof is terminal despite partial-fill state."""
         from src.observability import status_summary as status_summary_module

@@ -851,6 +851,39 @@ def _terminal_event_supersedes_nonterminal_fact(row) -> bool:
     event_type = str(row["terminal_event_type"] or "").upper()
     if event_type not in _TERMINAL_COMMAND_EVENT_TYPES:
         return False
+    if event_type == "FILL_CONFIRMED":
+        payload = _payload_mapping(row["terminal_event_payload_json"])
+        predicates = payload.get("required_predicates")
+        required = {
+            "authenticated_confirmed_trade_facts",
+            "bound_venue_order_id_matches_trade",
+            "command_state_review_required",
+            "latest_event_is_review_boundary",
+            "source_fill_time_valid",
+            "trade_facts_cover_command_or_leave_only_dust",
+        }
+        try:
+            fill_matches = abs(
+                float(payload.get("filled_size")) - float(row["matched_size"])
+            ) <= 1e-9
+        except (TypeError, ValueError):
+            fill_matches = False
+        if (
+            payload.get("proof_class") == "authenticated_trade_fact_full_fill"
+            and str(row["command_state"] or "").upper() == "FILLED"
+            and str(payload.get("command_id") or "")
+            == str(row["command_id"] or "")
+            and str(payload.get("venue_order_id") or "")
+            == str(row["venue_order_id"] or "")
+            and fill_matches
+            and isinstance(predicates, dict)
+            and all(predicates.get(name) is True for name in required)
+        ):
+            # This event is selected by highest canonical command sequence.
+            # Its occurred_at intentionally preserves the venue fill time, so
+            # comparing that business timestamp with a fact's observed_at can
+            # invert the actual write/authority order by milliseconds.
+            return True
     if not _status_time_not_before(row["terminal_event_at"], row["venue_observed_at"]):
         return False
     if event_type == "CANCEL_ACKED":
