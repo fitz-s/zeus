@@ -5230,11 +5230,12 @@ def process_current_global_batch(
                         str(asset.bin_id),
                         str(asset.side),
                         str(asset.token_id),
-                        "NOT_APPLICABLE",
+                        execution_mode,
                     )
                     for asset in tuple(
                         getattr(attempt_book_epoch, "sell_assets", ()) or ()
                     )
+                    for execution_mode in ("TAKER_LIMIT", "MAKER_REST")
                 }
                 if not set(excluded_candidates).issubset(known_candidate_keys):
                     raise ValueError("GLOBAL_EXCLUDED_CANDIDATE_UNKNOWN")

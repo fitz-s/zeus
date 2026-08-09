@@ -24170,11 +24170,13 @@ def test_global_batch_falls_through_family_local_preflight_block(
         ),
     ),
 )
+@pytest.mark.parametrize("execution_mode", ("TAKER_LIMIT", "MAKER_REST"))
 def test_global_batch_candidate_block_keeps_sibling_eligible(
     monkeypatch,
     reason,
     blocked_action,
     sibling_action,
+    execution_mode,
 ):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
@@ -24197,6 +24199,7 @@ def test_global_batch_candidate_block_keeps_sibling_eligible(
         bin_id="bin-a",
         side="NO",
         token_id="token-a",
+        execution_mode=execution_mode,
     )
     family_entry_block = reason.startswith(
         (
