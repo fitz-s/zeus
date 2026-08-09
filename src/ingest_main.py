@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -84,6 +85,23 @@ _REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC = 0.0
 # src/riskguard/riskguard.py emit. See WAVE3_BATCH_C_PER_FINDING_ACCOUNTING.md
 # carry-forward #5.
 _PROCESS_START = time.monotonic()
+
+
+def _git_head_at_boot() -> str:
+    """Immutable checkout identity for the process serving Day0 source truth."""
+
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return ""
+
+
+_PROCESS_GIT_HEAD = _git_head_at_boot()
 
 
 def _forecast_live_owner() -> str:
@@ -1228,6 +1246,7 @@ def _write_ingest_heartbeat() -> None:
             "daemon": "data-ingest",
             "alive_at": datetime.now(timezone.utc).isoformat(),
             "pid": os.getpid(),
+            "git_head": _PROCESS_GIT_HEAD,
         }
         tmp = Path(str(path) + ".tmp")
         tmp.write_text(json.dumps(payload))

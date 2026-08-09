@@ -1,5 +1,5 @@
 # Created: 2026-05-17
-# Last reused or audited: 2026-05-17
+# Last reused or audited: 2026-08-09
 # Authority basis: OBSERVABILITY_STRUCTURAL_FIX.md — paired-existence invariant (F99/F100)
 """Antibody: every JSON heartbeat writer must have a registered consumer.
 
@@ -46,11 +46,12 @@ HEARTBEAT_REGISTRY: dict[str, dict] = {
     "daemon-heartbeat-ingest.json": {
         "writer": "src/ingest_main.py",
         "consumers": [
-            "PENDING_OPENCLAW_ENFORCEMENT: plist --heartbeat-files arg is informational-only "
-            "in sensor_layer1.py; enforcement tracked as OpenClaw-layer gap (F91/F100). "
-            "Until sensor_layer1 enforces the arg, this writer has no active Zeus consumer.",
+            "src/main.py:_startup_required_sidecar_head_check",
+            "src/control/live_health.py:_live_boot_prerequisites_surface",
+            "src/control/heartbeat_supervisor.py:_live_trading_sidecars_ready",
+            "scripts/deploy_live.py:_wait_for_prerequisite_code_identity",
         ],
-        "note": "Ingest daemon alive signal. Plist references it but sensor_layer1 ignores it.",
+        "note": "Day0 source-writer liveness and process code identity are live prerequisites.",
     },
     "forecast-live-heartbeat.json": {
         "writer": "src/ingest/forecast_live_daemon.py",
@@ -227,18 +228,11 @@ class TestHeartbeatWriterConsumerRegistry:
             "check_oracle_missing() must be called in run_checks checks list"
         )
 
-    def test_daemon_heartbeat_ingest_gap_documented(self):
-        """daemon-heartbeat-ingest.json orphan gap must be documented (not silently skipped)."""
+    def test_daemon_heartbeat_ingest_has_active_consumers(self):
+        """The Day0 source-writer heartbeat must not regress to an orphan."""
         entry = HEARTBEAT_REGISTRY.get("daemon-heartbeat-ingest.json", {})
         consumers = entry.get("consumers", [])
         pending = _pending_consumers(entry)
-        assert len(pending) >= 1, (
-            "daemon-heartbeat-ingest.json has no active consumer and no PENDING_ token. "
-            "Document the gap with a PENDING_ entry (F100)."
-        )
-        # The PENDING token must mention F91 or F100 or OpenClaw to show it's tracked
-        combined = " ".join(pending)
-        assert any(kw in combined for kw in ("F91", "F100", "OpenClaw", "sensor_layer1", "plist")), (
-            "daemon-heartbeat-ingest.json PENDING_ token must reference the gap (F91/F100 "
-            "or sensor_layer1 enforcement). Got: " + combined
-        )
+        assert pending == []
+        assert len(consumers) >= 4
+        assert all(PROJECT_ROOT.joinpath(consumer.split(":", 1)[0]).exists() for consumer in consumers)

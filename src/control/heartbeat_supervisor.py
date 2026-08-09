@@ -64,6 +64,7 @@ DEFAULT_LIVE_TRADING_DAEMON_HEARTBEAT_MAX_AGE_SECONDS = 300
 _RESTING_ORDER_TYPES = {"GTC", "GTD"}
 _IMMEDIATE_ORDER_TYPES = {"FOK", "FAK"}
 _LIVE_TRADING_REQUIRED_SIDECAR_HEARTBEATS = (
+    ("data-ingest", "daemon-heartbeat-ingest.json", 180.0),
     ("forecast-live", "forecast-live-heartbeat.json", 120.0),
     ("substrate-observer", "daemon-heartbeat-substrate-observer.json", 180.0),
     ("price-channel-ingest", "daemon-heartbeat-price-channel-ingest.json", 180.0),

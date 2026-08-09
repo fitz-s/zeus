@@ -2753,6 +2753,35 @@ def test_deploy_live_waits_for_fresh_prerequisite_code_identity(monkeypatch, tmp
     assert "verified" in detail
 
 
+def test_deploy_live_requires_data_ingest_code_identity(monkeypatch, tmp_path):
+    """The 5-second Day0 source writer must load the deployed checkout."""
+
+    dl = _load("deploy_live_data_ingest_identity", "deploy_live.py")
+    launched = datetime.now(timezone.utc)
+    state = tmp_path / "state"
+    state.mkdir()
+    expected = "c" * 40
+    (state / "daemon-heartbeat-ingest.json").write_text(
+        json.dumps(
+            {
+                "git_head": expected[:9],
+                "alive_at": launched.isoformat(),
+            }
+        )
+    )
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_prerequisite_code_identity(
+        [dl.DAEMONS["data-ingest"]],
+        expected_sha=expected,
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "verified" in detail
+
+
 def test_deploy_live_accepts_sidecar_abbreviated_head(monkeypatch, tmp_path):
     dl = _load("deploy_live_prerequisite_identity_short", "deploy_live.py")
     launched = datetime.now(timezone.utc)

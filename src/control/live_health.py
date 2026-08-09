@@ -41,6 +41,7 @@ VERY_HIGH_YES_EDGE_MIN_Q_LCB = 0.80
 HIGH_YES_EDGE_MIN_LCB_MINUS_ASK = 0.05
 HIGH_YES_EDGE_SAMPLE_LIMIT = 10
 LIVE_BOOT_SIDECAR_HEARTBEATS = (
+    ("data-ingest", "daemon-heartbeat-ingest.json", 180.0),
     ("forecast-live", "forecast-live-heartbeat.json", 120.0),
     ("substrate-observer", "daemon-heartbeat-substrate-observer.json", 180.0),
     ("price-channel-ingest", "daemon-heartbeat-price-channel-ingest.json", 180.0),

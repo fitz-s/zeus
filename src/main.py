@@ -3014,6 +3014,7 @@ _DEPLOYMENT_FRESHNESS_LEGACY_PAUSE_REASONS = frozenset(
     {"deployment_freshness_4h_divergence"}
 )
 _LIVE_SIDECAR_BOOT_HEARTBEATS = (
+    ("data-ingest", "daemon-heartbeat-ingest.json", 180.0),
     ("forecast-live", "forecast-live-heartbeat.json", 120.0),
     ("substrate-observer", "daemon-heartbeat-substrate-observer.json", 180.0),
     ("price-channel-ingest", "daemon-heartbeat-price-channel-ingest.json", 180.0),
