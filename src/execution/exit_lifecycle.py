@@ -3608,10 +3608,17 @@ def _global_sell_capital_certificate_error(
     except (InvalidOperation, TypeError, ValueError):
         return "global_sell_execution_position_economics_mismatch"
     sellable = exact_held.quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
+    chain_sellable = chain_held.quantize(Decimal("0.01"), rounding=ROUND_FLOOR)
     if not (
         exact_held.is_finite()
         and exact_held > 0
-        and chain_held == exact_held
+        and chain_held.is_finite()
+        and chain_held > 0
+        # Venue balance mirrors and fill facts may preserve different
+        # sub-cent share precision.  SELL is executable only in 0.01-share
+        # units, so exact float equality is neither necessary nor sufficient:
+        # bind both authorities to the same conservative sellable inventory.
+        and chain_sellable == sellable
         and matches_decimal(candidate.held_shares, sellable)
         and matches_decimal(exit_intent.shares, decision.shares)
         and matches_decimal(exit_intent.exact_limit_price, authority.limit_price())
