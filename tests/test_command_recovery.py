@@ -29879,3 +29879,84 @@ def test_cancel_unknown_partial_accepts_canonical_projection_precision(conn):
         filled_size="29.850742",
         fill_price="0.33",
     )
+
+
+def test_cancel_unknown_partial_accepts_exact_increment_inside_aggregate_position(conn):
+    """An exact command fill may be one increment of a larger position."""
+    from src.execution.command_recovery import _cancel_unknown_partial_position_proof
+    from src.state.db import log_execution_fact
+
+    _insert(conn, size=8.5, price=0.32)
+    _advance_to_acked(conn, venue_order_id="ord-increment-partial")
+    _seed_pending_entry_projection(
+        conn,
+        position_id="pos-001",
+        command_id="cmd-001",
+        order_id="ord-prior-entry",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'day0_window',
+               chain_state = 'synced',
+               order_id = 'ord-prior-entry',
+               shares = 34.957214,
+               chain_shares = 34.9572,
+               cost_basis_usd = 11.797218,
+               chain_cost_basis_usd = 11.7971
+         WHERE position_id = 'pos-001'
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, decision_id,
+            snapshot_id, order_id, command_id, source_module, env, payload_json
+        ) VALUES (
+            'pos-001:entry_order_filled:cmd-001', 'pos-001', 1, 3,
+            'ENTRY_ORDER_FILLED', '2026-04-26T00:06:00Z', 'day0_window',
+            'day0_window', 'opening_inertia', 'dec-001', 'snap-pos-001',
+            'ord-increment-partial', 'cmd-001',
+            'src.execution.exchange_reconcile', 'live',
+            '{"order_status":"partial"}'
+        )
+        """
+    )
+    log_execution_fact(
+        conn,
+        intent_id="pos-001:entry:cmd-001",
+        position_id="pos-001",
+        decision_id="dec-001",
+        command_id="cmd-001",
+        order_role="entry",
+        strategy_key="opening_inertia",
+        posted_at="2026-04-26T00:02:00Z",
+        filled_at="2026-04-26T00:06:00Z",
+        submitted_price=0.32,
+        fill_price=0.320000036266689,
+        shares=4.411762,
+        venue_status="PARTIAL",
+        terminal_exec_status="partial",
+        decision_law_id="predicted_bin_ev_v1",
+    )
+    command = {
+        "command_id": "cmd-001",
+        "position_id": "pos-001",
+        "venue_order_id": "ord-increment-partial",
+    }
+
+    assert _cancel_unknown_partial_position_proof(
+        conn,
+        command=command,
+        filled_size="4.411762",
+        fill_price="0.3200000362666889",
+    )
+
+    conn.execute("DELETE FROM execution_fact WHERE command_id = 'cmd-001'")
+    assert not _cancel_unknown_partial_position_proof(
+        conn,
+        command=command,
+        filled_size="4.411762",
+        fill_price="0.3200000362666889",
+    )
