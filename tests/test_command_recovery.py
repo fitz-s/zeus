@@ -16511,10 +16511,34 @@ class TestRecoveryResolutionTable:
             return _conn_factory()
 
         _conn_factory.trade_only_factory = _trade_only_conn_factory
+        _conn_factory.requires_writer_flocks = True
+        _trade_only_conn_factory.requires_writer_flocks = True
+
+        priority_deadlines = []
+
+        def _priority_factory_spy(
+            conn_factory,
+            *,
+            scope,
+            deadline_monotonic=None,
+        ):
+            priority_deadlines.append((conn_factory, scope, deadline_monotonic))
+            return conn_factory
+
+        monkeypatch.setattr(
+            command_recovery,
+            "_recovery_priority_conn_factory",
+            _priority_factory_spy,
+        )
 
         monkeypatch.setattr(
             venue_sync_contract,
             "default_trade_conn_factory",
+            _conn_factory,
+        )
+        monkeypatch.setattr(
+            venue_sync_contract,
+            "default_trade_read_conn_factory",
             _conn_factory,
         )
         monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
@@ -16539,6 +16563,11 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
         assert capital_apply_calls
+        assert len(priority_deadlines) == 2
+        general_deadline = priority_deadlines[0][2]
+        capital_deadline = priority_deadlines[1][2]
+        assert priority_deadlines[1][0] is _trade_only_conn_factory
+        assert capital_deadline > general_deadline + 1.0
         verified = _conn_factory()
         try:
             assert _get_state(verified, "cmd-001") == "EXPIRED"

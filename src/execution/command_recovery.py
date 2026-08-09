@@ -25035,11 +25035,6 @@ def _reconcile_passes_short_conn(
         scope=scope,
         deadline_monotonic=apply_deadline,
     )
-    capital_conn_factory = _recovery_priority_conn_factory(
-        capital_conn_factory,
-        scope=scope,
-        deadline_monotonic=apply_deadline,
-    )
     apply_conn_factory = _recovery_apply_conn_factory(
         conn_factory,
         scope=scope,
@@ -25421,8 +25416,17 @@ def _reconcile_passes_short_conn(
             ),
         )
         fast_deadline = _capital_deadline()
-        fast_conn_factory = _recovery_apply_conn_factory(
+        # Bind the writer-lease deadline after venue truth is captured.  The
+        # ordinary live-tick deadline is intentionally tiny and may already be
+        # spent by NETWORK; reusing it here makes the capital fast lane
+        # structurally unable to reach APPLY.
+        priority_capital_conn_factory = _recovery_priority_conn_factory(
             capital_conn_factory,
+            scope="live_tick",
+            deadline_monotonic=fast_deadline,
+        )
+        fast_conn_factory = _recovery_apply_conn_factory(
+            priority_capital_conn_factory,
             scope="live_tick",
             deadline_monotonic=fast_deadline,
         )
