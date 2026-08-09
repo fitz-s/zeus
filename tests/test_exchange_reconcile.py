@@ -3575,6 +3575,44 @@ def test_entry_fill_position_event_backfills_law_identity_when_unstamped(conn):
     assert row["position_origin"] == "zeus_decision"
 
 
+def test_entry_fill_only_recovery_binds_command_id_to_filled_event(conn):
+    from src.execution.exchange_reconcile import _ensure_entry_fill_position_event
+
+    # Recovery consumes an already-persisted legacy command; seed it through a
+    # legal SELL FAK then make its historical ENTRY shape explicit.
+    seed_command(conn, side="SELL", size=10, price=0.50, order_type="FAK", q_version="q-test")
+    conn.execute(
+        "UPDATE venue_commands SET intent_kind = 'ENTRY', side = 'BUY' WHERE command_id = 'cmd-m5'"
+    )
+    seed_position_baseline(conn)
+    append_trade_fact(conn, size="10", fill_price="0.50")
+    assert conn.execute(
+        "SELECT 1 FROM position_events WHERE position_id = 'pos-m5' AND event_type = 'ENTRY_ORDER_FILLED'"
+    ).fetchone() is None
+    command = dict(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = 'cmd-m5'"
+        ).fetchone()
+    )
+
+    _ensure_entry_fill_position_event(
+        conn,
+        command=command,
+        venue_order_id="ord-m5",
+        filled_size="10",
+        fill_price="0.50",
+        observed_at=NOW,
+        command_event="FILL_CONFIRMED",
+    )
+
+    assert conn.execute(
+        """
+        SELECT command_id FROM position_events
+         WHERE position_id = 'pos-m5' AND event_type = 'ENTRY_ORDER_FILLED'
+        """
+    ).fetchone()["command_id"] == "cmd-m5"
+
+
 def test_entry_reobservation_repairs_edli_alias_double_projection(conn):
     from src.execution.exchange_reconcile import _ensure_entry_fill_position_event
     from src.state.venue_command_repo import append_trade_fact as append
@@ -4343,6 +4381,223 @@ def test_confirmed_exit_fill_cannot_close_larger_current_holding(conn, filled_si
            AND order_id = ?
         """,
         (position_id, order_id),
+    ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("city", "direction"),
+    [("Paris", "buy_yes"), ("Amsterdam", "buy_no")],
+)
+def test_chain_zero_authenticated_full_exit_closes_stale_residual_once(
+    conn, city, direction
+):
+    """Chain-zero precedes local residual cleanup; canonical child fills close once."""
+    from src.execution.exchange_reconcile import _ensure_exit_fill_position_event
+
+    position_id = f"pos-{city.lower()}-chain-zero"
+    command_id = f"cmd-{city.lower()}-chain-zero"
+    order_id = f"ord-{city.lower()}-chain-zero"
+    yes_token = f"{city.lower()}-yes"
+    no_token = f"{city.lower()}-no"
+    held_token = yes_token if direction == "buy_yes" else no_token
+    target = Decimal("60")
+    seed_position_baseline(conn, position_id=position_id, order_id="ord-entry")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit', city = ?, direction = ?, token_id = ?, no_token_id = ?,
+               order_id = ?, order_status = 'sell_pending_confirmation',
+               shares = 20, cost_basis_usd = 12, entry_price = 0.60,
+               chain_state = 'chain_confirmed_zero', chain_shares = 0,
+               chain_avg_price = 0, chain_cost_basis_usd = 999, updated_at = ?
+         WHERE position_id = ?
+        """,
+        (city, direction, yes_token, no_token, order_id, NOW.isoformat(), position_id),
+    )
+    seed_command(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        token_id=held_token,
+        side="SELL",
+        size=float(target),
+        price=0.25,
+        state="FILLED",
+        order_type="FAK",
+        exit_close_position=True,
+        snapshot_token_id=yes_token,
+        snapshot_no_token_id=no_token,
+        snapshot_selected_token_id=held_token,
+        snapshot_outcome_label="YES" if direction == "buy_yes" else "NO",
+        envelope_yes_token_id=yes_token,
+        envelope_no_token_id=no_token,
+    )
+    append_trade_fact(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        token_id=held_token,
+        trade_id=f"trade-{city.lower()}-a",
+        size="20",
+        fill_price="0.20",
+        state="CONFIRMED",
+    )
+    # A weaker revision of the same trade must not be counted a second time.
+    append_trade_fact(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        token_id=held_token,
+        trade_id=f"trade-{city.lower()}-a",
+        size="20",
+        fill_price="0.20",
+        state="MATCHED",
+    )
+    append_trade_fact(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        token_id=held_token,
+        trade_id=f"trade-{city.lower()}-b",
+        size="39",
+        fill_price="0.30",
+        state="CONFIRMED",
+    )
+    command = dict(
+        conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ?", (command_id,)
+        ).fetchone()
+    )
+
+    assert not _ensure_exit_fill_position_event(
+        conn,
+        command=command,
+        venue_order_id=order_id,
+        filled_size=str(target),
+        fill_price="0.30",
+        observed_at=NOW,
+        command_event="FILL_CONFIRMED",
+    )
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ? AND event_type = 'EXIT_ORDER_FILLED'",
+        (position_id,),
+    ).fetchone()[0] == 0
+    append_trade_fact(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        token_id=held_token,
+        trade_id=f"trade-{city.lower()}-b",
+        size="40",
+        fill_price="0.30",
+        state="CONFIRMED",
+    )
+
+    assert _ensure_exit_fill_position_event(
+        conn,
+        command=command,
+        venue_order_id=order_id,
+        filled_size=str(target),
+        fill_price="0.30",
+        observed_at=NOW,
+        command_event="FILL_CONFIRMED",
+    )
+    projection = conn.execute(
+        """
+        SELECT phase, shares, chain_state, chain_shares, realized_pnl_usd
+          FROM position_current WHERE position_id = ?
+        """,
+        (position_id,),
+    ).fetchone()
+    assert dict(projection) == {
+        "phase": "economically_closed",
+        "shares": 20.0,
+        "chain_state": "chain_confirmed_zero",
+        "chain_shares": 0.0,
+        # 20 residual shares at $0.60 imply $36 immutable close cost; the
+        # deliberately absurd chain cost basis is not exit-cost authority.
+        "realized_pnl_usd": -20.0,
+    }
+    fact = conn.execute(
+        "SELECT shares, fill_price FROM execution_fact WHERE intent_id = ?",
+        (f"{position_id}:exit",),
+    ).fetchone()
+    assert dict(fact) == {
+        "shares": 60.0,
+        "fill_price": pytest.approx(float(Decimal("0.2666666666666666666666666667"))),
+    }
+    assert conn.execute(
+        """
+        SELECT COUNT(*) FROM position_events
+         WHERE position_id = ? AND event_type = 'EXIT_ORDER_FILLED' AND order_id = ?
+        """,
+        (position_id, order_id),
+    ).fetchone()[0] == 1
+
+
+def test_late_confirmed_exit_does_not_reopen_chain_zero_terminal_position(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_exit_fill_projections
+
+    position_id = "pos-terminal-chain-zero"
+    command_id = "cmd-terminal-chain-zero"
+    order_id = "ord-terminal-chain-zero"
+    token = "terminal-chain-zero-token"
+    seed_position_baseline(conn, position_id=position_id, order_id="ord-entry")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'voided', token_id = ?, order_id = ?, shares = 10,
+               chain_state = 'chain_confirmed_zero', chain_shares = 0,
+               order_status = 'voided', updated_at = ?
+         WHERE position_id = ?
+        """,
+        (token, order_id, NOW.isoformat(), position_id),
+    )
+    seed_command(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        token_id=token,
+        side="SELL",
+        size=10,
+        price=0.20,
+        state="FILLED",
+        order_type="FAK",
+        exit_close_position=True,
+    )
+    append_trade_fact(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        token_id=token,
+        trade_id="trade-terminal-chain-zero",
+        size="10",
+        fill_price="0.20",
+        state="CONFIRMED",
+    )
+
+    assert reconcile_recorded_exit_fill_projections(conn, observed_at=NOW) == {
+        "scanned": 0,
+        "projected": 0,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert dict(
+        conn.execute(
+            "SELECT phase, chain_state, chain_shares, order_status FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+    ) == {
+        "phase": "voided",
+        "chain_state": "chain_confirmed_zero",
+        "chain_shares": 0.0,
+        "order_status": "voided",
+    }
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ? AND event_type = 'EXIT_ORDER_FILLED'",
+        (position_id,),
     ).fetchone()[0] == 0
 
 

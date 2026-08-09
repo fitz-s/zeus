@@ -5264,6 +5264,7 @@ def _ensure_entry_fill_position_event(
         **{
             **current,
             "trade_id": position_id,
+            "command_id": str(command.get("command_id") or ""),
             "state": runtime_state,
             "exit_state": projection_exit_state,
             "chain_state": chain_state_after,
@@ -5352,6 +5353,11 @@ def _ensure_entry_fill_position_event(
             sequence_no=sequence_no,
             source_module="src.execution.exchange_reconcile",
         )
+        command_id = str(command.get("command_id") or "")
+        if command_id:
+            for event in events:
+                if event.get("event_type") == "ENTRY_ORDER_FILLED":
+                    event["command_id"] = command_id
     _apply_entry_fill_projection_and_execution_fact(
         conn,
         events=events,
@@ -5628,23 +5634,51 @@ def _ensure_exit_fill_position_event(
     holding_disagrees = any(
         size != current_holding for size in holding_sizes[1:]
     )
-    if (
+    exact_current_holding_close = not (
         current_holding is None
         or holding_disagrees
         or full_close_target != current_holding
         or command_size != current_holding
         or shares_dec != current_holding
-    ):
+    )
+    # A chain-confirmed zero can arrive before position_current sheds its
+    # pre-close residual.  It is safe to accept that stale local residual only
+    # when the immutable full-close intent and the deduplicated canonical fill
+    # aggregate independently prove the entire command was sold.  Do not use
+    # chain cost basis here: it is chain truth for the now-zero holding, not
+    # authority for realized exit economics.
+    canonical_filled = _canonical_filled_size_for_command(
+        conn, str(command.get("command_id") or "")
+    )
+    canonical_fill_economics = _exit_fill_economics_for_command(
+        conn,
+        command_id=str(command.get("command_id") or ""),
+        fallback_filled_size="",
+        fallback_fill_price="",
+    )
+    chain_zero_authenticated_close = (
+        str(current.get("chain_state") or "").lower() == "chain_confirmed_zero"
+        and _same_decimal_value(current.get("chain_shares"), 0)
+        and canonical_fill_economics is not None
+        and canonical_fill_economics[0] == shares_dec
+        and canonical_fill_economics[1] == exit_price_dec
+        and canonical_filled == shares_dec
+        and canonical_filled == command_size
+        and canonical_filled == full_close_target
+    )
+    if not exact_current_holding_close and not chain_zero_authenticated_close:
         logger.warning(
             "exchange_reconcile: refuse non-exact exit economic close "
             "command_id=%s filled=%s command_size=%s intended=%s "
-            "current_holding=%s holding_disagrees=%s order_id=%s",
+            "current_holding=%s holding_disagrees=%s chain_zero_authenticated=%s "
+            "order_id=%s",
             command.get("command_id"),
             shares_dec,
             command.get("size"),
             full_close_target,
             current_holding,
             holding_disagrees,
+            chain_zero_authenticated_close,
             venue_order_id,
         )
         return False
