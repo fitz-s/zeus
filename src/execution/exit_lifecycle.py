@@ -5482,6 +5482,12 @@ def _execute_live_exit(
             == "TAKER_LIMIT"
         ):
             executor_intent = create_exit_order_intent(**executor_kwargs)
+            logger.warning(
+                "GLOBAL_TAKER_AUTHORITY_TRACE trade_id=%s present=%s type=%s",
+                position.trade_id,
+                executor_intent.marketable_sell_execution_authority is not None,
+                type(executor_intent.marketable_sell_execution_authority).__name__,
+            )
             deadline_error = _exit_execution_authority_deadline_error(
                 executor_intent
             )
