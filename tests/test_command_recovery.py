@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-04; last_reused=2026-08-08
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-09; last_reused=2026-08-09
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-08-08
+# Last reused/audited: 2026-08-09
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -1412,6 +1412,85 @@ def test_live_tick_lock_contention_defers_once_without_sleep(monkeypatch, lock_e
     assert summary == {
         "db_lock_deferred": True,
         "db_lock_deferred_at": "first_pass",
+        "db_lock_deferred_count": 1,
+    }
+
+
+def test_capital_recovery_retries_brief_contention_within_bounded_deadline(
+    monkeypatch,
+):
+    from src.execution import command_recovery
+
+    attempts = 0
+    now = [10.0]
+    sleeps = []
+
+    def _eventually_available():
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise BlockingIOError(
+                "db_writer_lock(write_class=live) contended on test.writer-lock.live"
+            )
+        return "released"
+
+    def _sleep(delay):
+        sleeps.append(delay)
+        now[0] += delay
+
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(command_recovery.time, "sleep", _sleep)
+    summary = {}
+
+    result = command_recovery._run_recovery_pass_with_lock_policy(
+        "cancel_recovery_fast",
+        _eventually_available,
+        scope="live_tick",
+        summary=summary,
+        deadline_monotonic=11.0,
+        bounded_lock_retry_delays=(0.05, 0.10, 0.20),
+    )
+
+    assert result == "released"
+    assert attempts == 3
+    assert sleeps == [0.05, 0.10]
+    assert summary == {}
+
+
+def test_capital_recovery_still_defers_when_bounded_retry_window_expires(
+    monkeypatch,
+):
+    from src.execution import command_recovery
+
+    attempts = 0
+    now = [20.0]
+
+    def _contended():
+        nonlocal attempts
+        attempts += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    def _sleep(delay):
+        now[0] += delay
+
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(command_recovery.time, "sleep", _sleep)
+    summary = {}
+
+    result = command_recovery._run_recovery_pass_with_lock_policy(
+        "cancel_recovery_fast",
+        _contended,
+        scope="live_tick",
+        summary=summary,
+        deadline_monotonic=20.12,
+        bounded_lock_retry_delays=(0.05, 0.10, 0.20),
+    )
+
+    assert result is None
+    assert attempts == 2
+    assert summary == {
+        "db_lock_deferred": True,
+        "db_lock_deferred_at": "cancel_recovery_fast",
         "db_lock_deferred_count": 1,
     }
 

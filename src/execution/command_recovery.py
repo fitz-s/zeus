@@ -87,6 +87,12 @@ class TerminalExitHeldTokenMismatch(RuntimeError):
 _RECOVERY_LOCK_RETRY_DELAYS = (2.0, 5.0, 10.0)
 _LIVE_TICK_DB_BUDGET_SECONDS = 0.1
 _LIVE_TICK_DB_PROGRESS_OPCODES = 1_000
+# Current cancel/unknown rows can freeze every new entry while still retaining
+# venue exposure. Give only that exact capital-release lane a short retry
+# window: the general live tick remains a nowait 100ms probe, and an announced
+# held-monitor writer still preempts the apply through the progress handler.
+_CAPITAL_RECOVERY_DB_BUDGET_SECONDS = 1.5
+_CAPITAL_RECOVERY_LOCK_RETRY_DELAYS = (0.05, 0.10, 0.20, 0.40)
 # A live recovery tick has a 60-second cadence.  Bound the identity-directed
 # point reads so one historical account sweep cannot make the scheduler miss
 # its next invocation.  Rows beyond this cap remain durably SUBMITTING with
@@ -167,6 +173,20 @@ def _identity_bound_point_read_budget_seconds() -> float:
     # Leave scheduler headroom even if an operator has supplied an excessive
     # value; a timed-out point read is a continuation, never absence proof.
     return min(value, 30.0)
+
+
+def _capital_recovery_db_budget_seconds() -> float:
+    raw = os.environ.get(
+        "ZEUS_CAPITAL_RECOVERY_DB_BUDGET_SECONDS",
+        str(_CAPITAL_RECOVERY_DB_BUDGET_SECONDS),
+    )
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = _CAPITAL_RECOVERY_DB_BUDGET_SECONDS
+    if not value > 0.0:
+        value = _CAPITAL_RECOVERY_DB_BUDGET_SECONDS
+    return min(value, 5.0)
 
 
 def _identity_bound_rotation_slot() -> int:
@@ -24088,6 +24108,7 @@ def _run_recovery_pass_with_lock_policy(
     scope: str,
     summary: dict,
     deadline_monotonic: float | None = None,
+    bounded_lock_retry_delays: Sequence[float] = (),
 ):
     bounded_scope = scope == "live_tick" or (
         scope == "full" and deadline_monotonic is not None
@@ -24097,7 +24118,12 @@ def _run_recovery_pass_with_lock_policy(
     ):
         return None
 
-    for attempt in range(len(_RECOVERY_LOCK_RETRY_DELAYS) + 1):
+    lock_retry_delays = (
+        tuple(max(0.0, float(delay)) for delay in bounded_lock_retry_delays)
+        if bounded_scope
+        else _RECOVERY_LOCK_RETRY_DELAYS
+    )
+    for attempt in range(len(lock_retry_delays) + 1):
         _RECOVERY_MONITOR_PREEMPTION.pending = False
         try:
             return fn()
@@ -24155,6 +24181,14 @@ def _run_recovery_pass_with_lock_policy(
             if not is_lock:
                 raise
             if bounded_scope:
+                if attempt < len(lock_retry_delays):
+                    delay = lock_retry_delays[attempt]
+                    if (
+                        deadline_monotonic is None
+                        or time.monotonic() + delay < deadline_monotonic
+                    ):
+                        time.sleep(delay)
+                        continue
                 summary["db_lock_deferred"] = True
                 summary["db_lock_deferred_at"] = label
                 summary["db_lock_deferred_count"] = 1
@@ -24165,15 +24199,15 @@ def _run_recovery_pass_with_lock_policy(
                     label,
                 )
                 return None
-            if attempt >= len(_RECOVERY_LOCK_RETRY_DELAYS):
+            if attempt >= len(lock_retry_delays):
                 raise
-            delay = _RECOVERY_LOCK_RETRY_DELAYS[attempt]
+            delay = lock_retry_delays[attempt]
             logger.warning(
                 "recovery: pass %s hit database lock; retrying in %.1fs (attempt %d/%d)",
                 label,
                 delay,
                 attempt + 1,
-                len(_RECOVERY_LOCK_RETRY_DELAYS) + 1,
+                len(lock_retry_delays) + 1,
             )
             time.sleep(delay)
 
@@ -25116,6 +25150,24 @@ def _reconcile_passes_short_conn(
         Venue reads remain bounded to the currently affected order ids and run
         with no DB connection open.
         """
+        capital_budget = _capital_recovery_db_budget_seconds()
+
+        def _capital_deadline() -> float:
+            return _bounded_recovery_deadline(
+                scheduler_deadline,
+                capital_budget,
+            )
+
+        def _run_capital_pass(label: str, fn, *, deadline_monotonic: float):
+            return _run_recovery_pass_with_lock_policy(
+                label,
+                fn,
+                scope="live_tick",
+                summary=summary,
+                deadline_monotonic=deadline_monotonic,
+                bounded_lock_retry_delays=_CAPITAL_RECOVERY_LOCK_RETRY_DELAYS,
+            )
+
         identity_submit_deferred = 0
         with open_tracked(
             read_conn_factory,
@@ -25176,16 +25228,13 @@ def _reconcile_passes_short_conn(
             # the prior LIVE fact.  That removes the command from the point-read
             # candidate set, so project the already-durable terminal truth before
             # any venue I/O or historical fill maintenance can consume the tick.
-            terminal_fact_deadline = _bounded_recovery_deadline(
-                scheduler_deadline,
-                live_tick_budget,
-            )
+            terminal_fact_deadline = _capital_deadline()
             terminal_fact_conn_factory = _recovery_apply_conn_factory(
                 conn_factory,
                 scope="live_tick",
                 deadline_monotonic=terminal_fact_deadline,
             )
-            preexisting_terminal_result = _run_recovery_pass_with_lock_policy(
+            preexisting_terminal_result = _run_capital_pass(
                 "terminal_order_facts_fast",
                 lambda: run_db_only_pass(
                     lambda conn: reconcile_terminal_order_facts(
@@ -25195,8 +25244,6 @@ def _reconcile_passes_short_conn(
                     conn_factory=terminal_fact_conn_factory,
                     label="recovery.terminal_order_facts_fast",
                 ),
-                scope="live_tick",
-                summary=summary,
                 deadline_monotonic=terminal_fact_deadline,
             )
             if preexisting_terminal_result is not None:
@@ -25211,24 +25258,19 @@ def _reconcile_passes_short_conn(
             # fact.  They globally force the allocator into reduce-only, so
             # reset them from durable truth before any venue or historical
             # maintenance work can consume the live-tick budget.
-            finding_deadline = _bounded_recovery_deadline(
-                scheduler_deadline,
-                live_tick_budget,
-            )
+            finding_deadline = _capital_deadline()
             finding_conn_factory = _recovery_apply_conn_factory(
                 conn_factory,
                 scope="live_tick",
                 deadline_monotonic=finding_deadline,
             )
-            stale_terminal_finding_result = _run_recovery_pass_with_lock_policy(
+            stale_terminal_finding_result = _run_capital_pass(
                 "stale_terminal_no_fill_findings_fast",
                 lambda: run_db_only_pass(
                     reconcile_stale_terminal_no_fill_findings,
                     conn_factory=finding_conn_factory,
                     label="recovery.stale_terminal_no_fill_findings_fast",
                 ),
-                scope="live_tick",
-                summary=summary,
                 deadline_monotonic=finding_deadline,
             )
             if stale_terminal_finding_result is not None:
@@ -25241,24 +25283,19 @@ def _reconcile_passes_short_conn(
             summary["identity_bound_inflight_deferred"] = identity_submit_deferred
         preexisting_obligation_result = None
         if terminal_obligation_open:
-            obligation_deadline = _bounded_recovery_deadline(
-                scheduler_deadline,
-                live_tick_budget,
-            )
+            obligation_deadline = _capital_deadline()
             obligation_conn_factory = _recovery_apply_conn_factory(
                 conn_factory,
                 scope="live_tick",
                 deadline_monotonic=obligation_deadline,
             )
-            preexisting_obligation_result = _run_recovery_pass_with_lock_policy(
+            preexisting_obligation_result = _run_capital_pass(
                 "terminal_entry_exposure_obligations_fast",
                 lambda: run_db_only_pass(
                     reconcile_terminal_entry_exposure_obligations,
                     conn_factory=obligation_conn_factory,
                     label="recovery.terminal_entry_exposure_obligations_fast",
                 ),
-                scope="live_tick",
-                summary=summary,
                 deadline_monotonic=obligation_deadline,
             )
             if preexisting_obligation_result is not None:
@@ -25282,10 +25319,7 @@ def _reconcile_passes_short_conn(
             # a response that repeats the command's already-persisted order id;
             # unavailable/NOT_FOUND responses remain durable continuations.
             assert_no_open_connection("recovery.identity_bound_inflight_fast")
-            identity_deadline = _bounded_recovery_deadline(
-                scheduler_deadline,
-                live_tick_budget,
-            )
+            identity_deadline = _capital_deadline()
             point_read_budget = _identity_bound_point_read_budget_seconds()
             point_read_budget = min(
                 point_read_budget,
@@ -25315,7 +25349,7 @@ def _reconcile_passes_short_conn(
                 scope="live_tick",
                 deadline_monotonic=identity_deadline,
             )
-            identity_result = _run_recovery_pass_with_lock_policy(
+            identity_result = _run_capital_pass(
                 "identity_bound_inflight_fast",
                 lambda: run_three_phase(
                     lambda conn: None,
@@ -25329,8 +25363,6 @@ def _reconcile_passes_short_conn(
                     snapshot_conn_factory=read_conn_factory,
                     label="recovery.identity_bound_inflight_fast",
                 ),
-                scope="live_tick",
-                summary=summary,
                 deadline_monotonic=identity_deadline,
             )
             if identity_result is not None:
@@ -25372,10 +25404,7 @@ def _reconcile_passes_short_conn(
                 deadline_monotonic=scheduler_deadline,
             ),
         )
-        fast_deadline = _bounded_recovery_deadline(
-            scheduler_deadline,
-            live_tick_budget,
-        )
+        fast_deadline = _capital_deadline()
         fast_conn_factory = _recovery_apply_conn_factory(
             conn_factory,
             scope="live_tick",
@@ -25417,7 +25446,7 @@ def _reconcile_passes_short_conn(
 
         cancel_result = None
         if cancel_candidates:
-            cancel_result = _run_recovery_pass_with_lock_policy(
+            cancel_result = _run_capital_pass(
                 "cancel_recovery_fast",
                 lambda: run_three_phase(
                     lambda conn: None,
@@ -25427,8 +25456,6 @@ def _reconcile_passes_short_conn(
                     snapshot_conn_factory=read_conn_factory,
                     label="recovery.cancel_recovery_fast",
                 ),
-                scope="live_tick",
-                summary=summary,
                 deadline_monotonic=fast_deadline,
             )
             if cancel_result is not None:
@@ -25436,7 +25463,7 @@ def _reconcile_passes_short_conn(
 
         partial_result = None
         if partial_candidates:
-            partial_result = _run_recovery_pass_with_lock_policy(
+            partial_result = _run_capital_pass(
                 "partial_remainder_recovery_fast",
                 lambda: run_three_phase(
                     lambda conn: None,
@@ -25451,8 +25478,6 @@ def _reconcile_passes_short_conn(
                     snapshot_conn_factory=read_conn_factory,
                     label="recovery.partial_remainder_recovery_fast",
                 ),
-                scope="live_tick",
-                summary=summary,
                 deadline_monotonic=fast_deadline,
             )
             if partial_result is not None:
@@ -25462,15 +25487,13 @@ def _reconcile_passes_short_conn(
                     partial_result,
                 )
 
-        obligation_result = _run_recovery_pass_with_lock_policy(
+        obligation_result = _run_capital_pass(
             "terminal_entry_exposure_obligations_fast",
             lambda: run_db_only_pass(
                 reconcile_terminal_entry_exposure_obligations,
                 conn_factory=fast_conn_factory,
                 label="recovery.terminal_entry_exposure_obligations_fast",
             ),
-            scope="live_tick",
-            summary=summary,
             deadline_monotonic=fast_deadline,
         )
         if obligation_result is not None:
@@ -25482,7 +25505,7 @@ def _reconcile_passes_short_conn(
 
         terminal_result = None
         if terminal_candidates:
-            terminal_result = _run_recovery_pass_with_lock_policy(
+            terminal_result = _run_capital_pass(
                 "terminal_point_recovery_fast",
                 lambda: run_three_phase(
                     lambda conn: None,
@@ -25492,8 +25515,6 @@ def _reconcile_passes_short_conn(
                     snapshot_conn_factory=read_conn_factory,
                     label="recovery.terminal_point_recovery_fast",
                 ),
-                scope="live_tick",
-                summary=summary,
                 deadline_monotonic=fast_deadline,
             )
             if terminal_result is not None:
