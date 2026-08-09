@@ -28885,3 +28885,18 @@ def test_global_sell_single_flight_is_command_truth_not_lifecycle_intent(
         token_id="token",
         legacy_order_id=legacy_order_id,
     ) is expected
+
+
+def test_global_auction_receipt_delta_component_uses_byte_minimal_exact_encoding():
+    assert global_batch_runtime._delta_component_is_smaller(
+        delta="d" * 60,
+        inline="f" * 100,
+    )
+    assert not global_batch_runtime._delta_component_is_smaller(
+        delta="d" * 100,
+        inline="f" * 100,
+    )
+    assert not global_batch_runtime._delta_component_is_smaller(
+        delta="d" * 101,
+        inline="f" * 100,
+    )

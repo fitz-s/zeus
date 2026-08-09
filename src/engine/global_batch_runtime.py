@@ -288,6 +288,12 @@ _GLOBAL_AUCTION_AUDIT_CONTEXT_FIELDS = (
 )
 
 
+def _delta_component_is_smaller(*, delta: object, inline: object) -> bool:
+    """Prefer the exact bounded representation that writes fewer bytes."""
+
+    return len(str(delta)) < len(str(inline))
+
+
 def _rebind_prepared_probability(prepared: object, probability: object) -> object:
     """Keep probability-dependent action authority coherent at the book cut."""
 
@@ -3000,13 +3006,10 @@ def _store_global_auction_receipt(
                     current=audit_context,
                     expected_sha256=audit_context_identity[1],
                 )
-                audit_context_delta_bytes = len(
-                    str(audit_context_delta["audit_context_delta_zlib_b64"])
-                )
-                audit_context_inline_bytes = len(
-                    _canonical_json_bytes(audit_context)
-                )
-                if audit_context_delta_bytes * 2 < audit_context_inline_bytes:
+                if _delta_component_is_smaller(
+                    delta=audit_context_delta["audit_context_delta_zlib_b64"],
+                    inline=receipt["audit_context_zlib_b64"],
+                ):
                     for field in _GLOBAL_AUCTION_AUDIT_CONTEXT_FIELDS:
                         compact_receipt.pop(field, None)
                     compact_receipt.update(audit_context_delta)
@@ -3080,15 +3083,12 @@ def _store_global_auction_receipt(
                     compact_receipt[candidate_field] = receipt[candidate_field]
                     inline_fields.add(candidate_field)
                 else:
-                    candidate_delta_bytes = len(
-                        str(
-                            candidate_delta[
-                                "candidate_evaluations_delta_zlib_b64"
-                            ]
-                        )
-                    )
-                    candidate_full_bytes = len(str(receipt[candidate_field]))
-                    if candidate_delta_bytes * 2 < candidate_full_bytes:
+                    if _delta_component_is_smaller(
+                        delta=candidate_delta[
+                            "candidate_evaluations_delta_zlib_b64"
+                        ],
+                        inline=receipt[candidate_field],
+                    ):
                         compact_receipt.update(candidate_delta)
                         compact_receipt.update(
                             {
@@ -3162,11 +3162,12 @@ def _store_global_auction_receipt(
                     current_rows=holding_coverage_rows,
                     expected_sha256=holding_identity[1],
                 )
-                holding_delta_bytes = len(
-                    str(holding_delta["holding_auction_coverage_delta_zlib_b64"])
-                )
-                holding_full_bytes = len(str(receipt[holding_field]))
-                if holding_delta_bytes * 2 < holding_full_bytes:
+                if _delta_component_is_smaller(
+                    delta=holding_delta[
+                        "holding_auction_coverage_delta_zlib_b64"
+                    ],
+                    inline=receipt[holding_field],
+                ):
                     compact_receipt.update(holding_delta)
                     compact_receipt.update(
                         {
@@ -3217,7 +3218,10 @@ def _store_global_auction_receipt(
                 )
                 delta_b64 = str(book_delta["book_native_side_delta_zlib_b64"])
                 full_book_b64 = str(receipt[book_field])
-                if len(delta_b64) * 2 < len(full_book_b64):
+                if _delta_component_is_smaller(
+                    delta=delta_b64,
+                    inline=full_book_b64,
+                ):
                     compact_receipt.update(book_delta)
                     compact_receipt.update(
                         {
