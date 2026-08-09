@@ -1790,7 +1790,24 @@ files:
   src/engine/cycle_runtime.py:
     zone: K2_runtime
     authority_role: runtime_helper
-    why: "Extracted heavy helpers from cycle_runner; supports orchestration without becoming authority. R3 A2 threads candidate event/date/cluster allocation metadata into ExecutionIntent for live cap enforcement. Monitor receipts consume the same fresh position-stamped probability and edge as exit evaluation, including lossless reconstruction of exit-specific validation subsets indexed into the event's canonical monitor validation vector. Held-monitor recovery serves the least-recently persisted MONITOR_REFRESHED debt before optional tail work; production batch books use the DB-free killable reader, failure defers without singular fan-out, and quote/probability work shares one cycle deadline instead of resetting a budget per position. The held replacement HWM cut is frozen before auxiliary debt and hard-fact scans can spend its primary reserve, and its raw batch has an independent wall-clock cap so an occasional wait cannot consume the full auxiliary tranche. Deadline expiry revokes new I/O, not a preclassified local absorbing hard fact: one dead-bin rescue explicitly disables quote refresh and retry preflight while recording its direct exit/retry decision, then the next cycle retries executable truth."
+    why: >
+      Extracted heavy helpers from cycle_runner; supports orchestration without
+      becoming authority. R3 A2 threads candidate event/date/cluster allocation
+      metadata into ExecutionIntent for live cap enforcement. Monitor receipts
+      consume the same fresh position-stamped probability and edge as exit
+      evaluation, including lossless reconstruction of exit-specific validation
+      subsets indexed into the event's canonical monitor validation vector.
+      Held-monitor recovery serves the least-recently persisted MONITOR_REFRESHED
+      debt before optional tail work; production batch books use the DB-free
+      killable reader, failure defers without singular fan-out, and
+      quote/probability work shares one cycle deadline instead of resetting a
+      budget per position. Deadline expiry revokes new I/O, not a preclassified
+      local absorbing hard fact: one dead-bin rescue explicitly disables quote
+      refresh and retry preflight while recording its direct exit/retry decision,
+      then the next cycle retries executable truth. The held replacement HWM cut
+      is frozen before auxiliary debt and hard-fact scans can spend its primary
+      reserve, and its raw batch has an independent wall-clock cap so an
+      occasional wait cannot consume the full auxiliary tranche.
   src/engine/discovery_mode.py:
     zone: K2_runtime
     authority_role: mode_enum
