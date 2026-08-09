@@ -368,6 +368,71 @@ def test_paused_wake_resumes_same_pending_event_exactly_once():
     assert row[2] == decision_time.isoformat()
 
 
+def test_risk_allocator_suppression_parks_ordinary_entry_work(monkeypatch):
+    import src.engine.event_reactor_adapter as adapter
+    import src.events.reactor as reactor_module
+
+    conn, store = _store()
+    event = _forecast_event("risk-suppressed-ordinary-entry")
+    store.insert_or_ignore(event)
+    risk_block: list[str | None] = [
+        "RISK_ALLOCATOR_GLOBAL_ENTRY_UNAVAILABLE:"
+        "reason=reduce_only_mode_active:reduce_only=True:"
+        "kill_switch_reason=operator"
+    ]
+    monkeypatch.setattr(
+        adapter,
+        "_entry_pause_blocks_live_submit",
+        lambda _conn: None,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_entry_global_submit_suppression_reason",
+        lambda: risk_block[0],
+    )
+    submitted: list[str] = []
+    reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda *_args: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=lambda current, _decision_time: submitted.append(
+            current.event_id
+        ),
+        reject=lambda *_args: None,
+        paused_entry_wake_gate=lambda: reactor_module._paused_entry_wake_should_park(
+            pause_reason=reactor_module._entry_reactor_park_reason(conn),
+        ),
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+    decision_time = datetime(2026, 5, 24, 18, 3, tzinfo=timezone.utc)
+
+    parked = reactor.process_pending(decision_time=decision_time, limit=10)
+    parked_row = conn.execute(
+        "SELECT processing_status, attempt_count, claimed_at "
+        "FROM opportunity_event_processing WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+
+    assert parked.rejection_reasons == [
+        "ENTRIES_PAUSED_NO_CANONICAL_HELD_FAMILIES"
+    ]
+    assert tuple(parked_row) == ("pending", 0, None)
+    assert submitted == []
+
+    risk_block[0] = None
+    resumed = reactor.process_pending(decision_time=decision_time, limit=10)
+
+    assert resumed.processed == 1
+    assert submitted == [event.event_id]
+    assert conn.execute(
+        "SELECT processing_status, attempt_count FROM opportunity_event_processing "
+        "WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone() == ("processed", 1)
+
+
 def test_paused_entry_park_requires_exact_canonical_held_sell_work():
     from src.events.reactor import _paused_entry_wake_should_park
     from src.runtime.reactor_wake import make_held_sell_reauction_request

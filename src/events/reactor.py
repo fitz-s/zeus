@@ -775,6 +775,25 @@ def _paused_entry_wake_should_park(
     return True
 
 
+def _entry_reactor_park_reason(conn: sqlite3.Connection | None) -> str | None:
+    """Return the current runtime block that should park ordinary BUY work."""
+
+    from src.engine.event_reactor_adapter import (
+        _entry_global_submit_suppression_reason,
+        _entry_pause_blocks_live_submit,
+    )
+
+    # SCOPE: ordinary BUY-capable reactor cycles only; targeted forecast
+    # materialization and exact held-SELL completion bypass the caller's park.
+    # DRAIN: pending immutable carriers remain unclaimed, so the blocked state
+    # creates no retry writes. RESET: every wake re-reads both authorities and
+    # resumes the same pending carriers when neither block remains.
+    return (
+        _entry_pause_blocks_live_submit(conn)
+        or _entry_global_submit_suppression_reason()
+    )
+
+
 Submit = Callable[[OpportunityEvent, datetime], bool | None | EventSubmissionReceipt]
 
 
@@ -7459,12 +7478,10 @@ def run_edli_event_reactor_cycle(
             "EDLI reactor skipped before runtime DB setup: new entries are globally blocked"
         )
         return not completion_wake
-    from src.engine.event_reactor_adapter import _entry_pause_blocks_live_submit
-
     held_family_provider = _edli_reactor_held_family_provider()
     held_sell_request_exposure_provider = _edli_held_sell_request_exposure_provider()
     if _paused_entry_wake_should_park(
-        pause_reason=_entry_pause_blocks_live_submit(None),
+        pause_reason=_entry_reactor_park_reason(None),
         held_sell_reauction_requests=(
             producer_held_sell_reauction_requests if completion_wake else ()
         ),
@@ -8156,7 +8173,7 @@ def run_edli_event_reactor_cycle(
                 or get_current_level() == RiskLevel.GREEN
             ),
             paused_entry_wake_gate=lambda: _paused_entry_wake_should_park(
-                pause_reason=_entry_pause_blocks_live_submit(conn),
+                pause_reason=_entry_reactor_park_reason(conn),
                 held_sell_reauction_requests=(
                     producer_held_sell_reauction_requests if completion_wake else ()
                 ),
