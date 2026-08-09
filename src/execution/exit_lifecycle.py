@@ -4901,6 +4901,7 @@ def execute_exit(
     execution_evidence: ExitExecutionEvidence | None = None,
     global_sell_authority: GlobalSellExecutionAuthority | None = None,
     hard_fact_authority: object | None = None,
+    global_sell_prefetched_orderbook: Mapping[str, object] | None = None,
 ) -> str:
     """Execute an exit decision. Returns outcome description.
 
@@ -4968,6 +4969,7 @@ def execute_exit(
         is_red_force_exit=is_red_force_exit,
         global_sell_authority=global_sell_authority,
         hard_fact_authority=hard_fact_authority,
+        global_sell_prefetched_orderbook=global_sell_prefetched_orderbook,
     )
 
 
@@ -4983,6 +4985,7 @@ def _execute_live_exit(
     is_red_force_exit: bool,
     global_sell_authority: GlobalSellExecutionAuthority | None,
     hard_fact_authority: object | None,
+    global_sell_prefetched_orderbook: Mapping[str, object] | None = None,
 ) -> str:
     """Live exit: place sell, check fill, retry on failure."""
     if conn is not None:
@@ -5108,7 +5111,17 @@ def _execute_live_exit(
             clob,
             position,
             token_id,
+            now=(
+                global_sell_authority.jit_candidate.book_captured_at_utc
+                if global_authorized
+                else None
+            ),
             required_raw_orderbook_hash=required_book_hash,
+            prefetched_orderbook=(
+                global_sell_prefetched_orderbook
+                if global_authorized
+                else None
+            ),
         )
     except Exception as exc:  # noqa: BLE001
         snapshot_reason = f"{exit_context.exit_reason} [EXECUTABLE_SNAPSHOT_ERROR]"
@@ -6055,6 +6068,7 @@ def _latest_or_capture_exit_snapshot_context(
     *,
     now: datetime | None = None,
     required_raw_orderbook_hash: str | None = None,
+    prefetched_orderbook: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Return fresh snapshot kwargs for exits, capturing one when possible.
 
@@ -6178,6 +6192,11 @@ def _latest_or_capture_exit_snapshot_context(
             captured_at=captured_at,
             scan_authority=scan_authority,
             execution_side="SELL",
+            prefetched_orderbook=(
+                dict(prefetched_orderbook)
+                if prefetched_orderbook is not None
+                else None
+            ),
             # capture_policy_spec.md §2 trigger 2: synchronous pre-submit
             # recapture (exit SELL path), already structurally full.
             capture_trigger="JIT_SUBMIT",
@@ -6198,7 +6217,7 @@ def _latest_or_capture_exit_snapshot_context(
             token_id,
             now=captured_at,
         )
-        if refreshed_context:
+        if refreshed_context and matches_required_book(refreshed_context):
             return refreshed_context
         refreshed_no_bid_context = _latest_exit_snapshot_context(
             conn,
@@ -6206,7 +6225,9 @@ def _latest_or_capture_exit_snapshot_context(
             now=captured_at,
             require_sell_bid=False,
         )
-        if refreshed_no_bid_context:
+        if refreshed_no_bid_context and matches_required_book(
+            refreshed_no_bid_context
+        ):
             return refreshed_no_bid_context
         from src.state.snapshot_repo import get_snapshot
 

@@ -27837,6 +27837,16 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         assert isinstance(authority, GlobalSellExecutionAuthority)
         assert authority.actuation is actuation
         assert authority.jit_candidate.executable_sell_curve.book_hash
+        assert kwargs["global_sell_prefetched_orderbook"] == {
+            "asset_id": "yes-token",
+            "hash": "jit-sell-hash",
+            "tick_size": tick,
+            "min_order_size": "5",
+            "bids": [
+                {"price": price, "size": size}
+                for price, size in bid_levels
+            ],
+        }
         intent = kwargs["exit_intent"]
         assert intent.exact_limit_price == pytest.approx(expected_limit)
         assert intent.shares == pytest.approx(6.0)

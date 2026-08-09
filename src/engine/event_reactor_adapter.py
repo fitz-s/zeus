@@ -11746,6 +11746,7 @@ def _submit_current_global_sell(
                 exit_intent=exit_intent,
                 execution_evidence=exit_evidence,
                 global_sell_authority=execution_authority,
+                global_sell_prefetched_orderbook=raw_book,
             )
     except Exception as exc:  # noqa: BLE001 - exit safety remains fail closed
         if exit_evidence is not None and exit_evidence.venue_call_started:
