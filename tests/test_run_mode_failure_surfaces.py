@@ -9954,7 +9954,7 @@ def test_monitor_bootstrap_scopes_defer_to_entry_competitors(monkeypatch) -> Non
         assert main_module._defer_for_held_position_monitor(job_name) is False
 
 
-def test_monitor_bootstrap_admits_only_exact_held_sell_completion_debt(
+def test_monitor_bootstrap_does_not_waive_current_coverage_for_exact_sell_debt(
     monkeypatch,
 ) -> None:
     import src.main as main_module
@@ -9987,22 +9987,16 @@ def test_monitor_bootstrap_admits_only_exact_held_sell_completion_debt(
         "_promote_held_position_monitor_bootstrap_from_canonical_progress",
         lambda: promote_calls.append(True) or False,
     )
-    monkeypatch.setattr(
-        main_module,
-        "_held_position_monitor_entry_block_reason",
-        lambda: None,
-    )
-
-    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
-    assert promote_calls == []
-    assert main_module._defer_for_held_position_monitor("market_discovery") is True
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
     assert promote_calls == [True]
+    assert main_module._defer_for_held_position_monitor("market_discovery") is True
+    assert promote_calls == [True, True]
 
     handoff_pending.set()
     assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
 
 
-def test_monitor_bootstrap_does_not_spin_exact_sell_debt_without_current_monitor_truth(
+def test_monitor_bootstrap_retains_exact_sell_debt_while_current_coverage_is_missing(
     monkeypatch,
 ) -> None:
     import src.main as main_module
@@ -10026,13 +10020,8 @@ def test_monitor_bootstrap_does_not_spin_exact_sell_debt_without_current_monitor
     )
     monkeypatch.setattr(
         main_module,
-        "_held_position_monitor_entry_block_reason",
-        lambda: "held_position_monitor_cadence_overdue",
-    )
-    monkeypatch.setattr(
-        main_module,
         "_promote_held_position_monitor_bootstrap_from_canonical_progress",
-        lambda: pytest.fail("stale exact debt must leave bootstrap deferred"),
+        lambda: False,
     )
 
     assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True

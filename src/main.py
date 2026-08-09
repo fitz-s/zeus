@@ -450,54 +450,6 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
         logger.info("edli_event_reactor deferred: capital recovery handoff pending")
         return True
     if (
-        job_name == "edli_event_reactor"
-        and not _held_position_monitor_bootstrap_complete.is_set()
-    ):
-        try:
-            from src.runtime.reactor_wake import (
-                exact_held_sell_completion_wake_ids,
-            )
-
-            exact_held_sell_debt = bool(
-                exact_held_sell_completion_wake_ids(fail_on_error=True)
-            )
-        except (OSError, ValueError):
-            # Unknown durable debt cannot waive the bootstrap gate.
-            logger.warning(
-                "held SELL completion debt read failed during monitor bootstrap; "
-                "retaining reactor defer",
-                exc_info=True,
-            )
-            exact_held_sell_debt = False
-        if exact_held_sell_debt:
-            monitor_block_reason = _held_position_monitor_entry_block_reason()
-            if monitor_block_reason is not None:
-                # SCOPE: only the exact held-SELL bootstrap bypass; monitor,
-                # command recovery, settlement, and already-running venue work
-                # continue. DRAIN: the independent monitor recovery executor
-                # appends current canonical held-position evidence without a
-                # competing no-authority auction. RESET: the next reactor poll
-                # admits the exact debt immediately after monitor evidence is
-                # current. This does not discard or acknowledge the debt.
-                logger.warning(
-                    "edli_event_reactor deferred: exact held SELL debt lacks "
-                    "current monitor authority (%s)",
-                    monitor_block_reason,
-                )
-                return True
-            # SCOPE: only an already-persisted exact held-position SELL
-            # completion wake may pass the new-entry bootstrap defer. BUY-capable
-            # work remains blocked by the reactor's risk/pause gates. DRAIN: the
-            # reactor consumes the exact request through global redecision and
-            # persists its terminal receipt/venue command. RESET: the durable
-            # wake disappears only after acknowledgement; empty or unreadable
-            # debt restores the ordinary post-boot monitor coverage requirement.
-            logger.warning(
-                "edli_event_reactor admitted before monitor bootstrap only to "
-                "drain exact held SELL completion debt"
-            )
-            return False
-    if (
         not _held_position_monitor_bootstrap_complete.is_set()
         and not _promote_held_position_monitor_bootstrap_from_canonical_progress()
     ):
