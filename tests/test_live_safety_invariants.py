@@ -6346,6 +6346,11 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         position.last_monitor_at = "2026-07-14T18:00:00+00:00"
         setattr(
             position,
+            monitor_refresh._HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
+            5.0 if outcome == "dust" else None,
+        )
+        setattr(
+            position,
             monitor_refresh._GLOBAL_MONITOR_SAMPLES_ATTR,
             (
                 np.array([0.0, 0.0])
@@ -6417,7 +6422,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     monkeypatch.setattr(
         exit_lifecycle,
         "_latest_fresh_snapshot_min_order",
-        lambda *args, **kwargs: Decimal("5"),
+        lambda *args, **kwargs: None,
     )
 
     monkeypatch.setattr(
@@ -6761,6 +6766,33 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert auction_completion_requests == []
     assert invalidations == ([] if outcome != "direct" else ["venue_side_effect"])
     conn.close()
+
+
+def test_held_monitor_quote_preserves_current_book_min_order_size():
+    from src.engine import monitor_refresh
+
+    pos = _make_position(
+        trade_id="held-quote-min-order",
+        token_id="held-yes-token",
+        direction="buy_yes",
+        state="day0_window",
+    )
+
+    class Clob:
+        @staticmethod
+        def get_orderbook(_token_id):
+            return {
+                "asset_id": "held-yes-token",
+                "bids": [{"price": "0.04", "size": "20"}],
+                "asks": [{"price": "0.06", "size": "20"}],
+                "min_order_size": "5",
+            }
+
+    quote = monitor_refresh.monitor_quote_refresh(None, Clob(), pos)
+
+    assert quote is not None
+    assert quote.best_bid == 0.04
+    assert quote.min_order_size == 5.0
 
 
 @pytest.mark.parametrize(

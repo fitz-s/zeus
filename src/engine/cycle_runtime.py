@@ -5707,6 +5707,7 @@ def execute_monitoring_phase(
         HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
         _GLOBAL_MONITOR_SAMPLES_ATTR,
         _HELD_MONITOR_DEADLINE_ATTR,
+        _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
         install_monitor_day0_family_cache,
         refresh_position,
     )
@@ -7494,15 +7495,29 @@ def execute_monitoring_phase(
                     )
                 except (InvalidOperation, TypeError, ValueError):
                     held_shares = Decimal("0")
-                fresh_min_order = _latest_fresh_snapshot_min_order(
+                monitor_min_order = getattr(
                     pos,
-                    conn=conn,
-                    now=(
-                        deps._utcnow()
-                        if hasattr(deps, "_utcnow")
-                        else datetime.now(timezone.utc)
-                    ),
+                    _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
+                    None,
                 )
+                try:
+                    fresh_min_order = (
+                        Decimal(str(monitor_min_order))
+                        if monitor_min_order is not None
+                        else None
+                    )
+                except (InvalidOperation, TypeError, ValueError):
+                    fresh_min_order = None
+                if fresh_min_order is None or fresh_min_order <= 0:
+                    fresh_min_order = _latest_fresh_snapshot_min_order(
+                        pos,
+                        conn=conn,
+                        now=(
+                            deps._utcnow()
+                            if hasattr(deps, "_utcnow")
+                            else datetime.now(timezone.utc)
+                        ),
+                    )
                 if (
                     fresh_min_order is not None
                     and held_shares > 0
