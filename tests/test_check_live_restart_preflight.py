@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-18; last_reviewed=2026-08-03; last_reused=2026-08-03
+# Lifecycle: created=2026-06-18; last_reviewed=2026-08-03; last_reused=2026-08-08
 # Purpose: Regression tests for read-only live restart preflight risk classification.
 # Reuse: pytest tests/test_check_live_restart_preflight.py
 # Authority basis: AGENTS.md live-money restart proof gates.
@@ -6475,6 +6475,80 @@ def test_preflight_tolerates_pre_submit_exit_retry_without_exit_command(monkeypa
     assert tolerated["restart_resolution"] == "exit_lifecycle_pre_submit_retry_resume"
     assert tolerated["repair_evidence"]["command_state"] == "NO_EXIT_COMMAND_RETRY_PENDING"
     assert tolerated["repair_evidence"]["event_type"] == "EXIT_ORDER_REJECTED"
+
+
+def test_preflight_tolerates_pre_submit_backoff_for_global_redecision(
+    monkeypatch,
+    tmp_path,
+):
+    trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
+    trade = _init_trade_db(trade_db)
+    _init_forecast_db(forecast_db).close()
+    trade.execute(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            venue_order_id TEXT,
+            size REAL,
+            updated_at TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        CREATE TABLE position_events (
+            event_id TEXT PRIMARY KEY,
+            position_id TEXT,
+            sequence_no INTEGER,
+            event_type TEXT,
+            occurred_at TEXT,
+            venue_status TEXT,
+            payload_json TEXT
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'backoff-no-command-pos', 'pending_exit', 'Busan', '2026-08-09', 'high',
+            'Will the highest temperature in Busan be 31°C on August 9?',
+            'buy_no', 16.0, 16.0, 'backoff_exhausted', '',
+            25, '', 0.385, 1, 0.60, 1,
+            '2026-08-09T02:18:25+00:00'
+        )
+        """
+    )
+    trade.execute(
+        """
+        INSERT INTO position_events VALUES (
+            'backoff-no-command-pos:phase_transition:519',
+            'backoff-no-command-pos',
+            519,
+            'EXIT_ORDER_REJECTED',
+            '2026-08-09T02:18:25+00:00',
+            'backoff_exhausted',
+            '{"error":"marketable_sell_authority_required","venue_call_started":false}'
+        )
+        """
+    )
+    trade.commit()
+    trade.close()
+
+    result = preflight.evaluate()
+
+    pending = next(
+        check
+        for check in result["checks"]
+        if check["name"] == "pending_exit_restart_risk"
+    )
+    assert pending["ok"] is True
+    tolerated = pending["evidence"]["tolerated"][0]
+    assert tolerated["restart_resolution"] == "global_redecision_pre_submit_resume"
+    assert tolerated["repair_evidence"]["command_id"] is None
+    assert tolerated["repair_evidence"]["venue_status"] == "backoff_exhausted"
 
 
 def test_preflight_tolerates_pending_exit_phantom_sell_projection(monkeypatch, tmp_path):

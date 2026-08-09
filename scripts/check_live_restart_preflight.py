@@ -6252,11 +6252,18 @@ def _exit_retry_resumable_by_position() -> dict[str, dict[str, Any]]:
              WHERE pc.phase = 'pending_exit'
                AND latest_exit.command_id IS NULL
                AND latest_event.event_type = 'EXIT_ORDER_REJECTED'
-               AND LOWER(COALESCE(latest_event.venue_status, '')) = 'retry_pending'
-               AND COALESCE(pc.next_exit_retry_at, '') != ''
+               AND LOWER(COALESCE(latest_event.venue_status, '')) IN (
+                   'retry_pending',
+                   'backoff_exhausted'
+               )
+               AND (
+                   COALESCE(pc.next_exit_retry_at, '') != ''
+                   OR LOWER(COALESCE(latest_event.venue_status, '')) = 'backoff_exhausted'
+               )
             """
         ).fetchall()
     for row in rows:
+        venue_status = str(row["venue_status"] or "").lower()
         resumable[str(row["position_id"])] = {
             "command_id": None,
             "command_state": "NO_EXIT_COMMAND_RETRY_PENDING",
@@ -6268,7 +6275,11 @@ def _exit_retry_resumable_by_position() -> dict[str, dict[str, Any]]:
             "event_type": row["event_type"],
             "venue_status": row["venue_status"],
             "event_occurred_at": row["occurred_at"],
-            "restart_resolution": "exit_lifecycle_pre_submit_retry_resume",
+            "restart_resolution": (
+                "global_redecision_pre_submit_resume"
+                if venue_status == "backoff_exhausted"
+                else "exit_lifecycle_pre_submit_retry_resume"
+            ),
         }
     return resumable
 
