@@ -670,6 +670,12 @@ def test_main_threads_pause_carrier_qualification_to_reactor(monkeypatch):
         "_edli_live_entry_readiness_block",
         lambda _cfg: (None, {}),
     )
+    monkeypatch.setattr(
+        main,
+        "_unowned_day0_urgent_wake_pending",
+        lambda: False,
+    )
+    main._capital_recovery_handoff_pending.clear()
 
     def run_cycle(**kwargs):
         captured.update(kwargs)
@@ -685,6 +691,14 @@ def test_main_threads_pause_carrier_qualification_to_reactor(monkeypatch):
     assert captured["live_entry_block_reason"] == (
         "paused_forecast_snapshot_completion"
     )
+    preemption_pending = captured["urgent_day0_pending"]
+    assert callable(preemption_pending)
+    assert preemption_pending() is False
+    main._capital_recovery_handoff_pending.set()
+    try:
+        assert preemption_pending() is True
+    finally:
+        main._capital_recovery_handoff_pending.clear()
 
 
 def test_main_drains_control_commands_before_edli_readiness(monkeypatch):

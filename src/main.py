@@ -4230,7 +4230,14 @@ def _edli_event_reactor_cycle(
         allow_paused_forecast_snapshot_completion=(
             allow_paused_forecast_snapshot_completion
         ),
-        urgent_day0_pending=_unowned_day0_urgent_wake_pending,
+        # Capital recovery is durable and independently re-queries current
+        # truth.  Reuse the reactor's cooperative SQLite/safe-point preemption
+        # seam so it releases the active fence after its current bounded unit
+        # instead of running lower-value discovery ahead of exact cancel debt.
+        urgent_day0_pending=lambda: (
+            _unowned_day0_urgent_wake_pending()
+            or _capital_recovery_handoff_pending.is_set()
+        ),
         held_position_monitor_pending=(
             _periodic_held_position_monitor_handoff_pending.is_set
         ),
