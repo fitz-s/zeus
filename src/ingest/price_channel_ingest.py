@@ -210,6 +210,20 @@ def _bound_background_price_channel_sqlite_wait(conn) -> None:
     )
 
 
+def _disable_background_quote_autocheckpoint(conn) -> None:
+    """Keep WAL checkpoint I/O out of the high-frequency quote writer lease.
+
+    ``src.main`` owns a periodic PASSIVE checkpoint for the canonical TRADE DB.
+    Letting this persistent background connection inherit SQLite's per-connection
+    autocheckpoint makes an otherwise tiny quote commit checkpoint thousands of
+    frames while it still owns the unified writer lease.  That inverts capital
+    priority by delaying monitor and terminal-command recovery behind market-data
+    materialization.
+    """
+
+    conn.execute("PRAGMA wal_autocheckpoint = 0")
+
+
 def _bound_held_quote_sqlite_wait(
     conn,
     *,
@@ -3848,6 +3862,7 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
         feasibility_conn = get_trade_connection(write_class="live")
         _bound_price_channel_sqlite_wait(world_conn)
         _bound_background_price_channel_sqlite_wait(feasibility_conn)
+        _disable_background_quote_autocheckpoint(feasibility_conn)
 
         def _commit_quote() -> None:
             feasibility_conn.commit()

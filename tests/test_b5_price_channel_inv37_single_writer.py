@@ -116,6 +116,16 @@ def test_forever_runner_opens_independent_world_and_trade_lanes():
     assert _live_conn_vars(runner, "get_world_connection") == {"world_conn"}
     assert "feasibility_conn" in _live_conn_vars(runner, "get_trade_connection")
     assert not _live_conn_vars(runner, "get_world_connection_with_trades_required")
+    autocheckpoint_calls = [
+        sub
+        for sub in ast.walk(runner)
+        if isinstance(sub, ast.Call)
+        and isinstance(sub.func, ast.Name)
+        and sub.func.id == "_disable_background_quote_autocheckpoint"
+    ]
+    assert len(autocheckpoint_calls) == 1
+    assert isinstance(autocheckpoint_calls[0].args[0], ast.Name)
+    assert autocheckpoint_calls[0].args[0].id == "feasibility_conn"
 
 
 @pytest.mark.parametrize("func_name", _REFRESH_FUNCS)
@@ -538,6 +548,18 @@ def test_held_quote_sqlite_wait_is_clamped_by_hold_and_refresh_deadlines(
                 conn,
                 deadline_monotonic=99.0,
             )
+    finally:
+        conn.close()
+
+
+def test_background_quote_connection_disables_sqlite_autocheckpoint():
+    from src.ingest import price_channel_ingest as lane
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        assert conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0] > 0
+        lane._disable_background_quote_autocheckpoint(conn)
+        assert conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == 0
     finally:
         conn.close()
 
