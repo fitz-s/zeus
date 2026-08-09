@@ -7669,7 +7669,9 @@ def test_reactor_bootstrap_releases_after_canonical_monitor_coverage(
         "collect_monitor_cadence_evidence",
         lambda *_args, **kwargs: observed_kwargs.update(kwargs) or {
             "open_position_count": 20,
-            "fresh_position_count": 20,
+            "fresh_position_count": 19,
+            "settlement_recoverable_position_count": 1,
+            "stale_or_missing_position_count": 0,
             "future_monitor_event_count": 0,
         },
     )
@@ -7696,6 +7698,13 @@ def test_reactor_bootstrap_releases_after_canonical_monitor_coverage(
         {
             "open_position_count": 20,
             "fresh_position_count": 19,
+            "future_monitor_event_count": 0,
+        },
+        {
+            "open_position_count": 20,
+            "fresh_position_count": 19,
+            "settlement_recoverable_position_count": 1,
+            "stale_or_missing_position_count": 1,
             "future_monitor_event_count": 0,
         },
     ),

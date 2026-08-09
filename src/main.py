@@ -303,14 +303,19 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
             return False
         open_count = int(evidence.get("open_position_count") or 0)
         fresh = int(evidence.get("fresh_position_count") or 0)
+        settlement_recoverable = int(
+            evidence.get("settlement_recoverable_position_count") or 0
+        )
+        stale = int(evidence.get("stale_or_missing_position_count") or 0)
         required = open_count
-        if fresh < required:
+        covered = fresh + settlement_recoverable
+        if stale > 0 or covered < required:
             return False
         _held_position_monitor_bootstrap_complete.set()
         logger.info(
             "held-position monitor bootstrap coverage verified: "
             "progress_positions=%d required_progress=%d open_positions=%d",
-            fresh,
+            covered,
             required,
             open_count,
         )
