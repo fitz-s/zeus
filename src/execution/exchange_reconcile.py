@@ -71,6 +71,7 @@ from src.state.fill_dedup import (
 )
 from src.state.portfolio import INACTIVE_RUNTIME_STATES
 from src.state.venue_command_repo import trade_fact_has_positive_fill_economics
+from src.venue.response_contracts import VenueOrderNotFound
 
 logger = logging.getLogger(__name__)
 
@@ -252,10 +253,16 @@ def fresh_reconcile_snapshot(
     missing_local_order_ids = sorted(local_order_ids - open_order_ids)
     get_order = getattr(adapter, "get_order", None)
     if callable(get_order) and missing_local_order_ids:
-        captured["point_orders"] = {
-            order_id: get_order(order_id)
-            for order_id in missing_local_order_ids
-        }
+        point_orders: dict[str, Any] = {}
+        for order_id in missing_local_order_ids:
+            try:
+                point_orders[order_id] = get_order(order_id)
+            except VenueOrderNotFound:
+                # Authenticated 404 is exact absence, not surface failure. Keep
+                # the order in the immutable snapshot with a None value so the
+                # reconcile law can combine absence with trades/positions.
+                point_orders[order_id] = None
+        captured["point_orders"] = point_orders
     for surface, method in (("trades", "get_trades"), ("positions", "get_positions")):
         fn = getattr(adapter, method, None)
         if not callable(fn):

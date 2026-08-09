@@ -6601,6 +6601,57 @@ def test_position_drift_visibility_floor_does_not_hide_material_drift(conn):
     assert '"confirmed_journal_size":"0.0101"' in position_findings[0].evidence_json
 
 
+def test_fresh_reconcile_snapshot_captures_typed_point_order_absence():
+    from src.execution.exchange_reconcile import fresh_reconcile_snapshot
+    from src.venue.response_contracts import VenueOrderNotFound
+
+    class Adapter:
+        @staticmethod
+        def get_open_orders():
+            return []
+
+        @staticmethod
+        def get_order(order_id):
+            raise VenueOrderNotFound(order_id)
+
+        @staticmethod
+        def get_trades():
+            return []
+
+        @staticmethod
+        def get_positions():
+            return []
+
+    snapshot = fresh_reconcile_snapshot(
+        Adapter(),
+        observed_at=NOW,
+        trade_order_ids={"missing-order"},
+    )
+
+    assert "point_orders" in snapshot.captured_surfaces
+    assert snapshot.adapter.get_order("missing-order") is None
+
+
+def test_fresh_reconcile_snapshot_keeps_unknown_point_order_failure_fail_closed():
+    from src.execution.exchange_reconcile import fresh_reconcile_snapshot
+
+    class Adapter:
+        @staticmethod
+        def get_open_orders():
+            return []
+
+        @staticmethod
+        def get_order(order_id):
+            raise RuntimeError(f"transport failed: {order_id}")
+
+    with pytest.raises(RuntimeError, match="transport failed"):
+        fresh_reconcile_snapshot(
+            Adapter(),
+            observed_at=NOW,
+            trade_order_ids={"unknown-order"},
+        )
+
+
 def test_terminal_canonical_position_does_not_remain_current_journal_exposure(conn):
     from src.execution.exchange_reconcile import (
         record_finding,
