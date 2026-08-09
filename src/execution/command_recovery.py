@@ -3721,8 +3721,9 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                    MAX(CASE WHEN fact.state = 'CONFIRMED' THEN 1 ELSE 0 END)
                        AS has_confirmed_fill,
                    MAX(fact.trade_fact_id) AS trade_fact_id
-              FROM economic_trade_fact fact
+             FROM economic_trade_fact fact
              WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+               AND fact.source IN ('REST', 'WS_USER')
                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
                AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
              GROUP BY fact.command_id

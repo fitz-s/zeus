@@ -13263,6 +13263,7 @@ def _position_current_effective_entry_economics(
     allow_pending_fill_projection: bool = False,
 ) -> dict:
     from src.state.portfolio import (
+        FILL_AUTHORITY_CANCELLED_REMAINDER,
         FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
         FILL_GRADE_FILL_AUTHORITIES,
         fill_authority_effective_open_cost_basis,
@@ -13336,6 +13337,11 @@ def _position_current_effective_entry_economics(
             fill_hint.get("fill_authority")
             or FILL_AUTHORITY_VENUE_CONFIRMED_FULL
         )
+        if (
+            row_fill_authority == FILL_AUTHORITY_CANCELLED_REMAINDER
+            and fill_hint_authority == FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL
+        ):
+            fill_hint_authority = FILL_AUTHORITY_CANCELLED_REMAINDER
         return {
             "submitted_size_usd": submitted_size_usd,
             "projection_cost_basis_usd": projection_cost_basis_usd,
@@ -13350,7 +13356,8 @@ def _position_current_effective_entry_economics(
             "fill_authority": fill_hint_authority,
             "entry_economics_source": str(fill_hint.get("entry_economics_source") or "execution_fact"),
             "entry_fill_verified": bool(
-                fill_hint.get(
+                fill_hint_authority == FILL_AUTHORITY_CANCELLED_REMAINDER
+                or fill_hint.get(
                     "entry_fill_verified",
                     fill_hint_authority != FILL_AUTHORITY_VENUE_CONFIRMED_PARTIAL,
                 )

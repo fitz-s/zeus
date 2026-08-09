@@ -13654,6 +13654,133 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
 
+    def test_pending_exit_same_order_reobservation_preserves_exit_intent(
+        self,
+        conn,
+        mock_client,
+    ):
+        from src.execution.command_recovery import (
+            ensure_live_entry_projection_for_command,
+            reconcile_filled_entry_projection_repairs,
+        )
+
+        _insert(conn, size=31.0, price=0.21)
+        _advance_to_acked(conn, venue_order_id="ord-growing-fill")
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-001",
+            order_id="ord-growing-fill",
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-growing-fill",
+            trade_id="trade-growing-prefix",
+            state="CONFIRMED",
+            filled_size="11",
+            fill_price="0.21",
+        )
+        conn.execute(
+            "UPDATE venue_commands SET state='PARTIAL' WHERE command_id='cmd-001'"
+        )
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key,
+                decision_id, snapshot_id, order_id, command_id, caused_by,
+                idempotency_key, venue_status, source_module, env, payload_json
+            ) VALUES (
+                'pos-001:entry-prefix', 'pos-001', 1, 3, 'ENTRY_ORDER_FILLED',
+                '2026-04-26T00:06:00Z', 'pending_entry', 'active',
+                'opening_inertia', 'dec-001', 'snap-pos-001',
+                'ord-growing-fill', 'cmd-001', 'test-prefix',
+                'pos-001:entry-prefix', 'PARTIAL',
+                'tests.test_command_recovery', 'live', '{}'
+            )
+            """
+        )
+        conn.execute(
+            "UPDATE position_current SET phase='pending_exit', shares=11, "
+            "cost_basis_usd=2.31, entry_price=.21, "
+            "fill_authority='venue_confirmed_partial', "
+            "exit_reason='BELIEF_REVERSAL_EXIT' WHERE position_id='pos-001'"
+        )
+        from src.state.db import log_execution_fact
+
+        log_execution_fact(
+            conn,
+            intent_id="pos-001:entry",
+            position_id="pos-001",
+            decision_id="dec-001",
+            command_id="cmd-001",
+            order_role="entry",
+            posted_at="2026-04-26T00:00:00Z",
+            filled_at="2026-04-26T00:06:00Z",
+            submitted_price=.21,
+            fill_price=.21,
+            shares=11,
+            venue_status="PARTIAL",
+            terminal_exec_status="partial",
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-growing-fill",
+            trade_id="trade-growing-remainder",
+            state="CONFIRMED",
+            filled_size="20",
+            fill_price="0.21",
+        )
+
+        summary = reconcile_filled_entry_projection_repairs(conn, client=mock_client)
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            "SELECT phase, shares, cost_basis_usd, exit_reason FROM position_current "
+            "WHERE position_id='pos-001'"
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_exit",
+            "shares": pytest.approx(31.0),
+            "cost_basis_usd": pytest.approx(6.51),
+            "exit_reason": "BELIEF_REVERSAL_EXIT",
+        }
+
+    @pytest.mark.parametrize("source", ["OPERATOR", "FAKE_VENUE"])
+    def test_review_required_projection_rejects_unauthenticated_fill_source(
+        self,
+        conn,
+        source,
+    ):
+        from src.execution import command_recovery as recovery
+
+        _insert(conn, size=31.0, price=0.21)
+        _advance_to_acked(conn, venue_order_id="ord-untrusted-fill")
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-001",
+            order_id="ord-untrusted-fill",
+        )
+        conn.execute(
+            "UPDATE venue_commands SET state='REVIEW_REQUIRED' WHERE command_id='cmd-001'"
+        )
+        conn.execute(
+            "UPDATE position_current SET phase='pending_exit', shares=1, "
+            "cost_basis_usd=.21, entry_price=.21 WHERE position_id='pos-001'"
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-untrusted-fill",
+            trade_id=f"trade-{source.lower()}",
+            state="CONFIRMED",
+            filled_size="31",
+            fill_price="0.21",
+            source=source,
+        )
+
+        assert recovery._latest_unprojected_filled_entry_candidates(conn) == []
+
     def test_partial_entry_repair_promotes_zero_share_pending_projection(
         self,
         conn,

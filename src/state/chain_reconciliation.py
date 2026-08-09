@@ -66,7 +66,6 @@ _TERMINAL_ENTRY_COMMAND_STATES = frozenset(
     {
         "CANCELLED",
         "EXPIRED",
-        "FILLED",
         "REJECTED",
         "SUBMIT_REJECTED",
         "SUPERSEDED",
@@ -573,16 +572,16 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                    fact.filled_size,
                    fact.fill_price
               FROM venue_commands command
-              JOIN economic_trade_fact fact
+              LEFT JOIN economic_trade_fact fact
                 ON fact.command_id = command.command_id
+               AND UPPER(COALESCE(fact.state, '')) IN ('MATCHED', 'MINED', 'CONFIRMED')
+               AND UPPER(COALESCE(fact.source, '')) IN ('REST', 'WS_USER')
+               AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+               AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
              WHERE command.position_id = ?
                AND UPPER(COALESCE(command.intent_kind, '')) = 'ENTRY'
                AND UPPER(COALESCE(command.side, '')) = 'BUY'
                AND command.token_id = ?
-               AND UPPER(COALESCE(fact.state, '')) IN ('MATCHED', 'MINED', 'CONFIRMED')
-               AND UPPER(COALESCE(fact.source, '')) IN ('REST', 'WS_USER', 'WS_MARKET', 'DATA_API', 'CHAIN')
-               AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
-               AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
             """
         )
         try:
@@ -606,17 +605,13 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             state = str(
                 (values["command_state"] if values is not None else row[2]) or ""
             ).upper()
-            filled = Decimal(
-                str((values["filled_size"] if values is not None else row[3]) or 0)
-            )
-            price = Decimal(
-                str((values["fill_price"] if values is not None else row[4]) or 0)
-            )
+            filled = Decimal(str((values["filled_size"] if values is not None else row[3]) or 0))
+            price = Decimal(str((values["fill_price"] if values is not None else row[4]) or 0))
             if not all(value.is_finite() for value in (submitted, filled, price)):
                 raise RuntimeError(
                     f"pending-entry exact fill fold is non-finite for position_id={position_id}"
                 )
-            if not command_id or filled <= 0 or price <= 0:
+            if not command_id:
                 continue
             command = commands.setdefault(
                 command_id,
@@ -627,29 +622,30 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
                     "cost": Decimal("0"),
                 },
             )
-            command["filled"] += filled
-            command["cost"] += filled * price
+            if filled > 0 and price > 0:
+                command["filled"] += filled
+                command["cost"] += filled * price
 
         filled_shares = Decimal("0")
         filled_cost = Decimal("0")
         has_live_remainder = False
         has_terminal_remainder = False
-        submitted_shares = Decimal("0")
+        live_remaining_shares = Decimal("0")
         for command in commands.values():
             submitted = command["submitted"]
             filled = command["filled"]
             cost = command["cost"]
             state = str(command["state"])
-            if filled <= 0 or cost <= 0:
-                continue
-            submitted_shares += max(Decimal("0"), submitted)
-            filled_shares += filled
-            filled_cost += cost
-            if submitted > 0 and filled < submitted - Decimal("0.000001"):
+            if filled > 0 and cost > 0:
+                filled_shares += filled
+                filled_cost += cost
+            remainder = max(Decimal("0"), submitted - filled)
+            if remainder > Decimal("0.000001"):
                 if state in _TERMINAL_ENTRY_COMMAND_STATES:
                     has_terminal_remainder = True
                 else:
                     has_live_remainder = True
+                    live_remaining_shares += remainder
         if filled_shares <= 0 or filled_cost <= 0:
             return None
 
@@ -666,7 +662,7 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
             "shares": filled_shares,
             "cost": filled_cost,
             "avg_price": filled_cost / filled_shares,
-            "submitted_shares": submitted_shares,
+            "submitted_shares": filled_shares + live_remaining_shares,
             "fill_authority": fill_authority,
             "order_status": order_status,
         }

@@ -5138,6 +5138,43 @@ def _ensure_entry_fill_position_event(
     elif incremental_fill:
         from src.state.db import query_entry_execution_fill_aggregate
 
+        selected_token_id = str(command.get("token_id") or "").strip()
+        token_scope = conn.execute(
+            """
+            SELECT COUNT(*) AS fact_count,
+                   SUM(
+                       CASE
+                           WHEN fact.command_id IS NULL
+                             OR command.command_id IS NULL
+                             OR command.token_id != ?
+                           THEN 1 ELSE 0
+                       END
+                   ) AS invalid_count
+              FROM execution_fact fact
+              LEFT JOIN venue_commands command
+                ON command.command_id = fact.command_id
+             WHERE fact.position_id = ?
+               AND fact.order_role = 'entry'
+               AND fact.voided_at IS NULL
+               AND lower(COALESCE(fact.terminal_exec_status, ''))
+                   IN ('filled', 'partial')
+            """,
+            (selected_token_id, position_id),
+        ).fetchone()
+        if (
+            not selected_token_id
+            or token_scope is None
+            or int(token_scope["fact_count"] or 0) == 0
+            or int(token_scope["invalid_count"] or 0) != 0
+        ):
+            logger.error(
+                "exchange_reconcile: refuse entry increment without exact "
+                "execution token scope position_id=%s command_id=%s token_id=%s",
+                position_id,
+                command.get("command_id"),
+                selected_token_id,
+            )
+            return
         historical = query_entry_execution_fill_aggregate(
             conn,
             position_id,
@@ -5247,6 +5284,7 @@ def _ensure_entry_fill_position_event(
         from src.engine.lifecycle_events import build_position_current_projection
 
         projection = build_position_current_projection(position)
+        projection["phase"] = phase
         if incremental_fill:
             projection["updated_at"] = occurred_at
         _apply_entry_fill_projection_and_execution_fact(

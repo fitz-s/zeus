@@ -1118,7 +1118,19 @@ def build_venue_position_observed_canonical_write(
             "applied_validations": list(getattr(position, "applied_validations", []) or []),
             "entry_fill_verified": getattr(position, "entry_fill_verified", False),
             "shares": getattr(position, "shares", None),
+            "shares_submitted": getattr(position, "shares_submitted", None),
+            "shares_filled": getattr(position, "shares_filled", None),
+            "shares_remaining": getattr(position, "shares_remaining", None),
             "cost_basis_usd": getattr(position, "cost_basis_usd", None),
+            "filled_cost_basis_usd": getattr(
+                position, "filled_cost_basis_usd", None
+            ),
+            "entry_price_avg_fill": getattr(
+                position, "entry_price_avg_fill", None
+            ),
+            "entry_economics_authority": getattr(
+                position, "entry_economics_authority", None
+            ),
             "size_usd": getattr(position, "size_usd", None),
             "condition_id": getattr(position, "condition_id", ""),
             "rescue_condition_id": getattr(position, "condition_id", ""),
@@ -1208,7 +1220,19 @@ def build_reconciliation_rescue_canonical_write(
             "applied_validations": list(getattr(position, "applied_validations", []) or []),
             "entry_fill_verified": getattr(position, "entry_fill_verified", False),
             "shares": getattr(position, "shares", None),
+            "shares_submitted": getattr(position, "shares_submitted", None),
+            "shares_filled": getattr(position, "shares_filled", None),
+            "shares_remaining": getattr(position, "shares_remaining", None),
             "cost_basis_usd": getattr(position, "cost_basis_usd", None),
+            "filled_cost_basis_usd": getattr(
+                position, "filled_cost_basis_usd", None
+            ),
+            "entry_price_avg_fill": getattr(
+                position, "entry_price_avg_fill", None
+            ),
+            "entry_economics_authority": getattr(
+                position, "entry_economics_authority", None
+            ),
             "size_usd": getattr(position, "size_usd", None),
             "condition_id": getattr(position, "condition_id", ""),
             "rescue_condition_id": getattr(position, "condition_id", ""),
