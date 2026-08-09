@@ -6425,10 +6425,11 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         lambda *args, **kwargs: None,
     )
 
-    monkeypatch.setattr(
-        cycle_runtime,
-        "_current_monitor_global_holding_coverage",
-        lambda **kwargs: (
+    coverage_checks = []
+
+    def current_monitor_coverage(**kwargs):
+        coverage_checks.append(kwargs["position"].trade_id)
+        return (
             global_batch_runtime.CurrentGlobalHoldingCoverage(
                 outcome=global_batch_runtime.GlobalHoldingCoverageOutcome.COVERED,
                 reason="test-coverage",
@@ -6437,7 +6438,12 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             )
             if has_position_coverage
             else None
-        ),
+        )
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_current_monitor_global_holding_coverage",
+        current_monitor_coverage,
     )
     monkeypatch.setattr(
         cycle_runtime,
@@ -6761,6 +6767,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         if posterior_support_zero:
             assert summary["monitor_branchwise_dominant_direct_sells"] == 1
             assert "posterior_support_zero_sell_dominates" in pos.applied_validations
+            assert coverage_checks == []
         assert execute_calls == [pos]
     if outcome not in {"blocked", "request_failed", "dust"}:
         assert auction_completion_requests == []
@@ -7988,6 +7995,11 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
 
     monkeypatch.setattr(
         global_batch_runtime,
+        "held_sell_reauction_coverage",
+        lambda **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
         "current_global_holding_coverage",
         current_coverage,
     )
@@ -8132,6 +8144,11 @@ def test_monitor_reuses_one_wealth_witness_across_held_sell_coverage(monkeypatch
 
     monkeypatch.setattr(
         global_batch_runtime,
+        "held_sell_reauction_coverage",
+        lambda **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
         "current_global_holding_coverage",
         current_coverage,
     )
@@ -8166,6 +8183,49 @@ def test_monitor_reuses_one_wealth_witness_across_held_sell_coverage(monkeypatch
         )
 
     assert wealth_calls == [True]
+
+
+def test_monitor_handoff_skips_witness_io_without_published_coverage(monkeypatch):
+    """An uncovered SELL must reserve reauction debt before slow witness I/O."""
+    from src.engine import cycle_runtime, global_auction_universe, global_batch_runtime
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "held_sell_reauction_coverage",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        global_auction_universe,
+        "current_portfolio_wealth_witness",
+        lambda *_args, **_kwargs: pytest.fail(
+            "missing coverage must not rebuild collateral authority"
+        ),
+    )
+    position = SimpleNamespace(
+        position_id="uncovered-position",
+        trade_id="uncovered-position",
+        direction="buy_yes",
+        token_id="uncovered-token",
+        no_token_id="uncovered-no-token",
+        city="Paris",
+        target_date="2026-08-09",
+        temperature_metric="high",
+    )
+
+    result = cycle_runtime._current_monitor_global_holding_coverage(
+        conn=object(),
+        clob=object(),
+        portfolio=SimpleNamespace(positions=(position,)),
+        position=position,
+        probability_content_identity="uncovered-q",
+        checked_at_utc=datetime(2026, 8, 9, 15, 0, tzinfo=timezone.utc),
+    )
+
+    assert (
+        result.outcome
+        is global_batch_runtime.GlobalHoldingCoverageOutcome.COVERAGE_NOT_PUBLISHED
+    )
+    assert result.reason == "GLOBAL_HOLDING_COVERAGE_NOT_PUBLISHED"
 
 
 def test_day0_resting_entry_sweep_bounds_and_rotates_scan_work(monkeypatch):

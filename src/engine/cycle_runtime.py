@@ -5420,6 +5420,7 @@ def _current_monitor_global_holding_coverage(
         from src.engine.global_batch_runtime import (
             _CurrentHoldingWitness,
             current_global_holding_coverage,
+            held_sell_reauction_coverage,
         )
         from src.engine.global_single_order_auction import (
             global_sell_book_witness_identity,
@@ -5441,6 +5442,44 @@ def _current_monitor_global_holding_coverage(
             return value.astimezone(timezone.utc)
 
         checked = checked_at_utc.astimezone(timezone.utc)
+        position_id = str(
+            getattr(position, "position_id", "")
+            or getattr(position, "trade_id", "")
+            or ""
+        )
+        direction_raw = getattr(position, "direction", "")
+        direction = str(
+            getattr(direction_raw, "value", direction_raw) or ""
+        ).lower()
+        if direction == "buy_yes":
+            side = "YES"
+            token_id = str(getattr(position, "token_id", "") or "").strip()
+        elif direction == "buy_no":
+            side = "NO"
+            token_id = str(getattr(position, "no_token_id", "") or "").strip()
+        else:
+            return unavailable(
+                GlobalHoldingCoverageOutcome.COVERAGE_PARTITION,
+                "GLOBAL_HOLDING_COVERAGE_SIDE_UNSUPPORTED",
+            )
+        family = (
+            str(getattr(position, "city", "") or ""),
+            str(getattr(position, "target_date", "") or ""),
+            str(getattr(position, "temperature_metric", "") or "").lower(),
+        )
+        # Absence of an exact published lease is cheap and authoritative.
+        # Witness I/O cannot create coverage and must not delay reservation of
+        # the V4 SELL obligation while an executable bid is disappearing.
+        if held_sell_reauction_coverage(
+            position_id=position_id,
+            probability_content_identity=probability_content_identity,
+            token_id=token_id,
+            family=family,
+        ) is None:
+            return unavailable(
+                GlobalHoldingCoverageOutcome.COVERAGE_NOT_PUBLISHED,
+                "GLOBAL_HOLDING_COVERAGE_NOT_PUBLISHED",
+            )
         wealth_max_age = timedelta(
             seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS)
         )
@@ -5478,21 +5517,6 @@ def _current_monitor_global_holding_coverage(
                 GlobalHoldingCoverageOutcome.WEALTH,
                 "GLOBAL_HOLDING_COVERAGE_WEALTH_EXPIRED",
             )
-        direction_raw = getattr(position, "direction", "")
-        direction = str(
-            getattr(direction_raw, "value", direction_raw) or ""
-        ).lower()
-        if direction == "buy_yes":
-            side = "YES"
-            token_id = str(getattr(position, "token_id", "") or "").strip()
-        elif direction == "buy_no":
-            side = "NO"
-            token_id = str(getattr(position, "no_token_id", "") or "").strip()
-        else:
-            return unavailable(
-                GlobalHoldingCoverageOutcome.COVERAGE_PARTITION,
-                "GLOBAL_HOLDING_COVERAGE_SIDE_UNSUPPORTED",
-            )
         native_holdings = {
             str(token): Decimal(int(amount)) / Decimal("1000000")
             for token, amount in tuple(wealth.native_holdings_micro or ())
@@ -5507,11 +5531,9 @@ def _current_monitor_global_holding_coverage(
             getattr(position, "condition_id", "") or ""
         ).strip()
         family_key = weather_family_id(
-            city=str(getattr(position, "city", "") or ""),
-            target_date=str(getattr(position, "target_date", "") or ""),
-            metric=str(
-                getattr(position, "temperature_metric", "") or ""
-            ).lower(),
+            city=family[0],
+            target_date=family[1],
+            metric=family[2],
         )
 
         def current_sell_book_witness(coverage) -> str | None:
@@ -5600,11 +5622,7 @@ def _current_monitor_global_holding_coverage(
             )
 
         return current_global_holding_coverage(
-            position_id=str(
-                getattr(position, "position_id", "")
-                or getattr(position, "trade_id", "")
-                or ""
-            ),
+            position_id=position_id,
             probability_content_identity=probability_content_identity,
             checked_at_utc=checked,
             family_key=family_key,
@@ -7627,6 +7645,8 @@ def execute_monitoring_phase(
                 should_exit
                 and local_exit_trigger != "RED_FORCE_EXIT"
                 and local_exit_trigger != "DAY0_HARD_FACT_BIN_DEAD"
+                and local_exit_trigger
+                != "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
                 and getattr(pos, _GLOBAL_MONITOR_SAMPLES_ATTR, None) is not None
             ):
                 if probability_content_identity:
