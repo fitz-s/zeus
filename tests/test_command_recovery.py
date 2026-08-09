@@ -53,6 +53,40 @@ def mock_client():
     return MagicMock(spec_set=["get_order", "get_open_orders", "get_trades", "get_clob_market_info", "v2_preflight"])
 
 
+def test_terminal_order_fact_snapshot_scopes_append_only_history_before_ranking(
+    monkeypatch,
+):
+    """Live recovery must not rank unrelated historical order facts."""
+    from src.execution import command_recovery as recovery
+
+    captured = {}
+
+    class Result:
+        def fetchall(self):
+            return []
+
+    class Connection:
+        def execute(self, sql, params):
+            captured["sql"] = sql
+            captured["params"] = params
+            return Result()
+
+    monkeypatch.setattr(recovery, "_table_exists", lambda *_args: True)
+
+    assert recovery._latest_terminal_order_fact_candidates(Connection()) == []
+    sql = captured["sql"]
+    scope = "terminal_order_fact_candidate_commands"
+    assert f"WITH {scope} AS" in sql
+    assert f"JOIN {scope} scope ON scope.command_id = fact.command_id" in sql
+    assert sql.index(f"WITH {scope} AS") < sql.index("ROW_NUMBER() OVER")
+    fact_scan = sql.index("FROM venue_order_facts fact")
+    scope_join = sql.index(f"JOIN {scope} scope")
+    scored_boundary = sql.index(") scored", scope_join)
+    assert fact_scan < scope_join < scored_boundary
+    assert "cmd.state IN (?,?,?,?,?)" in sql
+    assert len(captured["params"]) == 13
+
+
 def test_edli_recovery_refs_prefer_world_authority_over_trade_ghosts():
     from src.execution.command_recovery import (
         _edli_live_cap_ref,

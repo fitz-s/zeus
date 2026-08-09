@@ -1811,7 +1811,30 @@ def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dic
         )
     )
     sources = tuple(sorted(_LIVE_TERMINAL_ORDER_FACT_SOURCES))
-    sql = "WITH " + _canonical_order_truth_cte() + """
+    command_state_placeholders = ",".join("?" for _ in command_states)
+    command_scope_cte = "terminal_order_fact_candidate_commands"
+    sql = f"""
+        WITH {command_scope_cte} AS (
+            SELECT cmd.command_id
+              FROM venue_commands cmd
+              LEFT JOIN position_current pc
+                ON pc.position_id = cmd.position_id
+             WHERE cmd.intent_kind = 'ENTRY'
+               AND cmd.state IN ({command_state_placeholders})
+               AND (
+                    cmd.state IN ('ACKED', 'POST_ACKED', 'CANCEL_PENDING')
+                    OR pc.position_id IS NULL
+                    OR (
+                        cmd.state IN ('CANCELLED', 'EXPIRED')
+                        AND pc.phase = 'pending_entry'
+                        AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
+                        AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
+                    )
+               )
+        ),
+    """ + _canonical_order_truth_cte(
+        command_scope_cte=command_scope_cte,
+    ) + """
         SELECT
             cmd.*,
             fact.fact_id AS order_fact_id,
@@ -1843,21 +1866,9 @@ def _latest_terminal_order_fact_candidates(conn: sqlite3.Connection) -> list[dic
             ON pc.position_id = cmd.position_id
           LEFT JOIN venue_submission_envelopes env
             ON env.envelope_id = cmd.envelope_id
-          LEFT JOIN executable_market_snapshots snap
+         LEFT JOIN executable_market_snapshots snap
             ON snap.snapshot_id = cmd.snapshot_id
-         WHERE cmd.intent_kind = 'ENTRY'
-           AND cmd.state IN (?, ?, ?, ?, ?)
-           AND (
-                cmd.state IN ('ACKED', 'POST_ACKED', 'CANCEL_PENDING')
-                OR pc.position_id IS NULL
-                OR (
-                    cmd.state IN ('CANCELLED', 'EXPIRED')
-                    AND pc.phase = 'pending_entry'
-                    AND CAST(COALESCE(pc.shares, '0') AS REAL) = 0
-                    AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) = 0
-                )
-           )
-           AND (
+         WHERE (
                 fact.state IN (?, ?, ?)
                 OR (
                     cmd.state = 'CANCEL_PENDING'
