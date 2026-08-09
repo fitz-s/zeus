@@ -3854,6 +3854,36 @@ def _global_auction_owns_statistical_sell(exit_decision, exit_reason: str) -> bo
     )
 
 
+def _posterior_support_zero_sell_dominates(pos, exit_context) -> bool:
+    """Return whether legal SELL proceeds dominate HOLD in every current q draw."""
+
+    if not (
+        bool(getattr(exit_context, "fresh_prob_is_fresh", False))
+        and bool(getattr(exit_context, "current_market_price_is_fresh", False))
+    ):
+        return False
+    fresh_prob = _finite_float_or_none(getattr(exit_context, "fresh_prob", None))
+    best_bid = _finite_float_or_none(getattr(exit_context, "best_bid", None))
+    if fresh_prob is None or fresh_prob > 1e-12:
+        return False
+    if best_bid is None or not 0.05 <= best_bid <= 0.95:
+        return False
+    raw_samples = getattr(pos, "_current_global_held_probability_samples", None)
+    if raw_samples is None:
+        return False
+    try:
+        samples = tuple(float(value) for value in raw_samples)
+    except (TypeError, ValueError):
+        return False
+    # Removing a zero-payoff token and adding positive cash increases every
+    # represented terminal branch. Correlation and capital ranking cannot
+    # reverse that dominance, so a full-universe auction only adds latency.
+    return bool(samples) and all(
+        math.isfinite(value) and 0.0 <= value <= 1e-12
+        for value in samples
+    )
+
+
 def _apply_family_monitor_overlay(
     *,
     portfolio,
@@ -7423,6 +7453,26 @@ def execute_monitoring_phase(
                     exit_reason,
                 )
             )
+            if (
+                statistical_sell_requires_global
+                and local_exit_trigger == "SELL_REVERSAL"
+                and _posterior_support_zero_sell_dominates(pos, exit_context)
+            ):
+                statistical_sell_requires_global = False
+                exit_reason = "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+                local_exit_trigger = exit_reason
+                pos.applied_validations = list(
+                    dict.fromkeys(
+                        [
+                            *(pos.applied_validations or []),
+                            "posterior_support_zero_sell_dominates",
+                            "global_auction_comparison_inapplicable:branchwise_dominance",
+                        ]
+                    )
+                )
+                summary["monitor_branchwise_dominant_direct_sells"] = (
+                    summary.get("monitor_branchwise_dominant_direct_sells", 0) + 1
+                )
             probability_receipt = getattr(
                 pos,
                 "_day0_monitor_probability_receipt",

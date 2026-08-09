@@ -6265,16 +6265,25 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
         "request_accepted",
         "outcome",
         "malformed_request",
+        "posterior_support_zero",
     ),
     (
-        ("EDGE_REVERSAL", True, True, "delegated", False),
-        ("EDGE_REVERSAL", False, True, "blocked", False),
-        ("EDGE_REVERSAL", False, False, "request_failed", False),
-        ("CI_OVERLAP_SELL_VALUE_DOMINATES", False, True, "blocked", False),
-        ("SETTLEMENT_IMMINENT", False, True, "blocked", False),
-        ("DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES", False, True, "direct", False),
-        ("RED_FORCE_EXIT", True, True, "direct", False),
-        ("EDGE_REVERSAL", False, True, "blocked", True),
+        ("EDGE_REVERSAL", True, True, "delegated", False, False),
+        ("EDGE_REVERSAL", False, True, "blocked", False, False),
+        ("EDGE_REVERSAL", False, False, "request_failed", False, False),
+        ("CI_OVERLAP_SELL_VALUE_DOMINATES", False, True, "blocked", False, False),
+        ("SETTLEMENT_IMMINENT", False, True, "blocked", False, False),
+        (
+            "DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES",
+            False,
+            True,
+            "direct",
+            False,
+            False,
+        ),
+        ("RED_FORCE_EXIT", True, True, "direct", False, False),
+        ("EDGE_REVERSAL", False, True, "blocked", True, False),
+        ("SELL_REVERSAL", False, True, "direct", False, True),
     ),
 )
 def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_red(
@@ -6285,6 +6294,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     request_accepted,
     outcome,
     malformed_request,
+    posterior_support_zero,
 ):
     """Statistical SELL is global-only; missing authority holds while RED acts."""
     from src.contracts import EdgeContext, EntryMethod
@@ -6325,9 +6335,9 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     portfolio = _make_portfolio(pos)
 
     def fake_refresh(_conn, _clob, position):
-        position.last_monitor_prob = 0.10
+        position.last_monitor_prob = 0.0 if posterior_support_zero else 0.10
         position.last_monitor_prob_is_fresh = True
-        position.last_monitor_edge = -0.40
+        position.last_monitor_edge = -0.50 if posterior_support_zero else -0.40
         position.last_monitor_market_price = 0.50
         position.last_monitor_market_price_is_fresh = True
         position.last_monitor_best_bid = 0.49
@@ -6336,7 +6346,11 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         setattr(
             position,
             monitor_refresh._GLOBAL_MONITOR_SAMPLES_ATTR,
-            np.array([0.05, 0.15]),
+            (
+                np.array([0.0, 0.0])
+                if posterior_support_zero
+                else np.array([0.05, 0.15])
+            ),
         )
         setattr(
                 position,
@@ -6358,8 +6372,8 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             p_raw=np.array([]),
             p_cal=np.array([]),
             p_market=np.array([0.50]),
-            p_posterior=0.10,
-            forward_edge=-0.40,
+            p_posterior=0.0 if posterior_support_zero else 0.10,
+            forward_edge=-0.50 if posterior_support_zero else -0.40,
             alpha=0.1,
             confidence_band_upper=-0.35,
             confidence_band_lower=-0.45,
@@ -6713,12 +6727,52 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         ) == 0
         assert summary["exits"] == 1
         assert results[0].should_exit is True
-        assert results[0].exit_reason == trigger
+        assert results[0].exit_reason == (
+            "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+            if posterior_support_zero
+            else trigger
+        )
+        if posterior_support_zero:
+            assert summary["monitor_branchwise_dominant_direct_sells"] == 1
+            assert "posterior_support_zero_sell_dominates" in pos.applied_validations
         assert execute_calls == [pos]
     if outcome not in {"blocked", "request_failed"}:
         assert auction_completion_requests == []
     assert invalidations == ([] if outcome != "direct" else ["venue_side_effect"])
     conn.close()
+
+
+@pytest.mark.parametrize(
+    ("samples", "fresh_prob", "best_bid", "fresh", "expected"),
+    (
+        ((0.0, 0.0), 0.0, 0.05, True, True),
+        ((0.0, 1e-6), 5e-7, 0.05, True, False),
+        ((0.0, 0.0), 0.0, 0.049, True, False),
+        ((0.0, 0.0), 0.0, 0.05, False, False),
+        ((), 0.0, 0.05, True, False),
+    ),
+)
+def test_branchwise_dominant_sell_requires_zero_support_and_legal_fresh_bid(
+    samples,
+    fresh_prob,
+    best_bid,
+    fresh,
+    expected,
+):
+    from src.engine import cycle_runtime
+
+    pos = SimpleNamespace(_current_global_held_probability_samples=samples)
+    context = SimpleNamespace(
+        fresh_prob=fresh_prob,
+        fresh_prob_is_fresh=fresh,
+        current_market_price_is_fresh=fresh,
+        best_bid=best_bid,
+    )
+
+    assert (
+        cycle_runtime._posterior_support_zero_sell_dominates(pos, context)
+        is expected
+    )
 
 
 def test_reserved_global_sell_reauction_deadline_is_an_actuation_contract(
