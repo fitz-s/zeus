@@ -29,6 +29,9 @@ HELD_SELL_REAUCTION_V2 = 2
 HELD_SELL_REAUCTION_V3 = 3
 HELD_SELL_REAUCTION_V4 = 4
 POSITION_NO_LONGER_EXPOSED = "POSITION_NO_LONGER_EXPOSED"
+SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN = (
+    "SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN"
+)
 SELL_OBLIGATION_ENDED_BY_CANONICAL_CHAIN_ZERO = (
     "SELL_OBLIGATION_ENDED_BY_CANONICAL_CHAIN_ZERO"
 )
@@ -127,6 +130,19 @@ class HeldSellReauctionReceipt:
     capital_objective_proof: str = ""
     answered_probability_content_identity: str = ""
     attempt_identity: str = ""
+    position_id: str = ""
+    held_token_id: str = ""
+    debt_event_id: str = ""
+    debt_sequence_no: int = 0
+    monitor_event_id: str = ""
+    monitor_sequence_no: int = 0
+    monitor_occurred_at: str = ""
+    monitor_payload_sha256: str = ""
+    monitor_probability: float | None = None
+    monitor_probability_is_fresh: bool | None = None
+    monitor_selected_method: str = ""
+    monitor_should_exit: bool | None = None
+    monitor_trigger: str = ""
 
 
 @dataclass(frozen=True)
@@ -1462,6 +1478,31 @@ def _held_sell_reauction_receipt_from_payload(
                 payload.get("answered_probability_content_identity") or ""
             ).strip(),
             attempt_identity=str(payload.get("attempt_identity") or "").strip(),
+            position_id=str(payload.get("position_id") or "").strip(),
+            held_token_id=str(payload.get("held_token_id") or "").strip(),
+            debt_event_id=str(payload.get("debt_event_id") or "").strip(),
+            debt_sequence_no=int(payload.get("debt_sequence_no") or 0),
+            monitor_event_id=str(payload.get("monitor_event_id") or "").strip(),
+            monitor_sequence_no=int(payload.get("monitor_sequence_no") or 0),
+            monitor_occurred_at=str(
+                payload.get("monitor_occurred_at") or ""
+            ).strip(),
+            monitor_payload_sha256=str(
+                payload.get("monitor_payload_sha256") or ""
+            ).strip(),
+            monitor_probability=(
+                None
+                if payload.get("monitor_probability") is None
+                else float(payload["monitor_probability"])
+            ),
+            monitor_probability_is_fresh=payload.get(
+                "monitor_probability_is_fresh"
+            ),
+            monitor_selected_method=str(
+                payload.get("monitor_selected_method") or ""
+            ).strip(),
+            monitor_should_exit=payload.get("monitor_should_exit"),
+            monitor_trigger=str(payload.get("monitor_trigger") or "").strip(),
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -1487,6 +1528,9 @@ def _held_sell_reauction_receipt_from_payload(
         return None
     if receipt.status == POSITION_NO_LONGER_EXPOSED:
         if not _terminal_no_longer_exposed_receipt_valid(receipt):
+            return None
+    elif receipt.status == SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN:
+        if not _structural_win_supersession_receipt_valid(receipt):
             return None
     elif receipt.schema_version == 1 and receipt.status not in {"ACTUATED", "REJECTED"}:
         return None
@@ -1756,6 +1800,47 @@ def _terminal_no_longer_exposed_receipt_valid(
     )
 
 
+def _structural_win_supersession_receipt_valid(
+    receipt: HeldSellReauctionReceipt,
+) -> bool:
+    """Validate one exact V4 debt superseded by a later absorbing win."""
+
+    if isinstance(receipt.monitor_probability, bool):
+        return False
+    try:
+        probability = float(receipt.monitor_probability)
+        monitor_time = datetime.fromisoformat(
+            receipt.monitor_occurred_at.replace("Z", "+00:00")
+        )
+        int(receipt.monitor_payload_sha256, 16)
+    except (TypeError, ValueError):
+        return False
+    return (
+        receipt.schema_version == HELD_SELL_REAUCTION_V4
+        and receipt.status == SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN
+        and receipt.reason == SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN
+        and bool(receipt.scope_identity)
+        and bool(receipt.attempt_identity)
+        and bool(receipt.position_id)
+        and bool(receipt.held_token_id)
+        and bool(receipt.debt_event_id)
+        and receipt.debt_sequence_no > 0
+        and receipt.monitor_sequence_no > receipt.debt_sequence_no
+        and receipt.monitor_event_id
+        == f"{receipt.position_id}:monitor_refreshed:{receipt.monitor_sequence_no}"
+        and monitor_time.tzinfo is not None
+        and len(receipt.monitor_payload_sha256) == 64
+        and receipt.monitor_payload_sha256
+        == receipt.monitor_payload_sha256.lower()
+        and math.isfinite(probability)
+        and probability == 1.0
+        and receipt.monitor_probability_is_fresh is True
+        and receipt.monitor_selected_method == "day0_absorbing_hard_fact"
+        and receipt.monitor_should_exit is False
+        and receipt.monitor_trigger == "DAY0_HARD_FACT_STRUCTURAL_WIN_HOLD"
+    )
+
+
 def _read_held_sell_reauction_receipt(
     request_id: str,
     *,
@@ -1813,12 +1898,25 @@ def persist_held_sell_reauction_receipts(
                     and not _terminal_no_longer_exposed_receipt_valid(receipt)
                 )
                 or (
-                    receipt.status != POSITION_NO_LONGER_EXPOSED
+                    receipt.status
+                    == SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN
+                    and not _structural_win_supersession_receipt_valid(receipt)
+                )
+                or (
+                    receipt.status
+                    not in {
+                        POSITION_NO_LONGER_EXPOSED,
+                        SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
+                    }
                     and receipt.schema_version == 1
                     and receipt.status not in {"ACTUATED", "REJECTED"}
                 )
                 or (
-                    receipt.status != POSITION_NO_LONGER_EXPOSED
+                    receipt.status
+                    not in {
+                        POSITION_NO_LONGER_EXPOSED,
+                        SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
+                    }
                     and
                     receipt.schema_version in {
                         HELD_SELL_REAUCTION_V2,
@@ -1873,6 +1971,19 @@ def persist_held_sell_reauction_receipts(
                         or lineage.generation != receipt.generation
                     ):
                         raise ValueError("HELD_SELL_REAUCTION_RECEIPT_LINEAGE_INVALID")
+                    if (
+                        receipt.status
+                        == SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN
+                    ):
+                        latest = _v4_held_sell_reauction_lineage_request(lineage)
+                        if (
+                            receipt.attempt_identity != latest.attempt_identity
+                            or receipt.position_id != latest.position_id
+                            or receipt.held_token_id != latest.held_token_id
+                        ):
+                            raise ValueError(
+                                "HELD_SELL_REAUCTION_SUPERSESSION_LINEAGE_INVALID"
+                            )
                     target = _held_sell_reauction_attempt_receipt_path(
                         receipt.request_id,
                         receipt.attempt_identity,
@@ -1989,7 +2100,20 @@ def held_sell_reauction_requests_completed(
                 and (
                     receipt.scope_identity != request.scope_identity
                     or (
-                        receipt.status != POSITION_NO_LONGER_EXPOSED
+                        receipt.status
+                        == SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN
+                        and (
+                            not _structural_win_supersession_receipt_valid(receipt)
+                            or receipt.position_id != request.position_id
+                            or receipt.held_token_id != request.held_token_id
+                        )
+                    )
+                    or (
+                        receipt.status
+                        not in {
+                            POSITION_NO_LONGER_EXPOSED,
+                            SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
+                        }
                         and (
                             receipt.status not in {"ACTUATED", "CAPITAL_REJECTED"}
                             or not receipt.answered_probability_content_identity

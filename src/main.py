@@ -5152,19 +5152,23 @@ def _acknowledge_edli_reactor_wake_batch(
 def _terminal_held_sell_reauction_receipts(
     requests: tuple[object, ...],
 ) -> tuple[object, ...]:
-    """Read one canonical trade snapshot and prove only explicit SELL obligations done.
+    """Read one canonical snapshot and prove exact SELL obligations done or stale.
 
     SCOPE: one held SELL request_id whose canonical phase-specific chain proof
-    shows either exact zero tradeable shares or settlement ending only its SELL
-    obligation; missing/ambiguous rows and reads prove nothing. DRAIN: one
-    read-only batch query feeds idempotent receipts before exact per-wake ack,
-    while incomplete requests continue through the normal exact cut. RESET: a
-    new request material/generation/attempt identity is a new obligation and
-    cannot reuse a prior receipt; non-qualifying canonical proof stays pending.
+    shows either exact zero tradeable shares, settlement ending only its SELL
+    obligation, or a later absorbing Day0 structural win superseding one exact
+    V4 attempt after all prior SELL commands are terminal. Missing or ambiguous
+    rows prove nothing. DRAIN: one read-only snapshot feeds idempotent receipts
+    before exact per-wake ack; incomplete requests continue through the normal
+    exact cut. RESET: a new material/generation/attempt identity or later monitor
+    verdict is a new obligation/evidence state and cannot reuse a prior receipt.
     """
 
+    from src.execution.exit_safety import can_submit_replacement_sell
     from src.runtime.reactor_wake import (
+        HELD_SELL_REAUCTION_V4,
         POSITION_NO_LONGER_EXPOSED,
+        SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
         HeldSellReauctionReceipt,
         held_sell_no_longer_exposed_reason,
     )
@@ -5179,8 +5183,13 @@ def _terminal_held_sell_reauction_receipts(
         return ()
 
     trade_ro = None
+    structural_proof_enabled = False
+    proof_by_position: dict[str, tuple[object, ...]] = {}
+    event_by_position: dict[tuple[str, str], tuple[object, ...]] = {}
+    replacement_allowed: dict[tuple[str, str], bool] = {}
     try:
         trade_ro = get_trade_connection_read_only()
+        trade_ro.execute("BEGIN")
         columns = {
             str(row[1])
             for row in trade_ro.execute("PRAGMA table_info(position_current)").fetchall()
@@ -5198,15 +5207,94 @@ def _terminal_held_sell_reauction_receipts(
                 "does not expose required proof columns"
             )
             return ()
+        structural_columns = {
+            "direction",
+            "token_id",
+            "no_token_id",
+            "city",
+            "target_date",
+            "temperature_metric",
+            "bin_label",
+            "condition_id",
+        }
+        tables = {
+            str(row[0])
+            for row in trade_ro.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        structural_proof_enabled = (
+            structural_columns.issubset(columns)
+            and {"position_events", "venue_commands"}.issubset(tables)
+        )
         placeholders = ",".join("?" for _ in by_position)
+        structural_select = (
+            "direction, token_id, no_token_id, city, target_date, "
+            "temperature_metric, bin_label, condition_id"
+            if structural_proof_enabled
+            else "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL"
+        )
         rows = trade_ro.execute(
             f"""
-            SELECT position_id, phase, chain_state, chain_shares, settled_at
+            SELECT position_id, phase, chain_state, chain_shares, settled_at,
+                   {structural_select}
               FROM position_current
              WHERE position_id IN ({placeholders})
             """,
             tuple(by_position),
         ).fetchall()
+        proof_by_position = {
+            str(row[0] or "").strip(): tuple(row[1:]) for row in rows
+        }
+        if structural_proof_enabled:
+            event_rows = trade_ro.execute(
+                f"""
+                SELECT event_id, position_id, sequence_no, event_type,
+                       occurred_at, payload_json
+                  FROM position_events AS current_event
+                 WHERE position_id IN ({placeholders})
+                   AND event_type IN ('EXIT_RETRY_RELEASED', 'MONITOR_REFRESHED')
+                   AND sequence_no = (
+                       SELECT MAX(latest_event.sequence_no)
+                         FROM position_events AS latest_event
+                        WHERE latest_event.position_id = current_event.position_id
+                          AND latest_event.event_type = current_event.event_type
+                   )
+                """,
+                tuple(by_position),
+            ).fetchall()
+            event_by_position = {
+                (str(row[1] or "").strip(), str(row[3] or "").strip()): (
+                    str(row[0] or "").strip(),
+                    row[2],
+                    str(row[4] or "").strip(),
+                    str(row[5] or ""),
+                )
+                for row in event_rows
+            }
+            for position_id, position_requests in by_position.items():
+                for request in position_requests:
+                    if (
+                        int(getattr(request, "schema_version", 1) or 1)
+                        != HELD_SELL_REAUCTION_V4
+                    ):
+                        continue
+                    held_token_id = str(
+                        getattr(request, "held_token_id", "") or ""
+                    ).strip()
+                    if not held_token_id:
+                        continue
+                    try:
+                        allowed, block_reason = can_submit_replacement_sell(
+                            trade_ro,
+                            position_id,
+                            held_token_id,
+                        )
+                    except Exception:  # noqa: BLE001 - command ambiguity retains debt
+                        allowed, block_reason = False, "command_truth_read_failed"
+                    replacement_allowed[(position_id, held_token_id)] = bool(
+                        allowed and block_reason is None
+                    )
     except Exception:  # noqa: BLE001 - truth-read failure must retain the wake
         logger.warning(
             "held SELL terminal receipt deferred: canonical trade read failed",
@@ -5219,22 +5307,28 @@ def _terminal_held_sell_reauction_receipts(
                 trade_ro.close()
             except Exception:  # noqa: BLE001 - read-only close cannot prove completion
                 pass
-
-    proof_by_position = {
-        str(row[0] or "").strip(): (
-            str(row[1] or "").strip(),
-            str(row[2] or "").strip(),
-            row[3],
-            str(row[4] or "").strip(),
-        )
-        for row in rows
-    }
     receipts: list[HeldSellReauctionReceipt] = []
     for position_id, position_requests in by_position.items():
         proof = proof_by_position.get(position_id)
         if proof is None:
             continue
-        lifecycle_phase, chain_state, raw_chain_shares, settled_at = proof
+        (
+            raw_lifecycle_phase,
+            raw_chain_state,
+            raw_chain_shares,
+            raw_settled_at,
+            raw_direction,
+            raw_token_id,
+            raw_no_token_id,
+            raw_city,
+            raw_target_date,
+            raw_metric,
+            raw_bin_label,
+            raw_condition_id,
+        ) = proof
+        lifecycle_phase = str(raw_lifecycle_phase or "").strip()
+        chain_state = str(raw_chain_state or "").strip()
+        settled_at = str(raw_settled_at or "").strip()
         try:
             chain_shares = float(raw_chain_shares)
         except (TypeError, ValueError):
@@ -5250,34 +5344,201 @@ def _terminal_held_sell_reauction_receipts(
             chain_shares=chain_shares,
             settled_at=settled_at,
         )
-        if reason is None:
+        if reason is not None:
+            for request in position_requests:
+                receipts.append(
+                    HeldSellReauctionReceipt(
+                        request_id=str(getattr(request, "request_id", "") or ""),
+                        material_identity=str(
+                            getattr(request, "material_identity", "") or ""
+                        ),
+                        generation=str(getattr(request, "generation", "") or ""),
+                        schema_version=int(
+                            getattr(request, "schema_version", 1) or 1
+                        ),
+                        scope_identity=str(
+                            getattr(request, "scope_identity", "") or ""
+                        ),
+                        book_state=str(
+                            getattr(request, "book_state", "EXECUTABLE")
+                            or "EXECUTABLE"
+                        ),
+                        attempt_identity=str(
+                            getattr(request, "attempt_identity", "") or ""
+                        ),
+                        status=POSITION_NO_LONGER_EXPOSED,
+                        reason=reason,
+                        lifecycle_phase=lifecycle_phase,
+                        chain_state=chain_state,
+                        chain_shares=chain_shares,
+                        settled_at=settled_at,
+                    )
+                )
+            continue
+        if not structural_proof_enabled:
+            continue
+
+        direction = str(raw_direction or "").strip()
+        token_id = str(raw_token_id or "").strip()
+        no_token_id = str(raw_no_token_id or "").strip()
+        city = str(raw_city or "").strip()
+        target_date = str(raw_target_date or "").strip()[:10]
+        metric = str(raw_metric or "").strip().lower()
+        bin_label = str(raw_bin_label or "").strip()
+        condition_id = str(raw_condition_id or "").strip()
+        held_token = no_token_id if direction == "buy_no" else token_id
+        current_family = (city, target_date, metric)
+        debt_event = event_by_position.get(
+            (position_id, "EXIT_RETRY_RELEASED")
+        )
+        monitor_event = event_by_position.get(
+            (position_id, "MONITOR_REFRESHED")
+        )
+        if (
+            lifecycle_phase != "day0_window"
+            or chain_state != "synced"
+            or not math.isfinite(chain_shares)
+            or chain_shares <= 0.0
+            or direction not in {"buy_yes", "buy_no"}
+            or not all((*current_family, held_token, bin_label, condition_id))
+            or debt_event is None
+            or monitor_event is None
+        ):
+            continue
+
+        debt_event_id, raw_debt_sequence, _debt_occurred_at, raw_debt_payload = (
+            debt_event
+        )
+        monitor_event_id, raw_monitor_sequence, monitor_occurred_at, raw_monitor_payload = (
+            monitor_event
+        )
+        try:
+            debt_sequence = int(raw_debt_sequence)
+            monitor_sequence = int(raw_monitor_sequence)
+            debt_payload = json.loads(raw_debt_payload)
+            monitor_payload = json.loads(raw_monitor_payload)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(debt_payload, dict) or not isinstance(monitor_payload, dict):
+            continue
+        obligation = debt_payload.get("held_sell_reauction_obligation")
+        if not isinstance(obligation, dict):
+            continue
+        validations = monitor_payload.get("applied_validations")
+        probability = monitor_payload.get("last_monitor_prob")
+        if isinstance(probability, bool):
+            continue
+        try:
+            probability = float(probability)
+        except (TypeError, ValueError):
+            continue
+        if (
+            monitor_sequence <= debt_sequence
+            or monitor_event_id
+            != f"{position_id}:monitor_refreshed:{monitor_sequence}"
+            or debt_payload.get("release_reason")
+            != "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
+            or debt_payload.get("status") != "durable_wake_reserved"
+            or obligation.get("state") != "ARMED"
+            or monitor_payload.get("city") != city
+            or str(monitor_payload.get("target_date") or "")[:10]
+            != target_date
+            or monitor_payload.get("direction") != direction
+            or monitor_payload.get("bin_label") != bin_label
+            or monitor_payload.get("condition_id") != condition_id
+            or not math.isfinite(probability)
+            or probability != 1.0
+            or monitor_payload.get("last_monitor_prob_is_fresh") is not True
+            or monitor_payload.get("selected_method")
+            != "day0_absorbing_hard_fact"
+            or monitor_payload.get("exit_decision_selected_method")
+            != "day0_absorbing_hard_fact"
+            or monitor_payload.get("exit_decision_should_exit") is not False
+            or monitor_payload.get("exit_decision_trigger")
+            != "DAY0_HARD_FACT_STRUCTURAL_WIN_HOLD"
+            or not isinstance(validations, list)
+            or "day0_absorbing_hard_fact" not in validations
+            or "day0_hard_fact_structural_win_hold" not in validations
+        ):
             continue
         for request in position_requests:
+            if int(getattr(request, "schema_version", 1) or 1) != HELD_SELL_REAUCTION_V4:
+                continue
+            request_id = str(getattr(request, "request_id", "") or "").strip()
+            material_identity = str(
+                getattr(request, "material_identity", "") or ""
+            ).strip()
+            scope_identity = str(
+                getattr(request, "scope_identity", "") or ""
+            ).strip()
+            generation = str(getattr(request, "generation", "") or "").strip()
+            attempt_identity = str(
+                getattr(request, "attempt_identity", "") or ""
+            ).strip()
+            request_token = str(
+                getattr(request, "held_token_id", "") or ""
+            ).strip()
+            request_family = tuple(
+                str(value or "").strip()
+                for value in tuple(getattr(request, "family", ()) or ())
+            )
+            if (
+                not all(
+                    (
+                        request_id,
+                        material_identity,
+                        scope_identity,
+                        generation,
+                        attempt_identity,
+                        request_token,
+                    )
+                )
+                or request_token != held_token
+                or request_family != current_family
+                or not replacement_allowed.get((position_id, request_token), False)
+                or any(
+                    str(obligation.get(key) or "").strip() != expected
+                    for key, expected in (
+                        ("request_id", request_id),
+                        ("material_identity", material_identity),
+                        ("scope_identity", scope_identity),
+                        ("generation", generation),
+                        ("attempt_identity", attempt_identity),
+                        ("position_id", position_id),
+                        ("held_token_id", request_token),
+                    )
+                )
+            ):
+                continue
             receipts.append(
                 HeldSellReauctionReceipt(
-                    request_id=str(getattr(request, "request_id", "") or ""),
-                    material_identity=str(
-                        getattr(request, "material_identity", "") or ""
-                    ),
-                    generation=str(getattr(request, "generation", "") or ""),
-                    schema_version=int(
-                        getattr(request, "schema_version", 1) or 1
-                    ),
-                    scope_identity=str(
-                        getattr(request, "scope_identity", "") or ""
-                    ),
+                    request_id=request_id,
+                    material_identity=material_identity,
+                    generation=generation,
+                    schema_version=HELD_SELL_REAUCTION_V4,
+                    scope_identity=scope_identity,
                     book_state=str(
-                        getattr(request, "book_state", "EXECUTABLE") or "EXECUTABLE"
+                        getattr(request, "book_state", "EXECUTABLE")
+                        or "EXECUTABLE"
                     ),
-                    attempt_identity=str(
-                        getattr(request, "attempt_identity", "") or ""
-                    ),
-                    status=POSITION_NO_LONGER_EXPOSED,
-                    reason=reason,
-                    lifecycle_phase=lifecycle_phase,
-                    chain_state=chain_state,
-                    chain_shares=chain_shares,
-                    settled_at=settled_at,
+                    attempt_identity=attempt_identity,
+                    status=SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
+                    reason=SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
+                    position_id=position_id,
+                    held_token_id=request_token,
+                    debt_event_id=str(debt_event_id),
+                    debt_sequence_no=debt_sequence,
+                    monitor_event_id=monitor_event_id,
+                    monitor_sequence_no=monitor_sequence,
+                    monitor_occurred_at=monitor_occurred_at,
+                    monitor_payload_sha256=hashlib.sha256(
+                        raw_monitor_payload.encode("utf-8")
+                    ).hexdigest(),
+                    monitor_probability=probability,
+                    monitor_probability_is_fresh=True,
+                    monitor_selected_method="day0_absorbing_hard_fact",
+                    monitor_should_exit=False,
+                    monitor_trigger="DAY0_HARD_FACT_STRUCTURAL_WIN_HOLD",
                 )
             )
     return tuple(receipts)

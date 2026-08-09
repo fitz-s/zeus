@@ -1,6 +1,6 @@
 # Created: 2026-07-30
-# Last reused/audited: 2026-08-02
-# Lifecycle: created=2026-07-30; last_reviewed=2026-08-02; last_reused=2026-08-02
+# Last reused/audited: 2026-08-08
+# Lifecycle: created=2026-07-30; last_reviewed=2026-08-08; last_reused=2026-08-08
 # Authority basis: operator-directed held SELL terminal-wake hotfix.
 """Held SELL terminal-wake completion antibodies."""
 
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -352,6 +353,365 @@ def test_canonical_terminal_query_retains_wake_on_trade_read_failure(
         )
         == ()
     )
+
+
+def _install_structural_win_reader(
+    monkeypatch,
+    tmp_path: Path,
+    request: reactor_wake.HeldSellReauctionRequest,
+    *,
+    command_state: str = "EXPIRED",
+    debt_overrides: dict[str, object] | None = None,
+    monitor_overrides: dict[str, object] | None = None,
+    debt_sequence: int = 10,
+    monitor_sequence: int = 11,
+) -> None:
+    db_path = tmp_path / "structural-win-trades.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT,
+                chain_state TEXT,
+                chain_shares REAL,
+                settled_at TEXT,
+                direction TEXT,
+                token_id TEXT,
+                no_token_id TEXT,
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                bin_label TEXT,
+                condition_id TEXT
+            )
+            """
+        )
+        direction = "buy_no"
+        bin_label = "Will the lowest temperature in Paris be 18°C on July 30?"
+        condition_id = "condition-structural-win"
+        conn.execute(
+            "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                request.position_id,
+                "day0_window",
+                "synced",
+                7.0,
+                None,
+                direction,
+                f"yes-{request.position_id}",
+                request.held_token_id,
+                request.family[0],
+                request.family[1],
+                request.family[2],
+                bin_label,
+                condition_id,
+            ),
+        )
+        conn.execute(
+            """
+            CREATE TABLE position_events (
+                event_id TEXT PRIMARY KEY,
+                position_id TEXT,
+                sequence_no INTEGER,
+                event_type TEXT,
+                occurred_at TEXT,
+                payload_json TEXT
+            )
+            """
+        )
+        obligation = {
+            "request_id": request.request_id,
+            "material_identity": request.material_identity,
+            "scope_identity": request.scope_identity,
+            "generation": request.generation,
+            "attempt_identity": request.attempt_identity,
+            "position_id": request.position_id,
+            "held_token_id": request.held_token_id,
+            "state": "ARMED",
+        }
+        if debt_overrides:
+            obligation.update(debt_overrides)
+        debt_payload = {
+            "release_reason": "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+            "status": "durable_wake_reserved",
+            "held_sell_reauction_obligation": obligation,
+        }
+        monitor_payload = {
+            "applied_validations": [
+                "day0_absorbing_hard_fact",
+                "day0_hard_fact_structural_win_hold",
+            ],
+            "bin_label": bin_label,
+            "city": request.family[0],
+            "condition_id": condition_id,
+            "direction": direction,
+            "exit_decision_selected_method": "day0_absorbing_hard_fact",
+            "exit_decision_should_exit": False,
+            "exit_decision_trigger": "DAY0_HARD_FACT_STRUCTURAL_WIN_HOLD",
+            "last_monitor_prob": 1.0,
+            "last_monitor_prob_is_fresh": True,
+            "selected_method": "day0_absorbing_hard_fact",
+            "target_date": request.family[1],
+        }
+        if monitor_overrides:
+            monitor_payload.update(monitor_overrides)
+        conn.executemany(
+            "INSERT INTO position_events VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                (
+                    "debt-event",
+                    request.position_id,
+                    debt_sequence,
+                    "EXIT_RETRY_RELEASED",
+                    "2026-07-30T12:00:00+00:00",
+                    json.dumps(debt_payload, sort_keys=True),
+                ),
+                (
+                    f"{request.position_id}:monitor_refreshed:{monitor_sequence}",
+                    request.position_id,
+                    monitor_sequence,
+                    "MONITOR_REFRESHED",
+                    "2026-07-30T12:01:00+00:00",
+                    json.dumps(monitor_payload, sort_keys=True),
+                ),
+            ),
+        )
+        conn.execute(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                state TEXT,
+                venue_order_id TEXT,
+                idempotency_key TEXT,
+                position_id TEXT,
+                token_id TEXT,
+                side TEXT,
+                intent_kind TEXT,
+                updated_at TEXT,
+                created_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE venue_command_events (
+                event_id TEXT PRIMARY KEY,
+                command_id TEXT,
+                sequence_no INTEGER,
+                event_type TEXT,
+                payload_json TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "prior-exit-command",
+                command_state,
+                None,
+                "prior-exit-key",
+                request.position_id,
+                request.held_token_id,
+                "SELL",
+                "EXIT",
+                "2026-07-30T12:00:00+00:00",
+                "2026-07-30T12:00:00+00:00",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO venue_command_events VALUES (?, ?, ?, ?, ?)",
+            (
+                "prior-exit-event",
+                "prior-exit-command",
+                1,
+                command_state,
+                "{}",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    monkeypatch.setattr(
+        "src.state.db.get_trade_connection_read_only",
+        lambda: sqlite3.connect(f"file:{db_path}?mode=ro", uri=True),
+    )
+
+
+def test_structural_win_supersedes_exact_v4_debt_after_terminal_command(
+    monkeypatch, tmp_path: Path
+) -> None:
+    request = _request(position_id="structural-win", schema_version=4)
+    _install_structural_win_reader(monkeypatch, tmp_path, request)
+
+    receipts = main._terminal_held_sell_reauction_receipts((request,))
+
+    assert len(receipts) == 1
+    receipt = receipts[0]
+    assert (
+        receipt.status,
+        receipt.reason,
+        receipt.position_id,
+        receipt.held_token_id,
+        receipt.debt_sequence_no,
+        receipt.monitor_sequence_no,
+    ) == (
+        reactor_wake.SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
+        reactor_wake.SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
+        request.position_id,
+        request.held_token_id,
+        10,
+        11,
+    )
+    wake_path = tmp_path / "wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=wake_path,
+        wake_id="wake-structural-win",
+        held_sell_reauction_requests=(request,),
+    )
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        receipts, path=wake_path
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        (request,), path=wake_path
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        {"monitor_payload_sha256": "0" * 63},
+        {"monitor_sequence_no": 10},
+        {"monitor_probability_is_fresh": False},
+        {"held_token_id": "different-held-token"},
+    ),
+)
+def test_structural_win_receipt_rejects_invalid_proof_or_lineage(
+    monkeypatch,
+    tmp_path: Path,
+    mutation: dict[str, object],
+) -> None:
+    request = _request(position_id="invalid-structural-receipt", schema_version=4)
+    _install_structural_win_reader(monkeypatch, tmp_path, request)
+    receipt = main._terminal_held_sell_reauction_receipts((request,))[0]
+    wake_path = tmp_path / "wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=wake_path,
+        wake_id="wake-invalid-structural-receipt",
+        held_sell_reauction_requests=(request,),
+    )
+
+    assert not reactor_wake.persist_held_sell_reauction_receipts(
+        (replace(receipt, **mutation),), path=wake_path
+    )
+    assert not reactor_wake.held_sell_reauction_requests_completed(
+        (request,), path=wake_path
+    )
+
+
+@pytest.mark.parametrize(
+    "command_state",
+    (
+        "REVIEW_REQUIRED",
+        "UNKNOWN",
+        "SUBMIT_UNKNOWN_SIDE_EFFECT",
+        "ACKED",
+        "UNRECOGNIZED_STATE",
+    ),
+)
+def test_structural_win_cannot_supersede_nonterminal_or_unknown_command(
+    monkeypatch, tmp_path: Path, command_state: str
+) -> None:
+    request = _request(position_id=f"blocked-{command_state}", schema_version=4)
+    _install_structural_win_reader(
+        monkeypatch,
+        tmp_path,
+        request,
+        command_state=command_state,
+    )
+
+    assert main._terminal_held_sell_reauction_receipts((request,)) == ()
+
+
+@pytest.mark.parametrize(
+    ("monitor_overrides", "debt_overrides", "debt_sequence", "monitor_sequence"),
+    (
+        ({"last_monitor_prob": 0.99}, None, 10, 11),
+        ({"last_monitor_prob_is_fresh": False}, None, 10, 11),
+        ({"selected_method": "model_only_v1"}, None, 10, 11),
+        ({"exit_decision_should_exit": True}, None, 10, 11),
+        ({"exit_decision_trigger": "SELL_REVERSAL"}, None, 10, 11),
+        (None, {"attempt_identity": "stale-attempt"}, 10, 11),
+        (None, None, 11, 11),
+    ),
+)
+def test_structural_win_supersession_rejects_stale_or_mismatched_proof(
+    monkeypatch,
+    tmp_path: Path,
+    monitor_overrides: dict[str, object] | None,
+    debt_overrides: dict[str, object] | None,
+    debt_sequence: int,
+    monitor_sequence: int,
+) -> None:
+    request = _request(position_id="mismatched-proof", schema_version=4)
+    _install_structural_win_reader(
+        monkeypatch,
+        tmp_path,
+        request,
+        monitor_overrides=monitor_overrides,
+        debt_overrides=debt_overrides,
+        debt_sequence=debt_sequence,
+        monitor_sequence=monitor_sequence,
+    )
+
+    assert main._terminal_held_sell_reauction_receipts((request,)) == ()
+
+
+def test_structural_win_supersession_is_exact_and_leaves_sibling_bytes_unchanged(
+    monkeypatch, tmp_path: Path
+) -> None:
+    matched = _request(position_id="matched-structural-win", schema_version=4)
+    sibling = _request(position_id="sibling-still-pending", schema_version=4)
+    _install_structural_win_reader(monkeypatch, tmp_path, matched)
+    wake_path = tmp_path / "wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=wake_path,
+        wake_id="wake-matched",
+        held_sell_reauction_requests=(matched,),
+    )
+    sibling_wake = reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=wake_path,
+        wake_id="wake-sibling",
+        held_sell_reauction_requests=(sibling,),
+    )
+    sibling_file = reactor_wake._wake_queue_target(sibling_wake, path=wake_path)
+    sibling_bytes = sibling_file.read_bytes()
+
+    receipts = main._terminal_held_sell_reauction_receipts((matched, sibling))
+
+    assert tuple(receipt.position_id for receipt in receipts) == (
+        matched.position_id,
+    )
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        receipts, path=wake_path
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        (matched,), path=wake_path
+    )
+    assert not reactor_wake.held_sell_reauction_requests_completed(
+        (sibling,), path=wake_path
+    )
+    assert sibling_file.read_bytes() == sibling_bytes
 
 
 def _wake(*requests: reactor_wake.HeldSellReauctionRequest) -> reactor_wake.ReactorWake:
