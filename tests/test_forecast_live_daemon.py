@@ -861,6 +861,79 @@ def test_structural_win_atomic_revalidation_closes_snapshot_to_ack_race(
     )
 
 
+def test_multi_wake_ack_restores_all_visible_bytes_when_staging_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    wake_path = tmp_path / "wake.json"
+    first = reactor_wake.publish_reactor_wake(
+        source="test",
+        reason="market_price_advanced",
+        path=wake_path,
+        wake_id="wake-stage-first",
+    )
+    second = reactor_wake.publish_reactor_wake(
+        source="test",
+        reason="forecast_posterior_advanced",
+        path=wake_path,
+        wake_id="wake-stage-second",
+    )
+    first_file = reactor_wake._wake_queue_target(first, path=wake_path)
+    second_file = reactor_wake._wake_queue_target(second, path=wake_path)
+    before = (first_file.read_bytes(), second_file.read_bytes())
+    real_replace = reactor_wake.os.replace
+    stage_count = 0
+
+    def _fail_second_stage(source, destination):
+        nonlocal stage_count
+        if str(destination).endswith(".ack-stage"):
+            stage_count += 1
+            if stage_count == 2:
+                raise OSError("injected second-stage failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(reactor_wake.os, "replace", _fail_second_stage)
+
+    assert not reactor_wake.acknowledge_reactor_wakes(
+        (first, second), path=wake_path
+    )
+    assert (first_file.read_bytes(), second_file.read_bytes()) == before
+
+
+def test_multi_wake_ack_reports_success_after_all_are_staged(
+    monkeypatch, tmp_path: Path
+) -> None:
+    wake_path = tmp_path / "wake.json"
+    wakes = tuple(
+        reactor_wake.publish_reactor_wake(
+            source="test",
+            reason=reason,
+            path=wake_path,
+            wake_id=f"wake-cleanup-{index}",
+        )
+        for index, reason in enumerate(
+            ("market_price_advanced", "forecast_posterior_advanced")
+        )
+    )
+    queue_files = tuple(
+        reactor_wake._wake_queue_target(wake, path=wake_path) for wake in wakes
+    )
+    real_unlink = Path.unlink
+    stage_cleanup_count = 0
+
+    def _fail_second_hidden_cleanup(target, *args, **kwargs):
+        nonlocal stage_cleanup_count
+        if str(target).endswith(".ack-stage"):
+            stage_cleanup_count += 1
+            if stage_cleanup_count == 2:
+                raise OSError("injected hidden cleanup failure")
+        return real_unlink(target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _fail_second_hidden_cleanup)
+
+    assert reactor_wake.acknowledge_reactor_wakes(wakes, path=wake_path)
+    assert all(not queue_file.exists() for queue_file in queue_files)
+
+
 def _wake(*requests: reactor_wake.HeldSellReauctionRequest) -> reactor_wake.ReactorWake:
     return reactor_wake.ReactorWake(
         wake_id="wake-terminal",

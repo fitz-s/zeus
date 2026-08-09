@@ -2169,12 +2169,43 @@ def acknowledge_reactor_wakes(
         )
 
         def unlink_wakes() -> None:
-            for queued in wakes:
-                _wake_queue_target(queued, path=path).unlink(missing_ok=True)
+            targets = [
+                _wake_queue_target(queued, path=path)
+                for queued in wakes
+            ]
             legacy = _wake_path(path)
             latest = _read_reactor_wake_path(legacy)
             if latest is not None and latest.wake_id in wake_ids:
-                legacy.unlink(missing_ok=True)
+                targets.append(legacy)
+            staged: list[tuple[Path, Path]] = []
+            try:
+                for target in dict.fromkeys(targets):
+                    if not target.exists():
+                        continue
+                    staging = target.with_name(
+                        f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.ack-stage"
+                    )
+                    os.replace(target, staging)
+                    staged.append((target, staging))
+            except OSError:
+                restore_error: OSError | None = None
+                for original, staging in reversed(staged):
+                    try:
+                        if staging.exists():
+                            os.replace(staging, original)
+                    except OSError as exc:
+                        if restore_error is None:
+                            restore_error = exc
+                if restore_error is not None:
+                    raise restore_error
+                raise
+            for _original, staging in staged:
+                try:
+                    staging.unlink()
+                except OSError:
+                    # The hidden non-JSON stage is already outside the queue.
+                    # Cleanup failure cannot turn a completed ack into failure.
+                    pass
 
         if v4_pairs:
             with _held_sell_reauction_lineage_locks(
