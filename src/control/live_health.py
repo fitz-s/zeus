@@ -5885,11 +5885,11 @@ def _current_global_auction_candidate_payload(
             summary.get("candidate_evaluations_delta_encoding") or ""
         )
         if delta_encoding not in {
-                "zlib+base64+canonical-json-object-delta-v1",
-                "zlib+base64+semantic-keyed-canonical-json-delta-v2",
-                "zlib+base64+semantic-keyed-canonical-json-delta-v3",
-                "zlib+base64+semantic-keyed-canonical-json-delta-v4",
-            }:
+            "zlib+base64+canonical-json-object-delta-v1",
+            "zlib+base64+semantic-keyed-canonical-json-delta-v2",
+            "zlib+base64+semantic-keyed-canonical-json-delta-v3",
+            "zlib+base64+semantic-keyed-canonical-json-delta-v4",
+        }:
             raise ValueError("DELTA_ENCODING")
         base_row_id = int(summary["candidate_evaluations_base_decision_log_id"])
         base_receipt_hash = str(
