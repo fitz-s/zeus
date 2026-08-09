@@ -749,12 +749,13 @@ def test_structural_win_atomic_revalidation_persists_and_acks_under_writer_lock(
     )
     queue_file = reactor_wake._wake_queue_target(wake, path=wake_path)
 
-    completed = main._atomically_ack_structural_win_wakes(
+    completed, failed = main._atomically_ack_structural_win_wakes(
         (wake,),
         wake_path=wake_path,
         coordinator=_structural_win_coordinator(db_path),
     )
 
+    assert failed is False
     assert completed == (wake,)
     assert not queue_file.exists()
     assert not reactor_wake.held_sell_reauction_requests_completed(
@@ -848,12 +849,13 @@ def test_structural_win_atomic_revalidation_closes_snapshot_to_ack_race(
     finally:
         conn.close()
 
-    completed = main._atomically_ack_structural_win_wakes(
+    completed, failed = main._atomically_ack_structural_win_wakes(
         (wake,),
         wake_path=wake_path,
         coordinator=_structural_win_coordinator(db_path),
     )
 
+    assert failed is True
     assert completed == ()
     assert queue_file.read_bytes() == queue_bytes
     assert not reactor_wake.held_sell_reauction_requests_completed(
@@ -932,6 +934,62 @@ def test_multi_wake_ack_reports_success_after_all_are_staged(
 
     assert reactor_wake.acknowledge_reactor_wakes(wakes, path=wake_path)
     assert all(not queue_file.exists() for queue_file in queue_files)
+
+
+def test_listener_ack_staging_failure_never_runs_stale_structural_global_cut(
+    monkeypatch, tmp_path: Path
+) -> None:
+    request = _request(position_id="listener-stage-failure", schema_version=4)
+    db_path = _install_structural_win_reader(monkeypatch, tmp_path, request)
+    wake_path = tmp_path / "wake.json"
+    monkeypatch.setattr("src.config.state_path", lambda _filename: wake_path)
+    wake = reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=wake_path,
+        wake_id="wake-listener-stage-failure",
+        held_sell_reauction_requests=(request,),
+    )
+    queue_file = reactor_wake._wake_queue_target(wake, path=wake_path)
+    queue_bytes = queue_file.read_bytes()
+    if not wake_path.exists():
+        wake_path.write_bytes(queue_bytes)
+    legacy_bytes = wake_path.read_bytes()
+    actual_acknowledge_many = reactor_wake.acknowledge_reactor_wakes
+    order: list[str] = []
+    _install_listener_dependencies(monkeypatch, wake, order)
+    monkeypatch.setattr(
+        reactor_wake,
+        "acknowledge_reactor_wakes",
+        actual_acknowledge_many,
+    )
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        "src.state.write_coordinator.default_runtime_write_coordinator",
+        lambda: _structural_win_coordinator(db_path),
+    )
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: order.append("global_cut") or True,
+    )
+    real_replace = reactor_wake.os.replace
+    stage_count = 0
+
+    def _fail_second_stage(source, destination):
+        nonlocal stage_count
+        if str(destination).endswith(".ack-stage"):
+            stage_count += 1
+            if stage_count == 2:
+                raise OSError("injected listener stage failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(reactor_wake.os, "replace", _fail_second_stage)
+
+    assert main._edli_reactor_wake_poll_once() is False
+    assert order == []
+    assert queue_file.read_bytes() == queue_bytes
+    assert wake_path.read_bytes() == legacy_bytes
 
 
 def _wake(*requests: reactor_wake.HeldSellReauctionRequest) -> reactor_wake.ReactorWake:

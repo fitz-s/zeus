@@ -5554,7 +5554,7 @@ def _atomically_ack_structural_win_wakes(
     *,
     wake_path: Path | None = None,
     coordinator: object | None = None,
-) -> tuple[object, ...]:
+) -> tuple[tuple[object, ...], bool]:
     """Revalidate and ack V4 structural-win debt under one trade writer lock.
 
     SCOPE: exact global-completion wakes containing a V4 supersession candidate.
@@ -5587,7 +5587,7 @@ def _atomically_ack_structural_win_wakes(
         and tuple(getattr(wake, "held_sell_reauction_requests", ()) or ())
     )
     if not exact_wakes:
-        return ()
+        return (), True
     runtime_coordinator = coordinator or default_runtime_write_coordinator()
     try:
         with runtime_coordinator.transaction(
@@ -5618,13 +5618,13 @@ def _atomically_ack_structural_win_wakes(
             )
             if not structural_receipts:
                 transaction.connection.rollback()
-                return ()
+                return (), True
             if not persist_held_sell_reauction_receipts(
                 structural_receipts,
                 path=wake_path,
             ):
                 transaction.connection.rollback()
-                return ()
+                return (), True
             current_by_attempt = {
                 (
                     str(getattr(receipt, "request_id", "") or ""),
@@ -5679,15 +5679,15 @@ def _atomically_ack_structural_win_wakes(
                 path=wake_path,
             ):
                 transaction.connection.rollback()
-                return ()
+                return (), True
             transaction.connection.rollback()
-            return completed_wakes
+            return completed_wakes, False
     except Exception:  # noqa: BLE001 - any fence failure retains durable debt
         logger.warning(
             "held SELL structural-win atomic completion deferred",
             exc_info=True,
         )
-        return ()
+        return (), True
 
 
 def _yield_incomplete_global_completion_once(
@@ -5919,7 +5919,18 @@ def _edli_reactor_wake_poll_once() -> bool:
         logger.warning(
             "held SELL terminal receipts could not persist; wake remains pending"
         )
-    structural_completed_wakes = _atomically_ack_structural_win_wakes(wakes)
+    structural_candidate_present = len(ordinary_terminal_receipts) != len(
+        terminal_receipts
+    )
+    structural_completed_wakes: tuple[object, ...] = ()
+    structural_finalization_failed = False
+    if structural_candidate_present:
+        (
+            structural_completed_wakes,
+            structural_finalization_failed,
+        ) = _atomically_ack_structural_win_wakes(wakes)
+    if structural_finalization_failed:
+        return False
     if structural_completed_wakes:
         completed_ids = {
             str(getattr(queued, "wake_id", "") or "")
