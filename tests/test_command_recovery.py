@@ -16606,6 +16606,13 @@ class TestRecoveryResolutionTable:
             "default_trade_conn_factory",
             _conn_factory,
         )
+        monkeypatch.setattr(
+            command_recovery,
+            "_partial_remainder_candidates",
+            lambda *_args, **_kwargs: pytest.fail(
+                "exact cancel debt must preempt the historical partial scan"
+            ),
+        )
         monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
         mock_client.get_order.return_value = None
         mock_client.get_open_orders.return_value = []
@@ -16622,6 +16629,7 @@ class TestRecoveryResolutionTable:
             "stayed": 0,
             "errors": 0,
         }
+        assert summary["partial_remainder_scan_deferred_for_cancel"] is True
         verified = _conn_factory()
         try:
             assert _get_state(verified, "cmd-001") == "CANCELLED"

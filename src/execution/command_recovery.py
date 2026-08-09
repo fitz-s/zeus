@@ -25193,21 +25193,29 @@ def _reconcile_passes_short_conn(
             stale_terminal_finding_candidates = (
                 _stale_local_orphan_terminal_no_fill_candidates(conn)
             )
-            partial_candidates = (
-                _partial_remainder_candidates(
-                    conn,
-                    live_tick_scope=True,
-                )
-                if all(
-                    _table_exists(conn, table)
-                    for table in (
-                        "venue_commands",
-                        "venue_order_facts",
-                        "position_current",
+            if cancel_candidates:
+                # Exact cancel uncertainty globally removes entry authority.
+                # Do not spend its bounded tick on the broader historical
+                # partial-remainder scan; that debt remains durable and gets
+                # its own pass as soon as the cancel set drains.
+                partial_candidates = []
+                summary["partial_remainder_scan_deferred_for_cancel"] = True
+            else:
+                partial_candidates = (
+                    _partial_remainder_candidates(
+                        conn,
+                        live_tick_scope=True,
                     )
+                    if all(
+                        _table_exists(conn, table)
+                        for table in (
+                            "venue_commands",
+                            "venue_order_facts",
+                            "position_current",
+                        )
+                    )
+                    else []
                 )
-                else []
-            )
             obligation_states = tuple(
                 sorted(
                     _TERMINAL_ENTRY_NO_FILL_COMMAND_STATES
