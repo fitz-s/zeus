@@ -15035,9 +15035,11 @@ def test_global_sell_with_persisted_command_stays_owned_by_command_recovery(tmp_
     conn.close()
 
 
+@pytest.mark.parametrize("runtime_state", ["pending_exit", "day0_window"])
 def test_global_sell_reauction_debt_waits_for_in_band_bid_before_publish_claim(
     tmp_path,
     monkeypatch,
+    runtime_state,
 ):
     """No-bid retry debt must not contend for the monitor writer lease."""
     conn = get_connection(tmp_path / "global-sell-no-bid-debt.db")
@@ -15045,7 +15047,7 @@ def test_global_sell_reauction_debt_waits_for_in_band_bid_before_publish_claim(
     init_schema_trade_only(conn)
     pos = _position(
         trade_id="global-sell-no-bid-debt",
-        state="pending_exit",
+        state=runtime_state,
         pre_exit_state="day0_window",
         exit_state="retry_pending",
         order_status="retry_pending",

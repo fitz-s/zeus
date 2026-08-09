@@ -8972,6 +8972,8 @@ def _record_global_sell_reauction_publish_claim(
             else dict(zip((item[0] for item in cursor.description), current))
         )
         phase = str(projection.get("phase") or "")
+        if _pending_exit_no_order_waits_for_liquidity(position, conn=conn):
+            return False
         if phase == LifecyclePhase.PENDING_EXIT.value:
             held_token_id = str(obligation.get("held_token_id") or "").strip()
             if (
@@ -8981,10 +8983,6 @@ def _record_global_sell_reauction_publish_claim(
                 or not str(obligation.get("scope_identity") or "").strip()
                 or not str(obligation.get("generation") or "").strip()
                 or float(projection.get("shares") or 0.0) <= 0.0
-                or _pending_exit_no_order_waits_for_liquidity(
-                    position,
-                    conn=conn,
-                )
             ):
                 return False
         from src.state.db import append_many_and_project
@@ -9053,10 +9051,7 @@ def recover_global_sell_snapshot_reauction_debt(
     obligation = latest_held_sell_reauction_obligation(conn, position)
     if not obligation:
         return False
-    if (
-        _runtime_state_value(position) == "pending_exit"
-        and _pending_exit_no_order_waits_for_liquidity(position, conn=conn)
-    ):
+    if _pending_exit_no_order_waits_for_liquidity(position, conn=conn):
         return False
     from src.execution.executor import (
         _EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
