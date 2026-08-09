@@ -3266,17 +3266,25 @@ def _assert_final_executable_price_bound(
     _client: Any,
     envelope: VenueSubmissionEnvelope,
 ) -> None:
-    """Independently require a legal maker-only envelope immediately pre-POST."""
+    """Independently require a direction-aware bounded fill pre-POST."""
 
     _assert_absolute_live_price_before_sdk(envelope.price)
     order_type = str(envelope.order_type or "").strip().upper()
-    if not envelope.post_only or order_type not in {"GTC", "GTD"}:
+    maker = envelope.post_only and order_type in {"GTC", "GTD"}
+    marketable_sell = (
+        envelope.side == "SELL"
+        and not envelope.post_only
+        and order_type == "FAK"
+    )
+    if not (maker or marketable_sell):
         # INV-47 SCOPE: only this token/side submission (or its atomic batch)
-        # is rejected. DRAIN: the next submit may carry a certified maker-only
-        # envelope. RESET: no latch is stored; legal GTC/GTD post-only passes.
+        # is rejected. DRAIN: the next submit may carry a certified maker or
+        # marketable SELL envelope. RESET: no latch is stored; a direction-aware
+        # bounded-fill mode passes immediately.
         raise ValueError(
             "LIVE_FILL_PRICE_UNBOUNDED:FINAL_SDK_BOUNDARY:"
-            f"order_type={order_type or 'ABSENT'}:post_only={envelope.post_only}"
+            f"side={envelope.side}:order_type={order_type or 'ABSENT'}:"
+            f"post_only={envelope.post_only}"
         )
 
 

@@ -27820,12 +27820,16 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
             }
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Clob)
+    fee_checked_at = []
+
+    def current_global_sell_fee_fraction(**_kwargs):
+        fee_checked_at.append(_dt.datetime.now(_dt.timezone.utc))
+        return actuation.decision.candidate.executable_sell_curve.fee_model.fee_rate
+
     monkeypatch.setattr(
         era,
         "_current_global_sell_fee_fraction",
-        lambda **_kwargs: (
-            actuation.decision.candidate.executable_sell_curve.fee_model.fee_rate
-        ),
+        current_global_sell_fee_fraction,
     )
     exits = []
 
@@ -27837,6 +27841,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         assert isinstance(authority, GlobalSellExecutionAuthority)
         assert authority.actuation is actuation
         assert authority.jit_candidate.executable_sell_curve.book_hash
+        assert authority.jit_candidate.book_captured_at_utc <= fee_checked_at[-1]
         assert kwargs["global_sell_prefetched_orderbook"] == {
             "asset_id": "yes-token",
             "hash": "jit-sell-hash",

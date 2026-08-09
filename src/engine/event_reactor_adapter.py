@@ -11395,6 +11395,7 @@ def _submit_current_global_sell(
                 [str(getattr(candidate, "token_id", "") or "")],
                 timeout=timeout,
             )
+            book_captured_at_utc = datetime.now(UTC)
             raw_book = books.get(str(getattr(candidate, "token_id", "") or ""))
             if not isinstance(raw_book, Mapping):
                 raise ValueError("GLOBAL_SELL_JIT_BOOK_MISSING")
@@ -11424,7 +11425,7 @@ def _submit_current_global_sell(
             current_candidate = _global_sell_candidate_from_raw_book(
                 candidate,
                 raw_book,
-                captured_at_utc=datetime.now(UTC),
+                captured_at_utc=book_captured_at_utc,
             )
             drift = _global_sell_execution_economics_drift(
                 decision=decision,

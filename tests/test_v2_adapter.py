@@ -2945,6 +2945,36 @@ def test_final_sdk_boundary_independently_rejects_non_maker_before_post(
     assert not any(call[0] == "post_order" for call in fake.calls)
 
 
+def test_final_sdk_boundary_allows_fak_sell_with_limit_price_floor(
+    tmp_path,
+    monkeypatch,
+):
+    import src.venue.polymarket_v2_adapter as adapter_mod
+
+    fake = FakeTwoStepClient(
+        post_response={"orderID": "0xexpected", "status": "LIVE"}
+    )
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC"
+    ).with_updates(side="SELL", order_type="FAK", post_only=False)
+    monkeypatch.setattr(
+        adapter_mod,
+        "_deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected",
+    )
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "accepted"
+    assert any(
+        call[0] == "post_order"
+        and call[2] == "FAK"
+        and call[3] is False
+        for call in fake.calls
+    )
+
+
 def test_fok_one_step_only_client_fails_closed_before_submit(tmp_path):
     fake = FakeOneStepClient()
     adapter, _ = _adapter(tmp_path, fake)
