@@ -8850,7 +8850,23 @@ def record_global_sell_reauction_reserved(
         )
         phase = str(projection.get("phase") or "")
         if phase == LifecyclePhase.PENDING_EXIT.value:
-            return False
+            obligation = getattr(
+                position,
+                "_held_sell_reauction_obligation",
+                {},
+            )
+            if not isinstance(obligation, dict):
+                return False
+            held_token_id = str(obligation.get("held_token_id") or "").strip()
+            if (
+                int(obligation.get("schema_version") or 0) != 4
+                or str(obligation.get("position_id") or "").strip() != trade_id
+                or held_token_id != _asset_id_for_position(position)
+                or not str(obligation.get("scope_identity") or "").strip()
+                or not str(obligation.get("generation") or "").strip()
+                or float(projection.get("shares") or 0.0) <= 0.0
+            ):
+                return False
         sequence_no = _next_canonical_sequence_no(conn, trade_id)
         occurred_at = datetime.now(timezone.utc).isoformat()
         projection["phase"] = phase
@@ -8957,7 +8973,20 @@ def _record_global_sell_reauction_publish_claim(
         )
         phase = str(projection.get("phase") or "")
         if phase == LifecyclePhase.PENDING_EXIT.value:
-            return False
+            held_token_id = str(obligation.get("held_token_id") or "").strip()
+            if (
+                int(obligation.get("schema_version") or 0) != 4
+                or str(obligation.get("position_id") or "").strip() != trade_id
+                or held_token_id != _asset_id_for_position(position)
+                or not str(obligation.get("scope_identity") or "").strip()
+                or not str(obligation.get("generation") or "").strip()
+                or float(projection.get("shares") or 0.0) <= 0.0
+                or _pending_exit_no_order_waits_for_liquidity(
+                    position,
+                    conn=conn,
+                )
+            ):
+                return False
         from src.state.db import append_many_and_project
 
         sequence_no = _next_canonical_sequence_no(conn, trade_id)
@@ -9024,11 +9053,17 @@ def recover_global_sell_snapshot_reauction_debt(
     obligation = latest_held_sell_reauction_obligation(conn, position)
     if not obligation:
         return False
+    if (
+        _runtime_state_value(position) == "pending_exit"
+        and _pending_exit_no_order_waits_for_liquidity(position, conn=conn)
+    ):
+        return False
     from src.execution.executor import (
         _EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
         _EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
         _canonical_trade_write_lease,
     )
+    from src.state.write_coordinator import WritePriority
 
     try:
         with _canonical_trade_write_lease(
@@ -9036,6 +9071,7 @@ def recover_global_sell_snapshot_reauction_debt(
             owner="global_sell_reauction_publish_claim",
             deadline_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_DEADLINE_MS,
             max_hold_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
+            priority=WritePriority.MONITOR,
         ):
             if (
                 _canonical_global_sell_command_ownership(

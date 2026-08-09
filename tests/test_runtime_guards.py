@@ -15035,6 +15035,143 @@ def test_global_sell_with_persisted_command_stays_owned_by_command_recovery(tmp_
     conn.close()
 
 
+def test_global_sell_reauction_debt_waits_for_in_band_bid_before_publish_claim(
+    tmp_path,
+    monkeypatch,
+):
+    """No-bid retry debt must not contend for the monitor writer lease."""
+    conn = get_connection(tmp_path / "global-sell-no-bid-debt.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    pos = _position(
+        trade_id="global-sell-no-bid-debt",
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        exit_state="retry_pending",
+        order_status="retry_pending",
+    )
+    requested = []
+    monkeypatch.setattr(
+        exit_lifecycle_module,
+        "needs_global_sell_snapshot_reauction",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle_module,
+        "latest_held_sell_reauction_obligation",
+        lambda *_args, **_kwargs: {
+            "schema_version": 4,
+            "position_id": pos.trade_id,
+            "held_token_id": pos.token_id,
+            "scope_identity": "scope-1",
+            "generation": "generation-1",
+        },
+    )
+    monkeypatch.setattr(
+        exit_lifecycle_module,
+        "_pending_exit_no_order_waits_for_liquidity",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle_module,
+        "_record_global_sell_reauction_publish_claim",
+        lambda *_args, **_kwargs: pytest.fail(
+            "no-bid debt must not acquire or persist a publish claim"
+        ),
+    )
+
+    assert exit_lifecycle_module.recover_global_sell_snapshot_reauction_debt(
+        pos,
+        conn=conn,
+        requester=lambda *_args: requested.append(True) or True,
+    ) is False
+    assert requested == []
+    conn.close()
+
+
+def test_pending_exit_global_sell_reauction_claims_with_monitor_priority(
+    tmp_path,
+    monkeypatch,
+):
+    """Executable V4 debt may atomically rearm without losing pending-exit ownership."""
+    from contextlib import nullcontext
+
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.execution import executor as executor_module
+    from src.state.projection import upsert_position_current
+    from src.state.write_coordinator import WritePriority
+
+    conn = get_connection(tmp_path / "global-sell-pending-exit-rearm.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    pos = _position(
+        trade_id="global-sell-pending-exit-rearm",
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        exit_state="retry_pending",
+        order_status="retry_pending",
+    )
+    upsert_position_current(conn, build_position_current_projection(pos))
+    conn.commit()
+    obligation = {
+        "schema_version": 4,
+        "position_id": pos.trade_id,
+        "held_token_id": pos.token_id,
+        "scope_identity": "scope-1",
+        "generation": "generation-1",
+    }
+    priorities = []
+    requests = []
+    monkeypatch.setattr(
+        exit_lifecycle_module,
+        "needs_global_sell_snapshot_reauction",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle_module,
+        "latest_held_sell_reauction_obligation",
+        lambda *_args, **_kwargs: obligation,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle_module,
+        "_pending_exit_no_order_waits_for_liquidity",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle_module,
+        "_canonical_global_sell_command_ownership",
+        lambda *_args, **_kwargs: "GLOBAL_NO_COMMAND",
+    )
+
+    def lease(*_args, **kwargs):
+        priorities.append(kwargs.get("priority"))
+        return nullcontext()
+
+    monkeypatch.setattr(executor_module, "_canonical_trade_write_lease", lease)
+
+    assert exit_lifecycle_module.recover_global_sell_snapshot_reauction_debt(
+        pos,
+        conn=conn,
+        requester=lambda position, force: requests.append(
+            (position.trade_id, force)
+        )
+        or True,
+    ) is True
+    assert priorities == [WritePriority.MONITOR]
+    assert requests == [(pos.trade_id, True)]
+    statuses = conn.execute(
+        "SELECT json_extract(payload_json, '$.global_sell_reauction_status') "
+        "FROM position_events WHERE position_id = ? "
+        "AND event_type = 'EXIT_RETRY_RELEASED' ORDER BY sequence_no",
+        (pos.trade_id,),
+    ).fetchall()
+    assert [row[0] for row in statuses] == [
+        "publish_claimed",
+        "durable_wake_reserved",
+    ]
+    conn.close()
+
+
 def test_global_sell_command_ownership_uses_event_sequence_not_caller_timestamp(tmp_path):
     conn = get_connection(tmp_path / "global-sell-command-sequence.db")
     init_schema(conn)

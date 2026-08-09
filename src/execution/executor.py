@@ -4086,7 +4086,14 @@ def _reserve_collateral_for_sell(
     CollateralLedger.reserve_tokens_for_sell_in_transaction(conn, command_id, token_id, shares)
 
 
-def _canonical_trade_write_lease(conn, *, owner: str, deadline_ms: int, max_hold_ms: int):
+def _canonical_trade_write_lease(
+    conn,
+    *,
+    owner: str,
+    deadline_ms: int,
+    max_hold_ms: int,
+    priority=None,
+):
     """Serialize canonical live-trade writes without imposing the live lease on test DBs."""
 
     from contextlib import nullcontext
@@ -4113,12 +4120,17 @@ def _canonical_trade_write_lease(conn, *, owner: str, deadline_ms: int, max_hold
     from src.state.db_writer_lock import WriteClass
     from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
 
+    lease_kwargs = {
+        "owner": owner,
+        "write_class": WriteClass.LIVE,
+        "deadline_ms": deadline_ms,
+        "max_hold_ms": max_hold_ms,
+    }
+    if priority is not None:
+        lease_kwargs["priority"] = priority
     return default_runtime_write_coordinator().lease(
         (DBIdentity.TRADE,),
-        owner=owner,
-        write_class=WriteClass.LIVE,
-        deadline_ms=deadline_ms,
-        max_hold_ms=max_hold_ms,
+        **lease_kwargs,
     )
 
 
