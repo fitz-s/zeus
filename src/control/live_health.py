@@ -5499,7 +5499,7 @@ _LATEST_GLOBAL_AUCTION_RECEIPT_ID_SQL = """
       FROM decision_log INDEXED BY idx_decision_log_ts
      WHERE mode IN (?, ?, ?)
        AND timestamp >= ?
-     ORDER BY id DESC
+     ORDER BY timestamp DESC, id DESC
      LIMIT 1
 """
 _GLOBAL_AUCTION_RECEIPT_BY_ID_SQL = """

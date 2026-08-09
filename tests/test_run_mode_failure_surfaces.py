@@ -6259,7 +6259,7 @@ def test_high_yes_reason_groups_filter_recent_rows_before_grouping() -> None:
         )
 
 
-def test_high_yes_latest_auction_reads_timestamp_index_before_one_payload() -> None:
+def test_high_yes_latest_auction_seeks_timestamp_index_before_one_payload() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
@@ -6286,12 +6286,12 @@ def test_high_yes_latest_auction_reads_timestamp_index_before_one_payload() -> N
     id_details = [str(row["detail"]) for row in id_plan]
     assert any("idx_decision_log_ts" in detail for detail in id_details)
     assert all("SCAN decision_log" not in detail for detail in id_details)
-    assert any("USE TEMP B-TREE" in detail for detail in id_details)
+    assert all("USE TEMP B-TREE" not in detail for detail in id_details)
     payload_details = [str(row["detail"]) for row in payload_plan]
     assert any("INTEGER PRIMARY KEY" in detail for detail in payload_details)
 
 
-def test_high_yes_latest_auction_id_search_ignores_ineligible_newer_rows() -> None:
+def test_high_yes_latest_auction_search_uses_latest_eligible_timestamp() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.execute(
@@ -6306,6 +6306,7 @@ def test_high_yes_latest_auction_id_search_ignores_ineligible_newer_rows() -> No
             (10, live_health._GLOBAL_AUCTION_RECEIPT_MODES[0], "{}", _now_iso(-1)),
             (11, "unrelated_mode", "{}", _now_iso(0)),
             (12, live_health._GLOBAL_AUCTION_RECEIPT_MODES[1], "{}", _now_iso(-72 * 3600)),
+            (13, live_health._GLOBAL_AUCTION_RECEIPT_MODES[2], "{}", _now_iso(-2)),
         ],
     )
 
