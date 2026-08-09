@@ -173,6 +173,11 @@ def test_live_health_composite_yields_to_active_entry_reactor(monkeypatch):
         "_defer_for_active_entry_reactor",
         lambda job_name: job_name == "live_health_composite",
     )
+    monkeypatch.setattr(
+        main,
+        "_defer_for_held_position_monitor",
+        lambda _job_name: False,
+    )
     monkeypatch.setattr(main, "_status_summary_refresh_can_defer", lambda: True)
     monkeypatch.setattr(
         live_health,
@@ -192,6 +197,11 @@ def test_live_health_composite_breaks_entry_defer_before_status_stales(monkeypat
 
     calls = []
     monkeypatch.setattr(main, "_status_summary_refresh_can_defer", lambda: False)
+    monkeypatch.setattr(
+        main,
+        "_defer_for_held_position_monitor",
+        lambda _name: False,
+    )
     monkeypatch.setattr(
         main,
         "_defer_for_active_entry_reactor",
@@ -215,8 +225,63 @@ def test_live_health_composite_breaks_entry_defer_before_status_stales(monkeypat
     ]
 
 
+def test_live_health_composite_yields_to_held_monitor_with_fresh_status(monkeypatch):
+    """Cold health scans must not compete with held-capital bootstrap I/O."""
+
+    import src.control.live_health as live_health
+    import src.main as main
+
+    calls = []
+    monkeypatch.setattr(main, "_status_summary_refresh_can_defer", lambda: True)
+    monkeypatch.setattr(
+        main,
+        "_defer_for_held_position_monitor",
+        lambda job_name: calls.append(job_name) or True,
+    )
+    monkeypatch.setattr(
+        main,
+        "_defer_for_active_entry_reactor",
+        lambda _name: pytest.fail("held monitor owns the first admission check"),
+    )
+    monkeypatch.setattr(
+        live_health,
+        "compute_composite_live_health",
+        lambda: pytest.fail("health scan must defer inside its freshness budget"),
+    )
+
+    assert main._live_health_composite_cycle.__wrapped__() is None
+    assert calls == ["live_health_composite"]
+
+
+def test_live_health_composite_yields_to_held_monitor_with_expired_status(monkeypatch):
+    """Held capital keeps priority even when the observability cut is stale."""
+
+    import src.control.live_health as live_health
+    import src.main as main
+
+    calls = []
+    monkeypatch.setattr(
+        main,
+        "_defer_for_held_position_monitor",
+        lambda job_name: calls.append(job_name) or True,
+    )
+    monkeypatch.setattr(
+        main,
+        "_status_summary_refresh_can_defer",
+        lambda: pytest.fail("held monitor owns admission before freshness reads"),
+    )
+    monkeypatch.setattr(
+        live_health,
+        "compute_composite_live_health",
+        lambda: pytest.fail("health scan must not compete with held capital"),
+    )
+
+    assert main._live_health_composite_cycle.__wrapped__() is None
+    assert calls == ["live_health_composite"]
+
+
 def test_status_summary_refresh_defer_has_half_budget_backstop(monkeypatch, tmp_path):
-    """The normal defer is bounded well inside the health freshness deadline."""
+    """The normal defer requires both cuts inside the health freshness deadline."""
 
     import json
     from datetime import datetime, timedelta, timezone
@@ -226,9 +291,13 @@ def test_status_summary_refresh_defer_has_half_budget_backstop(monkeypatch, tmp_
     from src.control.live_health import STATUS_FRESH_BUDGET_SECONDS
 
     status_path = tmp_path / "status_summary.json"
-    monkeypatch.setattr(config, "state_path", lambda _name: status_path)
+    health_path = tmp_path / "live_health_composite.json"
+    monkeypatch.setattr(config, "state_path", lambda name: tmp_path / name)
     status_path.write_text(
         json.dumps({"timestamp": datetime.now(timezone.utc).isoformat()})
+    )
+    health_path.write_text(
+        json.dumps({"computed_at": datetime.now(timezone.utc).isoformat()})
     )
     assert main._status_summary_refresh_can_defer()
 
@@ -236,6 +305,12 @@ def test_status_summary_refresh_defer_has_half_budget_backstop(monkeypatch, tmp_
         seconds=STATUS_FRESH_BUDGET_SECONDS / 2.0 + 1.0
     )
     status_path.write_text(json.dumps({"timestamp": old.isoformat()}))
+    assert not main._status_summary_refresh_can_defer()
+
+    status_path.write_text(
+        json.dumps({"timestamp": datetime.now(timezone.utc).isoformat()})
+    )
+    health_path.write_text(json.dumps({"computed_at": old.isoformat()}))
     assert not main._status_summary_refresh_can_defer()
 
 
@@ -248,6 +323,7 @@ def test_live_health_composite_refreshes_status_before_evaluation(monkeypatch):
 
     calls = []
     monkeypatch.setattr(main, "_status_summary_refresh_can_defer", lambda: True)
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _name: False)
     monkeypatch.setattr(main, "_defer_for_active_entry_reactor", lambda _name: False)
     monkeypatch.setattr(
         status_summary,

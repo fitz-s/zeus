@@ -9609,7 +9609,11 @@ def test_monitor_bootstrap_scopes_defer_to_entry_competitors(monkeypatch) -> Non
         lambda **_kwargs: (),
     )
 
-    for job_name in ("edli_event_reactor", "market_discovery"):
+    for job_name in (
+        "edli_event_reactor",
+        "live_health_composite",
+        "market_discovery",
+    ):
         assert main_module._defer_for_held_position_monitor(job_name) is True
 
     for job_name in (
@@ -9617,7 +9621,6 @@ def test_monitor_bootstrap_scopes_defer_to_entry_competitors(monkeypatch) -> Non
         "edli_continuous_redecision_screen",
         "edli_day0_hourly_refresh",
         "c3_staleness_cancel",
-        "live_health_composite",
         "settlement_guard_report",
         "settlement_skill_attribution",
         "trades_wal_checkpoint",
@@ -9633,7 +9636,11 @@ def test_monitor_bootstrap_scopes_defer_to_entry_competitors(monkeypatch) -> Non
     assert main_module._edli_reactor_wake_poll_once() is False
 
     bootstrap_complete.set()
-    for job_name in ("edli_event_reactor", "market_discovery"):
+    for job_name in (
+        "edli_event_reactor",
+        "live_health_composite",
+        "market_discovery",
+    ):
         assert main_module._defer_for_held_position_monitor(job_name) is False
 
 

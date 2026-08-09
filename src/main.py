@@ -142,12 +142,16 @@ _edli_terminal_day0_cleanup_yield = threading.Event()
 _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
     {
         "edli_event_reactor",
+        "live_health_composite",
         "market_discovery",
     }
 )
-# Bootstrap protects the new-entry decision lane. Recovery, held-q refresh,
-# cancels, health, settlement, and passive checkpoints are prerequisites or
-# independent drains; starving them cannot establish held-position coverage.
+# Bootstrap gives held-capital monitoring first access to cold DB pages. Health
+# yields only while its last verified cut retains ample freshness budget; the
+# cycle-level backstop bypasses this defer before observability can go stale.
+# Recovery, held-q refresh, cancels, settlement, and passive checkpoints remain
+# prerequisites or independent drains whose starvation cannot establish held
+# coverage.
 _HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS = _HELD_POSITION_MONITOR_DEFER_JOBS
 _market_discovery_last_completed_monotonic: float | None = None
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
@@ -1743,21 +1747,28 @@ def _live_health_composite_cycle() -> None:
 
 
 def _status_summary_refresh_can_defer() -> bool:
-    """Yield to entry only while the last verified status cut has ample freshness budget."""
+    """Yield only while both observability cuts have ample freshness budget."""
 
     try:
         from src.config import state_path
         from src.control.live_health import STATUS_FRESH_BUDGET_SECONDS
 
-        payload = json.loads(state_path("status_summary.json").read_text())
-        raw = payload.get("timestamp")
-        stamp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-        if stamp.tzinfo is None or stamp.utcoffset() is None:
-            return False
-        age_seconds = (
-            datetime.now(timezone.utc) - stamp.astimezone(timezone.utc)
-        ).total_seconds()
-        return age_seconds < STATUS_FRESH_BUDGET_SECONDS / 2.0
+        cuts = (
+            ("status_summary.json", "timestamp"),
+            ("live_health_composite.json", "computed_at"),
+        )
+        now = datetime.now(timezone.utc)
+        for filename, field in cuts:
+            payload = json.loads(state_path(filename).read_text())
+            stamp = datetime.fromisoformat(
+                str(payload.get(field)).replace("Z", "+00:00")
+            )
+            if stamp.tzinfo is None or stamp.utcoffset() is None:
+                return False
+            age_seconds = (now - stamp.astimezone(timezone.utc)).total_seconds()
+            if age_seconds >= STATUS_FRESH_BUDGET_SECONDS / 2.0:
+                return False
+        return True
     except Exception:
         return False
 
