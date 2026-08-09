@@ -31829,10 +31829,12 @@ def _prepare_current_global_probability_family(
 ):
     """Build current simplex or exact-bin payoff authority without price dependency.
 
-    Whole-family preparation uses the canonical conditioned replacement Day0
-    simplex. Exact observation-proved bins may still form a partial witness;
-    unknown siblings remain ineligible. JIT revalidation preserves the selected
-    witness kind and never substitutes an alternate statistical probability.
+    Whole-family preparation uses one current-state Day0 simplex. The persisted
+    replacement posterior remains the source-clock prior and identity carrier;
+    the action probability is the final extreme conditioned on observations
+    through ``decision_time`` and the hourly trajectories that remain. Exact
+    observation-proved bins may still form a partial witness; unknown siblings
+    remain ineligible. JIT revalidation preserves the selected witness kind.
     """
 
     from src.data.replacement_forecast_bundle_reader import (
@@ -31898,6 +31900,7 @@ def _prepare_current_global_probability_family(
     use_unobserved_day0_replacement = False
     current_day0_payload: dict[str, object] | None = None
     day0_observation_conn = observation_conn or forecast_conn
+    day0_snapshot: Mapping[str, object] | None = None
     day0_base_identity = ""
     provisional_day0_observation = False
     post_local_incomplete_monitor_authority = False
@@ -32417,38 +32420,78 @@ def _prepare_current_global_probability_family(
                 }
             )
         else:
-            # One probability world: the replacement bundle already applies the
-            # current Day0 observation as an absorbing max/min transform to the
-            # target-specific ENS + provider carrier.  Rebuilding action q from
-            # three deterministic hourly trajectories created a second regime;
-            # live evidence showed it assigning 0.49 to a bin whose canonical
-            # conditioned replacement q was 0.097.  Entry and held redecision
-            # must consume the same persisted point q and coherent samples.
-            replacement_components = _replacement_global_probability_components(
-                bundle,
-                candidates=family.candidates,
-                bindings=bindings,
-            )
-            if replacement_components is None:
-                raise ValueError(
-                    "GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_INVALID"
+            if (
+                fast_residual_conditioning is not None
+                and post_local_incomplete_monitor_authority
+            ):
+                # Once the local day is over there is no remaining weather
+                # interval to price.  A qualified same-station residual carrier
+                # may then describe the still-unpublished settlement value for
+                # reduce-only redecision.  During the target day it must not
+                # replace the remaining-window random variable: doing so freezes
+                # q between fast-observation updates even as wall clock, current
+                # temperature, and the executable book move.
+                components = _replacement_global_probability_components(
+                    bundle,
+                    candidates=family.candidates,
+                    bindings=bindings,
                 )
-            components = (
-                replacement_components[0],
-                replacement_components[1],
-                _GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_BAND_BASIS,
-            )
-            probability_authority = (
-                "day0_conditioned_replacement_global_probability_v1"
-            )
-            payload.update(
-                {
-                    "probability_authority": probability_authority,
-                    "q_source": "day0_conditioned_replacement",
-                    "_edli_q_source": "day0_conditioned_replacement",
-                    "_edli_day0_q_mode": "conditioned_replacement",
-                }
-            )
+                if components is None:
+                    raise ValueError(
+                        "GLOBAL_DAY0_FAST_RESIDUAL_SIMPLEX_INVALID"
+                    )
+                probability_authority = (
+                    "day0_conditioned_replacement_global_probability_v1"
+                )
+                payload.update(
+                    {
+                        "probability_authority": probability_authority,
+                        "q_source": "day0_conditioned_replacement",
+                        "_edli_q_source": "day0_conditioned_replacement",
+                        "_edli_day0_q_mode": "fast_residual_conditioned_replacement",
+                    }
+                )
+            else:
+                # Wall-clock completion does not make the information set
+                # complete.  The interval after the latest authorized
+                # settlement-channel observation and before local midnight has
+                # happened physically, but remains unobserved by that channel.
+                # Held-position redecision must keep pricing that causal tail;
+                # only the complete final-daily proof may upgrade it to an
+                # exact settlement simplex.  During the local day this same
+                # builder continuously shortens the stochastic interval and
+                # consumes the current physical frontier; fast residual evidence
+                # is boundary/time evidence, never a frozen full-day action q.
+                # Entry authority remains blocked after local completion.
+                components = _day0_remaining_global_probability_components(
+                    event,
+                    forecast_conn=forecast_conn,
+                    calibration_conn=day0_observation_conn,
+                    family=family,
+                    payload=payload,
+                    decision_time=decision_time,
+                    snapshot=day0_snapshot,
+                )
+                probability_authority = (
+                    "day0_remaining_day_global_probability_v1"
+                )
+                payload.update(
+                    {
+                        "probability_authority": probability_authority,
+                        "q_source": "day0_remaining_day",
+                        "_edli_q_source": "day0_remaining_day",
+                        "_edli_day0_q_mode": (
+                            "post_local_provisional_tail"
+                            if post_local_incomplete_monitor_authority
+                            and provisional_day0_observation
+                            else (
+                                "post_local_incomplete_settlement_tail"
+                                if post_local_incomplete_monitor_authority
+                                else "remaining_day"
+                            )
+                        ),
+                    }
+                )
     elif current_day0_payload is not None:
         components = _day0_absorbing_exact_probability_components(
             omega=omega,
@@ -32485,6 +32528,43 @@ def _prepare_current_global_probability_family(
                     ),
                     separators=(",", ":"),
                 )
+            if (
+                exact_yes_payoffs
+                and allow_partial_deterministic
+                and required_bin_id is None
+            ):
+                try:
+                    components = _day0_remaining_global_probability_components(
+                        event,
+                        forecast_conn=forecast_conn,
+                        calibration_conn=day0_observation_conn,
+                        family=family,
+                        payload=payload,
+                        decision_time=decision_time,
+                        snapshot=day0_snapshot,
+                    )
+                except ValueError as exc:
+                    if str(exc) != "DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE":
+                        raise
+                    # D1 (2026-07-20 review, DEFERRED — no live economic bug):
+                    # this ``min(exact_bin_ids)`` is a BRITTLE SCALAR SENTINEL. It
+                    # is NOT a semantically-required bin (unlike the caller's
+                    # ``required_condition_id`` binding above); it is an ARBITRARY
+                    # representative chosen only to satisfy the gate below
+                    # (``required_bin_id in exact_bin_ids``) so the deterministic-
+                    # bin-payoff authority engages when remaining-day members are
+                    # unavailable. Safe today because the FULL payoff set is carried
+                    # by ``exact_yes_payoffs`` into the witness / q_version /
+                    # ``_edli_day0_exact_yes_payoffs`` payload — the sentinel drops
+                    # no economic information. HAZARD: a future reader could mistake
+                    # this ``min()`` for a meaningful "the required bin" and conflate
+                    # it with the required_condition_id case, silently narrowing the
+                    # deterministic scope. Replace with an explicit typed carrier
+                    # (e.g. a ``deterministic_scope`` union of REQUIRED_BIN vs
+                    # ANY_DETERMINISTIC) when the q_version-bearing path is next
+                    # touched; not done now to avoid churning that path.
+                    required_bin_id = min(exact_bin_ids)
+                    payload["_edli_day0_deterministic_scope_reason"] = str(exc)
             if (
                 exact_yes_payoffs
                 and allow_partial_deterministic
@@ -32641,14 +32721,24 @@ def _prepare_current_global_probability_family(
                         )
                     ),
                 )
-            # A current observation without the canonical conditioned
-            # replacement carrier is not a statistical probability.  Exact
-            # absorbing facts and required-bin deterministic payoffs above may
-            # act on their own authority; every other action must wait for the
-            # replacement bundle instead of reviving the retired three-center
-            # remaining-day regime.
-            raise ValueError(
-                "GLOBAL_DAY0_CONDITIONED_REPLACEMENT_BUNDLE_MISSING"
+            if components is None:
+                components = _day0_remaining_global_probability_components(
+                    event,
+                    forecast_conn=forecast_conn,
+                    calibration_conn=day0_observation_conn,
+                    family=family,
+                    payload=payload,
+                    decision_time=decision_time,
+                    snapshot=day0_snapshot,
+                )
+            probability_authority = "day0_remaining_day_global_probability_v1"
+            payload.update(
+                {
+                    "probability_authority": probability_authority,
+                    "q_source": "day0_remaining_day",
+                    "_edli_q_source": "day0_remaining_day",
+                    "_edli_day0_q_mode": "remaining_day",
+                }
             )
     else:
         if bundle is None:

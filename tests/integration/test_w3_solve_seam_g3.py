@@ -5465,7 +5465,7 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
     observations.close()
 
 
-def test_current_day0_global_probability_uses_canonical_conditioned_replacement_simplex(
+def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     monkeypatch,
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
@@ -5703,34 +5703,32 @@ def test_current_day0_global_probability_uses_canonical_conditioned_replacement_
     witness = prepared.probability_witness
     binding = day0_payload["_edli_global_day0_binding"]
     assert witness.band_alpha == pytest.approx(0.05)
-    assert witness.band_basis == (
-        "current_coherent_day0_conditioned_replacement_simplex_v1"
-    )
+    assert witness.band_basis == "current_coherent_day0_remaining_model_bootstrap_v3"
     assert witness.yes_q_samples.shape == (400, 3)
     assert witness.posterior_identity_hash
     assert binding["probability_base_identity"]
     assert binding["posterior_id"] == 17
-    assert remaining_day_calls == 0
-    assert day0_payload["q_source"] == "day0_conditioned_replacement"
-    assert day0_payload["_edli_day0_q_mode"] == "conditioned_replacement"
+    assert remaining_day_calls == 1
+    assert day0_payload["q_source"] == "day0_remaining_day"
+    assert day0_payload["_edli_day0_q_mode"] == "remaining_day"
     assert (
         day0_payload["probability_authority"]
-        == "day0_conditioned_replacement_global_probability_v1"
+        == "day0_remaining_day_global_probability_v1"
     )
     remaining_lcb = day0_payload["_edli_day0_lcb_transform"][
         "yes_lcb_by_condition"
     ]["c2"]
     remaining_authority_payload = {
         **day0_payload,
-        # The canonical conditioned replacement posterior is both supporting
-        # provenance and the action q; no second Day0 point estimate exists.
+        # The source-clock posterior remains bound as supporting provenance,
+        # while the current remaining-day witness supplies the action q.
         "posterior_id": 16,
         "city": "Dallas",
         "target_date": "2026-07-11",
         "metric": "high",
         "condition_id": "c2",
         "direction": "buy_yes",
-        "q_live": 0.3,
+        "q_live": 0.8,
         "q_lcb_5pct": remaining_lcb,
         "day0_probability_authority": (
             era._global_day0_probability_authority_payload(day0_payload)
@@ -5740,9 +5738,21 @@ def test_current_day0_global_probability_uses_canonical_conditioned_replacement_
         remaining_authority_payload,
         direction="buy_yes",
         condition_id="c2",
-        q_live=0.3,
+        q_live=0.8,
         q_lcb=remaining_lcb,
     )
+    forged_remaining = json.loads(json.dumps(remaining_authority_payload))
+    with pytest.raises(
+        ValueError,
+        match="selected q_lcb does not match remaining-day transform",
+    ):
+        assert_live_day0_probability_authority(
+            forged_remaining,
+            direction="buy_yes",
+            condition_id="c2",
+            q_live=0.8,
+            q_lcb=0.3,
+        )
     assert replacement_bound_reads == 1
     caps = {
         row[:4]: row[4]
@@ -5758,7 +5768,9 @@ def test_current_day0_global_probability_uses_canonical_conditioned_replacement_
     assert caps[
         (witness.family_key, "c1", bin_by_condition["c1"], "NO")
     ] == pytest.approx(0.4)
-    assert witness.yes_point_q.tolist() == pytest.approx(list(source_clock_q))
+    assert witness.yes_point_q.tolist() == pytest.approx([0.0, 0.2, 0.8])
+    assert day0_payload["_edli_day0_source_clock_bound_posterior_identity"]
+
     capture_time["value"] = "2026-07-11T17:31:00+00:00"
     recaptured_payload: dict[str, object] = {}
     recaptured = era._prepare_current_global_probability_family(
@@ -5774,10 +5786,10 @@ def test_current_day0_global_probability_uses_canonical_conditioned_replacement_
         witness.yes_q_samples,
         recaptured.probability_witness.yes_q_samples,
     )
-    assert witness.source_truth_identity == (
+    assert witness.source_truth_identity != (
         recaptured.probability_witness.source_truth_identity
     )
-    assert witness.probability_content_identity == (
+    assert witness.probability_content_identity != (
         recaptured.probability_witness.probability_content_identity
     )
 
@@ -5798,7 +5810,7 @@ def test_current_day0_global_probability_uses_canonical_conditioned_replacement_
     forecast.close()
 
 
-def test_fast_residual_day0_bundle_is_the_single_conditioned_replacement_q(
+def test_fast_residual_day0_bundle_cannot_replace_remaining_window_q(
     monkeypatch,
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
@@ -6100,13 +6112,15 @@ def test_fast_residual_day0_bundle_is_the_single_conditioned_replacement_q(
     )
 
     witness = prepared.probability_witness
-    assert remaining_calls == []
-    assert witness.yes_point_q.tolist() == pytest.approx(list(fast_q))
-    assert witness.yes_q_samples[0].tolist() == pytest.approx(list(fast_q))
+    assert remaining_calls == [
+        _dt.datetime(2026, 7, 11, 10, 0, tzinfo=_dt.timezone.utc)
+    ]
+    assert witness.yes_point_q.tolist() == pytest.approx(list(remaining_q))
+    assert witness.yes_q_samples[0].tolist() == pytest.approx(list(remaining_q))
     assert witness.band_basis == (
-        era._GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_BAND_BASIS
+        era._GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
     )
-    assert witness.posterior_identity_hash == bundle.posterior_identity_hash
+    assert witness.posterior_identity_hash != bundle.posterior_identity_hash
     assert day0_payload["_edli_global_day0_binding"][
         "probability_base_identity"
     ] == bundle.posterior_identity_hash
@@ -6115,15 +6129,16 @@ def test_fast_residual_day0_bundle_is_the_single_conditioned_replacement_q(
         "statistical_probability_conditioning"
     ] == conditioning
     assert day0_payload["probability_authority"] == (
-        "day0_conditioned_replacement_global_probability_v1"
+        "day0_remaining_day_global_probability_v1"
     )
-    assert day0_payload["q_source"] == "day0_conditioned_replacement"
-    assert day0_payload["_edli_day0_q_mode"] == "conditioned_replacement"
+    assert day0_payload["q_source"] == "day0_remaining_day"
+    assert day0_payload["_edli_day0_q_mode"] == "remaining_day"
     remaining_action = {
         **day0_payload,
         "event_type": "DAY0_EXTREME_UPDATED",
     }
-    assert era._uses_replacement_probability_authority(remaining_action)
+    assert not era._uses_replacement_probability_authority(remaining_action)
+    assert era._day0_maker_only_required(remaining_action)
     forecast.close()
     observations.close()
 
@@ -6196,7 +6211,7 @@ def test_global_candidate_probability_use_requires_typed_reduce_only_sell():
         )
 
 
-def test_provisional_hko_held_probability_uses_revision_aware_replacement_simplex(
+def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
     monkeypatch,
 ):
     import src.data.day0_observation_reader as day0_reader
@@ -6506,23 +6521,25 @@ def test_provisional_hko_held_probability_uses_revision_aware_replacement_simple
     )
 
     witness = prepared.probability_witness
-    assert witness.yes_point_q.tolist() == pytest.approx([0.1, 0.1, 0.8])
-    assert witness.yes_q_samples[0].tolist() == pytest.approx([0.1, 0.1, 0.8])
+    assert witness.yes_point_q.tolist() == pytest.approx([0.2, 0.5, 0.3])
+    assert witness.yes_q_samples[0].tolist() == pytest.approx([0.2, 0.5, 0.3])
     assert witness.band_basis == (
-        "current_coherent_day0_conditioned_replacement_simplex_v1"
+        "current_coherent_day0_remaining_model_bootstrap_v3"
     )
     assert prepared.candidate_payoff_q_lcb_caps == ()
     assert day0_payload["probability_authority"] == (
-        "day0_conditioned_replacement_global_probability_v1"
+        "day0_remaining_day_global_probability_v1"
     )
-    assert day0_payload["q_source"] == "day0_conditioned_replacement"
-    assert day0_payload["_edli_day0_q_mode"] == "conditioned_replacement"
+    assert day0_payload["q_source"] == "day0_remaining_day"
+    assert day0_payload["_edli_day0_q_mode"] == "remaining_day"
     assert day0_payload["_edli_day0_provisional_revision_likelihood"] == (
         revision_likelihood
     )
     assert day0_payload[
         "_edli_day0_provisional_boundary_survival_probability"
     ] == pytest.approx(0.95)
+    assert day0_payload["_edli_day0_source_clock_bound_posterior_identity"]
+    assert day0_payload["_edli_day0_source_clock_bound_identity"]
     assert day0_payload["_edli_global_day0_binding"][
         "evidence_finality"
     ] == "PROVISIONAL_CURRENT_SNAPSHOT"
@@ -6543,13 +6560,15 @@ def test_provisional_hko_held_probability_uses_revision_aware_replacement_simple
         probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
     )
     assert post_day.probability_witness.yes_point_q.tolist() == pytest.approx(
-        [0.1, 0.1, 0.8]
+        [0.2, 0.5, 0.3]
     )
     assert post_day_payload["probability_authority"] == (
-        "day0_conditioned_replacement_global_probability_v1"
+        "day0_remaining_day_global_probability_v1"
     )
-    assert post_day_payload["q_source"] == "day0_conditioned_replacement"
-    assert post_day_payload["_edli_day0_q_mode"] == "conditioned_replacement"
+    assert post_day_payload["q_source"] == "day0_remaining_day"
+    assert post_day_payload["_edli_day0_q_mode"] == (
+        "post_local_provisional_tail"
+    )
 
     with pytest.raises(
         ValueError,
@@ -6566,21 +6585,21 @@ def test_provisional_hko_held_probability_uses_revision_aware_replacement_simple
             probability_use=era._CurrentProbabilityUse.ENTRY,
         )
 
-    assert remaining_calls == 0
+    assert remaining_calls == 2
     assert replacement_calls == 2
     assert bundle_reads == 2
 
-    def unavailable_replacement_components(*_args, **_kwargs):
-        return None
+    def unavailable_remaining_components(*_args, **_kwargs):
+        raise ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE")
 
     monkeypatch.setattr(
         era,
-        "_replacement_global_probability_components",
-        unavailable_replacement_components,
+        "_day0_remaining_global_probability_components",
+        unavailable_remaining_components,
     )
     with pytest.raises(
         ValueError,
-        match="GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_INVALID",
+        match="DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE",
     ):
         era._prepare_current_global_probability_family(
             event,
@@ -7033,11 +7052,13 @@ def test_post_day_complete_hourly_observation_builds_exact_global_simplex(
         [0.2, 0.5, 0.3]
     )
     assert incomplete_payload["probability_authority"] == (
-        "day0_conditioned_replacement_global_probability_v1"
+        "day0_remaining_day_global_probability_v1"
     )
-    assert incomplete_payload["q_source"] == "day0_conditioned_replacement"
-    assert incomplete_payload["_edli_day0_q_mode"] == "conditioned_replacement"
-    assert tail_calls == 0
+    assert incomplete_payload["q_source"] == "day0_remaining_day"
+    assert incomplete_payload["_edli_day0_q_mode"] == (
+        "post_local_incomplete_settlement_tail"
+    )
+    assert tail_calls == 1
 
     with pytest.raises(
         ValueError,
@@ -7145,7 +7166,7 @@ def test_post_day_complete_hourly_observation_builds_exact_global_simplex(
         "final_daily_observation_exact_global_probability_v1"
     )
     assert day0_payload["_edli_global_day0_binding"]["final_daily"] is True
-    assert tail_calls == 0
+    assert tail_calls == 1
     assert snapshot_calls == 0
     observations.close()
     forecast.close()
