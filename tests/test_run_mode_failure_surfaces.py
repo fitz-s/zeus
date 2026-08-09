@@ -9427,6 +9427,7 @@ def test_periodic_full_book_timeout_fairness_debt_yields_reactor_until_coverage(
         main_module._held_position_monitor_handoff_pending.clear()
         main_module._periodic_held_position_monitor_handoff_pending.clear()
         main_module._periodic_held_position_monitor_fairness_debt.clear()
+        main_module._held_position_monitor_canonical_debt.clear()
         main_module._held_position_monitor_bootstrap_complete.clear()
         main_module._day0_urgent_wake_pending.clear()
         main_module._day0_held_monitor_preempt_requested.clear()
@@ -9742,6 +9743,7 @@ def test_durable_monitor_recovery_arms_fairness_debt_when_reactor_stays_busy(
         main_module._held_position_monitor_handoff_pending.clear()
         main_module._periodic_held_position_monitor_handoff_pending.clear()
         main_module._periodic_held_position_monitor_fairness_debt.clear()
+        main_module._held_position_monitor_canonical_debt.clear()
 
 
 def test_periodic_monitor_handoff_clears_fairness_debt_before_incomplete_scan(
@@ -10035,6 +10037,42 @@ def test_monitor_bootstrap_does_not_spin_exact_sell_debt_without_current_monitor
 
     assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
     assert bootstrap_complete.is_set() is False
+
+
+def test_canonical_monitor_debt_defers_reactor_after_bootstrap_until_current(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+
+    canonical_debt = type(main_module._held_position_monitor_canonical_debt)()
+    canonical_debt.set()
+    bootstrap_complete = type(main_module._held_position_monitor_bootstrap_complete)()
+    bootstrap_complete.set()
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_debt",
+        canonical_debt,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_bootstrap_complete",
+        bootstrap_complete,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_entry_block_reason",
+        lambda: "held_position_monitor_cadence_overdue",
+    )
+
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_entry_block_reason",
+        lambda: None,
+    )
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+    assert canonical_debt.is_set() is False
 
 
 def test_full_book_monitor_without_canonical_progress_does_not_complete_bootstrap(
