@@ -4433,6 +4433,27 @@ def test_monitor_fairness_debt_reserves_completion_before_cancelling(
     assert reservations == ["periodic_monitor_preemption"]
 
 
+def test_monitor_fairness_debt_probe_failure_cannot_veto_auction(monkeypatch):
+    from src.events import reactor
+
+    monkeypatch.setattr(
+        reactor,
+        "request_global_auction_completion",
+        lambda **_kwargs: pytest.fail("failed scheduler hint must not reserve debt"),
+    )
+    due_at_start, cancellation_probe = (
+        reactor._global_auction_monitor_cancellation_probe(
+            lambda: False,
+            monitor_debt_pending=lambda: (_ for _ in ()).throw(
+                RuntimeError("debt hint unavailable")
+            ),
+        )
+    )
+
+    assert due_at_start is False
+    assert cancellation_probe() is False
+
+
 def test_held_sell_completion_request_persists_position_q_and_bid_witness(monkeypatch):
     from types import SimpleNamespace
 

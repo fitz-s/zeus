@@ -13657,7 +13657,11 @@ def test_global_scope_reports_a_held_family_without_probability_carrier(
     assert missing == [("Held", "2026-07-08", "high")]
 
 
-def test_global_scope_interrupts_forecast_sql_for_monitor_handoff(monkeypatch):
+def test_completion_auction_debt_interrupts_forecast_sql_for_monitor_handoff(
+    monkeypatch,
+):
+    from src.events import reactor
+
     class SlowTrigger:
         def __init__(self, *_args, **_kwargs):
             pass
@@ -13692,8 +13696,21 @@ def test_global_scope_interrupts_forecast_sql_for_monitor_handoff(monkeypatch):
         return 0
 
     forecasts_conn.set_progress_handler(prior_progress_handler, 1_000)
-    monitor_pending = threading.Event()
-    timer = threading.Timer(0.05, monitor_pending.set)
+    monitor_debt = threading.Event()
+    monkeypatch.setattr(
+        reactor,
+        "request_global_auction_completion",
+        lambda **_kwargs: pytest.fail("reserved completion debt must not duplicate"),
+    )
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    due_at_start, cancellation_probe = (
+        reactor._global_auction_monitor_cancellation_probe(
+            lambda: False,
+            monitor_debt_pending=monitor_debt.is_set,
+            completion_due=True,
+        )
+    )
+    timer = threading.Timer(0.05, monitor_debt.set)
     timer.start()
     started = time.monotonic()
     try:
@@ -13707,12 +13724,14 @@ def test_global_scope_interrupts_forecast_sql_for_monitor_handoff(monkeypatch):
                 decision_at_utc=_dt.datetime(
                     2026, 7, 10, 12, 0, tzinfo=_dt.timezone.utc
                 ),
-                cancelled=monitor_pending.is_set,
+                cancelled=cancellation_probe,
             )
     finally:
         timer.cancel()
         timer.join()
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
+    assert due_at_start is True
     assert time.monotonic() - started < 1.0
     calls_before_probe = prior_handler_calls
     forecasts_conn.execute(
