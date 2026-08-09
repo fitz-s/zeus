@@ -2065,6 +2065,16 @@ def test_global_reauction_epoch_expiry_is_explicitly_transient(caplog):
     assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
 
 
+def test_duplicate_same_token_pre_submit_rejection_is_terminal(caplog):
+    reason = "duplicate_entry_same_token:open_or_filled_entry_command_same_token"
+
+    with caplog.at_level(logging.ERROR, logger="zeus.events.reactor"):
+        assert "duplicate_entry_same_token" in TERMINAL_MONEY_PATH_REASONS
+        assert _is_transient_money_path_reason(reason) is False
+
+    assert not any("UNKNOWN money-path reason" in row.message for row in caplog.records)
+
+
 def test_selected_family_forecast_authority_loss_is_transient(caplog):
     reason = (
         "LIVE_INFERENCE_INPUTS_MISSING:"
