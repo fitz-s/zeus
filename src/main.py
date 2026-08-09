@@ -95,6 +95,9 @@ _held_position_monitor_handoff_pending = threading.Event()
 _periodic_held_position_monitor_handoff_pending = threading.Event()
 _periodic_held_position_monitor_fairness_debt = threading.Event()
 _held_position_monitor_canonical_debt = threading.Event()
+_held_position_monitor_canonical_recheck_lock = threading.Lock()
+_held_position_monitor_canonical_last_check = 0.0
+_HELD_POSITION_MONITOR_CANONICAL_RECHECK_SECONDS = 1.0
 _held_position_monitor_bootstrap_complete = threading.Event()
 _capital_recovery_handoff_pending = threading.Event()
 _held_position_monitor_bootstrap_check_lock = threading.Lock()
@@ -376,6 +379,46 @@ def _held_position_monitor_entry_block_reason() -> str | None:
     if int(evidence.get("stale_or_missing_position_count") or 0) > 0:
         return "held_position_monitor_cadence_overdue"
     return None
+
+
+def _held_position_monitor_debt_pending() -> bool:
+    """Recheck canonical held coverage inside long-running reactor cuts."""
+
+    global _held_position_monitor_canonical_last_check
+
+    if _held_position_monitor_canonical_debt.is_set():
+        return True
+    now = time.monotonic()
+    if (
+        now - _held_position_monitor_canonical_last_check
+        < _HELD_POSITION_MONITOR_CANONICAL_RECHECK_SECONDS
+    ):
+        return False
+    if not _held_position_monitor_canonical_recheck_lock.acquire(blocking=False):
+        return _held_position_monitor_canonical_debt.is_set()
+    try:
+        now = time.monotonic()
+        if (
+            now - _held_position_monitor_canonical_last_check
+            < _HELD_POSITION_MONITOR_CANONICAL_RECHECK_SECONDS
+        ):
+            return _held_position_monitor_canonical_debt.is_set()
+        _held_position_monitor_canonical_last_check = now
+        reason = _held_position_monitor_entry_block_reason()
+        if reason is not None:
+            # SCOPE: only the current/new reactor auction. DRAIN: its
+            # cooperative callback yields, then monitor recovery refreshes the
+            # canonical held book. RESET: recovery clears the debt after full
+            # current coverage; queued auction facts remain durable.
+            _held_position_monitor_canonical_debt.set()
+            logger.warning(
+                "reactor yielded to newly overdue canonical held-position "
+                "monitor debt (%s)",
+                reason,
+            )
+        return _held_position_monitor_canonical_debt.is_set()
+    finally:
+        _held_position_monitor_canonical_recheck_lock.release()
 
 
 def _defer_for_held_position_monitor(job_name: str) -> bool:
@@ -4276,7 +4319,7 @@ def _edli_event_reactor_cycle(
         held_position_monitor_pending=(
             lambda: (
                 _periodic_held_position_monitor_handoff_pending.is_set()
-                or _held_position_monitor_canonical_debt.is_set()
+                or _held_position_monitor_debt_pending()
             )
         ),
         held_position_monitor_debt_pending=(

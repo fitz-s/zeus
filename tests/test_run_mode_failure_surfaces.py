@@ -10064,6 +10064,38 @@ def test_canonical_monitor_debt_defers_reactor_after_bootstrap_until_current(
     assert canonical_debt.is_set() is False
 
 
+def test_long_reactor_cut_rechecks_and_yields_when_canonical_monitor_becomes_stale(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+
+    canonical_debt = type(main_module._held_position_monitor_canonical_debt)()
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_debt",
+        canonical_debt,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_last_check",
+        0.0,
+    )
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: 2.0)
+    checks = []
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_entry_block_reason",
+        lambda: checks.append(True) or "held_position_monitor_cadence_overdue",
+    )
+
+    assert main_module._held_position_monitor_debt_pending() is True
+    assert canonical_debt.is_set()
+    assert checks == [True]
+
+    assert main_module._held_position_monitor_debt_pending() is True
+    assert checks == [True]
+
+
 def test_full_book_monitor_without_canonical_progress_does_not_complete_bootstrap(
     monkeypatch,
 ) -> None:
