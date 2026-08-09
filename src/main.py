@@ -6747,8 +6747,9 @@ def _edli_command_recovery_cycle() -> None:
             "capital-blocking cancels",
             capital_blockers,
         )
+    reactor_fence_acquired = False
     try:
-        if capital_blockers and _edli_reactor_active_lock.locked():
+        if capital_blockers:
             drain_budget = min(
                 _CAPITAL_RECOVERY_REACTOR_DRAIN_SECONDS,
                 max(0.0, invocation_deadline - _time.monotonic()),
@@ -6763,12 +6764,14 @@ def _edli_command_recovery_cycle() -> None:
                     drain_budget,
                 )
                 return
-            _edli_reactor_active_lock.release()
+            reactor_fence_acquired = True
         summary = reconcile_unresolved_commands(
             scope="live_tick",
             deadline_monotonic=invocation_deadline,
         )
     finally:
+        if reactor_fence_acquired:
+            _edli_reactor_active_lock.release()
         _capital_recovery_handoff_pending.clear()
     _consume_edli_command_recovery_summary(
         summary,
