@@ -95,6 +95,7 @@ _held_position_monitor_handoff_pending = threading.Event()
 _periodic_held_position_monitor_handoff_pending = threading.Event()
 _periodic_held_position_monitor_fairness_debt = threading.Event()
 _held_position_monitor_bootstrap_complete = threading.Event()
+_capital_recovery_handoff_pending = threading.Event()
 _held_position_monitor_bootstrap_check_lock = threading.Lock()
 _held_position_monitor_bootstrap_last_check = 0.0
 _day0_urgent_wake_pending = threading.Event()
@@ -370,6 +371,20 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
         and _held_position_monitor_handoff_pending.is_set()
     ):
         logger.info("%s deferred: held-position monitor reactor handoff pending", job_name)
+        return True
+
+    # SCOPE: only admission of a new EDLI reactor auction, and only while an
+    # exact capital-blocking cancel recovery tick is active. Held monitoring,
+    # exits, collateral refresh, and already-running work remain unaffected.
+    # DRAIN: the bounded live_tick recovery either applies current venue truth
+    # or yields to the higher-priority monitor writer. RESET: the recovery
+    # cycle's finally block clears this event on every return/exception; a
+    # process restart also initializes it clear.
+    if (
+        job_name == "edli_event_reactor"
+        and _capital_recovery_handoff_pending.is_set()
+    ):
+        logger.info("edli_event_reactor deferred: capital recovery handoff pending")
         return True
     if (
         job_name == "edli_event_reactor"
@@ -6701,17 +6716,42 @@ def _edli_command_recovery_cycle() -> None:
     if _defer_for_held_position_monitor("edli_command_recovery"):
         return
     from src.execution.command_recovery import (
+        capital_blocking_cancel_command_count,
         reconcile_unresolved_commands,
         scheduled_recovery_budget_seconds,
     )
+    from src.state.db import get_trade_connection_read_only
 
     invocation_deadline = (
         _time.monotonic() + scheduled_recovery_budget_seconds()
     )
-    summary = reconcile_unresolved_commands(
-        scope="live_tick",
-        deadline_monotonic=invocation_deadline,
-    )
+    capital_blockers = 0
+    try:
+        trade_conn = get_trade_connection_read_only()
+        try:
+            capital_blockers = capital_blocking_cancel_command_count(trade_conn)
+        finally:
+            trade_conn.close()
+    except Exception as exc:  # noqa: BLE001 - recovery still runs fail-closed.
+        logger.warning(
+            "edli_command_recovery: capital blocker read unavailable; "
+            "continuing without reactor handoff: %r",
+            exc,
+        )
+    if capital_blockers:
+        _capital_recovery_handoff_pending.set()
+        logger.info(
+            "edli_command_recovery: reserving reactor handoff for %d "
+            "capital-blocking cancels",
+            capital_blockers,
+        )
+    try:
+        summary = reconcile_unresolved_commands(
+            scope="live_tick",
+            deadline_monotonic=invocation_deadline,
+        )
+    finally:
+        _capital_recovery_handoff_pending.clear()
     _consume_edli_command_recovery_summary(
         summary,
         log_context="edli_command_recovery.live_tick",

@@ -24325,6 +24325,12 @@ def _capital_blocking_cancel_commands(conn: sqlite3.Connection) -> list[dict]:
     return rows
 
 
+def capital_blocking_cancel_command_count(conn: sqlite3.Connection) -> int:
+    """Return current cancel commands whose ambiguity can freeze capital."""
+
+    return len(_capital_blocking_cancel_commands(conn))
+
+
 def _identity_bound_submitting_candidates(
     conn: sqlite3.Connection,
     *,

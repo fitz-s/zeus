@@ -7519,9 +7519,13 @@ def test_edli_command_recovery_cycle_refreshes_allocator_after_mutation(monkeypa
     import src.execution.command_recovery as command_recovery
     import src.main as main_module
     import src.state.db as state_db
+    import src.state.portfolio as portfolio
 
     class FakeConn:
         closed = False
+
+        def set_progress_handler(self, *_args) -> None:
+            return None
 
         def close(self) -> None:
             self.closed = True
@@ -7533,6 +7537,13 @@ def test_edli_command_recovery_cycle_refreshes_allocator_after_mutation(monkeypa
     monkeypatch.setattr(main_module, "_settings_section", lambda name, default=None: {"enabled": True})
     monkeypatch.setattr(main_module, "get_mode", lambda: "live")
     monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda job_name: False)
+    monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 11)
+    monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 11)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_cancel_command_count",
+        lambda _conn: 0,
+    )
     monkeypatch.setattr(
         command_recovery,
         "reconcile_unresolved_commands",
@@ -7542,13 +7553,14 @@ def test_edli_command_recovery_cycle_refreshes_allocator_after_mutation(monkeypa
     )
     monkeypatch.setattr(
         state_db,
-        "get_trade_connection_with_world_required",
-        lambda write_class=None: fake_conn,
+        "get_trade_connection_read_only",
+        lambda: fake_conn,
     )
+    monkeypatch.setattr(portfolio, "load_runtime_open_portfolio", lambda _conn: {})
     monkeypatch.setattr(
         main_module,
         "_edli_refresh_global_allocator",
-        lambda conn: refresh_calls.append(conn) or {"configured": True},
+        lambda conn, **_kwargs: refresh_calls.append(conn) or {"configured": True},
     )
     monkeypatch.setattr(
         main_module,
@@ -7571,13 +7583,26 @@ def test_edli_command_recovery_runs_live_tick_during_active_redecision(monkeypat
     not starve behind continuous redecision activity."""
     import src.execution.command_recovery as command_recovery
     import src.main as main_module
+    import src.state.db as state_db
 
     calls: list[str] = []
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
 
     monkeypatch.setattr(main_module, "_settings_section", lambda name, default=None: {"enabled": True})
     monkeypatch.setattr(main_module, "get_mode", lambda: "live")
     monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda job_name: False)
+    monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 13)
+    monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 13)
     monkeypatch.setattr(main_module, "_edli_reactor_active", lambda: False)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_cancel_command_count",
+        lambda _conn: 0,
+    )
     monkeypatch.setattr(
         main_module,
         "_edli_redecision_screen_lock",
@@ -7592,6 +7617,78 @@ def test_edli_command_recovery_runs_live_tick_during_active_redecision(monkeypat
     main_module._edli_command_recovery_cycle()
 
     assert calls == ["live_tick"]
+
+
+def test_capital_cancel_recovery_reserves_reactor_then_resets(monkeypatch) -> None:
+    """Only the capital fast pass owns the reactor fairness handoff."""
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
+
+    observed: list[tuple[str, bool]] = []
+    main_module._capital_recovery_handoff_pending.clear()
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 9)
+    monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 9)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_cancel_command_count",
+        lambda _conn: 3,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: observed.append(
+            (
+                str(kwargs.get("scope")),
+                main_module._capital_recovery_handoff_pending.is_set(),
+            )
+        )
+        or {"scanned": 3, "advanced": 0},
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert observed == [("live_tick", True)]
+    assert not main_module._capital_recovery_handoff_pending.is_set()
+
+
+def test_capital_cancel_recovery_resets_handoff_after_failure(monkeypatch) -> None:
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
+
+    main_module._capital_recovery_handoff_pending.clear()
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_cancel_command_count",
+        lambda _conn: 1,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("apply failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="apply failed"):
+        main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert not main_module._capital_recovery_handoff_pending.is_set()
 
 
 def test_redecision_screen_progresses_while_entry_reactor_is_active(monkeypatch) -> None:
@@ -9623,6 +9720,41 @@ def test_entry_reactor_monitor_defer_contract_is_effective(monkeypatch) -> None:
     assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
     handoff_pending.set()
     assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+
+
+def test_capital_recovery_handoff_defers_only_entry_reactor(monkeypatch) -> None:
+    import threading
+
+    import src.main as main_module
+
+    bootstrap_complete = threading.Event()
+    bootstrap_complete.set()
+    capital_handoff = threading.Event()
+    capital_handoff.set()
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_handoff_pending",
+        threading.Event(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_periodic_held_position_monitor_fairness_debt",
+        threading.Event(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_bootstrap_complete",
+        bootstrap_complete,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_capital_recovery_handoff_pending",
+        capital_handoff,
+    )
+
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+    assert main_module._defer_for_held_position_monitor("live_health_composite") is False
+    assert main_module._defer_for_held_position_monitor("edli_command_recovery") is False
 
 
 def test_monitor_bootstrap_scopes_defer_to_entry_competitors(monkeypatch) -> None:
