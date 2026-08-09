@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-08
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-08; last_reused=2026-08-08
+# Last reused/audited: 2026-08-09
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-09; last_reused=2026-08-09
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -177,6 +177,75 @@ def test_durable_exact_completion_debt_gets_one_bounded_fairness_turn(monkeypatc
         assert reactor._claim_durable_exact_held_sell_completion_turn() is True
     finally:
         reactor._DURABLE_EXACT_HELD_COMPLETION_SEEN.clear()
+
+
+def test_durable_fallback_cut_binds_current_exact_request(monkeypatch):
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="durable-fallback-held",
+        family=("Guangzhou", "2026-08-09", "high"),
+        probability_content_identity="q-durable-fallback",
+        probability_observed_at="2026-08-09T10:32:20+00:00",
+        held_token_id="held-token-durable-fallback",
+        held_best_bid=0.001,
+        bid_observed_at="2026-08-09T10:32:20+00:00",
+        schema_version=4,
+        book_state="NO_EXECUTABLE_BOOK",
+    )
+    wake = SimpleNamespace(held_sell_reauction_requests=(request,))
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_for_reason",
+        lambda *_args, **_kwargs: (wake,),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "held_sell_reauction_requests_completed",
+        lambda _requests: False,
+    )
+
+    durable_requests = reactor._durable_exact_held_sell_completion_requests()
+
+    assert durable_requests == (request,)
+    cut_requests = reactor._held_sell_completion_cut_requests(
+        completion_wake=False,
+        producer_requests=(),
+        durable_turn_claimed=True,
+        durable_requests=durable_requests,
+    )
+    assert cut_requests == (request,)
+    assert reactor._held_sell_completion_cut_requests(
+        completion_wake=False,
+        producer_requests=(),
+        durable_turn_claimed=False,
+        durable_requests=durable_requests,
+    ) == ()
+    coverage = SimpleNamespace(
+        position_id=request.position_id,
+        token_id=request.held_token_id,
+        status="EXCLUDED",
+        book_state="NO_EXECUTABLE_BOOK",
+        probability_content_identity="q-current-global-cut",
+        selection_epoch_identity="epoch-current-global-cut",
+        sell_book_witness_identity="book-current-global-cut",
+    )
+    receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=cut_requests,
+        result=ReactorResult(
+            global_held_sell_completion_cuts=[
+                GlobalHeldSellCompletionCut(
+                    holding_coverage=(coverage,),
+                    economic_cut_completed=False,
+                    outcome="INCOMPLETE",
+                )
+            ]
+        ),
+    )
+    assert len(receipts) == 1
+    assert receipts[0].status == "NO_EXECUTABLE_BOOK"
+    assert receipts[0].attempt_identity == request.attempt_identity
 
 
 def test_completion_risk_bypass_is_bound_to_reduce_only_mode():

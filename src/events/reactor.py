@@ -7314,6 +7314,57 @@ def _durable_exact_held_sell_completion_pending() -> bool:
         return False
 
 
+def _durable_exact_held_sell_completion_requests() -> tuple[object, ...]:
+    """Read the exact requests that authorize a durable fallback cut.
+
+    SCOPE: current queued exact held-SELL debt only. DRAIN: each request's
+    immutable terminal receipt. RESET: completed requests disappear on the
+    next queue read, so stale debt cannot reserve later auction turns.
+    """
+
+    try:
+        from src.runtime.reactor_wake import (
+            GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+            held_sell_reauction_requests_completed,
+            reactor_wakes_for_reason,
+        )
+
+        return tuple(
+            dict.fromkeys(
+                request
+                for wake in reactor_wakes_for_reason(
+                    GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+                    max_wakes=100,
+                    fail_on_error=True,
+                )
+                for request in wake.held_sell_reauction_requests
+                if not held_sell_reauction_requests_completed((request,))
+            )
+        )
+    except (OSError, TypeError, ValueError):
+        logging.getLogger("zeus.events.reactor").warning(
+            "durable held SELL completion requests unreadable; retaining debt",
+            exc_info=True,
+        )
+        return ()
+
+
+def _held_sell_completion_cut_requests(
+    *,
+    completion_wake: bool,
+    producer_requests: tuple[object, ...],
+    durable_turn_claimed: bool,
+    durable_requests: tuple[object, ...],
+) -> tuple[object, ...]:
+    """Bind one global cut to the exact debt that authorized reduce-only mode."""
+
+    if completion_wake and producer_requests:
+        return producer_requests
+    if durable_turn_claimed:
+        return durable_requests
+    return ()
+
+
 def _claim_durable_exact_held_sell_completion_turn() -> bool:
     """Reserve one ordinary auction turn per durable exact-debt generation.
 
@@ -7505,6 +7556,11 @@ def run_edli_event_reactor_cycle(
 
     durable_exact_held_completion_pending = (
         _durable_exact_held_sell_completion_pending()
+    )
+    durable_exact_held_completion_requests = (
+        _durable_exact_held_sell_completion_requests()
+        if durable_exact_held_completion_pending
+        else ()
     )
     held_sell_completion_cycle = bool(
         (completion_wake and producer_held_sell_reauction_requests)
@@ -7977,6 +8033,7 @@ def run_edli_event_reactor_cycle(
             and forecast_posterior_wake
             and not producer_wake_event_ids
             and not producer_held_sell_reauction_requests
+            and not durable_exact_held_completion_requests
         )
         if paused_forecast_carrier_completion:
             # SCOPE: only no-held paused forecast-carrier completion. DRAIN:
@@ -8129,8 +8186,23 @@ def run_edli_event_reactor_cycle(
         durable_exact_held_completion = (
             _claim_durable_exact_held_sell_completion_turn()
         )
+        if (
+            durable_exact_held_completion
+            and not durable_exact_held_completion_requests
+        ):
+            durable_exact_held_completion_requests = (
+                _durable_exact_held_sell_completion_requests()
+            )
+        held_sell_completion_cut_requests = (
+            _held_sell_completion_cut_requests(
+                completion_wake=completion_wake,
+                producer_requests=producer_held_sell_reauction_requests,
+                durable_turn_claimed=durable_exact_held_completion,
+                durable_requests=durable_exact_held_completion_requests,
+            )
+        )
         active_held_sell_completion_cycle = bool(
-            (completion_wake and producer_held_sell_reauction_requests)
+            held_sell_completion_cut_requests
             or durable_exact_held_completion
         )
         (
@@ -8226,9 +8298,7 @@ def run_edli_event_reactor_cycle(
             ),
             paused_entry_wake_gate=lambda: _paused_entry_wake_should_park(
                 pause_reason=_entry_reactor_park_reason(conn),
-                held_sell_reauction_requests=(
-                    producer_held_sell_reauction_requests if completion_wake else ()
-                ),
+                held_sell_reauction_requests=held_sell_completion_cut_requests,
                 held_sell_request_exposure_provider=(
                     held_sell_request_exposure_provider
                 ),
@@ -8274,7 +8344,7 @@ def run_edli_event_reactor_cycle(
             ),
         )
         terminal_no_book_completion = False
-        if producer_held_sell_reauction_requests:
+        if held_sell_completion_cut_requests:
             from src.runtime.reactor_wake import (
                 NO_EXECUTABLE_BOOK,
                 held_sell_reauction_requests_completed,
@@ -8282,7 +8352,7 @@ def run_edli_event_reactor_cycle(
             )
 
             held_sell_reauction_receipts = _held_sell_reauction_receipts_from_global_cut(
-                requests=producer_held_sell_reauction_requests,
+                requests=held_sell_completion_cut_requests,
                 result=_rr,
             )
             if held_sell_reauction_receipts and not persist_held_sell_reauction_receipts(
@@ -8295,7 +8365,7 @@ def run_edli_event_reactor_cycle(
             # partition, and receipt-write failures; this is deliberately not
             # folded into the generic monitor HOLD reason.
             requests_completed = held_sell_reauction_requests_completed(
-                producer_held_sell_reauction_requests
+                held_sell_completion_cut_requests
             )
             if not requests_completed:
                 completion_wake_needs_retry = True
