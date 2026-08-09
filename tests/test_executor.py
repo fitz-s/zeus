@@ -2204,6 +2204,11 @@ class TestExecutor:
         (False, True),
         ids=("typed-authority-only", "typed-authority-with-audit-projection"),
     )
+    @pytest.mark.parametrize(
+        "replace_nominal_class",
+        (False, True),
+        ids=("stable-module-class", "reloaded-module-class"),
+    )
     def test_taker_exit_revalidates_real_typed_authority_at_final_sdk_seam(
         self,
         monkeypatch,
@@ -2211,9 +2216,10 @@ class TestExecutor:
         min_tick,
         expected_limit,
         include_certificate_projection,
+        replace_nominal_class,
     ):
         from src.engine import event_reactor_adapter as era
-        from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+        from src.execution import exit_lifecycle
         from src.execution.executor import marketable_sell_certificate_identity
         from tests.integration.test_w3_solve_seam_g3 import (
             _adapter_sell_actuation,
@@ -2249,10 +2255,16 @@ class TestExecutor:
             },
             captured_at_utc=datetime.now(timezone.utc),
         )
-        authority = GlobalSellExecutionAuthority.from_current(
+        authority = exit_lifecycle.GlobalSellExecutionAuthority.from_current(
             actuation=actuation,
             jit_candidate=jit,
         )
+        if replace_nominal_class:
+            monkeypatch.setattr(
+                exit_lifecycle,
+                "GlobalSellExecutionAuthority",
+                type("GlobalSellExecutionAuthority", (), {}),
+            )
         certificate = {
             "action": "SELL",
             "position_id": candidate.position_id,
