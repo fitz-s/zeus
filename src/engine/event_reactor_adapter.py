@@ -32351,7 +32351,17 @@ def _prepare_current_global_probability_family(
                 }
             )
         else:
-            if fast_residual_conditioning is not None:
+            if (
+                fast_residual_conditioning is not None
+                and post_local_incomplete_monitor_authority
+            ):
+                # Once the local day is over there is no remaining weather
+                # interval to price.  A qualified same-station residual carrier
+                # may then describe the still-unpublished settlement value for
+                # reduce-only redecision.  During the target day it must not
+                # replace the remaining-window random variable: doing so freezes
+                # q between fast-observation updates even as wall clock, current
+                # temperature, and the executable book move.
                 components = _replacement_global_probability_components(
                     bundle,
                     candidates=family.candidates,
@@ -32372,14 +32382,18 @@ def _prepare_current_global_probability_family(
                         "_edli_day0_q_mode": "fast_residual_conditioned_replacement",
                     }
                 )
-            elif post_local_incomplete_monitor_authority:
+            else:
                 # Wall-clock completion does not make the information set
                 # complete.  The interval after the latest authorized
                 # settlement-channel observation and before local midnight has
                 # happened physically, but remains unobserved by that channel.
                 # Held-position redecision must keep pricing that causal tail;
                 # only the complete final-daily proof may upgrade it to an
-                # exact settlement simplex.  Entry authority remains blocked.
+                # exact settlement simplex.  During the local day this same
+                # builder continuously shortens the stochastic interval and
+                # consumes the current physical frontier; fast residual evidence
+                # is boundary/time evidence, never a frozen full-day action q.
+                # Entry authority remains blocked after local completion.
                 components = _day0_remaining_global_probability_components(
                     event,
                     forecast_conn=forecast_conn,
@@ -32399,30 +32413,14 @@ def _prepare_current_global_probability_family(
                         "_edli_q_source": "day0_remaining_day",
                         "_edli_day0_q_mode": (
                             "post_local_provisional_tail"
-                            if provisional_day0_observation
-                            else "post_local_incomplete_settlement_tail"
+                            if post_local_incomplete_monitor_authority
+                            and provisional_day0_observation
+                            else (
+                                "post_local_incomplete_settlement_tail"
+                                if post_local_incomplete_monitor_authority
+                                else "remaining_day"
+                            )
                         ),
-                    }
-                )
-            else:
-                components = _day0_remaining_global_probability_components(
-                    event,
-                    forecast_conn=forecast_conn,
-                    calibration_conn=day0_observation_conn,
-                    family=family,
-                    payload=payload,
-                    decision_time=decision_time,
-                    snapshot=day0_snapshot,
-                )
-                probability_authority = (
-                    "day0_remaining_day_global_probability_v1"
-                )
-                payload.update(
-                    {
-                        "probability_authority": probability_authority,
-                        "q_source": "day0_remaining_day",
-                        "_edli_q_source": "day0_remaining_day",
-                        "_edli_day0_q_mode": "remaining_day",
                     }
                 )
     elif current_day0_payload is not None:

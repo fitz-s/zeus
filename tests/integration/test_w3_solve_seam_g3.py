@@ -5684,7 +5684,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     forecast.close()
 
 
-def test_fast_residual_day0_bundle_drives_entry_and_held_redecision_q(
+def test_fast_residual_day0_bundle_cannot_replace_remaining_window_q(
     monkeypatch,
 ):
     import src.data.replacement_forecast_bundle_reader as bundle_reader
@@ -5926,12 +5926,22 @@ def test_fast_residual_day0_bundle_drives_entry_and_held_redecision_q(
         "_global_day0_execution_payload",
         current_observation_payload,
     )
+    remaining_q = (0.3, 0.6, 0.1)
+    remaining_calls: list[_dt.datetime] = []
+
+    def remaining_components(*_args, **kwargs):
+        remaining_calls.append(kwargs["decision_time"])
+        matrix = np.asarray([remaining_q] * 400, dtype=float)
+        return (
+            matrix,
+            np.asarray(remaining_q, dtype=float),
+            era._GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS,
+        )
+
     monkeypatch.setattr(
         era,
         "_day0_remaining_global_probability_components",
-        lambda *_args, **_kwargs: pytest.fail(
-            "fast residual posterior must be the point-q authority"
-        ),
+        remaining_components,
     )
 
     base_event = _global_day0_scope_event(
@@ -5976,26 +5986,33 @@ def test_fast_residual_day0_bundle_drives_entry_and_held_redecision_q(
     )
 
     witness = prepared.probability_witness
-    assert witness.yes_point_q.tolist() == pytest.approx(list(fast_q))
-    assert witness.yes_q_samples[0].tolist() == pytest.approx(list(fast_q))
+    assert remaining_calls == [
+        _dt.datetime(2026, 7, 11, 10, 0, tzinfo=_dt.timezone.utc)
+    ]
+    assert witness.yes_point_q.tolist() == pytest.approx(list(remaining_q))
+    assert witness.yes_q_samples[0].tolist() == pytest.approx(list(remaining_q))
     assert witness.band_basis == (
-        era._GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_BAND_BASIS
+        era._GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
     )
-    assert witness.posterior_identity_hash == bundle.posterior_identity_hash
+    assert witness.posterior_identity_hash != bundle.posterior_identity_hash
+    assert day0_payload["_edli_global_day0_binding"][
+        "probability_base_identity"
+    ] == bundle.posterior_identity_hash
     assert prepared.candidate_payoff_q_lcb_caps == ()
+    assert day0_payload["_edli_global_day0_binding"][
+        "statistical_probability_conditioning"
+    ] == conditioning
     assert day0_payload["probability_authority"] == (
-        "day0_conditioned_replacement_global_probability_v1"
+        "day0_remaining_day_global_probability_v1"
     )
-    assert day0_payload["q_source"] == "day0_conditioned_replacement"
-    assert day0_payload["_edli_day0_q_mode"] == (
-        "fast_residual_conditioned_replacement"
-    )
-    conditioned_action = {
+    assert day0_payload["q_source"] == "day0_remaining_day"
+    assert day0_payload["_edli_day0_q_mode"] == "remaining_day"
+    remaining_action = {
         **day0_payload,
         "event_type": "DAY0_EXTREME_UPDATED",
     }
-    assert era._uses_replacement_probability_authority(conditioned_action)
-    assert not era._day0_maker_only_required(conditioned_action)
+    assert not era._uses_replacement_probability_authority(remaining_action)
+    assert era._day0_maker_only_required(remaining_action)
     forecast.close()
     observations.close()
 
