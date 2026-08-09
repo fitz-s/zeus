@@ -993,7 +993,8 @@ class GlobalHeldSellCompletionCut:
     ``holding_coverage`` is the exact selection partition, not a later
     process-cache lookup.  An ACTUATED outcome names the held SELL that crossed
     the venue boundary; a CAPITAL_REJECTED outcome names a completed HOLD/CASH
-    cut.  INCOMPLETE cuts are evidence only and must not terminalize a wake.
+    cut. An INCOMPLETE cut is evidence only, except that exact fresh V4
+    ``NO_EXECUTABLE_BOOK`` coverage may terminalize that one immutable attempt.
     """
 
     holding_coverage: tuple[object, ...]
@@ -6992,7 +6993,10 @@ def _held_sell_reauction_receipts_from_global_cut(
     be inferred as an ACTUATED or CAPITAL_REJECTED completion here.
     """
 
-    from src.runtime.reactor_wake import HeldSellReauctionReceipt
+    from src.runtime.reactor_wake import (
+        NO_EXECUTABLE_BOOK,
+        HeldSellReauctionReceipt,
+    )
 
     receipts: list[HeldSellReauctionReceipt] = []
     for request in requests:
@@ -7034,8 +7038,35 @@ def _held_sell_reauction_receipts_from_global_cut(
             sell_book_witness_identity = str(
                 getattr(coverage, "sell_book_witness_identity", "") or ""
             )
+            coverage_status = str(getattr(coverage, "status", "") or "")
+            coverage_book_state = str(
+                getattr(coverage, "book_state", "") or ""
+            ).upper()
             if (
-                str(getattr(coverage, "status", "") or "") != "EVALUATED"
+                request_schema_version == 4
+                and coverage_status == "EXCLUDED"
+                and coverage_book_state == NO_EXECUTABLE_BOOK
+                and selection_epoch_identity
+                and sell_book_witness_identity
+            ):
+                receipts.append(
+                    HeldSellReauctionReceipt(
+                        **receipt_identity,
+                        schema_version=request_schema_version,
+                        scope_identity=str(
+                            getattr(request, "scope_identity", "") or ""
+                        ),
+                        book_state=NO_EXECUTABLE_BOOK,
+                        status=NO_EXECUTABLE_BOOK,
+                        reason="GLOBAL_AUCTION_CURRENT_HOLDING_NO_EXECUTABLE_BOOK",
+                        selection_epoch_identity=selection_epoch_identity,
+                        sell_book_witness_identity=sell_book_witness_identity,
+                        answered_probability_content_identity=coverage_q,
+                    )
+                )
+                break
+            if (
+                coverage_status != "EVALUATED"
                 or not selection_epoch_identity
                 or not sell_book_witness_identity
             ):
@@ -7293,7 +7324,10 @@ def _claim_durable_exact_held_sell_completion_turn() -> bool:
 
 
 def _settle_global_auction_monitor_fairness(
-    *, completion_due_at_start: bool, result: object
+    *,
+    completion_due_at_start: bool,
+    result: object,
+    terminal_no_book_completion: bool = False,
 ) -> bool:
     """Clear a prior monitor preemption only after useful auction completion."""
 
@@ -7302,10 +7336,10 @@ def _settle_global_auction_monitor_fairness(
     completed = int(
         getattr(result, "global_auction_completed_non_cancelled", 0) or 0
     )
-    if completed > 0:
+    if completed > 0 or terminal_no_book_completion:
         _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
         logging.getLogger("zeus.events.reactor").info(
-            "global auction completion debt cleared after economic cut"
+            "global auction completion debt cleared after terminal current cut"
         )
         return True
     _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
@@ -8221,8 +8255,10 @@ def run_edli_event_reactor_cycle(
                 urgent_day0_pending=urgent_day0_pending,
             ),
         )
+        terminal_no_book_completion = False
         if producer_held_sell_reauction_requests:
             from src.runtime.reactor_wake import (
+                NO_EXECUTABLE_BOOK,
                 held_sell_reauction_requests_completed,
                 persist_held_sell_reauction_receipts,
             )
@@ -8240,13 +8276,23 @@ def run_edli_event_reactor_cycle(
             # receipt.  Keep the exact durable debt queued across witness,
             # partition, and receipt-write failures; this is deliberately not
             # folded into the generic monitor HOLD reason.
-            if not held_sell_reauction_requests_completed(
+            requests_completed = held_sell_reauction_requests_completed(
                 producer_held_sell_reauction_requests
-            ):
+            )
+            if not requests_completed:
                 completion_wake_needs_retry = True
+            terminal_no_book_completion = bool(
+                requests_completed
+                and held_sell_reauction_receipts
+                and any(
+                    getattr(receipt, "status", "") == NO_EXECUTABLE_BOOK
+                    for receipt in held_sell_reauction_receipts
+                )
+            )
         completion_satisfied = _settle_global_auction_monitor_fairness(
             completion_due_at_start=_monitor_completion_due_at_start,
             result=_rr,
+            terminal_no_book_completion=terminal_no_book_completion,
         )
         completion_wake_needs_retry = completion_wake_needs_retry or (
             completion_wake and not completion_satisfied

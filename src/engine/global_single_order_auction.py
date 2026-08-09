@@ -181,6 +181,35 @@ def global_sell_book_witness_identity(curve: object) -> str:
     return digest.hexdigest()
 
 
+def global_sell_book_unavailability_witness_identity(
+    *,
+    asset_state: tuple[str, ...],
+    book_epoch_identity: str,
+    native_bid_level_count: int,
+) -> str:
+    """Bind one fresh token-level no-SELL-book fact to its complete epoch."""
+
+    state = tuple(str(value) for value in asset_state)
+    epoch_identity = str(book_epoch_identity or "").strip()
+    if (
+        len(state) < 7
+        or not epoch_identity
+        or state[5] not in {"EXECUTABLE", "NO_ASK", "VENUE_NOT_EXECUTABLE"}
+        or native_bid_level_count != 0
+        or not all(state[index].strip() for index in (0, 1, 2, 3, 4, 6))
+    ):
+        raise ValueError("GLOBAL_SELL_BOOK_UNAVAILABILITY_WITNESS_INCOMPLETE")
+    digest = hashlib.sha256()
+    digest.update(epoch_identity.encode("utf-8"))
+    digest.update(b"\x1f")
+    digest.update(str(native_bid_level_count).encode("utf-8"))
+    digest.update(b"\x1f")
+    for value in state:
+        digest.update(value.encode("utf-8"))
+        digest.update(b"\x1f")
+    return digest.hexdigest()
+
+
 @dataclass(frozen=True)
 class PreparedGlobalAuctionResult:
     """One selection result plus the event that may own later actuation."""
@@ -861,9 +890,8 @@ def select_prepared_global_auction(
             )
 
         candidates = []
-        book_status_by_key = {
-            tuple(state[:5]): str(state[5])
-            for state in book_epoch.asset_states
+        book_state_row_by_key = {
+            tuple(state[:5]): tuple(state) for state in book_epoch.asset_states
         }
         for asset in book_epoch.assets:
             probability = probability_witnesses.get(asset.family_key)
@@ -967,7 +995,7 @@ def select_prepared_global_auction(
                 )
                 if asset is None:
                     binding = holding_binding(holding, probability)
-                    book_status = book_status_by_key.get(
+                    book_state_row = book_state_row_by_key.get(
                         (
                             family_key,
                             str(binding.bin_id),
@@ -975,6 +1003,20 @@ def select_prepared_global_auction(
                             str(holding.side),
                             str(holding.token_id),
                         )
+                    )
+                    book_status = (
+                        str(book_state_row[5]) if book_state_row is not None else None
+                    )
+                    native_asset = book_epoch.asset_by_key.get(
+                        (
+                            family_key,
+                            str(binding.bin_id),
+                            str(holding.side),
+                            str(holding.token_id),
+                        )
+                    )
+                    native_bid_level_count = len(
+                        tuple(getattr(native_asset, "bid_levels", ()) or ())
                     )
                     reason = (
                         f"SELL_{book_status}"
@@ -994,6 +1036,22 @@ def select_prepared_global_auction(
                                 "STALE"
                                 if book_status == "VENUE_METADATA_STALE"
                                 else "NO_EXECUTABLE_BOOK"
+                            ),
+                            sell_book_witness_identity=(
+                                global_sell_book_unavailability_witness_identity(
+                                    asset_state=book_state_row,
+                                    book_epoch_identity=book_epoch.witness_identity,
+                                    native_bid_level_count=native_bid_level_count,
+                                )
+                                if book_state_row is not None
+                                and book_status
+                                in {
+                                    "EXECUTABLE",
+                                    "NO_ASK",
+                                    "VENUE_NOT_EXECUTABLE",
+                                }
+                                and native_bid_level_count == 0
+                                else None
                             ),
                         )
                     )

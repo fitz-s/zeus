@@ -32,6 +32,7 @@ POSITION_NO_LONGER_EXPOSED = "POSITION_NO_LONGER_EXPOSED"
 SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN = (
     "SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN"
 )
+NO_EXECUTABLE_BOOK = "NO_EXECUTABLE_BOOK"
 SELL_OBLIGATION_ENDED_BY_CANONICAL_CHAIN_ZERO = (
     "SELL_OBLIGATION_ENDED_BY_CANONICAL_CHAIN_ZERO"
 )
@@ -1539,9 +1540,20 @@ def _held_sell_reauction_receipt_from_payload(
         HELD_SELL_REAUCTION_V3,
         HELD_SELL_REAUCTION_V4,
     } and (
-        receipt.status not in {"ACTUATED", "CAPITAL_REJECTED"}
+        receipt.status
+        not in {"ACTUATED", "CAPITAL_REJECTED", NO_EXECUTABLE_BOOK}
         or not receipt.scope_identity
-        or receipt.book_state != "EXECUTABLE"
+        or (
+            receipt.status == NO_EXECUTABLE_BOOK
+            and (
+                receipt.schema_version != HELD_SELL_REAUCTION_V4
+                or receipt.book_state != NO_EXECUTABLE_BOOK
+            )
+        )
+        or (
+            receipt.status != NO_EXECUTABLE_BOOK
+            and receipt.book_state != "EXECUTABLE"
+        )
         or not receipt.answered_probability_content_identity
     ):
         return None
@@ -1562,6 +1574,13 @@ def _held_sell_reauction_receipt_from_payload(
             receipt.selection_epoch_identity,
             receipt.sell_book_witness_identity,
             receipt.capital_objective_proof,
+        )
+    ):
+        return None
+    if receipt.status == NO_EXECUTABLE_BOOK and not all(
+        (
+            receipt.selection_epoch_identity,
+            receipt.sell_book_witness_identity,
         )
     ):
         return None
@@ -1924,9 +1943,24 @@ def persist_held_sell_reauction_receipts(
                         HELD_SELL_REAUCTION_V4,
                     }
                     and (
-                        receipt.status not in {"ACTUATED", "CAPITAL_REJECTED"}
+                        receipt.status
+                        not in {
+                            "ACTUATED",
+                            "CAPITAL_REJECTED",
+                            NO_EXECUTABLE_BOOK,
+                        }
                         or not receipt.scope_identity
-                        or receipt.book_state != "EXECUTABLE"
+                        or (
+                            receipt.status == NO_EXECUTABLE_BOOK
+                            and (
+                                receipt.schema_version != HELD_SELL_REAUCTION_V4
+                                or receipt.book_state != NO_EXECUTABLE_BOOK
+                            )
+                        )
+                        or (
+                            receipt.status != NO_EXECUTABLE_BOOK
+                            and receipt.book_state != "EXECUTABLE"
+                        )
                         or not receipt.answered_probability_content_identity
                     )
                 )
@@ -1948,6 +1982,13 @@ def persist_held_sell_reauction_receipts(
                         receipt.selection_epoch_identity
                         and receipt.sell_book_witness_identity
                         and receipt.capital_objective_proof
+                    )
+                )
+                or (
+                    receipt.status == NO_EXECUTABLE_BOOK
+                    and not (
+                        receipt.selection_epoch_identity
+                        and receipt.sell_book_witness_identity
                     )
                 )
             ):
@@ -2126,8 +2167,24 @@ def held_sell_reauction_requests_completed(
                             SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
                         }
                         and (
-                            receipt.status not in {"ACTUATED", "CAPITAL_REJECTED"}
+                            receipt.status
+                            not in {
+                                "ACTUATED",
+                                "CAPITAL_REJECTED",
+                                NO_EXECUTABLE_BOOK,
+                            }
                             or not receipt.answered_probability_content_identity
+                            or (
+                                receipt.status == NO_EXECUTABLE_BOOK
+                                and (
+                                    request.schema_version
+                                    != HELD_SELL_REAUCTION_V4
+                                    or receipt.book_state
+                                    != NO_EXECUTABLE_BOOK
+                                    or not receipt.selection_epoch_identity
+                                    or not receipt.sell_book_witness_identity
+                                )
+                            )
                         )
                     )
                 )

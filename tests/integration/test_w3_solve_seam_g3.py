@@ -18195,6 +18195,13 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
         for row in book_selected.holding_coverage
         if row.status == "EXCLUDED"
     } == {"SELL_BOOK_NO_BID"}
+    missing_book_coverage = next(
+        row
+        for row in book_selected.holding_coverage
+        if row.position_id == "position-missing-book"
+    )
+    assert missing_book_coverage.book_state == "NO_EXECUTABLE_BOOK"
+    assert len(missing_book_coverage.sell_book_witness_identity or "") == 64
     sell_evaluations = {
         evaluation.position_id
         for evaluation in book_selected.decision.candidate_evaluations

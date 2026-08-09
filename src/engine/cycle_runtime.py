@@ -7607,8 +7607,8 @@ def execute_monitoring_phase(
                 should_exit = False
                 # SCOPE: this exact position-scoped global reauction debt.
                 # DRAIN: the committed V4 wake and its terminal global receipt.
-                # RESET: ACTUATED/CAPITAL_REJECTED/POSITION_NO_LONGER_EXPOSED
-                # receipt for this immutable request generation.
+                # RESET: ACTUATED/CAPITAL_REJECTED/NO_EXECUTABLE_BOOK or
+                # POSITION_NO_LONGER_EXPOSED receipt for this immutable attempt.
                 exit_reason = "GLOBAL_REAUCTION_PENDING"
                 completion_validations = [
                     (

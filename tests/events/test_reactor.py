@@ -5987,6 +5987,116 @@ def test_v3_excluded_or_unknown_q_global_cut_stays_pending(monkeypatch):
     ) == ()
 
 
+def test_v4_no_executable_book_cut_completes_only_exact_attempt(tmp_path):
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    common = {
+        "position_id": "v4-no-book",
+        "family": ("Karachi", "2026-08-09", "high"),
+        "held_token_id": "token-v4-no-book",
+        "schema_version": 4,
+        "generation": "v4-no-book-generation",
+    }
+    no_book = reactor_wake.make_held_sell_reauction_request(
+        **common,
+        probability_content_identity="q-v4-no-book",
+        probability_observed_at="2026-08-09T12:00:00+00:00",
+        held_best_bid=0.0,
+        bid_observed_at="2026-08-09T12:00:00+00:00",
+        book_state="NO_EXECUTABLE_BOOK",
+    )
+    fresh_book = reactor_wake.make_held_sell_reauction_request(
+        **common,
+        scope_identity=no_book.scope_identity,
+        probability_content_identity="q-v4-fresh-book",
+        probability_observed_at="2026-08-09T12:01:00+00:00",
+        held_best_bid=0.21,
+        bid_observed_at="2026-08-09T12:01:00+00:00",
+        book_state="EXECUTABLE",
+    )
+    coverage = SimpleNamespace(
+        position_id=no_book.position_id,
+        token_id=no_book.held_token_id,
+        status="EXCLUDED",
+        book_state="NO_EXECUTABLE_BOOK",
+        probability_content_identity="q-cut-current",
+        selection_epoch_identity="epoch-v4-no-book",
+        sell_book_witness_identity="no-book-witness-v4",
+    )
+    result = ReactorResult(
+        global_held_sell_completion_cuts=[
+            GlobalHeldSellCompletionCut(
+                holding_coverage=(coverage,),
+                economic_cut_completed=False,
+                outcome="INCOMPLETE",
+            )
+        ]
+    )
+
+    receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(no_book,), result=result
+    )
+    assert len(receipts) == 1
+    assert receipts[0].status == "NO_EXECUTABLE_BOOK"
+    assert receipts[0].book_state == "NO_EXECUTABLE_BOOK"
+    assert receipts[0].answered_probability_content_identity == "q-cut-current"
+
+    path = tmp_path / "wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        held_sell_reauction_requests=(no_book,),
+    )
+    assert reactor_wake.persist_held_sell_reauction_receipts(receipts, path=path)
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        (no_book,), path=path
+    )
+    assert not reactor_wake.held_sell_reauction_requests_completed(
+        (fresh_book,), path=path
+    )
+
+
+@pytest.mark.parametrize("book_state", ("UNKNOWN", "STALE"))
+def test_v4_unknown_or_stale_book_cut_cannot_complete_attempt(book_state):
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id=f"v4-{book_state.lower()}",
+        family=("Karachi", "2026-08-09", "high"),
+        probability_content_identity="q-v4-current",
+        held_token_id=f"token-v4-{book_state.lower()}",
+        held_best_bid=None,
+        bid_observed_at="",
+        schema_version=4,
+        book_state=book_state,
+    )
+    coverage = SimpleNamespace(
+        position_id=request.position_id,
+        token_id=request.held_token_id,
+        status="EXCLUDED",
+        book_state=book_state,
+        probability_content_identity="q-v4-current",
+        selection_epoch_identity="epoch-v4-incomplete",
+        sell_book_witness_identity="",
+    )
+    result = ReactorResult(
+        global_held_sell_completion_cuts=[
+            GlobalHeldSellCompletionCut(
+                holding_coverage=(coverage,),
+                economic_cut_completed=False,
+                outcome="INCOMPLETE",
+            )
+        ]
+    )
+
+    assert reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,), result=result
+    ) == ()
+
+
 def test_held_sell_other_winner_never_emits_actuated_receipt():
     from src.events import reactor
     from src.runtime.reactor_wake import make_held_sell_reauction_request
@@ -6479,6 +6589,23 @@ def test_completion_wake_recovers_debt_after_process_restart():
             is False
         )
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
+def test_exact_v4_no_book_completion_discharges_monitor_fairness_debt():
+    from types import SimpleNamespace
+
+    from src.events import reactor
+
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    try:
+        assert reactor._settle_global_auction_monitor_fairness(
+            completion_due_at_start=True,
+            result=SimpleNamespace(global_auction_completed_non_cancelled=0),
+            terminal_no_book_completion=True,
+        )
+        assert not reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
     finally:
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
