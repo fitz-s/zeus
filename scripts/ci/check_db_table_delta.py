@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-# Created: 2026-05-26
-# Last reused or audited: 2026-05-26
-# Authority basis: architecture/topology_enforcement.yaml#blocking_structural:db_table_delta_gate
-#                  architecture/db_table_ownership.yaml
-#                  docs/operations/current/plans/ci_topology_refactor_refined.md Phase D
+# Lifecycle: created=2026-05-26; last_reviewed=2026-08-08; last_reused=2026-08-08
+# Purpose: Reject a new database table without declared canonical ownership.
+# Reuse: Inspect the changed schema diff and `architecture/db_table_ownership.yaml` before relying on its verdict.
 """
 Detect new DB table names introduced by the PR and require matching
 ownership entries in architecture/db_table_ownership.yaml.
@@ -225,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--repo-root", default=str(REPO_ROOT))
     p.add_argument("--changed-files", nargs="*", default=None)
-    p.add_argument("--base", default="origin/main")
+    p.add_argument("--base", default="origin/live")
     p.add_argument("--head", default="HEAD")
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)

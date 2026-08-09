@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-# Created: 2026-05-26
-# Last reused or audited: 2026-05-26
-# Authority basis: architecture/topology_enforcement.yaml#blocking_structural:source_rationale_delta_gate
-#                  architecture/source_rationale.yaml
-#                  docs/operations/current/plans/ci_topology_refactor_refined.md Phase D
+# Lifecycle: created=2026-05-26; last_reviewed=2026-08-08; last_reused=2026-08-08
+# Purpose: Reject a new external source/provider without a declared source-rationale role.
+# Reuse: Inspect the changed diff and `architecture/source_rationale.yaml` before relying on its verdict.
 """
 Detect new external sources/providers introduced by the PR and require
 matching entries in architecture/source_rationale.yaml.
@@ -125,7 +123,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--repo-root", default=str(REPO_ROOT))
     p.add_argument("--changed-files", nargs="*", default=None,
                    help="Changed file paths; auto-detected from git diff if omitted")
-    p.add_argument("--base", default="origin/main")
+    p.add_argument("--base", default="origin/live")
     p.add_argument("--head", default="HEAD")
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
