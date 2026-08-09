@@ -560,11 +560,13 @@ def _reconcile_terminal_no_fill_after_cancel_ack(
             return
         from src.execution.command_recovery import (
             reconcile_cancel_ack_terminal_no_fill_facts,
+            reconcile_cancel_ack_terminal_partial_facts,
             reconcile_terminal_entry_exposure_obligations,
             reconcile_terminal_order_facts,
         )
 
         cancel_summary = reconcile_cancel_ack_terminal_no_fill_facts(conn)
+        partial_summary = reconcile_cancel_ack_terminal_partial_facts(conn)
         conn.commit()
         terminal_summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
         for attempt in range(1, 4):
@@ -581,6 +583,8 @@ def _reconcile_terminal_no_fill_after_cancel_ack(
         obligation_summary = reconcile_terminal_entry_exposure_obligations(conn)
         conn.commit()
         advanced = int(cancel_summary.get("advanced", 0) or 0) + int(
+            partial_summary.get("advanced", 0) or 0
+        ) + int(
             terminal_summary.get("advanced", 0) or 0
         ) + int(
             obligation_summary.get("advanced", 0) or 0
@@ -588,10 +592,11 @@ def _reconcile_terminal_no_fill_after_cancel_ack(
         if advanced:
             logger.info(
                 "venue_cancel_journal: terminal no-fill reducers advanced command=%s "
-                "order=%s cancel_ack=%s terminal=%s obligation=%s",
+                "order=%s cancel_ack=%s cancel_partial=%s terminal=%s obligation=%s",
                 command_id,
                 order_id,
                 cancel_summary,
+                partial_summary,
                 terminal_summary,
                 obligation_summary,
             )

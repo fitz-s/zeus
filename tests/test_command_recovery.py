@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-04; last_reused=2026-08-04
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-04; last_reused=2026-08-08
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-08-04
+# Last reused/audited: 2026-08-08
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -13926,6 +13926,7 @@ class TestRecoveryResolutionTable:
         """Cancel terminates only the unfilled remainder, never confirmed exposure."""
         from src.execution.command_recovery import (
             _latest_order_fact_for_command_order,
+            reconcile_cancel_ack_terminal_partial_facts,
             reconcile_filled_entry_projection_repairs,
             reconcile_terminal_entry_exposure_obligations,
         )
@@ -13964,6 +13965,16 @@ class TestRecoveryResolutionTable:
             occurred_at="2026-04-26T00:06:00Z",
             payload={"venue_order_id": "ord-cancelled-partial"},
         )
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        # Project the confirmed fill before the cancel.  The cancel reducer
+        # must not depend on a missing/short position projection.
+        assert reconcile_filled_entry_projection_repairs(conn, mock_client) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
         append_event(
             conn,
             command_id="cmd-001",
@@ -13978,11 +13989,16 @@ class TestRecoveryResolutionTable:
             occurred_at="2026-04-26T00:08:00Z",
             payload={"venue_order_id": "ord-cancelled-partial"},
         )
-        _insert_decision_log_trade_case_for_recovery(conn)
 
-        assert reconcile_filled_entry_projection_repairs(conn, mock_client) == {
+        assert reconcile_cancel_ack_terminal_partial_facts(conn) == {
             "scanned": 1,
             "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert reconcile_cancel_ack_terminal_partial_facts(conn) == {
+            "scanned": 0,
+            "advanced": 0,
             "stayed": 0,
             "errors": 0,
         }
@@ -14046,6 +14062,33 @@ class TestRecoveryResolutionTable:
             """
         ).fetchone()
         assert obligation["status"] == "RESOLVED"
+
+        # A late authenticated fill from the cancel race must monotonically
+        # revise both terminal order truth and the projected exposure.
+        _append_trade_fact(
+            conn,
+            order_id="ord-cancelled-partial",
+            trade_id="trade-cancelled-partial-late",
+            state="CONFIRMED",
+            filled_size="0.652175",
+            fill_price="0.77",
+            source="REST",
+        )
+        assert reconcile_cancel_ack_terminal_partial_facts(conn)["advanced"] == 1
+        assert reconcile_filled_entry_projection_repairs(conn, mock_client)[
+            "advanced"
+        ] == 1
+        terminal_order = _latest_order_fact_for_command_order(
+            conn,
+            command_id="cmd-001",
+            venue_order_id="ord-cancelled-partial",
+        )
+        assert terminal_order["matched_size"] == "5"
+        assert terminal_order["remaining_size"] == "0"
+        current = conn.execute(
+            "SELECT shares FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()
+        assert current["shares"] == pytest.approx(5.0)
 
     def test_cancelled_partial_corrects_false_terminal_match_before_projection(
         self,

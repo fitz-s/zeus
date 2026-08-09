@@ -1972,6 +1972,125 @@ def _cancel_ack_terminal_no_fill_fact_candidates(conn: sqlite3.Connection) -> li
     return [_dict_row(row) for row in rows]
 
 
+def _cancel_ack_terminal_partial_fact_candidates(
+    conn: sqlite3.Connection,
+) -> list[dict]:
+    """Return cancel-acked ENTRY commands whose positive fill lacks terminality.
+
+    Position projection is deliberately absent from this query.  A confirmed
+    partial fill may already be projected correctly while its cancelled
+    remainder still survives as a false open-order/exposure obligation.
+    """
+
+    required = {
+        "venue_commands",
+        "venue_command_events",
+        "venue_order_facts",
+        "venue_trade_facts",
+        "position_current",
+    }
+    if not all(_table_exists(conn, table) for table in required):
+        return []
+    sql = (
+        "WITH candidate_commands AS ("
+        """
+            SELECT cmd.*,
+                   (
+                       SELECT MAX(event.occurred_at)
+                         FROM venue_command_events event
+                        WHERE event.command_id = cmd.command_id
+                          AND event.event_type = 'CANCEL_ACKED'
+                   ) AS cancel_acked_at
+              FROM venue_commands cmd
+             WHERE cmd.intent_kind = 'ENTRY'
+               AND cmd.side = 'BUY'
+               AND cmd.state = 'CANCELLED'
+               AND TRIM(COALESCE(cmd.venue_order_id, '')) != ''
+               AND EXISTS (
+                    SELECT 1
+                      FROM venue_command_events event
+                     WHERE event.command_id = cmd.command_id
+                       AND event.event_type = 'CANCEL_ACKED'
+               )
+        ),
+        """
+        + _canonical_trade_fact_cte(
+            source_clause_sql="WHERE fact.source IN ('REST', 'WS_USER')"
+        )
+        + ",\n"
+        + _economic_trade_fact_cte()
+        + ",\n"
+        + """
+        entry_fill AS (
+            SELECT fact.command_id,
+                   SUM(CAST(fact.filled_size AS REAL)) AS filled_size,
+                   SUM(CAST(fact.filled_size AS REAL) * CAST(fact.fill_price AS REAL))
+                       / SUM(CAST(fact.filled_size AS REAL)) AS fill_price,
+                   MAX(COALESCE(NULLIF(fact.venue_timestamp, ''), fact.observed_at))
+                       AS observed_at,
+                   MAX(fact.source) AS fill_source,
+                   MAX(fact.trade_fact_id) AS source_trade_fact_id
+              FROM economic_trade_fact fact
+             WHERE UPPER(COALESCE(fact.state, ''))
+                       IN ('MATCHED', 'MINED', 'CONFIRMED')
+               AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+               AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+             GROUP BY fact.command_id
+        ),
+        """
+        + _canonical_order_truth_cte(command_scope_cte="candidate_commands")
+        + """
+        SELECT cmd.command_id AS command_id,
+               cmd.venue_order_id AS venue_order_id,
+               cmd.state AS cmd_state,
+               cmd.size AS cmd_size,
+               cmd.side AS side,
+               fill.filled_size AS fill_filled_size,
+               fill.fill_price AS fill_price,
+               fill.observed_at AS fill_observed_at,
+               fill.fill_source AS fill_source,
+               fill.source_trade_fact_id AS source_trade_fact_id,
+               fact.fact_id AS latest_order_fact_id,
+               fact.state AS latest_order_fact_state,
+               fact.matched_size AS latest_order_fact_matched_size,
+               fact.remaining_size AS latest_order_fact_remaining_size
+          FROM candidate_commands cmd
+          JOIN entry_fill fill
+            ON fill.command_id = cmd.command_id
+          LEFT JOIN canonical_order_truth fact
+            ON fact.command_id = cmd.command_id
+           AND fact.venue_order_id = cmd.venue_order_id
+          LEFT JOIN position_current pc
+            ON pc.position_id = cmd.position_id
+         WHERE CAST(fill.filled_size AS REAL) < CAST(cmd.size AS REAL) - 0.000000001
+           AND (
+                pc.position_id IS NULL
+                OR pc.phase IN ('pending_entry', 'active', 'day0_window', 'pending_exit')
+           )
+           AND (
+                fact.fact_id IS NULL
+                OR (
+                    UPPER(COALESCE(fact.state, ''))
+                        IN ('LIVE', 'OPEN', 'RESTING', 'PARTIALLY_MATCHED', 'PARTIAL')
+                    AND CAST(COALESCE(fact.remaining_size, '0') AS REAL) > 0
+                )
+                OR (
+                    UPPER(COALESCE(fact.state, ''))
+                        IN ('PARTIALLY_MATCHED', 'PARTIAL')
+                    AND CAST(COALESCE(fact.remaining_size, '0') AS REAL) = 0
+                    AND json_valid(fact.raw_payload_json)
+                    AND json_extract(fact.raw_payload_json, '$.proof_class')
+                           = 'terminal_partial_order_fact'
+                    AND CAST(COALESCE(fact.matched_size, '0') AS REAL)
+                           < CAST(fill.filled_size AS REAL) - 0.000000001
+                )
+           )
+         ORDER BY cmd.cancel_acked_at, cmd.command_id
+        """
+    )
+    return [_dict_row(row) for row in conn.execute(sql).fetchall()]
+
+
 def _local_orphan_no_fill_candidates(conn: sqlite3.Connection) -> list[dict]:
     if not _table_exists(conn, "exchange_reconcile_findings"):
         return []
@@ -14207,6 +14326,44 @@ def reconcile_cancel_ack_terminal_no_fill_facts(conn: sqlite3.Connection) -> dic
     return summary
 
 
+def reconcile_cancel_ack_terminal_partial_facts(conn: sqlite3.Connection) -> dict:
+    """Close only the unfilled remainder of an acknowledged cancelled ENTRY.
+
+    SCOPE: the exact cancelled command/order backed by authenticated economic
+    trade facts.  DRAIN: append a terminal-partial order fact; the existing
+    obligation reducer then releases only the unmatched commitment.  RESET:
+    an equal-or-newer terminal fact removes the command from this candidate set;
+    a late authenticated fill re-enters it with a larger cumulative match.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    for candidate in _cancel_ack_terminal_partial_fact_candidates(conn):
+        summary["scanned"] += 1
+        command_id = str(candidate.get("command_id") or "")
+        safe_command_id = "".join(
+            ch if ch.isalnum() else "_" for ch in command_id
+        )
+        sp_name = f"sp_cancel_ack_partial_fact_{safe_command_id}"
+        conn.execute(f"SAVEPOINT {sp_name}")
+        try:
+            advanced = _append_cancelled_entry_terminal_partial_order_fact(
+                conn,
+                candidate=candidate,
+            )
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            summary["advanced" if advanced else "stayed"] += 1
+        except Exception as exc:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
+            conn.execute(f"RELEASE SAVEPOINT {sp_name}")
+            logger.error(
+                "recovery: cancel-ack terminal partial fact failed for command %s: %s",
+                command_id,
+                exc,
+            )
+            summary["errors"] += 1
+    return summary
+
+
 def reconcile_local_orphan_no_fill_findings(conn: sqlite3.Connection, client) -> dict:
     """Convert proven no-fill local-orphan findings into terminal order facts."""
 
@@ -23327,6 +23484,12 @@ def _reconcile_passes_inline(
         summary["stayed"] += cancel_ack_terminal_summary["stayed"]
         summary["errors"] += cancel_ack_terminal_summary["errors"]
 
+        cancel_ack_partial_summary = reconcile_cancel_ack_terminal_partial_facts(conn)
+        summary["cancel_ack_terminal_partial_facts"] = cancel_ack_partial_summary
+        summary["advanced"] += cancel_ack_partial_summary["advanced"]
+        summary["stayed"] += cancel_ack_partial_summary["stayed"]
+        summary["errors"] += cancel_ack_partial_summary["errors"]
+
         terminal_summary = reconcile_terminal_order_facts(conn)
         summary["terminal_order_facts"] = terminal_summary
         summary["advanced"] += terminal_summary["advanced"]
@@ -25420,6 +25583,11 @@ def _reconcile_passes_short_conn(
             "cancel_ack_terminal_no_fill_facts",
         )
         _boot_db_pass(
+            "cancel_ack_terminal_partial_facts",
+            reconcile_cancel_ack_terminal_partial_facts,
+            "cancel_ack_terminal_partial_facts",
+        )
+        _boot_db_pass(
             "terminal_order_facts",
             reconcile_terminal_order_facts,
             "terminal_order_facts",
@@ -25655,6 +25823,11 @@ def _reconcile_passes_short_conn(
             "cancel_ack_terminal_no_fill_facts",
             reconcile_cancel_ack_terminal_no_fill_facts,
             "cancel_ack_terminal_no_fill_facts",
+        )
+        _db_pass(
+            "cancel_ack_terminal_partial_facts",
+            reconcile_cancel_ack_terminal_partial_facts,
+            "cancel_ack_terminal_partial_facts",
         )
         _db_pass(
             "terminal_entry_exposure_obligations",
@@ -26100,6 +26273,9 @@ def _reconcile_passes_short_conn(
     )
     _db_pass("cancel_ack_terminal_no_fill_facts",
              reconcile_cancel_ack_terminal_no_fill_facts, "cancel_ack_terminal_no_fill_facts")
+    _db_pass("cancel_ack_terminal_partial_facts",
+             reconcile_cancel_ack_terminal_partial_facts,
+             "cancel_ack_terminal_partial_facts")
     _db_pass("terminal_order_facts", reconcile_terminal_order_facts, "terminal_order_facts")
     _db_pass("stale_terminal_no_fill_findings",
              reconcile_stale_terminal_no_fill_findings, "stale_terminal_no_fill_findings")
