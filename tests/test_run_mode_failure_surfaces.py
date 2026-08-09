@@ -9544,6 +9544,11 @@ def test_monitor_bootstrap_scopes_defer_to_entry_competitors(monkeypatch) -> Non
         "_held_position_monitor_handoff_pending",
         handoff_pending,
     )
+    monkeypatch.setattr(
+        wake_module,
+        "exact_held_sell_completion_wake_ids",
+        lambda **_kwargs: (),
+    )
 
     for job_name in ("edli_event_reactor", "market_discovery"):
         assert main_module._defer_for_held_position_monitor(job_name) is True
@@ -9571,6 +9576,49 @@ def test_monitor_bootstrap_scopes_defer_to_entry_competitors(monkeypatch) -> Non
     bootstrap_complete.set()
     for job_name in ("edli_event_reactor", "market_discovery"):
         assert main_module._defer_for_held_position_monitor(job_name) is False
+
+
+def test_monitor_bootstrap_admits_only_exact_held_sell_completion_debt(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    bootstrap_complete = type(main_module._held_position_monitor_bootstrap_complete)()
+    handoff_pending = type(main_module._held_position_monitor_handoff_pending)()
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_bootstrap_complete",
+        bootstrap_complete,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_handoff_pending",
+        handoff_pending,
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "exact_held_sell_completion_wake_ids",
+        lambda **kwargs: (
+            ("held-sell-wake",)
+            if kwargs == {"fail_on_error": True}
+            else pytest.fail("bootstrap bypass must use the fail-closed exact reader")
+        ),
+    )
+    promote_calls = []
+    monkeypatch.setattr(
+        main_module,
+        "_promote_held_position_monitor_bootstrap_from_canonical_progress",
+        lambda: promote_calls.append(True) or False,
+    )
+
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+    assert promote_calls == []
+    assert main_module._defer_for_held_position_monitor("market_discovery") is True
+    assert promote_calls == [True]
+
+    handoff_pending.set()
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
 
 
 def test_full_book_monitor_without_canonical_progress_does_not_complete_bootstrap(
