@@ -2032,6 +2032,24 @@ def _setup_healthy_state(sd: Path, offset_seconds: int = -30) -> None:
     )
 
 
+def test_composite_persistence_failure_is_scheduler_visible(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed atomic replace must fail the job, never report scheduler OK."""
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+
+    def fail_replace(_src, _dst):
+        raise PermissionError("injected composite replace failure")
+
+    monkeypatch.setattr(live_health.os, "replace", fail_replace)
+
+    with pytest.raises(PermissionError, match="injected composite replace failure"):
+        compute_composite_live_health(state_dir=sd)
+
+
 # ---------------------------------------------------------------------------
 # T1: heartbeat OK + run_mode FAILED → DEGRADED
 # ---------------------------------------------------------------------------

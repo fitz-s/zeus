@@ -7350,6 +7350,7 @@ def compute_composite_live_health(
                 pass
             raise
     except Exception:
-        logger.debug("live_health_composite: write failed", exc_info=True)
+        logger.exception("live_health_composite: write failed")
+        raise
 
     return result
