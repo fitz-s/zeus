@@ -129,7 +129,7 @@ class TestQVersionStaleCancel:
             (DEADLINE_MIN + 5, "q-old"),
         ],
     )
-    def test_sub_min_partial_fill_is_not_cancelled_by_staleness_or_ttl(
+    def test_sub_min_partial_remainder_is_cancelled_and_redecided(
         self, age_minutes, current_q
     ):
         entry = _entry("c1", q_version="q-old", age_minutes=age_minutes)
@@ -140,7 +140,13 @@ class TestQVersionStaleCancel:
             [entry], {"c1": FAMILY}, {FAMILY: current_q}, now=NOW, deadline_minutes=DEADLINE_MIN
         )
 
-        assert cancel_set == []
+        assert len(cancel_set) == 1
+        expected_reason = (
+            "Q_VERSION_STALE"
+            if current_q == "q-new"
+            else "REST_DEADLINE_EXCEEDED"
+        )
+        assert cancel_set[0]["cancel_reason"] == expected_reason
 
     def test_partial_fill_at_or_above_minimum_still_cancels_when_stale(self):
         entry = _entry("c1", q_version="q-old", age_minutes=5.0)

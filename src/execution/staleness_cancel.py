@@ -240,19 +240,6 @@ def find_open_entry_rests(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return out
 
 
-def _has_sub_min_partial_fill(entry: dict[str, Any]) -> bool:
-    try:
-        matched_size = float(entry.get("matched_size") or 0.0)
-        min_order_size = float(entry.get("min_order_size") or 0.0)
-    except (TypeError, ValueError):
-        return False
-    return (
-        matched_size > 0.0
-        and min_order_size > 0.0
-        and matched_size < min_order_size
-    )
-
-
 def resolve_order_families(
     entries: list[dict[str, Any]],
     trade_conn: sqlite3.Connection,
@@ -426,8 +413,6 @@ def classify_cancel_set(
             deadline_minutes=deadline_minutes,
         )
         if not (stale is True or ttl):
-            continue
-        if _has_sub_min_partial_fill(entry):
             continue
         reasons = []
         if stale is True:
