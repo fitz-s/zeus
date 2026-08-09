@@ -210,6 +210,7 @@ _PRE_SDK_REVIEW_REQUIRED_REASONS = frozenset({
 _NO_VENUE_EXPOSURE_REVIEW_REASONS = frozenset({
     "recovery_no_venue_order_id",
     "recovery_no_venue_order_id_lookup_unavailable",
+    "terminal_rejection_persistence_failed_after_side_effect",
 })
 _PRE_SDK_COLLATERAL_REASON_MARKERS = (
     "pusd_allowance_insufficient",

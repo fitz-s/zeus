@@ -526,6 +526,11 @@ _NO_VENUE_EXPOSURE_REVIEW_REASONS = frozenset({
     # read surface was unavailable. A later fresh zero-exposure proof is the
     # only legal clearance; future attempts now stay SUBMITTING instead.
     "recovery_no_venue_order_id_lookup_unavailable",
+    # The venue returned a terminal rejection but the local terminal-event
+    # append failed. The command remains unknown until authenticated open-order
+    # and trade enumeration proves the exact submit identity created no
+    # exposure; absence must never be inferred from the missing order id.
+    "terminal_rejection_persistence_failed_after_side_effect",
 })
 _TERMINAL_ENTRY_NO_FILL_COMMAND_STATES = frozenset({
     CommandState.CANCELLED.value,

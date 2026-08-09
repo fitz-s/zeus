@@ -6680,8 +6680,15 @@ class TestRecoveryResolutionTable:
         # get_order should NOT be called
         mock_client.get_order.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "review_reason",
+        (
+            "recovery_no_venue_order_id",
+            "terminal_rejection_persistence_failed_after_side_effect",
+        ),
+    )
     def test_review_required_recovery_no_venue_order_id_auto_clears_on_absence_proof(
-        self, conn, mock_client
+        self, conn, mock_client, review_reason
     ):
         from src.risk_allocator.governor import count_unknown_side_effects
         from src.state.venue_command_repo import append_event
@@ -6700,7 +6707,7 @@ class TestRecoveryResolutionTable:
             command_id="cmd-no-order",
             event_type="REVIEW_REQUIRED",
             occurred_at="2026-04-26T00:01:00Z",
-            payload={"reason": "recovery_no_venue_order_id"},
+            payload={"reason": review_reason},
         )
         mock_client.get_open_orders.return_value = [
             {"id": "unrelated", "asset_id": "other-token", "status": "LIVE"}
@@ -6714,7 +6721,12 @@ class TestRecoveryResolutionTable:
         before_count, _ = count_unknown_side_effects(conn)
         summary = reconcile_unresolved_commands(conn, mock_client)
 
-        assert before_count == 0
+        assert before_count == (
+            1
+            if review_reason
+            == "terminal_rejection_persistence_failed_after_side_effect"
+            else 0
+        )
         assert _get_state(conn, "cmd-no-order") == "EXPIRED"
         assert summary["advanced"] == 1
         events = _get_events(conn, "cmd-no-order")
@@ -7305,8 +7317,15 @@ class TestRecoveryResolutionTable:
         events = _get_events(conn, "cmd-confirmed-open")
         assert events[-1]["event_type"] == "REVIEW_REQUIRED"
 
+    @pytest.mark.parametrize(
+        "review_reason",
+        (
+            "recovery_no_venue_order_id",
+            "terminal_rejection_persistence_failed_after_side_effect",
+        ),
+    )
     def test_review_required_recovery_no_venue_order_id_stays_on_matching_trade(
-        self, conn, mock_client
+        self, conn, mock_client, review_reason
     ):
         from src.state.venue_command_repo import append_event
 
@@ -7322,7 +7341,7 @@ class TestRecoveryResolutionTable:
             command_id="cmd-has-trade",
             event_type="REVIEW_REQUIRED",
             occurred_at="2026-04-26T00:01:00Z",
-            payload={"reason": "recovery_no_venue_order_id"},
+            payload={"reason": review_reason},
         )
         mock_client.get_open_orders.return_value = []
         mock_client.get_trades.return_value = [
