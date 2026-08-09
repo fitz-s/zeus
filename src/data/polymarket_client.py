@@ -1143,7 +1143,12 @@ class PolymarketClient:
         results = adapter.submit_batch(list(envelopes))
         return [_legacy_order_result_from_submit(result) for result in results]
 
-    def get_order(self, order_id: str) -> Optional[dict]:
+    def get_order(
+        self,
+        order_id: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> Optional[dict]:
         """Fetch a single order by venue order ID. Returns None if not found.
 
         Wraps SDK's get_order. Normalizes response to at least
@@ -1158,7 +1163,10 @@ class PolymarketClient:
         from src.venue.response_contracts import VenueOrderNotFound
 
         try:
-            state = self._ensure_v2_adapter().get_order(order_id)
+            state = self._ensure_v2_adapter().get_order(
+                order_id,
+                deadline_monotonic=deadline_monotonic,
+            )
         except VenueOrderNotFound:
             return None
         except httpx.HTTPStatusError as exc:
@@ -1229,16 +1237,26 @@ class PolymarketClient:
         logger.info("Batch order cancel result: %d orders → %s", len(order_ids), [r.status for r in results])
         return payloads
 
-    def get_order_status(self, order_id: str) -> Optional[dict]:
+    def get_order_status(
+        self,
+        order_id: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> Optional[dict]:
         """Fetch a live order's latest exchange status."""
         try:
-            result = self.get_order(order_id)
+            result = self.get_order(
+                order_id,
+                deadline_monotonic=deadline_monotonic,
+            )
             if result is None:
                 return {"status": "NOT_FOUND"}
             logger.info("Order status: %s → %s", order_id, result.get("status"))
             return result
         except Exception as exc:
             logger.warning("Order status fetch failed for %s: %s", order_id, exc)
+            if exc.__class__.__name__ == "IncompleteOrderTruthError":
+                raise
             return {"status": "FETCH_ERROR", "reason": str(exc)}
 
     def get_open_orders(self) -> list[dict]:

@@ -7959,6 +7959,7 @@ def check_pending_exits(
     *,
     max_positions: int | None = None,
     cycle_budget_seconds: float | None = None,
+    deadline_monotonic: float | None = None,
     global_sell_reauction_requester: Callable[[Position, bool], bool] | None = None,
 ) -> dict:
     """Check fill status for positions with pending sell orders.
@@ -7989,7 +7990,12 @@ def check_pending_exits(
         if cycle_budget_seconds is None
         else max(0.25, float(cycle_budget_seconds))
     )
-    deadline = _time_module.monotonic() + budget_seconds
+    local_deadline = _time_module.monotonic() + budget_seconds
+    deadline = (
+        local_deadline
+        if deadline_monotonic is None
+        else min(local_deadline, float(deadline_monotonic))
+    )
     scan_positions = _rotated_pending_exit_scan_positions(portfolio, stats=stats)
     stats["pending_exit_scan_candidates"] = len(scan_positions)
     stats["pending_exit_scan_max_positions"] = max_scan_positions
@@ -8210,7 +8216,22 @@ def check_pending_exits(
                 continue
 
         _commit_exit_write_boundary(conn, stage="pending_exit_status_poll")
-        status, status_payload = _check_order_fill(clob, exit_order_id)
+        try:
+            status, status_payload = _check_order_fill(
+                clob,
+                exit_order_id,
+                deadline_monotonic=deadline,
+            )
+        except _PendingExitOrderTruthIncomplete as exc:
+            # SCOPE: this pending-exit status read only. DRAIN: a later cycle
+            # obtains a complete authenticated order fact before its fresh
+            # deadline. RESET: that complete fact re-enters the normal fill /
+            # void / live-status state machine. Unknown truth never mutates the
+            # position or authorizes a replacement order.
+            stats["pending_exit_positions_deferred"] = len(scan_positions) - index
+            stats["pending_exit_defer_reason"] = "order_truth_incomplete"
+            stats["pending_exit_order_truth_error"] = str(exc)[:500]
+            break
         if conn is not None:
             if status:
                 log_pending_exit_status_event(conn, pos, status=status)
@@ -9353,21 +9374,75 @@ def _pending_exit_no_order_waits_for_liquidity(
     )
 
 
-def _check_order_fill(clob, order_id: str) -> tuple[str, object]:
+class _PendingExitOrderTruthIncomplete(RuntimeError):
+    """A bounded pending-exit read ended without authoritative order truth."""
+
+
+def _check_order_fill(
+    clob,
+    order_id: str,
+    *,
+    deadline_monotonic: float | None = None,
+) -> tuple[str, object]:
     """Check CLOB order status. Returns (normalized status, raw payload)."""
+    if (
+        deadline_monotonic is not None
+        and _time_module.monotonic() >= float(deadline_monotonic)
+    ):
+        raise _PendingExitOrderTruthIncomplete(
+            "pending-exit order truth deadline elapsed before request"
+        )
     try:
-        payload = clob.get_order_status(order_id)
+        get_order_status = clob.get_order_status
+        params = signature(get_order_status).parameters
+        accepts_deadline = "deadline_monotonic" in params or any(
+            param.kind == Parameter.VAR_KEYWORD for param in params.values()
+        )
+        if accepts_deadline:
+            payload = get_order_status(
+                order_id,
+                deadline_monotonic=deadline_monotonic,
+            )
+        else:
+            # Test doubles may retain the historical one-argument surface.
+            # Runtime-owned clients must never silently drop the deadline.
+            if str(getattr(get_order_status, "__module__", "")).startswith("src."):
+                raise _PendingExitOrderTruthIncomplete(
+                    "runtime order-status reader does not accept deadline_monotonic"
+                )
+            payload = get_order_status(order_id)
+        if (
+            deadline_monotonic is not None
+            and _time_module.monotonic() >= float(deadline_monotonic)
+        ):
+            raise _PendingExitOrderTruthIncomplete(
+                "pending-exit order truth deadline elapsed during request"
+            )
         if payload is None:
             return "", None
         if isinstance(payload, str):
-            return payload.upper(), payload
+            status = payload.upper()
+            if status in {"FETCH_ERROR", "UNKNOWN"}:
+                raise _PendingExitOrderTruthIncomplete(
+                    f"pending-exit order truth unavailable: {status}"
+                )
+            return status, payload
         if isinstance(payload, dict):
             status = payload.get("status") or payload.get("state") or payload.get("orderStatus")
-            return (str(status).upper() if status else "", payload)
+            normalized = str(status).upper() if status else ""
+            if normalized in {"FETCH_ERROR", "UNKNOWN"}:
+                raise _PendingExitOrderTruthIncomplete(
+                    f"pending-exit order truth unavailable: {normalized}"
+                )
+            return normalized, payload
         return "", payload
+    except _PendingExitOrderTruthIncomplete:
+        raise
     except Exception as exc:
         logger.warning("Order fill check failed for %s: %s", order_id, exc)
-        return "", None
+        raise _PendingExitOrderTruthIncomplete(
+            f"pending-exit order truth read failed: {type(exc).__name__}"
+        ) from exc
 
 
 def _coerce_sell_result(trade_id: str, sell_result: OrderResult | dict) -> OrderResult:

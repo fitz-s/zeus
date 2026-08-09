@@ -16558,3 +16558,47 @@ def test_monitor_hold_append_failure_has_no_hold_artifact_or_monitor_count(monke
     assert results == []
     assert summary["monitors"] == 0
     assert summary["monitor_canonical_write_failed"] == 1
+
+
+def test_monitor_absolute_deadline_includes_pending_exit_preflight(monkeypatch):
+    from src.engine import cycle_runtime
+    from src.execution import exit_lifecycle
+
+    observed = []
+
+    def fake_pending_exits(
+        _portfolio,
+        _clob,
+        *,
+        conn,
+        deadline_monotonic,
+        global_sell_reauction_requester,
+    ):
+        observed.append((deadline_monotonic, time.monotonic()))
+        return {
+            "filled": 0,
+            "retried": 0,
+            "unchanged": 0,
+            "filled_positions": [],
+        }
+
+    monkeypatch.setattr(exit_lifecycle, "check_pending_exits", fake_pending_exits)
+    started = time.monotonic()
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_monitor_preflight_deadline"),
+        run_exit_preflight=True,
+        held_position_monitor_budget_seconds=0.5,
+    )
+
+    assert len(observed) == 1
+    deadline, preflight_called_at = observed[0]
+    assert started < deadline
+    assert 0.0 < deadline - preflight_called_at <= 0.5
+    assert summary["held_monitor_budget_seconds"] == pytest.approx(0.5)

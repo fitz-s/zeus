@@ -4466,3 +4466,47 @@ class TestCancelBatch:
 
         assert results[0].status == "UNKNOWN"
         assert results[0].error_code == "BATCH_RESPONSE_UNMAPPED"
+
+
+def test_deadline_order_read_cancels_transport_without_sdk_get_order(
+    tmp_path,
+    monkeypatch,
+):
+    import httpx
+
+    from src.venue.polymarket_v2_adapter import IncompleteOrderTruthError
+
+    class FakeAuthenticatedClient:
+        host = "https://clob-v2.polymarket.com"
+        signer = object()
+        creds = object()
+
+        def get_order(self, _order_id):
+            raise AssertionError("deadline path must not call blocking SDK get_order")
+
+    class SlowHttp:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            await asyncio.sleep(1.0)
+            raise AssertionError("absolute deadline must cancel the transport")
+
+    adapter, _ = _adapter(tmp_path, FakeAuthenticatedClient())
+
+    async def fake_headers(*_args, **_kwargs):
+        return {"x-test": "signed"}, 1_700_000_000
+
+    monkeypatch.setattr(adapter, "_account_truth_headers_async", fake_headers)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: SlowHttp())
+
+    started = time.monotonic()
+    with pytest.raises(IncompleteOrderTruthError, match="deadline elapsed"):
+        adapter.get_order(
+            "ord-never-returns",
+            deadline_monotonic=started + 0.02,
+        )
+    assert time.monotonic() - started < 0.20

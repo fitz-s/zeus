@@ -12406,3 +12406,52 @@ def test_global_maker_rest_void_without_proof_stays_single_flight(
         """,
         (position.trade_id,),
     ).fetchone()[0] == 0
+
+
+def test_pending_exit_incomplete_order_truth_defers_without_state_mutation(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState
+
+    position = _seed_pending_exit_reprice_case(
+        conn,
+        trade_id="pos-order-truth-incomplete",
+        command_id="cmd-order-truth-incomplete",
+        order_id="ord-order-truth-incomplete",
+        reason="EXIT_PROBABILITY_DECAY",
+        capital_certificate=None,
+    )
+    before = (
+        position.state,
+        position.exit_state,
+        position.order_status,
+        position.exit_retry_count,
+        position.last_exit_order_id,
+    )
+    observed_deadlines = []
+
+    class FakeClob:
+        def get_order_status(self, order_id, *, deadline_monotonic):
+            assert order_id == position.last_exit_order_id
+            observed_deadlines.append(deadline_monotonic)
+            return {"status": "FETCH_ERROR", "reason": "transport unavailable"}
+
+    deadline = exit_lifecycle._time_module.monotonic() + 1.0
+    stats = exit_lifecycle.check_pending_exits(
+        PortfolioState(positions=[position]),
+        FakeClob(),
+        conn=conn,
+        deadline_monotonic=deadline,
+    )
+
+    assert observed_deadlines == [pytest.approx(deadline)]
+    assert stats["pending_exit_positions_deferred"] == 1
+    assert stats["pending_exit_defer_reason"] == "order_truth_incomplete"
+    assert stats["filled"] == 0
+    assert stats["retried"] == 0
+    assert (
+        position.state,
+        position.exit_state,
+        position.order_status,
+        position.exit_retry_count,
+        position.last_exit_order_id,
+    ) == before

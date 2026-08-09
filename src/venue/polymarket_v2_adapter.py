@@ -338,7 +338,12 @@ class PolymarketV2AdapterProtocol(Protocol):
 
     def cancel_batch(self, order_ids: list[str]) -> list[CancelResult]: ...
 
-    def get_order(self, order_id: str) -> OrderState: ...
+    def get_order(
+        self,
+        order_id: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> OrderState: ...
 
     def get_account_truth(
         self,
@@ -397,6 +402,12 @@ class IncompleteAccountTruthError(V2ReadUnavailable):
     """Typed fail-closed account-read failure; empty data is never inferred."""
 
     code = "INCOMPLETE_ACCOUNT_TRUTH"
+
+
+class IncompleteOrderTruthError(V2ReadUnavailable):
+    """Typed fail-closed order-read failure; absence is never inferred."""
+
+    code = "ORDER_TRUTH_INCOMPLETE"
 
 
 class PolymarketV2Adapter:
@@ -1226,9 +1237,8 @@ class PolymarketV2Adapter:
                 results.append(_cancel_result_from_response(order_id, item.raw_item))
         return results
 
-    def get_order(self, order_id: str) -> OrderState:
-        _assert_no_world_mutex_held_for_io("venue.get_order")
-        raw = self._sdk_client().get_order(order_id)
+    @staticmethod
+    def _order_state_from_raw(order_id: str, raw: object) -> OrderState:
         if raw is None or raw == {}:
             raise VenueOrderNotFound(order_id)
         raw_dict = _normalize_v2_amount_response(
@@ -1242,6 +1252,103 @@ class PolymarketV2Adapter:
         raw_dict["status"] = outcome.status
         raw_dict["_venue_order_status"] = outcome.status
         return OrderState(order_id=outcome.order_id, status=outcome.status, raw=raw_dict)
+
+    @staticmethod
+    def _order_truth_deadline_remaining(deadline_monotonic: float) -> float:
+        remaining = float(deadline_monotonic) - time.monotonic()
+        if remaining <= 0.0:
+            raise IncompleteOrderTruthError(
+                "ORDER_TRUTH_INCOMPLETE: order read deadline elapsed"
+            )
+        return remaining
+
+    async def _get_order_deadline_async(
+        self,
+        order_id: str,
+        *,
+        deadline_monotonic: float,
+    ) -> object:
+        try:
+            import httpx
+            from py_clob_client_v2.endpoints import GET_ORDER
+        except Exception as exc:  # pragma: no cover - installed SDK surface
+            raise IncompleteOrderTruthError(
+                "ORDER_TRUTH_INCOMPLETE: authenticated order helpers unavailable"
+            ) from exc
+
+        client = self._sdk_client()
+        request_path = f"{GET_ORDER}{urllib.parse.quote(str(order_id), safe='')}"
+        host = str(getattr(client, "host", self.host)).rstrip("/")
+        remaining = self._order_truth_deadline_remaining(deadline_monotonic)
+        try:
+            async with httpx.AsyncClient(http2=False, timeout=None) as http:
+                async with asyncio.timeout(remaining):
+                    headers, _ = await self._account_truth_headers_async(
+                        http,
+                        client,
+                        request_path=request_path,
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                    remaining = self._order_truth_deadline_remaining(
+                        deadline_monotonic
+                    )
+                    async with asyncio.timeout(remaining):
+                        response = await http.get(
+                            f"{host}{request_path}",
+                            headers=headers,
+                        )
+            if response.status_code == 404:
+                raise VenueOrderNotFound(order_id)
+            if response.status_code != 200:
+                raise IncompleteOrderTruthError(
+                    "ORDER_TRUTH_INCOMPLETE: authenticated order read returned "
+                    f"HTTP {response.status_code}"
+                )
+            decoded = response.json()
+            self._order_truth_deadline_remaining(deadline_monotonic)
+            return decoded
+        except (IncompleteOrderTruthError, VenueOrderNotFound):
+            raise
+        except IncompleteAccountTruthError as exc:
+            raise IncompleteOrderTruthError(
+                "ORDER_TRUTH_INCOMPLETE: order authentication deadline elapsed"
+            ) from exc
+        except TimeoutError as exc:
+            raise IncompleteOrderTruthError(
+                "ORDER_TRUTH_INCOMPLETE: order read deadline elapsed"
+            ) from exc
+        except Exception as exc:
+            raise IncompleteOrderTruthError(
+                "ORDER_TRUTH_INCOMPLETE: authenticated order read failed"
+            ) from exc
+
+    def get_order(
+        self,
+        order_id: str,
+        *,
+        deadline_monotonic: float | None = None,
+    ) -> OrderState:
+        _assert_no_world_mutex_held_for_io("venue.get_order")
+        if deadline_monotonic is None:
+            raw = self._sdk_client().get_order(order_id)
+        else:
+            self._order_truth_deadline_remaining(deadline_monotonic)
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass
+            else:
+                raise IncompleteOrderTruthError(
+                    "ORDER_TRUTH_INCOMPLETE: synchronous order read cannot nest "
+                    "in a running event loop"
+                )
+            raw = asyncio.run(
+                self._get_order_deadline_async(
+                    order_id,
+                    deadline_monotonic=deadline_monotonic,
+                )
+            )
+        return self._order_state_from_raw(order_id, raw)
 
     @staticmethod
     def _account_truth_deadline_remaining(deadline_monotonic: float) -> float:

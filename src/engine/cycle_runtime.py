@@ -6104,6 +6104,16 @@ def execute_monitoring_phase(
         summary["held_monitor_defer_reason"] = "urgent_day0_wake"
         return portfolio_dirty, tracker_dirty
 
+    # One wall-clock budget owns the entire admitted held-monitor pass,
+    # including pending-exit preflight. A budget created after preflight is
+    # not a deadline: one stalled authenticated order read could retain the
+    # global monitor claim forever and blind every other held position.
+    monitor_budget_seconds = _held_position_monitor_budget_seconds(
+        held_position_monitor_budget_seconds
+    )
+    monitor_deadline = time.monotonic() + monitor_budget_seconds
+    summary["held_monitor_budget_seconds"] = monitor_budget_seconds
+
     # Preflight may release a due retry back to its economic holding phase
     # before the normal monitor pass. Preserve the preflight identity fact so
     # a stale snapshot may still recover only the held token identity; the
@@ -6123,6 +6133,7 @@ def execute_monitoring_phase(
                 portfolio,
                 clob,
                 conn=conn,
+                deadline_monotonic=monitor_deadline,
                 global_sell_reauction_requester=(
                     request_global_sell_snapshot_reauction
                 ),
@@ -6220,15 +6231,10 @@ def execute_monitoring_phase(
         conn=conn,
         now_utc=monitor_now_utc,
     )
-    monitor_budget_seconds = _held_position_monitor_budget_seconds(
-        held_position_monitor_budget_seconds
-    )
     monitor_reservation_count = _held_position_monitor_reservation_count(
         len(monitor_positions)
     )
-    monitor_deadline = time.monotonic() + monitor_budget_seconds
     summary["held_monitor_candidates"] = len(monitor_positions)
-    summary["held_monitor_budget_seconds"] = monitor_budget_seconds
     if urgent_preemption_requested():
         summary["held_monitor_preempted"] = True
         summary["held_monitor_positions_deferred"] = len(monitor_positions)
