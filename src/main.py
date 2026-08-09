@@ -449,6 +449,21 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
             )
             exact_held_sell_debt = False
         if exact_held_sell_debt:
+            monitor_block_reason = _held_position_monitor_entry_block_reason()
+            if monitor_block_reason is not None:
+                # SCOPE: only the exact held-SELL bootstrap bypass; monitor,
+                # command recovery, settlement, and already-running venue work
+                # continue. DRAIN: the independent monitor recovery executor
+                # appends current canonical held-position evidence without a
+                # competing no-authority auction. RESET: the next reactor poll
+                # admits the exact debt immediately after monitor evidence is
+                # current. This does not discard or acknowledge the debt.
+                logger.warning(
+                    "edli_event_reactor deferred: exact held SELL debt lacks "
+                    "current monitor authority (%s)",
+                    monitor_block_reason,
+                )
+                return True
             # SCOPE: only an already-persisted exact held-position SELL
             # completion wake may pass the new-entry bootstrap defer. BUY-capable
             # work remains blocked by the reactor's risk/pause gates. DRAIN: the

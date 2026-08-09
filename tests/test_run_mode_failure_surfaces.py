@@ -9985,6 +9985,11 @@ def test_monitor_bootstrap_admits_only_exact_held_sell_completion_debt(
         "_promote_held_position_monitor_bootstrap_from_canonical_progress",
         lambda: promote_calls.append(True) or False,
     )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_entry_block_reason",
+        lambda: None,
+    )
 
     assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
     assert promote_calls == []
@@ -9993,6 +9998,43 @@ def test_monitor_bootstrap_admits_only_exact_held_sell_completion_debt(
 
     handoff_pending.set()
     assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+
+
+def test_monitor_bootstrap_does_not_spin_exact_sell_debt_without_current_monitor_truth(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    bootstrap_complete = type(main_module._held_position_monitor_bootstrap_complete)()
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_bootstrap_complete",
+        bootstrap_complete,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_handoff_pending",
+        type(main_module._held_position_monitor_handoff_pending)(),
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "exact_held_sell_completion_wake_ids",
+        lambda **_kwargs: ("held-sell-wake",),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_entry_block_reason",
+        lambda: "held_position_monitor_cadence_overdue",
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_promote_held_position_monitor_bootstrap_from_canonical_progress",
+        lambda: pytest.fail("stale exact debt must leave bootstrap deferred"),
+    )
+
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+    assert bootstrap_complete.is_set() is False
 
 
 def test_full_book_monitor_without_canonical_progress_does_not_complete_bootstrap(
