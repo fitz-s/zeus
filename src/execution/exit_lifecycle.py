@@ -8153,9 +8153,6 @@ def check_pending_exits(
                 log_exit_retry_event(conn, pos, reason="SELL_NO_ORDER_ID", error="no_order_id")
             stats["retried"] += 1
             continue
-        if not str(getattr(pos, "last_exit_order_id", "") or "").strip():
-            pos.last_exit_order_id = exit_order_id
-
         fill = _exit_trade_fact_close_candidate(conn, pos, exit_order_id=exit_order_id)
         if fill is not None:
             if fill.get("closes_position") is False:
@@ -8232,6 +8229,11 @@ def check_pending_exits(
             stats["pending_exit_defer_reason"] = "order_truth_incomplete"
             stats["pending_exit_order_truth_error"] = str(exc)[:500]
             break
+        if not str(getattr(pos, "last_exit_order_id", "") or "").strip():
+            # Canonical fallback identity becomes runtime projection only after
+            # the venue returned a complete order fact. Unknown truth leaves
+            # both memory and canonical state unchanged.
+            pos.last_exit_order_id = exit_order_id
         if conn is not None:
             if status:
                 log_pending_exit_status_event(conn, pos, status=status)
@@ -9419,7 +9421,9 @@ def _check_order_fill(
                 "pending-exit order truth deadline elapsed during request"
             )
         if payload is None:
-            return "", None
+            raise _PendingExitOrderTruthIncomplete(
+                "pending-exit order truth unavailable: empty response"
+            )
         if isinstance(payload, str):
             status = payload.upper()
             if status in {"FETCH_ERROR", "UNKNOWN"}:
@@ -9430,7 +9434,7 @@ def _check_order_fill(
         if isinstance(payload, dict):
             status = payload.get("status") or payload.get("state") or payload.get("orderStatus")
             normalized = str(status).upper() if status else ""
-            if normalized in {"FETCH_ERROR", "UNKNOWN"}:
+            if normalized in {"", "FETCH_ERROR", "UNKNOWN"}:
                 raise _PendingExitOrderTruthIncomplete(
                     f"pending-exit order truth unavailable: {normalized}"
                 )

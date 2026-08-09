@@ -1276,7 +1276,16 @@ class PolymarketV2Adapter:
                 "ORDER_TRUTH_INCOMPLETE: authenticated order helpers unavailable"
             ) from exc
 
-        client = self._sdk_client()
+        # The monitor deadline may not wrap lazy SDK/client initialization:
+        # custom factories and credential derivation are synchronous and cannot
+        # be cancelled by asyncio.timeout. The held-monitor prewarms this client
+        # before acquiring its single-writer claim.
+        client = self._client
+        if client is None:
+            raise IncompleteOrderTruthError(
+                "ORDER_TRUTH_INCOMPLETE: authenticated client was not prepared "
+                "before the monitor deadline"
+            )
         request_path = f"{GET_ORDER}{urllib.parse.quote(str(order_id), safe='')}"
         host = str(getattr(client, "host", self.host)).rstrip("/")
         remaining = self._order_truth_deadline_remaining(deadline_monotonic)

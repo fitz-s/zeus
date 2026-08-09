@@ -1163,10 +1163,25 @@ class PolymarketClient:
         from src.venue.response_contracts import VenueOrderNotFound
 
         try:
-            state = self._ensure_v2_adapter().get_order(
-                order_id,
-                deadline_monotonic=deadline_monotonic,
-            )
+            if deadline_monotonic is None:
+                # Preserve the historical one-argument adapter contract for
+                # non-monitor callers and compatibility fakes.
+                state = self._ensure_v2_adapter().get_order(order_id)
+            else:
+                adapter = getattr(self, "_v2_adapter", None)
+                if adapter is None:
+                    from src.venue.polymarket_v2_adapter import (
+                        IncompleteOrderTruthError,
+                    )
+
+                    raise IncompleteOrderTruthError(
+                        "ORDER_TRUTH_INCOMPLETE: authenticated adapter was not "
+                        "prepared before the monitor deadline"
+                    )
+                state = adapter.get_order(
+                    order_id,
+                    deadline_monotonic=deadline_monotonic,
+                )
         except VenueOrderNotFound:
             return None
         except httpx.HTTPStatusError as exc:

@@ -4496,6 +4496,7 @@ def test_deadline_order_read_cancels_transport_without_sdk_get_order(
             raise AssertionError("absolute deadline must cancel the transport")
 
     adapter, _ = _adapter(tmp_path, FakeAuthenticatedClient())
+    adapter._client = FakeAuthenticatedClient()
 
     async def fake_headers(*_args, **_kwargs):
         return {"x-test": "signed"}, 1_700_000_000
@@ -4510,3 +4511,26 @@ def test_deadline_order_read_cancels_transport_without_sdk_get_order(
             deadline_monotonic=started + 0.02,
         )
     assert time.monotonic() - started < 0.20
+
+
+def test_deadline_order_read_never_invokes_lazy_client_factory(tmp_path):
+    from src.venue.polymarket_v2_adapter import IncompleteOrderTruthError
+
+    factory_calls = []
+
+    def blocking_factory(**_kwargs):
+        factory_calls.append("called")
+        time.sleep(0.15)
+        return object()
+
+    adapter, _ = _adapter(tmp_path, object())
+    adapter._client_factory = blocking_factory
+    started = time.monotonic()
+    with pytest.raises(IncompleteOrderTruthError, match="client was not prepared"):
+        adapter.get_order(
+            "ord-unprepared",
+            deadline_monotonic=started + 0.01,
+        )
+
+    assert factory_calls == []
+    assert time.monotonic() - started < 0.10

@@ -12455,3 +12455,83 @@ def test_pending_exit_incomplete_order_truth_defers_without_state_mutation(conn)
         position.exit_retry_count,
         position.last_exit_order_id,
     ) == before
+
+
+@pytest.mark.parametrize("incomplete_payload", [None, {}, {"reason": "missing status"}])
+def test_pending_exit_empty_order_truth_never_accumulates_retry_or_reprices(
+    conn,
+    incomplete_payload,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState
+
+    position = _seed_pending_exit_reprice_case(
+        conn,
+        trade_id="pos-empty-order-truth",
+        command_id="cmd-empty-order-truth",
+        order_id="ord-empty-order-truth",
+        reason="EXIT_PROBABILITY_DECAY",
+        capital_certificate=None,
+    )
+    before = (
+        position.state,
+        position.exit_state,
+        position.order_status,
+        position.exit_retry_count,
+        position.next_exit_retry_at,
+    )
+
+    class FakeClob:
+        def get_order_status(self, _order_id, *, deadline_monotonic):
+            assert deadline_monotonic > exit_lifecycle._time_module.monotonic()
+            return incomplete_payload
+
+        def cancel_order(self, _order_id):
+            raise AssertionError("incomplete order truth cannot authorize cancel/reprice")
+
+    stats = exit_lifecycle.check_pending_exits(
+        PortfolioState(positions=[position]),
+        FakeClob(),
+        conn=conn,
+    )
+
+    assert stats["pending_exit_defer_reason"] == "order_truth_incomplete"
+    assert stats["retried"] == 0
+    assert (
+        position.state,
+        position.exit_state,
+        position.order_status,
+        position.exit_retry_count,
+        position.next_exit_retry_at,
+    ) == before
+
+
+def test_pending_exit_fallback_order_id_is_not_projected_on_unknown_truth(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import PortfolioState
+
+    position = _seed_pending_exit_reprice_case(
+        conn,
+        trade_id="pos-fallback-order-unknown",
+        command_id="cmd-fallback-order-unknown",
+        order_id="ord-fallback-order-unknown",
+        reason="EXIT_PROBABILITY_DECAY",
+        capital_certificate=None,
+    )
+    position.last_exit_order_id = ""
+
+    class FakeClob:
+        def get_order_status(self, order_id, *, deadline_monotonic):
+            assert order_id == "ord-fallback-order-unknown"
+            assert deadline_monotonic > exit_lifecycle._time_module.monotonic()
+            return {"status": "FETCH_ERROR"}
+
+    stats = exit_lifecycle.check_pending_exits(
+        PortfolioState(positions=[position]),
+        FakeClob(),
+        conn=conn,
+    )
+
+    assert stats["pending_exit_defer_reason"] == "order_truth_incomplete"
+    assert position.last_exit_order_id == ""
+    assert position.exit_retry_count == 0
