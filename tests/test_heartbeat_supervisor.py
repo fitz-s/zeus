@@ -1985,6 +1985,7 @@ def test_venue_background_maintenance_defers_when_edli_pending_backlog_exists(mo
     calls = []
 
     monkeypatch.setattr(main, "_edli_reactor_pending_backlog_exists", lambda: True)
+    monkeypatch.setattr(main, "_unresolved_reconcile_findings_exist", lambda: False)
     monkeypatch.setattr(main, "_ws_gap_m5_reconcile_required", lambda: False)
     monkeypatch.setattr(
         main,
@@ -1996,6 +1997,112 @@ def test_venue_background_maintenance_defers_when_edli_pending_backlog_exists(mo
     assert main._start_venue_background_maintenance_async(adapter) == "deferred_edli_pending_backlog"
     assert main._start_venue_background_maintenance_async(adapter) == "throttled"
     assert calls == []
+
+
+def test_venue_background_maintenance_prioritizes_reconcile_drain_over_active_reactor(
+    monkeypatch,
+):
+    from src import main
+
+    adapter = object()
+    calls = []
+
+    class InlineThread:
+        def __init__(self, *, target, name, daemon):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(main, "_unresolved_reconcile_findings_exist", lambda: True)
+    monkeypatch.setattr(main, "_ws_gap_m5_reconcile_required", lambda: False)
+    monkeypatch.setattr(main, "_edli_reactor_pending_backlog_exists", lambda: True)
+    monkeypatch.setattr(main.threading, "Thread", InlineThread)
+    monkeypatch.setattr(
+        main,
+        "_run_venue_background_maintenance_once",
+        lambda active_adapter: calls.append(active_adapter),
+    )
+    main._last_venue_background_maintenance_attempt_at = None
+
+    assert main._edli_reactor_active_lock.acquire(blocking=False)
+    try:
+        assert main._start_venue_background_maintenance_async(adapter) == "started"
+    finally:
+        main._edli_reactor_active_lock.release()
+
+    assert calls == [adapter]
+
+
+def test_reconcile_drain_probe_tracks_only_unresolved_canonical_findings():
+    from src import main
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE exchange_reconcile_findings (
+            finding_id TEXT PRIMARY KEY,
+            resolved_at TEXT
+        )
+        """
+    )
+
+    assert not main._unresolved_reconcile_findings_exist(conn_factory=lambda: conn)
+    conn.execute(
+        "INSERT INTO exchange_reconcile_findings VALUES ('finding-1', NULL)"
+    )
+    assert main._unresolved_reconcile_findings_exist(conn_factory=lambda: conn)
+    conn.execute(
+        "UPDATE exchange_reconcile_findings SET resolved_at='2026-08-09T00:00:00Z'"
+    )
+    assert not main._unresolved_reconcile_findings_exist(conn_factory=lambda: conn)
+
+
+def test_venue_background_maintenance_still_defers_active_reactor_without_drain(
+    monkeypatch,
+):
+    from src import main
+
+    monkeypatch.setattr(main, "_unresolved_reconcile_findings_exist", lambda: False)
+
+    assert main._edli_reactor_active_lock.acquire(blocking=False)
+    try:
+        result = main._start_venue_background_maintenance_async(object())
+    finally:
+        main._edli_reactor_active_lock.release()
+
+    assert result == "deferred_cycle_running"
+
+
+def test_venue_background_maintenance_run_allows_reconcile_drain_during_reactor(
+    monkeypatch,
+):
+    from src import main
+
+    adapter = object()
+    calls = []
+    monkeypatch.setattr(main, "_unresolved_reconcile_findings_exist", lambda: True)
+    monkeypatch.setattr(
+        main,
+        "_refresh_reconcile_findings_if_required",
+        lambda active_adapter: calls.append("refresh") or {"status": "resolved"},
+    )
+    monkeypatch.setattr(
+        main,
+        "_run_ws_gap_reconcile_if_required",
+        lambda active_adapter: calls.append("ws_gap") or {"status": "not_required"},
+    )
+
+    assert main._edli_reactor_active_lock.acquire(blocking=False)
+    try:
+        result = main._run_venue_background_maintenance_once(adapter)
+    finally:
+        main._edli_reactor_active_lock.release()
+
+    assert result["status"] == "ok"
+    assert result["reconcile_findings_refresh"]["status"] == "resolved"
+    assert calls == ["refresh", "ws_gap"]
 
 
 def test_venue_background_maintenance_runs_m5_reconcile_despite_edli_pending_backlog(monkeypatch):

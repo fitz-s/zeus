@@ -2036,7 +2036,9 @@ def _refresh_reconcile_findings_if_required(
 
     if adapter is None:
         return {"status": "adapter_unavailable"}
-    if _cycle_lock.locked() or _edli_reactor_active():
+    if _cycle_lock.locked():
+        return {"status": "deferred_cycle_running"}
+    if _edli_reactor_active() and not _unresolved_reconcile_findings_exist():
         return {"status": "deferred_cycle_running"}
     owns_connection = conn_factory is None
     conn = None
@@ -2083,10 +2085,43 @@ def _refresh_reconcile_findings_if_required(
             conn.close()
 
 
+def _unresolved_reconcile_findings_exist(*, conn_factory=None) -> bool:
+    """Return whether venue maintenance has canonical reconcile debt to drain."""
+
+    # SCOPE: only unresolved exchange-reconcile findings bypass reactor/backlog
+    # scheduling preference. DRAIN: the existing venue-maintenance singleton runs
+    # refresh_unresolved_reconcile_findings. RESET: resolved_at removes the row from
+    # this exact predicate. Read failure preserves the ordinary defer behavior.
+    owns_connection = conn_factory is None
+    conn = None
+    try:
+        from src.state.db import get_trade_connection_read_only
+
+        conn = (conn_factory or get_trade_connection_read_only)()
+        row = conn.execute(
+            """
+            SELECT EXISTS(
+                SELECT 1
+                  FROM exchange_reconcile_findings
+                 WHERE resolved_at IS NULL
+            ) AS present
+            """
+        ).fetchone()
+        return bool(row["present"] if hasattr(row, "keys") else row[0])
+    except Exception as exc:
+        logger.warning("Reconcile finding drain probe failed closed: %s", exc)
+        return False
+    finally:
+        if owns_connection and conn is not None:
+            conn.close()
+
+
 def _run_venue_background_maintenance_once(adapter=None) -> dict:
     """Run venue read-side maintenance outside the heartbeat critical path."""
 
-    if _cycle_lock.locked() or _edli_reactor_active():
+    if _cycle_lock.locked():
+        return {"status": "deferred_cycle_running"}
+    if _edli_reactor_active() and not _unresolved_reconcile_findings_exist():
         return {"status": "deferred_cycle_running"}
     active_adapter = adapter or _venue_heartbeat_adapter
     if active_adapter is None:
@@ -2110,7 +2145,13 @@ def _start_venue_background_maintenance_async(adapter=None) -> str:
     """Start slow venue maintenance without delaying the next heartbeat tick."""
 
     global _last_venue_background_maintenance_attempt_at
-    if _cycle_lock.locked() or _edli_reactor_active():
+    if _cycle_lock.locked():
+        return "deferred_cycle_running"
+    reactor_active = _edli_reactor_active()
+    reconcile_drain_required = (
+        reactor_active and _unresolved_reconcile_findings_exist()
+    )
+    if reactor_active and not reconcile_drain_required:
         return "deferred_cycle_running"
     active_adapter = adapter or _venue_heartbeat_adapter
     if active_adapter is None:
@@ -2119,15 +2160,19 @@ def _start_venue_background_maintenance_async(adapter=None) -> str:
     m5_reconcile_required = _ws_gap_m5_reconcile_required()
     if (
         not m5_reconcile_required
-        and
-        _last_venue_background_maintenance_attempt_at is not None
+        and not reconcile_drain_required
+        and _last_venue_background_maintenance_attempt_at is not None
         and (now - _last_venue_background_maintenance_attempt_at).total_seconds()
         < VENUE_BACKGROUND_MAINTENANCE_SECONDS
     ):
         return "throttled"
     if _edli_reactor_pending_backlog_exists() and not m5_reconcile_required:
-        _last_venue_background_maintenance_attempt_at = now
-        return "deferred_edli_pending_backlog"
+        reconcile_drain_required = (
+            reconcile_drain_required or _unresolved_reconcile_findings_exist()
+        )
+        if not reconcile_drain_required:
+            _last_venue_background_maintenance_attempt_at = now
+            return "deferred_edli_pending_backlog"
     if not _venue_background_maintenance_lock.acquire(blocking=False):
         return "already_running"
     _last_venue_background_maintenance_attempt_at = now
