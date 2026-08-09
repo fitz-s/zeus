@@ -5033,6 +5033,40 @@ def test_high_yes_edge_degrades_without_yes_action_or_rejection_trace(
     assert surface["missed_high_yes_edge_sample"][0]["condition_id"] == "cond-high-yes-1"
 
 
+def test_high_yes_loader_skips_large_payloads_before_lcb_candidate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(sd)
+    conn = sqlite3.connect(sd / "zeus-forecasts.db")
+    try:
+        conn.execute(
+            "UPDATE forecast_posteriors "
+            "SET q_lcb_json = '{}', q_json = 'Q_NOT_NEEDED', "
+            "provenance_json = 'PROVENANCE_NOT_NEEDED'"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    real_loads = live_health.json.loads
+
+    def guarded_loads(payload, *args, **kwargs):
+        assert payload not in {"Q_NOT_NEEDED", "PROVENANCE_NOT_NEEDED"}
+        return real_loads(payload, *args, **kwargs)
+
+    monkeypatch.setattr(live_health.json, "loads", guarded_loads)
+
+    assert live_health._load_high_yes_edges_python(
+        forecast_db=sd / "zeus-forecasts.db",
+        trade_db=sd / "zeus_trades.db",
+        cutoff=_now_iso(-48 * 3600),
+        now_iso=_now_iso(0),
+    ) == []
+
+
 def test_high_yes_edge_recognizes_day0_posterior_redecision_carrier(
     tmp_path: Path,
 ) -> None:
