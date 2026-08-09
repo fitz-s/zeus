@@ -153,7 +153,7 @@ class _CurrentGlobalDay0FamilySnapshot:
     deterministic_condition_ids: frozenset[str]
     day0_payload: dict[str, object]
     metric: str
-    probability_authority: str = "day0_remaining_day_global_probability_v1"
+    probability_authority: str = ""
 
 
 @dataclass
@@ -4718,17 +4718,34 @@ def _materialize_current_global_day0_probability(
         snapshot.probability_authority
         == "replacement_provisional_day0_global_probability_v1"
     )
+    is_conditioned_replacement = (
+        snapshot.probability_authority
+        == "day0_conditioned_replacement_global_probability_v1"
+    )
+    is_remaining_day = (
+        snapshot.probability_authority
+        == "day0_remaining_day_global_probability_v1"
+    )
     if is_final_daily:
         selected_method = SELECTED_METHOD_FINAL_DAILY_OBSERVATION_EXACT
         probability_authority = (
             "final_daily_observation_exact_global_probability_v1"
         )
-    elif is_unobserved_prefix_replacement or is_provisional_observation_replacement:
+    elif (
+        is_unobserved_prefix_replacement
+        or is_provisional_observation_replacement
+        or is_conditioned_replacement
+    ):
         selected_method = "replacement_posterior"
         probability_authority = snapshot.probability_authority
-    else:
+    elif is_remaining_day:
         selected_method = SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
         probability_authority = "day0_remaining_day_global_probability_v1"
+    else:
+        raise ValueError(
+            "monitor current global Day0 probability authority is unsupported: "
+            f"{snapshot.probability_authority or 'missing'}"
+        )
     refreshed.selected_method = selected_method
     _append_monitor_validation(
         refreshed,
@@ -4756,6 +4773,13 @@ def _materialize_current_global_day0_probability(
             refreshed,
             "day0_provisional_observation_probability_only:"
             "replacement_global_probability_authority",
+        )
+    elif is_conditioned_replacement:
+        _stamp_day0_monitor_belief(
+            refreshed,
+            selected_method=selected_method,
+            kind="probabilistic_day0_conditioned_replacement",
+            metric=snapshot.metric,
         )
     else:
         _stamp_day0_remaining_window_belief(refreshed, metric=snapshot.metric)
@@ -4804,13 +4828,7 @@ def _materialize_current_global_day0_probability(
                 "held_side_summary": _monitor_receipt_quantiles(held_samples),
             },
             "observation": dict(observation) if isinstance(observation, dict) else {},
-            "remaining_window": None
-            if (
-                is_final_daily
-                or is_unobserved_prefix_replacement
-                or is_provisional_observation_replacement
-            )
-            else {
+            "remaining_window": {
                 "source": "current_global_probability_builder",
                 "finite_evidence_member_count": snapshot.day0_payload.get(
                     "_edli_day0_finite_evidence_member_count"
@@ -4818,7 +4836,9 @@ def _materialize_current_global_day0_probability(
                 "finite_evidence_hits_by_condition": snapshot.day0_payload.get(
                     "_edli_day0_finite_evidence_hits_by_condition"
                 ),
-            },
+            }
+            if is_remaining_day
+            else None,
         },
     )
     return held_probability, refreshed, True
@@ -5002,6 +5022,16 @@ def _build_current_global_day0_family_snapshot(
         raise ValueError("monitor deterministic condition metadata is invalid")
     if not deterministic_condition_ids.issubset(condition_ids):
         raise ValueError("monitor deterministic condition metadata is inconsistent")
+    probability_authority = str(
+        day0_payload.get("probability_authority")
+        or (
+            "replacement_unobserved_day0_prefix_global_probability_v1"
+            if unobserved_prefix
+            else ""
+        )
+    ).strip()
+    if not probability_authority:
+        raise ValueError("monitor current global Day0 probability authority is missing")
     return _CurrentGlobalDay0FamilySnapshot(
         witness=witness,
         token_pairs=tuple(
@@ -5011,14 +5041,7 @@ def _build_current_global_day0_family_snapshot(
         deterministic_condition_ids=deterministic_condition_ids,
         day0_payload=day0_payload,
         metric=metric,
-        probability_authority=str(
-            day0_payload.get("probability_authority")
-            or (
-                "replacement_unobserved_day0_prefix_global_probability_v1"
-                if unobserved_prefix
-                else "day0_remaining_day_global_probability_v1"
-            )
-        ),
+        probability_authority=probability_authority,
     )
 
 

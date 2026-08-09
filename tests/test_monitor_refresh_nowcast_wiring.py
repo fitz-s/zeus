@@ -445,6 +445,9 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
                     "observed_extreme_native": 34.0,
                 },
                 "_edli_day0_finite_evidence_member_count": 4,
+                "probability_authority": (
+                    "day0_conditioned_replacement_global_probability_v1"
+                ),
             }
         )
         return SimpleNamespace(probability_witness=witness)
@@ -638,6 +641,9 @@ def test_day0_monitor_reuses_family_snapshot_across_sibling_bins(monkeypatch) ->
         deterministic_condition_ids=frozenset(),
         day0_payload={},
         metric="high",
+        probability_authority=(
+            "day0_conditioned_replacement_global_probability_v1"
+        ),
     )
     builds = []
 
@@ -741,7 +747,7 @@ def test_unobserved_prefix_monitor_uses_predictive_point_not_confidence_sample_m
     assert receipt["remaining_window"] is None
 
 
-def test_current_global_day0_monitor_preserves_exit_maturity_authority() -> None:
+def test_conditioned_replacement_monitor_preserves_q_and_exit_maturity_authority() -> None:
     import numpy as np
 
     condition_id = "0x" + "75" * 32
@@ -756,10 +762,10 @@ def test_current_global_day0_monitor_preserves_exit_maturity_authority() -> None
         ),
         yes_q_samples=np.array([[0.0], [0.2]]),
         yes_point_q=np.array([0.35]),
-        witness_identity="remaining-window-witness",
-        q_version="remaining-window-q",
-        source_truth_identity="remaining-window-truth",
-        band_basis="current_coherent_day0_remaining_model_bootstrap_v3",
+        witness_identity="conditioned-replacement-witness",
+        q_version="conditioned-replacement-q",
+        source_truth_identity="conditioned-replacement-truth",
+        band_basis="current_coherent_day0_conditioned_replacement_simplex_v1",
         band_alpha=0.05,
     )
     maturity_reason = (
@@ -775,6 +781,9 @@ def test_current_global_day0_monitor_preserves_exit_maturity_authority() -> None
             "_edli_day0_exit_authority_reason": maturity_reason,
         },
         metric="high",
+        probability_authority=(
+            "day0_conditioned_replacement_global_probability_v1"
+        ),
     )
     pos = _make_position()
     pos.condition_id = condition_id
@@ -791,6 +800,18 @@ def test_current_global_day0_monitor_preserves_exit_maturity_authority() -> None
 
     assert probability == pytest.approx(0.35)
     assert fresh is True
+    assert refreshed.selected_method == "replacement_posterior"
+    receipt = refreshed._day0_monitor_probability_receipt
+    assert receipt["probability_authority"] == (
+        "day0_conditioned_replacement_global_probability_v1"
+    )
+    assert receipt["remaining_window"] is None
+    assert (
+        "belief_source=replacement_posterior;"
+        "kind=probabilistic_day0_conditioned_replacement;"
+        "metric=high;posterior_mode=model_only_v1"
+        in refreshed.applied_validations
+    )
     assert maturity_reason in refreshed.applied_validations
 
 
