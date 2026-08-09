@@ -206,6 +206,7 @@ from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import (
     qkernel_declares_current_state,
     qkernel_current_state_identity_hash,
+    qkernel_current_state_rejection_reason,
     qkernel_global_buy_fak_prefix_rejection_reason,
     qkernel_global_current_state_rejection_reason,
     stable_hash,
@@ -5744,6 +5745,9 @@ def _qkernel_current_state_solve_economics(cert: Any) -> bool:
 def _qkernel_current_state_solve_economics_rejection_reason(cert: Any) -> str | None:
     """Return the exact broken identity field for a current-band certificate."""
 
+    canonical_reason = qkernel_current_state_rejection_reason(cert)
+    if canonical_reason is not None:
+        return canonical_reason
     if not isinstance(cert, Mapping):
         return "payload_not_mapping"
     band_basis = "CURRENT_POSTERIOR_BAND"

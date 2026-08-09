@@ -176,12 +176,29 @@ _QKERNEL_MAKER_REST_IDENTITY_FIELDS: tuple[str, ...] = (
     "global_rest_deadline_minutes",
 )
 
+_QKERNEL_GLOBAL_CURRENT_STATE_MARKERS: tuple[str, ...] = (
+    "global_actuation_identity",
+    "global_candidate_id",
+    "global_target_shares",
+    "global_expected_cost_usd",
+    "global_max_spend_usd",
+    "global_robust_delta_log_wealth",
+    "global_robust_ev_usd",
+)
+
+
+def _declares_global_current_state(economics: Mapping[str, Any]) -> bool:
+    return any(field in economics for field in _QKERNEL_GLOBAL_CURRENT_STATE_MARKERS)
+
 
 def qkernel_current_state_identity_hash(economics: Mapping[str, Any]) -> str:
     """Recomputable identity for the current-posterior execution certificate."""
 
     fields = _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS
-    if "global_execution_mode" not in economics:
+    if (
+        "global_execution_mode" not in economics
+        and not _declares_global_current_state(economics)
+    ):
         fields = tuple(
             field for field in fields if field != "global_execution_mode"
         )
@@ -215,6 +232,10 @@ def qkernel_current_state_rejection_reason(economics: Any) -> str | None:
 
     if not isinstance(economics, Mapping):
         return "payload_not_mapping"
+    if _declares_global_current_state(economics) and economics.get(
+        "global_execution_mode"
+    ) not in {"TAKER_LIMIT", "MAKER_REST"}:
+        return "global_execution_mode"
     band_basis = "CURRENT_POSTERIOR_BAND"
     selection_bases = {
         band_basis,

@@ -12093,6 +12093,7 @@ def test_global_current_state_mean_buy_uses_point_and_keeps_sample_telemetry():
             "receipt_hash": "receipt-current",
             "payoff_q_point": 0.70,
             "payoff_q_lcb": 0.35,
+            "global_execution_mode": candidate.execution_mode,
             "global_target_shares": float(shares),
             "global_expected_cost_usd": float(cost),
             "global_max_spend_usd": float(cost),

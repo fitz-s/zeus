@@ -2081,6 +2081,25 @@ def test_global_taker_action_cannot_be_rewritten_as_resting_maker():
     assert era._qkernel_current_state_solve_economics(stripped) is False
 
 
+def test_global_current_state_rejects_resealed_missing_execution_mode():
+    cert = _global_current_qkernel_cert(side="NO")
+    cert.pop("global_execution_mode")
+    _seal_current_qkernel_cert(cert)
+
+    assert (
+        era._qkernel_current_state_solve_economics_rejection_reason(cert)
+        == "global_execution_mode"
+    )
+    assert era.qkernel_global_current_state_rejection_reason(
+        cert,
+        direction="buy_no",
+    ) == "current_state:global_execution_mode"
+    assert era._global_current_state_execution_economics_rejection_reason(
+        cert,
+        direction="buy_no",
+    ) == "current_state:global_execution_mode"
+
+
 def test_global_taker_action_fresh_revalidation_never_downgrades_to_maker():
     cert = dict(
         _global_current_qkernel_cert(side="NO"),
@@ -3110,6 +3129,7 @@ def test_global_actuation_current_band_missing_prior_still_accepts_low_probabili
     cert.update(
         global_actuation_identity="global-actuation-1",
         global_economic_identity="global-economic-1",
+        global_execution_mode="TAKER_LIMIT",
         pre_qkernel_q_lcb_5pct=0.12,
     )
     decision = _global_decision(shares="100", cost="5", q="0.10")

@@ -26,6 +26,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.engine import event_reactor_adapter as era
 from src.engine import qkernel_spine_bridge as bridge
 from src.decision_kernel.canonicalization import stable_hash
@@ -364,42 +365,6 @@ def _drive(
     extra_exposure=None,
     selection_proofs=None,
 ):
-    from src.solve.solver import PortfolioWealthWitness, portfolio_wealth_identity
-    from src.contracts.strategy_capital_allocation import StrategyCapitalAllocationWitness
-
-    ledger_snapshot_id = "pr409-current-ledger"
-    position_set_hash = "pr409-empty-positions"
-    captured_at = decision_time.astimezone(_dt.timezone.utc)
-    allocation = StrategyCapitalAllocationWitness.build(
-        capital_basis_usd=Decimal("1000"),
-        committed_capital_usd=Decimal("0"),
-        venue_spendable_cash_usd=Decimal("1000"),
-        allocation={"mode": "wallet_total"},
-    )
-    wealth_identity = portfolio_wealth_identity(
-        ledger_snapshot_id=ledger_snapshot_id,
-        position_set_hash=position_set_hash,
-        wealth_floor_usd=Decimal("1000"),
-        wealth_ceiling_usd=Decimal("1000"),
-        spendable_cash_usd=Decimal("1000"),
-        reservations_usd=Decimal("0"),
-        collateral_authority="CHAIN",
-        strategy_capital_allocation_identity=allocation.witness_identity,
-        captured_at_utc=captured_at,
-    )
-    wealth = PortfolioWealthWitness(
-        ledger_snapshot_id=ledger_snapshot_id,
-        position_set_hash=position_set_hash,
-        wealth_floor_usd=Decimal("1000"),
-        wealth_ceiling_usd=Decimal("1000"),
-        spendable_cash_usd=Decimal("1000"),
-        reservations_usd=Decimal("0"),
-        collateral_authority="CHAIN",
-        strategy_capital_allocation=allocation,
-        captured_at_utc=captured_at,
-        max_age=_dt.timedelta(seconds=5),
-        witness_identity=wealth_identity,
-    )
     return bridge.decide_family_via_spine(
         family=family,
         payload=payload,
@@ -413,8 +378,6 @@ def _drive(
         baseline_usd_provider=era._robust_marginal_utility_baseline_usd,
         per_bin_yes_q_lcb=era._per_bin_yes_q_lcb(proofs),
         extra_exposure_by_bin_id=extra_exposure,
-        solve_wealth_witness=wealth,
-        solve_positions=(),
     )
 
 
@@ -1622,13 +1585,16 @@ def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
         "payoff_q_point": 0.70,
         "payoff_q_lcb": 0.60,
         "cost": 0.04,
-            "edge_lcb": 0.56,
-            "global_actuation_identity": "global-actuation-current",
-            "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
-            "global_candidate_id": "global-candidate-current",
-            "global_bin_id": "bin-1",
+        "edge_lcb": 0.56,
+        "global_actuation_identity": "global-actuation-current",
+        "global_economic_identity": "global-economic-current",
+        "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+        "global_candidate_id": "global-candidate-current",
+        "global_execution_mode": "TAKER_LIMIT",
+        "global_bin_id": "bin-1",
         "global_universe_witness_identity": "global-universe-current",
         "global_wealth_witness_identity": "global-wealth-current",
+        "global_wealth_economic_identity": "global-wealth-economic-current",
         "global_selection_epoch_identity": "global-epoch-current",
         "global_selection_cut_at": "2026-07-11T23:00:00+00:00",
         "global_selection_decision_at": "2026-07-11T23:00:01+00:00",
@@ -1641,6 +1607,15 @@ def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
         "global_max_spend_usd": "1",
         "global_robust_delta_log_wealth": 0.01,
         "global_robust_ev_usd": 14.0,
+        "global_ruin_probability_reduction": 0.0,
+        "global_terminal_ruin_probability_reduction": 0.0,
+        "global_utility_basis": STRATEGY_LOG_UTILITY_BASIS,
+        "global_proposal_expected_delta_log_wealth": 0.01,
+        "global_proposal_expected_ev_usd": 14.0,
+        "global_proposal_expected_log_growth_per_hour": 0.01 / 24.0,
+        "global_proposal_expected_capital_efficiency": 0.01,
+        "global_proposal_capital_lock_hours": 24.0,
+        "global_proposal_fill_semantics": "IMMEDIATE_FILL",
         "false_edge_rate": 0.10,
         "global_cut_time_win_probability_lcb": 0.60,
         "global_cut_time_loss_probability_ucb": 0.40,
@@ -1677,6 +1652,10 @@ def test_global_current_winner_survives_book_and_sizes_from_its_sealed_curve():
     all_hypothesis_ids = (selected_hypothesis_id,) + tuple(
         f"family-global-current:sibling-{idx}" for idx in range(21)
     )
+    assert era.qkernel_global_current_state_rejection_reason(
+        cert,
+        direction="buy_yes",
+    ) is None
     fdr_cert = era._qkernel_fdr_execution_economics(selected_day0)
     day0_fdr = era._day0_selected_route_fdr_proof(
         event_type="DAY0_EXTREME_UPDATED",
