@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -392,6 +393,301 @@ def _install_listener_dependencies(monkeypatch, wake, order: list[str]) -> None:
     )
 
 
+def _install_position_fill_scope_readers(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    event_rows: tuple[tuple[str, str, str], ...],
+    position_rows: tuple[tuple[object, ...], ...],
+) -> None:
+    world_path = tmp_path / "zeus-world.db"
+    world = sqlite3.connect(world_path)
+    try:
+        world.execute(
+            "CREATE TABLE opportunity_events "
+            "(event_id TEXT PRIMARY KEY, event_type TEXT, payload_json TEXT)"
+        )
+        world.executemany(
+            "INSERT INTO opportunity_events VALUES (?, ?, ?)", event_rows
+        )
+        world.commit()
+    finally:
+        world.close()
+
+    trade_path = tmp_path / "zeus_trades.db"
+    trade = sqlite3.connect(trade_path)
+    try:
+        trade.execute(
+            """
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT,
+                shares REAL,
+                cost_basis_usd REAL,
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT
+            )
+            """
+        )
+        trade.executemany(
+            "INSERT INTO position_current VALUES (?, ?, ?, ?, ?, ?, ?)",
+            position_rows,
+        )
+        trade.commit()
+    finally:
+        trade.close()
+
+    def _reader(path: Path):
+        return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+
+    monkeypatch.setattr(
+        main,
+        "get_world_connection_read_only",
+        lambda: _reader(world_path),
+    )
+    monkeypatch.setattr(
+        "src.state.db.get_trade_connection_read_only",
+        lambda: _reader(trade_path),
+    )
+
+
+def _position_fill_wake(*, wake_id: str = "wake-position-fill"):
+    return reactor_wake.ReactorWake(
+        wake_id=wake_id,
+        published_at="2026-08-08T12:00:00+00:00",
+        source="fill_tracker",
+        reason="position_fill_projected",
+        event_ids=("event-position-fill",),
+    )
+
+
+def _position_fill_event_payload(*position_ids: str) -> str:
+    return json.dumps(
+        {
+            "redecision_origin": "position_fill",
+            "position_fill_position_ids": list(position_ids),
+        }
+    )
+
+
+def test_position_fill_scope_uses_current_local_only_position_family(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _install_position_fill_scope_readers(
+        monkeypatch,
+        tmp_path,
+        event_rows=(
+            (
+                "event-position-fill",
+                "EDLI_REDECISION_PENDING",
+                _position_fill_event_payload("local-only"),
+            ),
+        ),
+        position_rows=(
+            (
+                "local-only",
+                "active",
+                2.0,
+                0.40,
+                "Paris",
+                "2026-08-08",
+                "low",
+            ),
+        ),
+    )
+
+    assert main._position_fill_wake_held_families(("event-position-fill",)) == frozenset(
+        {("Paris", "2026-08-08", "low")}
+    )
+
+
+def test_finished_position_fill_wake_monitors_before_reactor_and_ack(
+    monkeypatch, tmp_path: Path
+) -> None:
+    wake = _position_fill_wake()
+    _install_position_fill_scope_readers(
+        monkeypatch,
+        tmp_path,
+        event_rows=(
+            (
+                "event-position-fill",
+                "EDLI_REDECISION_PENDING",
+                _position_fill_event_payload("local-only"),
+            ),
+        ),
+        position_rows=(
+            (
+                "local-only",
+                "day0_window",
+                2.0,
+                0.40,
+                "Paris",
+                "2026-08-08",
+                "low",
+            ),
+        ),
+    )
+    order: list[str] = []
+    _install_listener_dependencies(monkeypatch, wake, order)
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        main,
+        "_reactor_wake_event_state",
+        lambda _event_ids: main._ReactorWakeEventState(
+            ready=False,
+            finished=True,
+        ),
+    )
+    monkeypatch.setattr(main, "_reactor_wake_events_finished", lambda _ids: True)
+
+    def _dispatch(wake_ids, target_families):
+        assert wake_ids == (wake.wake_id,)
+        assert target_families == frozenset({("Paris", "2026-08-08", "low")})
+        order.append("monitor")
+        with main._forecast_exit_monitor_attempts_lock:
+            for wake_id in wake_ids:
+                main._forecast_exit_monitor_attempts[wake_id] = True
+        return True
+
+    monkeypatch.setattr(main, "_dispatch_forecast_exit_monitor", _dispatch)
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: order.append("cycle") or True,
+    )
+    main._forecast_exit_monitor_attempts.clear()
+
+    try:
+        assert main._edli_reactor_wake_poll_once() is True
+        assert order == ["monitor", "cycle", "ack"]
+    finally:
+        main._forecast_exit_monitor_attempts.clear()
+
+
+def test_uncertain_position_fill_scope_uses_full_book_monitor(
+    monkeypatch, tmp_path: Path
+) -> None:
+    wake = _position_fill_wake(wake_id="wake-position-fill-uncertain")
+    _install_position_fill_scope_readers(
+        monkeypatch,
+        tmp_path,
+        event_rows=(
+            (
+                "event-position-fill",
+                "EDLI_REDECISION_PENDING",
+                json.dumps({"redecision_origin": "position_fill"}),
+            ),
+        ),
+        position_rows=(),
+    )
+    order: list[str] = []
+    _install_listener_dependencies(monkeypatch, wake, order)
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        main,
+        "_reactor_wake_event_state",
+        lambda _event_ids: main._ReactorWakeEventState(
+            ready=False,
+            finished=True,
+        ),
+    )
+    monkeypatch.setattr(main, "_reactor_wake_events_finished", lambda _ids: True)
+
+    def _dispatch(wake_ids, target_families):
+        assert target_families is None
+        order.append("monitor")
+        with main._forecast_exit_monitor_attempts_lock:
+            for wake_id in wake_ids:
+                main._forecast_exit_monitor_attempts[wake_id] = True
+        return True
+
+    monkeypatch.setattr(main, "_dispatch_forecast_exit_monitor", _dispatch)
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: order.append("cycle") or True,
+    )
+    main._forecast_exit_monitor_attempts.clear()
+
+    try:
+        assert main._edli_reactor_wake_poll_once() is True
+        assert order == ["monitor", "cycle", "ack"]
+    finally:
+        main._forecast_exit_monitor_attempts.clear()
+
+
+def test_position_fill_monitor_failure_retains_wake_for_retry(
+    monkeypatch, tmp_path: Path
+) -> None:
+    wake = _position_fill_wake(wake_id="wake-position-fill-retry")
+    _install_position_fill_scope_readers(
+        monkeypatch,
+        tmp_path,
+        event_rows=(
+            (
+                "event-position-fill",
+                "EDLI_REDECISION_PENDING",
+                _position_fill_event_payload("local-only"),
+            ),
+        ),
+        position_rows=(
+            (
+                "local-only",
+                "pending_exit",
+                2.0,
+                0.40,
+                "Paris",
+                "2026-08-08",
+                "low",
+            ),
+        ),
+    )
+    order: list[str] = []
+    _install_listener_dependencies(monkeypatch, wake, order)
+    monkeypatch.setattr(
+        main,
+        "_reactor_wake_event_state",
+        lambda _event_ids: main._ReactorWakeEventState(
+            ready=False,
+            finished=True,
+        ),
+    )
+    monkeypatch.setattr(main, "_reactor_wake_events_finished", lambda _ids: True)
+    attempts = iter((False, True))
+
+    def _allow_retry() -> frozenset[str]:
+        with main._forecast_exit_monitor_attempts_lock:
+            main._forecast_exit_monitor_attempts.pop(wake.wake_id, None)
+        return frozenset()
+
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", _allow_retry)
+
+    def _dispatch(wake_ids, _target_families):
+        order.append("monitor")
+        succeeded = next(attempts)
+        with main._forecast_exit_monitor_attempts_lock:
+            for wake_id in wake_ids:
+                main._forecast_exit_monitor_attempts[wake_id] = succeeded
+        return True
+
+    monkeypatch.setattr(main, "_dispatch_forecast_exit_monitor", _dispatch)
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **_kwargs: order.append("cycle") or True,
+    )
+    main._forecast_exit_monitor_attempts.clear()
+
+    try:
+        assert main._edli_reactor_wake_poll_once() is False
+        assert order == ["monitor"]
+        assert main._edli_reactor_wake_poll_once() is True
+        assert order == ["monitor", "monitor", "cycle", "ack"]
+    finally:
+        main._forecast_exit_monitor_attempts.clear()
+
+
 def test_listener_persists_terminal_before_exact_cut_and_acks_mixed_batch(
     monkeypatch,
 ) -> None:
@@ -515,6 +811,11 @@ def test_oldest_active_wake_cannot_starve_later_terminal_queue_files(
     )
     monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        main,
+        "_position_fill_wake_held_families",
+        lambda _event_ids: frozenset(),
+    )
     monkeypatch.setattr(
         main,
         "_edli_global_completion_yield",

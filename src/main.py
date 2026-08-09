@@ -4830,9 +4830,163 @@ def _forecast_wake_held_families(
     )
 
 
+def _position_fill_wake_held_families(
+    event_ids: tuple[str, ...],
+) -> frozenset[tuple[str, str, str]] | None:
+    """Resolve a fill wake to current held families, or fail closed.
+
+    SCOPE: exact wake event IDs -> exact position_fill_position_ids -> current
+    position family. DRAIN: a successful canonical trade read returns the
+    current positive open families; an empty result proves every referenced
+    position is terminal or absent. RESET:
+    successful wake acknowledgement; any uncertainty returns ``None`` so the
+    full-book monitor owns the retry.
+    """
+
+    clean_event_ids = tuple(
+        dict.fromkeys(
+            event_id
+            for raw_event_id in event_ids
+            if (event_id := str(raw_event_id or "").strip())
+        )
+    )
+    if not clean_event_ids:
+        return None
+
+    world_conn = None
+    try:
+        placeholders = ",".join("?" for _ in clean_event_ids)
+        world_conn = get_world_connection_read_only()
+        event_rows = world_conn.execute(
+            f"""
+            SELECT event_id, event_type, payload_json
+              FROM opportunity_events
+             WHERE event_id IN ({placeholders})
+            """,
+            clean_event_ids,
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - uncertain provenance requires full-book retry
+        logger.warning(
+            "position-fill wake scope unavailable; using full exit monitor",
+            exc_info=True,
+        )
+        return None
+    finally:
+        if world_conn is not None:
+            try:
+                world_conn.close()
+            except Exception:  # noqa: BLE001 - close failure leaves scope uncertain
+                logger.warning(
+                    "position-fill wake world connection close failed",
+                    exc_info=True,
+                )
+
+    if len(event_rows) != len(clean_event_ids) or {
+        str(row[0] or "").strip() for row in event_rows
+    } != set(clean_event_ids):
+        logger.warning(
+            "position-fill wake event identity incomplete; using full exit monitor"
+        )
+        return None
+
+    position_ids: set[str] = set()
+    try:
+        for _event_id, event_type, payload_json in event_rows:
+            if str(event_type or "").strip() != "EDLI_REDECISION_PENDING":
+                return None
+            payload = json.loads(str(payload_json or ""))
+            if payload.get("redecision_origin") != "position_fill":
+                return None
+            raw_position_ids = payload.get("position_fill_position_ids")
+            if not isinstance(raw_position_ids, (list, tuple)) or not raw_position_ids:
+                return None
+            for raw_position_id in raw_position_ids:
+                if not isinstance(raw_position_id, str) or not raw_position_id.strip():
+                    return None
+                position_ids.add(raw_position_id.strip())
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError):
+        logger.warning(
+            "position-fill wake payload identity invalid; using full exit monitor",
+            exc_info=True,
+        )
+        return None
+    if not position_ids:
+        return None
+
+    trade_conn = None
+    try:
+        from src.state.db import get_trade_connection_read_only
+
+        trade_conn = get_trade_connection_read_only()
+        placeholders = ",".join("?" for _ in position_ids)
+        rows = trade_conn.execute(
+            f"""
+            SELECT position_id, phase, shares, cost_basis_usd,
+                   city, target_date, temperature_metric
+              FROM position_current
+             WHERE position_id IN ({placeholders})
+            """,
+            tuple(sorted(position_ids)),
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - uncertain canonical truth requires full-book retry
+        logger.warning(
+            "position-fill wake trade scope unavailable; using full exit monitor",
+            exc_info=True,
+        )
+        return None
+    finally:
+        if trade_conn is not None:
+            try:
+                trade_conn.close()
+            except Exception:  # noqa: BLE001 - close failure leaves scope uncertain
+                logger.warning(
+                    "position-fill wake trade connection close failed",
+                    exc_info=True,
+                )
+
+    open_phases = {"active", "day0_window", "pending_exit"}
+    terminal_phases = {
+        "economically_closed",
+        "settled",
+        "voided",
+        "admin_closed",
+    }
+    families: set[tuple[str, str, str]] = set()
+    for row in rows:
+        position_id = str(row[0] or "").strip()
+        if position_id not in position_ids:
+            return None
+        phase = str(row[1] or "").strip()
+        if phase in terminal_phases:
+            continue
+        if phase not in open_phases:
+            return None
+        try:
+            shares = float(row[2])
+            cost_basis_usd = float(row[3])
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(shares) or not math.isfinite(cost_basis_usd):
+            return None
+        if shares <= 0 or cost_basis_usd <= 0:
+            return None
+        city = str(row[4] or "").strip()
+        try:
+            target_date = date.fromisoformat(
+                str(row[5] or "").strip()[:10]
+            ).isoformat()
+        except (TypeError, ValueError):
+            return None
+        metric = str(row[6] or "").strip().lower()
+        if not city or not target_date or metric not in {"high", "low"}:
+            return None
+        families.add((city, target_date, metric))
+    return frozenset(families)
+
+
 def _dispatch_forecast_exit_monitor(
     wake_ids: tuple[str, ...],
-    target_families: frozenset[tuple[str, str, str]],
+    target_families: frozenset[tuple[str, str, str]] | None,
 ) -> bool:
     """Run held-family belief re-decision independently of entry event admission."""
 
@@ -5379,13 +5533,28 @@ def _edli_reactor_wake_poll_once() -> bool:
     forecast_wake = wake.reason == "forecast_posterior_advanced"
     price_wake = wake.reason == "market_price_advanced"
     substrate_refresh_wake = wake.reason == "money_path_substrate_refreshed"
+    position_fill_wake = wake.reason == "position_fill_projected"
     wake_event_state = None
+    position_fill_monitor_families: frozenset[tuple[str, str, str]] | None = frozenset()
+    position_fill_monitor_required = False
+    if position_fill_wake:
+        position_fill_monitor_families = _position_fill_wake_held_families(
+            wake_event_ids
+        )
+        position_fill_monitor_required = (
+            position_fill_monitor_families is None
+            or bool(position_fill_monitor_families)
+        )
     if wake_event_ids:
         wake_event_state = _reactor_wake_event_state(wake_event_ids)
         # Entry-event completion does not satisfy the same fact's held-position
         # redecision. A finished Day0 wake must reach the monitor-before-ack path.
         finished_day0_monitor = day0_wake and wake_event_state.finished
-        if wake_event_state.finished and not finished_day0_monitor:
+        if (
+            wake_event_state.finished
+            and not finished_day0_monitor
+            and not position_fill_monitor_required
+        ):
             if not _acknowledge_edli_reactor_wake_batch(
                 wake,
                 wakes,
@@ -5402,7 +5571,11 @@ def _edli_reactor_wake_poll_once() -> bool:
                 len(wake_event_ids),
             )
             return True
-        if not wake_event_state.ready and not finished_day0_monitor:
+        if (
+            not wake_event_state.ready
+            and not finished_day0_monitor
+            and not position_fill_monitor_required
+        ):
             return False
     if (
         held_sell_reauction_requests
@@ -5482,6 +5655,16 @@ def _edli_reactor_wake_poll_once() -> bool:
             _dispatch_forecast_exit_monitor(
                 tuple(queued.wake_id for queued in wakes),
                 forecast_monitor_families,
+            )
+        _started, result = _forecast_exit_monitor_attempt_state(wake.wake_id)
+        if result is not True:
+            return False
+    if position_fill_monitor_required:
+        started, result = _forecast_exit_monitor_attempt_state(wake.wake_id)
+        if not started:
+            _dispatch_forecast_exit_monitor(
+                tuple(queued.wake_id for queued in wakes),
+                position_fill_monitor_families,
             )
         _started, result = _forecast_exit_monitor_attempt_state(wake.wake_id)
         if result is not True:
