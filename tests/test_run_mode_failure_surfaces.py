@@ -10113,6 +10113,18 @@ def test_command_recovery_runs_once_per_entry_decision_clock() -> None:
 
     assert main_module._EDLI_COMMAND_RECOVERY_INTERVAL_SECONDS == 60.0
     assert "seconds=_EDLI_COMMAND_RECOVERY_INTERVAL_SECONDS" in source
+    assert (
+        main_module._EDLI_COMMAND_RECOVERY_FIRST_DELAY_SECONDS
+        - (
+            main_module.HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS
+            + main_module.HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS
+        )
+    ) == 8.0
+    assert (
+        "_utc_run_time_after(\n"
+        "                _EDLI_COMMAND_RECOVERY_FIRST_DELAY_SECONDS\n"
+        "            )"
+    ) in source
 
 
 def test_boot_fast_command_recovery_includes_filled_entry_projection_repair() -> None:

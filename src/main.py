@@ -157,6 +157,7 @@ _HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS = _HELD_POSITION_MONITOR_DEFER_JOBS
 _market_discovery_last_completed_monotonic: float | None = None
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
 _EDLI_COMMAND_RECOVERY_INTERVAL_SECONDS = 60.0
+_EDLI_COMMAND_RECOVERY_FIRST_DELAY_SECONDS = 43.0
 _EDLI_COMMAND_RECOVERY_FULL_CADENCE_SECONDS = 300.0
 _CAPITAL_RECOVERY_REACTOR_DRAIN_SECONDS = 15.0
 _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET: int | None = None
@@ -9265,7 +9266,12 @@ def main():
             "interval",
             seconds=_EDLI_COMMAND_RECOVERY_INTERVAL_SECONDS,
             id="edli_command_recovery",
-            next_run_time=_utc_run_time_after(OPENING_HUNT_FIRST_DELAY_SECONDS + 60.0),
+            # Phase recovery after the 30s monitor-recovery slot. Starting it
+            # five seconds before that higher-priority writer made the venue
+            # snapshot and DB apply collide on every minute boundary.
+            next_run_time=_utc_run_time_after(
+                _EDLI_COMMAND_RECOVERY_FIRST_DELAY_SECONDS
+            ),
             max_instances=1,
             coalesce=True,
         )
