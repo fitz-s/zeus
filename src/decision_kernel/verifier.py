@@ -34,8 +34,6 @@ from src.strategy.live_inference.live_admission import (
     replacement_no_bound_expected_from_parents,
 )
 from src.events.day0_authority import (
-    DAY0_REPLACEMENT_GLOBAL_AUTHORITIES_BY_Q_SOURCE,
-    DAY0_REPLACEMENT_Q_SOURCE,
     Day0AuthorityError,
     assert_live_day0_probability_authority,
     assert_live_day0_payload_authority,
@@ -50,15 +48,13 @@ FORECAST_ACTIONABLE_EVENT_TYPES = frozenset(
 
 
 def _uses_replacement_probability_authority(payload: Mapping[str, object]) -> bool:
-    authority = str(payload.get("probability_authority") or "").strip()
-    q_source = str(
-        payload.get("_edli_q_source") or payload.get("q_source") or ""
-    ).strip()
-    if q_source == DAY0_REPLACEMENT_Q_SOURCE and authority == "replacement_0_1":
-        return True
-    return authority in DAY0_REPLACEMENT_GLOBAL_AUTHORITIES_BY_Q_SOURCE.get(
-        q_source,
-        frozenset(),
+    return (
+        str(payload.get("probability_authority") or "").strip()
+        == "replacement_0_1"
+        and str(
+            payload.get("_edli_q_source") or payload.get("q_source") or ""
+        ).strip()
+        == "replacement_0_1"
     )
 # mx2t3 carrier-decouple (GATE-1 C): the members_json_source value a posterior-provenance
 # FORECAST_AUTHORITY carries when belief is sourced from the multi-model raw_model_forecasts
