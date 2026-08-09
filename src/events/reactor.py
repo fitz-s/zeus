@@ -5963,6 +5963,25 @@ def _current_local_day_families(
     return current
 
 
+def _day0_redecision_carrier_families(
+    *,
+    producer_wake_reason: str | None,
+    forecast_wake_families: set[tuple[str, str, str]],
+    decision_time: datetime,
+) -> set[tuple[str, str, str]]:
+    """Route current-day belief and held-exit wakes through the Day0 carrier."""
+
+    if producer_wake_reason not in {
+        "forecast_posterior_advanced",
+        GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+    }:
+        return set()
+    return _current_local_day_families(
+        forecast_wake_families,
+        decision_time=decision_time,
+    )
+
+
 def _build_day0_posterior_redecision_events(
     world_conn,
     posterior_events: Iterable[OpportunityEvent],
@@ -7755,12 +7774,11 @@ def run_edli_event_reactor_cycle(
                         cancelled=_urgent_wake_pending,
                     )
                 _day0_posterior_wake_families = (
-                    _current_local_day_families(
-                        forecast_wake_families,
+                    _day0_redecision_carrier_families(
+                        producer_wake_reason=producer_wake_reason,
+                        forecast_wake_families=forecast_wake_families,
                         decision_time=now,
                     )
-                    if producer_wake_reason == "forecast_posterior_advanced"
-                    else set()
                 )
                 _forecast_only_wake_families = (
                     forecast_wake_families - _day0_posterior_wake_families

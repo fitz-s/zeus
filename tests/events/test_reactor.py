@@ -1555,6 +1555,40 @@ def test_paused_exact_canonical_held_sell_request_reaches_reduce_only_cycle(monk
     assert lock.locked() is False
 
 
+def test_exact_held_sell_completion_builds_current_day_redecision_carrier(
+    monkeypatch,
+):
+    import src.events.reactor as reactor_module
+
+    family = ("Dallas", "2026-05-24", "high")
+    decision_time = datetime(2026, 5, 24, 18, 0, tzinfo=timezone.utc)
+    calls = []
+
+    monkeypatch.setattr(
+        reactor_module,
+        "_current_local_day_families",
+        lambda families, *, decision_time: calls.append(
+            (set(families), decision_time)
+        )
+        or {family},
+    )
+
+    result = reactor_module._day0_redecision_carrier_families(
+        producer_wake_reason=reactor_module.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        forecast_wake_families={family},
+        decision_time=decision_time,
+    )
+
+    assert result == {family}
+    assert calls == [({family}, decision_time)]
+    assert reactor_module._day0_redecision_carrier_families(
+        producer_wake_reason="market_price_advanced",
+        forecast_wake_families={family},
+        decision_time=decision_time,
+    ) == set()
+    assert calls == [({family}, decision_time)]
+
+
 def test_degraded_durable_held_sell_debt_reaches_reduce_only_setup(monkeypatch):
     import src.engine.event_reactor_adapter as adapter_module
     import src.events.reactor as reactor_module
