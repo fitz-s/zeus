@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-25; last_reviewed=2026-07-27; last_reused=2026-07-27
+# Lifecycle: created=2026-05-25; last_reviewed=2026-08-09; last_reused=2026-08-09
 # Purpose: Prove actionable trade certificates bind every live probability and execution parent.
 # Reuse: Re-audit canonical parent identity and selected-leg probability closure before live use.
 # Authority basis: docs/operations/edli_v1/EDLI_REDEMPTION_FINAL_PACKAGE_SPEC.md §14 full-live increment.
@@ -960,6 +960,9 @@ def _replacement_day0_actionable_fixture(direction: str):
             "observation_available_at": "2026-05-25T11:35:00+00:00",
             "q_source": "replacement_0_1",
             "_edli_q_source": "replacement_0_1",
+            "probability_authority": probability_authority[
+                "probability_authority"
+            ],
             "day0_probability_authority": probability_authority,
             "qkernel_execution_economics": economics,
         }
@@ -1000,6 +1003,70 @@ def test_actionable_accepts_provisional_replacement_day0_without_hard_fact_paren
     )
 
     verify_actionable_trade(action, parents)
+
+
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+def test_actionable_accepts_conditioned_replacement_day0_without_hard_fact_parents(
+    direction,
+):
+    action_payload, parent_overrides, _extra_parents = (
+        _replacement_day0_actionable_fixture(direction)
+    )
+    conditioned_authority = "day0_conditioned_replacement_global_probability_v1"
+    conditioned_q_source = "day0_conditioned_replacement"
+    day0_probability_authority = dict(
+        action_payload["day0_probability_authority"]
+    )
+    day0_probability_authority.update(
+        {
+            "probability_authority": conditioned_authority,
+            "q_source": conditioned_q_source,
+        }
+    )
+    action_payload.update(
+        {
+            "probability_authority": conditioned_authority,
+            "q_source": conditioned_q_source,
+            "_edli_q_source": conditioned_q_source,
+            "day0_probability_authority": day0_probability_authority,
+        }
+    )
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+        extra_parent_payloads={},
+    )
+
+    verify_actionable_trade(action, parents)
+
+
+def test_actionable_conditioned_replacement_rejects_authority_q_source_mismatch():
+    action_payload, parent_overrides, _extra_parents = (
+        _replacement_day0_actionable_fixture("buy_no")
+    )
+    conditioned_q_source = "day0_conditioned_replacement"
+    day0_probability_authority = dict(
+        action_payload["day0_probability_authority"]
+    )
+    day0_probability_authority["q_source"] = conditioned_q_source
+    action_payload.update(
+        {
+            "q_source": conditioned_q_source,
+            "_edli_q_source": conditioned_q_source,
+            "day0_probability_authority": day0_probability_authority,
+        }
+    )
+    parents, action = actionable_graph(
+        action_payload=action_payload,
+        parent_overrides=parent_overrides,
+        extra_parent_payloads={},
+    )
+
+    with pytest.raises(
+        CertificateVerificationError,
+        match="replacement_day0_probability_authority required",
+    ):
+        verify_actionable_trade(action, parents)
 
 
 def test_actionable_rejects_replacement_day0_posterior_binding_mismatch():
