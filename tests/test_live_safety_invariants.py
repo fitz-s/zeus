@@ -10645,6 +10645,7 @@ def test_held_monitor_prefetch_batches_books_and_skips_redundant_market_metadata
             self.batch_calls.append(tuple(token_ids))
             return {
                 token_id: {
+                    "asset_id": token_id,
                     "bids": [{"price": "0.40", "size": "20"}],
                     "asks": [{"price": "0.42", "size": "20"}],
                 }
@@ -10678,6 +10679,14 @@ def test_held_monitor_prefetch_batches_books_and_skips_redundant_market_metadata
     assert summary["held_monitor_orderbooks_local"] == 0
     assert summary["held_monitor_orderbooks_network_requested"] == 3
     assert summary["held_monitor_orderbooks_prefetched"] == 3
+    assert summary["held_monitor_orderbooks_published_for_global_sell"] == 3
+    published = monitor_refresh.current_monitor_orderbook_batch(
+        [pos.token_id for pos in positions],
+        checked_at_utc=datetime.now(timezone.utc),
+        max_age=timedelta(seconds=8),
+    )
+    assert published is not None
+    assert set(published[0]) == {pos.token_id for pos in positions}
     for pos in positions:
         assert monitor_refresh.prefetched_monitor_orderbook(clob, pos.token_id)
         assert (
@@ -10685,6 +10694,62 @@ def test_held_monitor_prefetch_batches_books_and_skips_redundant_market_metadata
             is None
         )
     assert clob.market_calls == 0
+    monitor_refresh.publish_current_monitor_orderbook_batch(
+        {},
+        captured_at_utc=None,
+    )
+
+
+def test_monitor_global_sell_handoff_is_exact_and_does_not_extend_time():
+    from src.engine import event_reactor_adapter, monitor_refresh
+
+    captured_at = datetime(2026, 8, 9, 12, 30, tzinfo=timezone.utc)
+    assert monitor_refresh.publish_current_monitor_orderbook_batch(
+        {
+            "token-current": {
+                "asset_id": "token-current",
+                "bids": [{"price": "0.08", "size": "40"}],
+                "asks": [{"price": "0.10", "size": "40"}],
+            },
+            "token-mismatch": {
+                "asset_id": "different-token",
+                "bids": [{"price": "0.20", "size": "10"}],
+            },
+        },
+        captured_at_utc=captured_at,
+    ) == 1
+
+    current = monitor_refresh.current_monitor_orderbook_batch(
+        ("token-current", "token-mismatch"),
+        checked_at_utc=captured_at + timedelta(seconds=2),
+        max_age=timedelta(seconds=8),
+    )
+    assert current is not None
+    assert set(current[0]) == {"token-current"}
+    assert current[1] == captured_at
+    projection = event_reactor_adapter._monitor_first_global_book_projection(
+        ("token-current",),
+        checked_at=captured_at + timedelta(seconds=2),
+        max_age=timedelta(seconds=8),
+        projected_loader=lambda: pytest.fail(
+            "complete monitor cut must bypass slower projection and network recapture"
+        ),
+    )
+    assert projection is not None
+    assert set(projection[0]) == {"token-current"}
+    assert projection[1] == captured_at
+    assert (
+        monitor_refresh.current_monitor_orderbook_batch(
+            ("token-current",),
+            checked_at_utc=captured_at + timedelta(seconds=9),
+            max_age=timedelta(seconds=8),
+        )
+        is None
+    )
+    monitor_refresh.publish_current_monitor_orderbook_batch(
+        {},
+        captured_at_utc=None,
+    )
 
 
 def test_held_monitor_prefetch_clears_prior_cycle_when_batch_fetch_fails():

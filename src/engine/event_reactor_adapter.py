@@ -2461,6 +2461,61 @@ def _projected_global_book_rows_hint(
     )
 
 
+def _monitor_first_global_book_projection(
+    tokens: Iterable[str],
+    *,
+    checked_at: datetime,
+    max_age: timedelta,
+    projected: tuple[dict[str, Mapping[str, object]], datetime] | None = None,
+    projected_loader: Callable[
+        [], tuple[dict[str, Mapping[str, object]], datetime] | None
+    ]
+    | None = None,
+) -> tuple[dict[str, Mapping[str, object]], datetime] | None:
+    """Prefer the exact monitor network cut, then fill its missing tokens."""
+
+    from src.engine.monitor_refresh import current_monitor_orderbook_batch
+
+    requested = tuple(
+        dict.fromkeys(
+            token_id
+            for token in tokens
+            if (token_id := str(token).strip())
+        )
+    )
+    monitor_projection = current_monitor_orderbook_batch(
+        requested,
+        checked_at_utc=checked_at,
+        max_age=max_age,
+    )
+    monitor_books, monitor_at = (
+        monitor_projection if monitor_projection is not None else ({}, None)
+    )
+    if monitor_books and all(token in monitor_books for token in requested):
+        logging.getLogger(__name__).info(
+            "global book projection reused monitor network cut: tokens=%d age_ms=%d",
+            len(requested),
+            max(0, int((checked_at - monitor_at).total_seconds() * 1000)),
+        )
+        return monitor_books, monitor_at
+    base = projected
+    if base is None and projected_loader is not None:
+        base = projected_loader()
+    projected_books, projected_at = base if base is not None else ({}, None)
+    if monitor_books:
+        projected_books = {**projected_books, **monitor_books}
+        projected_at = (
+            min(projected_at, monitor_at)
+            if projected_at is not None and monitor_at is not None
+            else projected_at or monitor_at
+        )
+    return (
+        (projected_books, projected_at)
+        if projected_books and projected_at is not None
+        else None
+    )
+
+
 def _global_book_prefetch_epoch_at(
     *,
     projected_at: datetime | None,
@@ -8387,13 +8442,25 @@ def event_bound_live_adapter_from_trade_conn(
                 projection_checked = captured_at is not None
                 captured_at = captured_at or datetime.now(UTC)
                 fetch_started = _time.monotonic()
-                if not projection_checked:
-                    projected = _projected_global_book_hint(
-                        trade_conn,
-                        tokens,
-                        checked_at=captured_at,
-                        max_age=FRESHNESS_WINDOW_DEFAULT,
+                projected = _monitor_first_global_book_projection(
+                    tokens,
+                    checked_at=captured_at,
+                    max_age=min(
+                        FRESHNESS_WINDOW_DEFAULT,
+                        timedelta(seconds=timeout),
+                    ),
+                    projected=projected,
+                    projected_loader=(
+                        None
+                        if projection_checked
+                        else lambda: _projected_global_book_hint(
+                            trade_conn,
+                            tokens,
+                            checked_at=captured_at,
+                            max_age=FRESHNESS_WINDOW_DEFAULT,
+                        )
                     )
+                )
                 projected_books, projected_at = (
                     projected if projected is not None else ({}, None)
                 )
@@ -31838,10 +31905,12 @@ def _prepare_current_global_probability_family(
 ):
     """Build current simplex or exact-bin payoff authority without price dependency.
 
-    Whole-family preparation prefers one joint Day0 simplex. If the remaining-
-    day forecast is unavailable, exact observation-proved bins may still form a
-    partial witness; unknown siblings remain ineligible. JIT revalidation
-    preserves the selected witness kind.
+    Whole-family preparation uses one current-state Day0 simplex. The persisted
+    replacement posterior remains the source-clock prior and identity carrier;
+    the action probability is the final extreme conditioned on observations
+    through ``decision_time`` and the hourly trajectories that remain. Exact
+    observation-proved bins may still form a partial witness; unknown siblings
+    remain ineligible. JIT revalidation preserves the selected witness kind.
     """
 
     from src.data.replacement_forecast_bundle_reader import (

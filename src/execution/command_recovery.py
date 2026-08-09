@@ -17240,7 +17240,14 @@ def _cancel_unknown_partial_position_proof(
     filled_size: str,
     fill_price: str,
 ) -> bool:
-    """Require exact live exposure for a cancel-unknown partial fill."""
+    """Require exact command-bound materialization for a partial fill.
+
+    A first entry can be proven by equality with the current projection.  A
+    later same-position increment cannot: ``position_current`` is the aggregate
+    of every entry command.  For that case require both immutable command/order
+    lifecycle provenance and the command-scoped execution fact, while the
+    current chain-synced aggregate must still cover the proven increment.
+    """
 
     position_id = str(command.get("position_id") or "").strip()
     venue_order_id = str(command.get("venue_order_id") or "").strip()
@@ -17269,10 +17276,9 @@ def _cancel_unknown_partial_position_proof(
         return False
     if str(current.get("chain_state") or "").lower() != "synced":
         return False
-    if str(current.get("order_id") or "").lower() != venue_order_id.lower():
-        return False
     expected_cost = filled * price
     tolerance = _POSITION_PROJECTION_TOLERANCE
+    projection_values: dict[str, Decimal] = {}
     for field, expected in (
         ("shares", filled),
         ("chain_shares", filled),
@@ -17280,9 +17286,78 @@ def _cancel_unknown_partial_position_proof(
         ("chain_cost_basis_usd", expected_cost),
     ):
         actual = _positive_decimal_or_none(current.get(field))
-        if actual is None or abs(actual - expected) > tolerance:
+        if actual is None:
             return False
-    return True
+        projection_values[field] = actual
+    if (
+        str(current.get("order_id") or "").lower() == venue_order_id.lower()
+        and all(
+            abs(projection_values[field] - expected) <= tolerance
+            for field, expected in (
+                ("shares", filled),
+                ("chain_shares", filled),
+                ("cost_basis_usd", expected_cost),
+                ("chain_cost_basis_usd", expected_cost),
+            )
+        )
+    ):
+        return True
+
+    if any(
+        projection_values[field] + tolerance < expected
+        for field, expected in (
+            ("shares", filled),
+            ("chain_shares", filled),
+            ("cost_basis_usd", expected_cost),
+            ("chain_cost_basis_usd", expected_cost),
+        )
+    ):
+        return False
+    if not _table_exists(conn, "execution_fact"):
+        return False
+    execution = conn.execute(
+        """
+        SELECT shares, fill_price
+          FROM execution_fact
+         WHERE position_id = ?
+           AND command_id = ?
+           AND order_role = 'entry'
+           AND voided_at IS NULL
+           AND lower(COALESCE(terminal_exec_status, '')) IN ('partial', 'filled')
+         ORDER BY filled_at DESC, intent_id
+         LIMIT 1
+        """,
+        (position_id, str(command.get("command_id") or "")),
+    ).fetchone()
+    if execution is None:
+        return False
+    execution_row = _dict_row(execution)
+    execution_shares = _positive_decimal_or_none(execution_row.get("shares"))
+    execution_price = _positive_decimal_or_none(execution_row.get("fill_price"))
+    if (
+        execution_shares is None
+        or execution_price is None
+        or abs(execution_shares - filled) > tolerance
+        or abs(execution_price - price) > tolerance
+    ):
+        return False
+    projected = conn.execute(
+        """
+        SELECT 1
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'ENTRY_ORDER_FILLED'
+           AND command_id = ?
+           AND lower(COALESCE(order_id, '')) = lower(?)
+         LIMIT 1
+        """,
+        (
+            position_id,
+            str(command.get("command_id") or ""),
+            venue_order_id,
+        ),
+    ).fetchone()
+    return projected is not None
 
 
 def _review_required_cancel_unknown_terminal_partial_recovery(
@@ -25035,11 +25110,6 @@ def _reconcile_passes_short_conn(
         scope=scope,
         deadline_monotonic=apply_deadline,
     )
-    capital_conn_factory = _recovery_priority_conn_factory(
-        capital_conn_factory,
-        scope=scope,
-        deadline_monotonic=apply_deadline,
-    )
     apply_conn_factory = _recovery_apply_conn_factory(
         conn_factory,
         scope=scope,
@@ -25198,21 +25268,29 @@ def _reconcile_passes_short_conn(
             stale_terminal_finding_candidates = (
                 _stale_local_orphan_terminal_no_fill_candidates(conn)
             )
-            partial_candidates = (
-                _partial_remainder_candidates(
-                    conn,
-                    live_tick_scope=True,
-                )
-                if all(
-                    _table_exists(conn, table)
-                    for table in (
-                        "venue_commands",
-                        "venue_order_facts",
-                        "position_current",
+            if cancel_candidates:
+                # Exact cancel uncertainty globally removes entry authority.
+                # Do not spend its bounded tick on the broader historical
+                # partial-remainder scan; that debt remains durable and gets
+                # its own pass as soon as the cancel set drains.
+                partial_candidates = []
+                summary["partial_remainder_scan_deferred_for_cancel"] = True
+            else:
+                partial_candidates = (
+                    _partial_remainder_candidates(
+                        conn,
+                        live_tick_scope=True,
                     )
+                    if all(
+                        _table_exists(conn, table)
+                        for table in (
+                            "venue_commands",
+                            "venue_order_facts",
+                            "position_current",
+                        )
+                    )
+                    else []
                 )
-                else []
-            )
             obligation_states = tuple(
                 sorted(
                     _TERMINAL_ENTRY_NO_FILL_COMMAND_STATES
@@ -25421,8 +25499,17 @@ def _reconcile_passes_short_conn(
             ),
         )
         fast_deadline = _capital_deadline()
-        fast_conn_factory = _recovery_apply_conn_factory(
+        # Bind the writer-lease deadline after venue truth is captured.  The
+        # ordinary live-tick deadline is intentionally tiny and may already be
+        # spent by NETWORK; reusing it here makes the capital fast lane
+        # structurally unable to reach APPLY.
+        priority_capital_conn_factory = _recovery_priority_conn_factory(
             capital_conn_factory,
+            scope="live_tick",
+            deadline_monotonic=fast_deadline,
+        )
+        fast_conn_factory = _recovery_apply_conn_factory(
+            priority_capital_conn_factory,
             scope="live_tick",
             deadline_monotonic=fast_deadline,
         )
@@ -25698,6 +25785,9 @@ def _reconcile_passes_short_conn(
                     conn_factory=_boot_conn_factory,
                     label=f"recovery.{label}",
                 )
+            except WriteLeaseTimeout:
+                _defer_boot_pass(label, "database_locked_before_scheduler")
+                return None
             except BlockingIOError as exc:
                 if (
                     "db_writer_lock(" not in str(exc)

@@ -1359,6 +1359,132 @@ def test_candidate_delta_keys_high_cardinality_indexes_instead_of_rewriting():
         )
 
 
+def test_candidate_delta_packs_full_high_cardinality_id_rotation():
+    count = 1_024
+
+    def candidate_index(epoch: str) -> list[list[str]]:
+        return sorted(
+            [
+                hashlib.sha256(f"{epoch}:{index}".encode()).hexdigest(),
+                f"family-{index // 20}",
+                f"bin-{index}",
+                f"condition-{index // 2}",
+                "YES" if index % 2 == 0 else "NO",
+                f"token-{index}",
+                "TAKER_LIMIT" if index % 3 else "MAKER_REST",
+            ]
+            for index in range(count)
+        )
+
+    base = {
+        "rejected_groups": [],
+        "detailed": [],
+        "buy_condition_side_masks": [],
+        "buy_candidate_index_fields": [
+            "candidate_id",
+            "family_key",
+            "bin_id",
+            "condition_id",
+            "side",
+            "token_id",
+            "execution_mode",
+        ],
+        "buy_candidate_index": candidate_index("base"),
+    }
+    current = {**base, "buy_candidate_index": candidate_index("current")}
+    receipt = global_batch_runtime._candidate_evaluations_delta_receipt(
+        base=base,
+        current=current,
+        expected_sha256=hashlib.sha256(
+            global_batch_runtime._canonical_json_bytes(current)
+        ).hexdigest(),
+    )
+    delta_raw = zlib.decompress(
+        base64.b64decode(receipt["candidate_evaluations_delta_zlib_b64"])
+    )
+    delta = json.loads(delta_raw)
+
+    assert receipt["candidate_evaluations_delta_buy_index_patch_count"] == count
+    assert receipt["candidate_evaluations_delta_buy_index_packed"] is True
+    assert receipt["candidate_evaluations_delta_encoding"] == (
+        "zlib+base64+semantic-keyed-canonical-json-delta-v4"
+    )
+    assert delta["buy_candidate_index"]["patches"] == []
+    assert delta["buy_candidate_index"]["candidate_ids_count"] == count
+    assert global_batch_runtime._apply_candidate_evaluations_delta(
+        base,
+        delta,
+    ) == current
+
+    unpacked = json.loads(delta_raw)
+    unpacked["buy_candidate_index"] = {
+        "key_fields": list(global_batch_runtime._BUY_CANDIDATE_INDEX_KEY_FIELDS),
+        "removed_keys": [],
+        "patches": [
+            {
+                "key": row[1:],
+                "candidate_id": row[0],
+            }
+            for row in current["buy_candidate_index"]
+        ],
+    }
+    unpacked_b64 = base64.b64encode(
+        zlib.compress(
+            global_batch_runtime._canonical_json_bytes(unpacked),
+            level=9,
+        )
+    )
+    assert len(receipt["candidate_evaluations_delta_zlib_b64"]) * 4 < len(
+        unpacked_b64
+    ) * 3
+
+    changed_keys_index = candidate_index("changed-keys")[:-1]
+    changed_keys_index.append(
+        [
+            hashlib.sha256(b"changed-keys:new").hexdigest(),
+            "family-new",
+            "bin-new",
+            "condition-new",
+            "YES",
+            "token-new",
+            "TAKER_LIMIT",
+        ]
+    )
+    changed_keys_current = {
+        **base,
+        "buy_candidate_index": sorted(changed_keys_index),
+    }
+    changed_keys_receipt = (
+        global_batch_runtime._candidate_evaluations_delta_receipt(
+            base=base,
+            current=changed_keys_current,
+            expected_sha256=hashlib.sha256(
+                global_batch_runtime._canonical_json_bytes(
+                    changed_keys_current
+                )
+            ).hexdigest(),
+        )
+    )
+    changed_keys_delta = json.loads(
+        zlib.decompress(
+            base64.b64decode(
+                changed_keys_receipt[
+                    "candidate_evaluations_delta_zlib_b64"
+                ]
+            )
+        )
+    )
+    assert changed_keys_receipt[
+        "candidate_evaluations_delta_buy_index_packed"
+    ] is True
+    assert len(changed_keys_delta["buy_candidate_index"]["removed_keys"]) == 1
+    assert len(changed_keys_delta["buy_candidate_index"]["patches"]) == 1
+    assert global_batch_runtime._apply_candidate_evaluations_delta(
+        base,
+        changed_keys_delta,
+    ) == changed_keys_current
+
+
 def test_candidate_delta_reader_replays_pre_execution_mode_v3_index():
     fields = list(global_batch_runtime._LEGACY_BUY_CANDIDATE_INDEX_KEY_FIELDS)
     base = {

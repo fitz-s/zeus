@@ -4793,28 +4793,15 @@ def _load_high_yes_edges_python(
     latest_by_condition: dict[str, dict[str, object]] = {}
     for row in posterior_rows:
         try:
-            q_values = json.loads(row["q_json"] or "{}")
             q_lcb_values = json.loads(row["q_lcb_json"] or "{}")
-            provenance = json.loads(row["provenance_json"] or "{}")
         except (TypeError, json.JSONDecodeError):
             continue
-        if (
-            not isinstance(q_values, dict)
-            or not isinstance(q_lcb_values, dict)
-            or not isinstance(provenance, dict)
-        ):
+        if not isinstance(q_lcb_values, dict):
             continue
-        day0_provenance = provenance.get("day0_conditioning")
-        if not isinstance(day0_provenance, dict):
-            day0_provenance = provenance.get("day0_provisional_observation")
-        if (
-            not isinstance(day0_provenance, dict)
-            or day0_provenance.get("active") is not True
-        ):
-            day0_provenance = {}
         city = str(row["city"] or "")
         target_date = str(row["target_date"] or "")
         metric = str(row["temperature_metric"] or "")
+        eligible: list[tuple[object, float, str, dict[str, object], float]] = []
         for bin_label, raw_lcb in q_lcb_values.items():
             try:
                 yes_lcb = float(raw_lcb)
@@ -4831,43 +4818,65 @@ def _load_high_yes_edges_python(
                 lcb_minus_ask = yes_lcb - yes_ask
                 if lcb_minus_ask < HIGH_YES_EDGE_MIN_LCB_MINUS_ASK:
                     continue
-                try:
-                    yes_q = float(q_values.get(bin_label))
-                except (TypeError, ValueError):
-                    yes_q = None
-                edge = {
-                    "posterior_id": row["posterior_id"],
-                    "posterior_identity_hash": str(
-                        row["posterior_identity_hash"] or ""
-                    ),
-                    "posterior_source_id": str(row["source_id"] or ""),
-                    "day0_observation_source": str(
-                        day0_provenance.get("source") or ""
-                    ),
-                    "day0_observation_identity": str(
-                        day0_provenance.get("observation_time") or ""
-                    ),
-                    "city": city,
-                    "target_date": target_date,
-                    "temperature_metric": metric,
-                    "bin_label": str(bin_label),
-                    "condition_id": condition_id,
-                    "computed_at": row["computed_at"],
-                    "yes_q": yes_q,
-                    "yes_lcb": yes_lcb,
-                    "yes_ask": yes_ask,
-                    "lcb_minus_ask": lcb_minus_ask,
-                    **quote,
-                }
-                existing = latest_by_condition.get(condition_id)
-                if existing is None or (
-                    str(edge["computed_at"]),
-                    int(edge["posterior_id"] or 0),
-                ) > (
-                    str(existing["computed_at"]),
-                    int(existing["posterior_id"] or 0),
-                ):
-                    latest_by_condition[condition_id] = edge
+                eligible.append(
+                    (bin_label, yes_lcb, condition_id, quote, lcb_minus_ask)
+                )
+        if not eligible:
+            continue
+        try:
+            q_values = json.loads(row["q_json"] or "{}")
+            provenance = json.loads(row["provenance_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(q_values, dict) or not isinstance(provenance, dict):
+            continue
+        day0_provenance = provenance.get("day0_conditioning")
+        if not isinstance(day0_provenance, dict):
+            day0_provenance = provenance.get("day0_provisional_observation")
+        if (
+            not isinstance(day0_provenance, dict)
+            or day0_provenance.get("active") is not True
+        ):
+            day0_provenance = {}
+        for bin_label, yes_lcb, condition_id, quote, lcb_minus_ask in eligible:
+            yes_ask = float(quote["yes_ask"])
+            try:
+                yes_q = float(q_values.get(bin_label))
+            except (TypeError, ValueError):
+                yes_q = None
+            edge = {
+                "posterior_id": row["posterior_id"],
+                "posterior_identity_hash": str(
+                    row["posterior_identity_hash"] or ""
+                ),
+                "posterior_source_id": str(row["source_id"] or ""),
+                "day0_observation_source": str(
+                    day0_provenance.get("source") or ""
+                ),
+                "day0_observation_identity": str(
+                    day0_provenance.get("observation_time") or ""
+                ),
+                "city": city,
+                "target_date": target_date,
+                "temperature_metric": metric,
+                "bin_label": str(bin_label),
+                "condition_id": condition_id,
+                "computed_at": row["computed_at"],
+                "yes_q": yes_q,
+                "yes_lcb": yes_lcb,
+                "yes_ask": yes_ask,
+                "lcb_minus_ask": lcb_minus_ask,
+                **quote,
+            }
+            existing = latest_by_condition.get(condition_id)
+            if existing is None or (
+                str(edge["computed_at"]),
+                int(edge["posterior_id"] or 0),
+            ) > (
+                str(existing["computed_at"]),
+                int(existing["posterior_id"] or 0),
+            ):
+                latest_by_condition[condition_id] = edge
 
     return sorted(
         latest_by_condition.values(),
@@ -5506,7 +5515,7 @@ _LATEST_GLOBAL_AUCTION_RECEIPT_ID_SQL = """
       FROM decision_log INDEXED BY idx_decision_log_ts
      WHERE mode IN (?, ?, ?)
        AND timestamp >= ?
-     ORDER BY id DESC
+     ORDER BY timestamp DESC, id DESC
      LIMIT 1
 """
 _GLOBAL_AUCTION_RECEIPT_BY_ID_SQL = """
@@ -5886,6 +5895,7 @@ def _current_global_auction_candidate_payload(
             "zlib+base64+canonical-json-object-delta-v1",
             "zlib+base64+semantic-keyed-canonical-json-delta-v2",
             "zlib+base64+semantic-keyed-canonical-json-delta-v3",
+            "zlib+base64+semantic-keyed-canonical-json-delta-v4",
         }:
             raise ValueError("DELTA_ENCODING")
         base_row_id = int(summary["candidate_evaluations_base_decision_log_id"])

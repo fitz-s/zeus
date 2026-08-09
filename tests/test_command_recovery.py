@@ -1384,6 +1384,39 @@ def test_boot_fast_writer_flock_contention_defers_before_scheduler(monkeypatch):
     ] == "database_locked_before_scheduler"
 
 
+def test_boot_fast_write_lease_contention_defers_before_scheduler(monkeypatch):
+    """A live writer lease must not prevent the scheduler from starting."""
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+    from src.state.write_coordinator import WriteLeaseTimeout
+
+    calls = []
+
+    def _contended_factory(**kwargs):
+        calls.append(kwargs)
+        raise WriteLeaseTimeout(
+            "DB write lease timed out for owner=command_recovery_boot_fast_apply db=trade"
+        )
+
+    _contended_factory.supports_nonblocking_flocks = True
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_conn_factory",
+        _contended_factory,
+    )
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=MagicMock(),
+        scope="boot_fast",
+    )
+
+    assert calls
+    assert summary["boot_fast_deferred"] is True
+    assert summary["boot_fast_defer_reasons"][
+        "missing_filled_entry_execution_fact_repair"
+    ] == "database_locked_before_scheduler"
+
+
 @pytest.mark.parametrize(
     "lock_error",
     [
@@ -16511,10 +16544,34 @@ class TestRecoveryResolutionTable:
             return _conn_factory()
 
         _conn_factory.trade_only_factory = _trade_only_conn_factory
+        _conn_factory.requires_writer_flocks = True
+        _trade_only_conn_factory.requires_writer_flocks = True
+
+        priority_deadlines = []
+
+        def _priority_factory_spy(
+            conn_factory,
+            *,
+            scope,
+            deadline_monotonic=None,
+        ):
+            priority_deadlines.append((conn_factory, scope, deadline_monotonic))
+            return conn_factory
+
+        monkeypatch.setattr(
+            command_recovery,
+            "_recovery_priority_conn_factory",
+            _priority_factory_spy,
+        )
 
         monkeypatch.setattr(
             venue_sync_contract,
             "default_trade_conn_factory",
+            _conn_factory,
+        )
+        monkeypatch.setattr(
+            venue_sync_contract,
+            "default_trade_read_conn_factory",
             _conn_factory,
         )
         monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
@@ -16539,6 +16596,11 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
         assert capital_apply_calls
+        assert len(priority_deadlines) == 2
+        general_deadline = priority_deadlines[0][2]
+        capital_deadline = priority_deadlines[1][2]
+        assert priority_deadlines[1][0] is _trade_only_conn_factory
+        assert capital_deadline > general_deadline + 1.0
         verified = _conn_factory()
         try:
             assert _get_state(verified, "cmd-001") == "EXPIRED"
@@ -16577,6 +16639,13 @@ class TestRecoveryResolutionTable:
             "default_trade_conn_factory",
             _conn_factory,
         )
+        monkeypatch.setattr(
+            command_recovery,
+            "_partial_remainder_candidates",
+            lambda *_args, **_kwargs: pytest.fail(
+                "exact cancel debt must preempt the historical partial scan"
+            ),
+        )
         monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
         mock_client.get_order.return_value = None
         mock_client.get_open_orders.return_value = []
@@ -16593,6 +16662,7 @@ class TestRecoveryResolutionTable:
             "stayed": 0,
             "errors": 0,
         }
+        assert summary["partial_remainder_scan_deferred_for_cancel"] is True
         verified = _conn_factory()
         try:
             assert _get_state(verified, "cmd-001") == "CANCELLED"
@@ -29841,4 +29911,85 @@ def test_cancel_unknown_partial_accepts_canonical_projection_precision(conn):
         command=command,
         filled_size="29.850742",
         fill_price="0.33",
+    )
+
+
+def test_cancel_unknown_partial_accepts_exact_increment_inside_aggregate_position(conn):
+    """An exact command fill may be one increment of a larger position."""
+    from src.execution.command_recovery import _cancel_unknown_partial_position_proof
+    from src.state.db import log_execution_fact
+
+    _insert(conn, size=8.5, price=0.32)
+    _advance_to_acked(conn, venue_order_id="ord-increment-partial")
+    _seed_pending_entry_projection(
+        conn,
+        position_id="pos-001",
+        command_id="cmd-001",
+        order_id="ord-prior-entry",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'day0_window',
+               chain_state = 'synced',
+               order_id = 'ord-prior-entry',
+               shares = 34.957214,
+               chain_shares = 34.9572,
+               cost_basis_usd = 11.797218,
+               chain_cost_basis_usd = 11.7971
+         WHERE position_id = 'pos-001'
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, decision_id,
+            snapshot_id, order_id, command_id, source_module, env, payload_json
+        ) VALUES (
+            'pos-001:entry_order_filled:cmd-001', 'pos-001', 1, 3,
+            'ENTRY_ORDER_FILLED', '2026-04-26T00:06:00Z', 'day0_window',
+            'day0_window', 'opening_inertia', 'dec-001', 'snap-pos-001',
+            'ord-increment-partial', 'cmd-001',
+            'src.execution.exchange_reconcile', 'live',
+            '{"order_status":"partial"}'
+        )
+        """
+    )
+    log_execution_fact(
+        conn,
+        intent_id="pos-001:entry:cmd-001",
+        position_id="pos-001",
+        decision_id="dec-001",
+        command_id="cmd-001",
+        order_role="entry",
+        strategy_key="opening_inertia",
+        posted_at="2026-04-26T00:02:00Z",
+        filled_at="2026-04-26T00:06:00Z",
+        submitted_price=0.32,
+        fill_price=0.320000036266689,
+        shares=4.411762,
+        venue_status="PARTIAL",
+        terminal_exec_status="partial",
+        decision_law_id="predicted_bin_ev_v1",
+    )
+    command = {
+        "command_id": "cmd-001",
+        "position_id": "pos-001",
+        "venue_order_id": "ord-increment-partial",
+    }
+
+    assert _cancel_unknown_partial_position_proof(
+        conn,
+        command=command,
+        filled_size="4.411762",
+        fill_price="0.3200000362666889",
+    )
+
+    conn.execute("DELETE FROM execution_fact WHERE command_id = 'cmd-001'")
+    assert not _cancel_unknown_partial_position_proof(
+        conn,
+        command=command,
+        filled_size="4.411762",
+        fill_price="0.3200000362666889",
     )

@@ -102,6 +102,11 @@ _MONITOR_PREFETCHED_ORDERBOOKS_ATTR = "_zeus_monitor_prefetched_orderbooks"
 _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR = (
     "_zeus_monitor_prefetch_attempted_tokens"
 )
+_CURRENT_MONITOR_ORDERBOOK_BATCH_LOCK = threading.Lock()
+_CURRENT_MONITOR_ORDERBOOK_BATCH: tuple[dict[str, dict], datetime | None] = (
+    {},
+    None,
+)
 _HELD_MONITOR_DEADLINE_ATTR = "_zeus_held_monitor_deadline_monotonic"
 HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS = 5.0
 _MONITOR_DAY0_FAMILY_CACHE_ATTR = "_zeus_monitor_day0_family_cache"
@@ -148,7 +153,7 @@ class _CurrentGlobalDay0FamilySnapshot:
     deterministic_condition_ids: frozenset[str]
     day0_payload: dict[str, object]
     metric: str
-    probability_authority: str = "day0_remaining_day_global_probability_v1"
+    probability_authority: str = ""
 
 
 @dataclass
@@ -305,6 +310,71 @@ def install_monitor_orderbook_prefetch(
     except (AttributeError, TypeError):
         return False
     return True
+
+
+def publish_current_monitor_orderbook_batch(
+    books: dict[str, dict],
+    *,
+    captured_at_utc: datetime | None,
+) -> int:
+    """Publish one exact network batch for immediate global SELL redecision."""
+
+    global _CURRENT_MONITOR_ORDERBOOK_BATCH
+    captured_at = captured_at_utc
+    if captured_at is not None:
+        if captured_at.tzinfo is None:
+            raise ValueError("MONITOR_ORDERBOOK_BATCH_CLOCK_NAIVE")
+        captured_at = captured_at.astimezone(timezone.utc)
+    clean: dict[str, dict] = {}
+    for raw_token_id, raw_book in books.items():
+        token_id = str(raw_token_id).strip()
+        if not token_id or not isinstance(raw_book, dict) or not raw_book:
+            continue
+        asset_id = str(
+            raw_book.get("asset_id")
+            or raw_book.get("assetId")
+            or raw_book.get("token_id")
+            or ""
+        ).strip()
+        if asset_id != token_id:
+            continue
+        clean[token_id] = dict(raw_book)
+    if not clean:
+        captured_at = None
+    with _CURRENT_MONITOR_ORDERBOOK_BATCH_LOCK:
+        _CURRENT_MONITOR_ORDERBOOK_BATCH = (clean, captured_at)
+    return len(clean)
+
+
+def current_monitor_orderbook_batch(
+    token_ids,
+    *,
+    checked_at_utc: datetime,
+    max_age: timedelta,
+) -> tuple[dict[str, dict], datetime] | None:
+    """Read the latest exact monitor network cut without extending its clock."""
+
+    if checked_at_utc.tzinfo is None or max_age <= timedelta(0):
+        raise ValueError("MONITOR_ORDERBOOK_BATCH_READ_CLOCK_INVALID")
+    checked_at = checked_at_utc.astimezone(timezone.utc)
+    requested = {
+        token_id
+        for value in token_ids
+        if (token_id := str(value).strip())
+    }
+    with _CURRENT_MONITOR_ORDERBOOK_BATCH_LOCK:
+        books, captured_at = _CURRENT_MONITOR_ORDERBOOK_BATCH
+        selected = {
+            token_id: dict(books[token_id])
+            for token_id in requested
+            if token_id in books
+        }
+    if captured_at is None:
+        return None
+    age = checked_at - captured_at
+    if age < timedelta(0) or age > max_age or not selected:
+        return None
+    return selected, captured_at
 
 
 def install_monitor_day0_family_cache(clob) -> bool:
@@ -4648,17 +4718,34 @@ def _materialize_current_global_day0_probability(
         snapshot.probability_authority
         == "replacement_provisional_day0_global_probability_v1"
     )
+    is_conditioned_replacement = (
+        snapshot.probability_authority
+        == "day0_conditioned_replacement_global_probability_v1"
+    )
+    is_remaining_day = (
+        snapshot.probability_authority
+        == "day0_remaining_day_global_probability_v1"
+    )
     if is_final_daily:
         selected_method = SELECTED_METHOD_FINAL_DAILY_OBSERVATION_EXACT
         probability_authority = (
             "final_daily_observation_exact_global_probability_v1"
         )
-    elif is_unobserved_prefix_replacement or is_provisional_observation_replacement:
+    elif (
+        is_unobserved_prefix_replacement
+        or is_provisional_observation_replacement
+        or is_conditioned_replacement
+    ):
         selected_method = "replacement_posterior"
         probability_authority = snapshot.probability_authority
-    else:
+    elif is_remaining_day:
         selected_method = SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
         probability_authority = "day0_remaining_day_global_probability_v1"
+    else:
+        raise ValueError(
+            "monitor current global Day0 probability authority is unsupported: "
+            f"{snapshot.probability_authority or 'missing'}"
+        )
     refreshed.selected_method = selected_method
     _append_monitor_validation(
         refreshed,
@@ -4686,6 +4773,13 @@ def _materialize_current_global_day0_probability(
             refreshed,
             "day0_provisional_observation_probability_only:"
             "replacement_global_probability_authority",
+        )
+    elif is_conditioned_replacement:
+        _stamp_day0_monitor_belief(
+            refreshed,
+            selected_method=selected_method,
+            kind="probabilistic_day0_conditioned_replacement",
+            metric=snapshot.metric,
         )
     else:
         _stamp_day0_remaining_window_belief(refreshed, metric=snapshot.metric)
@@ -4734,13 +4828,7 @@ def _materialize_current_global_day0_probability(
                 "held_side_summary": _monitor_receipt_quantiles(held_samples),
             },
             "observation": dict(observation) if isinstance(observation, dict) else {},
-            "remaining_window": None
-            if (
-                is_final_daily
-                or is_unobserved_prefix_replacement
-                or is_provisional_observation_replacement
-            )
-            else {
+            "remaining_window": {
                 "source": "current_global_probability_builder",
                 "finite_evidence_member_count": snapshot.day0_payload.get(
                     "_edli_day0_finite_evidence_member_count"
@@ -4748,7 +4836,9 @@ def _materialize_current_global_day0_probability(
                 "finite_evidence_hits_by_condition": snapshot.day0_payload.get(
                     "_edli_day0_finite_evidence_hits_by_condition"
                 ),
-            },
+            }
+            if is_remaining_day
+            else None,
         },
     )
     return held_probability, refreshed, True
@@ -4932,6 +5022,16 @@ def _build_current_global_day0_family_snapshot(
         raise ValueError("monitor deterministic condition metadata is invalid")
     if not deterministic_condition_ids.issubset(condition_ids):
         raise ValueError("monitor deterministic condition metadata is inconsistent")
+    probability_authority = str(
+        day0_payload.get("probability_authority")
+        or (
+            "replacement_unobserved_day0_prefix_global_probability_v1"
+            if unobserved_prefix
+            else ""
+        )
+    ).strip()
+    if not probability_authority:
+        raise ValueError("monitor current global Day0 probability authority is missing")
     return _CurrentGlobalDay0FamilySnapshot(
         witness=witness,
         token_pairs=tuple(
@@ -4941,14 +5041,7 @@ def _build_current_global_day0_family_snapshot(
         deterministic_condition_ids=deterministic_condition_ids,
         day0_payload=day0_payload,
         metric=metric,
-        probability_authority=str(
-            day0_payload.get("probability_authority")
-            or (
-                "replacement_unobserved_day0_prefix_global_probability_v1"
-                if unobserved_prefix
-                else "day0_remaining_day_global_probability_v1"
-            )
-        ),
+        probability_authority=probability_authority,
     )
 
 

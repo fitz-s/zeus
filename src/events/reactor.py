@@ -4836,6 +4836,11 @@ _RUNTIME_TERMINAL_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     # lifecycle recovery; REJECTED/CANCELLED/EXPIRED commands should be replaced
     # only by a fresh redecision event with a fresh executable identity.
     "idempotency_collision",
+    # The executor found an already-open position or live command for the same
+    # token before any venue call. That existing owner is the final disposition
+    # for this immutable event; fresh evidence emits a new event after the owner
+    # advances. Requeueing this carrier only repeats the duplicate gate.
+    "duplicate_entry_same_token",
     # Receipt missing or not bound to this event (submit returned True / a
     # non-matching receipt): a structural expressibility failure, not a race.
     "EVENT_SUBMISSION_RECEIPT_MISSING_OR_UNBOUND",
