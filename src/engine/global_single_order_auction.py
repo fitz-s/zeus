@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
@@ -1098,12 +1098,31 @@ def select_prepared_global_auction(
                             )
                         )
                     else:
+                        sellable_shares = Decimal(holding.shares).quantize(
+                            Decimal("0.01"),
+                            rounding=ROUND_FLOOR,
+                        )
+                        no_executable_book = sellable_shares > 0
                         holding_coverage.append(
                             coverage_row(
                                 holding,
                                 probability,
                                 status="EXCLUDED",
-                                reason="SELLABLE_SHARES_BELOW_PRECISION",
+                                reason=(
+                                    "SELL_BOOK_NO_EXECUTABLE_UNIT_PRICE"
+                                    if no_executable_book
+                                    else "SELLABLE_SHARES_BELOW_PRECISION"
+                                ),
+                                book_state=(
+                                    "NO_EXECUTABLE_BOOK"
+                                    if no_executable_book
+                                    else "UNKNOWN"
+                                ),
+                                sell_book_witness_identity=(
+                                    global_sell_book_witness_identity(asset.curve)
+                                    if no_executable_book
+                                    else None
+                                ),
                             )
                         )
                 except Exception as exc:  # noqa: BLE001 - malformed holding invalidates globality

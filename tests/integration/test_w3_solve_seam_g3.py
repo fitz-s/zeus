@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-08
+# Last reused/audited: 2026-08-09
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -18208,6 +18208,59 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
         if evaluation.action == "SELL"
     }
     assert sell_evaluations == {"position-evaluated"}
+
+    below_floor_curve = replace(
+        actual_sell_curve,
+        snapshot_id="below-floor-sell-book",
+        book_hash="below-floor-sell-book-hash",
+        levels=(BookLevel(price=Decimal("0.001"), size=Decimal("26.25")),),
+        min_tick=Decimal("0.001"),
+    )
+    below_floor_book = CurrentGlobalBookEpoch(
+        assets=(),
+        sell_assets=(
+            CurrentGlobalSellAsset(
+                family_key=held_probability.family_key,
+                bin_id=weakest_binding.bin_id,
+                condition_id=weakest_binding.condition_id,
+                gamma_market_id="gamma-below-floor-sell",
+                market_event_id="market-event-below-floor-sell",
+                side="YES",
+                token_id=weakest_token,
+                curve=below_floor_curve,
+                captured_at_utc=decision_at,
+            ),
+        ),
+        asset_states=actual_sell_states,
+        captured_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=1),
+        witness_identity=current_global_book_epoch_identity(
+            asset_states=actual_sell_states,
+            captured_at_utc=decision_at,
+        ),
+    )
+    below_floor_selected = select_prepared_global_auction(
+        actual_prepared,
+        **{
+            **auction_kwargs,
+            "venue_universe_identity": below_floor_book.witness_identity,
+            "current_venue_universe_identity_resolver": (
+                lambda: below_floor_book.witness_identity
+            ),
+            "current_wealth_identity_resolver": (
+                lambda: actual_wealth.economic_identity
+            ),
+            "wealth_witness": actual_wealth,
+            "book_epoch": below_floor_book,
+            "current_capital_limit_resolver": current_capital_limit,
+        },
+    )
+    below_floor_coverage = below_floor_selected.holding_coverage[0]
+    assert below_floor_coverage.held_shares == Decimal("10")
+    assert below_floor_coverage.status == "EXCLUDED"
+    assert below_floor_coverage.reason == "SELL_BOOK_NO_EXECUTABLE_UNIT_PRICE"
+    assert below_floor_coverage.book_state == "NO_EXECUTABLE_BOOK"
+    assert len(below_floor_coverage.sell_book_witness_identity or "") == 64
 
     cancelled_book = select_prepared_global_auction(
         prepared_with_holdings,
