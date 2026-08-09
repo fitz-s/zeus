@@ -16609,7 +16609,13 @@ def test_full_recovery_quantum_yields_between_large_matched_fact_batches(
         "find_unresolved_commands",
         lambda _conn: [second, first],
     )
-    assert [row["command_id"] for row in command_recovery._full_quantum_candidates(None)] == ["a", "b"]
+    assert [
+        row["command_id"]
+        for row in command_recovery._full_quantum_candidates(
+            None,
+            rotation_slot=0,
+        )
+    ] == ["a", "b"]
 
     command_ids = [f"command-{index:03d}" for index in range(849)]
     first_batches = command_recovery._full_background_recovery_command_id_batches(
