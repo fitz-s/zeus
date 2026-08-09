@@ -158,6 +158,7 @@ _market_discovery_last_completed_monotonic: float | None = None
 OPENING_HUNT_FIRST_DELAY_SECONDS = 30.0
 _EDLI_COMMAND_RECOVERY_INTERVAL_SECONDS = 60.0
 _EDLI_COMMAND_RECOVERY_FULL_CADENCE_SECONDS = 300.0
+_CAPITAL_RECOVERY_REACTOR_DRAIN_SECONDS = 15.0
 _EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET: int | None = None
 HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS = 5.0
 HELD_POSITION_MONITOR_BOOTSTRAP_CHECK_SECONDS = 5.0
@@ -6746,6 +6747,22 @@ def _edli_command_recovery_cycle() -> None:
             capital_blockers,
         )
     try:
+        if capital_blockers and _edli_reactor_active_lock.locked():
+            drain_budget = min(
+                _CAPITAL_RECOVERY_REACTOR_DRAIN_SECONDS,
+                max(0.0, invocation_deadline - _time.monotonic()),
+            )
+            reactor_idle = _edli_reactor_active_lock.acquire(
+                timeout=drain_budget,
+            )
+            if not reactor_idle:
+                logger.warning(
+                    "edli_command_recovery: active reactor did not drain within "
+                    "%.1fs; capital recovery will retry next cadence",
+                    drain_budget,
+                )
+                return
+            _edli_reactor_active_lock.release()
         summary = reconcile_unresolved_commands(
             scope="live_tick",
             deadline_monotonic=invocation_deadline,

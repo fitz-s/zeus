@@ -7691,6 +7691,100 @@ def test_capital_cancel_recovery_resets_handoff_after_failure(monkeypatch) -> No
     assert not main_module._capital_recovery_handoff_pending.is_set()
 
 
+def test_capital_cancel_recovery_waits_for_active_reactor(monkeypatch) -> None:
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
+
+    class ActiveLock:
+        released = False
+        timeout = None
+
+        def locked(self) -> bool:
+            return True
+
+        def acquire(self, *, timeout: float) -> bool:
+            self.timeout = timeout
+            return True
+
+        def release(self) -> None:
+            self.released = True
+
+    active_lock = ActiveLock()
+    calls: list[str] = []
+    main_module._capital_recovery_handoff_pending.clear()
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", active_lock)
+    monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 17)
+    monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 17)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_cancel_command_count",
+        lambda _conn: 2,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: calls.append(str(kwargs.get("scope")))
+        or {"scanned": 2, "advanced": 0},
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert calls == ["live_tick"]
+    assert active_lock.released is True
+    assert 0 < active_lock.timeout <= main_module._CAPITAL_RECOVERY_REACTOR_DRAIN_SECONDS
+    assert not main_module._capital_recovery_handoff_pending.is_set()
+
+
+def test_capital_cancel_recovery_skips_apply_when_reactor_drain_times_out(
+    monkeypatch,
+) -> None:
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
+
+    class BusyLock:
+        def locked(self) -> bool:
+            return True
+
+        def acquire(self, *, timeout: float) -> bool:
+            assert 0 < timeout <= main_module._CAPITAL_RECOVERY_REACTOR_DRAIN_SECONDS
+            return False
+
+    main_module._capital_recovery_handoff_pending.clear()
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main_module, "_consume_live_control_commands", lambda: None)
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyLock())
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_cancel_command_count",
+        lambda _conn: 1,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **_kwargs: pytest.fail("recovery must not race the active reactor"),
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert not main_module._capital_recovery_handoff_pending.is_set()
+
+
 def test_redecision_screen_progresses_while_entry_reactor_is_active(monkeypatch) -> None:
     """Submitted maker rests cannot starve behind new-entry computation."""
 
