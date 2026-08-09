@@ -90,6 +90,7 @@ def test_venue_heartbeat_launchd_artifact_has_explicit_clob_signature_type() -> 
 
 def _write_sidecar_heartbeats(state_root: Path, *, sha: str, at: datetime) -> None:
     rows = {
+        "daemon-heartbeat-ingest.json": {"git_head": sha, "alive_at": at.isoformat()},
         "forecast-live-heartbeat.json": {"git_head": sha, "written_at": at.isoformat()},
         "daemon-heartbeat-substrate-observer.json": {"git_head": sha, "timestamp": at.isoformat()},
         "daemon-heartbeat-price-channel-ingest.json": {"git_head": sha, "timestamp": at.isoformat()},
@@ -465,7 +466,7 @@ def test_live_trading_launchd_watchdog_observes_identity_drift_without_blocking(
 
     assert result["ok"] is True
     assert result["action"] == "bootstrapped"
-    assert len(result["identity_observations"]) == 4
+    assert len(result["identity_observations"]) == 5
 
 
 def test_live_trading_launchd_watchdog_git_unavailable_does_not_block_recovery(

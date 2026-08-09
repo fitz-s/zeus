@@ -94,6 +94,10 @@ _held_position_monitor_claim = threading.Lock()
 _held_position_monitor_handoff_pending = threading.Event()
 _periodic_held_position_monitor_handoff_pending = threading.Event()
 _periodic_held_position_monitor_fairness_debt = threading.Event()
+_held_position_monitor_canonical_debt = threading.Event()
+_held_position_monitor_canonical_recheck_lock = threading.Lock()
+_held_position_monitor_canonical_last_check = 0.0
+_HELD_POSITION_MONITOR_CANONICAL_RECHECK_SECONDS = 1.0
 _held_position_monitor_bootstrap_complete = threading.Event()
 _capital_recovery_handoff_pending = threading.Event()
 _held_position_monitor_bootstrap_check_lock = threading.Lock()
@@ -377,6 +381,46 @@ def _held_position_monitor_entry_block_reason() -> str | None:
     return None
 
 
+def _held_position_monitor_debt_pending() -> bool:
+    """Recheck canonical held coverage inside long-running reactor cuts."""
+
+    global _held_position_monitor_canonical_last_check
+
+    if _held_position_monitor_canonical_debt.is_set():
+        return True
+    now = time.monotonic()
+    if (
+        now - _held_position_monitor_canonical_last_check
+        < _HELD_POSITION_MONITOR_CANONICAL_RECHECK_SECONDS
+    ):
+        return False
+    if not _held_position_monitor_canonical_recheck_lock.acquire(blocking=False):
+        return _held_position_monitor_canonical_debt.is_set()
+    try:
+        now = time.monotonic()
+        if (
+            now - _held_position_monitor_canonical_last_check
+            < _HELD_POSITION_MONITOR_CANONICAL_RECHECK_SECONDS
+        ):
+            return _held_position_monitor_canonical_debt.is_set()
+        _held_position_monitor_canonical_last_check = now
+        reason = _held_position_monitor_entry_block_reason()
+        if reason is not None:
+            # SCOPE: only the current/new reactor auction. DRAIN: its
+            # cooperative callback yields, then monitor recovery refreshes the
+            # canonical held book. RESET: recovery clears the debt after full
+            # current coverage; queued auction facts remain durable.
+            _held_position_monitor_canonical_debt.set()
+            logger.warning(
+                "reactor yielded to newly overdue canonical held-position "
+                "monitor debt (%s)",
+                reason,
+            )
+        return _held_position_monitor_canonical_debt.is_set()
+    finally:
+        _held_position_monitor_canonical_recheck_lock.release()
+
+
 def _defer_for_held_position_monitor(job_name: str) -> bool:
     """Give initial held monitoring first access to DB I/O and reactor work.
 
@@ -387,6 +431,26 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
 
     if job_name not in _HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS:
         return False
+
+    if (
+        job_name == "edli_event_reactor"
+        and _held_position_monitor_canonical_debt.is_set()
+    ):
+        monitor_block_reason = _held_position_monitor_entry_block_reason()
+        if monitor_block_reason is not None:
+            # SCOPE: admission of a new global auction while any current held
+            # exposure lacks canonical redecision authority. DRAIN: monitor
+            # recovery owns the writer lane and refreshes the full held book;
+            # queued BUY/SELL facts remain durable. RESET: a canonical clean
+            # read clears this event and the next reactor poll resumes. The
+            # in-flight reactor also sees this debt at its cooperative seam.
+            logger.warning(
+                "edli_event_reactor deferred: canonical held-position monitor "
+                "debt (%s)",
+                monitor_block_reason,
+            )
+            return True
+        _held_position_monitor_canonical_debt.clear()
 
     # SCOPE: a timed-out periodic full-book monitor blocks only EDLI reactor
     # admission. DRAIN: the next periodic full-book monitor that successfully
@@ -428,39 +492,6 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     ):
         logger.info("edli_event_reactor deferred: capital recovery handoff pending")
         return True
-    if (
-        job_name == "edli_event_reactor"
-        and not _held_position_monitor_bootstrap_complete.is_set()
-    ):
-        try:
-            from src.runtime.reactor_wake import (
-                exact_held_sell_completion_wake_ids,
-            )
-
-            exact_held_sell_debt = bool(
-                exact_held_sell_completion_wake_ids(fail_on_error=True)
-            )
-        except (OSError, ValueError):
-            # Unknown durable debt cannot waive the bootstrap gate.
-            logger.warning(
-                "held SELL completion debt read failed during monitor bootstrap; "
-                "retaining reactor defer",
-                exc_info=True,
-            )
-            exact_held_sell_debt = False
-        if exact_held_sell_debt:
-            # SCOPE: only an already-persisted exact held-position SELL
-            # completion wake may pass the new-entry bootstrap defer. BUY-capable
-            # work remains blocked by the reactor's risk/pause gates. DRAIN: the
-            # reactor consumes the exact request through global redecision and
-            # persists its terminal receipt/venue command. RESET: the durable
-            # wake disappears only after acknowledgement; empty or unreadable
-            # debt restores the ordinary post-boot monitor coverage requirement.
-            logger.warning(
-                "edli_event_reactor admitted before monitor bootstrap only to "
-                "drain exact held SELL completion debt"
-            )
-            return False
     if (
         not _held_position_monitor_bootstrap_complete.is_set()
         and not _promote_held_position_monitor_bootstrap_from_canonical_progress()
@@ -2983,6 +3014,7 @@ _DEPLOYMENT_FRESHNESS_LEGACY_PAUSE_REASONS = frozenset(
     {"deployment_freshness_4h_divergence"}
 )
 _LIVE_SIDECAR_BOOT_HEARTBEATS = (
+    ("data-ingest", "daemon-heartbeat-ingest.json", 180.0),
     ("forecast-live", "forecast-live-heartbeat.json", 120.0),
     ("substrate-observer", "daemon-heartbeat-substrate-observer.json", 180.0),
     ("price-channel-ingest", "daemon-heartbeat-price-channel-ingest.json", 180.0),
@@ -4247,6 +4279,10 @@ def _edli_event_reactor_cycle(
         _settings_section("edli", {})
     )
     monitor_entry_block = _held_position_monitor_entry_block_reason()
+    if monitor_entry_block is None:
+        _held_position_monitor_canonical_debt.clear()
+    else:
+        _held_position_monitor_canonical_debt.set()
     if _global_block_reason is None and monitor_entry_block is not None:
         _global_block_reason = monitor_entry_block
     if allow_paused_forecast_snapshot_completion:
@@ -4282,7 +4318,10 @@ def _edli_event_reactor_cycle(
             or _capital_recovery_handoff_pending.is_set()
         ),
         held_position_monitor_pending=(
-            _periodic_held_position_monitor_handoff_pending.is_set
+            lambda: (
+                _periodic_held_position_monitor_handoff_pending.is_set()
+                or _held_position_monitor_debt_pending()
+            )
         ),
         held_position_monitor_debt_pending=(
             _periodic_held_position_monitor_fairness_debt.is_set
@@ -8877,7 +8916,10 @@ def _durable_held_position_monitor_recovery_cycle() -> bool:
     overdue_count = int(overdue.get("stale_or_missing_position_count") or 0)
     future_count = int(overdue.get("future_monitor_event_count") or 0)
     if overdue_count <= 0 and future_count <= 0:
+        _held_position_monitor_canonical_debt.clear()
         return True
+
+    _held_position_monitor_canonical_debt.set()
 
     # SCOPE: only current positive-exposure positions whose canonical monitor
     # evidence is stale, missing, or invalid.  DRAIN: retry the existing
@@ -8906,6 +8948,7 @@ def _durable_held_position_monitor_recovery_cycle() -> bool:
             "HELD_POSITION_MONITOR_RECOVERY_INCOMPLETE:"
             f"overdue={remaining_overdue}:future={remaining_future}"
         )
+    _held_position_monitor_canonical_debt.clear()
     return True
 
 

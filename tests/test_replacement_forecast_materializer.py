@@ -1197,8 +1197,8 @@ def test_materializer_day0_observed_extreme_conditions_q_and_bounds(monkeypatch:
     assert provenance["day0_conditioning"]["observed_extreme_c"] == 26.0
 
 
-def test_materializer_write_keeps_high_physical_frontier_on_same_cycle(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AWC HIGH31 remains absorbing when an older WU HIGH30 re-materializes the same cycle."""
+def test_materializer_write_replaces_retracted_same_source_high(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A newer snapshot may retract its own HIGH without erasing independent evidence."""
     conn = _conn()
     _install_live_fusion(monkeypatch)
     awc = _request(
@@ -1286,12 +1286,45 @@ def test_materializer_write_keeps_high_physical_frontier_on_same_cycle(monkeypat
             (same_source_regression.posterior_id,),
         ).fetchone()["provenance_json"]
     )
-    assert regression_provenance["day0_conditioning"]["observed_extreme_c"] == 31.0
-    assert regression_provenance["day0_conditioning"]["observation_time"] == _dt(18, 5).isoformat()
+    assert regression_provenance["day0_conditioning"]["observed_extreme_c"] == 30.0
+    assert regression_provenance["day0_conditioning"]["observation_time"] == _dt(18, 10).isoformat()
 
 
-def test_materializer_readonly_keeps_low_physical_frontier_on_same_cycle(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AWC LOW19 remains absorbing when a causal readonly WU LOW20 request arrives."""
+def test_wu_newer_snapshot_retracts_stale_source_frontier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shenzhen antibody: WU 37 -> 36 must not leave the posterior pinned at 37."""
+    conn = _conn()
+    _install_live_fusion(monkeypatch)
+    first = _request(
+        computed_at=_dt(18),
+        expires_at=datetime(2026, 6, 7, 2, tzinfo=UTC),
+        day0_observed_extreme_c=37.0,
+        day0_observed_extreme_source="wu_icao_history",
+        day0_observed_extreme_observation_time=_dt(17, 55).isoformat(),
+        day0_observed_extreme_sample_count=22,
+    )
+    assert materialize_replacement_forecast_live(conn, first).ok is True
+
+    revised = materializer_mod._request_with_day0_physical_frontier(
+        conn,
+        replace(
+            first,
+            computed_at=_dt(18, 20),
+            day0_observed_extreme_c=36.0,
+            day0_observed_extreme_observation_time=_dt(18, 10).isoformat(),
+            day0_observed_extreme_sample_count=24,
+        ),
+        metric="high",
+    )
+
+    assert isinstance(revised, ReplacementForecastMaterializeRequest)
+    assert revised.day0_observed_extreme_c == 36.0
+    assert revised.day0_observed_extreme_observation_time == _dt(18, 10).isoformat()
+
+
+def test_materializer_readonly_replaces_retracted_same_source_low(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A newer snapshot may retract its own LOW without reopening other sources."""
     conn = _conn()
     _install_live_fusion(monkeypatch)
     awc = replace(
@@ -1343,9 +1376,9 @@ def test_materializer_readonly_keeps_low_physical_frontier_on_same_cycle(monkeyp
             (write_result.posterior_id,),
         ).fetchone()["provenance_json"]
     )
-    assert write_provenance["day0_conditioning"]["observed_extreme_c"] == 19.0
+    assert write_provenance["day0_conditioning"]["observed_extreme_c"] == 20.0
     assert write_provenance["day0_conditioning"]["observation_time"] == _dt(
-        17, 55
+        18, 5
     ).isoformat()
 
     old_wu = replace(

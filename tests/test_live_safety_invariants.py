@@ -6265,16 +6265,26 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
         "request_accepted",
         "outcome",
         "malformed_request",
+        "posterior_support_zero",
     ),
     (
-        ("EDGE_REVERSAL", True, True, "delegated", False),
-        ("EDGE_REVERSAL", False, True, "blocked", False),
-        ("EDGE_REVERSAL", False, False, "request_failed", False),
-        ("CI_OVERLAP_SELL_VALUE_DOMINATES", False, True, "blocked", False),
-        ("SETTLEMENT_IMMINENT", False, True, "blocked", False),
-        ("DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES", False, True, "direct", False),
-        ("RED_FORCE_EXIT", True, True, "direct", False),
-        ("EDGE_REVERSAL", False, True, "blocked", True),
+        ("EDGE_REVERSAL", True, True, "delegated", False, False),
+        ("EDGE_REVERSAL", False, True, "blocked", False, False),
+        ("EDGE_REVERSAL", False, False, "request_failed", False, False),
+        ("CI_OVERLAP_SELL_VALUE_DOMINATES", False, True, "blocked", False, False),
+        ("SETTLEMENT_IMMINENT", False, True, "blocked", False, False),
+        (
+            "DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES",
+            False,
+            True,
+            "direct",
+            False,
+            False,
+        ),
+        ("RED_FORCE_EXIT", True, True, "direct", False, False),
+        ("EDGE_REVERSAL", False, True, "blocked", True, False),
+        ("SELL_REVERSAL", False, True, "direct", False, True),
+        ("EDGE_REVERSAL", False, True, "dust", False, False),
     ),
 )
 def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_red(
@@ -6285,6 +6295,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     request_accepted,
     outcome,
     malformed_request,
+    posterior_support_zero,
 ):
     """Statistical SELL is global-only; missing authority holds while RED acts."""
     from src.contracts import EdgeContext, EntryMethod
@@ -6307,8 +6318,8 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         entered_at="2026-07-14T17:00:00+00:00",
         order_posted_at="2026-07-14T16:59:00+00:00",
         fill_authority=FILL_AUTHORITY_VENUE_CONFIRMED_FULL,
-        shares=500.0,
-        shares_filled=500.0,
+        shares=3.0 if outcome == "dust" else 500.0,
+        shares_filled=3.0 if outcome == "dust" else 500.0,
         chain_state="synced",
         chain_shares=500.0,
         token_id="paris-yes",
@@ -6325,9 +6336,9 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     portfolio = _make_portfolio(pos)
 
     def fake_refresh(_conn, _clob, position):
-        position.last_monitor_prob = 0.10
+        position.last_monitor_prob = 0.0 if posterior_support_zero else 0.10
         position.last_monitor_prob_is_fresh = True
-        position.last_monitor_edge = -0.40
+        position.last_monitor_edge = -0.50 if posterior_support_zero else -0.40
         position.last_monitor_market_price = 0.50
         position.last_monitor_market_price_is_fresh = True
         position.last_monitor_best_bid = 0.49
@@ -6335,8 +6346,17 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         position.last_monitor_at = "2026-07-14T18:00:00+00:00"
         setattr(
             position,
+            monitor_refresh._HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
+            5.0 if outcome == "dust" else None,
+        )
+        setattr(
+            position,
             monitor_refresh._GLOBAL_MONITOR_SAMPLES_ATTR,
-            np.array([0.05, 0.15]),
+            (
+                np.array([0.0, 0.0])
+                if posterior_support_zero
+                else np.array([0.05, 0.15])
+            ),
         )
         setattr(
                 position,
@@ -6358,8 +6378,8 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             p_raw=np.array([]),
             p_cal=np.array([]),
             p_market=np.array([0.50]),
-            p_posterior=0.10,
-            forward_edge=-0.40,
+            p_posterior=0.0 if posterior_support_zero else 0.10,
+            forward_edge=-0.50 if posterior_support_zero else -0.40,
             alpha=0.1,
             confidence_band_upper=-0.35,
             confidence_band_lower=-0.45,
@@ -6397,11 +6417,19 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         lambda **kwargs: (kwargs["should_exit"], kwargs["exit_reason"]),
     )
     from src.engine import global_batch_runtime
+    from src.execution import exit_lifecycle
 
     monkeypatch.setattr(
-        cycle_runtime,
-        "_current_monitor_global_holding_coverage",
-        lambda **kwargs: (
+        exit_lifecycle,
+        "_latest_fresh_snapshot_min_order",
+        lambda *args, **kwargs: None,
+    )
+
+    coverage_checks = []
+
+    def current_monitor_coverage(**kwargs):
+        coverage_checks.append(kwargs["position"].trade_id)
+        return (
             global_batch_runtime.CurrentGlobalHoldingCoverage(
                 outcome=global_batch_runtime.GlobalHoldingCoverageOutcome.COVERED,
                 reason="test-coverage",
@@ -6410,7 +6438,12 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             )
             if has_position_coverage
             else None
-        ),
+        )
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_current_monitor_global_holding_coverage",
+        current_monitor_coverage,
     )
     monkeypatch.setattr(
         cycle_runtime,
@@ -6515,6 +6548,12 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         fake_execute_exit,
     )
 
+    monitor_now = (
+        (lambda: datetime.now(timezone.utc))
+        if outcome == "dust"
+        else (lambda: datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc))
+    )
+
     results = []
     artifact = type(
         "Artifact",
@@ -6532,9 +6571,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             ),
             "logger": logging.getLogger("test_global_auction_owned_monitor_sell"),
             "cities_by_name": {},
-            "_utcnow": staticmethod(
-                lambda: datetime(2026, 7, 14, 18, 0, tzinfo=timezone.utc)
-            ),
+            "_utcnow": staticmethod(monitor_now),
         },
     )
     summary = {"monitors": 0, "exits": 0}
@@ -6560,6 +6597,15 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert conn.execute(
             "SELECT COUNT(*) FROM venue_commands WHERE intent_kind = 'EXIT'"
         ).fetchone()[0] == 0
+    elif outcome == "dust":
+        assert summary["monitor_statistical_sell_dust_holds"] == 1
+        assert summary["exits"] == 0
+        assert results[0].should_exit is False
+        assert "[DUST:" in results[0].exit_reason
+        assert pos.order_status == "backoff_exhausted"
+        assert "fresh_snapshot_sub_minimum_dust_hold" in pos.applied_validations
+        assert execute_calls == []
+        assert auction_completion_requests == []
     elif outcome in {"blocked", "request_failed"}:
         completion_accepted = request_accepted and not malformed_request
         assert summary.get("monitor_sells_delegated_to_global_auction", 0) == 0
@@ -6713,12 +6759,80 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         ) == 0
         assert summary["exits"] == 1
         assert results[0].should_exit is True
-        assert results[0].exit_reason == trigger
+        assert results[0].exit_reason == (
+            "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+            if posterior_support_zero
+            else trigger
+        )
+        if posterior_support_zero:
+            assert summary["monitor_branchwise_dominant_direct_sells"] == 1
+            assert "posterior_support_zero_sell_dominates" in pos.applied_validations
+            assert coverage_checks == []
         assert execute_calls == [pos]
-    if outcome not in {"blocked", "request_failed"}:
+    if outcome not in {"blocked", "request_failed", "dust"}:
         assert auction_completion_requests == []
     assert invalidations == ([] if outcome != "direct" else ["venue_side_effect"])
     conn.close()
+
+
+def test_held_monitor_quote_preserves_current_book_min_order_size():
+    from src.engine import monitor_refresh
+
+    pos = _make_position(
+        trade_id="held-quote-min-order",
+        token_id="held-yes-token",
+        direction="buy_yes",
+        state="day0_window",
+    )
+
+    class Clob:
+        @staticmethod
+        def get_orderbook(_token_id):
+            return {
+                "asset_id": "held-yes-token",
+                "bids": [{"price": "0.04", "size": "20"}],
+                "asks": [{"price": "0.06", "size": "20"}],
+                "min_order_size": "5",
+            }
+
+    quote = monitor_refresh.monitor_quote_refresh(None, Clob(), pos)
+
+    assert quote is not None
+    assert quote.best_bid == 0.04
+    assert quote.min_order_size == 5.0
+
+
+@pytest.mark.parametrize(
+    ("samples", "fresh_prob", "best_bid", "fresh", "expected"),
+    (
+        ((0.0, 0.0), 0.0, 0.05, True, True),
+        ((0.0, 1e-6), 5e-7, 0.05, True, False),
+        ((0.0, 0.0), 0.0, 0.049, True, False),
+        ((0.0, 0.0), 0.0, 0.05, False, False),
+        ((), 0.0, 0.05, True, False),
+    ),
+)
+def test_branchwise_dominant_sell_requires_zero_support_and_legal_fresh_bid(
+    samples,
+    fresh_prob,
+    best_bid,
+    fresh,
+    expected,
+):
+    from src.engine import cycle_runtime
+
+    pos = SimpleNamespace(_current_global_held_probability_samples=samples)
+    context = SimpleNamespace(
+        fresh_prob=fresh_prob,
+        fresh_prob_is_fresh=fresh,
+        current_market_price_is_fresh=fresh,
+        best_bid=best_bid,
+    )
+
+    assert (
+        cycle_runtime._posterior_support_zero_sell_dominates(pos, context)
+        is expected
+    )
 
 
 def test_reserved_global_sell_reauction_deadline_is_an_actuation_contract(
@@ -7881,6 +7995,11 @@ def test_monitor_handoff_rebuilds_current_ledger_and_executable_sell_book(
 
     monkeypatch.setattr(
         global_batch_runtime,
+        "held_sell_reauction_coverage",
+        lambda **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
         "current_global_holding_coverage",
         current_coverage,
     )
@@ -8025,6 +8144,11 @@ def test_monitor_reuses_one_wealth_witness_across_held_sell_coverage(monkeypatch
 
     monkeypatch.setattr(
         global_batch_runtime,
+        "held_sell_reauction_coverage",
+        lambda **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
         "current_global_holding_coverage",
         current_coverage,
     )
@@ -8059,6 +8183,49 @@ def test_monitor_reuses_one_wealth_witness_across_held_sell_coverage(monkeypatch
         )
 
     assert wealth_calls == [True]
+
+
+def test_monitor_handoff_skips_witness_io_without_published_coverage(monkeypatch):
+    """An uncovered SELL must reserve reauction debt before slow witness I/O."""
+    from src.engine import cycle_runtime, global_auction_universe, global_batch_runtime
+
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "held_sell_reauction_coverage",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        global_auction_universe,
+        "current_portfolio_wealth_witness",
+        lambda *_args, **_kwargs: pytest.fail(
+            "missing coverage must not rebuild collateral authority"
+        ),
+    )
+    position = SimpleNamespace(
+        position_id="uncovered-position",
+        trade_id="uncovered-position",
+        direction="buy_yes",
+        token_id="uncovered-token",
+        no_token_id="uncovered-no-token",
+        city="Paris",
+        target_date="2026-08-09",
+        temperature_metric="high",
+    )
+
+    result = cycle_runtime._current_monitor_global_holding_coverage(
+        conn=object(),
+        clob=object(),
+        portfolio=SimpleNamespace(positions=(position,)),
+        position=position,
+        probability_content_identity="uncovered-q",
+        checked_at_utc=datetime(2026, 8, 9, 15, 0, tzinfo=timezone.utc),
+    )
+
+    assert (
+        result.outcome
+        is global_batch_runtime.GlobalHoldingCoverageOutcome.COVERAGE_NOT_PUBLISHED
+    )
+    assert result.reason == "GLOBAL_HOLDING_COVERAGE_NOT_PUBLISHED"
 
 
 def test_day0_resting_entry_sweep_bounds_and_rotates_scan_work(monkeypatch):
@@ -8510,8 +8677,9 @@ def test_receipt_rejects_coverage_q_absent_from_authoritative_manifest(tmp_path)
 
 
 def test_pending_exit_backoff_exhausted_dust_hold_does_not_emit_exit_intent(monkeypatch):
-    """Non-executable dust holds must not re-enter monitor and spam EXIT_INTENT."""
-    from src.engine import cycle_runtime
+    """Dust remains monitored without re-entering the impossible SELL lane."""
+    from src.contracts import EdgeContext, EntryMethod
+    from src.engine import cycle_runtime, monitor_refresh
 
     pos = _make_position(
         trade_id="backoff-exhausted-dust-hold",
@@ -8539,20 +8707,80 @@ def test_pending_exit_backoff_exhausted_dust_hold_does_not_emit_exit_intent(monk
 
     class LiveClob:
         def get_best_bid_ask(self, token_id):
-            raise AssertionError("dust hold must not request fresh exit quote")
+            raise AssertionError("test refresh owns the current quote")
 
     class Tracker:
         def record_exit(self, position):
             raise AssertionError("dust hold must not record an exit")
 
-    def refresh_must_not_run(conn, clob, position):
-        raise AssertionError("dust hold must not refresh into evaluate_exit")
+    def refresh_current_dust(_conn, _clob, position):
+        position.last_monitor_prob = 0.0
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_edge = -0.49
+        position.last_monitor_market_price = 0.49
+        position.last_monitor_market_price_is_fresh = True
+        position.last_monitor_best_bid = 0.49
+        position.last_monitor_best_ask = 0.50
+        position.last_monitor_at = "2026-07-08T09:30:00+00:00"
+        setattr(position, monitor_refresh._HELD_MONITOR_MIN_ORDER_SIZE_ATTR, 5.0)
+        setattr(
+            position,
+            monitor_refresh._GLOBAL_MONITOR_SAMPLES_ATTR,
+            np.array([0.0, 0.0]),
+        )
+        return EdgeContext(
+            p_raw=np.array([]),
+            p_cal=np.array([]),
+            p_market=np.array([0.49]),
+            p_posterior=0.0,
+            forward_edge=-0.49,
+            alpha=0.1,
+            confidence_band_upper=-0.49,
+            confidence_band_lower=-0.49,
+            entry_provenance=EntryMethod.QKERNEL_SPINE,
+            decision_snapshot_id="dust-current-cut",
+            n_edges_found=1,
+            n_edges_after_fdr=1,
+        )
 
-    def evaluate_must_not_run(self, exit_context):
-        raise AssertionError("dust hold must not evaluate or emit exit intent")
-
-    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", refresh_must_not_run)
-    monkeypatch.setattr(Position, "evaluate_exit", evaluate_must_not_run)
+    monkeypatch.setattr(monitor_refresh, "refresh_position", refresh_current_dust)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _context: ExitDecision(
+            True,
+            "SELL_REVERSAL",
+            trigger="SELL_REVERSAL",
+            selected_method=self.selected_method or self.entry_method,
+            applied_validations=["current_dust_sell_signal"],
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_closed_non_accepting_market_info",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_entry_selection_guard_exit_decision",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_apply_family_monitor_overlay",
+        lambda **kwargs: (kwargs["should_exit"], kwargs["exit_reason"]),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_day0_hard_fact_position_eligible",
+        lambda _position: False,
+    )
+    monkeypatch.setattr(
+        "src.events.reactor.request_global_auction_completion",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("current dust must not request global reauction")
+        ),
+    )
 
     monitor_results = []
     artifact = type("Artifact", (), {"add_monitor_result": lambda self, result: monitor_results.append(result)})()
@@ -8582,12 +8810,46 @@ def test_pending_exit_backoff_exhausted_dust_hold_does_not_emit_exit_intent(monk
     assert pos.state == "pending_exit"
     assert pos.exit_state == "backoff_exhausted"
     assert pos.order_status == "backoff_exhausted"
-    assert portfolio_dirty is False
+    assert portfolio_dirty is True
     assert tracker_dirty is False
-    assert summary["monitor_skipped_pending_exit_phase"] == 1
-    assert summary["monitors"] == 0
+    assert summary["monitor_pending_exit_dust_redecisions"] == 1
+    assert summary["monitor_statistical_sell_dust_holds"] == 1
+    assert summary["monitors"] == 1
     assert summary["exits"] == 0
-    assert monitor_results == []
+    assert len(monitor_results) == 1
+    assert monitor_results[0].should_exit is False
+    assert "[DUST:" in monitor_results[0].exit_reason
+
+
+def test_current_book_min_decrease_releases_dust_back_to_redecision():
+    from src.execution.exit_lifecycle import (
+        release_backoff_exhausted_pending_exit_for_redecision,
+    )
+
+    pos = _make_position(
+        trade_id="dust-min-decreased",
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        chain_state="synced",
+        shares=3.0,
+        chain_shares=3.0,
+        exit_state="backoff_exhausted",
+        order_status="backoff_exhausted",
+        exit_reason="SELL_REVERSAL [DUST: size 3 below min_order_size 5]",
+        last_exit_error="size 3 below min_order_size 5",
+    )
+
+    assert not release_backoff_exhausted_pending_exit_for_redecision(
+        pos,
+        current_min_order_size="5",
+    )
+    assert release_backoff_exhausted_pending_exit_for_redecision(
+        pos,
+        current_min_order_size="1",
+    )
+    assert pos.state == "day0_window"
+    assert pos.exit_state == ""
+    assert pos.order_status == "filled"
 
 
 # ---- Test 7: Collateral check blocks underfunded sell ----
@@ -16422,7 +16684,13 @@ def test_full_recovery_quantum_yields_between_large_matched_fact_batches(
         "find_unresolved_commands",
         lambda _conn: [second, first],
     )
-    assert [row["command_id"] for row in command_recovery._full_quantum_candidates(None)] == ["a", "b"]
+    assert [
+        row["command_id"]
+        for row in command_recovery._full_quantum_candidates(
+            None,
+            rotation_slot=0,
+        )
+    ] == ["a", "b"]
 
     command_ids = [f"command-{index:03d}" for index in range(849)]
     first_batches = command_recovery._full_background_recovery_command_id_batches(

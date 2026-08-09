@@ -201,8 +201,8 @@ def test_running_max_reader_uses_sql_max_not_last_row():
     )
 
 
-def test_day0_high_p_vector_respects_unseen_peak_probability():
-    """Wellington-class guard: 0.73 post-peak confidence cannot price a point bin at 99%."""
+def test_day0_high_p_vector_does_not_double_count_peak_timing():
+    """Remaining trajectories, not temporal maturity, carry unseen-peak mass."""
 
     from src.signal.day0_router import Day0Router, Day0SignalInputs
     from src.types import Bin
@@ -238,7 +238,8 @@ def test_day0_high_p_vector_respects_unseen_peak_probability():
     p = signal.p_vector(bins, n_mc=20_000, rng=np.random.default_rng(11))
     context = signal.forecast_context()
 
-    assert context["unseen_peak_sigma"] > 0.0
-    assert p[1] < 0.86
-    assert p[2] > 0.12
+    assert context["unseen_peak_sigma"] == 0.0
+    assert context["effective_sigma"] > 0.0
+    assert p[1] > 0.86
+    assert p[2] < 0.12
     assert p.sum() == pytest.approx(1.0)

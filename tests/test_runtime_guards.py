@@ -11481,6 +11481,11 @@ def test_main_registers_only_policy_owned_ecmwf_open_data_jobs(monkeypatch, tmp_
 
 def _write_live_sidecar_heartbeats(root: Path, *, sha: str, at: datetime) -> None:
     root.mkdir(parents=True, exist_ok=True)
+    (root / "daemon-heartbeat-ingest.json").write_text(json.dumps({
+        "daemon": "data-ingest",
+        "git_head": sha,
+        "alive_at": at.isoformat(),
+    }))
     (root / "forecast-live-heartbeat.json").write_text(json.dumps({
         "daemon": "forecast-live",
         "git_head": sha,

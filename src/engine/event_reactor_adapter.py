@@ -11494,11 +11494,23 @@ def _submit_current_global_sell(
                 candidate.executable_sell_curve.fee_model.fee_rate
             ):
                 raise ValueError("GLOBAL_SELL_JIT_FEE_SUPERSEDED")
-            current_candidate = _global_sell_candidate_from_raw_book(
-                candidate,
-                raw_book,
-                captured_at_utc=book_captured_at_utc,
-            )
+            try:
+                current_candidate = _global_sell_candidate_from_raw_book(
+                    candidate,
+                    raw_book,
+                    captured_at_utc=book_captured_at_utc,
+                )
+            except ValueError as exc:
+                if not str(exc).startswith(
+                    "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:"
+                ):
+                    raise
+                return _global_sell_receipt(
+                    event,
+                    global_actuation=global_actuation,
+                    reason=str(exc),
+                    proof_accepted=False,
+                )
             drift = _global_sell_execution_economics_drift(
                 decision=decision,
                 current_candidate=current_candidate,
@@ -12045,6 +12057,7 @@ def _global_preflight_block_status(reason: str) -> str:
         (
             "GLOBAL_SELL_LEGAL_PRICE_UNAVAILABLE:",
             "GLOBAL_SELL_LEGAL_MAKER_PRICE_UNAVAILABLE:",
+            "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:",
         )
     ):
         return "CANDIDATE_BLOCKED"
@@ -35126,9 +35139,12 @@ def _day0_process_sigma_native(
 
     Day0 remaining-day q is conditioned on a fixed observed running boundary.
     This width belongs to the still-unobserved trajectory: instrument noise plus
-    publication-latency and unseen-peak uncertainty are applied before the
-    physical max/min with that boundary.  The helper is shared by point q and
-    q_lcb bootstrap, so a single-model remaining-day bundle still carries a real
+    publication-latency uncertainty are applied before the physical max/min with
+    that boundary.  Peak timing is already represented by the explicit
+    remaining-hour trajectories; turning temporal maturity into an additional
+    symmetric temperature sigma double-counts that uncertainty and systematically
+    creates anti-modal NO probability.  The helper is shared by point q and q_lcb
+    bootstrap, so a single-model remaining-day bundle still carries a real
     positive predictive width instead of failing with MU_SIGMA_NOT_STASHED.
     """
     try:
@@ -35144,19 +35160,7 @@ def _day0_process_sigma_native(
         margin = stale_extreme_uncertainty_margin(
             unit=unit, obs_age_minutes=obs_age_min, budget_minutes=budget_min
         )
-        unseen_peak_sigma = 0.0
-        metric = str(payload.get("metric") or payload.get("temperature_metric") or "")
-        if metric == "high":
-            post_peak_confidence = _optional_float(payload.get("_edli_day0_post_peak_confidence"))
-            if post_peak_confidence is not None:
-                peak = min(1.0, max(0.0, float(post_peak_confidence)))
-                precision = _optional_float(payload.get("members_precision") or payload.get("precision"))
-                if precision is None or precision <= 0.0:
-                    precision = 1.0
-                unseen_peak_sigma = (1.0 - peak) * 3.0 * float(precision)
-        sigma = float(np.sqrt(base_sigma ** 2 + (margin / 2.0) ** 2 + unseen_peak_sigma ** 2))
-        if unseen_peak_sigma > 0.0:
-            payload["_edli_day0_unseen_peak_sigma_native"] = float(unseen_peak_sigma)
+        sigma = float(np.sqrt(base_sigma ** 2 + (margin / 2.0) ** 2))
     except Exception:  # noqa: BLE001 - caller turns absence into typed no-trade/log evidence.
         return None
     if not (sigma > 0.0 and np.isfinite(sigma)):
@@ -35175,9 +35179,10 @@ def _day0_extra_member_sigma_native(
     """Extra member-space sigma for Day0 point q integration.
 
     The Day0 point-q operator already adds instrument sigma to raw future
-    extrema.  The process seam includes instrument + staleness + unseen-peak
+    extrema.  The process seam includes instrument + observation-staleness
     uncertainty because q_lcb samples those same raw future values.  Pass only
-    the extra part to point q so instrument noise is not double-counted.
+    the extra part to point q so instrument noise is not double-counted.  Peak
+    timing is carried by the remaining-hour trajectories themselves.
     """
 
     sigma = _day0_process_sigma_native(

@@ -693,11 +693,11 @@ def _request_with_day0_physical_frontier(
 
     ``forecast_posteriors`` is the materializer's durable local ledger.  A
     same-cycle re-materialization may improve model evidence, but it must not
-    reopen support that an earlier absorbing observation already removed.  The
-    reducer mirrors the canonical Day0 fact shape: HIGH takes MAX, LOW takes
-    MIN. When the current request proves the same frontier, its independently
-    reproducible source/clock replaces a historical carrier identity; otherwise
-    the source that owns the winning extreme keeps its latest clock. Rows
+    reopen support that independent evidence already removed.  The reducer
+    mirrors the canonical Day0 fact shape across sources: HIGH takes MAX, LOW
+    takes MIN.  Within one source, however, a newer snapshot replaces that
+    source's older snapshot even when the provider retracts an extreme.  The
+    physical quantity is monotone; an upstream snapshot is not.  Rows
     materialized after this request's clock are excluded, so this guard cannot
     introduce look-ahead.
     """
@@ -870,6 +870,17 @@ def _request_with_day0_physical_frontier(
             return blocked(
                 "REPLACEMENT_MATERIALIZATION_DAY0_FRONTIER_LEDGER_INVALID"
             )
+        if (
+            request_extreme is not None
+            and request_observed_at is not None
+            and source.strip().lower()
+            == str(request.day0_observed_extreme_source or "").strip().lower()
+            and observed_at <= request_observed_at
+        ):
+            # The current causal snapshot is the state of this source.  Keeping
+            # an older, more-extreme snapshot would convert provider revision
+            # into false physical certainty and can pin q at 0/1 indefinitely.
+            continue
         sample_count_raw = conditioning.get("sample_count")
         sample_count = (
             int(sample_count_raw)

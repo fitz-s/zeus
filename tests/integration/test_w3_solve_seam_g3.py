@@ -28477,6 +28477,7 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
     )
     decision = actuation.decision
     candidate = decision.candidate
+    canonical_held = candidate.held_shares + Decimal("0.006663")
     certificate = {
         "action": "SELL",
         "position_id": candidate.position_id,
@@ -28508,7 +28509,7 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
             decision.expected_growth.expected_delta_log_wealth
         ),
         "expected_comparison_ev_usd": decision.expected_growth.expected_ev_usd,
-        "held_shares": str(candidate.held_shares),
+        "held_shares": str(canonical_held),
         "sellable_shares": str(candidate.held_shares),
         "selected_shares": str(decision.shares),
         "selected_cash_proceeds_usd": str(decision.cash_proceeds_usd),
@@ -28535,8 +28536,10 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
         direction="buy_yes",
         token_id=candidate.token_id,
         no_token_id="no-token",
-        effective_shares=float(candidate.held_shares),
-        chain_shares=float(candidate.held_shares),
+        effective_shares=float(canonical_held),
+        # Venue balance precision may differ below the executable 0.01-share
+        # floor without changing the safely sellable inventory.
+        chain_shares=float(candidate.held_shares + Decimal("0.0066")),
     )
     snapshot = SimpleNamespace(
         executable_snapshot_hash="snapshot-hash",
@@ -28565,6 +28568,16 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
         snapshot_context=context,
         now=captured_at + _dt.timedelta(seconds=1),
     ) is None
+    position.chain_shares = float(candidate.held_shares - Decimal("0.0001"))
+    assert _global_sell_capital_certificate_error(
+        position,
+        intent,
+        authority,
+        conn=conn,
+        snapshot_context=context,
+        now=captured_at + _dt.timedelta(seconds=1),
+    ) == "global_sell_execution_position_economics_mismatch"
+    position.chain_shares = float(candidate.held_shares + Decimal("0.0066"))
     if execution_mode == "TAKER_LIMIT":
         from src.execution.executor import (
             _marketable_sell_certificate_error,
@@ -28656,6 +28669,12 @@ def test_global_sell_selected_taker_mode_stays_taker_at_jit(
     )
 
     assert rebound.execution_mode == "TAKER_LIMIT"
+
+
+def test_global_sell_current_mode_unavailable_excludes_only_selected_candidate():
+    assert era._global_preflight_block_status(
+        "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:TAKER_LIMIT"
+    ) == "CANDIDATE_BLOCKED"
 
 
 def test_global_sell_high_bid_binds_legal_fak_floor():

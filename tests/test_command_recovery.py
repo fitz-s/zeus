@@ -29993,3 +29993,48 @@ def test_cancel_unknown_partial_accepts_exact_increment_inside_aggregate_positio
         filled_size="4.411762",
         fill_price="0.3200000362666889",
     )
+
+
+def test_full_quantum_prioritizes_unknown_submit_and_rotates_stayed_peers(
+    monkeypatch,
+):
+    from src.execution import command_recovery
+
+    rows = [
+        {
+            "command_id": "historical-review",
+            "state": "REVIEW_REQUIRED",
+            "updated_at": "2026-07-01T00:00:00Z",
+        },
+        {
+            "command_id": "unknown-submit-a",
+            "state": "SUBMITTING",
+            "venue_order_id": "",
+            "updated_at": "2026-08-01T00:00:02Z",
+        },
+        {
+            "command_id": "unknown-submit-b",
+            "state": "SUBMITTING",
+            "venue_order_id": "",
+            "updated_at": "2026-08-01T00:00:03Z",
+        },
+    ]
+    monkeypatch.setattr(
+        command_recovery,
+        "find_unresolved_commands",
+        lambda _conn: rows,
+    )
+
+    first = command_recovery._full_quantum_candidates(None, rotation_slot=0)
+    second = command_recovery._full_quantum_candidates(None, rotation_slot=1)
+
+    assert [row["command_id"] for row in first] == [
+        "unknown-submit-a",
+        "unknown-submit-b",
+        "historical-review",
+    ]
+    assert [row["command_id"] for row in second] == [
+        "unknown-submit-b",
+        "unknown-submit-a",
+        "historical-review",
+    ]

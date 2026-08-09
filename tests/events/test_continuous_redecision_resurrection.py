@@ -616,6 +616,51 @@ def test_rest_pull_holds_on_same_snapshot_price_wiggle():
     assert pulls == [], "a bare wiggle on the same snapshot must never pull a rest (anti-twitch)"
 
 
+def test_rest_pull_cancels_current_negative_ev_when_historical_identity_is_misbound():
+    """A live rest cannot remain fillable after q reverses merely because its
+    historical identity was accidentally populated with a CLOB snapshot id and
+    its resting posterior was reconstructed from the latest belief.
+    """
+
+    world = _mem_world()
+    trade = _mem_trade()
+    family_id = "hyp|live|Sao Paulo|2026-08-09|high|disc"
+    # Latest YES=.88 means this BUY_NO has current q=.12 against a 41c fill.
+    _cache(
+        world,
+        family_id=family_id,
+        p_yes=0.88,
+        snapshot_id="day0-current",
+        cond="0xc26",
+        recorded_at="2026-08-09T15:00:42+00:00",
+    )
+    rest = cr.OpenRest(
+        command_id="cmd-stale-entry",
+        venue_order_id="venue-stale-entry",
+        family_id=family_id,
+        bin_label="b30",
+        side="buy_no",
+        condition_id="0xc26",
+        # Reproduces the live bug: latest q was used as the alleged resting q,
+        # while a market-data snapshot occupied the probability identity slot.
+        resting_posterior=0.12,
+        resting_snapshot_id="clob-executable-snapshot",
+        limit_price=0.41,
+        quote_age_ms=90_000.0,
+    )
+
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=[rest],
+        decision_time="2026-08-09T15:01:00+00:00",
+    )
+
+    assert len(pulls) == 1
+    assert pulls[0][1].reason == "CURRENT_MEAN_EDGE_NON_POSITIVE"
+    assert pulls[0][1].detail < 0.0
+
+
 def test_rest_pull_does_not_cancel_by_order_age_alone():
     world = _mem_world()
     trade = _mem_trade()
@@ -1535,6 +1580,80 @@ def test_open_maker_rests_preserve_no_token_direction_and_held_side_posterior():
     assert rests[0].fact_state == "LIVE"
     assert rests[0].matched_size is None
     assert rests[0].min_order_size == pytest.approx(5.0)
+
+
+def test_open_maker_rest_recovers_causal_entry_belief_not_latest_belief():
+    from src.events import reactor
+
+    world = _mem_world()
+    trade = _mem_trade()
+    trade.execute(
+        "CREATE TABLE venue_commands ("
+        "command_id TEXT, venue_order_id TEXT, token_id TEXT, market_id TEXT, "
+        "side TEXT, price REAL, snapshot_id TEXT, created_at TEXT, intent_kind TEXT)"
+    )
+    trade.execute(
+        "CREATE TABLE venue_order_facts ("
+        "venue_order_id TEXT, state TEXT, local_sequence INTEGER)"
+    )
+    family_id = "hyp|live|Sao Paulo|2026-08-09|high|disc"
+    _cache(
+        world,
+        family_id=family_id,
+        p_yes=0.16,
+        snapshot_id="day0-entry",
+        cond="0xc26",
+        recorded_at="2026-08-09T14:57:35+00:00",
+    )
+    _cache(
+        world,
+        family_id=family_id,
+        p_yes=0.88,
+        snapshot_id="day0-reversal",
+        cond="0xc26",
+        recorded_at="2026-08-09T15:00:42+00:00",
+    )
+    _snapshot(
+        trade,
+        condition_id="0xc26",
+        yes_token_id="yes-c26",
+        no_token_id="no-c26",
+        selected_outcome_token_id="no-c26",
+        snapshot_id="clob-entry",
+    )
+    trade.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "cmd-causal",
+            "order-causal",
+            "no-c26",
+            "m1",
+            "BUY",
+            0.41,
+            "clob-entry",
+            "2026-08-09T14:57:41+00:00",
+            "ENTRY",
+        ),
+    )
+    trade.execute(
+        "INSERT INTO venue_order_facts VALUES (?,?,?)",
+        ("order-causal", "LIVE", 1),
+    )
+    trade.commit()
+
+    rests = reactor._edli_open_maker_rests_for_screen(trade, world)
+
+    assert len(rests) == 1
+    assert rests[0].resting_posterior == pytest.approx(0.84)
+    assert rests[0].resting_snapshot_id == "day0-entry"
+    pulls = cr.screen_resting_orders(
+        world,
+        trade,
+        open_rests=rests,
+        decision_time="2026-08-09T15:01:00+00:00",
+    )
+    assert len(pulls) == 1
+    assert pulls[0][1].reason == "BELIEF_WORSENING"
 
 
 def test_open_maker_rests_use_current_trade_fill_when_order_fact_is_stale():

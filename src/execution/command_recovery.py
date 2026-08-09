@@ -25013,17 +25013,66 @@ def reconcile_restart_no_venue_exit_retry_projections(conn: sqlite3.Connection) 
     return summary
 
 
-def _full_quantum_candidates(conn: sqlite3.Connection) -> list[dict]:
-    """Return durable full-sweep candidates in stable identity order."""
+def _full_quantum_candidate_priority(row: Mapping[str, object]) -> int:
+    """Rank unresolved commands by unresolved venue-side-effect risk."""
+
+    state = str(row.get("state") or "")
+    venue_order_id = str(row.get("venue_order_id") or "").strip()
+    if state == CommandState.SUBMITTING.value and not venue_order_id:
+        return 0
+    if state in {
+        CommandState.UNKNOWN.value,
+        CommandState.SUBMIT_UNKNOWN_SIDE_EFFECT.value,
+    }:
+        return 1
+    if state == CommandState.CANCEL_PENDING.value:
+        return 2
+    if state == CommandState.SUBMITTING.value:
+        return 3
+    if state in {
+        CommandState.POST_ACKED.value,
+        CommandState.ACKED.value,
+        CommandState.PARTIAL.value,
+    }:
+        return 4
+    return 5
+
+
+def _full_quantum_candidates(
+    conn: sqlite3.Connection,
+    *,
+    rotation_slot: int | None = None,
+) -> list[dict]:
+    """Return risk-prioritized, crash-stable, starvation-free full candidates.
+
+    A full sweep applies only its first row.  Stable oldest-first order therefore
+    lets one unresolvable historical REVIEW_REQUIRED row monopolize every run.
+    Ambiguous submit/cancel side effects outrank known resting exposure, while a
+    wall-clock rotation within each risk class guarantees that a repeatedly
+    stayed row cannot permanently hide its peers.
+    """
 
     rows = find_unresolved_commands(conn)
-    return sorted(
-        rows,
-        key=lambda row: (
-            str(row.get("updated_at") or ""),
-            str(row.get("command_id") or ""),
-        ),
+    slot = (
+        _full_background_recovery_quantum_slot()
+        if rotation_slot is None
+        else max(0, int(rotation_slot))
     )
+    buckets: dict[int, list[dict]] = {}
+    for row in rows:
+        buckets.setdefault(_full_quantum_candidate_priority(row), []).append(row)
+    ordered: list[dict] = []
+    for priority in sorted(buckets):
+        bucket = sorted(
+            buckets[priority],
+            key=lambda row: (
+                str(row.get("updated_at") or ""),
+                str(row.get("command_id") or ""),
+            ),
+        )
+        offset = slot % len(bucket)
+        ordered.extend(bucket[offset:] + bucket[:offset])
+    return ordered
 
 
 def _reconcile_passes_short_conn(

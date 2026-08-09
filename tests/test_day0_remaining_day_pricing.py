@@ -1591,7 +1591,7 @@ class TestRemainingDayMembers:
             "2026-06-10T21:20:00+00:00"
         )
 
-    def test_entry_point_q_keeps_unseen_peak_tail_for_nonfinal_post_peak(self, monkeypatch):
+    def test_entry_point_q_does_not_double_count_peak_timing(self, monkeypatch):
         import src.engine.event_reactor_adapter as era
 
         monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
@@ -1627,10 +1627,10 @@ class TestRemainingDayMembers:
             extra_member_sigma=extra_sigma,
         )
 
-        assert extra_sigma > 0.0
-        assert payload["_edli_day0_unseen_peak_sigma_native"] > 0.0
-        assert p_raw[1] < 0.86
-        assert p_raw[2] > 0.12
+        assert extra_sigma == 0.0
+        assert "_edli_day0_unseen_peak_sigma_native" not in payload
+        assert p_raw[1] > 0.86
+        assert p_raw[2] < 0.12
         assert p_raw.sum() == pytest.approx(1.0)
 
     def test_excursion_still_possible_keeps_above_floor_members(self, monkeypatch):

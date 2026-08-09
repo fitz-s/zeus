@@ -108,6 +108,7 @@ _CURRENT_MONITOR_ORDERBOOK_BATCH: tuple[dict[str, dict], datetime | None] = (
     None,
 )
 _HELD_MONITOR_DEADLINE_ATTR = "_zeus_held_monitor_deadline_monotonic"
+_HELD_MONITOR_MIN_ORDER_SIZE_ATTR = "_zeus_held_monitor_min_order_size"
 HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS = 5.0
 _MONITOR_DAY0_FAMILY_CACHE_ATTR = "_zeus_monitor_day0_family_cache"
 _DAY0_MATERIALIZATION_VISIBILITY_RETRY_SECONDS = 0.1
@@ -509,9 +510,20 @@ class HeldTokenMonitorQuote:
     ask_size: float
     mark_price: float
     source_timestamp: str
+    min_order_size: float | None = None
     # Held-side depth ladder (top rungs, price-descending) for the depth-honest
     # exit stopping law. Empty when the book was unavailable (one-sided/degraded).
     bid_ladder: tuple[tuple[float, float], ...] = ()
+
+
+def _book_min_order_size(book: dict | None) -> float | None:
+    if not isinstance(book, dict):
+        return None
+    try:
+        value = float(book.get("min_order_size"))
+    except (TypeError, ValueError):
+        return None
+    return value if np.isfinite(value) and value > 0.0 else None
 
 
 def _compute_divergence_score(p_posterior: float, p_market: float, *, available: bool) -> float:
@@ -2956,6 +2968,7 @@ def _day0_one_sided_monitor_quote(
             ask_size=ask_sz_f,
             mark_price=bid_f,
             source_timestamp=source_timestamp,
+            min_order_size=_book_min_order_size(book),
             bid_ladder=_bid_ladder_from_book(book) if isinstance(book, dict) else (),
         )
     except Exception as exc:
@@ -3039,6 +3052,7 @@ def monitor_quote_refresh(
             ask_size=ask_sz_f,
             mark_price=mark_price,
             source_timestamp=source_timestamp,
+            min_order_size=_book_min_order_size(book),
             bid_ladder=_bid_ladder_from_book(book) if isinstance(book, dict) else (),
         )
     except Exception as e:
@@ -5685,6 +5699,7 @@ def refresh_exact_one_position(pos: Position) -> EdgeContext:
     pos.last_monitor_market_vig = None
     pos.last_monitor_whale_toxicity = False
     pos.last_monitor_market_price_is_fresh = False
+    setattr(pos, _HELD_MONITOR_MIN_ORDER_SIZE_ATTR, None)
     for attr in (
         _GLOBAL_MONITOR_SAMPLES_ATTR,
         _GLOBAL_MONITOR_ALPHA_ATTR,
@@ -5775,6 +5790,9 @@ def refresh_exact_zero_position(
         current_p_market = quote.mark_price
         pos.last_monitor_market_price = current_p_market
         pos.last_monitor_market_price_is_fresh = True
+        setattr(pos, _HELD_MONITOR_MIN_ORDER_SIZE_ATTR, quote.min_order_size)
+    else:
+        setattr(pos, _HELD_MONITOR_MIN_ORDER_SIZE_ATTR, None)
 
     pos.selected_method = SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT
     pos.last_monitor_prob = 0.0
@@ -5843,6 +5861,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     pos.last_monitor_whale_toxicity = None
     pos.last_monitor_market_price_is_fresh = False
     pos.last_monitor_prob_is_fresh = False
+    setattr(pos, _HELD_MONITOR_MIN_ORDER_SIZE_ATTR, None)
     _set_day0_zero_probability_exit_authority(pos, False)
     try:
         delattr(pos, "_day0_monitor_probability_receipt")
@@ -5870,6 +5889,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         market_refreshed = True
         pos.last_monitor_market_price = current_p_market
         pos.last_monitor_market_price_is_fresh = True
+        setattr(pos, _HELD_MONITOR_MIN_ORDER_SIZE_ATTR, quote.min_order_size)
 
     # 2. Recompute P_posterior from fresh ENS/Day0 evidence
     city = cities_by_name.get(pos.city)

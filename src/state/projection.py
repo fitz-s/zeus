@@ -450,7 +450,6 @@ def _preserve_existing_pending_exit_authority(
     current = {column: row[index] for index, column in enumerate(selected)}
     if (
         str(current.get("phase") or "") == LifecyclePhase.PENDING_EXIT.value
-        and str(projection.get("phase") or "") != LifecyclePhase.PENDING_EXIT.value
         and str(current.get("order_status") or "")
         in _MONITOR_REFRESH_PROTECTED_PENDING_EXIT_STATUSES
     ):
@@ -530,7 +529,6 @@ def _preserve_existing_monitor_refresh_authority(
         merged[column] = current[column]
     if (
         str(current.get("phase") or "") == LifecyclePhase.PENDING_EXIT.value
-        and str(projection.get("phase") or "") != LifecyclePhase.PENDING_EXIT.value
         and str(current.get("order_status") or "")
         in _MONITOR_REFRESH_PROTECTED_PENDING_EXIT_STATUSES
     ):

@@ -178,6 +178,58 @@ def test_repair_candidates_restore_projection_lost_min_order_dust_hold() -> None
         conn.close()
 
 
+def test_monitor_refresh_cannot_downgrade_pending_exit_authority() -> None:
+    """Observational refreshes update belief/book fields, never exit control state."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    try:
+        current = _projection(
+            "pending-exit-pos",
+            phase="pending_exit",
+            order_status="retry_pending",
+            shares=34.95,
+            exit_reason="GLOBAL_CAPITAL_OPTIMAL_SELL [NO_IN_BAND_BID]",
+        )
+        current["exit_retry_count"] = 2
+        current["next_exit_retry_at"] = "2026-08-09T15:36:38+00:00"
+        upsert_position_current(conn, current)
+
+        stale_monitor = dict(current)
+        stale_monitor.update(
+            {
+                "_canonical_event_type": "MONITOR_REFRESHED",
+                "order_status": "filled",
+                "exit_reason": "",
+                "exit_retry_count": 0,
+                "next_exit_retry_at": None,
+                "last_monitor_prob": 0.018,
+                "last_monitor_best_bid": 0.03,
+            }
+        )
+        upsert_position_current(conn, stale_monitor)
+
+        row = conn.execute(
+            """
+            SELECT phase, order_status, exit_reason, exit_retry_count,
+                   next_exit_retry_at, last_monitor_prob, last_monitor_best_bid
+              FROM position_current
+             WHERE position_id = 'pending-exit-pos'
+            """
+        ).fetchone()
+        assert row is not None
+        assert row["phase"] == "pending_exit"
+        assert row["order_status"] == "retry_pending"
+        assert row["exit_reason"] == "GLOBAL_CAPITAL_OPTIMAL_SELL [NO_IN_BAND_BID]"
+        assert row["exit_retry_count"] == 2
+        assert row["next_exit_retry_at"] == "2026-08-09T15:36:38+00:00"
+        assert row["last_monitor_prob"] == 0.018
+        assert row["last_monitor_best_bid"] == 0.03
+    finally:
+        conn.close()
+
+
 def test_repair_candidates_ignore_settled_min_order_dust_history() -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row

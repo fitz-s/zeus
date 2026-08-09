@@ -133,9 +133,9 @@ _HELD_POSITION_MONITOR_BUDGET_ENV = "ZEUS_HELD_POSITION_MONITOR_BUDGET_SECONDS"
 _HELD_POSITION_MONITOR_BUDGET_DEFAULT_SECONDS = 75.0
 _HELD_POSITION_MONITOR_RESERVATION_MIN = 2
 _HELD_POSITION_MONITOR_DEGRADED_COVERAGE_CYCLES = 3
-_MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS = 50
-_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS = 100
-_MONITOR_CANONICAL_WRITE_RETRY_DEADLINE_MS = 100
+_MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS = 250
+_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS = 250
+_MONITOR_CANONICAL_WRITE_RETRY_DEADLINE_MS = 1_000
 
 
 def _held_position_monitor_reservation_count(position_count: int) -> int:
@@ -3854,6 +3854,36 @@ def _global_auction_owns_statistical_sell(exit_decision, exit_reason: str) -> bo
     )
 
 
+def _posterior_support_zero_sell_dominates(pos, exit_context) -> bool:
+    """Return whether legal SELL proceeds dominate HOLD in every current q draw."""
+
+    if not (
+        bool(getattr(exit_context, "fresh_prob_is_fresh", False))
+        and bool(getattr(exit_context, "current_market_price_is_fresh", False))
+    ):
+        return False
+    fresh_prob = _finite_float_or_none(getattr(exit_context, "fresh_prob", None))
+    best_bid = _finite_float_or_none(getattr(exit_context, "best_bid", None))
+    if fresh_prob is None or fresh_prob > 1e-12:
+        return False
+    if best_bid is None or not 0.05 <= best_bid <= 0.95:
+        return False
+    raw_samples = getattr(pos, "_current_global_held_probability_samples", None)
+    if raw_samples is None:
+        return False
+    try:
+        samples = tuple(float(value) for value in raw_samples)
+    except (TypeError, ValueError):
+        return False
+    # Removing a zero-payoff token and adding positive cash increases every
+    # represented terminal branch. Correlation and capital ranking cannot
+    # reverse that dominance, so a full-universe auction only adds latency.
+    return bool(samples) and all(
+        math.isfinite(value) and 0.0 <= value <= 1e-12
+        for value in samples
+    )
+
+
 def _apply_family_monitor_overlay(
     *,
     portfolio,
@@ -5390,6 +5420,7 @@ def _current_monitor_global_holding_coverage(
         from src.engine.global_batch_runtime import (
             _CurrentHoldingWitness,
             current_global_holding_coverage,
+            held_sell_reauction_coverage,
         )
         from src.engine.global_single_order_auction import (
             global_sell_book_witness_identity,
@@ -5411,6 +5442,44 @@ def _current_monitor_global_holding_coverage(
             return value.astimezone(timezone.utc)
 
         checked = checked_at_utc.astimezone(timezone.utc)
+        position_id = str(
+            getattr(position, "position_id", "")
+            or getattr(position, "trade_id", "")
+            or ""
+        )
+        direction_raw = getattr(position, "direction", "")
+        direction = str(
+            getattr(direction_raw, "value", direction_raw) or ""
+        ).lower()
+        if direction == "buy_yes":
+            side = "YES"
+            token_id = str(getattr(position, "token_id", "") or "").strip()
+        elif direction == "buy_no":
+            side = "NO"
+            token_id = str(getattr(position, "no_token_id", "") or "").strip()
+        else:
+            return unavailable(
+                GlobalHoldingCoverageOutcome.COVERAGE_PARTITION,
+                "GLOBAL_HOLDING_COVERAGE_SIDE_UNSUPPORTED",
+            )
+        family = (
+            str(getattr(position, "city", "") or ""),
+            str(getattr(position, "target_date", "") or ""),
+            str(getattr(position, "temperature_metric", "") or "").lower(),
+        )
+        # Absence of an exact published lease is cheap and authoritative.
+        # Witness I/O cannot create coverage and must not delay reservation of
+        # the V4 SELL obligation while an executable bid is disappearing.
+        if held_sell_reauction_coverage(
+            position_id=position_id,
+            probability_content_identity=probability_content_identity,
+            token_id=token_id,
+            family=family,
+        ) is None:
+            return unavailable(
+                GlobalHoldingCoverageOutcome.COVERAGE_NOT_PUBLISHED,
+                "GLOBAL_HOLDING_COVERAGE_NOT_PUBLISHED",
+            )
         wealth_max_age = timedelta(
             seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS)
         )
@@ -5448,21 +5517,6 @@ def _current_monitor_global_holding_coverage(
                 GlobalHoldingCoverageOutcome.WEALTH,
                 "GLOBAL_HOLDING_COVERAGE_WEALTH_EXPIRED",
             )
-        direction_raw = getattr(position, "direction", "")
-        direction = str(
-            getattr(direction_raw, "value", direction_raw) or ""
-        ).lower()
-        if direction == "buy_yes":
-            side = "YES"
-            token_id = str(getattr(position, "token_id", "") or "").strip()
-        elif direction == "buy_no":
-            side = "NO"
-            token_id = str(getattr(position, "no_token_id", "") or "").strip()
-        else:
-            return unavailable(
-                GlobalHoldingCoverageOutcome.COVERAGE_PARTITION,
-                "GLOBAL_HOLDING_COVERAGE_SIDE_UNSUPPORTED",
-            )
         native_holdings = {
             str(token): Decimal(int(amount)) / Decimal("1000000")
             for token, amount in tuple(wealth.native_holdings_micro or ())
@@ -5477,11 +5531,9 @@ def _current_monitor_global_holding_coverage(
             getattr(position, "condition_id", "") or ""
         ).strip()
         family_key = weather_family_id(
-            city=str(getattr(position, "city", "") or ""),
-            target_date=str(getattr(position, "target_date", "") or ""),
-            metric=str(
-                getattr(position, "temperature_metric", "") or ""
-            ).lower(),
+            city=family[0],
+            target_date=family[1],
+            metric=family[2],
         )
 
         def current_sell_book_witness(coverage) -> str | None:
@@ -5570,11 +5622,7 @@ def _current_monitor_global_holding_coverage(
             )
 
         return current_global_holding_coverage(
-            position_id=str(
-                getattr(position, "position_id", "")
-                or getattr(position, "trade_id", "")
-                or ""
-            ),
+            position_id=position_id,
             probability_content_identity=probability_content_identity,
             checked_at_utc=checked,
             family_key=family_key,
@@ -5677,6 +5725,7 @@ def execute_monitoring_phase(
         HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
         _GLOBAL_MONITOR_SAMPLES_ATTR,
         _HELD_MONITOR_DEADLINE_ATTR,
+        _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
         install_monitor_day0_family_cache,
         refresh_position,
     )
@@ -5688,6 +5737,7 @@ def execute_monitoring_phase(
         check_pending_retries,
         execute_exit,
         has_global_sell_snapshot_reauction_retry,
+        _is_non_executable_dust_hold,
         handle_exit_pending_missing,
         is_exit_cooldown_active,
         latest_held_sell_reauction_obligation,
@@ -6608,6 +6658,7 @@ def execute_monitoring_phase(
             summary["monitor_skipped_admin_close"] = summary.get("monitor_skipped_admin_close", 0) + 1
             continue
         pending_exit_monitor_only = False
+        monitoring_non_executable_dust = False
         pending_exit_retry_identity_seed_allowed = (
             id(pos) in retry_quote_identity_seed_position_ids
             or (
@@ -6622,6 +6673,12 @@ def execute_monitoring_phase(
                     portfolio_dirty = True
                     summary["monitor_repaired_market_closed_pending_exit_hold"] = (
                         summary.get("monitor_repaired_market_closed_pending_exit_hold", 0) + 1
+                    )
+                elif _is_non_executable_dust_hold(pos, conn=conn):
+                    pending_exit_monitor_only = True
+                    monitoring_non_executable_dust = True
+                    summary["monitor_pending_exit_dust_redecisions"] = (
+                        summary.get("monitor_pending_exit_dust_redecisions", 0) + 1
                     )
                 elif release_backoff_exhausted_pending_exit_for_redecision(pos, conn=conn):
                     portfolio_dirty = True
@@ -6670,7 +6727,7 @@ def execute_monitoring_phase(
                 counter="monitor_exit_order_in_flight_holds",
             )
             continue
-        if pos.exit_state == "backoff_exhausted":
+        if pos.exit_state == "backoff_exhausted" and not monitoring_non_executable_dust:
             _record_monitor_hold_decision(
                 conn,
                 pos,
@@ -7262,6 +7319,23 @@ def execute_monitoring_phase(
                         delattr(pos, _HELD_MONITOR_DEADLINE_ATTR)
                     except AttributeError:
                         pass
+            if monitoring_non_executable_dust:
+                current_min_order_size = getattr(
+                    pos,
+                    _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
+                    None,
+                )
+                if release_backoff_exhausted_pending_exit_for_redecision(
+                    pos,
+                    conn=conn,
+                    current_min_order_size=current_min_order_size,
+                ):
+                    monitoring_non_executable_dust = False
+                    pending_exit_monitor_only = False
+                    portfolio_dirty = True
+                    summary["monitor_released_dust_after_current_book"] = (
+                        summary.get("monitor_released_dust_after_current_book", 0) + 1
+                    )
             # === DAY0 HARD-FACT verdict — computed before the exit decision and
             # before closed-market pre-emption above. Settlement-authority hard
             # facts must not depend on estimator evidence.
@@ -7423,6 +7497,121 @@ def execute_monitoring_phase(
                     exit_reason,
                 )
             )
+            if (
+                statistical_sell_requires_global
+                and local_exit_trigger == "SELL_REVERSAL"
+                and _posterior_support_zero_sell_dominates(pos, exit_context)
+            ):
+                statistical_sell_requires_global = False
+                exit_reason = "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+                local_exit_trigger = exit_reason
+                pos.applied_validations = list(
+                    dict.fromkeys(
+                        [
+                            *(pos.applied_validations or []),
+                            "posterior_support_zero_sell_dominates",
+                            "global_auction_comparison_inapplicable:branchwise_dominance",
+                        ]
+                    )
+                )
+                summary["monitor_branchwise_dominant_direct_sells"] = (
+                    summary.get("monitor_branchwise_dominant_direct_sells", 0) + 1
+                )
+            if should_exit:
+                # No SELL actuator can make a sub-minimum holding executable.
+                # Apply the same current-book size law before global, direct,
+                # hard-fact, and RED paths so no route can mint impossible debt.
+                from src.execution.exit_lifecycle import (
+                    _latest_fresh_snapshot_min_order,
+                    _mark_exit_dust_hold,
+                )
+
+                try:
+                    held_shares = Decimal(
+                        str(
+                            getattr(pos, "effective_shares", None)
+                            or getattr(pos, "shares", 0)
+                        )
+                    )
+                except (InvalidOperation, TypeError, ValueError):
+                    held_shares = Decimal("0")
+                monitor_min_order = getattr(
+                    pos,
+                    _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
+                    None,
+                )
+                try:
+                    fresh_min_order = (
+                        Decimal(str(monitor_min_order))
+                        if monitor_min_order is not None
+                        else None
+                    )
+                except (InvalidOperation, TypeError, ValueError):
+                    fresh_min_order = None
+                if fresh_min_order is None or fresh_min_order <= 0:
+                    fresh_min_order = _latest_fresh_snapshot_min_order(
+                        pos,
+                        conn=conn,
+                        now=(
+                            deps._utcnow()
+                            if hasattr(deps, "_utcnow")
+                            else datetime.now(timezone.utc)
+                        ),
+                    )
+                if (
+                    fresh_min_order is not None
+                    and held_shares > 0
+                    and held_shares < fresh_min_order
+                ):
+                    dust_error = (
+                        "executable_snapshot_gate: size "
+                        f"{held_shares} is below snapshot min_order_size "
+                        f"{fresh_min_order}"
+                    )
+                    dust_reason = f"{exit_reason} [DUST: {dust_error}]"
+                    _mark_exit_dust_hold(
+                        pos,
+                        reason=dust_reason,
+                        error=dust_error,
+                        conn=conn,
+                    )
+                    should_exit = False
+                    statistical_sell_requires_global = False
+                    exit_reason = dust_reason
+                    local_exit_trigger = "CANONICAL_DUST_HOLD"
+                    pos.applied_validations = list(
+                        dict.fromkeys(
+                            [
+                                *(pos.applied_validations or []),
+                                "fresh_snapshot_sub_minimum_dust_hold",
+                                "global_auction_inapplicable:venue_minimum",
+                            ]
+                        )
+                    )
+                    summary["monitor_statistical_sell_dust_holds"] = (
+                        summary.get("monitor_statistical_sell_dust_holds", 0) + 1
+                    )
+                elif monitoring_non_executable_dust and fresh_min_order is None:
+                    should_exit = False
+                    statistical_sell_requires_global = False
+                    exit_reason = "CANONICAL_DUST_HOLD_MIN_ORDER_UNAVAILABLE"
+                    local_exit_trigger = exit_reason
+                    pos.applied_validations = list(
+                        dict.fromkeys(
+                            [
+                                *(pos.applied_validations or []),
+                                "current_min_order_size_unavailable",
+                                "canonical_dust_hold_preserved_fail_closed",
+                            ]
+                        )
+                    )
+                    summary["monitor_statistical_sell_dust_min_unavailable_holds"] = (
+                        summary.get(
+                            "monitor_statistical_sell_dust_min_unavailable_holds",
+                            0,
+                        )
+                        + 1
+                    )
             probability_receipt = getattr(
                 pos,
                 "_day0_monitor_probability_receipt",
@@ -7456,6 +7645,8 @@ def execute_monitoring_phase(
                 should_exit
                 and local_exit_trigger != "RED_FORCE_EXIT"
                 and local_exit_trigger != "DAY0_HARD_FACT_BIN_DEAD"
+                and local_exit_trigger
+                != "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
                 and getattr(pos, _GLOBAL_MONITOR_SAMPLES_ATTR, None) is not None
             ):
                 if probability_content_identity:

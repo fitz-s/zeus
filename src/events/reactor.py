@@ -11085,13 +11085,17 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
     decision belief via condition_id. Pure read on both DBs.
 
     The rest's condition_id (token_id → executable_market_snapshots) joins to the belief's
-    per-bin condition_ids → (family_id, bin_label, resting_posterior, resting_snapshot_id). The
-    resting_posterior is the belief's posterior at that bin from the LATEST cached belief whose
-    snapshot matches the rest's pricing snapshot (anti-twitch: screen_reprice fires only when the
-    LATEST belief is from a NEWER snapshot than the rest's). When the bin/belief cannot be resolved
-    the rest still gets the book/stale checks (which need no posterior)."""
+    per-bin condition_ids → family identity. Its resting posterior and probability snapshot are
+    then reconstructed from the latest causal belief recorded at or before command creation; the
+    CLOB snapshot is a different identity namespace and must never stand in for probability
+    evidence. When the historical belief is unavailable, the current belief remains a conservative
+    fallback and current-fill economics still protect the rest."""
     from datetime import datetime, timezone
-    from src.events.continuous_redecision import OpenRest, _all_latest_beliefs
+    from src.events.continuous_redecision import (
+        OpenRest,
+        _all_latest_beliefs,
+        latest_cached_belief,
+    )
     from src.execution.staleness_cancel import OPEN_REST_FACT_STATES
 
     now = datetime.now(timezone.utc)
@@ -11340,7 +11344,28 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
         target_date = str(getattr(belief_hit[0], "target_date", "") or "") if belief_hit else ""
         metric = str(getattr(belief_hit[0], "metric", "") or "") if belief_hit else ""
         bin_label = belief_hit[1] if belief_hit else ""
+        resting_belief = None
+        if belief_hit and created_at:
+            try:
+                resting_belief = latest_cached_belief(
+                    world_conn,
+                    family_id=str(belief_hit[0].family_id or ""),
+                    at_or_before=created_at,
+                )
+            except sqlite3.Error:
+                resting_belief = None
+        resting_belief = resting_belief or (belief_hit[0] if belief_hit else None)
         resting_posterior = belief_hit[2] if belief_hit else 0.0
+        resting_probability_snapshot_id = ""
+        if resting_belief is not None:
+            try:
+                resting_idx = list(resting_belief.condition_ids or ()).index(cond)
+                resting_posterior = float(resting_belief.p_posterior_vec[resting_idx])
+                resting_probability_snapshot_id = str(
+                    getattr(resting_belief, "snapshot_id", "") or ""
+                )
+            except (ValueError, IndexError, TypeError):
+                pass
         # quote_age_ms from the command's creation (the order has rested since created_at).
         try:
             from datetime import datetime as _dt
@@ -11366,7 +11391,7 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
                 side=screen_side,
                 condition_id=cond,
                 resting_posterior=resting_held_side_posterior,
-                resting_snapshot_id=snap_id,
+                resting_snapshot_id=resting_probability_snapshot_id or snap_id,
                 limit_price=float(price) if price is not None else 0.0,
                 quote_age_ms=age_ms,
                 created_at=created_at,
