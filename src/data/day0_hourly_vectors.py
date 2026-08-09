@@ -46,6 +46,7 @@ from collections import Counter
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
+from functools import lru_cache
 from typing import Any, Iterable, Mapping, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -627,6 +628,8 @@ def read_freshest_day0_hourly_vectors(
         from src.state.db import get_forecasts_connection_read_only
 
         conn = get_forecasts_connection_read_only()
+    moment = (now or datetime.now(UTC)).astimezone(UTC)
+    oldest_capture = moment - timedelta(hours=float(max_age_hours))
     try:
         try:
             rows = conn.execute(
@@ -635,9 +638,16 @@ def read_freshest_day0_hourly_vectors(
                        times_json, temps_c_json
                 FROM day0_hourly_vectors
                 WHERE city = ? AND target_date = ?
+                  AND julianday(captured_at)
+                      BETWEEN julianday(?) AND julianday(?)
                 ORDER BY captured_at DESC
                 """,
-                (str(city), str(target_date)),
+                (
+                    str(city),
+                    str(target_date),
+                    oldest_capture.isoformat(),
+                    moment.isoformat(),
+                ),
             ).fetchall()
         except sqlite3.Error:
             if raise_on_db_error:
@@ -663,7 +673,7 @@ def read_freshest_day0_hourly_vectors(
             candidates,
             target_date=target_date,
             max_age_hours=max_age_hours,
-            now=now,
+            now=moment,
             expected_models=expected_models,
             require_expected=require_expected,
             max_bundle_skew_minutes=max_bundle_skew_minutes,
@@ -675,6 +685,7 @@ def read_freshest_day0_hourly_vectors(
             conn.close()
 
 
+@lru_cache(maxsize=256)
 def _target_day_hour_grid_utc(*, target: date, tz: ZoneInfo) -> tuple[datetime, ...]:
     """UTC instants for every local hourly grid point, including DST folds."""
 

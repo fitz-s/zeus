@@ -62,6 +62,19 @@ UTC = timezone.utc
 PRUNE_NOW = datetime(2026, 6, 10, 12, 0, tzinfo=UTC)
 
 
+def test_target_day_hour_grid_reuses_immutable_calendar_geometry():
+    import src.data.day0_hourly_vectors as vectors
+
+    vectors._target_day_hour_grid_utc.cache_clear()
+    kwargs = {"target": date(2026, 6, 10), "tz": ZoneInfo("Europe/Paris")}
+
+    first = vectors._target_day_hour_grid_utc(**kwargs)
+    second = vectors._target_day_hour_grid_utc(**kwargs)
+
+    assert second is first
+    assert vectors._target_day_hour_grid_utc.cache_info().hits == 1
+
+
 def _paris():
     return SimpleNamespace(
         name="Paris", timezone="Europe/Paris", settlement_unit="C",
@@ -419,6 +432,28 @@ class TestParsePayload:
 # ===========================================================================
 
 class TestPersistence:
+    def test_reader_pushes_freshness_window_into_sql(self):
+        from src.data.day0_hourly_vectors import _ensure_schema
+
+        conn = _conn()
+        _ensure_schema(conn)
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+
+        read_freshest_day0_hourly_vectors(
+            city="Paris",
+            target_date="2026-06-10",
+            max_age_hours=3.0,
+            now=datetime(2026, 6, 10, 10, 0, tzinfo=UTC),
+            conn=conn,
+        )
+
+        selects = [sql for sql in statements if "FROM day0_hourly_vectors" in sql]
+        assert len(selects) == 1
+        assert "julianday(captured_at)" in selects[0]
+        assert "2026-06-10T07:00:00+00:00" in selects[0]
+        assert "2026-06-10T10:00:00+00:00" in selects[0]
+
     def test_read_error_is_distinct_when_producer_requires_proof(self):
         class BrokenConnection:
             def execute(self, *_args, **_kwargs):
