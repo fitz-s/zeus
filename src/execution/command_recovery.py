@@ -25785,6 +25785,9 @@ def _reconcile_passes_short_conn(
                     conn_factory=_boot_conn_factory,
                     label=f"recovery.{label}",
                 )
+            except WriteLeaseTimeout:
+                _defer_boot_pass(label, "database_locked_before_scheduler")
+                return None
             except BlockingIOError as exc:
                 if (
                     "db_writer_lock(" not in str(exc)

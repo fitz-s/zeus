@@ -1384,6 +1384,39 @@ def test_boot_fast_writer_flock_contention_defers_before_scheduler(monkeypatch):
     ] == "database_locked_before_scheduler"
 
 
+def test_boot_fast_write_lease_contention_defers_before_scheduler(monkeypatch):
+    """A live writer lease must not prevent the scheduler from starting."""
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+    from src.state.write_coordinator import WriteLeaseTimeout
+
+    calls = []
+
+    def _contended_factory(**kwargs):
+        calls.append(kwargs)
+        raise WriteLeaseTimeout(
+            "DB write lease timed out for owner=command_recovery_boot_fast_apply db=trade"
+        )
+
+    _contended_factory.supports_nonblocking_flocks = True
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_conn_factory",
+        _contended_factory,
+    )
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=MagicMock(),
+        scope="boot_fast",
+    )
+
+    assert calls
+    assert summary["boot_fast_deferred"] is True
+    assert summary["boot_fast_defer_reasons"][
+        "missing_filled_entry_execution_fact_repair"
+    ] == "database_locked_before_scheduler"
+
+
 @pytest.mark.parametrize(
     "lock_error",
     [
