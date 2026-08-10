@@ -8757,6 +8757,7 @@ def _exit_monitor_cycle(
     monitor acquires and releases the reactor boundary; network work does not
     hold that gate. The dispatcher owns both signals.
     """
+    from src.engine.cycle_runtime import _held_position_monitor_budget_seconds
     from src.execution.exit_lifecycle import run_exit_monitor_cycle
 
     urgent_fact = urgent_day0 or urgent_forecast
@@ -8802,6 +8803,14 @@ def _exit_monitor_cycle(
             _forecast_held_monitor_preempt_requested.set()
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
         return False
+
+    # The deadline belongs to the single-writer monitor claim, not merely to
+    # the later network phase. Reactor handoff and all pre-monitor preparation
+    # consume the same finite budget so a stalled handoff cannot shift the
+    # probability/exit work beyond its advertised cadence.
+    monitor_deadline_monotonic = (
+        time.monotonic() + _held_position_monitor_budget_seconds()
+    )
 
     if urgent_day0:
         # Owning the claim satisfies any earlier request for the current holder
@@ -8851,10 +8860,14 @@ def _exit_monitor_cycle(
     try:
         # Recovery repeats every 30s; a full normal handoff wait would occupy
         # its entire slot and make max_instances=1 skip the next repair tick.
-        handoff_timeout = (
+        configured_handoff_timeout = (
             _URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
             if urgent_fact or recovery_full_book
             else _EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
+        )
+        handoff_timeout = min(
+            configured_handoff_timeout,
+            max(0.0, monitor_deadline_monotonic - time.monotonic()),
         )
         reactor_idle = _edli_reactor_active_lock.acquire(timeout=handoff_timeout)
         if not reactor_idle:
@@ -8938,6 +8951,7 @@ def _exit_monitor_cycle(
             # cadence recovery or a newer held-family redecision.
             mark_held_position_monitor_complete=_release_monitor_claim,
             monitor_claimed=True,
+            monitor_deadline_monotonic=monitor_deadline_monotonic,
             target_families=target_families,
             should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
         )

@@ -10960,6 +10960,7 @@ def run_exit_monitor_cycle(
     held_position_monitor_active: threading.Event,
     mark_held_position_monitor_complete: Callable[[], None],
     monitor_claimed: bool = False,
+    monitor_deadline_monotonic: float | None = None,
     target_families: Collection[tuple[str, str, str]] | None = None,
     should_preempt_for_urgent_day0: Callable[[], bool] | None = None,
 ) -> bool:
@@ -10977,7 +10978,11 @@ def run_exit_monitor_cycle(
     handoff priority is a separate dispatcher-owned event and ends before this
     function performs network work. ``monitor_claimed`` means
     the dispatcher already set the Event while waiting for an active reactor to
-    finish; direct callers retain the original local claim behavior.
+    finish; direct callers retain the original local claim behavior. When the
+    dispatcher owns the claim, ``monitor_deadline_monotonic`` carries the same
+    absolute claim-clock deadline through handoff, preparation, refresh, and
+    retry. Direct callers create that deadline immediately after their local
+    active claim.
     ``target_families`` limits event-triggered runs to the families changed by
     the committed observation while periodic runs retain the full portfolio.
 
@@ -11005,8 +11010,20 @@ def run_exit_monitor_cycle(
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
         return False
     held_position_monitor_active.set()
-    monitor_budget_seconds = _held_position_monitor_budget_seconds()
-    monitor_deadline_monotonic = _time_module.monotonic() + monitor_budget_seconds
+    if monitor_deadline_monotonic is None:
+        monitor_deadline_monotonic = (
+            _time_module.monotonic() + _held_position_monitor_budget_seconds()
+        )
+    else:
+        monitor_deadline_monotonic = float(monitor_deadline_monotonic)
+        if not math.isfinite(monitor_deadline_monotonic):
+            logger.error("exit_monitor: held monitor deadline is not finite")
+            mark_held_position_monitor_complete()
+            return False
+    if monitor_deadline_monotonic <= _time_module.monotonic():
+        logger.warning("exit_monitor: claim budget expired before DB acquisition")
+        mark_held_position_monitor_complete()
+        return False
 
     conn = get_connection()
     if conn is None:

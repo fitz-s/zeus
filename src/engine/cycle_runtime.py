@@ -5272,6 +5272,7 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
     pos,
     exit_context,
     identity_seed_allowed: bool,
+    deadline_monotonic: float | None = None,
 ):
     """Use stale snapshot identity only to find the held token; price comes from CLOB."""
 
@@ -5280,22 +5281,34 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
         or conn is None
         or clob is None
         or getattr(exit_context, "current_market_price_is_fresh", False)
+        or (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        )
     ):
         return exit_context, False
 
     token_id = _held_exit_token_from_snapshot_identity(conn, pos)
     if not token_id:
         return exit_context, False
-    quote_fn = getattr(clob, "get_best_bid_ask", None)
-    if not callable(quote_fn):
-        return exit_context, False
+
+    from src.engine.monitor_refresh import (
+        _HELD_MONITOR_DEADLINE_ATTR,
+        monitor_quote_refresh,
+    )
+
+    previous_deadline = getattr(pos, _HELD_MONITOR_DEADLINE_ATTR, None)
+    had_previous_deadline = hasattr(pos, _HELD_MONITOR_DEADLINE_ATTR)
+    if deadline_monotonic is not None:
+        setattr(pos, _HELD_MONITOR_DEADLINE_ATTR, float(deadline_monotonic))
 
     try:
-        bid, ask, bid_size, ask_size = quote_fn(token_id)
-        bid_f = float(bid)
-        ask_f = float(ask)
-        bid_size_f = float(bid_size)
-        ask_size_f = float(ask_size)
+        quote = monitor_quote_refresh(
+            conn,
+            clob,
+            pos,
+            retry_after_prefetch=True,
+        )
     except Exception as exc:
         logger.debug(
             "Exit retry current CLOB quote failed for %s token=%s: %s",
@@ -5304,25 +5317,50 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
             exc,
         )
         return exit_context, False
+    finally:
+        if deadline_monotonic is not None:
+            if had_previous_deadline:
+                setattr(pos, _HELD_MONITOR_DEADLINE_ATTR, previous_deadline)
+            else:
+                try:
+                    delattr(pos, _HELD_MONITOR_DEADLINE_ATTR)
+                except AttributeError:
+                    pass
+
     if (
-        not math.isfinite(bid_f)
-        or not math.isfinite(ask_f)
-        or not math.isfinite(bid_size_f)
-        or not math.isfinite(ask_size_f)
-        or bid_f <= 0.0
-        or ask_f <= 0.0
-        or bid_size_f <= 0.0
-        or ask_size_f <= 0.0
-        or bid_f > ask_f
+        quote is None
+        or (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        )
     ):
         return exit_context, False
-
-    from src.strategy.market_fusion import vwmp
-
-    telemetry_market_price = (
-        bid_f if _position_state_value(pos) == "day0_window" else float(vwmp(bid_f, ask_f, bid_size_f, ask_size_f))
-    )
-    source_timestamp = datetime.now(timezone.utc).isoformat()
+    try:
+        bid_f = float(quote.best_bid)
+        ask_f = (
+            float(quote.best_ask)
+            if quote.best_ask is not None
+            else None
+        )
+        bid_size_f = float(quote.bid_size)
+        ask_size_f = float(quote.ask_size)
+        telemetry_market_price = float(quote.mark_price)
+    except (TypeError, ValueError):
+        return exit_context, False
+    if (
+        not math.isfinite(bid_f)
+        or not math.isfinite(bid_size_f)
+        or not math.isfinite(ask_size_f)
+        or not math.isfinite(telemetry_market_price)
+        or bid_f <= 0.0
+        or bid_size_f <= 0.0
+        or (
+            ask_f is not None
+            and (not math.isfinite(ask_f) or ask_f <= 0.0 or bid_f > ask_f)
+        )
+    ):
+        return exit_context, False
+    source_timestamp = str(quote.source_timestamp)
     pos.last_monitor_best_bid = bid_f
     pos.last_monitor_best_ask = ask_f
     pos.last_monitor_market_price = telemetry_market_price
@@ -5335,6 +5373,8 @@ def _refresh_pending_exit_retry_quote_from_current_clob(
             current_market_price_is_fresh=True,
             best_bid=bid_f,
             best_ask=ask_f,
+            bid_size=bid_size_f,
+            bid_ladder=quote.bid_ladder,
         ),
         True,
     )
@@ -7433,6 +7473,7 @@ def execute_monitoring_phase(
                     pos=pos,
                     exit_context=exit_context,
                     identity_seed_allowed=pending_exit_retry_identity_seed_allowed,
+                    deadline_monotonic=monitor_deadline,
                 )
                 if refreshed_retry_quote:
                     summary["pending_exit_retry_current_clob_quote_refreshed"] = (

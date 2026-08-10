@@ -17919,8 +17919,29 @@ def test_monitor_absolute_deadline_includes_pending_exit_preflight(monkeypatch):
 def test_exit_monitor_budget_starts_at_claim_and_wrapper_forwards_remaining(
     monkeypatch,
 ):
+    from src import main
     from src.engine import cycle_runner
     from src.execution.exit_lifecycle import run_exit_monitor_cycle
+
+    dispatcher_source = inspect.getsource(main._exit_monitor_cycle)
+    dispatcher_claim_offset = dispatcher_source.index(
+        "_held_position_monitor_claim.acquire"
+    )
+    dispatcher_deadline_offset = dispatcher_source.index(
+        "monitor_deadline_monotonic ="
+    )
+    dispatcher_handoff_offset = dispatcher_source.index(
+        "_edli_reactor_active_lock.acquire"
+    )
+    assert (
+        dispatcher_claim_offset
+        < dispatcher_deadline_offset
+        < dispatcher_handoff_offset
+    )
+    assert (
+        "monitor_deadline_monotonic=monitor_deadline_monotonic"
+        in dispatcher_source
+    )
 
     source = inspect.getsource(run_exit_monitor_cycle)
     claim_offset = source.index("held_position_monitor_active.set()")
@@ -17945,6 +17966,93 @@ def test_exit_monitor_budget_starts_at_claim_and_wrapper_forwards_remaining(
         held_position_monitor_budget_seconds=12.5,
     )
     assert captured["held_position_monitor_budget_seconds"] == pytest.approx(12.5)
+
+
+def test_pending_exit_retry_quote_respects_expired_monitor_deadline(monkeypatch):
+    from src.engine import cycle_runtime
+
+    position = _make_position(
+        trade_id="expired-retry-quote",
+        token_id="expired-retry-quote-token",
+        direction="buy_yes",
+        state="pending_exit",
+        chain_state="synced",
+    )
+    exit_context = ExitContext(current_market_price_is_fresh=False)
+
+    class NoLateQuote:
+        def get_best_bid_ask(self, _token_id):
+            pytest.fail("expired monitor deadline must not start a retry quote")
+
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: 2.0)
+    refreshed, used = (
+        cycle_runtime._refresh_pending_exit_retry_quote_from_current_clob(
+            conn=object(),
+            clob=NoLateQuote(),
+            pos=position,
+            exit_context=exit_context,
+            identity_seed_allowed=True,
+            deadline_monotonic=1.0,
+        )
+    )
+
+    assert refreshed is exit_context
+    assert used is False
+
+
+def test_pending_exit_retry_quote_uses_deadline_aware_bid_only_truth(monkeypatch):
+    from src.engine import cycle_runtime, monitor_refresh
+
+    position = _make_position(
+        trade_id="bid-only-retry-quote",
+        token_id="bid-only-retry-quote-token",
+        direction="buy_yes",
+        state="pending_exit",
+        chain_state="synced",
+    )
+    exit_context = ExitContext(current_market_price_is_fresh=False)
+    observed_deadlines = []
+
+    def quote(_conn, _clob, pos, *, retry_after_prefetch):
+        observed_deadlines.append(
+            (
+                pos._zeus_held_monitor_deadline_monotonic,
+                retry_after_prefetch,
+            )
+        )
+        return monitor_refresh.HeldTokenMonitorQuote(
+            token_id=position.token_id,
+            best_bid=0.21,
+            best_ask=None,
+            bid_size=17.0,
+            ask_size=0.0,
+            mark_price=0.21,
+            source_timestamp="2026-08-10T12:00:00+00:00",
+            bid_ladder=((0.21, 17.0),),
+        )
+
+    monkeypatch.setattr(monitor_refresh, "monitor_quote_refresh", quote)
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: 2.0)
+    refreshed, used = (
+        cycle_runtime._refresh_pending_exit_retry_quote_from_current_clob(
+            conn=object(),
+            clob=object(),
+            pos=position,
+            exit_context=exit_context,
+            identity_seed_allowed=True,
+            deadline_monotonic=3.0,
+        )
+    )
+
+    assert observed_deadlines == [(3.0, True)]
+    assert not hasattr(position, "_zeus_held_monitor_deadline_monotonic")
+    assert used is True
+    assert refreshed.current_market_price == pytest.approx(0.21)
+    assert refreshed.current_market_price_is_fresh is True
+    assert refreshed.best_bid == pytest.approx(0.21)
+    assert refreshed.best_ask is None
+    assert refreshed.bid_size == pytest.approx(17.0)
+    assert refreshed.bid_ladder == ((0.21, 17.0),)
 
 
 def test_expired_monitor_deadline_defers_global_sell_debt_without_refresh(
