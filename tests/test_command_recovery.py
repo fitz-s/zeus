@@ -14664,10 +14664,16 @@ class TestRecoveryResolutionTable:
         ).fetchone()
         assert current["shares"] == pytest.approx(5.0)
 
+    @pytest.mark.parametrize(
+        ("terminal_matched_size", "terminal_remaining_size"),
+        (("4.347825", "58.652175"), ("0", "63")),
+    )
     def test_cancelled_partial_corrects_false_terminal_match_before_projection(
         self,
         conn,
         mock_client,
+        terminal_matched_size,
+        terminal_remaining_size,
     ):
         """A cancel-acked remainder may correct an earlier false full-match fact."""
         from src.execution.command_recovery import (
@@ -14697,8 +14703,8 @@ class TestRecoveryResolutionTable:
             conn,
             order_id="ord-cancelled-false-match",
             state="CANCEL_CONFIRMED",
-            matched_size="4.347825",
-            remaining_size="58.652175",
+            matched_size=terminal_matched_size,
+            remaining_size=terminal_remaining_size,
             source="WS_USER",
         )
         append_event(
@@ -14747,6 +14753,16 @@ class TestRecoveryResolutionTable:
         predicates = json.loads(terminal_order["raw_payload_json"])[
             "required_predicates"
         ]
+        proof_fact = conn.execute(
+            "SELECT state, matched_size, remaining_size FROM venue_order_facts "
+            "WHERE fact_id = ?",
+            (json.loads(terminal_order["raw_payload_json"])["latest_order_fact_id"],),
+        ).fetchone()
+        assert dict(proof_fact) == {
+            "state": "CANCEL_CONFIRMED",
+            "matched_size": "4.347825",
+            "remaining_size": "0" if terminal_matched_size == "0" else "58.652175",
+        }
         assert predicates["command_state_cancelled"] is True
         assert predicates["cancel_acked"] is True
         assert predicates["terminal_order_remainder_zero"] is True

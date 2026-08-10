@@ -3130,12 +3130,59 @@ def _append_cancelled_entry_terminal_partial_order_fact(
     matched_size = _decimal_text(
         _positive_decimal_or_none(filled_size) or Decimal("0")
     )
+    latest_order_fact = _latest_order_fact_for_command_order(
+        conn,
+        command_id=command_id,
+        venue_order_id=venue_order_id,
+    )
+    proof_fact_id = latest_order_fact.get("fact_id")
+    if not (
+        str(latest_order_fact.get("state") or "").upper() == "CANCEL_CONFIRMED"
+        and _decimal_matches(latest_order_fact.get("matched_size"), matched_size)
+    ):
+        proof_payload = {
+            "schema_version": 1,
+            "reason": "cancelled_entry_confirmed_partial_fill_order_fact_authority_proof",
+            "proof_class": "cancel_ack_plus_canonical_positive_partial_fill",
+            "command_id": command_id,
+            "venue_order_id": venue_order_id,
+            "source_trade_fact_id": (
+                candidate.get("source_trade_fact_id")
+                or candidate.get("trade_fact_id")
+            ),
+            "requested_size": str(requested_size or ""),
+            "matched_size": matched_size,
+            "remaining_size": "0",
+            "source": source,
+            "required_predicates": {
+                "command_state_cancelled": True,
+                "cancel_acked": True,
+                "canonical_positive_trade_facts": True,
+                "canonical_trade_facts_match_terminal_order_fact": True,
+                "cumulative_fill_below_requested_size": True,
+                "terminal_order_remainder_zero": True,
+            },
+        }
+        proof_fact_id = append_order_fact(
+            conn,
+            venue_order_id=venue_order_id,
+            command_id=command_id,
+            state="CANCEL_CONFIRMED",
+            remaining_size="0",
+            matched_size=matched_size,
+            source=source,
+            observed_at=observed_at,
+            venue_timestamp=observed_at,
+            raw_payload_hash=_payload_hash(proof_payload),
+            raw_payload_json=proof_payload,
+        )
     payload = {
         "schema_version": 1,
         "reason": "cancelled_entry_confirmed_partial_fill_projection_repair",
         "proof_class": "terminal_partial_order_fact",
         "command_id": command_id,
         "venue_order_id": venue_order_id,
+        "latest_order_fact_id": proof_fact_id,
         "matched_size": matched_size,
         "remaining_size": "0",
         "requested_size": str(requested_size or ""),
