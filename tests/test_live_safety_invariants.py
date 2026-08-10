@@ -3316,6 +3316,13 @@ def test_monitor_retry_timeout_defers_frozen_attempt_to_next_cycle(
     assert "CANONICAL_MONITOR_REFRESHED_RETRY_DEFERRED_NEXT_CYCLE" in caplog.text
 
 
+def test_monitor_retry_waits_out_one_incumbent_writer() -> None:
+    """Priority intent must outlive a short incumbent TRADE transaction."""
+    from src.engine import cycle_runtime
+
+    assert cycle_runtime._MONITOR_CANONICAL_WRITE_RETRY_DEADLINE_MS >= 5_000
+
+
 def test_monitor_append_failure_rolls_back_and_retains_retry_debt(tmp_path, monkeypatch):
     """A failed append cannot leave a transaction or in-memory monitor debt cleared."""
     from src.engine import cycle_runtime

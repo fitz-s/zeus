@@ -135,7 +135,11 @@ _HELD_POSITION_MONITOR_RESERVATION_MIN = 2
 _HELD_POSITION_MONITOR_DEGRADED_COVERAGE_CYCLES = 3
 _MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS = 250
 _MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS = 250
-_MONITOR_CANONICAL_WRITE_RETRY_DEADLINE_MS = 1_000
+# A foreground quote writer may already own the unified TRADE gate when the
+# monitor publishes its priority intent.  New background writers then yield,
+# but the monitor must wait long enough for that one incumbent transaction to
+# commit; a one-second retry repeatedly dropped otherwise-complete decisions.
+_MONITOR_CANONICAL_WRITE_RETRY_DEADLINE_MS = 5_000
 
 
 def _held_position_monitor_reservation_count(position_count: int) -> int:
