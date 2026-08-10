@@ -13188,12 +13188,17 @@ def _rebind_global_jit_receipt_snapshot(
             rebound_bundle,
             belief=dataclass_replace(belief, payload=belief_payload),
         )
+    opportunity_book = _opportunity_book_with_selected_qkernel_economics(
+        receipt.opportunity_book,
+        economics,
+    )
     rebound = dataclass_replace(
         receipt,
         executable_snapshot_id=snapshot.snapshot_id,
         kelly_cost_basis_id=cost_basis.cost_basis_id,
         neg_risk=snapshot.neg_risk,
         qkernel_execution_economics=economics,
+        opportunity_book=opportunity_book,
         decision_proof_bundle=rebound_bundle,
     )
     rebound_snapshot_id = str(
@@ -13217,6 +13222,64 @@ def _rebind_global_jit_receipt_snapshot(
     ):
         raise ValueError("GLOBAL_JIT_RECEIPT_SNAPSHOT_BINDING_MISMATCH")
     return rebound
+
+
+def _opportunity_book_with_selected_qkernel_economics(
+    opportunity_book: Mapping[str, object] | None,
+    economics: Mapping[str, object] | None,
+) -> dict[str, object] | None:
+    """Project one rebound certificate onto every selected-book receipt view.
+
+    The selected global BUY has one execution-economics authority. JIT changes
+    that certificate's book identity, so the receipt-level certificate and the
+    selected OpportunityBook candidate must advance atomically. Leaving the
+    book copy at the pre-JIT generation creates a twin authority that the final
+    live consistency wall correctly rejects.
+    """
+
+    if economics is None:
+        return dict(opportunity_book) if isinstance(opportunity_book, Mapping) else None
+    if not isinstance(opportunity_book, Mapping):
+        raise ValueError("GLOBAL_JIT_OPPORTUNITY_BOOK_MISSING")
+    selected_candidate_id = str(
+        opportunity_book.get("selected_candidate_id") or ""
+    ).strip()
+    actual_candidate_id = str(
+        opportunity_book.get("actual_receipt_selected_candidate_id") or ""
+    ).strip()
+    if not selected_candidate_id:
+        raise ValueError("GLOBAL_JIT_OPPORTUNITY_BOOK_SELECTED_MISSING")
+    if actual_candidate_id and actual_candidate_id != selected_candidate_id:
+        raise ValueError("GLOBAL_JIT_OPPORTUNITY_BOOK_SELECTION_MISMATCH")
+    candidates = opportunity_book.get("candidates")
+    if not isinstance(candidates, list):
+        raise ValueError("GLOBAL_JIT_OPPORTUNITY_BOOK_CANDIDATES_MISSING")
+
+    canonical_economics = _json_finite(economics)
+    rebound_candidates: list[object] = []
+    selected_count = 0
+    for candidate in candidates:
+        if not isinstance(candidate, Mapping):
+            rebound_candidates.append(candidate)
+            continue
+        rebound_candidate = dict(candidate)
+        if str(candidate.get("candidate_id") or "").strip() == selected_candidate_id:
+            selected_count += 1
+            rebound_candidate["qkernel_execution_economics"] = canonical_economics
+        rebound_candidates.append(rebound_candidate)
+    if selected_count != 1:
+        raise ValueError(
+            f"GLOBAL_JIT_OPPORTUNITY_BOOK_SELECTED_CARDINALITY:{selected_count}"
+        )
+
+    rebound_book = dict(opportunity_book)
+    rebound_book["candidates"] = rebound_candidates
+    rebound_book["selected_qkernel_execution_economics"] = canonical_economics
+    cache_summary = opportunity_book.get("cache_summary")
+    rebound_cache = dict(cache_summary) if isinstance(cache_summary, Mapping) else {}
+    rebound_cache["selected_qkernel_execution_economics"] = canonical_economics
+    rebound_book["cache_summary"] = rebound_cache
+    return rebound_book
 
 
 def _global_preflight_entry_jit_receipt(
