@@ -4,6 +4,26 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-10 Held-monitor deadline begins at ownership claim
+
+Production evidence showed a held-monitor pass retaining its single-owner claim
+well past the nominal 75-second budget while command recovery performed
+unbounded decision-artifact reads.  Recovery/review now admits decision-log
+evidence only through the timestamp index in the command's causal window.  The
+held-monitor budget begins when ownership is claimed, not after portfolio and
+allocator preparation; its remaining budget reaches pending-exit preflight and
+the monitor phase.  Global SELL reauction debt never starts a fresh probability
+or book refresh after that deadline, and a deadline-bound book miss cannot fall
+back to an unbounded quote request.  Expiry preserves the durable debt and the
+original invocation's ownership until safe return; it never releases the claim
+while old work can still submit.
+
+SCOPE is one admitted held-monitor invocation and each position-scoped global
+SELL debt. DRAIN is the next normal bounded monitor/recovery pass. RESET is a
+fresh indexed causal decision witness or a completed current q/book reauction
+within the same absolute deadline. Missing proof remains position-scoped and
+fail-closed; unrelated monitoring and entries do not inherit the debt.
+
 ## 2026-08-10 Executable limit modes, fill convergence, and command ownership
 
 The current global auction ranks each independently executable maker or taker

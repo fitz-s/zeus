@@ -3008,6 +3008,8 @@ def monitor_quote_refresh(
                     [tid],
                     timeout_seconds=remaining,
                 ).get(tid)
+                if book is None:
+                    return None
             else:
                 book = get_orderbook(tid) if callable(get_orderbook) else None
             _remember_monitor_orderbook(clob, tid, book)

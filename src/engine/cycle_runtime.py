@@ -5798,7 +5798,38 @@ def execute_monitoring_phase(
             obligation = getattr(position, "_held_sell_reauction_obligation", {})
             obligation = obligation if isinstance(obligation, dict) else {}
             if force_new_generation:
-                refresh_position(conn, clob, position)
+                if time.monotonic() >= monitor_deadline:
+                    raise TimeoutError(
+                        "GLOBAL_SELL_REAUCTION_MONITOR_DEADLINE_EXPIRED"
+                    )
+                previous_deadline = getattr(
+                    position,
+                    _HELD_MONITOR_DEADLINE_ATTR,
+                    None,
+                )
+                setattr(
+                    position,
+                    _HELD_MONITOR_DEADLINE_ATTR,
+                    monitor_deadline,
+                )
+                try:
+                    refresh_position(conn, clob, position)
+                finally:
+                    if previous_deadline is None:
+                        try:
+                            delattr(position, _HELD_MONITOR_DEADLINE_ATTR)
+                        except AttributeError:
+                            pass
+                    else:
+                        setattr(
+                            position,
+                            _HELD_MONITOR_DEADLINE_ATTR,
+                            previous_deadline,
+                        )
+                if time.monotonic() >= monitor_deadline:
+                    raise TimeoutError(
+                        "GLOBAL_SELL_REAUCTION_MONITOR_DEADLINE_EXPIRED"
+                    )
                 if not (
                     bool(getattr(position, "last_monitor_prob_is_fresh", False))
                     and bool(
@@ -6036,11 +6067,28 @@ def execute_monitoring_phase(
         )
         return True
 
-    def drain_committed_global_sell_snapshot_reauction_debts() -> None:
+    def drain_committed_global_sell_snapshot_reauction_debts(
+        debt_positions: tuple[object, ...],
+    ) -> None:
         nonlocal portfolio_dirty
-        for position in tuple(getattr(portfolio, "positions", ()) or ()):
-            if not needs_global_sell_snapshot_reauction(position, conn):
-                continue
+        for index, position in enumerate(debt_positions):
+            if time.monotonic() >= monitor_deadline:
+                deferred = len(debt_positions) - index
+                summary["global_sell_snapshot_reauction_deadline_deferred"] = (
+                    summary.get(
+                        "global_sell_snapshot_reauction_deadline_deferred",
+                        0,
+                    )
+                    + deferred
+                )
+                summary["global_sell_snapshot_reauction_debts_pending"] = (
+                    summary.get(
+                        "global_sell_snapshot_reauction_debts_pending",
+                        0,
+                    )
+                    + deferred
+                )
+                break
             if recover_global_sell_snapshot_reauction_debt(
                 position,
                 conn=conn,
@@ -6268,12 +6316,27 @@ def execute_monitoring_phase(
     else:
         summary["exit_preflight_skipped_for_monitor_refresh"] = True
 
-    committed_debts = any(
-        needs_global_sell_snapshot_reauction(position, conn)
-        for position in tuple(getattr(portfolio, "positions", ()) or ())
-    )
-    if committed_debts:
-        if conn is not None and conn.in_transaction and not _release_monitor_write_lock_boundary(
+    portfolio_positions = tuple(getattr(portfolio, "positions", ()) or ())
+    committed_debt_candidates: list[object] = []
+    for index, position in enumerate(portfolio_positions):
+        if time.monotonic() >= monitor_deadline:
+            summary["global_sell_snapshot_reauction_scan_deadline_deferred"] = (
+                len(portfolio_positions) - index
+            )
+            break
+        if needs_global_sell_snapshot_reauction(position, conn):
+            committed_debt_candidates.append(position)
+    committed_debt_positions = tuple(committed_debt_candidates)
+    if committed_debt_positions:
+        if time.monotonic() >= monitor_deadline:
+            summary["global_sell_snapshot_reauction_deadline_deferred"] = len(
+                committed_debt_positions
+            )
+            summary["global_sell_snapshot_reauction_debts_pending"] = (
+                summary.get("global_sell_snapshot_reauction_debts_pending", 0)
+                + len(committed_debt_positions)
+            )
+        elif conn is not None and conn.in_transaction and not _release_monitor_write_lock_boundary(
             conn,
             summary,
             deps,
@@ -6284,7 +6347,9 @@ def execute_monitoring_phase(
                 + 1
             )
         else:
-            drain_committed_global_sell_snapshot_reauction_debts()
+            drain_committed_global_sell_snapshot_reauction_debts(
+                committed_debt_positions
+            )
 
     try:
         monitor_now_utc = deps._utcnow() if hasattr(deps, "_utcnow") else datetime.now(timezone.utc)

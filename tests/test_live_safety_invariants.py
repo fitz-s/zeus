@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-08-09; last_reused=2026-08-09
+# Lifecycle: created=2026-03-31; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-08-09
+# Last reused/audited: 2026-08-10
 # Authority basis: finite-evidence single-q global SELL ownership; 7-day capital-loop audit
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -14,6 +14,7 @@ GOLDEN RULE: economic close is ONLY created after CONFIRMED fill truth.
 
 import logging
 import base64
+import inspect
 import json
 import math
 import multiprocessing
@@ -11951,6 +11952,38 @@ def test_held_monitor_production_book_reads_receive_only_cycle_remaining_time(
     ]
 
 
+def test_held_monitor_deadline_book_miss_never_falls_back_to_unbounded_quote(
+    monkeypatch,
+):
+    from src.data.polymarket_client import PolymarketClient
+    from src.engine import monitor_refresh
+
+    position = _make_position(
+        trade_id="deadline-book-miss",
+        token_id="deadline-book-miss-token",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+    )
+    clob = PolymarketClient(public_http_timeout=2.0)
+    monkeypatch.setattr(monitor_refresh.time, "monotonic", lambda: 3.0)
+    monkeypatch.setattr(
+        clob,
+        "get_held_orderbook_snapshots_hard_deadline",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        clob,
+        "get_best_bid_ask",
+        lambda *_args, **_kwargs: pytest.fail(
+            "deadline-bound book miss must not start an unbounded fallback"
+        ),
+    )
+    setattr(position, "_zeus_held_monitor_deadline_monotonic", 10.0)
+
+    assert monitor_refresh.monitor_quote_refresh(None, clob, position) is None
+
+
 def test_polymarket_book_http_phases_are_clamped_to_remaining_budget(monkeypatch):
     from src.data.polymarket_client import PolymarketClient
 
@@ -17881,3 +17914,144 @@ def test_monitor_absolute_deadline_includes_pending_exit_preflight(monkeypatch):
     assert started < deadline
     assert 0.0 < deadline - preflight_called_at <= 0.5
     assert summary["held_monitor_budget_seconds"] == pytest.approx(0.5)
+
+
+def test_exit_monitor_budget_starts_at_claim_and_wrapper_forwards_remaining(
+    monkeypatch,
+):
+    from src.engine import cycle_runner
+    from src.execution.exit_lifecycle import run_exit_monitor_cycle
+
+    source = inspect.getsource(run_exit_monitor_cycle)
+    claim_offset = source.index("held_position_monitor_active.set()")
+    deadline_offset = source.index("monitor_deadline_monotonic =")
+    connection_offset = source.index("conn = get_connection()")
+    assert claim_offset < deadline_offset < connection_offset
+
+    captured = {}
+
+    def execute(*_args, **kwargs):
+        captured.update(kwargs)
+        return False, False
+
+    monkeypatch.setattr(cycle_runner._runtime, "execute_monitoring_phase", execute)
+    cycle_runner._execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        {"monitors": 0, "exits": 0},
+        held_position_monitor_budget_seconds=12.5,
+    )
+    assert captured["held_position_monitor_budget_seconds"] == pytest.approx(12.5)
+
+
+def test_expired_monitor_deadline_defers_global_sell_debt_without_refresh(
+    monkeypatch,
+):
+    from src.engine import cycle_runtime
+    from src.execution import exit_lifecycle
+
+    position = _make_position(
+        trade_id="expired-global-sell-debt",
+        token_id="expired-global-sell-debt-token",
+        direction="buy_yes",
+        state="pending_exit",
+        chain_state="synced",
+    )
+    position.exit_state = "retry_pending"
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "needs_global_sell_snapshot_reauction",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "recover_global_sell_snapshot_reauction_debt",
+        lambda *_args, **_kwargs: pytest.fail(
+            "expired monitor debt must remain durable without refresh"
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: [],
+    )
+
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        PortfolioState(positions=[position]),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_expired_global_sell_debt"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=0.0,
+    )
+
+    assert summary["global_sell_snapshot_reauction_scan_deadline_deferred"] == 1
+    assert "global_sell_snapshot_reauction_debts_pending" not in summary
+
+
+def test_global_sell_debt_drain_stops_after_first_attempt_exhausts_deadline(
+    monkeypatch,
+):
+    from src.engine import cycle_runtime
+    from src.execution import exit_lifecycle
+
+    positions = [
+        _make_position(
+            trade_id=f"bounded-global-sell-debt-{index}",
+            token_id=f"bounded-global-sell-token-{index}",
+            direction="buy_yes",
+            state="pending_exit",
+            chain_state="synced",
+        )
+        for index in range(2)
+    ]
+    for position in positions:
+        position.exit_state = "retry_pending"
+    clock = [0.0]
+    attempted: list[str] = []
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "needs_global_sell_snapshot_reauction",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def recover(position, **_kwargs):
+        attempted.append(position.trade_id)
+        clock[0] = 2.0
+        return False
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "recover_global_sell_snapshot_reauction_debt",
+        recover,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: [],
+    )
+
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        PortfolioState(positions=positions),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_bounded_global_sell_debt_drain"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=1.0,
+    )
+
+    assert attempted == ["bounded-global-sell-debt-0"]
+    assert summary["global_sell_snapshot_reauction_deadline_deferred"] == 1
+    assert summary["global_sell_snapshot_reauction_debts_pending"] == 2

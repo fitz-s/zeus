@@ -10993,6 +10993,7 @@ def run_exit_monitor_cycle(
         save_tracker,
         save_portfolio,
     )
+    from src.engine.cycle_runtime import _held_position_monitor_budget_seconds
     from src.observability.scheduler_health import _write_scheduler_health
     from src.state.canonical_write import commit_then_export
     from src.state.decision_chain import CycleArtifact
@@ -11004,6 +11005,8 @@ def run_exit_monitor_cycle(
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
         return False
     held_position_monitor_active.set()
+    monitor_budget_seconds = _held_position_monitor_budget_seconds()
+    monitor_deadline_monotonic = _time_module.monotonic() + monitor_budget_seconds
 
     conn = get_connection()
     if conn is None:
@@ -11071,6 +11074,10 @@ def run_exit_monitor_cycle(
                     tracker,
                     summary,
                     run_exit_preflight=True,
+                    held_position_monitor_budget_seconds=max(
+                        0.0,
+                        monitor_deadline_monotonic - _time_module.monotonic(),
+                    ),
                     should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
                     defer_partial_orderbook_gaps=target_families is None,
                 )

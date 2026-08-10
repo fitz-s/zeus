@@ -521,6 +521,7 @@ def _execute_monitoring_phase(
     summary: dict,
     *,
     run_exit_preflight: bool = True,
+    held_position_monitor_budget_seconds: float | None = None,
     should_preempt_for_urgent_day0=None,
     defer_partial_orderbook_gaps: bool = False,
 ):
@@ -533,6 +534,7 @@ def _execute_monitoring_phase(
         summary,
         deps=sys.modules[__name__],
         run_exit_preflight=run_exit_preflight,
+        held_position_monitor_budget_seconds=held_position_monitor_budget_seconds,
         should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
         defer_partial_orderbook_gaps=defer_partial_orderbook_gaps,
     )
