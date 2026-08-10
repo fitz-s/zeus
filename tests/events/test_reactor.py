@@ -1486,6 +1486,11 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
         "_edli_live_entry_readiness_block",
         lambda _cfg: (None, {}),
     )
+    monkeypatch.setattr(
+        main,
+        "_held_position_monitor_entry_block_reason",
+        lambda: None,
+    )
     monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
     monkeypatch.setattr(main, "_paused_forecast_carrier_priority_allowed", lambda: paused[0])
