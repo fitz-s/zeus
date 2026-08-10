@@ -539,6 +539,48 @@ def _compute_divergence_score(p_posterior: float, p_market: float, *, available:
     return max(0.0, p_market - p_posterior)
 
 
+def _causal_market_velocity_1h(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    current_price: float,
+    observed_at: str,
+) -> float:
+    """Return the held-token price change from the latest causal 1h baseline."""
+    try:
+        as_of = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
+        if as_of.tzinfo is None:
+            as_of = as_of.replace(tzinfo=timezone.utc)
+        cutoff = (as_of.astimezone(timezone.utc) - timedelta(hours=1)).isoformat()
+        row = conn.execute(
+            """
+            SELECT price
+              FROM token_price_log
+             WHERE token_id = ?
+               AND COALESCE(
+                       julianday(NULLIF(source_timestamp, '')),
+                       julianday(timestamp)
+                   ) <= julianday(?)
+             ORDER BY COALESCE(
+                          julianday(NULLIF(source_timestamp, '')),
+                          julianday(timestamp)
+                      ) DESC,
+                      id DESC
+             LIMIT 1
+            """,
+            (str(token_id), cutoff),
+        ).fetchone()
+        if row is None:
+            return 0.0
+        old_price = float(row["price"])
+        now_price = float(current_price)
+        if not (np.isfinite(old_price) and np.isfinite(now_price)):
+            return 0.0
+        return now_price - old_price
+    except (TypeError, ValueError, sqlite3.Error):
+        return 0.0
+
+
 def _model_only_native_posterior(p_native: float) -> float:
     """Return held-side payoff belief without using executable quote as prior."""
     p = float(p_native)
@@ -6046,18 +6088,12 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     # Try fetching 1h velocity if we know the token
     tid = pos.token_id if pos.direction == "buy_yes" else pos.no_token_id
     if tid:
-        from datetime import timedelta
-        try:
-            one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-            row = conn.execute(
-                "SELECT price FROM token_price_log WHERE token_id = ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT 1",
-                (tid, one_hour_ago),
-            ).fetchone()
-            if row:
-                old_native_p = row["price"]
-                market_velocity_1h = current_p_market - old_native_p
-        except Exception as e:
-            logger.debug("Failed to calculate market velocity for %s: %s", pos.trade_id, e)
+        market_velocity_1h = _causal_market_velocity_1h(
+            conn,
+            token_id=tid,
+            current_price=current_p_market,
+            observed_at=quote.source_timestamp,
+        )
 
     # Wrap into verified EdgeContext
     current_forward_edge = (

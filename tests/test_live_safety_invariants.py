@@ -18579,3 +18579,34 @@ def test_global_sell_debt_drain_stops_after_first_attempt_exhausts_deadline(
     assert attempted == ["bounded-global-sell-debt-0"]
     assert summary["global_sell_snapshot_reauction_deadline_deferred"] == 1
     assert summary["global_sell_snapshot_reauction_debts_pending"] == 2
+
+
+def test_market_velocity_uses_causal_source_time_not_legacy_text_order(tmp_path):
+    from src.engine.monitor_refresh import _causal_market_velocity_1h
+    from src.state.db import get_connection, init_schema
+
+    conn = get_connection(tmp_path / "causal-market-velocity.db")
+    init_schema(conn)
+    rows = (
+        ("held-token", 0.80, "2026-08-10T10:59:00+00:00", "2026-08-10 10:59:01"),
+        ("held-token", 0.40, "2026-08-10T11:30:00+00:00", "2026-08-10 11:30:01"),
+        ("held-token", 0.05, "2026-08-10T12:30:00+00:00", "2026-08-10 12:30:01"),
+    )
+    conn.executemany(
+        """
+        INSERT INTO token_price_log
+            (token_id, price, source_timestamp, timestamp)
+        VALUES (?, ?, ?, ?)
+        """,
+        rows,
+    )
+    conn.commit()
+
+    velocity = _causal_market_velocity_1h(
+        conn,
+        token_id="held-token",
+        current_price=0.20,
+        observed_at="2026-08-10T12:00:00+00:00",
+    )
+
+    assert velocity == pytest.approx(-0.60)
