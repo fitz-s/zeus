@@ -604,7 +604,10 @@ def _is_global_jit_authority_failure(reason: object) -> bool:
         "GLOBAL_SELL_JIT_BID_LEVEL_INVALID",
         "GLOBAL_SELL_JIT_ASK_LEVEL_INVALID",
         "GLOBAL_SELL_JIT_MARKET_METADATA_CONFLICT",
+        "GLOBAL_SELL_JIT_MAKER_WITNESS_SUPERSEDED",
         "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE",
+        "GLOBAL_SELL_EXECUTION_MAKER_WITNESS_INVALID",
+        "GLOBAL_SELL_EXECUTION_MAKER_WITNESS_SUPERSEDED",
         "GLOBAL_SELL_JIT_FEE_FULL_MARKET_AUTHORITY_REQUIRED",
         "PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED",
     )
@@ -11643,9 +11646,12 @@ def _global_sell_candidate_from_raw_book(
 
     from src.solve.solver import (
         BookLevel,
+        CurrentMakerFillWitness,
         ExecutableSellCurve,
+        current_maker_fill_witness_identity,
         executable_curve_identity,
         global_sell_execution_terms,
+        maker_fill_candidate_binding_identity,
     )
 
     if captured_at_utc.tzinfo is None:
@@ -11735,6 +11741,127 @@ def _global_sell_candidate_from_raw_book(
     ).strip().upper()
     if selected_execution_mode not in {"TAKER_LIMIT", "MAKER_REST"}:
         raise ValueError("GLOBAL_SELL_SELECTED_EXECUTION_MODE_INVALID")
+    maker_fill_witness = None
+    if selected_execution_mode == "MAKER_REST":
+        selected_witness = getattr(candidate, "maker_fill_witness", None)
+        asset_epoch_identity = str(
+            getattr(candidate, "asset_epoch_identity", "") or ""
+        ).strip()
+        selected_proposal = getattr(candidate, "proposal_sell_curve", None)
+        selected_deadline = getattr(candidate, "rest_deadline_minutes", None)
+        selected_source = str(
+            getattr(candidate, "fill_probability_source", "") or ""
+        ).strip()
+        selected_capacity = Decimal(
+            str(getattr(candidate, "held_shares", "0") or "0")
+        )
+        try:
+            if (
+                not isinstance(selected_witness, CurrentMakerFillWitness)
+                or selected_proposal is None
+                or not asset_epoch_identity
+                or selected_deadline is None
+                or selected_source != selected_witness.witness_identity
+            ):
+                raise ValueError("selected_witness_missing_or_unbound")
+            selected_binding = maker_fill_candidate_binding_identity(
+                action="SELL",
+                family_key=str(getattr(candidate, "family_key", "") or ""),
+                bin_id=str(getattr(candidate, "bin_id", "") or ""),
+                condition_id=str(getattr(candidate, "condition_id", "") or ""),
+                side=str(getattr(candidate, "side", "") or ""),
+                token_id=token_id,
+                ledger_snapshot_id=str(
+                    getattr(candidate, "ledger_snapshot_id", "") or ""
+                ),
+                position_id=str(getattr(candidate, "position_id", "") or "")
+                or None,
+                held_shares=selected_capacity,
+                asset_epoch_identity=asset_epoch_identity,
+                proposal_identity=executable_curve_identity(selected_proposal),
+            )
+            if (
+                selected_witness.candidate_binding_identity != selected_binding
+                or selected_witness.asset_epoch_identity != asset_epoch_identity
+                or selected_witness.book_snapshot_id != selected_proposal.snapshot_id
+                or selected_witness.book_hash != selected_proposal.book_hash
+                or selected_witness.limit_price != selected_proposal.levels[0].price
+                or selected_witness.rest_deadline_minutes != selected_deadline
+                or not math.isclose(
+                    selected_witness.fill_probability,
+                    float(getattr(candidate, "fill_probability", 0.0)),
+                )
+                or any(
+                    outcome.fill_fraction > 0
+                    and outcome.proceeds_per_share_usd
+                    != selected_proposal.levels[0].price
+                    for outcome in selected_witness.outcomes
+                )
+            ):
+                raise ValueError("selected_witness_economics_mismatch")
+            selected_witness.assert_current_at(captured_at_utc)
+            current_proposal, *_ = global_sell_execution_terms(
+                curve,
+                capacity=selected_capacity,
+                required_mode="MAKER_REST",
+                maker_fill_witness=selected_witness,
+            )
+            if (
+                current_proposal is None
+                or current_proposal.levels[0].price != selected_witness.limit_price
+            ):
+                raise ValueError("current_limit_or_cashflow_changed")
+            current_binding = maker_fill_candidate_binding_identity(
+                action="SELL",
+                family_key=str(getattr(candidate, "family_key", "") or ""),
+                bin_id=str(getattr(candidate, "bin_id", "") or ""),
+                condition_id=str(getattr(candidate, "condition_id", "") or ""),
+                side=str(getattr(candidate, "side", "") or ""),
+                token_id=token_id,
+                ledger_snapshot_id=str(
+                    getattr(candidate, "ledger_snapshot_id", "") or ""
+                ),
+                position_id=str(getattr(candidate, "position_id", "") or "")
+                or None,
+                held_shares=selected_capacity,
+                asset_epoch_identity=asset_epoch_identity,
+                proposal_identity=executable_curve_identity(current_proposal),
+            )
+            maker_fill_witness = CurrentMakerFillWitness(
+                witness_identity=current_maker_fill_witness_identity(
+                    candidate_binding_identity=current_binding,
+                    asset_epoch_identity=asset_epoch_identity,
+                    book_snapshot_id=snapshot_id,
+                    book_hash=book_hash,
+                    limit_price=current_proposal.levels[0].price,
+                    rest_deadline_minutes=selected_witness.rest_deadline_minutes,
+                    source_identity=selected_witness.source_identity,
+                    model_identity=selected_witness.model_identity,
+                    sample_identity=selected_witness.sample_identity,
+                    training_cutoff_at_utc=selected_witness.training_cutoff_at_utc,
+                    issued_at_utc=selected_witness.issued_at_utc,
+                    valid_until_at_utc=selected_witness.valid_until_at_utc,
+                    outcomes=selected_witness.outcomes,
+                ),
+                candidate_binding_identity=current_binding,
+                asset_epoch_identity=asset_epoch_identity,
+                book_snapshot_id=snapshot_id,
+                book_hash=book_hash,
+                limit_price=current_proposal.levels[0].price,
+                rest_deadline_minutes=selected_witness.rest_deadline_minutes,
+                outcomes=selected_witness.outcomes,
+                source_identity=selected_witness.source_identity,
+                model_identity=selected_witness.model_identity,
+                sample_identity=selected_witness.sample_identity,
+                training_cutoff_at_utc=selected_witness.training_cutoff_at_utc,
+                issued_at_utc=selected_witness.issued_at_utc,
+                valid_until_at_utc=selected_witness.valid_until_at_utc,
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "GLOBAL_SELL_JIT_MAKER_WITNESS_SUPERSEDED:"
+                f"{type(exc).__name__}:{exc}"
+            ) from exc
     (
         proposal,
         execution_mode,
@@ -11745,6 +11872,7 @@ def _global_sell_candidate_from_raw_book(
         curve,
         capacity=Decimal(str(getattr(candidate, "held_shares", "0") or "0")),
         required_mode=selected_execution_mode,
+        maker_fill_witness=maker_fill_witness,
     )
     if proposal is None or execution_mode != selected_execution_mode:
         raise ValueError(
@@ -11762,6 +11890,7 @@ def _global_sell_candidate_from_raw_book(
         fill_probability=fill_probability,
         fill_probability_source=fill_probability_source,
         rest_deadline_minutes=rest_deadline_minutes,
+        maker_fill_witness=maker_fill_witness,
         native_ask_levels=ask_levels,
         neg_risk=market_authority.neg_risk,
         eligibility_reason=(
@@ -12046,7 +12175,10 @@ def _submit_current_global_sell(
                     )
                 except ValueError as exc:
                     if not str(exc).startswith(
-                        "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:"
+                        (
+                            "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:",
+                            "GLOBAL_SELL_JIT_MAKER_WITNESS_SUPERSEDED:",
+                        )
                     ):
                         raise
                     return _global_sell_receipt(

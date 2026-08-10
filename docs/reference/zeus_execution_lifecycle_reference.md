@@ -573,7 +573,11 @@ trade leg advances actual-price PnL exactly once through the shared fill cursor;
 the residual is `baseline - cumulative sold`. A non-executable dust residual
 remains real `pending_exit` exposure under a position+command-scoped
 `RECOVERED_EXIT_DUST_REMAINDER` work item, never a family veto or a synthetic
-`EXIT_ORDER_FILLED` event.
+`EXIT_ORDER_FILLED` event. Its executable threshold comes only from the held
+token's latest current-time fresh, non-invalidated snapshot. Missing threshold
+authority stays pending; a newly executable residual returns to redecision only
+after a canonical chain observation at least as new as the terminal order fact
+and command update, plus exact `EXIT_RETRY_RELEASED` proof.
 
 Same-family exposure is portfolio endowment, not an entry prohibition. Before
 ranking a sibling-bin BUY, the global auction projects every current

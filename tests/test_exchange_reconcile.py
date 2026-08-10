@@ -185,6 +185,9 @@ def _ensure_snapshot(
     selected_outcome_token_id: str | None = None,
     outcome_label: str = "YES",
     snapshot_id: str | None = None,
+    min_order_size: Decimal = Decimal("0.01"),
+    captured_at: datetime = NOW,
+    freshness_deadline: datetime | None = None,
 ) -> str:
     from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
@@ -216,7 +219,7 @@ def _ensure_snapshot(
             market_close_at=None,
             sports_start_at=None,
             min_tick_size=Decimal("0.01"),
-            min_order_size=Decimal("0.01"),
+            min_order_size=min_order_size,
             fee_details={},
             token_map_raw={"YES": token_id, "NO": f"{token_id}-no"},
             rfqe=None,
@@ -228,8 +231,12 @@ def _ensure_snapshot(
             raw_clob_market_info_hash="b" * 64,
             raw_orderbook_hash="c" * 64,
             authority_tier="CLOB",
-            captured_at=NOW,
-            freshness_deadline=NOW + timedelta(days=365),
+            captured_at=captured_at,
+            freshness_deadline=(
+                freshness_deadline
+                if freshness_deadline is not None
+                else NOW + timedelta(days=365)
+            ),
         ),
     )
     return snapshot_id
@@ -1399,11 +1406,8 @@ def test_recovered_ghost_sell_position_closes_via_existing_trade_fact_path_not_s
     recovery time. No new hook was needed; this proves the existing lane
     already picks these positions up.
     """
-    from decimal import Decimal as _Decimal
-
     from src.execution import exit_lifecycle
     from src.execution.exchange_reconcile import run_reconcile_sweep
-    from src.state.close_economics import compute_realized_pnl_usd
     from src.state.portfolio import PortfolioState, Position
     from src.state.venue_command_repo import append_trade_fact as repo_append_trade_fact
 
@@ -1537,16 +1541,6 @@ def test_recovered_ghost_sell_position_closes_via_existing_trade_fact_path_not_s
         raw_payload_json={"trade_id": "trade-live-ghost-sell-strand-completing"},
     )
 
-    expected_blended_price = (
-        _Decimal("5.06") * _Decimal("0.09") + _Decimal(completing_size) * _Decimal(completing_price)
-    ) / (_Decimal("5.06") + _Decimal(completing_size))
-    expected_realized_pnl = compute_realized_pnl_usd(
-        shares=remaining_shares,
-        exit_price=float(expected_blended_price),
-        cost_basis_usd=remaining_cost_basis,
-        entry_price=entry_price,
-    )
-
     position_obj = Position(
         trade_id=position_id,
         market_id="condition-m5-strand",
@@ -1601,11 +1595,13 @@ def test_recovered_ghost_sell_position_closes_via_existing_trade_fact_path_not_s
     assert closed["exit_price"] is None
 
 
-def test_recovered_partial_exit_two_authenticated_legs_keep_dust_live(conn):
+def test_recovered_partial_exit_two_authenticated_legs_keep_dust_live(conn, monkeypatch):
     """Recovered SELL legs fold exactly once against the immutable lot baseline."""
+    from src.execution import command_recovery
     from src.execution.command_recovery import reconcile_recovered_partial_exit_economics
     from src.execution.exchange_reconcile import run_reconcile_sweep
-    from src.state.venue_command_repo import append_trade_fact
+    from src.state.snapshot_repo import record_snapshot_invalidation
+    from src.state.venue_command_repo import append_order_fact, append_trade_fact
 
     position_id = "pos-recovered-two-leg"
     token = "recovered-two-leg-token"
@@ -1617,7 +1613,7 @@ def test_recovered_partial_exit_two_authenticated_legs_keep_dust_live(conn):
         position_id=position_id,
         token_id=token,
         side="BUY",
-        size=18.682141,
+        size=19.08,
         price=0.72,
         state="FILLED",
     )
@@ -1627,7 +1623,7 @@ def test_recovered_partial_exit_two_authenticated_legs_keep_dust_live(conn):
         venue_order_id="ord-recovered-entry",
         command_id="cmd-recovered-entry",
         state="CONFIRMED",
-        filled_size="18.682141",
+        filled_size="19.08",
         fill_price="0.72",
         source="REST",
         observed_at=NOW,
@@ -1637,9 +1633,9 @@ def test_recovered_partial_exit_two_authenticated_legs_keep_dust_live(conn):
     conn.execute(
         """
         UPDATE position_current
-           SET phase='active', token_id=?, no_token_id=?, shares=18.682141,
-               chain_shares=18.682141, cost_basis_usd=13.45114152,
-               chain_cost_basis_usd=13.45114152, entry_price=.72,
+           SET phase='active', token_id=?, no_token_id=?, shares=19.08,
+               chain_shares=19.08, cost_basis_usd=13.7376,
+               chain_cost_basis_usd=13.7376, entry_price=.72,
                chain_state='synced', order_status='filled'
          WHERE position_id=?
         """,
@@ -1692,7 +1688,7 @@ def test_recovered_partial_exit_two_authenticated_legs_keep_dust_live(conn):
     )
 
     run_reconcile_sweep(
-        _adapter(matched="5.06", residual="13.622141", trades=[first_trade]),
+        _adapter(matched="5.06", residual="14.02", trades=[first_trade]),
         conn,
         context="ws_gap",
         observed_at=NOW,
@@ -1702,7 +1698,7 @@ def test_recovered_partial_exit_two_authenticated_legs_keep_dust_live(conn):
         (position_id,),
     ).fetchone()
     assert current["phase"] == "pending_exit"
-    assert current["shares"] == pytest.approx(13.622141)
+    assert current["shares"] == pytest.approx(14.02)
     assert current["realized_pnl_usd"] == pytest.approx(0.09 * 5.06 - 0.72 * 5.06)
     first_events = conn.execute(
         "SELECT payload_json FROM position_events WHERE position_id=? AND caused_by='partial_exit_economics_repair'",
@@ -1714,14 +1710,21 @@ def test_recovered_partial_exit_two_authenticated_legs_keep_dust_live(conn):
     conn.execute(
         """
         UPDATE position_current
-           SET shares=.002141, chain_shares=.002141,
-               cost_basis_usd=.00154152, chain_cost_basis_usd=.00154152
+           SET shares=.4, chain_shares=.4,
+               cost_basis_usd=.288, chain_cost_basis_usd=.288
          WHERE position_id=?
         """,
         (position_id,),
     )
+    _ensure_snapshot(
+        conn,
+        token_id=token,
+        snapshot_id="snap-recovered-min-five",
+        min_order_size=Decimal("5"),
+        captured_at=NOW + timedelta(seconds=30),
+    )
     run_reconcile_sweep(
-        _adapter(matched="18.68", residual=".002141", trades=[first_trade, second_trade]),
+        _adapter(matched="18.68", residual=".4", trades=[first_trade, second_trade]),
         conn,
         context="ws_gap",
         observed_at=NOW + timedelta(minutes=1),
@@ -1731,7 +1734,7 @@ def test_recovered_partial_exit_two_authenticated_legs_keep_dust_live(conn):
         (position_id,),
     ).fetchone()
     assert current["phase"] == "pending_exit"
-    assert current["shares"] == pytest.approx(.002141)
+    assert current["shares"] == pytest.approx(.4)
     expected_pnl = 5.06 * (.09 - .72) + 13.62 * (.20 - .72)
     assert current["realized_pnl_usd"] == pytest.approx(expected_pnl)
     economics = conn.execute(
@@ -1749,23 +1752,199 @@ def test_recovered_partial_exit_two_authenticated_legs_keep_dust_live(conn):
         (f"{position_id}:%",),
     ).fetchone()[0] == 1
 
-    before = conn.execute(
-        "SELECT COUNT(*) FROM position_events WHERE position_id=?", (position_id,)
+    before_economics = conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id=? "
+        "AND caused_by='partial_exit_economics_repair'",
+        (position_id,),
     ).fetchone()[0]
     before_pnl = current["realized_pnl_usd"]
     run_reconcile_sweep(
-        _adapter(matched="18.68", residual=".002141", trades=[first_trade, second_trade]),
+        _adapter(matched="18.68", residual=".4", trades=[first_trade, second_trade]),
         conn,
         context="ws_gap",
         observed_at=NOW + timedelta(minutes=2),
     )
-    after = conn.execute(
-        "SELECT COUNT(*) FROM position_events WHERE position_id=?", (position_id,)
+    after_economics = conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id=? "
+        "AND caused_by='partial_exit_economics_repair'",
+        (position_id,),
     ).fetchone()[0]
-    assert after == before
+    assert after_economics == before_economics
     assert conn.execute(
         "SELECT realized_pnl_usd FROM position_current WHERE position_id=?", (position_id,)
     ).fetchone()[0] == pytest.approx(before_pnl)
+
+    command_id = conn.execute(
+        "SELECT command_id FROM venue_commands WHERE venue_order_id=?",
+        (order_id,),
+    ).fetchone()[0]
+    append_order_fact(
+        conn,
+        venue_order_id=order_id,
+        command_id=command_id,
+        state="MATCHED",
+        remaining_size="0",
+        matched_size="18.67",
+        source="REST",
+        observed_at=NOW + timedelta(minutes=2, seconds=10),
+        raw_payload_hash=hashlib.sha256(b"recovered-aggregate-conflict").hexdigest(),
+        raw_payload_json={"orderID": order_id, "status": "MATCHED", "size_matched": "18.67"},
+    )
+    before_conflict_events = conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id=?",
+        (position_id,),
+    ).fetchone()[0]
+    conflict = reconcile_recovered_partial_exit_economics(
+        conn,
+        command_id=command_id,
+        observed_at=(NOW + timedelta(minutes=2, seconds=10)).isoformat(),
+    )
+    assert conflict["errors"] == 1
+    authority_review = conn.execute(
+        """
+        SELECT last_error_detail FROM review_work_items
+         WHERE subject_id=? AND reason_code='MISSING_FILL_AUTHORITY' AND status='OPEN'
+        """,
+        (f"{position_id}:{command_id}",),
+    ).fetchone()
+    assert authority_review is not None
+    assert "canonical fills disagree" in authority_review["last_error_detail"]
+    assert "NameError" not in authority_review["last_error_detail"]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id=?",
+        (position_id,),
+    ).fetchone()[0] == before_conflict_events
+    assert conn.execute(
+        "SELECT realized_pnl_usd FROM position_current WHERE position_id=?",
+        (position_id,),
+    ).fetchone()[0] == pytest.approx(before_pnl)
+
+    # A new exact account/order snapshot repairs aggregate authority but the
+    # 0.4-share residual remains below the current venue minimum of 5.
+    run_reconcile_sweep(
+        _adapter(matched="18.68", residual=".4", trades=[first_trade, second_trade]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW + timedelta(minutes=3),
+    )
+    assert conn.execute(
+        "SELECT phase FROM position_current WHERE position_id=?",
+        (position_id,),
+    ).fetchone()[0] == "pending_exit"
+    append_order_fact(
+        conn,
+        venue_order_id=order_id,
+        command_id=command_id,
+        state="MATCHED",
+        remaining_size="0",
+        matched_size="18.68",
+        source="REST",
+        observed_at=NOW + timedelta(minutes=3, seconds=1),
+        raw_payload_hash=hashlib.sha256(b"recovered-aggregate-repaired").hexdigest(),
+        raw_payload_json={
+            "orderID": order_id,
+            "status": "MATCHED",
+            "size_matched": "18.68",
+        },
+    )
+
+    # Command recovery has authenticated fills but no current account positions
+    # surface. It must not use the prior chain projection as submit-time truth.
+    opened_reviews: list[dict[str, object]] = []
+    real_open_review = command_recovery._safe_open_recovered_exit_review_item
+
+    def record_open_review(review_conn, **kwargs):
+        opened_reviews.append(kwargs)
+        return real_open_review(review_conn, **kwargs)
+
+    monkeypatch.setattr(
+        command_recovery,
+        "_safe_open_recovered_exit_review_item",
+        record_open_review,
+    )
+    before_missing_account_events = conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id=?",
+        (position_id,),
+    ).fetchone()[0]
+    missing_account = reconcile_recovered_partial_exit_economics(
+        conn,
+        command_id=command_id,
+        observed_at=(NOW + timedelta(minutes=3, seconds=5)).isoformat(),
+    )
+    assert missing_account == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id=?",
+        (position_id,),
+    ).fetchone()[0] == before_missing_account_events
+    missing_account_review = conn.execute(
+        "SELECT last_error_detail FROM review_work_items "
+        "WHERE subject_id=? AND reason_code='MISSING_FILL_AUTHORITY' AND status='OPEN'",
+        (f"{position_id}:{command_id}",),
+    ).fetchone()
+    assert missing_account_review is not None
+    assert "fresh_account_positions_unavailable" in missing_account_review[
+        "last_error_detail"
+    ]
+    assert opened_reviews[-1]["reason_code"] == "MISSING_FILL_AUTHORITY"
+    assert opened_reviews[-1]["reason"] == "fresh_account_positions_unavailable"
+    assert opened_reviews[-1]["evidence"]["economic_write"] is False
+
+    # Invalidating the only current token snapshot fails closed: no fixed
+    # numeric dust threshold may release the position.
+    assert record_snapshot_invalidation(
+        conn,
+        condition_id=None,
+        token_id=token,
+        reason="test_market_channel_change",
+        invalidated_at=NOW + timedelta(minutes=3, seconds=10),
+    ) == 1
+    unavailable = reconcile_recovered_partial_exit_economics(
+        conn,
+        command_id=command_id,
+        observed_at=(NOW + timedelta(minutes=3, seconds=10)).isoformat(),
+        fresh_exchange_positions={token: Decimal(".4")},
+    )
+    assert unavailable["stayed"] == 1
+    assert conn.execute(
+        "SELECT phase FROM position_current WHERE position_id=?",
+        (position_id,),
+    ).fetchone()[0] == "pending_exit"
+
+    # A newer fresh executable snapshot lowers the venue minimum below the
+    # residual. Only then may exact terminal-release evidence return capital
+    # to ordinary redecision and resolve the position-scoped review debt.
+    _ensure_snapshot(
+        conn,
+        token_id=token,
+        snapshot_id="snap-recovered-min-point-one",
+        min_order_size=Decimal("0.1"),
+        captured_at=NOW + timedelta(minutes=4),
+    )
+    released = reconcile_recovered_partial_exit_economics(
+        conn,
+        command_id=command_id,
+        observed_at=(NOW + timedelta(minutes=4)).isoformat(),
+        fresh_exchange_positions={token: Decimal(".4")},
+    )
+    assert released["errors"] == 0
+    assert released["advanced"] >= 1
+    current = conn.execute(
+        "SELECT phase, shares FROM position_current WHERE position_id=?",
+        (position_id,),
+    ).fetchone()
+    assert current["phase"] in {"active", "day0_window"}
+    assert current["shares"] == pytest.approx(.4)
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id=? "
+        "AND command_id=? AND event_type='EXIT_RETRY_RELEASED'",
+        (position_id, command_id),
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM review_work_items WHERE subject_id=? "
+        "AND reason_code IN ('RECOVERED_EXIT_DUST_REMAINDER', 'MISSING_FILL_AUTHORITY') "
+        "AND status='OPEN'",
+        (f"{position_id}:{command_id}",),
+    ).fetchone()[0] == 0
 
 
 def test_live_partial_ghost_sell_stays_finding_when_position_conservation_fails(conn):

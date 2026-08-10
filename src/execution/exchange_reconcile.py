@@ -707,20 +707,6 @@ def run_reconcile_sweep(
         if finding is not None:
             findings.append(finding)
 
-    # Adopted ghost SELLs are reduced from durable trade facts after the whole
-    # account snapshot is ingested.  This keeps one reducer for REST replay and
-    # command-recovery ticks, and deliberately never manufactures a close event
-    # for a partial command.
-    try:
-        from src.execution.command_recovery import reconcile_recovered_partial_exit_economics
-
-        reconcile_recovered_partial_exit_economics(
-            conn,
-            observed_at=observed.isoformat(),
-        )
-    except Exception:
-        logger.exception("exchange_reconcile: recovered partial EXIT reducer failed")
-
     for order_id, command in local_by_order.items():
         if order_id in open_order_ids:
             continue
@@ -772,6 +758,22 @@ def run_reconcile_sweep(
         adapter, conn, open_order_ids, trades=trades if trades_available else None, observed_at=observed
     )
     reconcile_recorded_maker_fill_economics(conn, observed_at=observed)
+    # Fold adopted ghost-SELL economics only after every generic projection
+    # writer has finished. The fresh account residual and its chain timestamp
+    # must be the final canonical projection of this account snapshot; an
+    # earlier fold could be overwritten by the normal fill-reconcile lane.
+    try:
+        from src.execution.command_recovery import reconcile_recovered_partial_exit_economics
+
+        reconcile_recovered_partial_exit_economics(
+            conn,
+            observed_at=observed.isoformat(),
+            fresh_exchange_positions=(
+                exchange_positions if positions_available else None
+            ),
+        )
+    except Exception:
+        logger.exception("exchange_reconcile: recovered partial EXIT reducer failed")
     return findings
 
 

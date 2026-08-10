@@ -63,7 +63,13 @@ baseline, folds each authenticated `(command_id, trade_id)` exactly once through
 the existing partial-exit economic cursor, and projects only delta
 shares/cost/PnL.  It never emits `EXIT_ORDER_FILLED` without exact full intent.
 A sub-minimum residual remains its true size/cost and opens an idempotent typed
-`ReviewWorkItem`; later executable residual truth or settlement resolves it.
+`ReviewWorkItem`. Dust is decided only against the exact held token's latest
+current-time fresh, non-invalidated executable snapshot; missing authority keeps
+the position pending under `MISSING_FILL_AUTHORITY`. A later lower minimum
+resolves the debt only after canonical chain observation and an exact
+`EXIT_RETRY_RELEASED` event actually return the residual to redecision. That
+chain observation must be at least as new as both the terminal order fact and
+the command update; an older local residual cannot release capital.
 
 SCOPE is respectively one selected command envelope, one command's authenticated
 trade aggregate, the heartbeat transport instance, one recovered venue order,

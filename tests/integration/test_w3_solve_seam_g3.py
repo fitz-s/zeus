@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import datetime as _dt
 import hashlib
 import inspect
@@ -76,6 +77,7 @@ from src.solve.solver import (
     BinaryTerminalWealthCertificate,
     CurrentExecutionAuthority,
     CurrentFamilyProbabilityAuthority,
+    CurrentMakerFillWitness,
     DeterministicBinPayoffWitness,
     ExecutableSellCurve,
     ExpectedBuyTerminalWealthCertificate,
@@ -95,11 +97,14 @@ from src.solve.solver import (
     global_candidate_from_native,
     global_sell_fill_prefix_objective,
     global_sell_execution_terms,
+    current_maker_fill_witness_identity,
     executable_curve_identity,
     joint_probability_content_identity,
     joint_probability_witness_identity,
     portfolio_wealth_identity,
     passive_sell_proposal_curve,
+    maker_fill_candidate_binding_identity,
+    MakerFillOutcome,
     select_global_single_order,
     _score_global_single_order,
 )
@@ -17970,7 +17975,7 @@ def test_global_candidate_endowment_projects_correlated_family_holdings_exactly(
             executable_sell_curve=sell_curve,
             resolution_identity="resolution-family",
             neg_risk=False,
-            **_explicit_sell_maker_terms(sell_curve, capacity=Decimal("5")),
+                **_explicit_sell_maker_terms(sell_curve, capacity=Decimal("5")),
         ),
         probability_witness=SimpleNamespace(bin_ids=("a", "b", "c")),
         holdings_snapshot=holdings,
@@ -28258,6 +28263,68 @@ def _adapter_sell_actuation(
         min_order_size=Decimal("5"),
         quote_ttl=_dt.timedelta(seconds=30),
     )
+    maker_fill_witness = None
+    asset_epoch_identity = None
+    if required_execution_mode == "MAKER_REST":
+        proposal = passive_sell_proposal_curve(curve, capacity=Decimal("10"))
+        assert proposal is not None
+        asset_epoch_identity = "asset-epoch-1"
+        binding = maker_fill_candidate_binding_identity(
+            action="SELL",
+            family_key="Alpha|2026-07-14|high",
+            bin_id="20C",
+            condition_id="condition-1",
+            side="YES",
+            token_id="yes-token",
+            ledger_snapshot_id="ledger-1",
+            position_id="position-1",
+            held_shares=Decimal("10"),
+            asset_epoch_identity=asset_epoch_identity,
+            proposal_identity=executable_curve_identity(proposal),
+        )
+        outcomes = (
+            MakerFillOutcome(
+                probability=Decimal("0.2"),
+                fill_fraction=Decimal("1"),
+                proceeds_per_share_usd=proposal.levels[0].price,
+            ),
+            MakerFillOutcome(
+                probability=Decimal("0.8"),
+                fill_fraction=Decimal("0"),
+                proceeds_per_share_usd=Decimal("0"),
+            ),
+        )
+        valid_until = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(hours=1)
+        maker_fill_witness = CurrentMakerFillWitness(
+            witness_identity=current_maker_fill_witness_identity(
+                candidate_binding_identity=binding,
+                asset_epoch_identity=asset_epoch_identity,
+                book_snapshot_id=curve.snapshot_id,
+                book_hash=curve.book_hash,
+                limit_price=proposal.levels[0].price,
+                rest_deadline_minutes=20.0,
+                source_identity="fixture-current-maker-fill-source",
+                model_identity="fixture-current-maker-fill-model",
+                sample_identity="fixture-current-maker-fill-sample",
+                training_cutoff_at_utc=at - _dt.timedelta(minutes=1),
+                issued_at_utc=at,
+                valid_until_at_utc=valid_until,
+                outcomes=outcomes,
+            ),
+            candidate_binding_identity=binding,
+            asset_epoch_identity=asset_epoch_identity,
+            book_snapshot_id=curve.snapshot_id,
+            book_hash=curve.book_hash,
+            limit_price=proposal.levels[0].price,
+            rest_deadline_minutes=20.0,
+            outcomes=outcomes,
+            source_identity="fixture-current-maker-fill-source",
+            model_identity="fixture-current-maker-fill-model",
+            sample_identity="fixture-current-maker-fill-sample",
+            training_cutoff_at_utc=at - _dt.timedelta(minutes=1),
+            issued_at_utc=at,
+            valid_until_at_utc=valid_until,
+        )
     (
         proposal,
         execution_mode,
@@ -28268,6 +28335,7 @@ def _adapter_sell_actuation(
         curve,
         capacity=Decimal("10"),
         required_mode=required_execution_mode,
+        maker_fill_witness=maker_fill_witness,
     )
     candidate = GlobalSingleOrderSellCandidate(
         candidate_id="sell-position-1",
@@ -28294,6 +28362,8 @@ def _adapter_sell_actuation(
         probability_functional=probability_functional,
         exit_authority_status=exit_authority_status,
         exit_authority_reason=exit_authority_reason,
+        maker_fill_witness=maker_fill_witness,
+        asset_epoch_identity=asset_epoch_identity,
     )
     selected = Decimal(selected_shares)
     proposal_curve = candidate.economic_sell_curve
@@ -28652,10 +28722,39 @@ def test_global_sell_jit_rejects_changed_day0_statistical_authority(monkeypatch)
     ("LOWER_CVAR_PARAMETER_DRAWS", "POSTERIOR_PREDICTIVE_MEAN"),
 )
 @pytest.mark.parametrize(
-    ("bid_levels", "tick", "expected_limit", "expected_order_type", "expected_mode"),
     (
-        ((("0.60", "4"), ("0.50", "6")), "0.01", 0.50, "FAK", "TAKER_LIMIT"),
-        ((("0.999", "10"),), "0.001", 0.95, "FAK", "TAKER_LIMIT"),
+        "bid_levels",
+        "tick",
+        "expected_limit",
+        "expected_order_type",
+        "expected_mode",
+        "required_execution_mode",
+    ),
+    (
+        (
+            (("0.60", "4"), ("0.50", "6")),
+            "0.01",
+            0.50,
+            "FAK",
+            "TAKER_LIMIT",
+            None,
+        ),
+        (
+            (("0.999", "10"),),
+            "0.001",
+            0.95,
+            "FAK",
+            "TAKER_LIMIT",
+            None,
+        ),
+        (
+            (("0.60", "10"),),
+            "0.01",
+            0.61,
+            "GTC",
+            "MAKER_REST",
+            "MAKER_REST",
+        ),
     ),
 )
 def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
@@ -28666,6 +28765,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     expected_limit,
     expected_order_type,
     expected_mode,
+    required_execution_mode,
 ):
     from src.data.polymarket_request_governor import RequestPriority
     from src.events.event_store import (
@@ -28709,6 +28809,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         min_tick=tick,
         probability_functional=probability_functional,
         book_hash=stable_hash(jit_raw_book),
+        required_execution_mode=required_execution_mode,
     )
     _install_global_jit_market_authority_fetches(
         monkeypatch,
@@ -28858,6 +28959,27 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         assert intent.shares == pytest.approx(6.0)
         assert intent.close_position is False
         assert intent.submit_order_type == expected_order_type
+        if expected_mode == "MAKER_REST":
+            assert intent.exact_limit_price > intent.best_bid
+            current_witness = authority.jit_candidate.maker_fill_witness
+            assert current_witness is not None
+            assert current_witness.book_snapshot_id == authority.jit_candidate.book_snapshot_id
+            assert current_witness.book_hash == authority.jit_candidate.executable_sell_curve.book_hash
+            assert current_witness.witness_identity != (
+                actuation.decision.candidate.maker_fill_witness.witness_identity
+            )
+            assert authority.jit_candidate.fill_probability_source == (
+                current_witness.witness_identity
+            )
+            assert authority.jit_candidate.fill_probability_source != (
+                actuation.decision.candidate.fill_probability_source
+            )
+            from src.solve.solver import _maker_witness_rejection
+
+            assert _maker_witness_rejection(
+                authority.jit_candidate,
+                decision_at_utc=authority.jit_candidate.book_captured_at_utc,
+            ) is None
         assert intent.capital_certificate["execution_mode"] == expected_mode
         assert intent.capital_certificate["economic_limit_price"] == str(
             actuation.decision.limit_price
@@ -28947,7 +29069,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         global_claimed_at=global_claimed_at,
         global_claim_attempt_count=global_claim_attempt_count,
     )
-    assert receipt.submitted is True
+    assert receipt.submitted is True, receipt.reason
     assert receipt.side_effect_status == "EXIT_SUBMITTED"
     assert receipt.reason == "GLOBAL_SELL_EXIT:sell_placed: order=sell-1"
     assert receipt.venue_call_started is True
@@ -29461,6 +29583,115 @@ def test_global_sell_selected_taker_mode_stays_taker_at_jit(
     )
 
     assert rebound.execution_mode == "TAKER_LIMIT"
+
+
+def test_global_sell_jit_maker_witness_change_requires_complete_reauction():
+    from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
+
+    event = _global_scope_event(city="Alpha", source_run_id="run-maker-jit")
+    actuation = _adapter_sell_actuation(
+        event,
+        required_execution_mode="MAKER_REST",
+        book_hash="maker-selected-book",
+    )
+    selected = actuation.decision.candidate
+    tampered = replace(selected, fill_probability_source="tampered-witness")
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_SELL_JIT_MAKER_WITNESS_SUPERSEDED",
+    ) as exc_info:
+        era._global_sell_candidate_from_raw_book(
+            tampered,
+            {
+                "asset_id": "yes-token",
+                "tick_size": "0.01",
+                "min_order_size": "5",
+                "bids": [{"price": "0.60", "size": "10"}],
+                "asks": [],
+            },
+            captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
+            market_authority=_jit_market_authority(
+                tampered,
+                tick="0.01",
+                min_order_size="5",
+            ),
+        )
+
+    receipt = era._global_sell_receipt(
+        event,
+        global_actuation=actuation,
+        reason=(
+            "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+            f"{exc_info.value}"
+        ),
+        proof_accepted=False,
+    )
+    assert receipt.submitted is False
+    assert receipt.venue_call_started is False
+    assert era._global_curve_supersession_from_receipt(receipt) == (
+        "MARKET_AUTHORITY_SUPERSEDED",
+        None,
+        receipt.reason,
+    )
+
+    jit = era._global_sell_candidate_from_raw_book(
+        selected,
+        {
+            "asset_id": "yes-token",
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "bids": [{"price": "0.60", "size": "10"}],
+            "asks": [],
+        },
+        captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
+        market_authority=_jit_market_authority(
+            selected,
+            tick="0.01",
+            min_order_size="5",
+        ),
+    )
+    forged_jit = replace(jit, fill_probability_source="tampered-witness")
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_SELL_EXECUTION_MAKER_WITNESS_SUPERSEDED",
+    ):
+        GlobalSellExecutionAuthority.from_current(
+            actuation=actuation,
+            jit_candidate=forged_jit,
+        )
+
+    forged_witness = copy.deepcopy(jit.maker_fill_witness)
+    forged_identity = "f" * 64
+    object.__setattr__(forged_witness, "witness_identity", forged_identity)
+    forged_nested_jit = replace(
+        jit,
+        maker_fill_witness=forged_witness,
+        fill_probability_source=forged_identity,
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_SELL_EXECUTION_MAKER_WITNESS_SUPERSEDED",
+    ) as nested_exc:
+        GlobalSellExecutionAuthority.from_current(
+            actuation=actuation,
+            jit_candidate=forged_nested_jit,
+        )
+    failure = f"ValueError:{nested_exc.value}"
+    assert era._is_global_jit_authority_failure(failure) is True
+    nested_receipt = era._global_sell_receipt(
+        event,
+        global_actuation=actuation,
+        reason=f"GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:{failure}",
+        proof_accepted=False,
+    )
+    assert nested_receipt.submitted is False
+    assert nested_receipt.venue_call_started is False
+    assert era._global_curve_supersession_from_receipt(nested_receipt) == (
+        "MARKET_AUTHORITY_SUPERSEDED",
+        None,
+        nested_receipt.reason,
+    )
 
 
 def test_global_sell_current_mode_unavailable_excludes_only_selected_candidate():

@@ -2102,7 +2102,9 @@ class GlobalSellExecutionAuthority:
     def _identity(actuation: object, jit_candidate: object) -> str:
         from src.engine.global_single_order_auction import GlobalSingleOrderActuation
         from src.solve.solver import (
+            CurrentMakerFillWitness,
             GlobalSingleOrderSellCandidate,
+            _maker_witness_rejection,
             executable_curve_identity,
         )
 
@@ -2134,13 +2136,68 @@ class GlobalSellExecutionAuthority:
             "sell_action_authority_identity",
             "execution_mode",
             "fill_probability",
-            "fill_probability_source",
             "rest_deadline_minutes",
         )
         if any(
             getattr(selected, field) != getattr(jit_candidate, field)
             for field in fixed_fields
         ):
+            raise ValueError("GLOBAL_SELL_EXECUTION_JIT_IDENTITY_SUPERSEDED")
+        if selected.execution_mode == "MAKER_REST":
+            selected_witness = selected.maker_fill_witness
+            jit_witness = jit_candidate.maker_fill_witness
+            if not isinstance(
+                selected_witness, CurrentMakerFillWitness
+            ) or not isinstance(jit_witness, CurrentMakerFillWitness):
+                raise ValueError("GLOBAL_SELL_EXECUTION_MAKER_WITNESS_INVALID")
+            try:
+                # Recompute each nested hash at the final submit boundary. A
+                # candidate/source pair that merely agrees with a forged
+                # witness_identity is not canonical maker-fill authority.
+                selected_witness.__post_init__()
+                jit_witness.__post_init__()
+            except ValueError as exc:
+                raise ValueError(
+                    "GLOBAL_SELL_EXECUTION_MAKER_WITNESS_SUPERSEDED"
+                ) from exc
+            if (
+                _maker_witness_rejection(
+                    selected,
+                    decision_at_utc=actuation.decision_at_utc,
+                )
+                is not None
+                or _maker_witness_rejection(
+                    jit_candidate,
+                    decision_at_utc=jit_candidate.book_captured_at_utc,
+                )
+                is not None
+            ):
+                raise ValueError("GLOBAL_SELL_EXECUTION_MAKER_WITNESS_SUPERSEDED")
+            if (
+                selected.fill_probability_source
+                != selected_witness.witness_identity
+                or jit_candidate.fill_probability_source
+                != jit_witness.witness_identity
+            ):
+                raise ValueError("GLOBAL_SELL_EXECUTION_MAKER_WITNESS_INVALID")
+            if any(
+                getattr(selected_witness, field) != getattr(jit_witness, field)
+                for field in (
+                    "asset_epoch_identity",
+                    "book_hash",
+                    "limit_price",
+                    "rest_deadline_minutes",
+                    "outcomes",
+                    "source_identity",
+                    "model_identity",
+                    "sample_identity",
+                    "training_cutoff_at_utc",
+                    "issued_at_utc",
+                    "valid_until_at_utc",
+                )
+            ):
+                raise ValueError("GLOBAL_SELL_EXECUTION_MAKER_WITNESS_SUPERSEDED")
+        elif selected.fill_probability_source != jit_candidate.fill_probability_source:
             raise ValueError("GLOBAL_SELL_EXECUTION_JIT_IDENTITY_SUPERSEDED")
         curve = jit_candidate.executable_sell_curve
         mean_sell = (
@@ -2204,6 +2261,11 @@ class GlobalSellExecutionAuthority:
             jit_candidate.execution_mode,
             jit_candidate.fill_probability,
             jit_candidate.fill_probability_source,
+            (
+                jit_candidate.maker_fill_witness.witness_identity
+                if jit_candidate.execution_mode == "MAKER_REST"
+                else ""
+            ),
             jit_candidate.rest_deadline_minutes,
             proposal.levels[0].price,
             proposal.levels[0].size,
@@ -3155,30 +3217,33 @@ def _exit_token_id(position: Position) -> str:
     return str(token_id or "").strip()
 
 
-def _latest_fresh_snapshot_min_order(
-    position: Position,
+def _latest_fresh_snapshot_min_order_for_token(
+    token_id: str,
     *,
     conn: sqlite3.Connection | None,
     now: datetime | None = None,
 ) -> Decimal | None:
-    """min_order_size of the latest FRESH executable snapshot for the exit token.
+    """Return current min size from one fresh, non-invalidated token snapshot.
 
     C5: freshness requires a non-null, unexpired ``freshness_deadline``. A null
     or expired snapshot cannot suppress a live exit/re-decision — it is treated
-    as absent. Returns None when no fresh snapshot exists.
+    as absent. A later market-channel invalidation likewise makes the snapshot
+    unusable until a newer immutable snapshot exists. Malformed authority never
+    falls back to an older row.
     """
 
     if conn is None:
         return None
-    token_id = _exit_token_id(position)
-    if not token_id:
+    clean_token_id = str(token_id or "").strip()
+    if not clean_token_id:
         return None
+    checked_at = (now or _utcnow()).astimezone(timezone.utc)
     saved = conn.row_factory
     conn.row_factory = sqlite3.Row
     try:
         row = conn.execute(
             """
-            SELECT min_order_size
+            SELECT snapshot_id
               FROM executable_market_snapshots
              WHERE selected_outcome_token_id = ?
                AND freshness_deadline IS NOT NULL
@@ -3186,13 +3251,42 @@ def _latest_fresh_snapshot_min_order(
              ORDER BY captured_at DESC, snapshot_id DESC
              LIMIT 1
             """,
-            (token_id, (now or _utcnow()).astimezone(timezone.utc).isoformat()),
+            (clean_token_id, checked_at.isoformat()),
         ).fetchone()
     except sqlite3.Error:
         return None
     finally:
         conn.row_factory = saved
-    return _positive_decimal(row["min_order_size"] if row is not None else None)
+    if row is None:
+        return None
+    try:
+        from src.state.snapshot_repo import get_snapshot, snapshot_is_invalidated
+
+        snapshot = get_snapshot(conn, str(row["snapshot_id"] or ""))
+        if (
+            snapshot is None
+            or snapshot.selected_outcome_token_id != clean_token_id
+            or snapshot_is_invalidated(conn, snapshot, checked_at=checked_at)
+        ):
+            return None
+        return _positive_decimal(snapshot.min_order_size)
+    except (sqlite3.Error, InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _latest_fresh_snapshot_min_order(
+    position: Position,
+    *,
+    conn: sqlite3.Connection | None,
+    now: datetime | None = None,
+) -> Decimal | None:
+    """min_order_size of the current executable snapshot for the exit token."""
+
+    return _latest_fresh_snapshot_min_order_for_token(
+        _exit_token_id(position),
+        conn=conn,
+        now=now,
+    )
 
 
 def _dust_evidence_marks_non_executable(evidence: str) -> bool:
@@ -3220,21 +3314,17 @@ def _is_non_executable_dust_hold(
     exit_state = getattr(exit_state, "value", exit_state)
     if str(exit_state or "") != "backoff_exhausted":
         return False
-    # C5: a FRESH snapshot is authoritative both ways. If it proves the size is
-    # below min_order -> dust hold; if it proves the size is executable -> NOT
-    # dust, and a stale "[DUST:...]" reason string may not suppress re-decision.
-    # Historical dust text is a fallback ONLY when no fresh snapshot exists.
+    # C5: only a current fresh snapshot may prove a non-executable dust hold.
+    # Historical reason/error text is never current venue authority.
     fresh_min = _positive_decimal(current_min_order_size)
     if fresh_min is None:
         fresh_min = _latest_fresh_snapshot_min_order(position, conn=conn)
-    if fresh_min is not None:
-        shares = _positive_decimal(getattr(position, "effective_shares", None))
-        if shares is None:
-            shares = _positive_decimal(getattr(position, "shares", None))
-        return shares is not None and shares < fresh_min
-    reason = str(getattr(position, "exit_reason", "") or "")
-    last_error = str(getattr(position, "last_exit_error", "") or "")
-    return _dust_evidence_marks_non_executable(f"{reason} {last_error}")
+    if fresh_min is None:
+        return False
+    shares = _positive_decimal(getattr(position, "effective_shares", None))
+    if shares is None:
+        shares = _positive_decimal(getattr(position, "shares", None))
+    return shares is not None and shares < fresh_min
 
 
 def _canonical_non_executable_dust_hold(
@@ -3299,26 +3389,11 @@ def _canonical_non_executable_dust_hold(
     if shares is None:
         return None
 
-    saved = conn.row_factory
-    conn.row_factory = sqlite3.Row
-    try:
-        snapshot = conn.execute(
-            """
-            SELECT min_order_size
-              FROM executable_market_snapshots
-             WHERE selected_outcome_token_id = ?
-               AND freshness_deadline IS NOT NULL
-               AND datetime(freshness_deadline) >= datetime(?)
-             ORDER BY captured_at DESC, snapshot_id DESC
-             LIMIT 1
-            """,
-            (selected_token_id, (now or _utcnow()).astimezone(timezone.utc).isoformat()),
-        ).fetchone()
-    except sqlite3.Error:
-        return None
-    finally:
-        conn.row_factory = saved
-    min_order = _positive_decimal(snapshot["min_order_size"] if snapshot is not None else None)
+    min_order = _latest_fresh_snapshot_min_order_for_token(
+        selected_token_id,
+        conn=conn,
+        now=now,
+    )
     if min_order is None or shares >= min_order:
         return None
     error = f"executable_snapshot_gate: size {shares} is below snapshot min_order_size {min_order}"
@@ -4837,7 +4912,7 @@ def _positive_decimal(value: object) -> Decimal | None:
         numeric = Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
-    if numeric <= 0:
+    if not numeric.is_finite() or numeric <= 0:
         return None
     return numeric
 
@@ -6047,7 +6122,8 @@ def _latest_exit_snapshot_context(
 
     if conn is None or not token_id:
         return {}
-    now_s = (now or _utcnow()).isoformat()
+    checked_at = now or _utcnow()
+    now_s = checked_at.isoformat()
     saved = conn.row_factory
     conn.row_factory = sqlite3.Row
     try:
@@ -6080,11 +6156,20 @@ def _latest_exit_snapshot_context(
         conn.row_factory = saved
     if row is None:
         return {}
-    from src.state.snapshot_repo import get_snapshot
+    from src.state.snapshot_repo import get_snapshot, snapshot_is_invalidated
 
     snapshot_id = str(row["snapshot_id"])
-    snapshot = get_snapshot(conn, snapshot_id)
-    snapshot_hash = str(snapshot.executable_snapshot_hash or "") if snapshot is not None else ""
+    try:
+        snapshot = get_snapshot(conn, snapshot_id)
+        if snapshot is None or snapshot_is_invalidated(
+            conn,
+            snapshot,
+            checked_at=checked_at,
+        ):
+            return {}
+    except (sqlite3.Error, InvalidOperation, TypeError, ValueError):
+        return {}
+    snapshot_hash = str(snapshot.executable_snapshot_hash or "")
     return {
         "executable_snapshot_id": snapshot_id,
         "executable_snapshot_hash": snapshot_hash,
@@ -6163,10 +6248,18 @@ def _exact_exit_snapshot_context(
     except (InvalidOperation, ValueError):
         return {}
 
-    from src.state.snapshot_repo import get_snapshot
+    from src.state.snapshot_repo import get_snapshot, snapshot_is_invalidated
 
-    snapshot = get_snapshot(conn, clean_snapshot_id)
-    if snapshot is None:
+    try:
+        snapshot = get_snapshot(conn, clean_snapshot_id)
+        invalidated = snapshot is not None and snapshot_is_invalidated(
+            conn,
+            snapshot,
+            checked_at=checked_at,
+        )
+    except (sqlite3.Error, InvalidOperation, TypeError, ValueError):
+        return {}
+    if snapshot is None or invalidated:
         return {}
     # The direct row query above is the authority selection.  Hydration only
     # supplies the immutable executable identity hash and scalar fields used by
@@ -7043,6 +7136,7 @@ def _dual_write_partial_exit_projection_batch(
             previous_error=previous_error,
             release_reason="CAPITAL_REDUCTION_FILLED",
             caused_by="capital_reduction_filled",
+            base_projection=projection,
         )
         if released is None:
             raise RuntimeError("confirmed reduction canonical release build failed")

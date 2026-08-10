@@ -5903,6 +5903,57 @@ def _seed_cancel_pending_partial_exit_dust_case(
     )
 
 
+def test_terminal_partial_exit_release_waits_for_post_terminal_chain_observation(
+    conn,
+    mock_client,
+    monkeypatch,
+):
+    from src.execution import command_recovery
+
+    _seed_partial_exit_dust_case(conn)
+    conn.execute(
+        "UPDATE position_current SET chain_seen_at = ? WHERE position_id = 'pos-001'",
+        ("2026-04-26T00:04:00+00:00",),
+    )
+    _configure_partial_exit_dust_client(
+        mock_client,
+        point_status="CANCELED",
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_now_iso",
+        lambda: "2026-04-26T00:09:00+00:00",
+    )
+
+    terminalized = command_recovery.reconcile_partial_remainders(
+        conn,
+        mock_client,
+        live_tick_scope=True,
+    )
+    stale_release = command_recovery.reconcile_pending_exit_terminal_order_releases(
+        conn,
+    )
+
+    assert terminalized == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+    assert stale_release == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    assert conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = 'pos-001'",
+    ).fetchone()[0] == "pending_exit"
+
+    conn.execute(
+        "UPDATE position_current SET chain_seen_at = ? WHERE position_id = 'pos-001'",
+        ("2026-04-26T00:10:00+00:00",),
+    )
+    fresh_release = command_recovery.reconcile_pending_exit_terminal_order_releases(
+        conn,
+    )
+
+    assert fresh_release == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+    assert conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = 'pos-001'",
+    ).fetchone()[0] == "active"
+
+
 def _connect_file_db(path):
     from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
@@ -27599,6 +27650,10 @@ class TestRecoveryResolutionTable:
             "_now_iso",
             lambda: "2026-05-16T12:00:00+00:00",
         )
+        conn.execute(
+            "UPDATE position_current SET chain_seen_at = ? WHERE position_id = 'pos-001'",
+            ("2026-05-16T12:00:00+00:00",),
+        )
 
         summary = command_recovery.reconcile_partial_remainders(
             conn,
@@ -27782,6 +27837,11 @@ class TestRecoveryResolutionTable:
             "_backfill_terminal_exit_trade_facts",
             counted_backfill,
         )
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-04-26T00:09:00+00:00",
+        )
         first = command_recovery.reconcile_partial_remainders(conn, mock_client, live_tick_scope=True)
         second = command_recovery.reconcile_partial_remainders(conn, mock_client, live_tick_scope=True)
 
@@ -27805,6 +27865,7 @@ class TestRecoveryResolutionTable:
         self,
         conn,
         mock_client,
+        monkeypatch,
     ):
         from src.execution import command_recovery
 
@@ -27846,6 +27907,11 @@ class TestRecoveryResolutionTable:
                 ("trade-dust-b", "56.6", "0xdustb"),
             )
         ]
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-04-26T00:09:00+00:00",
+        )
 
         first = command_recovery.reconcile_partial_remainders(
             conn,
@@ -27870,7 +27936,12 @@ class TestRecoveryResolutionTable:
             "WHERE position_id = 'pos-001'"
         ).fetchone()[0] == pytest.approx(-14.094)
 
-    def test_cancel_pending_partial_exit_accepts_preliminary_null_tx_fact(self, conn, mock_client):
+    def test_cancel_pending_partial_exit_accepts_preliminary_null_tx_fact(
+        self,
+        conn,
+        mock_client,
+        monkeypatch,
+    ):
         from src.execution import command_recovery
 
         _seed_cancel_pending_partial_exit_dust_case(conn, preliminary_trade=True)
@@ -27878,6 +27949,11 @@ class TestRecoveryResolutionTable:
             mock_client,
             point_status="CANCELED",
             point_remaining="0",
+        )
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-04-26T00:09:00+00:00",
         )
 
         summary = command_recovery.reconcile_partial_remainders(conn, mock_client, live_tick_scope=True)
@@ -28001,6 +28077,7 @@ class TestRecoveryResolutionTable:
         self,
         conn,
         mock_client,
+        monkeypatch,
     ):
         from src.execution import command_recovery
 
@@ -28046,6 +28123,11 @@ class TestRecoveryResolutionTable:
             mock_client,
             point_status="CANCELED",
             point_remaining="0",
+        )
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-04-26T00:09:00+00:00",
         )
 
         summary = command_recovery.reconcile_partial_remainders(
