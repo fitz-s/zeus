@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-08-07
+# Last reused/audited: 2026-08-09
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from src.events.day0_authority import assert_live_day0_entry_provenance
 from src.events.reactor import EventSubmissionReceipt, _is_transient_money_path_reason
 from src.riskguard.risk_level import RiskLevel
 from src.contracts.execution_intent import DecisionSourceContext
+from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
 from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
@@ -164,6 +165,21 @@ def _seal_current_qkernel_cert(cert: dict) -> None:
     cert["current_state_identity_hash"] = era.qkernel_current_state_identity_hash(cert)
 
 
+def _global_receipt_payload() -> dict[str, object]:
+    return GlobalAuctionReceiptRef(
+        decision_log_id=41,
+        decision_log_mode="global_single_order_auction",
+        receipt_hash="a" * 64,
+        execution_binding_hash="b" * 64,
+        artifact_summary_hash="c" * 64,
+        schema_version=21,
+        winner_event_id="global-event-1",
+        winner_candidate_id="global-candidate-1",
+        winner_actuation_identity="global-actuation-1",
+        selection_epoch_identity="global-epoch-1",
+    ).as_payload()
+
+
 def _global_current_qkernel_cert(*, side: str = "YES") -> dict:
     cert = _current_qkernel_cert(side=side)
     for field in (
@@ -183,6 +199,8 @@ def _global_current_qkernel_cert(*, side: str = "YES") -> dict:
         cost=0.05,
         edge_lcb=0.55,
         global_actuation_identity="global-actuation-1",
+        global_winner_event_id="global-event-1",
+        global_auction_receipt=_global_receipt_payload(),
         global_economic_identity="global-economic-1",
         global_optimum_semantics="CUT_TIME_GLOBAL_OPTIMUM",
         global_candidate_id="global-candidate-1",
@@ -2760,6 +2778,26 @@ def test_global_current_certificate_rejects_missing_or_forged_terminal_branch(
     )
 
 
+@pytest.mark.parametrize("mutation", ("missing", "winner_mismatch"))
+def test_global_current_certificate_rejects_unbound_auction_receipt(mutation):
+    cert = _global_current_qkernel_cert()
+    if mutation == "missing":
+        cert.pop("global_auction_receipt")
+    else:
+        forged = dict(cert["global_auction_receipt"])
+        forged["winner_candidate_id"] = "different-candidate"
+        cert["global_auction_receipt"] = forged
+    _seal_current_qkernel_cert(cert)
+
+    assert (
+        era._global_current_state_execution_economics_rejection_reason(
+            cert,
+            direction="buy_yes",
+        )
+        == "global_auction_receipt"
+    )
+
+
 def test_broken_global_certificate_cannot_fall_back_to_legacy_route_fields():
     cert = _global_current_qkernel_cert()
     cert.update(
@@ -2835,6 +2873,7 @@ def test_actionable_payload_preserves_sealed_global_execution_economics(
     payload["event_type"] = "FORECAST_SNAPSHOT_READY"
 
     assert payload["qkernel_execution_economics"] == cert
+    assert payload["global_auction_receipt"] == cert["global_auction_receipt"]
     assert payload["_edli_q_source"] == "replacement_0_1"
     with pytest.raises(
         ValueError,

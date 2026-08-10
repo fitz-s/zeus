@@ -1,0 +1,383 @@
+"""Immutable reference from one selected order to its durable global receipt."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+import hashlib
+import json
+import re
+from typing import Any, Mapping
+
+
+GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION = 21
+GLOBAL_AUCTION_RECEIPT_MODES = frozenset(
+    {
+        "global_single_order_auction",
+        "global_single_order_auction_delta",
+        "global_single_order_auction_duplicate",
+    }
+)
+_EXECUTION_BINDING_VERSION = "global-auction-execution-binding-v1"
+_ARTIFACT_SUMMARY_HASH_FIELD = "artifact_summary_hash"
+_HEX_64 = re.compile(r"[0-9a-f]{64}")
+_EXECUTION_BINDING_FIELDS = (
+    "schema_version",
+    "selection_epoch_identity",
+    "selection_cut_at_utc",
+    "decision_at_utc",
+    "full_scope_identity",
+    "book_epoch_identity",
+    "wealth_witness_identity",
+    "wealth_economic_identity",
+    "winner_event_id",
+    "winner_candidate_id",
+    "winner_actuation_identity",
+    "payload_identity",
+    "decision_payload_identity",
+    "audit_context_sha256",
+    "book_native_side_states_sha256",
+    "candidate_evaluations_sha256",
+    "buy_minimum_marketable_repairs_sha256",
+    "holding_auction_coverage_sha256",
+)
+_EXECUTION_BINDING_TEXT_FIELDS = (
+    "selection_epoch_identity",
+    "full_scope_identity",
+    "book_epoch_identity",
+    "wealth_witness_identity",
+    "wealth_economic_identity",
+)
+_EXECUTION_BINDING_TIMESTAMP_FIELDS = (
+    "selection_cut_at_utc",
+    "decision_at_utc",
+)
+_EXECUTION_BINDING_HASH_FIELDS = (
+    "payload_identity",
+    "decision_payload_identity",
+    "audit_context_sha256",
+    "book_native_side_states_sha256",
+    "candidate_evaluations_sha256",
+    "buy_minimum_marketable_repairs_sha256",
+    "holding_auction_coverage_sha256",
+)
+_EXECUTION_BINDING_WINNER_FIELDS = (
+    "winner_event_id",
+    "winner_candidate_id",
+    "winner_actuation_identity",
+)
+
+
+def _required_text(value: object, field: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"GLOBAL_AUCTION_RECEIPT_{field.upper()}_MISSING")
+    return text
+
+
+def _hash_text(value: object, field: str) -> str:
+    text = _required_text(value, field)
+    if _HEX_64.fullmatch(text) is None:
+        raise ValueError(f"GLOBAL_AUCTION_RECEIPT_{field.upper()}_INVALID")
+    return text
+
+
+def _required_timestamp(value: object, field: str) -> str:
+    text = _required_text(value, field)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            f"GLOBAL_AUCTION_RECEIPT_{field.upper()}_INVALID"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"GLOBAL_AUCTION_RECEIPT_{field.upper()}_INVALID")
+    return text
+
+
+def _assert_execution_binding_fields(summary: Mapping[str, Any]) -> None:
+    schema_version = summary.get("schema_version")
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version != GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION
+    ):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION_INVALID")
+    for field in _EXECUTION_BINDING_TEXT_FIELDS:
+        _required_text(summary.get(field), field)
+    timestamps = {
+        field: _required_timestamp(summary.get(field), field)
+        for field in _EXECUTION_BINDING_TIMESTAMP_FIELDS
+    }
+    cut_at = datetime.fromisoformat(
+        timestamps["selection_cut_at_utc"].replace("Z", "+00:00")
+    )
+    decision_at = datetime.fromisoformat(
+        timestamps["decision_at_utc"].replace("Z", "+00:00")
+    )
+    if decision_at < cut_at:
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_DECISION_TIME_PRECEDES_CUT")
+    for field in _EXECUTION_BINDING_HASH_FIELDS:
+        _hash_text(summary.get(field), field)
+    winners = tuple(
+        str(summary.get(field) or "").strip()
+        for field in _EXECUTION_BINDING_WINNER_FIELDS
+    )
+    if any(winners) and not all(winners):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_WINNER_BINDING_INCOMPLETE")
+
+
+def global_auction_execution_binding_hash(summary: Mapping[str, Any]) -> str:
+    """Hash the complete compact-row witness that binds a winner to its cut."""
+
+    _assert_execution_binding_fields(summary)
+    payload = {field: summary[field] for field in _EXECUTION_BINDING_FIELDS}
+    payload["binding_version"] = _EXECUTION_BINDING_VERSION
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def global_auction_artifact_summary_hash(summary: Mapping[str, Any]) -> str:
+    """Hash the exact persisted summary independently of logical compaction."""
+
+    payload = dict(summary)
+    payload.pop(_ARTIFACT_SUMMARY_HASH_FIELD, None)
+    encoded = json.dumps(
+        payload,
+        default=str,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def assert_global_auction_summary_integrity(summary: Mapping[str, Any]) -> None:
+    """Require both actionable binding and exact stored-summary integrity."""
+
+    expected_binding_hash = global_auction_execution_binding_hash(summary)
+    stored_binding_hash = _hash_text(
+        summary.get("execution_binding_hash"),
+        "execution_binding_hash",
+    )
+    if stored_binding_hash != expected_binding_hash:
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_EXECUTION_BINDING_HASH_MISMATCH")
+    stored_summary_hash = _hash_text(
+        summary.get(_ARTIFACT_SUMMARY_HASH_FIELD),
+        _ARTIFACT_SUMMARY_HASH_FIELD,
+    )
+    if stored_summary_hash != global_auction_artifact_summary_hash(summary):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_ARTIFACT_SUMMARY_HASH_MISMATCH")
+    _hash_text(summary.get("receipt_hash"), "receipt_hash")
+
+
+@dataclass(frozen=True)
+class GlobalAuctionReceiptRef:
+    """Exact durable receipt identity committed by an actionable certificate."""
+
+    decision_log_id: int
+    decision_log_mode: str
+    receipt_hash: str
+    execution_binding_hash: str
+    artifact_summary_hash: str
+    schema_version: int
+    winner_event_id: str
+    winner_candidate_id: str
+    winner_actuation_identity: str
+    selection_epoch_identity: str
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.decision_log_id, bool)
+            or not isinstance(self.decision_log_id, int)
+            or self.decision_log_id <= 0
+        ):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_DECISION_LOG_ID_INVALID")
+        if self.decision_log_mode not in GLOBAL_AUCTION_RECEIPT_MODES:
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_DECISION_LOG_MODE_INVALID")
+        if self.schema_version != GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION:
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION_INVALID")
+        _hash_text(self.receipt_hash, "receipt_hash")
+        _hash_text(self.execution_binding_hash, "execution_binding_hash")
+        _hash_text(self.artifact_summary_hash, "artifact_summary_hash")
+        _required_text(self.winner_event_id, "winner_event_id")
+        _required_text(self.winner_candidate_id, "winner_candidate_id")
+        _required_text(self.winner_actuation_identity, "winner_actuation_identity")
+        _required_text(self.selection_epoch_identity, "selection_epoch_identity")
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "decision_log_id": self.decision_log_id,
+            "decision_log_mode": self.decision_log_mode,
+            "receipt_hash": self.receipt_hash,
+            "execution_binding_hash": self.execution_binding_hash,
+            "artifact_summary_hash": self.artifact_summary_hash,
+            "schema_version": self.schema_version,
+            "winner_event_id": self.winner_event_id,
+            "winner_candidate_id": self.winner_candidate_id,
+            "winner_actuation_identity": self.winner_actuation_identity,
+            "selection_epoch_identity": self.selection_epoch_identity,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "GlobalAuctionReceiptRef":
+        if not isinstance(payload, Mapping):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_REF_MISSING")
+        expected = {
+            "decision_log_id",
+            "decision_log_mode",
+            "receipt_hash",
+            "execution_binding_hash",
+            "artifact_summary_hash",
+            "schema_version",
+            "winner_event_id",
+            "winner_candidate_id",
+            "winner_actuation_identity",
+            "selection_epoch_identity",
+        }
+        if set(payload) != expected:
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_REF_FIELDS_INVALID")
+        decision_log_id = payload["decision_log_id"]
+        schema_version = payload["schema_version"]
+        if isinstance(decision_log_id, bool) or not isinstance(decision_log_id, int):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_DECISION_LOG_ID_INVALID")
+        if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION_INVALID")
+        return cls(
+            decision_log_id=decision_log_id,
+            decision_log_mode=str(payload["decision_log_mode"]),
+            receipt_hash=str(payload["receipt_hash"]),
+            execution_binding_hash=str(payload["execution_binding_hash"]),
+            artifact_summary_hash=str(payload["artifact_summary_hash"]),
+            schema_version=schema_version,
+            winner_event_id=str(payload["winner_event_id"]),
+            winner_candidate_id=str(payload["winner_candidate_id"]),
+            winner_actuation_identity=str(payload["winner_actuation_identity"]),
+            selection_epoch_identity=str(payload["selection_epoch_identity"]),
+        )
+
+    def assert_matches_actuation(
+        self,
+        *,
+        winner_event_id: object,
+        winner_candidate_id: object,
+        winner_actuation_identity: object,
+        selection_epoch_identity: object,
+    ) -> None:
+        expected = (
+            ("winner_event_id", self.winner_event_id, winner_event_id),
+            ("winner_candidate_id", self.winner_candidate_id, winner_candidate_id),
+            (
+                "winner_actuation_identity",
+                self.winner_actuation_identity,
+                winner_actuation_identity,
+            ),
+            (
+                "selection_epoch_identity",
+                self.selection_epoch_identity,
+                selection_epoch_identity,
+            ),
+        )
+        for field, stored, current in expected:
+            if stored != str(current or "").strip():
+                raise ValueError(
+                    f"GLOBAL_AUCTION_RECEIPT_{field.upper()}_MISMATCH"
+                )
+
+
+def global_auction_receipt_ref_from_summary(
+    *,
+    decision_log_id: int,
+    decision_log_mode: str,
+    summary: Mapping[str, Any],
+) -> GlobalAuctionReceiptRef:
+    """Validate a stored winner summary and construct its exact row reference.
+
+    ``receipt_hash`` is the content identity of the uncompressed logical receipt
+    and is copied into delta/duplicate rows. ``execution_binding_hash`` is the
+    locally recomputable closure over every field needed to bind the actionable
+    winner to that logical cut.
+    """
+
+    schema_version = summary.get("schema_version")
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION_INVALID")
+    assert_global_auction_summary_integrity(summary)
+    stored_binding_hash = _hash_text(
+        summary.get("execution_binding_hash"), "execution_binding_hash"
+    )
+    return GlobalAuctionReceiptRef(
+        decision_log_id=decision_log_id,
+        decision_log_mode=decision_log_mode,
+        receipt_hash=_hash_text(summary.get("receipt_hash"), "receipt_hash"),
+        execution_binding_hash=stored_binding_hash,
+        artifact_summary_hash=_hash_text(
+            summary.get("artifact_summary_hash"), "artifact_summary_hash"
+        ),
+        schema_version=schema_version,
+        winner_event_id=_required_text(
+            summary.get("winner_event_id"), "winner_event_id"
+        ),
+        winner_candidate_id=_required_text(
+            summary.get("winner_candidate_id"), "winner_candidate_id"
+        ),
+        winner_actuation_identity=_required_text(
+            summary.get("winner_actuation_identity"),
+            "winner_actuation_identity",
+        ),
+        selection_epoch_identity=_required_text(
+            summary.get("selection_epoch_identity"),
+            "selection_epoch_identity",
+        ),
+    )
+
+
+def assert_global_auction_receipt_artifact(
+    *,
+    expected: GlobalAuctionReceiptRef,
+    decision_log_id: int,
+    decision_log_mode: str,
+    artifact_json: object,
+) -> None:
+    """Re-read one decision_log row and require exact certificate equality."""
+
+    actual = global_auction_receipt_ref_from_artifact(
+        decision_log_id=decision_log_id,
+        decision_log_mode=decision_log_mode,
+        artifact_json=artifact_json,
+    )
+    if actual != expected:
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_REF_MISMATCH")
+
+
+def global_auction_receipt_ref_from_artifact(
+    *,
+    decision_log_id: int,
+    decision_log_mode: str,
+    artifact_json: object,
+) -> GlobalAuctionReceiptRef:
+    """Parse one decision_log artifact and validate its compact winner binding."""
+
+    try:
+        artifact = (
+            json.loads(artifact_json)
+            if isinstance(artifact_json, str)
+            else artifact_json
+        )
+        summary = artifact["summary"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_ARTIFACT_INVALID") from exc
+    if not isinstance(summary, Mapping):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_SUMMARY_INVALID")
+    return global_auction_receipt_ref_from_summary(
+        decision_log_id=decision_log_id,
+        decision_log_mode=decision_log_mode,
+        summary=summary,
+    )

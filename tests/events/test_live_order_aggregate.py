@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.decision_kernel.canonicalization import (
     qkernel_current_state_identity_hash,
     stable_hash,
@@ -1214,6 +1216,18 @@ def test_pre_submit_current_state_winner_ignores_legacy_profit_density_floors(
         min_submit_edge_density=1000.0,
     )
     economics = dict(payload["qkernel_execution_economics"])
+    auction_receipt = GlobalAuctionReceiptRef(
+        decision_log_id=41,
+        decision_log_mode="global_single_order_auction",
+        receipt_hash="a" * 64,
+        execution_binding_hash="b" * 64,
+        artifact_summary_hash="c" * 64,
+        schema_version=21,
+        winner_event_id="event-current-1",
+        winner_candidate_id="candidate-current-1",
+        winner_actuation_identity="global-current-1",
+        selection_epoch_identity="epoch-current-1",
+    ).as_payload()
     economics.update(
         {
             "side": side,
@@ -1230,11 +1244,16 @@ def test_pre_submit_current_state_winner_ignores_legacy_profit_density_floors(
             "selection_guard_n": 64,
             "optimal_stake_usd": 0.01,
             "global_actuation_identity": "global-current-1",
+            "global_winner_event_id": "event-current-1",
+            "global_auction_receipt": auction_receipt,
+            "global_economic_identity": "global-economic-current-1",
             "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+            "global_execution_mode": "TAKER_LIMIT",
             "global_candidate_id": "candidate-current-1",
             "global_bin_id": "bin-1",
             "global_universe_witness_identity": "universe-current-1",
             "global_wealth_witness_identity": "wealth-current-1",
+            "global_wealth_economic_identity": "wealth-economic-current-1",
             "global_selection_epoch_identity": "epoch-current-1",
             "global_selection_cut_at": "2026-07-13T02:00:00+00:00",
             "global_selection_decision_at": "2026-07-13T02:00:01+00:00",
@@ -1249,6 +1268,15 @@ def test_pre_submit_current_state_winner_ignores_legacy_profit_density_floors(
             "global_max_spend_usd": "0.40",
             "global_robust_delta_log_wealth": 0.001,
             "global_robust_ev_usd": 0.20,
+            "global_ruin_probability_reduction": 0.0,
+            "global_terminal_ruin_probability_reduction": 0.0,
+            "global_proposal_expected_delta_log_wealth": 0.001,
+            "global_proposal_expected_ev_usd": 0.20,
+            "global_proposal_expected_log_growth_per_hour": 0.001,
+            "global_proposal_expected_capital_efficiency": 0.0025,
+            "global_proposal_capital_lock_hours": 1.0,
+            "global_proposal_fill_semantics": "IMMEDIATE_FILL",
+            "global_utility_basis": STRATEGY_LOG_UTILITY_BASIS,
             "global_cut_time_win_probability_lcb": 0.60,
             "global_cut_time_loss_probability_ucb": 0.40,
             "global_terminal_win_probability_lcb": 0.60,

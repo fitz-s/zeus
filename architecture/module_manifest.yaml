@@ -624,6 +624,7 @@ modules:
       - src/contracts/provenance_registry.py
       - src/contracts/reality_contract.py
       - src/contracts/strategy_capital_allocation.py
+      - src/contracts/global_auction_receipt.py
     public_entry_files:
       - src/contracts/settlement_semantics.py
       - src/contracts/calibration_bins.py
@@ -633,6 +634,7 @@ modules:
       - src/contracts/semantic_types.py
       - src/contracts/execution_intent.py
       - src/contracts/strategy_capital_allocation.py
+      - src/contracts/global_auction_receipt.py
     law_dependencies:
       - docs/authority/zeus_current_architecture.md
       - architecture/invariants.yaml

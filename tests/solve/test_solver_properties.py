@@ -962,7 +962,7 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
     )
 
     assert plan.no_trade_reason is None
-    assert plan.primary_candidate_id is not None
+    assert plan.targets
     assert Decimal("0") < plan.fractional_target_cost_usd <= Decimal("1449.166") / 32
     assert plan.full_kelly_cost_usd > plan.fractional_target_cost_usd
     assert plan.expected_delta_log_wealth > 0
@@ -1012,7 +1012,6 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
         fractional_kelly_multiplier=Decimal("0.03125"),
     )
 
-    assert repeated.primary_candidate_id is None
     assert repeated.no_trade_reason == "FAMILY_JOINT_FRACTIONAL_BUDGET_EXHAUSTED"
     assert repeated.fractional_target_cost_usd == 0
     assert optimize_calls == 1
@@ -1023,6 +1022,53 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
             probability_witness_identity=witness.witness_identity,
         )
         for candidate in candidates
+    )
+
+    def reuse_joint_targets(selection_candidates, **_kwargs):
+        assert {
+            target.candidate_id for target in plan.targets
+        }.issubset(
+            {candidate.candidate_id for candidate in selection_candidates}
+        )
+        return plan
+
+    monkeypatch.setattr(S, "plan_family_joint_buy_targets", reuse_joint_targets)
+    original_expected_growth = S._expected_growth_comparison
+    forced_delta_by_candidate = {
+        "candidate-35-NO": 0.001,
+        "candidate-36-NO": 0.001 + 5e-16,
+    }
+
+    def sub_femtoscale_joint_growth(
+        score,
+        *,
+        probability_witness,
+        capital_lock_hours,
+    ):
+        comparison = original_expected_growth(
+            score,
+            probability_witness=probability_witness,
+            capital_lock_hours=capital_lock_hours,
+        )
+        candidate_id = score.candidate.candidate_id
+        expected_delta = forced_delta_by_candidate.get(candidate_id)
+        if expected_delta is None:
+            return comparison
+        return replace(
+            comparison,
+            expected_delta_log_wealth=expected_delta,
+            expected_log_growth_per_hour=(
+                expected_delta / comparison.capital_lock_hours
+            ),
+            expected_capital_efficiency=(
+                expected_delta / float(score.cost_usd)
+            ),
+        )
+
+    monkeypatch.setattr(
+        S,
+        "_expected_growth_comparison",
+        sub_femtoscale_joint_growth,
     )
     decision = _global_select(
         bound_candidates,
@@ -1039,7 +1085,15 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
         (row.candidate_id, row.status, row.rejection_reason)
         for row in decision.candidate_evaluations
     )
-    assert decision.candidate.candidate_id == plan.primary_candidate_id, tuple(
+    assert decision.candidate.candidate_id == "candidate-36-NO"
+    assert (
+        forced_delta_by_candidate["candidate-36-NO"]
+        - forced_delta_by_candidate["candidate-35-NO"]
+        < 1e-15
+    )
+    assert decision.candidate.candidate_id in {
+        target.candidate_id for target in plan.targets
+    }, tuple(
         (
             row.candidate_id,
             row.status,
@@ -1050,7 +1104,74 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
         for row in decision.candidate_evaluations
     )
     assert decision.buy_sizing_mode == "FAMILY_JOINT_FRACTIONAL_TARGET"
-    assert optimizer_shapes == [5, 4]
+    joint_rows = {
+        row.candidate_id: row
+        for row in decision.candidate_evaluations
+        if row.candidate_id in target_by_id
+    }
+    assert set(joint_rows) == set(target_by_id)
+    assert {
+        row.status for row in joint_rows.values()
+    } == {"SCORED", "SELECTED"}
+    assert all(
+        row.rejection_reason != "FAMILY_JOINT_PLAN_NOT_PRIMARY"
+        for row in joint_rows.values()
+    )
+    cross_family_sell = _global_sell_candidate(
+        candidate_id="cross-family-capital-release-sell",
+        family="cross-family-capital-release-sell",
+        side="YES",
+        held_q=0.10,
+        bids=(("0.90", "10"),),
+        shares="10",
+        required_mode="TAKER_LIMIT",
+    )
+    sell_witness = _global_probability_witness(cross_family_sell)
+    cross_action = _global_select(
+        (*bound_candidates, cross_family_sell),
+        floor="1449.166",
+        ceiling="1449.166",
+        cash="1449.166",
+        cap="1449.166",
+        probability_witnesses={
+            family: witness,
+            cross_family_sell.family_key: sell_witness,
+        },
+        family_portfolio_endowment_resolver=lambda _: endowment,
+        fractional_kelly_multiplier="0.03125",
+    )
+    assert cross_action.candidate is cross_family_sell
+    cross_rows = {
+        row.candidate_id: row for row in cross_action.candidate_evaluations
+    }
+    assert all(
+        cross_rows[candidate_id].status == "SCORED"
+        for candidate_id in target_by_id
+    )
+    original_buy_score = S._score_global_single_order_buy_expected
+
+    def broken_joint_target(candidate, **kwargs):
+        if candidate.candidate_id == "candidate-35-NO":
+            raise RuntimeError("joint-target-invariant-broken")
+        return original_buy_score(candidate, **kwargs)
+
+    monkeypatch.setattr(
+        S,
+        "_score_global_single_order_buy_expected",
+        broken_joint_target,
+    )
+    with pytest.raises(RuntimeError, match="joint-target-invariant-broken"):
+        _global_select(
+            bound_candidates,
+            floor="1449.166",
+            ceiling="1449.166",
+            cash="1449.166",
+            cap="1449.166",
+            probability_witnesses={family: witness},
+            family_portfolio_endowment_resolver=lambda _: endowment,
+            fractional_kelly_multiplier="0.03125",
+        )
+    assert optimizer_shapes == [5]
 
 
 def test_family_joint_does_not_spend_fixed_capital_fraction_above_kelly_target():
@@ -1092,14 +1213,13 @@ def test_family_joint_does_not_spend_fixed_capital_fraction_above_kelly_target()
         fractional_kelly_multiplier=Decimal("0.03125"),
     )
 
-    assert full.primary_candidate_id == candidate.candidate_id
+    assert full.targets[0].candidate_id == candidate.candidate_id
     assert full.targets[0].shares > Decimal("55")
     assert full.targets[0].full_kelly_target_shares == full.targets[0].shares
     assert (
         full.targets[0].full_kelly_target_shares * Decimal("0.03125")
         < Decimal("5")
     )
-    assert fractional.primary_candidate_id is None
     assert fractional.targets == ()
     assert fractional.no_trade_reason == "FAMILY_JOINT_NO_POSITIVE_TARGET"
 

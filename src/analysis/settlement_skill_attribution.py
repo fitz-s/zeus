@@ -142,6 +142,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from src.contracts.global_auction_receipt import (
+    GlobalAuctionReceiptRef,
+    assert_global_auction_receipt_artifact,
+)
+
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
@@ -471,7 +476,7 @@ def grade_position(
         category = "STALE_DECISION"
         counts_as_skill_win = False
         rationale = (
-            f"born-stale: "
+            "born-stale: "
             + (
                 "a strictly-fresher posterior cycle existed before the decision"
                 if fresher_cycle_existed_at_decision
@@ -896,6 +901,61 @@ def _resolve_decision_q_from_certificate(
         return None
     if not isinstance(payload, dict):
         return None
+    economics = payload.get("qkernel_execution_economics")
+    global_marker = (
+        str(economics.get("global_actuation_identity") or "").strip()
+        if isinstance(economics, dict)
+        else ""
+    )
+    receipt_payload = payload.get("global_auction_receipt")
+    if global_marker:
+        try:
+            expected_receipt = GlobalAuctionReceiptRef.from_payload(
+                receipt_payload
+            )
+            nested_receipt = GlobalAuctionReceiptRef.from_payload(
+                economics.get("global_auction_receipt")
+            )
+            expected_receipt.assert_matches_actuation(
+                winner_event_id=economics.get("global_winner_event_id"),
+                winner_candidate_id=economics.get("global_candidate_id"),
+                winner_actuation_identity=global_marker,
+                selection_epoch_identity=economics.get(
+                    "global_selection_epoch_identity"
+                ),
+            )
+        except ValueError:
+            return None
+        if nested_receipt != expected_receipt:
+            return None
+        attached = {
+            str(schema)
+            for _, schema, *_ in world_conn.execute(
+                "PRAGMA database_list"
+            ).fetchall()
+        }
+        if "trades" not in attached:
+            return None
+        try:
+            receipt_row = world_conn.execute(
+                "SELECT mode, artifact_json FROM trades.decision_log WHERE id = ?",
+                (expected_receipt.decision_log_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if receipt_row is None:
+            return None
+        try:
+            assert_global_auction_receipt_artifact(
+                expected=expected_receipt,
+                decision_log_id=expected_receipt.decision_log_id,
+                decision_log_mode=str(receipt_row[0]),
+                artifact_json=receipt_row[1],
+            )
+        except ValueError:
+            return None
+    elif receipt_payload not in (None, ""):
+        return None
     q_live = payload.get("q_live")
     if q_live is None:
         return None  # cert carries no decision-q — unattributable, never guessed
@@ -1293,7 +1353,6 @@ def load_settled_positions(
         if cert_q is not None:
             q_live = cert_q["q_live"]
             q_lcb_5pct = cert_q["q_lcb_5pct"]
-            decision_q_certificate_hash = cert_q["certificate_hash"]
             consumed_posterior_id = cert_q["consumed_posterior_id"]
         else:
             # No resolvable immutable decision-q. Do NOT fall back to the
@@ -1301,7 +1360,6 @@ def load_settled_positions(
             # decision-q is unknown and the position is UNATTRIBUTABLE.
             q_live = None
             q_lcb_5pct = None
-            decision_q_certificate_hash = None
             consumed_posterior_id = None
 
         # Quantity 2b — freshest posterior at settlement-eve (latest cycle).

@@ -734,6 +734,18 @@ files:
     - src/state/schema/review_work_items_schema.py
     - src/contracts/entry_exposure_obligation.py
     - src/execution/fill_tracker.py
+  src/contracts/global_auction_receipt.py:
+    zone: K0_frozen_kernel
+    authority_role: global_auction_receipt_reference_contract
+    why: Freezes the exact trade.decision_log schema-21 row, logical receipt hash, recomputable compact-row execution binding, exact persisted-summary hash, winning event/candidate/actuation, and selection epoch into one immutable reference; command persistence and settlement attribution re-read that exact row and fail closed on deletion, mutation, or mismatch instead of guessing from derived identities.
+    downstream:
+    - src/engine/global_single_order_auction.py
+    - src/engine/global_batch_runtime.py
+    - src/engine/event_reactor_adapter.py
+    - src/decision_kernel/canonicalization.py
+    - src/decision_kernel/verifier.py
+    - src/state/venue_command_repo.py
+    - src/analysis/settlement_skill_attribution.py
   src/contracts/strategy_capital_allocation.py:
     zone: K0_frozen_kernel
     authority_role: strategy_capital_allocation_contract

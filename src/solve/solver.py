@@ -1570,7 +1570,6 @@ class FamilyJointBuyPlan:
 
     family_key: str
     targets: tuple[FamilyJointBuyTarget, ...]
-    primary_candidate_id: str | None
     expected_delta_log_wealth: float
     full_kelly_cost_usd: Decimal
     fractional_target_cost_usd: Decimal
@@ -4404,7 +4403,6 @@ def plan_family_joint_buy_targets(
     empty = FamilyJointBuyPlan(
         family_key=family,
         targets=(),
-        primary_candidate_id=None,
         expected_delta_log_wealth=0.0,
         full_kelly_cost_usd=Decimal("0"),
         fractional_target_cost_usd=Decimal("0"),
@@ -4642,17 +4640,9 @@ def plan_family_joint_buy_targets(
         index: exact_delta(((index, shares),))
         for index, shares in desired
     }
-    standalone_cost = {
-        index: _single_order_cost(candidates[index].economic_cost_curve, shares)
-        for index, shares in desired
-    }
-    ranked = sorted(
+    ordered = sorted(
         desired,
-        key=lambda pair: (
-            -round(standalone[pair[0]] / float(standalone_cost[pair[0]]), 15),
-            -round(standalone[pair[0]], 15),
-            candidates[pair[0]].candidate_id,
-        ),
+        key=lambda pair: candidates[pair[0]].candidate_id,
     )
     targets = tuple(
         FamilyJointBuyTarget(
@@ -4666,7 +4656,7 @@ def plan_family_joint_buy_targets(
             fractional_kelly_target_shares=target_by_index[index][1],
             standalone_expected_delta_log_wealth=standalone[index],
         )
-        for index, shares in ranked
+        for index, shares in ordered
     )
     full_cost = sum(
         (
@@ -4678,7 +4668,6 @@ def plan_family_joint_buy_targets(
     return FamilyJointBuyPlan(
         family_key=family,
         targets=targets,
-        primary_candidate_id=targets[0].candidate_id,
         expected_delta_log_wealth=float(joint_du),
         full_kelly_cost_usd=full_cost,
         fractional_target_cost_usd=fractional_cost,
@@ -7104,7 +7093,6 @@ def select_global_single_order(
                 joint_plan = FamilyJointBuyPlan(
                     family_key=family_key,
                     targets=(),
-                    primary_candidate_id=None,
                     expected_delta_log_wealth=0.0,
                     full_kelly_cost_usd=Decimal("0"),
                     fractional_target_cost_usd=Decimal("0"),
@@ -7122,94 +7110,96 @@ def select_global_single_order(
             for candidate_id in family_ids:
                 rejections.pop(candidate_id, None)
                 rejected_buy_economics_by_id.pop(candidate_id, None)
-            primary_id = joint_plan.primary_candidate_id
-            if primary_id is None:
+            if not joint_plan.targets:
                 reason = joint_plan.no_trade_reason or "FAMILY_JOINT_NO_POSITIVE_TARGET"
                 rejections.update({candidate_id: reason for candidate_id in family_ids})
                 continue
             target_by_id = {target.candidate_id: target for target in joint_plan.targets}
+            candidate_by_id = {
+                candidate.candidate_id: candidate
+                for candidate in positive_family_candidates
+            }
             rejections.update(
                 {
-                    candidate_id: "FAMILY_JOINT_PLAN_NOT_PRIMARY"
+                    candidate_id: "FAMILY_JOINT_NO_POSITIVE_TARGET"
                     for candidate_id in family_ids
-                    if candidate_id != primary_id
+                    if candidate_id not in target_by_id
                 }
             )
-            primary = next(
-                candidate
-                for candidate in family_candidates
-                if candidate.candidate_id == primary_id
-            )
-            target = target_by_id[primary_id]
-            primary_endowment = buy_endowments[primary_id]
-            q_samples = family_payoff_q_samples(
-                witness,
-                bin_id=primary.bin_id,
-                side=primary.side,
-            )
-            payoff_probability_mean = family_payoff_point_q(
-                witness,
-                bin_id=primary.bin_id,
-                side=primary.side,
-            )
-            assert q_samples is not None and payoff_probability_mean is not None
-            try:
+            for target in joint_plan.targets:
+                candidate_id = target.candidate_id
+                candidate = candidate_by_id.get(candidate_id)
+                candidate_endowment = buy_endowments.get(candidate_id)
+                if candidate is None or candidate_endowment is None:
+                    rejections[candidate_id] = "FAMILY_JOINT_TARGET_AUTHORITY_MISSING"
+                    continue
+                q_samples = family_payoff_q_samples(
+                    witness,
+                    bin_id=candidate.bin_id,
+                    side=candidate.side,
+                )
+                payoff_probability_mean = family_payoff_point_q(
+                    witness,
+                    bin_id=candidate.bin_id,
+                    side=candidate.side,
+                )
+                if q_samples is None or payoff_probability_mean is None:
+                    rejections[candidate_id] = "FAMILY_JOINT_TARGET_PROBABILITY_MISSING"
+                    continue
                 target_cost = _single_order_cost(
-                    primary.economic_cost_curve,
+                    candidate.economic_cost_curve,
                     target.shares,
                 )
                 fixed = _score_global_single_order_buy_expected(
-                    primary,
+                    candidate,
                     payoff_probability_mean=payoff_probability_mean,
                     sample_count=q_samples.size,
                     band_alpha=witness.band_alpha,
-                    wealth_floor_usd=primary_endowment.loss_wealth_floor_usd,
-                    wealth_ceiling_usd=primary_endowment.win_wealth_floor_usd,
+                    wealth_floor_usd=candidate_endowment.loss_wealth_floor_usd,
+                    wealth_ceiling_usd=candidate_endowment.win_wealth_floor_usd,
                     spendable_cash_usd=wealth_witness.spendable_cash_usd,
                     capital_limit_usd=target_cost,
                     fractional_kelly_multiplier=Decimal("1"),
                     current_token_shares=Decimal("0"),
                 )
-            except Exception:  # noqa: BLE001 - repaired primary must remain executable
-                fixed = GlobalSingleOrderDecision(
-                    candidate=None,
-                    shares=Decimal("0"),
-                    cost_usd=Decimal("0"),
-                    robust_delta_log_wealth=0.0,
-                    robust_ev_usd=0.0,
-                    capital_efficiency=0.0,
-                    no_trade_reason="FAMILY_JOINT_PRIMARY_REPAIR_FAILED",
-                )
-            if fixed.candidate is None:
-                rejections[primary_id] = (
-                    fixed.no_trade_reason or "FAMILY_JOINT_PRIMARY_REPAIR_FAILED"
-                )
-                continue
-            fixed, horizon_reason = bind_capital_horizon(
-                fixed,
-                family_key=family_key,
-                action_mode=(
-                    "CONTINGENT_MAKER_REST_BUY"
-                    if primary.execution_mode == "MAKER_REST"
-                    else "SETTLEMENT_LOCKED_BUY"
-                ),
-            )
-            if fixed is None:
-                rejections[primary_id] = str(
-                    horizon_reason or "EXPECTED_COMPARISON_UNAVAILABLE"
-                )
-                continue
-            scored.append(
-                replace(
+                if fixed.candidate is None:
+                    rejections[candidate_id] = (
+                        fixed.rejection_reasons.get(candidate_id)
+                        or fixed.no_trade_reason
+                        or "FAMILY_JOINT_TARGET_REPAIR_FAILED"
+                    )
+                    if fixed.buy_rejection_economics is not None:
+                        rejected_buy_economics_by_id[candidate_id] = (
+                            fixed.buy_rejection_economics
+                        )
+                    continue
+                fixed, horizon_reason = bind_capital_horizon(
                     fixed,
-                    current_token_shares=target.current_token_shares,
-                    full_kelly_target_shares=target.full_kelly_target_shares,
-                    fractional_kelly_target_shares=(
-                        target.fractional_kelly_target_shares
+                    family_key=family_key,
+                    action_mode=(
+                        "CONTINGENT_MAKER_REST_BUY"
+                        if candidate.execution_mode == "MAKER_REST"
+                        else "SETTLEMENT_LOCKED_BUY"
                     ),
-                    buy_sizing_mode="FAMILY_JOINT_FRACTIONAL_TARGET",
                 )
-            )
+                if fixed is None:
+                    rejections[candidate_id] = str(
+                        horizon_reason or "EXPECTED_COMPARISON_UNAVAILABLE"
+                    )
+                    continue
+                scored.append(
+                    replace(
+                        fixed,
+                        current_token_shares=target.current_token_shares,
+                        full_kelly_target_shares=(
+                            target.full_kelly_target_shares
+                        ),
+                        fractional_kelly_target_shares=(
+                            target.fractional_kelly_target_shares
+                        ),
+                        buy_sizing_mode="FAMILY_JOINT_FRACTIONAL_TARGET",
+                    )
+                )
 
     positive_scored = tuple(
         score

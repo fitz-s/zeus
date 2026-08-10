@@ -183,6 +183,7 @@ from src.contracts.day0_payoff_truth import (
 )
 from src.contracts.execution_intent import ExecutableCostBasis
 from src.contracts.execution_price import ExecutionPrice, ExecutionPriceContractError
+from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
 from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.contracts.venue_submission_envelope import assert_live_order_unit_price
 from src.contracts.executable_cost_curve import (
@@ -13563,8 +13564,21 @@ def _global_actuation_selected_proof(
     candidate = getattr(decision, "candidate", None)
     prepared_witness = getattr(prepared_global_family, "probability_witness", None)
     witness = getattr(global_actuation, "probability_witness", None)
+    receipt_ref = getattr(global_actuation, "auction_receipt_ref", None)
     if candidate is None or witness is None or prepared_witness is None:
         raise ValueError("GLOBAL_ACTUATION_AUTHORITY_MISSING")
+    if not isinstance(receipt_ref, GlobalAuctionReceiptRef):
+        raise ValueError("GLOBAL_ACTUATION_RECEIPT_REF_MISSING")
+    receipt_ref.assert_matches_actuation(
+        winner_event_id=getattr(global_actuation, "winner_event_id", None),
+        winner_candidate_id=getattr(candidate, "candidate_id", None),
+        winner_actuation_identity=getattr(
+            global_actuation, "actuation_identity", None
+        ),
+        selection_epoch_identity=getattr(
+            global_actuation, "selection_epoch_identity", None
+        ),
+    )
     probability_fields = (
         "family_key",
         "q_version",
@@ -13679,6 +13693,10 @@ def _global_actuation_selected_proof(
             "global_actuation_identity": str(
                 getattr(global_actuation, "actuation_identity", "") or ""
             ),
+            "global_winner_event_id": str(
+                getattr(global_actuation, "winner_event_id", "") or ""
+            ),
+            "global_auction_receipt": receipt_ref.as_payload(),
             "global_economic_identity": str(
                 getattr(global_actuation, "economic_identity", "") or ""
             ),
@@ -19501,6 +19519,11 @@ def _actionable_payload_from_receipt(
         # qkernel cert to THIS selected leg across the two candidate_id namespaces.
         "candidate_bin_id": receipt.candidate_bin_id,
         "qkernel_execution_economics": qkernel_execution_economics,
+        "global_auction_receipt": (
+            qkernel_execution_economics.get("global_auction_receipt")
+            if isinstance(qkernel_execution_economics, dict)
+            else None
+        ),
         "day0_probability_authority": day0_probability_authority,
         # Keep the internal provenance projection byte-consistent with the
         # receipt's canonical probability witness. Day0 may carry a more
@@ -28173,7 +28196,12 @@ def _robust_marginal_utility_stake_and_price(
                     "payoff_q_action" if mean_action else "payoff_q_lcb"
                 ]
             )
+            # Preserve the complete frozen certificate.  This provenance mapping
+            # may be inspected independently of the final receipt, so retaining a
+            # global actuation marker without its exact auction receipt would create
+            # a second, unverifiable representation of the selected action.
             stake_floor_out["qkernel_execution_economics"] = {
+                **global_qkernel_cert,
                 "payoff_q_lcb": float(global_qkernel_cert["payoff_q_lcb"]),
                 "payoff_q_point": float(global_qkernel_cert["payoff_q_point"]),
                 "payoff_q_action": action_q,
@@ -28182,9 +28210,6 @@ def _robust_marginal_utility_stake_and_price(
                 "global_expected_cost_usd": float(target_cost),
                 "global_target_shares": float(
                     global_qkernel_cert["global_target_shares"]
-                ),
-                "global_actuation_identity": global_qkernel_cert.get(
-                    "global_actuation_identity"
                 ),
             }
         return float(chosen), price

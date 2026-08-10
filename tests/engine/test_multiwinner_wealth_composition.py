@@ -199,11 +199,10 @@ def test_family_joint_never_spends_fixed_fraction_above_kelly_target():
         fractional_kelly_multiplier=Decimal("0.03125"),
     )
 
-    assert full.primary_candidate_id == candidate_id
+    assert full.targets[0].candidate_id == candidate_id
     assert full.targets[0].shares > Decimal("55")
     assert full.targets[0].full_kelly_target_shares == full.targets[0].shares
     assert full.targets[0].full_kelly_target_shares * Decimal("0.03125") < Decimal("5")
-    assert fractional.primary_candidate_id is None
     assert fractional.targets == ()
     assert fractional.no_trade_reason == "FAMILY_JOINT_NO_POSITIVE_TARGET"
 

@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-01; last_reused=2026-08-01
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-09; last_reused=2026-08-09
 # Purpose: Lock venue command journal invariants, transitions, recovery, and U1 snapshot gate.
 # Reuse: Run when venue_command_repo, command schema, or executable snapshot gate changes.
-# Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S1
+# Authority basis: command-bus INV-28/NC-18 plus schema-21 global receipt closure.
 """Tests for src/state/venue_command_repo.py (P1.S1 — INV-28 / NC-18)."""
 from __future__ import annotations
 
@@ -16,6 +16,12 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+
+from src.contracts.global_auction_receipt import (
+    GlobalAuctionReceiptRef,
+    global_auction_artifact_summary_hash,
+    global_auction_execution_binding_hash,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 _NOW = datetime(2026, 4, 26, tzinfo=timezone.utc)
@@ -62,7 +68,8 @@ def _insert(c, *, command_id="cmd-001", position_id="pos-001",
             intent_kind="ENTRY", market_id="mkt-001", token_id="tok-001",
             side="BUY", size=10.0, price=0.5,
             created_at="2026-04-26T00:00:00Z", q_version=None,
-            decision_certificate_hash=None):
+            decision_certificate_hash=None,
+            decision_certificate_payload_extra=None):
     from src.state.venue_command_repo import insert_command
     snapshot_id = _ensure_snapshot(c, token_id=token_id)
     envelope = _make_envelope(
@@ -87,6 +94,7 @@ def _insert(c, *, command_id="cmd-001", position_id="pos-001",
             c,
             certificate_hash=decision_certificate_hash,
             envelope=envelope,
+            payload_extra=decision_certificate_payload_extra,
         )
     insert_command(
         c,
@@ -467,11 +475,18 @@ def _ensure_entry_certificate(
     certificate_hash: str,
     envelope,
     direction: str | None = None,
+    payload_extra: dict | None = None,
 ) -> None:
     token_id = str(envelope.selected_outcome_token_id)
     direction = direction or (
         "buy_yes" if token_id == str(envelope.yes_token_id) else "buy_no"
     )
+    payload = {
+        "condition_id": str(envelope.condition_id),
+        "token_id": token_id,
+        "direction": direction,
+    }
+    payload.update(payload_extra or {})
     c.execute(
         """
         INSERT OR REPLACE INTO world.decision_certificates(
@@ -480,15 +495,79 @@ def _ensure_entry_certificate(
         """,
         (
             certificate_hash,
-            json.dumps(
-                {
-                    "condition_id": str(envelope.condition_id),
-                    "token_id": token_id,
-                    "direction": direction,
-                }
-            ),
+            json.dumps(payload),
         ),
     )
+
+
+def _insert_global_auction_receipt(c) -> GlobalAuctionReceiptRef:
+    from src.state.decision_chain import CycleArtifact, store_artifact
+
+    summary = {
+        "schema_version": 21,
+        "selection_epoch_identity": "epoch-command",
+        "selection_cut_at_utc": "2026-08-09T00:00:00+00:00",
+        "decision_at_utc": "2026-08-09T00:00:01+00:00",
+        "full_scope_identity": "scope-command",
+        "book_epoch_identity": "book-command",
+        "wealth_witness_identity": "wealth-command",
+        "wealth_economic_identity": "wealth-economic-command",
+        "winner_event_id": "event-command",
+        "winner_candidate_id": "candidate-command",
+        "winner_actuation_identity": "actuation-command",
+        "payload_identity": "1" * 64,
+        "decision_payload_identity": "2" * 64,
+        "audit_context_sha256": "3" * 64,
+        "book_native_side_states_sha256": "4" * 64,
+        "candidate_evaluations_sha256": "5" * 64,
+        "buy_minimum_marketable_repairs_sha256": "6" * 64,
+        "holding_auction_coverage_sha256": "7" * 64,
+        "receipt_hash": "8" * 64,
+    }
+    summary["execution_binding_hash"] = (
+        global_auction_execution_binding_hash(summary)
+    )
+    summary["artifact_summary_hash"] = global_auction_artifact_summary_hash(
+        summary
+    )
+    mode = "global_single_order_auction"
+    row_id = store_artifact(
+        c,
+        CycleArtifact(
+            mode=mode,
+            started_at="2026-08-09T00:00:00+00:00",
+            completed_at="2026-08-09T00:00:01+00:00",
+            skipped_reason="",
+            summary=summary,
+        ),
+    )
+    assert row_id is not None
+    return GlobalAuctionReceiptRef(
+        decision_log_id=row_id,
+        decision_log_mode=mode,
+        receipt_hash=str(summary["receipt_hash"]),
+        execution_binding_hash=str(summary["execution_binding_hash"]),
+        artifact_summary_hash=str(summary["artifact_summary_hash"]),
+        schema_version=21,
+        winner_event_id="event-command",
+        winner_candidate_id="candidate-command",
+        winner_actuation_identity="actuation-command",
+        selection_epoch_identity="epoch-command",
+    )
+
+
+def _global_certificate_payload(ref: GlobalAuctionReceiptRef) -> dict:
+    receipt_payload = ref.as_payload()
+    return {
+        "global_auction_receipt": receipt_payload,
+        "qkernel_execution_economics": {
+            "global_actuation_identity": ref.winner_actuation_identity,
+            "global_winner_event_id": ref.winner_event_id,
+            "global_candidate_id": ref.winner_candidate_id,
+            "global_selection_epoch_identity": ref.selection_epoch_identity,
+            "global_auction_receipt": receipt_payload,
+        },
+    }
 
 
 def _signed_envelope(*, order_id="0xorder", token_id="tok-001", side="BUY"):
@@ -919,6 +998,84 @@ class TestInsertCommandAtomicWithIntentCreatedEvent:
 class TestPositionDecisionAttributionAppendHook:
     """LX-E packet (2026-07-13): insert_command appends the permanent
     position -> decision_certificate_hash fact atomically with the command."""
+
+    def test_global_receipt_closes_before_command_and_attribution(self, conn):
+        receipt_ref = _insert_global_auction_receipt(conn)
+
+        _insert(
+            conn,
+            command_id="cmd-global-receipt",
+            position_id="pos-global-receipt",
+            idempotency_key="idem-global-receipt",
+            decision_certificate_hash="cert-global-receipt",
+            decision_certificate_payload_extra=_global_certificate_payload(
+                receipt_ref
+            ),
+        )
+
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE command_id = ?",
+            ("cmd-global-receipt",),
+        ).fetchone()[0] == 1
+        assert _attribution_row(conn, "pos-global-receipt") is not None
+
+    @pytest.mark.parametrize(
+        "fault",
+        (
+            "missing_ref",
+            "deleted",
+            "mutated",
+            "missing_binding_field",
+            "nonbinding_mutation",
+        ),
+    )
+    def test_global_receipt_fault_rolls_back_command_and_attribution(
+        self,
+        conn,
+        fault,
+    ):
+        receipt_ref = _insert_global_auction_receipt(conn)
+        payload_extra = _global_certificate_payload(receipt_ref)
+        if fault == "missing_ref":
+            payload_extra.pop("global_auction_receipt")
+        elif fault == "deleted":
+            conn.execute(
+                "DELETE FROM decision_log WHERE id = ?",
+                (receipt_ref.decision_log_id,),
+            )
+        else:
+            row = conn.execute(
+                "SELECT artifact_json FROM decision_log WHERE id = ?",
+                (receipt_ref.decision_log_id,),
+            ).fetchone()
+            artifact = json.loads(row[0])
+            if fault == "mutated":
+                artifact["summary"]["winner_candidate_id"] = "mutated-candidate"
+            elif fault == "missing_binding_field":
+                artifact["summary"].pop("wealth_economic_identity")
+                artifact["summary"]["execution_binding_hash"] = "f" * 64
+            else:
+                artifact["summary"]["no_trade_reason"] = "forged-reason"
+            conn.execute(
+                "UPDATE decision_log SET artifact_json = ? WHERE id = ?",
+                (json.dumps(artifact), receipt_ref.decision_log_id),
+            )
+
+        with pytest.raises(ValueError, match="global auction receipt"):
+            _insert(
+                conn,
+                command_id=f"cmd-global-{fault}",
+                position_id=f"pos-global-{fault}",
+                idempotency_key=f"idem-global-{fault}",
+                decision_certificate_hash=f"cert-global-{fault}",
+                decision_certificate_payload_extra=payload_extra,
+            )
+
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE command_id = ?",
+            (f"cmd-global-{fault}",),
+        ).fetchone()[0] == 0
+        assert _attribution_row(conn, f"pos-global-{fault}") is None
 
     def test_hash_given_writes_attribution_row(self, conn):
         _insert(

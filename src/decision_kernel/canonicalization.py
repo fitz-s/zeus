@@ -11,6 +11,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, Mapping
 
+from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
 from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 
 CANONICALIZATION_VERSION = "decision-kernel-json-v1"
@@ -89,6 +90,8 @@ _QKERNEL_CURRENT_STATE_IDENTITY_FIELDS: tuple[str, ...] = (
     "robust_trade_score",
     "false_edge_rate",
     "global_actuation_identity",
+    "global_winner_event_id",
+    "global_auction_receipt",
     "global_optimum_semantics",
     "global_candidate_id",
     "global_execution_mode",
@@ -315,6 +318,20 @@ def qkernel_global_current_state_rejection_reason(
     assert isinstance(economics, Mapping)
     if not str(economics.get("global_actuation_identity") or "").strip():
         return "global_actuation_identity"
+    try:
+        receipt_ref = GlobalAuctionReceiptRef.from_payload(
+            economics.get("global_auction_receipt")
+        )
+        receipt_ref.assert_matches_actuation(
+            winner_event_id=economics.get("global_winner_event_id"),
+            winner_candidate_id=economics.get("global_candidate_id"),
+            winner_actuation_identity=economics.get("global_actuation_identity"),
+            selection_epoch_identity=economics.get(
+                "global_selection_epoch_identity"
+            ),
+        )
+    except ValueError:
+        return "global_auction_receipt"
     side = str(economics.get("side") or "").strip().upper()
     direction_text = str(direction or "").strip().lower()
     native_side = (
@@ -391,6 +408,7 @@ def qkernel_global_current_state_rejection_reason(
             return "global_posterior_id_mismatch"
     for field in (
         "global_candidate_id",
+        "global_winner_event_id",
         "global_bin_id",
         "global_economic_identity",
         "global_universe_witness_identity",

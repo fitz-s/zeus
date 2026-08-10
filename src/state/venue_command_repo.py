@@ -41,6 +41,10 @@ from typing import Any, Iterable, Iterator, Mapping, Optional
 
 from src.architecture.decorators import capability, protects
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
+from src.contracts.global_auction_receipt import (
+    GlobalAuctionReceiptRef,
+    assert_global_auction_receipt_artifact,
+)
 from src.venue.response_contracts import is_pre_sdk_no_side_effect_rejection
 
 UNRESOLVED_SIDE_EFFECT_STATES: tuple[str, ...] = (
@@ -1611,11 +1615,12 @@ def _assert_entry_certificate_closure(
 ) -> None:
     """Require an ENTRY's exact, live certificate in the attached WORLD ledger.
 
-    SCOPE: this command/envelope only.  DRAIN: none; a missing proof is not a
-    transient queue to bridge.  RESET: the caller retries only after the exact
-    certificate has been committed to WORLD and the sanctioned trade+world
-    connection attaches that authority.  This runs inside ``insert_command``'s
-    SAVEPOINT before any command, event, or attribution write.
+    SCOPE: this command/envelope only.  DRAIN: none; a missing certificate or
+    global-auction receipt is not a transient queue to bridge.  RESET: the
+    caller retries only after the exact certificate and referenced receipt have
+    committed through their sanctioned stores.  This runs inside
+    ``insert_command``'s SAVEPOINT before any command, event, or attribution
+    write.
     """
     schemas = {
         str(row[1]).strip()
@@ -1675,6 +1680,53 @@ def _assert_entry_certificate_closure(
         raise ValueError(
             "ENTRY certificate closure identity does not match command envelope"
         )
+
+    economics = payload.get("qkernel_execution_economics")
+    global_marker = (
+        str(economics.get("global_actuation_identity") or "").strip()
+        if isinstance(economics, dict)
+        else ""
+    )
+    receipt_payload = payload.get("global_auction_receipt")
+    if not global_marker:
+        if receipt_payload not in (None, ""):
+            raise ValueError(
+                "ENTRY certificate global receipt lacks global actuation"
+            )
+        return
+    try:
+        expected_receipt = GlobalAuctionReceiptRef.from_payload(receipt_payload)
+        nested_receipt = GlobalAuctionReceiptRef.from_payload(
+            economics.get("global_auction_receipt")
+        )
+        expected_receipt.assert_matches_actuation(
+            winner_event_id=economics.get("global_winner_event_id"),
+            winner_candidate_id=economics.get("global_candidate_id"),
+            winner_actuation_identity=global_marker,
+            selection_epoch_identity=economics.get(
+                "global_selection_epoch_identity"
+            ),
+        )
+    except ValueError as exc:
+        raise ValueError(f"ENTRY global auction receipt invalid: {exc}") from None
+    if nested_receipt != expected_receipt:
+        raise ValueError("ENTRY global auction receipt certificate mismatch")
+    with _row_factory_as(conn, sqlite3.Row):
+        receipt_row = conn.execute(
+            "SELECT mode, artifact_json FROM decision_log WHERE id = ?",
+            (expected_receipt.decision_log_id,),
+        ).fetchone()
+    if receipt_row is None:
+        raise ValueError("ENTRY global auction receipt row missing")
+    try:
+        assert_global_auction_receipt_artifact(
+            expected=expected_receipt,
+            decision_log_id=expected_receipt.decision_log_id,
+            decision_log_mode=str(receipt_row["mode"]),
+            artifact_json=receipt_row["artifact_json"],
+        )
+    except ValueError as exc:
+        raise ValueError(f"ENTRY global auction receipt closure failed: {exc}") from None
 
 
 def _decimal(value: Any) -> Decimal:

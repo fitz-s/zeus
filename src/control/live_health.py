@@ -1,5 +1,5 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-08-03
+# Last reused or audited: 2026-08-09
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
 #
@@ -29,6 +29,11 @@ from pathlib import Path
 from typing import Mapping, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from src.contracts.global_auction_receipt import (
+    assert_global_auction_summary_integrity,
+    global_auction_execution_binding_hash,
+    global_auction_receipt_ref_from_summary,
+)
 from src.contracts.strategy_capital_allocation import (
     STRATEGY_LOG_UTILITY_BASIS,
     StrategyCapitalAllocationWitness,
@@ -6144,6 +6149,39 @@ def _latest_global_auction_candidate_counts(
         schema_version = int(summary.get("schema_version") or 0)
         if schema_version < 5:
             return invalid("SCHEMA_VERSION")
+        if schema_version == 21:
+            try:
+                expected_execution_binding_hash = (
+                    global_auction_execution_binding_hash(summary)
+                )
+            except ValueError:
+                return invalid("EXECUTION_BINDING_FIELDS")
+            if (
+                summary.get("execution_binding_hash")
+                != expected_execution_binding_hash
+            ):
+                return invalid("EXECUTION_BINDING_HASH")
+            try:
+                assert_global_auction_summary_integrity(summary)
+            except ValueError:
+                return invalid("ARTIFACT_SUMMARY_HASH")
+            winner_candidate_id = str(
+                summary.get("winner_candidate_id") or ""
+            ).strip()
+            winner_event_id = str(summary.get("winner_event_id") or "").strip()
+            winner_actuation_identity = str(
+                summary.get("winner_actuation_identity") or ""
+            ).strip()
+            if bool(winner_candidate_id) != bool(
+                winner_event_id and winner_actuation_identity
+            ):
+                return invalid("WINNER_EXECUTION_BINDING")
+            if winner_candidate_id:
+                global_auction_receipt_ref_from_summary(
+                    decision_log_id=int(receipt_id),
+                    decision_log_mode=str(row["mode"]),
+                    summary=summary,
+                )
         if summary.get("candidate_coverage_complete") is not True:
             return invalid("COVERAGE_INCOMPLETE")
         if summary.get("candidate_condition_index_complete") is not True:

@@ -62,6 +62,13 @@ is exactly equal. Negative or non-finite terminal wealth remains invalid, BUY
 may not introduce a zero atom, and positive EV remains an explicit independent
 policy gate.
 
+The same-family Kelly solve owns only the endowment-aware cumulative target
+vector. It does not preselect a "primary" token: every venue-legal positive
+target is rematerialized as its own fixed BUY proposal, kept in the receipt,
+and compared with every other BUY, SELL, HOLD, and CASH proposal by the same
+raw global comparator. No rounded efficiency shortcut may delete a sibling
+before that comparison.
+
 A scalar maker-fill prior is not current decision-time truth and partial fills
 change both terminal atoms and capital-release time. Until a typed,
 candidate-bound current partial-fill distribution exists, every `MAKER_REST`
@@ -74,13 +81,21 @@ not a preference for taker orders.
 At submit, the selected mode is preserved and probability, executable book,
 fees, wealth/allocation, position, terminal ruin reduction, utility basis,
 proposal growth, and capital horizon are canonically sealed and revalidated.
-The current receipt shape is schema 21 / canonical candidate encoding v13.
-Settlement skill attribution does not grade that selection-log schema directly:
-an executed ENTRY persists the exact `ActionableTradeCertificate` hash, and the
-settlement grader resolves its frozen `q_live`, `q_lcb_5pct`, and `posterior_id`
-or records `UNATTRIBUTABLE_Q_MISSING`. This keeps decision-time probability
-immutable without pretending the schema-21 diagnostic receipt is settlement
-authority.
+The current receipt shape is schema 21 / canonical candidate encoding v13. A
+winning receipt now persists the winner event/candidate/actuation and a
+recomputable compact-row execution binding plus a hash of the exact persisted
+summary, then freezes the exact `decision_log` row ID, mode, logical receipt
+hash, execution-binding hash, persisted-summary hash, and selection epoch into
+the selected actuation and `ActionableTradeCertificate`. If claim-carrier
+rebinding changes the winner event or actuation identity, the runtime appends
+and commits a newly sealed receipt row that references the unchanged base cut;
+it never mutates or reuses the old binding. Entry command persistence re-reads
+that exact row before writing the command or position attribution. Settlement
+skill attribution follows the existing exact `position_id -> certificate_hash`
+relation, revalidates the same receipt row, then consumes the frozen `q_live`,
+`q_lcb_5pct`, and `posterior_id`; missing, deleted, mutated, or mismatched global receipts produce
+`UNATTRIBUTABLE_Q_MISSING` with no inferred fallback. No bridge table or
+settlement schema migration is introduced.
 
 SCOPE is one candidate or one complete q/book/wealth auction cut: malformed or
 stale allocation blocks new BUY authority; unavailable maker-fill evidence
@@ -95,10 +110,11 @@ bands, RiskAllocator exposure caps, and lifecycle law are unchanged.
 Acceptance requires E/L/K/U math and co-tenant isolation, allocation-zero
 SELL/HOLD/CASH preservation, exact sub-femtoscale ruin ordering, negative-wealth
 rejection, malformed-config rejection, maker rejection with taker-sibling
-survival, allocation and comparison-field identity drift rejection at JIT and
-submit, schema-21/v13 health validation, and focused global-auction/runtime
-regressions, plus the existing exact certificate-to-settlement attribution
-antibodies.
+survival, retention of every family-joint target through the raw global
+comparator, allocation and comparison-field identity drift rejection at JIT
+and submit, schema-21/v13 health validation, exact receipt-to-actuation/certificate/
+command/settlement closure with mutation/deletion/mismatch antibodies, and
+focused global-auction/runtime regressions.
 
 ## 2026-08-08 Day0 probability authority survives certificate compilation
 

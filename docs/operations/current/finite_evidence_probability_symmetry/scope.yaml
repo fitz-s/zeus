@@ -24,6 +24,7 @@ in_scope:
 - src/data/replacement_forecast_materialization_request_builder.py
 - src/contracts/replacement_pipeline_files.py
 - src/contracts/strategy_capital_allocation.py
+- src/contracts/global_auction_receipt.py
 - src/contracts/AGENTS.md
 - src/contracts/snapshot_ingest_contract.py
 - src/data/replacement_forecast_cycle_policy.py
@@ -69,6 +70,7 @@ in_scope:
 - src/state/chain_reconciliation.py
 - src/state/fill_dedup.py
 - src/state/venue_command_repo.py
+- src/analysis/settlement_skill_attribution.py
 - src/state/collateral_ledger.py
 - src/state/chain_mirror_reconciler.py
 - src/ops/monitor_cadence.py
@@ -157,6 +159,8 @@ in_scope:
 - tests/AGENTS.md
 - architecture/test_topology.yaml
 - architecture/source_rationale.yaml
+- architecture/module_manifest.yaml
+- architecture/db_table_ownership.yaml
 - architecture/script_manifest.yaml
 - src/contracts/venue_submission_envelope.py
 - src/contracts/position_truth.py
@@ -206,4 +210,8 @@ tests:
 - tests/solve/test_shim_decide.py
 - tests/integration/test_w3_solve_seam_g3.py
 - tests/integration/test_qkernel_spine_blockers_pr409.py
+- tests/test_venue_command_repo.py
+- tests/test_settlement_skill_attribution.py
+- tests/execution/test_entry_economics_submit_gate.py::current_state
+- tests/events/test_live_order_aggregate.py::current_state
 closeout_required: true

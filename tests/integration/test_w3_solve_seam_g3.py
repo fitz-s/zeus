@@ -114,6 +114,12 @@ from src.contracts.executable_market_snapshot import (
     canonicalize_fee_details,
 )
 from src.contracts.execution_price import ExecutionPrice
+from src.contracts.global_auction_receipt import (
+    GlobalAuctionReceiptRef,
+    global_auction_artifact_summary_hash,
+    global_auction_execution_binding_hash,
+    global_auction_receipt_ref_from_artifact,
+)
 from src.contracts.semantic_types import Direction
 from src.strategy import utility_ranker
 from src.strategy.live_inference.mode_consistent_ev import (
@@ -187,6 +193,28 @@ def _test_strategy_allocation(*, basis="20", cash="10", committed="0"):
         committed_capital_usd=Decimal(str(committed)),
         venue_spendable_cash_usd=Decimal(str(cash)),
         allocation={"mode": "wallet_total"},
+    )
+
+
+def _test_global_auction_receipt_ref(
+    *,
+    candidate_id: str,
+    actuation_identity: str,
+    event_id: str = "event-current",
+    selection_epoch_identity: str = "epoch-current",
+    decision_log_id: int = 1,
+) -> GlobalAuctionReceiptRef:
+    return GlobalAuctionReceiptRef(
+        decision_log_id=decision_log_id,
+        decision_log_mode="global_single_order_auction",
+        receipt_hash="a" * 64,
+        execution_binding_hash="b" * 64,
+        artifact_summary_hash="c" * 64,
+        schema_version=21,
+        winner_event_id=event_id,
+        winner_candidate_id=candidate_id,
+        winner_actuation_identity=actuation_identity,
+        selection_epoch_identity=selection_epoch_identity,
     )
 
 
@@ -413,6 +441,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     )
     identity_witness = SimpleNamespace(
         family_key="family-buy",
+        witness_identity="q-buy",
         family_binding_identity="family-binding-buy",
         sample_matrix_identity="sample-matrix-buy",
         q_version="q-buy",
@@ -517,8 +546,35 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             )
         )
     }
-    selected = SimpleNamespace(
+    receipt_actuation_identity = global_single_order_actuation_identity(
         decision=decision,
+        winner_event_id="event-buy",
+        universe_witness_identity="universe-current",
+        wealth_witness_identity="wealth-current",
+        selection_epoch_identity="epoch-current",
+        selection_cut_at_utc=at,
+        decision_at_utc=at + _dt.timedelta(seconds=1),
+    )
+    selected = PreparedGlobalAuctionResult(
+        decision=decision,
+        winner_event_id="event-buy",
+        actuation=GlobalSingleOrderActuation(
+            decision=decision,
+            winner_event_id="event-buy",
+            universe_witness_identity="universe-current",
+            wealth_witness_identity="wealth-current",
+            selection_epoch_identity="epoch-current",
+            probability_witness=identity_witness,
+            selection_cut_at_utc=at,
+            decision_at_utc=at + _dt.timedelta(seconds=1),
+            actuation_identity=receipt_actuation_identity,
+            wealth_economic_identity="wealth-economics-current",
+            economic_identity=global_single_order_economic_identity(
+                decision=decision,
+                probability_witness=identity_witness,
+                wealth_economic_identity="wealth-economics-current",
+            ),
+        ),
         holding_coverage=(
             GlobalHoldingAuctionCoverage(
                 position_id="position-sell",
@@ -710,6 +766,82 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
     assert summary["schema_version"] == 21
+    assert summary["winner_event_id"] == "event-buy"
+    assert summary["winner_candidate_id"] == "buy-repaired"
+    assert summary["winner_actuation_identity"] == receipt_actuation_identity
+    receipt_ref = global_auction_receipt_ref_from_artifact(
+        decision_log_id=row_id,
+        decision_log_mode=row["mode"],
+        artifact_json=row["artifact_json"],
+    )
+    receipt_ref.assert_matches_actuation(
+        winner_event_id="event-buy",
+        winner_candidate_id="buy-repaired",
+        winner_actuation_identity=receipt_actuation_identity,
+        selection_epoch_identity="epoch-current",
+    )
+    bound_selected = global_batch_runtime._bind_stored_global_auction_receipt(
+        conn,
+        selected=selected,
+        decision_log_id=row_id,
+    )
+    assert bound_selected.actuation.auction_receipt_ref == receipt_ref
+    assert selected.actuation.auction_receipt_ref is None
+    carrier_actuation_identity = global_single_order_actuation_identity(
+        decision=selected.actuation.decision,
+        winner_event_id="claimed-carrier-event",
+        universe_witness_identity=selected.actuation.universe_witness_identity,
+        wealth_witness_identity=selected.actuation.wealth_witness_identity,
+        selection_epoch_identity=selected.actuation.selection_epoch_identity,
+        selection_cut_at_utc=selected.actuation.selection_cut_at_utc,
+        decision_at_utc=selected.actuation.decision_at_utc,
+    )
+    carrier_selected = replace(
+        selected,
+        winner_event_id="claimed-carrier-event",
+        actuation=replace(
+            selected.actuation,
+            winner_event_id="claimed-carrier-event",
+            actuation_identity=carrier_actuation_identity,
+            auction_receipt_ref=None,
+        ),
+    )
+    carrier_bound, carrier_row_id = (
+        global_batch_runtime._store_global_claim_carrier_rebound_receipt(
+            conn,
+            selected=carrier_selected,
+            base_decision_log_id=row_id,
+        )
+    )
+    assert carrier_row_id != row_id
+    assert carrier_bound.actuation.auction_receipt_ref.decision_log_id == (
+        carrier_row_id
+    )
+    carrier_bound.actuation.auction_receipt_ref.assert_matches_actuation(
+        winner_event_id="claimed-carrier-event",
+        winner_candidate_id="buy-repaired",
+        winner_actuation_identity=carrier_actuation_identity,
+        selection_epoch_identity="epoch-current",
+    )
+    carrier_summary = json.loads(
+        conn.execute(
+            "SELECT artifact_json FROM decision_log WHERE id = ?",
+            (carrier_row_id,),
+        ).fetchone()[0]
+    )["summary"]
+    assert carrier_summary["claim_carrier_rebound"] == {
+        "version": "global-auction-claim-carrier-rebound-v1",
+        "base_decision_log_id": row_id,
+        "base_decision_log_mode": row["mode"],
+        "base_receipt_hash": receipt_ref.receipt_hash,
+        "base_execution_binding_hash": receipt_ref.execution_binding_hash,
+        "base_artifact_summary_hash": receipt_ref.artifact_summary_hash,
+    }
+    assert conn.execute(
+        "SELECT artifact_json FROM decision_log WHERE id = ?",
+        (row_id,),
+    ).fetchone()[0] == row["artifact_json"]
+    assert summary["winner_event_id"] == "event-buy"
     assert summary["strategy_capital_allocation"] == {
         "allocation_version": receipt_allocation.allocation_version,
         "capital_basis_semantics": receipt_allocation.capital_basis_semantics,
@@ -1007,6 +1139,64 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert yes_counts == {"condition-buy": 1}
     assert no_counts == {}
     assert health_evidence["issue"] is None
+    health_row_id = carrier_row_id
+    health_artifact_json = conn.execute(
+        "SELECT artifact_json FROM decision_log WHERE id = ?",
+        (health_row_id,),
+    ).fetchone()[0]
+    tampered_artifact = json.loads(health_artifact_json)
+    tampered_artifact["summary"]["winner_candidate_id"] = "tampered-winner"
+    conn.execute(
+        "UPDATE decision_log SET artifact_json = ? WHERE id = ?",
+        (json.dumps(tampered_artifact), health_row_id),
+    )
+    _, _, tampered_health = live_health._latest_global_auction_candidate_counts(
+        conn,
+        cutoff=(at - _dt.timedelta(days=1)).isoformat(),
+    )
+    assert tampered_health["issue"] == (
+        "GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:EXECUTION_BINDING_HASH"
+    )
+    missing_binding_artifact = json.loads(health_artifact_json)
+    missing_binding_artifact["summary"].pop("wealth_economic_identity")
+    missing_binding_artifact["summary"]["execution_binding_hash"] = "f" * 64
+    conn.execute(
+        "UPDATE decision_log SET artifact_json = ? WHERE id = ?",
+        (json.dumps(missing_binding_artifact), health_row_id),
+    )
+    _, _, missing_binding_health = (
+        live_health._latest_global_auction_candidate_counts(
+            conn,
+            cutoff=(at - _dt.timedelta(days=1)).isoformat(),
+        )
+    )
+    assert missing_binding_health["issue"] == (
+        "GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:EXECUTION_BINDING_FIELDS"
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_RECEIPT_WEALTH_ECONOMIC_IDENTITY_MISSING",
+    ):
+        global_auction_execution_binding_hash(
+            missing_binding_artifact["summary"]
+        )
+    nonbinding_mutation = json.loads(health_artifact_json)
+    nonbinding_mutation["summary"]["no_trade_reason"] = "forged-reason"
+    conn.execute(
+        "UPDATE decision_log SET artifact_json = ? WHERE id = ?",
+        (json.dumps(nonbinding_mutation), health_row_id),
+    )
+    _, _, nonbinding_health = live_health._latest_global_auction_candidate_counts(
+        conn,
+        cutoff=(at - _dt.timedelta(days=1)).isoformat(),
+    )
+    assert nonbinding_health["issue"] == (
+        "GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:ARTIFACT_SUMMARY_HASH"
+    )
+    conn.execute(
+        "UPDATE decision_log SET artifact_json = ? WHERE id = ?",
+        (health_artifact_json, health_row_id),
+    )
     with pytest.raises(ValueError, match="GLOBAL_AUCTION_RECEIPT_SCOPE_INCOMPLETE"):
         global_batch_runtime._store_global_auction_receipt(
             conn,
@@ -2215,7 +2405,9 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(
             candidate_input_count=len(evaluations),
             rejection_reasons=decision.rejection_reasons,
             no_trade_reason=None,
-        )
+        ),
+        winner_event_id="event-winner",
+        actuation=SimpleNamespace(actuation_identity="actuation-winner"),
     )
     winner_row_id = store(suffix="winner", current_selected=winner)
     winner_mode = conn.execute(
@@ -12298,6 +12490,7 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
     )
     actuation = SimpleNamespace(
         decision=decision,
+        winner_event_id="event-current",
         probability_witness=witness,
         actuation_identity="actuation-current",
         economic_identity="economics-current",
@@ -12307,6 +12500,10 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         selection_epoch_identity="epoch-current",
         selection_cut_at_utc=at,
         decision_at_utc=at,
+        auction_receipt_ref=_test_global_auction_receipt_ref(
+            candidate_id=candidate.candidate_id,
+            actuation_identity="actuation-current",
+        ),
     )
     monkeypatch.setattr(
         era,
@@ -12362,6 +12559,9 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
 
     assert selected is proof
     assert cert["global_actuation_identity"] == "actuation-current"
+    assert cert["global_auction_receipt"] == (
+        actuation.auction_receipt_ref.as_payload()
+    )
     assert captured["global_execution_mode"] == "TAKER_LIMIT"
     assert captured["cost"] == 0.027666
     assert captured["current_candidate_cap"] == pytest.approx(0.42)
@@ -22033,7 +22233,12 @@ def test_global_batch_distinguishes_unrelated_wake_from_final_authority_revocati
     monkeypatch.setattr(
         global_batch_runtime,
         "_store_global_auction_receipt",
-        lambda *_args, **_kwargs: None,
+        lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_bind_stored_global_auction_receipt",
+        lambda _conn, *, selected, decision_log_id: selected,
     )
 
     def store_stable_preflight(conn, *_args, **_kwargs):
@@ -24089,6 +24294,11 @@ def test_global_batch_rebuilds_full_cut_after_stale_sell_probability(
     )
     monkeypatch.setattr(
         global_batch_runtime, "_store_global_auction_receipt", lambda *_a, **_k: 1
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_bind_stored_global_auction_receipt",
+        lambda _conn, *, selected, decision_log_id: selected,
     )
     monkeypatch.setattr(
         global_batch_runtime, "_store_global_preflight_receipt", lambda *_a, **_k: 1
@@ -27126,6 +27336,11 @@ def test_global_batch_commits_receipts_before_external_io(monkeypatch, tmp_path)
         global_batch_runtime,
         "_store_global_auction_receipt",
         persist("selection"),
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_bind_stored_global_auction_receipt",
+        lambda _conn, *, selected, decision_log_id: selected,
     )
     monkeypatch.setattr(
         global_batch_runtime,

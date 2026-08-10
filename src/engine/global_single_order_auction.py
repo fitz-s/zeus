@@ -15,6 +15,7 @@ from decimal import ROUND_FLOOR, Decimal
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
+from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
 from src.engine.global_auction_universe import (
     CurrentGlobalBookEpoch,
     CurrentGlobalAuctionScope,
@@ -500,6 +501,7 @@ class GlobalSingleOrderActuation:
     actuation_identity: str
     wealth_economic_identity: str
     economic_identity: str
+    auction_receipt_ref: GlobalAuctionReceiptRef | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -533,6 +535,13 @@ class GlobalSingleOrderActuation:
         )
         if self.economic_identity != economic:
             raise ValueError("global actuation economic identity mismatch")
+        if self.auction_receipt_ref is not None:
+            self.auction_receipt_ref.assert_matches_actuation(
+                winner_event_id=self.winner_event_id,
+                winner_candidate_id=self.decision.candidate.candidate_id,
+                winner_actuation_identity=self.actuation_identity,
+                selection_epoch_identity=self.selection_epoch_identity,
+            )
 
 
 def _no_trade(reason: str) -> PreparedGlobalAuctionResult:
