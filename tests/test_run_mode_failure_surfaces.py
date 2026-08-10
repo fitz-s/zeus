@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-08-09
+# Last reused or audited: 2026-08-10
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-08-09; last_reused=2026-08-09
+# Lifecycle: created=2026-05-19; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -7983,6 +7983,86 @@ def test_edli_command_recovery_runs_live_tick_during_active_redecision(monkeypat
     )
 
     main_module._edli_command_recovery_cycle()
+
+    assert calls == ["live_tick"]
+
+
+def test_command_recovery_yields_trade_db_to_overdue_held_monitor(monkeypatch) -> None:
+    """Historical recovery may not consume the current-capital monitor's I/O."""
+    import threading
+
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
+
+    calls: list[str] = []
+    monitor_active = threading.Event()
+    monitor_debt = threading.Event()
+    monitor_debt.set()
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main_module, "_held_position_monitor_active", monitor_active)
+    monkeypatch.setattr(main_module, "_held_position_monitor_canonical_debt", monitor_debt)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_cancel_command_count",
+        lambda _conn: 0,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: calls.append(str(kwargs.get("scope"))),
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert calls == []
+
+
+def test_capital_cancel_recovery_keeps_priority_during_held_monitor(monkeypatch) -> None:
+    """Exact unresolved cancel capital remains a recovery exception."""
+    import threading
+
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
+
+    calls: list[str] = []
+    monitor_active = threading.Event()
+    monitor_active.set()
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main_module, "_held_position_monitor_active", monitor_active)
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_debt",
+        threading.Event(),
+    )
+    monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 17)
+    monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 17)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_cancel_command_count",
+        lambda _conn: 1,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: calls.append(str(kwargs.get("scope")))
+        or {"scanned": 1, "advanced": 0},
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
 
     assert calls == ["live_tick"]
 

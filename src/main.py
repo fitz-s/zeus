@@ -6870,6 +6870,22 @@ def _edli_command_recovery_cycle() -> None:
             "continuing without reactor handoff: %r",
             exc,
         )
+    if capital_blockers <= 0 and (
+        _held_position_monitor_active.is_set()
+        or _held_position_monitor_canonical_debt.is_set()
+    ):
+        # SCOPE: only a recovery tick with no exact capital-blocking cancel.
+        # DRAIN: the active/overdue held monitor gets uncontended trade-DB I/O
+        # and writes current MONITOR_REFRESHED evidence. RESET: its completion
+        # clears the active claim and canonical fresh coverage clears the debt;
+        # the next 60-second recovery tick resumes. Exact cancel recovery keeps
+        # authority because unresolved side effects can themselves strand
+        # current capital.
+        logger.info(
+            "edli_command_recovery deferred: held-position monitor owns "
+            "current-capital I/O priority"
+        )
+        return
     if capital_blockers:
         _capital_recovery_handoff_pending.set()
         logger.info(
