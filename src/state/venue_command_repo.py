@@ -2866,7 +2866,11 @@ def _validate_review_clearance_payload(
     command_decision_id = _actual_command_decision_id(conn, command_id)
     if source.get("decision_id") != command_decision_id:
         raise ValueError("pre-SDK review clearance decision_id does not match command")
-    if not _review_clearance_decision_log_pre_sdk_proven(conn, command_decision_id):
+    if not _review_clearance_decision_log_pre_sdk_proven(
+        conn,
+        command_id=command_id,
+        decision_id=command_decision_id,
+    ):
         raise ValueError("pre-SDK review clearance requires decision_log collateral proof")
     actual_reason = _actual_review_required_reason(conn, command_id)
     review_proof = payload.get("review_required_proof")
@@ -3818,21 +3822,49 @@ def _actual_command_decision_id(
 
 def _review_clearance_decision_log_pre_sdk_proven(
     conn: sqlite3.Connection,
+    *,
+    command_id: str,
     decision_id: str,
 ) -> bool:
     if not decision_id or not _review_clearance_table_exists(conn, "decision_log"):
         return False
     with _row_factory_as(conn, sqlite3.Row):
+        command = conn.execute(
+            "SELECT created_at FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        try:
+            command_at = datetime.datetime.fromisoformat(
+                str(command["created_at"] or "").replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError):
+            return False
+        if command_at.tzinfo is None:
+            command_at = command_at.replace(tzinfo=datetime.timezone.utc)
+        has_ts_index = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_decision_log_ts'"
+        ).fetchone()
+        if has_ts_index is None:
+            return False
+        causal_start = (command_at - datetime.timedelta(minutes=15)).strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        )
+        causal_end = (command_at + datetime.timedelta(minutes=15)).strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        ) + "\uffff"
         rows = conn.execute(
             """
             SELECT artifact_json
-            FROM decision_log
-            WHERE artifact_json LIKE ?
-            ORDER BY id DESC
-            LIMIT 20
+            FROM decision_log INDEXED BY idx_decision_log_ts
+            WHERE timestamp >= ?
+              AND timestamp <= ?
+            ORDER BY timestamp DESC, id DESC
+            LIMIT 65
             """,
-            (f"%{decision_id}%",),
+            (causal_start, causal_end),
         ).fetchall()
+    if len(rows) > 64:
+        return False
     for row in rows:
         artifact = _review_clearance_json_dict(row["artifact_json"])
         for case in artifact.get("no_trade_cases") or []:

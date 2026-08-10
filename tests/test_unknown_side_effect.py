@@ -1321,15 +1321,29 @@ def test_review_required_pre_sdk_no_side_effect_can_be_cleared(conn):
     )
     _insert_pre_sdk_decision_log(conn)
 
-    payload = clear_review_required_no_venue_side_effect(
-        conn,
-        "cmd-m2-clear",
-        source_commit="test-commit",
-        source_function="_live_order",
-        source_reason="pre_submit_collateral_reservation_failed",
-        reviewed_by="pytest",
-        occurred_at=NOW.isoformat(),
-    )
+    statements: list[str] = []
+    conn.set_trace_callback(statements.append)
+
+    try:
+        payload = clear_review_required_no_venue_side_effect(
+            conn,
+            "cmd-m2-clear",
+            source_commit="test-commit",
+            source_function="_live_order",
+            source_reason="pre_submit_collateral_reservation_failed",
+            reviewed_by="pytest",
+            occurred_at=NOW.isoformat(),
+        )
+    finally:
+        conn.set_trace_callback(None)
+
+    decision_queries = [
+        statement
+        for statement in statements
+        if "FROM decision_log" in statement
+    ]
+    assert any("INDEXED BY idx_decision_log_ts" in query for query in decision_queries)
+    assert all("artifact_json LIKE" not in query for query in decision_queries)
 
     cmd = conn.execute(
         "SELECT * FROM venue_commands WHERE command_id = ?",
@@ -1360,6 +1374,36 @@ def test_review_required_pre_sdk_no_side_effect_can_be_cleared(conn):
         price=0.55,
         size=18.19,
     ) is None
+
+
+def test_review_required_pre_sdk_clearance_rejects_noncausal_decision_log(conn):
+    from src.execution.command_recovery import clear_review_required_no_venue_side_effect
+
+    _insert_unknown_side_effect(
+        conn,
+        command_id="cmd-m2-stale-proof",
+        token_id="tok-m2-stale-proof",
+        idem="8" * 32,
+        final_event="REVIEW_REQUIRED",
+        final_event_payload={"reason": "recovery_no_venue_order_id"},
+    )
+    _insert_pre_sdk_decision_log(conn)
+    conn.execute(
+        "UPDATE decision_log SET timestamp = ?",
+        ((NOW - timedelta(days=1)).isoformat(),),
+    )
+    conn.commit()
+
+    with pytest.raises(ValueError, match="decision_log .*collateral proof"):
+        clear_review_required_no_venue_side_effect(
+            conn,
+            "cmd-m2-stale-proof",
+            source_commit="test-commit",
+            source_function="_live_order",
+            source_reason="pre_submit_collateral_reservation_failed",
+            reviewed_by="pytest",
+            occurred_at=NOW.isoformat(),
+        )
 
 
 def test_review_required_confirmed_entry_exposure_does_not_hold_global_reduce_only(conn):

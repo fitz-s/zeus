@@ -4464,6 +4464,44 @@ def _latest_unprojected_live_entry_candidates(conn: sqlite3.Connection) -> list[
     return [_dict_row(row) for row in rows]
 
 
+def _causal_decision_log_rows(
+    conn: sqlite3.Connection,
+    command: dict,
+) -> list[sqlite3.Row]:
+    if not _table_exists(conn, "decision_log"):
+        return []
+    command_at = _parse_ts(str(command.get("created_at") or ""))
+    has_ts_index = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_decision_log_ts'"
+    ).fetchone()
+    if command_at is None or has_ts_index is None:
+        return []
+
+    # A decision artifact and its command belong to the same live decision
+    # cycle.  Searching outside this causal window cannot strengthen command
+    # identity and, on the canonical DB, turns recovery into a full scan of
+    # multi-megabyte JSON artifacts that can starve held-position monitoring.
+    # The index and hard candidate cap are therefore part of the safety proof;
+    # overflow or missing temporal identity fails closed to immutable command /
+    # snapshot evidence rather than widening the search.
+    causal_start = (command_at - timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%S")
+    causal_end = (command_at + timedelta(minutes=15)).strftime("%Y-%m-%dT%H:%M:%S") + "\uffff"
+    rows = conn.execute(
+        """
+        SELECT id, mode, started_at, completed_at, artifact_json
+          FROM decision_log INDEXED BY idx_decision_log_ts
+         WHERE timestamp >= ?
+           AND timestamp <= ?
+         ORDER BY timestamp DESC, id DESC
+         LIMIT 65
+        """,
+        (causal_start, causal_end),
+    ).fetchall()
+    if len(rows) > 64:
+        return []
+    return rows
+
+
 def _decision_log_trade_case_for_command(
     conn: sqlite3.Connection,
     command: dict,
@@ -4479,31 +4517,9 @@ def _decision_log_trade_case_for_command(
         edli_case = _edli_trade_case_for_command(conn, command, client=client)
         return (edli_case, None) if edli_case else ({}, None)
 
-    if not _table_exists(conn, "decision_log"):
-        return {}, None
     position_id = str(command.get("position_id") or "")
     token_id = str(command.get("token_id") or "")
-    like_terms = [term for term in (position_id, decision_id, token_id) if term]
-    if not like_terms:
-        return {}, None
-    patterns = [f"%{term}%" for term in like_terms]
-    patterns.extend([None] * (3 - len(patterns)))
-    rows = conn.execute(
-        """
-        SELECT id, artifact_json
-          FROM decision_log
-         WHERE (? IS NOT NULL AND artifact_json LIKE ?)
-            OR (? IS NOT NULL AND artifact_json LIKE ?)
-            OR (? IS NOT NULL AND artifact_json LIKE ?)
-         ORDER BY id DESC
-         LIMIT 25
-        """,
-        (
-            patterns[0], patterns[0],
-            patterns[1], patterns[1],
-            patterns[2], patterns[2],
-        ),
-    ).fetchall()
+    rows = _causal_decision_log_rows(conn, command)
     for row in rows:
         record = _dict_row(row)
         artifact = _json_mapping(record.get("artifact_json"))
@@ -4513,11 +4529,17 @@ def _decision_log_trade_case_for_command(
         for case in cases:
             if not isinstance(case, dict):
                 continue
-            if (
+            exact_identity = (
                 (position_id and str(case.get("trade_id") or "") == position_id)
                 or (decision_id and str(case.get("decision_id") or "") == decision_id)
-                or (token_id and str(case.get("token_id") or "") == token_id)
-            ):
+                or (
+                    not position_id
+                    and not decision_id
+                    and token_id
+                    and str(case.get("token_id") or "") == token_id
+                )
+            )
+            if exact_identity:
                 if _positive_probability_or_none(case.get("p_posterior")) is None:
                     edli_case = _edli_trade_case_for_command(conn, command, client=client)
                     edli_posterior = _positive_probability_or_none(
@@ -21436,19 +21458,14 @@ def _reconcile_edli_post_submit_unknown_absence(
     return _apply_edli_post_submit_unknown_absence(conn, rows, None, None)
 
 
-def _decision_log_pre_sdk_proof(conn: sqlite3.Connection, decision_id: str) -> dict | None:
-    if not _table_exists(conn, "decision_log"):
+def _decision_log_pre_sdk_proof(
+    conn: sqlite3.Connection,
+    command: dict,
+) -> dict | None:
+    decision_id = str(command.get("decision_id") or "")
+    if not decision_id:
         return None
-    rows = conn.execute(
-        """
-        SELECT id, mode, started_at, completed_at, artifact_json
-        FROM decision_log
-        WHERE artifact_json LIKE ?
-        ORDER BY id DESC
-        LIMIT 20
-        """,
-        (f"%{decision_id}%",),
-    ).fetchall()
+    rows = _causal_decision_log_rows(conn, command)
     for row in rows:
         record = _dict_row(row)
         artifact = _json_dict(record.get("artifact_json"))
@@ -21708,7 +21725,7 @@ def clear_review_required_no_venue_side_effect(
             "review clearance predicates failed: " + ", ".join(sorted(predicate_failures))
         )
     decision_id = str(command.get("decision_id") or "")
-    decision_proof = _decision_log_pre_sdk_proof(conn, decision_id)
+    decision_proof = _decision_log_pre_sdk_proof(conn, command)
     if decision_proof is None:
         raise ValueError(
             "review clearance requires decision_log EXECUTION_FAILED "

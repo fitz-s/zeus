@@ -19990,6 +19990,44 @@ class TestRecoveryResolutionTable:
         assert after_count == 0
         assert after_markets == ()
 
+    def test_decision_log_trade_case_lookup_is_indexed_and_causally_bounded(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=13.45, price=0.05)
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        from src.execution.command_recovery import _decision_log_trade_case_for_command
+
+        command = dict(
+            conn.execute(
+                "SELECT * FROM venue_commands WHERE command_id = 'cmd-001'"
+            ).fetchone()
+        )
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        try:
+            case, source_id = _decision_log_trade_case_for_command(conn, command)
+        finally:
+            conn.set_trace_callback(None)
+
+        assert source_id is not None
+        assert case["decision_id"] == "dec-001"
+        decision_queries = [
+            statement
+            for statement in statements
+            if "FROM decision_log" in statement
+        ]
+        assert any("INDEXED BY idx_decision_log_ts" in query for query in decision_queries)
+        assert all("artifact_json LIKE" not in query for query in decision_queries)
+
+        conn.execute(
+            "UPDATE decision_log SET timestamp = '2026-04-25T00:00:00Z'"
+        )
+        _case, source_id = _decision_log_trade_case_for_command(conn, command)
+        assert source_id is None
+
     def test_live_entry_repair_does_not_duplicate_existing_order_token_projection(
         self,
         conn,
