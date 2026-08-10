@@ -11912,7 +11912,13 @@ def _global_sell_execution_economics_drift(
     decision: object,
     current_candidate: object,
 ) -> str | None:
-    """Reject any current maker proposal that worsens selected SELL economics."""
+    """Reject a JIT SELL unless it still dominates the selected fixed action.
+
+    A book hash or an unconsumed bid-tail change is evidence of elapsed time,
+    not by itself an economic veto.  The selected SELL remains safe to submit
+    when its identity and venue terms are unchanged and the fresh executable
+    prefix covers the same shares for no less proceeds at no worse a limit.
+    """
 
     selected_candidate = getattr(decision, "candidate", None)
     selected_neg_risk = getattr(selected_candidate, "neg_risk", None)
@@ -11930,14 +11936,13 @@ def _global_sell_execution_economics_drift(
     curve_fields = (
         ("token", selected_curve.token_id, current_curve.token_id),
         ("side", selected_curve.side, current_curve.side),
-        ("book_hash", selected_curve.book_hash, current_curve.book_hash),
         ("fee", selected_curve.fee_model.fee_rate, current_curve.fee_model.fee_rate),
         ("tick", selected_curve.min_tick, current_curve.min_tick),
         ("min_order", selected_curve.min_order_size, current_curve.min_order_size),
         (
-            "levels",
-            tuple((level.price, level.size) for level in selected_curve.levels),
-            tuple((level.price, level.size) for level in current_curve.levels),
+            "execution_mode",
+            str(getattr(selected_candidate, "execution_mode", "") or ""),
+            str(getattr(current_candidate, "execution_mode", "") or ""),
         ),
     )
     curve_drift = tuple(

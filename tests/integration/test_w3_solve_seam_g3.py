@@ -30246,6 +30246,45 @@ def test_global_sell_worse_jit_bid_requires_complete_reauction():
     )
 
 
+def test_global_sell_better_jit_prefix_submits_despite_book_and_tail_change():
+    event = _global_scope_event(city="Alpha", source_run_id="run-sell-better")
+    actuation = _adapter_sell_actuation(event)
+    better = era._global_sell_candidate_from_raw_book(
+        actuation.decision.candidate,
+        {
+            "asset_id": "yes-token",
+            "hash": "new-book-and-tail",
+            "tick_size": "0.01",
+            "min_order_size": "5",
+            "bids": [
+                {"price": "0.61", "size": "4"},
+                {"price": "0.51", "size": "6"},
+                {"price": "0.20", "size": "100"},
+            ],
+            "asks": [{"price": "0.62", "size": "10"}],
+        },
+        captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
+        market_authority=_jit_market_authority(
+            actuation.decision.candidate,
+            tick="0.01",
+            min_order_size="5",
+        ),
+    )
+
+    assert (
+        better.executable_sell_curve.book_hash
+        != actuation.decision.candidate.executable_sell_curve.book_hash
+    )
+    assert (
+        better.executable_sell_curve.levels
+        != actuation.decision.candidate.executable_sell_curve.levels
+    )
+    assert era._global_sell_execution_economics_drift(
+        decision=actuation.decision,
+        current_candidate=better,
+    ) is None
+
+
 def test_global_sell_jit_overlay_replaces_same_book_buy_and_sell_curves():
     event = _global_scope_event(city="Alpha", source_run_id="run-sell")
     selected = _adapter_sell_actuation(event).decision.candidate
