@@ -170,6 +170,7 @@ def test_family_joint_never_spends_fixed_fraction_above_kelly_target():
         ledger_snapshot_id="ledger-current",
         executable_cost_curve=curve,
         resolution_identity=witness.resolution_identity,
+        neg_risk=False,
     )
     endowment = solve.FamilyPortfolioEndowment(
         family_key=family,

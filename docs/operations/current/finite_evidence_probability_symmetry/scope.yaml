@@ -90,6 +90,7 @@ in_scope:
 - architecture/money_path_objects.yaml
 - tests/engine/test_event_reactor_live_qkernel_gate.py
 - tests/engine/test_final_submit_mode_authority.py
+- tests/engine/test_multiwinner_wealth_composition.py
 - tests/engine/test_cert_calibration_bridge.py
 - tests/engine/test_tick_size_provenance_cert_contract.py
 - tests/decision_kernel/test_k1_shared_authority_predicates.py
@@ -123,6 +124,7 @@ in_scope:
 - tests/test_chain_shares_persist_synced.py
 - tests/state/test_inv_chain_only_review_lifecycle.py
 - tests/test_architecture_contracts.py
+- tests/test_money_path_semantic_ci.py
 - tests/test_phase10a_hygiene.py
 - tests/state/test_fill_dedup.py
 - tests/test_collateral_ledger.py
@@ -207,6 +209,8 @@ tests:
 - tests/test_replacement_0_1_bayes_precision_fusion_materializer_wiring.py::source-clock
   subset
 - tests/solve/test_solver_properties.py
+- tests/engine/test_multiwinner_wealth_composition.py
+- tests/test_money_path_semantic_ci.py
 - tests/solve/test_shim_decide.py
 - tests/integration/test_w3_solve_seam_g3.py
 - tests/integration/test_qkernel_spine_blockers_pr409.py

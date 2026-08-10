@@ -139,6 +139,20 @@ and submit, schema-21/v13 health validation, exact receipt-to-actuation/certific
 command/settlement closure with mutation/deletion/mismatch antibodies, and
 focused global-auction/runtime regressions.
 
+The 2026-08-10 CI closeout harmonizes the already-executable global SELL
+receipt-audit reasons, `JIT_SUBMIT` snapshot-capture provenance, and JIT/sealed
+book final-submit rejection reasons with
+`architecture/money_path_objects.yaml`. They remain audit, provenance, and
+rejection vocabulary rather than lifecycle, command, order, or fill states.
+`MP-CI-001` is the governing invariant: a synthetic classifier antibody covers
+all nine registered values while unknown money-path objects remain fail-closed.
+The standard-market family-joint Kelly fixture also declares its required
+`neg_risk=False` authority instead of relying on an obsolete constructor shape.
+Allowed CI-closeout files are `architecture/money_path_objects.yaml`,
+`tests/test_money_path_semantic_ci.py`,
+`tests/engine/test_multiwinner_wealth_composition.py`, this plan, and its
+`scope.yaml` companion.
+
 ## 2026-08-08 Day0 probability authority survives certificate compilation
 
 The live global auction produced a current Shanghai Day0 remaining-day witness,
