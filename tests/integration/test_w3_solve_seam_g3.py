@@ -17911,10 +17911,10 @@ def test_verified_fill_cost_consumes_family_budget_before_chain_balance_catches_
         wealth_witness=wealth,
     )
 
-    # SELL inventory remains at the slower chain-observed 31.6 shares, but
-    # BUY allocation charges the complete 39.1-share verified fill cost.
-    assert wealth.native_holdings_micro == (("no-a", 31_600_000),)
-    assert snapshot.holdings[0].shares == Decimal("31.6")
+    # The newer venue-confirmed fill owns both tradable exposure and committed
+    # capital while the slower chain projection still shows only 31.6 shares.
+    assert wealth.native_holdings_micro == (("no-a", 39_100_000),)
+    assert snapshot.holdings[0].shares == Decimal("39.1")
     assert wealth.native_commitments_micro == (("no-a", 21_896_000),)
     assert family.committed_capital_usd == Decimal("21.896")
 
