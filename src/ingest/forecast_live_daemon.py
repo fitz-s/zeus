@@ -843,14 +843,97 @@ def _run_opendata_track_if_due(
     )
 
 
+def _enqueue_committed_opendata_cycle_advance_reseeds(
+    conn,
+    result: dict,
+) -> dict[str, object] | None:
+    """Wake exact replacement scopes after a new ENS source run commits.
+
+    Deterministic provider artifacts can arrive before the matching ENS shape.
+    The earlier availability poll cannot materialize that cycle yet, so the ENS
+    commit is the causal edge that must create the cycle-advance debt.
+    """
+    try:
+        snapshots_inserted = int(result.get("snapshots_inserted") or 0)
+    except (TypeError, ValueError):
+        snapshots_inserted = 0
+    source_run_id = str(result.get("source_run_id") or "").strip()
+    if snapshots_inserted <= 0 or not source_run_id:
+        return None
+
+    try:
+        scopes = tuple(
+            (str(row[0]), str(row[1]), str(row[2]))
+            for row in conn.execute(
+                """
+                SELECT city, target_date, temperature_metric
+                  FROM ensemble_snapshots
+                 WHERE source_run_id = ?
+                   AND source_id = 'ecmwf_open_data'
+                   AND model_version = 'ecmwf_ens'
+                   AND authority = 'VERIFIED'
+                   AND causality_status = 'OK'
+                   AND boundary_ambiguous = 0
+                   AND forecast_window_attribution_status = 'FULLY_INSIDE_TARGET_LOCAL_DAY'
+                   AND contributes_to_target_extrema = 1
+                 GROUP BY city, target_date, temperature_metric
+                 ORDER BY target_date, city, temperature_metric
+                """,
+                (source_run_id,),
+            )
+        )
+        if not scopes:
+            return {
+                "status": "OPENDATA_CYCLE_ADVANCE_NO_ELIGIBLE_SCOPES",
+                "source_run_id": source_run_id,
+                "snapshots_inserted": snapshots_inserted,
+            }
+
+        from src.data.replacement_forecast_production import (  # noqa: PLC0415
+            _enqueue_cycle_advance_reseeds_if_needed,
+            _replacement_forecast_live_materialization_queue_config,
+        )
+
+        report = _enqueue_cycle_advance_reseeds_if_needed(
+            _replacement_forecast_live_materialization_queue_config(),
+            scopes=scopes,
+            limit=len(scopes),
+        )
+        logger.info(
+            "forecast-live OpenData committed ENS wake source_run_id=%s scopes=%d report=%s",
+            source_run_id,
+            len(scopes),
+            report,
+        )
+        return report
+    except Exception as exc:  # noqa: BLE001 — committed ingest remains durable; poll retries
+        logger.warning(
+            "forecast-live OpenData committed ENS wake failed source_run_id=%s: %s",
+            source_run_id,
+            exc,
+        )
+        return {
+            "status": "OPENDATA_CYCLE_ADVANCE_TRIGGER_FAILSOFT_SKIPPED",
+            "source_run_id": source_run_id,
+            "error": str(exc),
+        }
+
+
+def _commit_opendata_result_and_wake(conn, result: dict) -> dict:
+    conn.commit()
+    report = _enqueue_committed_opendata_cycle_advance_reseeds(conn, result)
+    if report is None:
+        return result
+    return {**result, "cycle_advance_reseed": report}
+
+
 def _run_journaled_opendata_track(track: str) -> dict:
     from src.state.db import get_forecasts_connection
 
     conn = get_forecasts_connection(write_class="bulk")
     try:
         result = run_opendata_track(track, _job_conn=conn)
-        conn.commit()
-        return result
+        return _commit_opendata_result_and_wake(conn, result)
     except Exception:
         conn.commit()
         raise
@@ -864,8 +947,7 @@ def _run_journaled_opendata_track_if_due(track: str) -> dict:
     conn = get_forecasts_connection(write_class="bulk")
     try:
         result = _run_opendata_track_if_due(track, _job_conn=conn)
-        conn.commit()
-        return result
+        return _commit_opendata_result_and_wake(conn, result)
     except Exception:
         conn.commit()
         raise

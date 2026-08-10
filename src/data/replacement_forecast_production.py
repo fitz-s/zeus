@@ -2533,6 +2533,7 @@ def _enqueue_cycle_advance_reseeds_if_needed(
     *,
     scopes: Sequence[tuple[str, str, str]] | None = None,
     manifest_snapshot: dict[str, object] | None = None,
+    limit: int | None = None,
 ) -> dict[str, object] | None:
     """U5 step 2a — enqueue re-materialization seeds for active-window families whose latest
     posterior consumed a STRICTLY OLDER cycle than the freshest materializable in-universe cycle.
@@ -2560,7 +2561,11 @@ def _enqueue_cycle_advance_reseeds_if_needed(
             seed_dir=Path(str(seed_dir)),
             raw_manifest_dir=Path(str(raw_manifest_dir)),
             trades_db=_zeus_trade_db_path(),
-            limit=int(cfg.get("seed_limit") or cfg.get("limit") or 10),
+            limit=int(
+                limit
+                if limit is not None
+                else cfg.get("seed_limit") or cfg.get("limit") or 10
+            ),
             scopes=scopes,
             computed_at=computed_at,
             manifests=manifests,
