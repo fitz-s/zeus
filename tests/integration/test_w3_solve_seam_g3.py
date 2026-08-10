@@ -639,6 +639,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             "book-buy-yes",
             "event-buy",
             "gamma-buy",
+            "False",
         ),
         (
             "family-buy",
@@ -650,6 +651,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             "book-buy-no",
             "event-buy",
             "gamma-buy",
+            "False",
         ),
         (
             "family-sell",
@@ -661,6 +663,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             "metadata-sell-yes",
             "event-sell",
             "gamma-sell",
+            "False",
         ),
         (
             "family-sell",
@@ -672,6 +675,7 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             "book-sell-no",
             "event-sell",
             "gamma-sell",
+            "False",
         ),
     )
 
@@ -1231,6 +1235,87 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             fractional_kelly_multiplier=Decimal("0.25"),
         )
     conn.close()
+
+
+def test_book_native_side_receipt_requires_current_neg_risk_state_shape():
+    state = (
+        "family",
+        "20C",
+        "condition",
+        "YES",
+        "token",
+        "EXECUTABLE",
+        "book-hash",
+        "event",
+        "gamma",
+        "False",
+    )
+    candidate_index = ((
+        "candidate",
+        "family",
+        "20C",
+        "condition",
+        "YES",
+        "token",
+    ),)
+    receipt = global_batch_runtime._book_native_side_receipt(
+        asset_states=(state,),
+        probability_keys=("family",),
+        buy_candidate_index=candidate_index,
+        excluded_by_family={},
+    )
+    payload_json = zlib.decompress(
+        base64.b64decode(receipt["book_native_side_states_zlib_b64"])
+    )
+    payload = json.loads(payload_json)
+    assert payload["fields"][-1] == "neg_risk"
+    assert payload["rows"] == [list(state)]
+    assert hashlib.sha256(payload_json).hexdigest() == receipt[
+        "book_native_side_states_sha256"
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_RECEIPT_BOOK_SIDE_STATE_INVALID",
+    ):
+        global_batch_runtime._book_native_side_receipt(
+            asset_states=(state[:-1],),
+            probability_keys=("family",),
+            buy_candidate_index=candidate_index,
+            excluded_by_family={},
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_RECEIPT_BOOK_SIDE_STATE_INVALID",
+    ):
+        global_batch_runtime._book_native_side_receipt(
+            asset_states=((*state[:-1], "0"),),
+            probability_keys=("family",),
+            buy_candidate_index=candidate_index,
+            excluded_by_family={},
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_RECEIPT_BOOK_SIDE_STATE_INVALID",
+    ):
+        global_batch_runtime._book_native_side_receipt(
+            asset_states=((*state[:-1], False),),
+            probability_keys=("family",),
+            buy_candidate_index=candidate_index,
+            excluded_by_family={},
+        )
+
+    delta = global_batch_runtime._book_native_side_delta_receipt(
+        base_rows=(state,),
+        current_rows=((*state[:-1], "True"),),
+    )
+    delta_payload = json.loads(
+        zlib.decompress(base64.b64decode(delta["book_native_side_delta_zlib_b64"]))
+    )
+    assert delta_payload["fields"][-1] == "neg_risk"
+    assert delta_payload["upsert_rows"] == [list((*state[:-1], "True"))]
 
 
 def test_compact_buy_rejection_group_requires_complete_economic_frontier():
@@ -2005,6 +2090,7 @@ def test_global_auction_receipt_preserves_book_states_with_zero_evaluations():
                 "book-empty-yes",
                 "event-empty",
                 "gamma-empty",
+                "False",
             ),
             (
                 "family-empty",
@@ -2016,6 +2102,7 @@ def test_global_auction_receipt_preserves_book_states_with_zero_evaluations():
                 "metadata-empty-no",
                 "event-empty",
                 "gamma-empty",
+                "False",
             ),
         ),
         wealth_witness=SimpleNamespace(
@@ -2105,6 +2192,7 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(
             f"book-{index}-{side.lower()}",
             f"event-{index}",
             f"gamma-{index}",
+            "False",
         )
         for index, family_key in enumerate(families)
         for side in ("YES", "NO")
@@ -2531,6 +2619,7 @@ def test_global_auction_receipt_bounded_delta_chain_write_amplification(
             blob(f"book-{index}-{side.lower()}"),
             f"event-{index}",
             f"gamma-{index}",
+            "False",
         )
         for index, family_key in enumerate(families)
         for side in ("YES", "NO")
@@ -26328,6 +26417,7 @@ def test_global_batch_reauctions_complete_cut_on_current_wealth(
             sell_curve.book_hash,
             "market-event-a",
             "gamma-a",
+            "False",
         ),
         *(
             (
@@ -26341,6 +26431,7 @@ def test_global_batch_reauctions_complete_cut_on_current_wealth(
                     "no-executable-sell-book",
                     "market-event-a",
                     "gamma-b",
+                    "False",
                 ),
             )
             if same_family_unexecutable

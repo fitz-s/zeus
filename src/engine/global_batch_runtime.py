@@ -1252,6 +1252,7 @@ _BOOK_NATIVE_SIDE_STATE_FIELDS = (
     "book_hash",
     "market_event_id",
     "gamma_market_id",
+    "neg_risk",
 )
 _BOOK_NATIVE_SIDE_STATUSES = {
     "EXECUTABLE",
@@ -1259,6 +1260,24 @@ _BOOK_NATIVE_SIDE_STATUSES = {
     "VENUE_NOT_EXECUTABLE",
     "VENUE_METADATA_STALE",
 }
+_BOOK_NATIVE_SIDE_NEG_RISK_VALUES = frozenset({"True", "False"})
+
+
+def _normalized_book_native_side_state_rows(
+    asset_states: Sequence[Sequence[object]],
+) -> tuple[tuple[str, ...], ...]:
+    raw_rows = tuple(tuple(row) for row in asset_states)
+    if not raw_rows or any(
+        len(row) != len(_BOOK_NATIVE_SIDE_STATE_FIELDS)
+        or type(row[-1]) is not str
+        or row[-1] not in _BOOK_NATIVE_SIDE_NEG_RISK_VALUES
+        for row in raw_rows
+    ):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_BOOK_SIDE_STATE_INVALID")
+    rows = tuple(
+        sorted(tuple(str(value) for value in row) for row in raw_rows)
+    )
+    return rows
 
 
 def _book_native_side_receipt(
@@ -1297,13 +1316,7 @@ def _book_native_side_receipt(
             ).decode("ascii"),
         }
 
-    rows = tuple(
-        sorted(tuple(str(value) for value in row) for row in asset_states)
-    )
-    if not rows or any(
-        len(row) != len(_BOOK_NATIVE_SIDE_STATE_FIELDS) for row in rows
-    ):
-        raise ValueError("GLOBAL_AUCTION_RECEIPT_BOOK_SIDE_STATE_INVALID")
+    rows = _normalized_book_native_side_state_rows(asset_states)
     keys = tuple(row[:5] for row in rows)
     if (
         len(keys) != len(set(keys))
@@ -1382,8 +1395,14 @@ def _book_native_side_delta_receipt(
     """Encode one complete current side-state cut as a delta from a full receipt."""
 
     key_size = 5
-    base = {tuple(row[:key_size]): tuple(row) for row in base_rows}
-    current = {tuple(row[:key_size]): tuple(row) for row in current_rows}
+    base_normalized = _normalized_book_native_side_state_rows(base_rows)
+    current_normalized = _normalized_book_native_side_state_rows(current_rows)
+    base = {
+        tuple(row[:key_size]): tuple(row) for row in base_normalized
+    }
+    current = {
+        tuple(row[:key_size]): tuple(row) for row in current_normalized
+    }
     if len(base) != len(base_rows) or len(current) != len(current_rows):
         raise ValueError("GLOBAL_AUCTION_RECEIPT_BOOK_SIDE_DELTA_KEY_DUPLICATE")
     payload = {
