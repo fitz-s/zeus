@@ -16729,6 +16729,18 @@ def test_global_taker_winner_rebinds_local_maker_rejection_without_witness_bypas
         allow_global_current_state_rebind=True,
         enforce_win_rate_floor=False,
     ) == rebound
+    unpriced_exact = (replace(rebound[0], execution_price=None),)
+    assert era._selection_scoped_proofs(
+        proofs=unpriced_exact,
+        honor_admission_rejections=False,
+        allow_global_current_state_rebind=True,
+        enforce_win_rate_floor=False,
+    ) == unpriced_exact
+    assert era._selection_scoped_proofs(
+        proofs=unpriced_exact,
+        honor_admission_rejections=False,
+        enforce_win_rate_floor=False,
+    ) == ()
     assert era._selection_scoped_proofs(
         proofs=(sibling,),
         honor_admission_rejections=False,
@@ -29243,7 +29255,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     }
     actuation = _adapter_sell_actuation(
         event,
-        selected_shares="6",
+        selected_shares="5",
         bid_levels=bid_levels,
         min_tick=tick,
         probability_functional=probability_functional,
@@ -29395,7 +29407,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
             actuation.auction_receipt_ref.as_payload()
         )
         assert intent.exact_limit_price == pytest.approx(expected_limit)
-        assert intent.shares == pytest.approx(6.0)
+        assert intent.shares == pytest.approx(5.0)
         assert intent.close_position is False
         assert intent.submit_order_type == expected_order_type
         if expected_mode == "MAKER_REST":
@@ -29746,7 +29758,7 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
     event = _global_scope_event(city="Alpha", source_run_id="run-sell-authority")
     actuation = _adapter_sell_actuation(
         event,
-        selected_shares="6",
+        selected_shares="5",
         bid_levels=bid_levels,
         min_tick=tick,
     )
@@ -30003,7 +30015,7 @@ def test_global_sell_selected_taker_mode_stays_taker_at_jit(
     event = _global_scope_event(city="Alpha", source_run_id="run-taker-band")
     actuation = _adapter_sell_actuation(
         event,
-        selected_shares="6",
+        selected_shares="5",
         min_tick=tick,
     )
     rebound = era._global_sell_candidate_from_raw_book(
@@ -30146,7 +30158,7 @@ def test_global_sell_high_bid_binds_legal_fak_floor():
     event = _global_scope_event(city="Alpha", source_run_id="run-high-bid-fak")
     actuation = _adapter_sell_actuation(
         event,
-        selected_shares="6",
+        selected_shares="5",
         bid_levels=(("0.999", "10"),),
         min_tick="0.001",
     )

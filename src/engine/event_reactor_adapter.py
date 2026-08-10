@@ -26209,7 +26209,16 @@ def _selection_scoped_proofs(
             f"{class_counts or 'UNKNOWN=0'}"
         )
 
-    executable = [proof for proof in proofs if proof.execution_price is not None]
+    # A globally selected BUY is rebound to the exact auction/JIT curve after
+    # current lock, policy, and holding checks below.  Its locally reconstructed
+    # proof may therefore be deliberately unpriced at this seam.  The global
+    # current-state flag licenses only that later exact rebind; ordinary family
+    # selection still requires a local execution price here.
+    executable = (
+        list(proofs)
+        if allow_global_current_state_rebind
+        else [proof for proof in proofs if proof.execution_price is not None]
+    )
     if not executable:
         record_empty(
             "execution_price",
