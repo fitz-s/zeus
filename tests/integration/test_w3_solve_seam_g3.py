@@ -5001,7 +5001,7 @@ def test_global_day0_joint_witness_uses_one_remaining_day_simplex(monkeypatch):
     # 0/2 Clopper-Pearson floor.
     assert np.array_equal(samples, matrix)
     assert point.tolist() == pytest.approx([0.0, 1.0])
-    assert basis == "current_coherent_day0_remaining_model_bootstrap_v3"
+    assert basis == "current_coherent_day0_peak_state_remaining_model_bootstrap_v4"
     assert np.allclose(samples.sum(axis=1), 1.0)
     assert not any("finite_evidence" in key for key in payload)
 
@@ -6004,7 +6004,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
         return (
             matrix,
             np.asarray([0.0, 0.2, 0.8], dtype=float),
-            "current_coherent_day0_remaining_model_bootstrap_v3",
+            "current_coherent_day0_peak_state_remaining_model_bootstrap_v4",
         )
 
     monkeypatch.setattr(
@@ -6026,7 +6026,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     witness = prepared.probability_witness
     binding = day0_payload["_edli_global_day0_binding"]
     assert witness.band_alpha == pytest.approx(0.05)
-    assert witness.band_basis == "current_coherent_day0_remaining_model_bootstrap_v3"
+    assert witness.band_basis == "current_coherent_day0_peak_state_remaining_model_bootstrap_v4"
     assert witness.yes_q_samples.shape == (400, 3)
     assert witness.posterior_identity_hash
     assert binding["probability_base_identity"]
@@ -6763,7 +6763,7 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
         return (
             matrix,
             np.asarray([0.2, 0.5, 0.3], dtype=float),
-            "current_coherent_day0_remaining_model_bootstrap_v3",
+            "current_coherent_day0_peak_state_remaining_model_bootstrap_v4",
         )
 
     replacement_calls = 0
@@ -6847,7 +6847,7 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
     assert witness.yes_point_q.tolist() == pytest.approx([0.2, 0.5, 0.3])
     assert witness.yes_q_samples[0].tolist() == pytest.approx([0.2, 0.5, 0.3])
     assert witness.band_basis == (
-        "current_coherent_day0_remaining_model_bootstrap_v3"
+        "current_coherent_day0_peak_state_remaining_model_bootstrap_v4"
     )
     assert prepared.candidate_payoff_q_lcb_caps == ()
     assert day0_payload["probability_authority"] == (
@@ -7298,7 +7298,7 @@ def test_post_day_complete_hourly_observation_builds_exact_global_simplex(
         return (
             matrix,
             np.asarray([0.2, 0.5, 0.3], dtype=float),
-            "current_coherent_day0_remaining_model_bootstrap_v3",
+            "current_coherent_day0_peak_state_remaining_model_bootstrap_v4",
         )
 
     monkeypatch.setattr(

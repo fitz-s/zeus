@@ -26640,17 +26640,33 @@ class TestRecoveryResolutionTable:
         }
 
     @pytest.mark.parametrize(
-        ("command_token_id", "releases"),
         (
-            ("tok-filled-exit-slice", True),
-            ("tok-foreign-exit-asset", False),
+            "command_token_id",
+            "position_phase",
+            "command_size",
+            "matched_size",
+            "releases",
         ),
-        ids=("exact-command-token", "mismatched-command-token-stays"),
+        (
+            ("tok-filled-exit-slice", "pending_exit", 10.0, "10", True),
+            ("tok-filled-exit-slice", "day0_window", 10.0, "10", True),
+            ("tok-foreign-exit-asset", "pending_exit", 10.0, "10", False),
+            ("tok-filled-exit-slice", "day0_window", 11.0, "10", False),
+        ),
+        ids=(
+            "pending-exit-exact-command-token",
+            "already-released-exact-command-token",
+            "mismatched-command-token-stays",
+            "filled-command-size-mismatch-stays",
+        ),
     )
     def test_filled_selected_exit_slice_releases_post_fill_chain_remainder(
         self,
         conn,
         command_token_id,
+        position_phase,
+        command_size,
+        matched_size,
         releases,
     ):
         """A filled slice must return its proven chain remainder to redecision."""
@@ -26697,7 +26713,7 @@ class TestRecoveryResolutionTable:
             intent_kind="EXIT",
             token_id=command_token_id,
             side="SELL",
-            size=10.0,
+            size=command_size,
             price=0.14,
         )
         _advance_to_acked(
@@ -26712,7 +26728,7 @@ class TestRecoveryResolutionTable:
             occurred_at="2026-04-26T00:05:00Z",
             payload={
                 "venue_order_id": order_id,
-                "filled_size": "10",
+                "filled_size": matched_size,
                 "fill_price": "0.14",
             },
         )
@@ -26721,7 +26737,7 @@ class TestRecoveryResolutionTable:
             command_id="cmd-filled-exit-slice",
             order_id=order_id,
             state="MATCHED",
-            matched_size="10",
+            matched_size=matched_size,
             remaining_size="0",
         )
         conn.execute(
@@ -26732,14 +26748,14 @@ class TestRecoveryResolutionTable:
                 condition_id, token_id, order_id, order_status, updated_at,
                 temperature_metric
             ) VALUES (
-                ?, 'pending_exit', 'Karachi', '2026-04-26', '35C', 'buy_yes',
+                ?, ?, 'Karachi', '2026-04-26', '35C', 'buy_yes',
                 21.0, 21.0, 'synced', '2026-04-26T00:06:00Z',
                 'forecast_qkernel_entry', 'cond-filled-exit-slice',
                 'tok-filled-exit-slice', ?, 'sell_pending_confirmation',
                 '2026-04-26T00:06:00Z', 'high'
             )
             """,
-            (position_id, order_id),
+            (position_id, position_phase, order_id),
         )
 
         runtime_position = Position(
@@ -26766,14 +26782,15 @@ class TestRecoveryResolutionTable:
             condition_id="cond-filled-exit-slice",
             chain_state="synced",
         )
-        assert (
-            release_pending_exit_without_order_if_retryable(
-                runtime_position,
-                conn=conn,
+        if position_phase == "pending_exit":
+            assert (
+                release_pending_exit_without_order_if_retryable(
+                    runtime_position,
+                    conn=conn,
+                )
+                is False
             )
-            is False
-        )
-        assert runtime_position.state == "pending_exit"
+            assert runtime_position.state == "pending_exit"
         assert conn.execute(
             """
             SELECT COUNT(*) FROM position_events
@@ -26785,7 +26802,13 @@ class TestRecoveryResolutionTable:
         summary = reconcile_pending_exit_terminal_order_releases(conn)
 
         if not releases:
-            assert summary == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+            expected_scanned = int(command_size == float(matched_size))
+            assert summary == {
+                "scanned": expected_scanned,
+                "advanced": 0,
+                "stayed": expected_scanned,
+                "errors": 0,
+            }
             current = conn.execute(
                 """
                 SELECT phase, order_id, order_status
@@ -26795,7 +26818,7 @@ class TestRecoveryResolutionTable:
                 (position_id,),
             ).fetchone()
             assert dict(current) == {
-                "phase": "pending_exit",
+                "phase": position_phase,
                 "order_id": order_id,
                 "order_status": "sell_pending_confirmation",
             }
@@ -26838,7 +26861,7 @@ class TestRecoveryResolutionTable:
         obligation = payload.pop("held_sell_reauction_obligation")
         assert dict(event) | {"payload_json": payload} == {
             "event_type": "EXIT_RETRY_RELEASED",
-            "phase_before": "pending_exit",
+            "phase_before": position_phase,
             "phase_after": "day0_window",
             "command_id": "cmd-filled-exit-slice",
             "payload_json": {
@@ -26880,12 +26903,92 @@ class TestRecoveryResolutionTable:
                 "chain_seen_at": "2026-04-26T00:06:00Z",
             },
         }
+        from src.execution.exit_lifecycle import (
+            _relinquished_global_sell_command_id,
+        )
+
+        held = SimpleNamespace(
+            trade_id=position_id,
+            direction="buy_yes",
+            token_id="tok-filled-exit-slice",
+            no_token_id="",
+            state="day0_window",
+            effective_exposure=lambda: SimpleNamespace(shares=21.0),
+        )
+        assert (
+            _relinquished_global_sell_command_id(conn, held)
+            == "cmd-filled-exit-slice"
+        )
+        conn.execute(
+            "UPDATE position_current SET token_id = ? WHERE position_id = ?",
+            ("tok-current-position-mutated", position_id),
+        )
+        assert _relinquished_global_sell_command_id(conn, held) == ""
+        conn.execute(
+            "UPDATE position_current SET token_id = ? WHERE position_id = ?",
+            ("tok-filled-exit-slice", position_id),
+        )
+        conn.execute(
+            "UPDATE venue_commands SET size = 11 WHERE command_id = ?",
+            ("cmd-filled-exit-slice",),
+        )
+        assert _relinquished_global_sell_command_id(conn, held) == ""
+        conn.execute(
+            "UPDATE venue_commands SET size = 10 WHERE command_id = ?",
+            ("cmd-filled-exit-slice",),
+        )
+        assert (
+            _relinquished_global_sell_command_id(conn, held)
+            == "cmd-filled-exit-slice"
+        )
+
+        refreshed_obligation = {
+            **obligation,
+            "probability_content_identity": "q-after-residual-release",
+            "probability_observed_at": "2026-04-26T00:07:00Z",
+            "held_best_bid": 0.12,
+            "bid_observed_at": "2026-04-26T00:07:00Z",
+            "book_state": "EXECUTABLE",
+        }
+        sequence_no = conn.execute(
+            "SELECT MAX(sequence_no) + 1 FROM position_events WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()[0]
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, source_module, env,
+                payload_json
+            ) VALUES (?, ?, 1, ?, 'EXIT_RETRY_RELEASED', ?, 'day0_window',
+                      'day0_window', 'src.execution.exit_lifecycle', 'live', ?)
+            """,
+            (
+                f"{position_id}:refreshed-reauction:{sequence_no}",
+                position_id,
+                sequence_no,
+                "2026-04-26T00:07:00Z",
+                json.dumps(
+                    {
+                        "status": "durable_wake_reserved",
+                        "global_sell_reauction_status": "durable_wake_reserved",
+                        "held_sell_reauction_obligation": refreshed_obligation,
+                    },
+                    sort_keys=True,
+                ),
+            ),
+        )
+        assert (
+            _relinquished_global_sell_command_id(conn, held)
+            == "cmd-filled-exit-slice"
+        )
         rerun = reconcile_pending_exit_terminal_order_releases(conn)
         assert rerun == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
         stored = conn.execute(
             """
             SELECT payload_json FROM position_events
              WHERE position_id = ? AND event_type = 'EXIT_RETRY_RELEASED'
+               AND source_module = 'src.execution.command_recovery'
             """,
             (position_id,),
         ).fetchone()

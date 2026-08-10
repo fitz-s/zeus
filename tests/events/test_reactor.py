@@ -48,6 +48,7 @@ from src.events.reactor import (
     _POST_SUBMIT_WORLD_WRITE_LOCK_RETRY,
     _build_day0_posterior_redecision_events,
     _edli_emit_day0_extreme_events,
+    _held_position_monitor_preemption_pending,
     _is_posterior_staleness_reason,
     _process_pending_cancelled,
     _rank_forecast_wake_events,
@@ -2063,6 +2064,7 @@ def test_paused_exact_canonical_held_sell_request_reaches_reduce_only_cycle(monk
             active_lock=lock,
             producer_wake_reason="held_sell_global_auction_completion_requested",
             producer_held_sell_reauction_requests=(request,),
+            held_position_monitor_debt_pending=lambda: True,
         )
     assert lock.locked() is False
 
@@ -4975,7 +4977,7 @@ def test_global_batch_stops_claiming_when_cycle_is_cancelled():
     ) == 2
 
 
-def test_producer_batch_yields_only_to_day0_between_event_units():
+def test_process_pending_cancellation_includes_monitor_debt_except_exact_completion():
     def any_urgent():
         return False
 
@@ -5000,6 +5002,105 @@ def test_producer_batch_yields_only_to_day0_between_event_units():
         urgent_wake_pending=any_urgent,
         urgent_day0_pending=day0_urgent,
     ) is any_urgent
+
+    debt_pending = [False]
+    cancelled = _process_pending_cancelled(
+        committed_day0_wake=False,
+        producer_fast_path=False,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=day0_urgent,
+        held_position_monitor_debt_pending=lambda: debt_pending[0],
+    )
+    assert cancelled is not None
+    assert cancelled() is False
+    debt_pending[0] = True
+    assert cancelled() is True
+    assert _process_pending_cancelled(
+        committed_day0_wake=False,
+        producer_fast_path=False,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=day0_urgent,
+        held_position_monitor_debt_pending=lambda: True,
+        exact_held_completion=True,
+    ) is any_urgent
+    assert _held_position_monitor_preemption_pending(
+        lambda: False,
+        lambda: True,
+    ) is True
+    assert _process_pending_cancelled(
+        committed_day0_wake=True,
+        producer_fast_path=True,
+        urgent_wake_pending=any_urgent,
+        urgent_day0_pending=day0_urgent,
+        held_position_monitor_debt_pending=lambda: True,
+    ) is None
+
+
+def test_monitor_debt_preempts_global_batch_and_leaves_queue_retryable():
+    conn, store = _store()
+    events = _multiwinner_events("monitor-debt", 3)
+    for event in events:
+        store.insert_or_ignore(event)
+    debt_pending = [False]
+
+    def _batch(claimed, decision_time, *, claim_unpaged_winner=None):
+        outcome = _sequential_winner_batch(
+            claimed,
+            decision_time,
+            claim_unpaged_winner=claim_unpaged_winner,
+        )
+        debt_pending[0] = True
+        return outcome
+
+    reactor = _multiwinner_reactor(store, _batch)
+    cancelled = _process_pending_cancelled(
+        committed_day0_wake=False,
+        producer_fast_path=False,
+        urgent_wake_pending=lambda: False,
+        urgent_day0_pending=None,
+        held_position_monitor_debt_pending=lambda: debt_pending[0],
+    )
+    reactor.process_pending(
+        decision_time=_DT_VENUE_OPEN,
+        limit=None,
+        cancelled=cancelled,
+    )
+
+    statuses = {
+        event.event_id: _processing_status(conn, event.event_id) for event in events
+    }
+    assert sorted(statuses.values()) == ["pending", "pending", "processing"]
+
+
+def test_monitor_debt_yields_before_runtime_setup_and_releases_reactor_lock(
+    monkeypatch,
+):
+    import src.events.reactor as reactor_module
+    import src.main as main
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+    import src.state.db as db
+
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_pending",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: pytest.fail("monitor debt must yield before runtime DB setup"),
+    )
+
+    lock = threading.Lock()
+    assert reactor_module.run_edli_event_reactor_cycle(
+        active_lock=lock,
+        held_position_monitor_debt_pending=lambda: True,
+    ) is False
+    assert not lock.locked()
 
 
 def test_producer_fast_path_skips_metar_ledger_recovery_sync():

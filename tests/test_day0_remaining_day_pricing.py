@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-06
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-06; last_reused=2026-08-06
+# Last reused or audited: 2026-08-10
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -1632,6 +1632,152 @@ class TestRemainingDayMembers:
         assert p_raw[1] > 0.86
         assert p_raw[2] < 0.12
         assert p_raw.sum() == pytest.approx(1.0)
+
+    def test_empirical_peak_set_state_moves_probability_before_book_collapse(self):
+        """San Francisco replay: causal peak state, not the later settlement."""
+        import src.engine.event_reactor_adapter as era
+        from src.config import runtime_cities_by_name
+        from src.contracts.settlement_semantics import SettlementSemantics
+
+        bins = [
+            Bin(None, 75, "F", "75°F or below"),
+            Bin(76, None, "F", "76°F or higher"),
+        ]
+        city = runtime_cities_by_name()["San Francisco"]
+        payload = {
+            "metric": "high",
+            "rounded_value": 70,
+            "settlement_source": "wu_icao_history",
+            "_edli_day0_peak_set_probability": 0.9079,
+            "_edli_day0_peak_set_sample_count": 70,
+            "_edli_day0_peak_set_probability_basis": (
+                "monthly_empirical_jeffreys_v1"
+            ),
+        }
+
+        point = era._day0_remaining_p_raw_vector(
+            np.array([73.228, 69.402, 73.139, 76.309], dtype=float),
+            city=city,
+            settlement_semantics=SettlementSemantics.for_city(city),
+            bins=bins,
+            payload=payload,
+            extra_member_sigma=0.0,
+        )
+
+        assert point[1] < 0.05
+        assert point.sum() == pytest.approx(1.0)
+        assert payload["_edli_day0_peak_set_mixture_basis"] == (
+            "peak_set_atom_plus_truncated_remaining_path_v1"
+        )
+
+    def test_peak_set_mixture_requires_finite_empirical_evidence(self):
+        import src.engine.event_reactor_adapter as era
+
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE diurnal_peak_prob ("
+            "city TEXT, month INTEGER, hour INTEGER, "
+            "p_high_set REAL, n_obs INTEGER)"
+        )
+        conn.executemany(
+            "INSERT INTO diurnal_peak_prob VALUES (?,?,?,?,?)",
+            [
+                ("San Francisco", 8, 13, 0.6, 70),
+                ("San Francisco", 8, 14, 0.9142857, 70),
+            ],
+        )
+        temporal_context = SimpleNamespace(
+            confidence_source="monthly_empirical",
+            current_local_hour=13.999,
+            post_peak_confidence=0.9137619,
+        )
+
+        probability, sample_count, basis = (
+            era._day0_empirical_peak_set_probability(
+                temporal_context=temporal_context,
+                world_conn=conn,
+                city="San Francisco",
+                month=8,
+            )
+        )
+        conn.close()
+
+        interpolated = 0.6 + (0.9142857 - 0.6) * 0.999
+        assert probability == pytest.approx((interpolated * 70 + 0.5) / 71)
+        assert 0.0 < probability < 1.0
+        assert sample_count == 70
+        assert basis == "monthly_empirical_jeffreys_v1"
+
+    def test_peak_set_generator_conditions_unset_state_and_is_high_only(self):
+        import src.engine.event_reactor_adapter as era
+
+        draws = era._sample_day0_extreme_with_peak_state(
+            rng=np.random.default_rng(17),
+            member_means=np.full(20_000, 19.0),
+            sigma=1.0,
+            movement_boundary=21.0,
+            peak_set_atom=20.0,
+            metric="high",
+            peak_set_probability=0.8,
+        )
+        at_boundary = np.isclose(draws, 20.0, rtol=0.0, atol=0.0)
+        assert at_boundary.mean() == pytest.approx(0.8, abs=0.02)
+        assert np.all(draws[~at_boundary] > 21.0)
+
+        empirical_payload = {
+            "rounded_value": 20,
+            "settlement_source": "wu_icao_history",
+            "_edli_day0_peak_set_probability": 0.8,
+            "_edli_day0_peak_set_sample_count": 70,
+            "_edli_day0_peak_set_probability_basis": (
+                "monthly_empirical_jeffreys_v1"
+            ),
+        }
+        assert era._day0_peak_set_probability_for_distribution(
+            payload=empirical_payload,
+            metric="low",
+        ) is None
+        assert era._day0_peak_set_probability_for_distribution(
+            payload={
+                **empirical_payload,
+                "settlement_source": "hko_hourly_accumulator",
+            },
+            metric="high",
+        ) is None
+        assert era._day0_peak_set_probability_for_distribution(
+            payload=empirical_payload,
+            metric="high",
+        ) == pytest.approx(0.8)
+
+    def test_peak_set_bootstrap_rows_remain_coherent_simplexes(self):
+        import src.engine.event_reactor_adapter as era
+
+        bins = [
+            Bin(None, 20, "C", "20°C or below"),
+            Bin(21, None, "C", "21°C or higher"),
+        ]
+        analysis = SimpleNamespace(
+            _rng=np.random.default_rng(23),
+            _settle=lambda values: np.rint(values),
+            bins=bins,
+            p_cal=np.array([0.8, 0.2]),
+        )
+        sampler = era._Day0BootstrapSampler(
+            members=np.array([19.0, 21.0, 22.0]),
+            rounded=20.0,
+            boundary_survival_probability=1.0,
+            metric="high",
+            sigma=0.5,
+            mask=np.ones(2),
+            peak_set_probability=0.8,
+            peak_set_atom=20.0,
+        )
+        samples = sampler.sample_matrix(analysis, n_samples=100, n_members=50)
+
+        assert samples.shape == (100, 2)
+        assert np.all(samples >= 0.0)
+        assert np.all(samples <= 1.0)
+        assert np.allclose(samples.sum(axis=1), 1.0)
 
     def test_excursion_still_possible_keeps_above_floor_members(self, monkeypatch):
         vectors = [

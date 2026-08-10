@@ -6312,7 +6312,7 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
         ),
         ("RED_FORCE_EXIT", True, True, "direct", False, False),
         ("EDGE_REVERSAL", False, True, "blocked", True, False),
-        ("SELL_REVERSAL", False, True, "direct", False, True),
+        ("SELL_REVERSAL", False, True, "blocked", False, True),
         ("EDGE_REVERSAL", False, True, "dust", False, False),
     ),
 )
@@ -6788,15 +6788,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         ) == 0
         assert summary["exits"] == 1
         assert results[0].should_exit is True
-        assert results[0].exit_reason == (
-            "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
-            if posterior_support_zero
-            else trigger
-        )
-        if posterior_support_zero:
-            assert summary["monitor_branchwise_dominant_direct_sells"] == 1
-            assert "posterior_support_zero_sell_dominates" in pos.applied_validations
-            assert coverage_checks == []
+        assert results[0].exit_reason == trigger
         assert execute_calls == [pos]
     if outcome not in {"blocked", "request_failed", "dust"}:
         assert auction_completion_requests == []
@@ -6829,39 +6821,6 @@ def test_held_monitor_quote_preserves_current_book_min_order_size():
     assert quote is not None
     assert quote.best_bid == 0.04
     assert quote.min_order_size == 5.0
-
-
-@pytest.mark.parametrize(
-    ("samples", "fresh_prob", "best_bid", "fresh", "expected"),
-    (
-        ((0.0, 0.0), 0.0, 0.05, True, True),
-        ((0.0, 1e-6), 5e-7, 0.05, True, False),
-        ((0.0, 0.0), 0.0, 0.049, True, False),
-        ((0.0, 0.0), 0.0, 0.05, False, False),
-        ((), 0.0, 0.05, True, False),
-    ),
-)
-def test_branchwise_dominant_sell_requires_zero_support_and_legal_fresh_bid(
-    samples,
-    fresh_prob,
-    best_bid,
-    fresh,
-    expected,
-):
-    from src.engine import cycle_runtime
-
-    pos = SimpleNamespace(_current_global_held_probability_samples=samples)
-    context = SimpleNamespace(
-        fresh_prob=fresh_prob,
-        fresh_prob_is_fresh=fresh,
-        current_market_price_is_fresh=fresh,
-        best_bid=best_bid,
-    )
-
-    assert (
-        cycle_runtime._posterior_support_zero_sell_dominates(pos, context)
-        is expected
-    )
 
 
 def test_reserved_global_sell_reauction_deadline_is_an_actuation_contract(
@@ -6995,9 +6954,37 @@ def test_same_global_sell_attempt_cannot_slide_its_deadline():
     ]
 
 
+@pytest.mark.parametrize(
+    (
+        "canonical_newer",
+        "canonical_probability_identity",
+        "append_later_sequence_with_older_clock",
+        "expected_probability_identity",
+        "expected_bid",
+        "expected_observed_at",
+    ),
+    (
+        (False, "", False, "q-current", 0.31, "2026-08-08T18:01:00+00:00"),
+        (True, "q-canonical", False, "q-canonical", 0.27, "2026-08-08T18:02:00"),
+        (True, "", False, None, None, None),
+        (True, "q-canonical", True, "q-canonical", 0.27, "2026-08-08T18:02:00"),
+    ),
+    ids=(
+        "runtime-cut-newer",
+        "canonical-cut-newer-naive-clock",
+        "newest-canonical-cut-missing-q-fails-closed",
+        "newest-causal-clock-beats-later-sequence",
+    ),
+)
 def test_expired_global_sell_debt_refreshes_q_and_book_before_reauction(
     tmp_path,
     monkeypatch,
+    canonical_newer,
+    canonical_probability_identity,
+    append_later_sequence_with_older_clock,
+    expected_probability_identity,
+    expected_bid,
+    expected_observed_at,
 ):
     """Deadline recovery is a fresh decision, not a replay of its old witness."""
     from src.engine import cycle_runtime, monitor_refresh
@@ -7095,6 +7082,63 @@ def test_expired_global_sell_debt_refreshes_q_and_book_before_reauction(
         refreshed._monitor_probability_receipt = {
             "probability_content_identity": "q-current",
         }
+        if canonical_newer:
+            sequence_no = _conn.execute(
+                "SELECT COALESCE(MAX(sequence_no), 0) + 1 "
+                "FROM position_events WHERE position_id = ?",
+                (refreshed.trade_id,),
+            ).fetchone()[0]
+            _conn.execute(
+                """
+                INSERT INTO position_events (
+                    event_id, position_id, event_version, sequence_no,
+                    event_type, occurred_at, source_module, env, payload_json
+                ) VALUES (?, ?, 1, ?, 'MONITOR_REFRESHED', ?, ?, 'live', ?)
+                """,
+                (
+                    "fresh-global-sell-recovery:monitor:2",
+                    refreshed.trade_id,
+                    sequence_no,
+                    "2026-08-08T18:02:00",
+                    "tests/test_live_safety_invariants",
+                    json.dumps(
+                        {
+                            "last_monitor_best_bid": 0.27,
+                            "monitor_probability_receipt": {
+                                "probability_content_identity": (
+                                    canonical_probability_identity
+                                ),
+                            },
+                        }
+                    ),
+                ),
+            )
+            if append_later_sequence_with_older_clock:
+                _conn.execute(
+                    """
+                    INSERT INTO position_events (
+                        event_id, position_id, event_version, sequence_no,
+                        event_type, occurred_at, source_module, env, payload_json
+                    ) VALUES (?, ?, 1, ?, 'MONITOR_REFRESHED', ?, ?, 'live', ?)
+                    """,
+                    (
+                        "fresh-global-sell-recovery:monitor:sequence-latest",
+                        refreshed.trade_id,
+                        sequence_no + 1,
+                        "2026-08-08T18:00:30+00:00",
+                        "tests/test_live_safety_invariants",
+                        json.dumps(
+                            {
+                                "last_monitor_best_bid": 0.41,
+                                "monitor_probability_receipt": {
+                                    "probability_content_identity": (
+                                        "q-later-sequence-older-clock"
+                                    ),
+                                },
+                            }
+                        ),
+                    ),
+                )
         return SimpleNamespace()
 
     monkeypatch.setattr(monitor_refresh, "refresh_position", refresh_current)
@@ -7147,11 +7191,18 @@ def test_expired_global_sell_debt_refreshes_q_and_book_before_reauction(
     )
 
     assert refreshes == [position.trade_id]
+    if expected_probability_identity is None:
+        assert published == []
+        assert summary["global_sell_snapshot_reauction_debts_pending"] == 1
+        conn.close()
+        return
     assert len(published) == 1
     assert published[0]["force_new_generation"] is True
-    assert published[0]["probability_content_identity"] == "q-current"
-    assert published[0]["held_best_bid"] == pytest.approx(0.31)
-    assert published[0]["bid_observed_at"] == "2026-08-08T18:01:00+00:00"
+    assert published[0]["probability_content_identity"] == (
+        expected_probability_identity
+    )
+    assert published[0]["held_best_bid"] == pytest.approx(expected_bid)
+    assert published[0]["bid_observed_at"] == expected_observed_at
     assert summary["global_sell_snapshot_reauction_debts_recovered"] == 1
     payload = json.loads(
         conn.execute(

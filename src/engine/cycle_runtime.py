@@ -3854,36 +3854,6 @@ def _global_auction_owns_statistical_sell(exit_decision, exit_reason: str) -> bo
     )
 
 
-def _posterior_support_zero_sell_dominates(pos, exit_context) -> bool:
-    """Return whether legal SELL proceeds dominate HOLD in every current q draw."""
-
-    if not (
-        bool(getattr(exit_context, "fresh_prob_is_fresh", False))
-        and bool(getattr(exit_context, "current_market_price_is_fresh", False))
-    ):
-        return False
-    fresh_prob = _finite_float_or_none(getattr(exit_context, "fresh_prob", None))
-    best_bid = _finite_float_or_none(getattr(exit_context, "best_bid", None))
-    if fresh_prob is None or fresh_prob > 1e-12:
-        return False
-    if best_bid is None or not 0.05 <= best_bid <= 0.95:
-        return False
-    raw_samples = getattr(pos, "_current_global_held_probability_samples", None)
-    if raw_samples is None:
-        return False
-    try:
-        samples = tuple(float(value) for value in raw_samples)
-    except (TypeError, ValueError):
-        return False
-    # Removing a zero-payoff token and adding positive cash increases every
-    # represented terminal branch. Correlation and capital ranking cannot
-    # reverse that dominance, so a full-universe auction only adds latency.
-    return bool(samples) and all(
-        math.isfinite(value) and 0.0 <= value <= 1e-12
-        for value in samples
-    )
-
-
 def _apply_family_monitor_overlay(
     *,
     portfolio,
@@ -5808,6 +5778,12 @@ def execute_monitoring_phase(
         existing = getattr(position, "_held_sell_reauction_obligation", None)
         if not isinstance(existing, dict):
             existing = latest_held_sell_reauction_obligation(conn, position)
+        residual_proof = existing.get("residual_proof")
+        if isinstance(residual_proof, dict):
+            # A fresh q/book attempt supersedes only the auction witness.  The
+            # terminal command's authenticated handoff of positive residual
+            # shares remains the ownership proof for this position scope.
+            obligation["residual_proof"] = dict(residual_proof)
         return preserve_held_sell_reauction_deadline(obligation, existing)
 
     def request_global_sell_snapshot_reauction(
@@ -5841,14 +5817,14 @@ def execute_monitoring_phase(
             canonical_monitor_payload: dict[str, object] = {}
             if force_new_generation and conn is not None:
                 try:
-                    monitor_row = conn.execute(
+                    monitor_rows = conn.execute(
                         """
-                        SELECT occurred_at, payload_json
+                        SELECT sequence_no, occurred_at, payload_json
                           FROM position_events
                          WHERE position_id = ?
                            AND event_type = 'MONITOR_REFRESHED'
-                         ORDER BY sequence_no DESC
-                         LIMIT 1
+                         ORDER BY julianday(occurred_at) DESC, sequence_no DESC
+                         LIMIT 16
                         """,
                         (
                             str(
@@ -5857,10 +5833,22 @@ def execute_monitoring_phase(
                                 or ""
                             ),
                         ),
-                    ).fetchone()
+                    ).fetchall()
+                    monitor_row = max(
+                        (
+                            row
+                            for row in monitor_rows
+                            if _parse_utc_timestamp(row[1]) is not None
+                        ),
+                        key=lambda row: (
+                            _parse_utc_timestamp(row[1]),
+                            int(row[0]),
+                        ),
+                        default=None,
+                    )
                     if monitor_row is not None:
-                        canonical_monitor_at = str(monitor_row[0] or "")
-                        decoded = json.loads(str(monitor_row[1] or "{}"))
+                        canonical_monitor_at = str(monitor_row[1] or "")
+                        decoded = json.loads(str(monitor_row[2] or "{}"))
                         if isinstance(decoded, dict):
                             canonical_monitor_payload = decoded
                 except (sqlite3.Error, TypeError, json.JSONDecodeError):
@@ -5879,7 +5867,7 @@ def execute_monitoring_phase(
                     "_monitor_probability_receipt",
                     None,
                 )
-            current_probability_content_identity = str(
+            runtime_probability_content_identity = str(
                 (
                     probability_receipt.get("probability_content_identity")
                     if isinstance(probability_receipt, dict)
@@ -5887,41 +5875,62 @@ def execute_monitoring_phase(
                 )
                 or ""
             ).strip()
-            if not current_probability_content_identity:
-                canonical_receipt = canonical_monitor_payload.get(
-                    "day0_monitor_probability_receipt"
-                ) or canonical_monitor_payload.get("monitor_probability_receipt")
-                current_probability_content_identity = (
-                    _monitor_probability_content_identity(canonical_receipt)
+            canonical_receipt = canonical_monitor_payload.get(
+                "day0_monitor_probability_receipt"
+            ) or canonical_monitor_payload.get("monitor_probability_receipt")
+            canonical_probability_content_identity = (
+                _monitor_probability_content_identity(canonical_receipt)
+            )
+            runtime_monitor_at = str(
+                getattr(position, "last_monitor_at", "") or ""
+            ).strip()
+            canonical_monitor_clock = _parse_utc_timestamp(canonical_monitor_at)
+            runtime_monitor_clock = _parse_utc_timestamp(runtime_monitor_at)
+            canonical_is_current = bool(
+                canonical_monitor_clock is not None
+                and (
+                    runtime_monitor_clock is None
+                    or canonical_monitor_clock >= runtime_monitor_clock
                 )
+            )
+            # Recovery follows the latest committed MONITOR_REFRESHED cut.  An
+            # in-memory receipt can survive a refresh helper and must never
+            # pin a reauction to an older probability epoch.  Select the whole
+            # causal cut; never splice q from one cut to the book of another.
+            if force_new_generation and canonical_is_current:
+                current_probability_content_identity = str(
+                    canonical_probability_content_identity or ""
+                ).strip()
+                current_bid = canonical_monitor_payload.get(
+                    "last_monitor_best_bid"
+                )
+                current_observed_at = canonical_monitor_at
+            else:
+                current_probability_content_identity = str(
+                    runtime_probability_content_identity or ""
+                ).strip()
+                current_bid = getattr(position, "last_monitor_best_bid", None)
+                current_observed_at = runtime_monitor_at
             probability_content_identity = str(
                 (
                     current_probability_content_identity
                     if force_new_generation
                     else obligation.get("probability_content_identity")
+                    or current_probability_content_identity
                 )
-                or current_probability_content_identity
-                or obligation.get("probability_content_identity")
                 or ""
             ).strip()
             if force_new_generation and not probability_content_identity:
                 raise ValueError(
                     "GLOBAL_SELL_REAUCTION_CURRENT_PROBABILITY_IDENTITY_UNAVAILABLE"
                 )
-            current_bid = getattr(position, "last_monitor_best_bid", None)
-            if current_bid is None:
-                current_bid = canonical_monitor_payload.get("last_monitor_best_bid")
             try:
                 current_bid = float(current_bid)
             except (TypeError, ValueError):
                 current_bid = None
             if current_bid is not None and not math.isfinite(current_bid):
                 current_bid = None
-            current_observed_at = str(
-                getattr(position, "last_monitor_at", "")
-                or canonical_monitor_at
-                or ""
-            )
+            current_observed_at = str(current_observed_at or "")
             if force_new_generation:
                 held_best_bid = current_bid
                 bid_observed_at = current_observed_at
@@ -7497,26 +7506,6 @@ def execute_monitoring_phase(
                     exit_reason,
                 )
             )
-            if (
-                statistical_sell_requires_global
-                and local_exit_trigger == "SELL_REVERSAL"
-                and _posterior_support_zero_sell_dominates(pos, exit_context)
-            ):
-                statistical_sell_requires_global = False
-                exit_reason = "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
-                local_exit_trigger = exit_reason
-                pos.applied_validations = list(
-                    dict.fromkeys(
-                        [
-                            *(pos.applied_validations or []),
-                            "posterior_support_zero_sell_dominates",
-                            "global_auction_comparison_inapplicable:branchwise_dominance",
-                        ]
-                    )
-                )
-                summary["monitor_branchwise_dominant_direct_sells"] = (
-                    summary.get("monitor_branchwise_dominant_direct_sells", 0) + 1
-                )
             if should_exit:
                 # No SELL actuator can make a sub-minimum holding executable.
                 # Apply the same current-book size law before global, direct,
@@ -7645,8 +7634,6 @@ def execute_monitoring_phase(
                 should_exit
                 and local_exit_trigger != "RED_FORCE_EXIT"
                 and local_exit_trigger != "DAY0_HARD_FACT_BIN_DEAD"
-                and local_exit_trigger
-                != "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
                 and getattr(pos, _GLOBAL_MONITOR_SAMPLES_ATTR, None) is not None
             ):
                 if probability_content_identity:

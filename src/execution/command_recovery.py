@@ -16618,6 +16618,10 @@ def _pending_exit_terminal_order_release_rows(
                     AND fact.state = 'MATCHED'
                     AND ABS(CAST(COALESCE(fact.remaining_size, '0') AS REAL))
                         <= 0.000000001
+                    AND ABS(
+                        CAST(COALESCE(cmd.size, '0') AS REAL)
+                        - CAST(COALESCE(fact.matched_size, '0') AS REAL)
+                    ) <= 0.000000001
                     AND LOWER(COALESCE(pc.chain_state, '')) = 'synced'
                     AND CAST(COALESCE(pc.chain_shares, '0') AS REAL) > 0.000000001
                     AND ABS(
@@ -16629,18 +16633,36 @@ def _pending_exit_terminal_order_release_rows(
                     AND datetime(pc.chain_seen_at) >= datetime(cmd.updated_at)
                 )
            )
-           AND pc.phase = 'pending_exit'
            AND (
                 (
-                    cmd.state = 'CANCELLED'
-                    AND fact.state = 'PARTIALLY_MATCHED'
+                    pc.phase = 'pending_exit'
+                    AND (
+                        (
+                            cmd.state = 'CANCELLED'
+                            AND fact.state = 'PARTIALLY_MATCHED'
+                        )
+                        OR (
+                            pc.order_status = 'sell_pending_confirmation'
+                            AND pc.order_id = cmd.venue_order_id
+                        )
+                    )
                 )
                 OR (
-                    pc.order_status = 'sell_pending_confirmation'
-                    AND pc.order_id = cmd.venue_order_id
+                    pc.phase IN ('active', 'day0_window')
+                    AND cmd.state = 'FILLED'
+                    AND fact.state = 'MATCHED'
                 )
            )
            {position_predicate}
+           AND NOT EXISTS (
+                SELECT 1
+                  FROM position_events released
+                 WHERE released.position_id = cmd.position_id
+                   AND released.event_type = 'EXIT_RETRY_RELEASED'
+                   AND released.command_id = cmd.command_id
+                   AND released.source_module = 'src.execution.command_recovery'
+                   AND released.caused_by = 'venue_command:' || cmd.command_id
+           )
            AND NOT EXISTS (
                 SELECT 1
                   FROM venue_commands live
@@ -16672,10 +16694,11 @@ def pending_exit_has_terminal_order_release_debt(
 
     SCOPE: one canonical pending-exit position with a terminal positive-fill
     EXIT remainder and no newer live EXIT command.
-    DRAIN: command recovery writes the V3 held-sell reauction obligation on its
+    DRAIN: command recovery writes the V4 held-sell reauction obligation on its
     next live tick before releasing the position to normal redecision.
     RESET: that append/project changes the phase away from ``pending_exit``;
-    fully closed or unproven remainders never satisfy the shared candidate law.
+    the exact command-scoped release event prevents replay for already-released
+    active/day0 residuals. Fully closed or unproven remainders never qualify.
     """
 
     scoped_position_id = str(position_id or "").strip()
@@ -16712,9 +16735,11 @@ def reconcile_pending_exit_terminal_order_releases(
 
     A terminal command is not a resting order.  Preserve the real residual
     exposure, but release ``pending_exit`` so the next monitor cycle decides
-    from a fresh book instead of polling the dead order forever.  A fully
-    filled selected slice is released only after a newer synced chain snapshot
-    proves that positive residual exposure remains.
+    from a fresh book instead of polling the dead order forever.  Immediate
+    taker fills may already have released the lifecycle to active/day0; they
+    still need the same typed residual proof before the old command relinquishes
+    single-flight ownership.  A fully filled selected slice is released only
+    after a newer synced chain snapshot proves positive residual exposure.
     """
 
     summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
@@ -16855,7 +16880,7 @@ def reconcile_pending_exit_terminal_order_releases(
                 "sequence_no": _latest_position_sequence(conn, position_id) + 1,
                 "event_type": "EXIT_RETRY_RELEASED",
                 "occurred_at": occurred_at,
-                "phase_before": "pending_exit",
+                "phase_before": str(current.get("phase") or "pending_exit"),
                 "phase_after": phase_after,
                 "strategy_key": current.get("strategy_key"),
                 "decision_id": candidate.get("decision_id"),
