@@ -14761,7 +14761,7 @@ class TestRecoveryResolutionTable:
         assert dict(proof_fact) == {
             "state": "CANCEL_CONFIRMED",
             "matched_size": "4.347825",
-            "remaining_size": "0" if terminal_matched_size == "0" else "58.652175",
+            "remaining_size": "0",
         }
         assert predicates["command_state_cancelled"] is True
         assert predicates["cancel_acked"] is True
@@ -14929,6 +14929,107 @@ class TestRecoveryResolutionTable:
         assert conn.execute(
             "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = 'cmd-001'"
         ).fetchone()[0] == before_count + 2
+
+    def test_cancelled_partial_reuses_only_exact_zero_remainder_authority_proof(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Crash recovery reuses only the exact proof written before terminality."""
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_projection_repairs,
+        )
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=63.0, price=0.77)
+        _advance_to_acked(conn, venue_order_id="ord-cancelled-proof-reuse")
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-001",
+            order_id="ord-cancelled-proof-reuse",
+        )
+        trade_fact_id = _append_trade_fact(
+            conn,
+            order_id="ord-cancelled-proof-reuse",
+            trade_id="trade-cancelled-proof-reuse",
+            state="CONFIRMED",
+            filled_size="4.347825",
+            fill_price="0.7700001725",
+            source="WS_USER",
+        )
+        proof_fact_id = _append_order_fact(
+            conn,
+            order_id="ord-cancelled-proof-reuse",
+            state="CANCEL_CONFIRMED",
+            matched_size="4.347825",
+            remaining_size="0",
+            source="WS_USER",
+            raw_payload_json={
+                "schema_version": 1,
+                "reason": (
+                    "cancelled_entry_confirmed_partial_fill_order_fact_authority_proof"
+                ),
+                "proof_class": "cancel_ack_plus_canonical_positive_partial_fill",
+                "command_id": "cmd-001",
+                "venue_order_id": "ord-cancelled-proof-reuse",
+                "source_trade_fact_id": trade_fact_id,
+                "source_trade_fact_ids": [trade_fact_id],
+                "requested_size": "63.0",
+                "matched_size": "4.347825",
+                "remaining_size": "0",
+                "source": "WS_USER",
+                "required_predicates": {
+                    "command_state_cancelled": True,
+                    "cancel_acked": True,
+                    "canonical_positive_trade_facts": True,
+                    "canonical_trade_facts_match_terminal_order_fact": True,
+                    "cumulative_fill_below_requested_size": True,
+                    "terminal_order_remainder_zero": True,
+                },
+            },
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-cancelled-proof-reuse"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-cancelled-proof-reuse"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={"venue_order_id": "ord-cancelled-proof-reuse"},
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        before_count = conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = 'cmd-001'"
+        ).fetchone()[0]
+        assert reconcile_filled_entry_projection_repairs(conn, mock_client) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        facts = conn.execute(
+            "SELECT fact_id, state, raw_payload_json FROM venue_order_facts "
+            "WHERE command_id = 'cmd-001' ORDER BY fact_id"
+        ).fetchall()
+        assert len(facts) == before_count + 1
+        assert facts[-1]["state"] == "PARTIALLY_MATCHED"
+        assert json.loads(facts[-1]["raw_payload_json"])[
+            "latest_order_fact_id"
+        ] == proof_fact_id
 
     def test_cancelled_partial_does_not_borrow_fill_from_another_order(
         self,

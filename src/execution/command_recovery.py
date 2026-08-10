@@ -3203,11 +3203,35 @@ def _append_cancelled_entry_terminal_partial_order_fact(
         command_id=command_id,
         venue_order_id=venue_order_id,
     )
+    latest_proof = _json_dict(latest_order_fact.get("raw_payload_json"))
+    latest_predicates = latest_proof.get("required_predicates")
+    required_predicates = {
+        "command_state_cancelled",
+        "cancel_acked",
+        "canonical_positive_trade_facts",
+        "canonical_trade_facts_match_terminal_order_fact",
+        "cumulative_fill_below_requested_size",
+        "terminal_order_remainder_zero",
+    }
     proof_fact_id = latest_order_fact.get("fact_id")
-    if not (
+    reusable_proof = (
         str(latest_order_fact.get("state") or "").upper() == "CANCEL_CONFIRMED"
         and _decimal_matches(latest_order_fact.get("matched_size"), matched_size)
-    ):
+        and _decimal_is_zero(latest_order_fact.get("remaining_size"))
+        and str(latest_order_fact.get("source") or "").upper()
+        in _LIVE_TERMINAL_ORDER_FACT_SOURCES
+        and latest_proof.get("proof_class")
+        == "cancel_ack_plus_canonical_positive_partial_fill"
+        and latest_proof.get("command_id") == command_id
+        and latest_proof.get("venue_order_id") == venue_order_id
+        and latest_proof.get("source_trade_fact_id")
+        == confirmed.get("source_trade_fact_id")
+        and latest_proof.get("source_trade_fact_ids")
+        == confirmed.get("source_trade_fact_ids")
+        and isinstance(latest_predicates, Mapping)
+        and all(latest_predicates.get(name) is True for name in required_predicates)
+    )
+    if not reusable_proof:
         proof_payload = {
             "schema_version": 1,
             "reason": "cancelled_entry_confirmed_partial_fill_order_fact_authority_proof",
