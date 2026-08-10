@@ -21801,6 +21801,28 @@ def test_complete_holding_coverage_isolates_missing_held_book_state():
     assert coverage[0].status == "EXCLUDED"
     assert coverage[0].reason == "SELL_BOOK_WITNESS_UNAVAILABLE"
 
+    selection_unavailable = global_batch_runtime._complete_holding_coverage(
+        (),
+        obligations=(obligation,),
+        probability_witnesses={"held-family": probability},
+        ineligible_by_family={},
+        unavailable_book_by_position={},
+        selection_no_trade_reason="GLOBAL_BOOK_EPOCH_EXPIRED",
+        ledger_snapshot_id="ledger",
+        wealth_economic_identity="wealth",
+        selection_epoch_identity="selection",
+        book_epoch_identity="book",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+        book_deadline_at_utc=at + _dt.timedelta(seconds=30),
+    )
+
+    assert len(selection_unavailable) == 1
+    assert selection_unavailable[0].status == "EXCLUDED"
+    assert selection_unavailable[0].reason == (
+        "GLOBAL_SELECTION_UNAVAILABLE:GLOBAL_BOOK_EPOCH_EXPIRED"
+    )
+
     with pytest.raises(
         ValueError,
         match="GLOBAL_HOLDING_COVERAGE_SCOPE_INCOMPLETE:held-position",

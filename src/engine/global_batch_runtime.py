@@ -618,6 +618,13 @@ def _complete_holding_coverage(
                 if family_reason
                 else book_reason
             )
+            selection_reason = str(selection_no_trade_reason or "").strip()
+            if not reason and selection_reason:
+                # SCOPE: only this held position is excluded from this
+                # side-effect-free cut. DRAIN: the next cut rebuilds the full
+                # holdings/probability/book partition. RESET: any complete
+                # selection emits its own evaluated or typed-excluded row.
+                reason = f"GLOBAL_SELECTION_UNAVAILABLE:{selection_reason}"
             if not reason:
                 _LOG.error(
                     "global holding coverage source missing: position_id=%s "
