@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-02; last_reused=2026-08-02
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: Command recovery loop for unresolved venue command side effects.
 # Reuse: Run when command recovery, venue order payload normalization, or unknown side-effect resolution changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
@@ -2060,6 +2060,7 @@ def _cancel_ack_terminal_partial_fact_candidates(
         + """
         entry_fill AS (
             SELECT fact.command_id,
+                   fact.venue_order_id,
                    SUM(CAST(fact.filled_size AS REAL)) AS filled_size,
                    SUM(CAST(fact.filled_size AS REAL) * CAST(fact.fill_price AS REAL))
                        / SUM(CAST(fact.filled_size AS REAL)) AS fill_price,
@@ -2068,11 +2069,10 @@ def _cancel_ack_terminal_partial_fact_candidates(
                    MAX(fact.source) AS fill_source,
                    MAX(fact.trade_fact_id) AS source_trade_fact_id
               FROM economic_trade_fact fact
-             WHERE UPPER(COALESCE(fact.state, ''))
-                       IN ('MATCHED', 'MINED', 'CONFIRMED')
+             WHERE UPPER(COALESCE(fact.state, '')) = 'CONFIRMED'
                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
                AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
-             GROUP BY fact.command_id
+             GROUP BY fact.command_id, fact.venue_order_id
         ),
         """
         + _canonical_order_truth_cte(command_scope_cte="candidate_commands")
@@ -2094,6 +2094,7 @@ def _cancel_ack_terminal_partial_fact_candidates(
           FROM candidate_commands cmd
           JOIN entry_fill fill
             ON fill.command_id = cmd.command_id
+           AND fill.venue_order_id = cmd.venue_order_id
           LEFT JOIN canonical_order_truth fact
             ON fact.command_id = cmd.command_id
            AND fact.venue_order_id = cmd.venue_order_id
@@ -3076,6 +3077,57 @@ def _append_terminal_partial_order_fact(
     raise RuntimeError("terminal partial correction was rejected by order-fact authority")
 
 
+def _confirmed_entry_fill_proof(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    venue_order_id: str,
+) -> dict:
+    """Return exact canonical CONFIRMED fills for one command/order."""
+
+    sql = (
+        "WITH "
+        + _canonical_trade_fact_cte(
+            source_clause_sql="WHERE fact.source IN ('REST', 'WS_USER')"
+        )
+        + ",\n"
+        + _economic_trade_fact_cte()
+        + """
+        SELECT fact.trade_fact_id,
+               fact.state,
+               fact.filled_size,
+               fact.source,
+               COALESCE(NULLIF(fact.venue_timestamp, ''), fact.observed_at)
+                   AS observed_at
+          FROM economic_trade_fact fact
+         WHERE fact.command_id = ?
+           AND lower(fact.venue_order_id) = lower(?)
+           AND UPPER(COALESCE(fact.state, ''))
+                   IN ('MATCHED', 'MINED', 'CONFIRMED')
+           AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+         ORDER BY fact.trade_fact_id
+        """
+    )
+    rows = [
+        _dict_row(row)
+        for row in conn.execute(sql, (command_id, venue_order_id))
+    ]
+    sizes = [_positive_decimal_or_none(row.get("filled_size")) for row in rows]
+    if (
+        not rows
+        or any(size is None for size in sizes)
+        or any(str(row.get("state") or "").upper() != "CONFIRMED" for row in rows)
+    ):
+        return {}
+    return {
+        "filled_size": sum((size for size in sizes if size is not None), Decimal("0")),
+        "source": max(str(row.get("source") or "").upper() for row in rows),
+        "source_trade_fact_id": rows[-1].get("trade_fact_id"),
+        "source_trade_fact_ids": [row.get("trade_fact_id") for row in rows],
+        "observed_at": max(str(row.get("observed_at") or "") for row in rows),
+    }
+
+
 def _append_cancelled_entry_terminal_partial_order_fact(
     conn: sqlite3.Connection,
     *,
@@ -3088,11 +3140,27 @@ def _append_cancelled_entry_terminal_partial_order_fact(
         return False
     command_id = str(candidate.get("command_id") or "")
     venue_order_id = str(candidate.get("venue_order_id") or "")
-    filled_size = (
+    candidate_filled_size = (
         candidate.get("fill_filled_size")
         if candidate.get("fill_filled_size") is not None
         else candidate.get("filled_size")
     )
+    confirmed = _confirmed_entry_fill_proof(
+        conn,
+        command_id=command_id,
+        venue_order_id=venue_order_id,
+    )
+    filled_size = confirmed.get("filled_size")
+    candidate_filled = _positive_decimal_or_none(candidate_filled_size)
+    confirmed_filled = _positive_decimal_or_none(filled_size)
+    if (
+        candidate_filled is None
+        or confirmed_filled is None
+        or abs(candidate_filled - confirmed_filled) > Decimal("0.000000001")
+    ):
+        raise RuntimeError(
+            "cancelled entry projection requires exact canonical confirmed fill"
+        )
     requested_size = (
         candidate.get("size")
         if candidate.get("size") is not None
@@ -3117,12 +3185,12 @@ def _append_cancelled_entry_terminal_partial_order_fact(
         raise RuntimeError(
             "cancelled entry projection requires acknowledged terminal partial fill"
         )
-    source = str(candidate.get("fill_source") or candidate.get("source") or "").upper()
+    source = str(confirmed.get("source") or "").upper()
     if source not in _LIVE_TERMINAL_ORDER_FACT_SOURCES:
         raise RuntimeError("cancelled entry projection requires authenticated fill source")
     observed_at = str(
         cancel_ack["occurred_at"]
-        or candidate.get("fill_observed_at")
+        or confirmed.get("observed_at")
         or candidate.get("execution_filled_at")
         or candidate.get("observed_at")
         or _now_iso()
@@ -3146,10 +3214,8 @@ def _append_cancelled_entry_terminal_partial_order_fact(
             "proof_class": "cancel_ack_plus_canonical_positive_partial_fill",
             "command_id": command_id,
             "venue_order_id": venue_order_id,
-            "source_trade_fact_id": (
-                candidate.get("source_trade_fact_id")
-                or candidate.get("trade_fact_id")
-            ),
+            "source_trade_fact_id": confirmed.get("source_trade_fact_id"),
+            "source_trade_fact_ids": confirmed.get("source_trade_fact_ids"),
             "requested_size": str(requested_size or ""),
             "matched_size": matched_size,
             "remaining_size": "0",
@@ -3186,10 +3252,8 @@ def _append_cancelled_entry_terminal_partial_order_fact(
         "matched_size": matched_size,
         "remaining_size": "0",
         "requested_size": str(requested_size or ""),
-        "source_trade_fact_id": (
-            candidate.get("source_trade_fact_id")
-            or candidate.get("trade_fact_id")
-        ),
+        "source_trade_fact_id": confirmed.get("source_trade_fact_id"),
+        "source_trade_fact_ids": confirmed.get("source_trade_fact_ids"),
         "required_predicates": {
             "command_state_cancelled": True,
             "cancel_acked": True,
@@ -3922,6 +3986,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
         + """,
         entry_fill AS (
             SELECT fact.command_id,
+                   fact.venue_order_id,
                    COUNT(*) AS fill_fact_count,
                    SUM(CAST(fact.filled_size AS REAL)) AS filled_size,
                    SUM(CAST(fact.filled_size AS REAL) * CAST(fact.fill_price AS REAL))
@@ -3937,7 +4002,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
              WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
                AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
-             GROUP BY fact.command_id
+             GROUP BY fact.command_id, fact.venue_order_id
         )
         SELECT cmd.*,
                entry_fill.fill_fact_count AS fill_fact_count,
@@ -3965,6 +4030,7 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
          FROM venue_commands cmd
           JOIN entry_fill
             ON entry_fill.command_id = cmd.command_id
+           AND entry_fill.venue_order_id = cmd.venue_order_id
           LEFT JOIN position_current pc
             ON pc.position_id = cmd.position_id
           LEFT JOIN venue_submission_envelopes env

@@ -14768,6 +14768,313 @@ class TestRecoveryResolutionTable:
         assert predicates["terminal_order_remainder_zero"] is True
         assert predicates["canonical_trade_facts_match_terminal_order_fact"] is True
 
+    def test_cancelled_partial_restarts_with_zero_cancel_match_and_appends_authority_proof(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A zero-match cancel fact gets an append-only positive-match proof first."""
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_projection_repairs,
+        )
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=63.0, price=0.77)
+        _advance_to_acked(conn, venue_order_id="ord-cancelled-zero-match")
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-001",
+            order_id="ord-cancelled-zero-match",
+        )
+        trade_fact_id = _append_trade_fact(
+            conn,
+            order_id="ord-cancelled-zero-match",
+            trade_id="trade-cancelled-zero-match",
+            state="CONFIRMED",
+            filled_size="4.347825",
+            fill_price="0.7700001725",
+            source="WS_USER",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-cancelled-zero-match",
+            state="CANCEL_CONFIRMED",
+            matched_size="0",
+            remaining_size="58.652175",
+            source="WS_USER",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-cancelled-zero-match"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-cancelled-zero-match"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={"venue_order_id": "ord-cancelled-zero-match"},
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        before_count = conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = 'cmd-001'"
+        ).fetchone()[0]
+        repair = reconcile_filled_entry_projection_repairs(conn, mock_client)
+        assert repair == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert _get_state(conn, "cmd-001") == "CANCELLED"
+
+        facts = conn.execute(
+            """
+            SELECT fact_id, state, matched_size, remaining_size, raw_payload_json
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY fact_id
+            """
+        ).fetchall()
+        assert len(facts) == before_count + 2
+        proof = facts[-2]
+        terminal = facts[-1]
+        assert {
+            key: proof[key] for key in ("state", "matched_size", "remaining_size")
+        } == {
+            "state": "CANCEL_CONFIRMED",
+            "matched_size": "4.347825",
+            "remaining_size": "0",
+        }
+        proof_payload = json.loads(proof["raw_payload_json"])
+        assert proof_payload["reason"] == (
+            "cancelled_entry_confirmed_partial_fill_order_fact_authority_proof"
+        )
+        assert proof_payload["proof_class"] == (
+            "cancel_ack_plus_canonical_positive_partial_fill"
+        )
+        assert proof_payload["command_id"] == "cmd-001"
+        assert proof_payload["venue_order_id"] == "ord-cancelled-zero-match"
+        assert proof_payload["source_trade_fact_id"] == trade_fact_id
+        assert proof_payload["requested_size"] == "63.0"
+        assert proof_payload["matched_size"] == "4.347825"
+        assert proof_payload["required_predicates"] == {
+            "command_state_cancelled": True,
+            "cancel_acked": True,
+            "canonical_positive_trade_facts": True,
+            "canonical_trade_facts_match_terminal_order_fact": True,
+            "cumulative_fill_below_requested_size": True,
+            "terminal_order_remainder_zero": True,
+        }
+        assert {
+            key: terminal[key]
+            for key in ("state", "matched_size", "remaining_size")
+        } == {
+            "state": "PARTIALLY_MATCHED",
+            "matched_size": "4.347825",
+            "remaining_size": "0",
+        }
+        terminal_payload = json.loads(terminal["raw_payload_json"])
+        assert terminal_payload["latest_order_fact_id"] == proof["fact_id"]
+
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, order_status, fill_authority
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": pytest.approx(4.347825),
+            "cost_basis_usd": pytest.approx(4.347825 * 0.7700001725),
+            "order_status": "partial",
+            "fill_authority": "venue_confirmed_partial",
+        }
+        event_types = [
+            row["event_type"]
+            for row in conn.execute(
+                """
+                SELECT event_type
+                  FROM position_events
+                 WHERE position_id = 'pos-001'
+                 ORDER BY sequence_no
+                """
+            ).fetchall()
+        ]
+        assert event_types == [
+            "POSITION_OPEN_INTENT",
+            "ENTRY_ORDER_POSTED",
+            "ENTRY_ORDER_FILLED",
+        ]
+
+        second = reconcile_filled_entry_projection_repairs(conn, mock_client)
+        assert second == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = 'cmd-001'"
+        ).fetchone()[0] == before_count + 2
+
+    def test_cancelled_partial_does_not_borrow_fill_from_another_order(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A command-level join cannot move another order's fill into this order."""
+        from src.execution.command_recovery import (
+            reconcile_cancel_ack_terminal_partial_facts,
+            reconcile_filled_entry_projection_repairs,
+        )
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=63.0, price=0.77)
+        _advance_to_acked(conn, venue_order_id="ord-cancelled-exact")
+        _append_trade_fact(
+            conn,
+            order_id="ord-different",
+            trade_id="trade-different-order",
+            state="CONFIRMED",
+            filled_size="4.347825",
+            fill_price="0.7700001725",
+            source="WS_USER",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-cancelled-exact"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-cancelled-exact"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={"venue_order_id": "ord-cancelled-exact"},
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        before_count = conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = 'cmd-001'"
+        ).fetchone()[0]
+        assert reconcile_cancel_ack_terminal_partial_facts(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert reconcile_filled_entry_projection_repairs(conn, mock_client) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = 'cmd-001'"
+        ).fetchone()[0] == before_count
+        assert conn.execute(
+            "SELECT 1 FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone() is None
+
+    def test_cancelled_partial_rejects_mixed_confirmed_and_unconfirmed_fills(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A positive MATCHED remainder cannot ride a CONFIRMED fill into proof."""
+        from src.execution.command_recovery import (
+            reconcile_cancel_ack_terminal_partial_facts,
+            reconcile_filled_entry_projection_repairs,
+        )
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=63.0, price=0.77)
+        _advance_to_acked(conn, venue_order_id="ord-cancelled-mixed")
+        _append_trade_fact(
+            conn,
+            order_id="ord-cancelled-mixed",
+            trade_id="trade-confirmed",
+            state="CONFIRMED",
+            filled_size="4.0",
+            fill_price="0.77",
+            source="WS_USER",
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-cancelled-mixed",
+            trade_id="trade-matched-only",
+            state="MATCHED",
+            filled_size="0.347825",
+            fill_price="0.7700021555",
+            source="WS_USER",
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-cancelled-mixed"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-cancelled-mixed"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_ACKED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={"venue_order_id": "ord-cancelled-mixed"},
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        before_count = conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = 'cmd-001'"
+        ).fetchone()[0]
+        assert reconcile_cancel_ack_terminal_partial_facts(conn) == {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 1,
+        }
+        assert reconcile_filled_entry_projection_repairs(conn, mock_client) == {
+            "scanned": 1,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 1,
+        }
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id = 'cmd-001'"
+        ).fetchone()[0] == before_count
+        assert conn.execute(
+            "SELECT 1 FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone() is None
+
     def test_cancelled_partial_correction_without_cancel_ack_is_rejected(
         self,
         conn,
