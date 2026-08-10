@@ -16712,8 +16712,11 @@ def test_global_taker_winner_rebinds_local_maker_rejection_without_witness_bypas
         passed_prefilter=False,
         missing_reason=era._CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE,
     )
+    production_buy_candidate = selected_candidate("TAKER_LIMIT")
+    del production_buy_candidate.action
+    assert not hasattr(production_buy_candidate, "action")
     taker_actuation = SimpleNamespace(
-        decision=SimpleNamespace(candidate=selected_candidate("TAKER_LIMIT"))
+        decision=SimpleNamespace(candidate=production_buy_candidate)
     )
     exact = era._global_actuation_exact_buy_proofs(
         proofs=(rebound[0], sibling),

@@ -15127,7 +15127,10 @@ def _global_actuation_exact_buy_proofs(
     candidate = getattr(decision, "candidate", None)
     if candidate is None:
         return ()
-    action = str(getattr(candidate, "action", "") or "").strip().upper()
+    # BUY candidates predate the cross-action auction and therefore do not
+    # carry an explicit ``action`` field.  Absence means BUY; only the newer
+    # SELL/HOLD/CASH candidates name their action explicitly.
+    action = str(getattr(candidate, "action", "BUY") or "BUY").strip().upper()
     if action != "BUY":
         return proofs
     side = str(getattr(candidate, "side", "") or "").strip().upper()
@@ -15982,8 +15985,12 @@ def _build_event_bound_no_submit_receipt_core(
         "candidate",
         None,
     )
+    # Global BUY candidates have no ``action`` attribute.  Preserve the
+    # auction contract used by _global_actuation_current_admission_proofs:
+    # missing action is BUY, not an unknown action that falls through to a
+    # second local-family selection.
     _global_selected_action = str(
-        getattr(_global_selected_candidate, "action", "") or ""
+        getattr(_global_selected_candidate, "action", "BUY") or "BUY"
     ).strip().upper()
     if global_actuation is not None and _global_selected_action == "BUY":
         # The complete global auction already selected one action across every
