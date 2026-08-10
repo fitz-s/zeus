@@ -2667,7 +2667,7 @@ def _edli_confirmed_fill_bridge_coverage_check() -> CheckResult:
                 "missing_rest_filled_orphan_count": rest_orphan_count,
                 "samples": samples,
                 "repair_owner": (
-                    "src.ingest.price_channel_ingest._edli_user_channel_reconcile_cycle/"
+                    "src.ingest.price_channel_ingest._edli_fill_bridge_repair_cycle/"
                     "src.events.edli_trade_fact_bridge.append_confirmed_trade_facts_to_edli+"
                     "append_rest_filled_orphan_trade_facts_to_edli"
                 ),

@@ -36,6 +36,9 @@ class TradeFactBridgeCandidate:
 def discover_confirmed_trade_fact_candidates(
     conn: sqlite3.Connection,
     *,
+    trade_schema: str,
+    event_schema: str,
+    projection_schema: str,
     limit: int = 100,
     trade_db_path: str | Path | None = None,
 ) -> tuple[TradeFactBridgeCandidate, ...]:
@@ -44,6 +47,9 @@ def discover_confirmed_trade_fact_candidates(
     return _discover_trade_fact_candidates(
         conn,
         kind="confirmed",
+        trade_schema=trade_schema,
+        event_schema=event_schema,
+        projection_schema=projection_schema,
         limit=limit,
         trade_db_path=trade_db_path,
     )
@@ -52,6 +58,9 @@ def discover_confirmed_trade_fact_candidates(
 def discover_rest_filled_orphan_trade_fact_candidates(
     conn: sqlite3.Connection,
     *,
+    trade_schema: str,
+    event_schema: str,
+    projection_schema: str,
     limit: int = 50,
     trade_db_path: str | Path | None = None,
 ) -> tuple[TradeFactBridgeCandidate, ...]:
@@ -60,6 +69,9 @@ def discover_rest_filled_orphan_trade_fact_candidates(
     return _discover_trade_fact_candidates(
         conn,
         kind="rest_orphan",
+        trade_schema=trade_schema,
+        event_schema=event_schema,
+        projection_schema=projection_schema,
         limit=limit,
         trade_db_path=trade_db_path,
     )
@@ -69,19 +81,30 @@ def _discover_trade_fact_candidates(
     conn: sqlite3.Connection,
     *,
     kind: str,
+    trade_schema: str,
+    event_schema: str,
+    projection_schema: str,
     limit: int,
     trade_db_path: str | Path | None,
 ) -> tuple[TradeFactBridgeCandidate, ...]:
     """Run the expensive historical/window discovery query in a read-only phase."""
 
     _ensure_trades_attached_if_needed(conn, trade_db_path=trade_db_path)
-    trade_schema = _schema_with_table(conn, "venue_trade_facts", preferred="trades")
-    event_schema = _schema_with_table(conn, "edli_live_order_events", preferred="main")
-    projection_schema = _schema_with_table(
-        conn, "edli_live_order_projection", preferred=event_schema or "main"
+    _require_schema_tables(
+        conn,
+        schema=trade_schema,
+        tables=("venue_commands", "venue_trade_facts"),
     )
-    if trade_schema is None or event_schema is None or projection_schema is None:
-        return ()
+    _require_schema_tables(
+        conn,
+        schema=event_schema,
+        tables=("edli_live_order_events",),
+    )
+    _require_schema_tables(
+        conn,
+        schema=projection_schema,
+        tables=("edli_live_order_projection",),
+    )
     venue_trade_facts = _q(trade_schema, "venue_trade_facts")
     venue_commands = _q(trade_schema, "venue_commands")
     events = _q(event_schema, "edli_live_order_events")
@@ -500,15 +523,18 @@ def append_confirmed_trade_facts_to_edli(
     ``SubmitUnknown`` while the authenticated user channel later proved the fill.
     """
 
+    trade_schema, event_schema, projection_schema = _append_bridge_schemas(
+        conn, trade_db_path=trade_db_path
+    )
     if candidates is None:
         candidates = discover_confirmed_trade_fact_candidates(
-            conn, limit=limit, trade_db_path=trade_db_path
+            conn,
+            trade_schema=trade_schema,
+            event_schema=event_schema,
+            projection_schema=projection_schema,
+            limit=limit,
+            trade_db_path=trade_db_path,
         )
-    _ensure_trades_attached_if_needed(conn, trade_db_path=trade_db_path)
-    trade_schema = _schema_with_table(conn, "venue_trade_facts", preferred="trades")
-    event_schema = _schema_with_table(conn, "edli_live_order_events", preferred="main")
-    if trade_schema is None or event_schema is None:
-        return 0
 
     ledger = LiveOrderAggregateLedger(conn)
     appended = 0
@@ -562,6 +588,9 @@ def append_confirmed_trade_facts_to_edli(
     reconciled = _consume_absorbed_confirmed_fills(
         conn,
         trade_schema=trade_schema,
+        event_schema=event_schema,
+        projection_schema=projection_schema,
+        cap_schema=event_schema,
         limit=limit,
         now=default_now,
         aggregate_ids=absorbed_fill_aggregate_ids,
@@ -578,6 +607,9 @@ def _consume_absorbed_confirmed_fills(
     conn: sqlite3.Connection,
     *,
     trade_schema: str,
+    event_schema: str,
+    projection_schema: str,
+    cap_schema: str,
     limit: int,
     now: datetime,
     aggregate_ids: Sequence[str] | None = None,
@@ -592,26 +624,14 @@ def _consume_absorbed_confirmed_fills(
         "position_current",
         "position_events",
     )
-    if any(
-        _schema_with_table(conn, table, preferred=trade_schema) != trade_schema
-        for table in required
-    ):
-        return () if discover_only else 0
-    event_schema = _schema_with_table(
-        conn, "edli_live_order_events", preferred="main"
+    _require_schema_tables(conn, schema=trade_schema, tables=required)
+    _require_schema_tables(
+        conn, schema=event_schema, tables=("edli_live_order_events",)
     )
-    projection_schema = _schema_with_table(
-        conn,
-        "edli_live_order_projection",
-        preferred=event_schema or "main",
+    _require_schema_tables(
+        conn, schema=projection_schema, tables=("edli_live_order_projection",)
     )
-    cap_schema = _schema_with_table(
-        conn,
-        "edli_live_cap_usage",
-        preferred=event_schema or "main",
-    )
-    if event_schema is None or projection_schema is None or cap_schema is None:
-        return () if discover_only else 0
+    _require_schema_tables(conn, schema=cap_schema, tables=("edli_live_cap_usage",))
     events = _q(event_schema, "edli_live_order_events")
     projection = _q(projection_schema, "edli_live_order_projection")
     cap_usage = _q(cap_schema, "edli_live_cap_usage")
@@ -873,16 +893,20 @@ def _consume_absorbed_confirmed_fills(
 def discover_absorbed_confirmed_fill_aggregate_ids(
     conn: sqlite3.Connection,
     *,
+    trade_schema: str,
+    event_schema: str,
+    projection_schema: str,
+    cap_schema: str,
     limit: int = 100,
 ) -> tuple[str, ...]:
     """Discover cap-reconcile candidates before the canonical writer lease."""
 
-    trade_schema = _schema_with_table(conn, "venue_trade_facts", preferred="trades")
-    if trade_schema is None:
-        return ()
     candidates = _consume_absorbed_confirmed_fills(
         conn,
         trade_schema=trade_schema,
+        event_schema=event_schema,
+        projection_schema=projection_schema,
+        cap_schema=cap_schema,
         limit=limit,
         now=datetime.now(timezone.utc),
         discover_only=True,
@@ -924,15 +948,18 @@ def append_rest_filled_orphan_trade_facts_to_edli(
 
     default_now = now or datetime.now(timezone.utc)
     grace_cutoff = default_now.timestamp() - max(0.0, float(grace_minutes)) * 60.0
+    trade_schema, event_schema, projection_schema = _append_bridge_schemas(
+        conn, trade_db_path=trade_db_path
+    )
     if candidates is None:
         candidates = discover_rest_filled_orphan_trade_fact_candidates(
-            conn, limit=limit, trade_db_path=trade_db_path
+            conn,
+            trade_schema=trade_schema,
+            event_schema=event_schema,
+            projection_schema=projection_schema,
+            limit=limit,
+            trade_db_path=trade_db_path,
         )
-    _ensure_trades_attached_if_needed(conn, trade_db_path=trade_db_path)
-    trade_schema = _schema_with_table(conn, "venue_trade_facts", preferred="trades")
-    event_schema = _schema_with_table(conn, "edli_live_order_events", preferred="main")
-    if trade_schema is None or event_schema is None:
-        return 0
 
     ledger = LiveOrderAggregateLedger(conn)
     appended = 0
@@ -985,6 +1012,9 @@ def append_rest_filled_orphan_trade_facts_to_edli(
     reconciled = _consume_absorbed_confirmed_fills(
         conn,
         trade_schema=trade_schema,
+        event_schema=event_schema,
+        projection_schema=projection_schema,
+        cap_schema=event_schema,
         limit=limit,
         now=default_now,
         aggregate_ids=absorbed_fill_aggregate_ids,
@@ -1099,6 +1129,54 @@ def _append_one_recovered_fill(ledger, row, observed_at, message_hash, grace_min
             "recovery_basis": recovery_basis,
         },
     )
+
+
+def _append_bridge_schemas(
+    conn: sqlite3.Connection,
+    *,
+    trade_db_path: str | Path | None,
+) -> tuple[str, str, str]:
+    """Return the explicit writer-side schema roles for one bridge connection."""
+
+    _ensure_trades_attached_if_needed(conn, trade_db_path=trade_db_path)
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    trade_schema = "trades" if "trades" in attached else "main"
+    event_schema = "main"
+    projection_schema = "main"
+    _require_schema_tables(
+        conn,
+        schema=trade_schema,
+        tables=("venue_commands", "venue_trade_facts"),
+    )
+    _require_schema_tables(
+        conn,
+        schema=event_schema,
+        tables=("edli_live_order_events",),
+    )
+    _require_schema_tables(
+        conn,
+        schema=projection_schema,
+        tables=("edli_live_order_projection",),
+    )
+    return trade_schema, event_schema, projection_schema
+
+
+def _require_schema_tables(
+    conn: sqlite3.Connection,
+    *,
+    schema: str,
+    tables: tuple[str, ...],
+) -> None:
+    attached = {str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()}
+    if schema not in attached:
+        raise RuntimeError(f"EDLI_BRIDGE_SCHEMA_MISSING:{schema}")
+    missing = tuple(
+        table for table in tables if not _table_exists(conn, table, schema=schema)
+    )
+    if missing:
+        raise RuntimeError(
+            f"EDLI_BRIDGE_TABLE_MISSING:{schema}:{','.join(missing)}"
+        )
 
 
 def _ensure_trades_attached_if_needed(
