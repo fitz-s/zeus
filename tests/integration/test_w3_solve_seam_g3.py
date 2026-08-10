@@ -7944,6 +7944,8 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         return SimpleNamespace(witness_identity=f"book-{len(metadata_calls)}")
 
     class FakeClient:
+        book_fetches = []
+
         def __init__(self, **_):
             pass
 
@@ -7953,7 +7955,8 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         def __exit__(self, *_):
             return False
 
-        def get_orderbook_snapshots(self, *_args, **_kwargs):
+        def get_orderbook_snapshots(self, tokens, **_kwargs):
+            type(self).book_fetches.append(tuple(tokens))
             return {}
 
     monkeypatch.setattr(universe, "bind_current_global_probability_tokens", fake_bind)
@@ -7962,6 +7965,11 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         era,
         "_global_book_metadata_refresh_family_keys",
         metadata_refresh_keys,
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_current_executable_prefetch_tokens",
+        lambda *_args, **_kwargs: ("yes-token", "no-token"),
     )
     monkeypatch.setattr(polymarket_client, "PolymarketClient", FakeClient)
     provider = captured["current_book_epoch_provider"]
@@ -7999,6 +8007,12 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert refresh_hwm_calls[1]["family"].tzinfo is not None
     assert bind_required_tokens == [None, None]
     assert capture_required_tokens == [None, None]
+    assert FakeClient.book_fetches == [
+        ("yes-token", "no-token"),
+        ("yes-token", "no-token"),
+        ("yes-token", "no-token"),
+        ("yes-token", "no-token"),
+    ]
 
     trade.execute(
         """
@@ -10305,7 +10319,7 @@ def test_live_adapter_discards_stale_hint_then_prefetches_unknown_full_refresh(
 
     assert epoch.witness_identity == "book-current"
     assert refreshed_epoch.witness_identity == "book-current"
-    assert capture_prefetched == [False, True]
+    assert capture_prefetched == [True, True]
     assert book_calls == [
         ("no-token-old", "yes-token-old"),
         ("no-token-current", "yes-token-current"),

@@ -9148,15 +9148,11 @@ def event_bound_live_adapter_from_trade_conn(
                     )
                 )
                 if exact_tokens is None:
-                    full_tokens = _reduce_only_tokens(
+                    exact_tokens = _reduce_only_tokens(
                         _global_book_prefetch_tokens(probability_slice)
                     )
-                    return (
-                        prefetched
-                        if prefetched is not None
-                        and prefetched[0] == full_tokens
-                        else None
-                    )
+                if exact_tokens is None:
+                    return None
                 if prefetched is None:
                     prefetched = _prefetch_books(
                         probability_slice,
@@ -9165,7 +9161,16 @@ def event_bound_live_adapter_from_trade_conn(
                     )
                     if prefetched is None:
                         return None
-                _, prefetched_books, prefetched_at = prefetched
+                prefetched_tokens, prefetched_books, prefetched_at = prefetched
+                if not set(exact_tokens).issubset(prefetched_tokens):
+                    prefetched = _prefetch_books(
+                        probability_slice,
+                        mode=mode,
+                        token_override=exact_tokens,
+                    )
+                    if prefetched is None:
+                        return None
+                    _, prefetched_books, prefetched_at = prefetched
                 missing_tokens = tuple(
                     token
                     for token in exact_tokens
@@ -9174,6 +9179,10 @@ def event_bound_live_adapter_from_trade_conn(
                 books = dict(prefetched_books)
                 epoch_at = prefetched_at
                 if missing_tokens:
+                    # SCOPE: only a token still absent after this exact retry is
+                    # non-executable in the cut. DRAIN: retry the missing token
+                    # set once now. RESET: the next cut fetches every actionable
+                    # token again, so confirmed absence cannot become a ratchet.
                     supplement = _prefetch_books(
                         probability_slice,
                         mode=mode,
