@@ -8,6 +8,11 @@ from __future__ import annotations
 
 import sqlite3
 
+from src.decision_kernel import claims
+
+
+_PRE_SUBMIT_SEMANTIC_PREFIX = "pre_submit:"
+
 
 def no_submit_projection_rows(conn: sqlite3.Connection, *, limit: int = 100) -> list[sqlite3.Row]:
     return list(
@@ -18,12 +23,17 @@ def no_submit_projection_rows(conn: sqlite3.Connection, *, limit: int = 100) -> 
                 cert.certificate_hash AS no_submit_decision_certificate_hash
             FROM edli_no_submit_receipts AS receipt
             JOIN decision_certificates AS cert
-              ON cert.certificate_type = 'NoSubmitDecisionCertificate'
-             AND cert.semantic_key = 'no_submit:' || receipt.event_id || ':' || receipt.final_intent_id
+             ON cert.certificate_type = ?
+             AND cert.semantic_key = ? || receipt.event_id || ':' || receipt.final_intent_id
              AND cert.verifier_status = 'VERIFIED'
+             AND NOT EXISTS (
+                 SELECT 1
+                 FROM decision_certificate_supersessions AS supersession
+                 WHERE supersession.old_certificate_hash = cert.certificate_hash
+             )
             ORDER BY receipt.decision_time DESC
             LIMIT ?
             """,
-            (limit,),
+            (claims.PRE_SUBMIT_DECISION, _PRE_SUBMIT_SEMANTIC_PREFIX, limit),
         )
     )

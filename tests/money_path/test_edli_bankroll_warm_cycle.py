@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused/audited: 2026-08-03
+# Last reused/audited: 2026-08-10
 # Authority basis: src/runtime/bankroll_provider.py (cached() RESILIENT bound, KILLER 1
 #   2026-05-31: default 1800s, supersedes the prior 300s fail-closed window that blanked
 #   last-good across transient wallet-RPC blip clusters) + src/main.py:_edli_event_reactor_cycle
@@ -45,6 +45,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import textwrap
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -669,7 +670,7 @@ def test_collateral_reason_drain_is_bounded_and_includes_legacy_fallback(tmp_pat
     assert legacy == (published[2],)
 
 
-_SUBPROCESS_PYTHON = Path("/Users/leofitz/zeus/.venv/bin/python")
+_SUBPROCESS_PYTHON = Path(sys.executable)
 
 
 def _run_relationship_subprocess(

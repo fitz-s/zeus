@@ -1,9 +1,10 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-02
+# Last reused/audited: 2026-08-10
 # Authority basis: EDLI v1 implementation prompt §7 EventStore acceptance A01-A04.
 from __future__ import annotations
 
 import dataclasses
+import importlib
 import inspect
 import json
 import sqlite3
@@ -250,6 +251,47 @@ def _insert_processing_claims(
     *,
     consumer_name: str = "edli_reactor_v1",
 ) -> None:
+    # Use a valid append-only channel parent so these synthetic claims are
+    # structurally legal without becoming forecast/global-winner candidates.
+    parent = _channel_event("BOOK_SNAPSHOT")
+    parent_rows = []
+    processing_rows = []
+    for event_id, claimed_at in claims.items():
+        event_id = str(event_id or "").strip()
+        if not event_id:
+            # Empty IDs are lookup inputs only. Never create an active orphan
+            # row just to exercise the missing-ID branch.
+            continue
+        parent_rows.append(
+            (
+                event_id,
+                parent.event_type,
+                f"claim-parent:{event_id}",
+                parent.source,
+                parent.observed_at,
+                parent.available_at,
+                parent.received_at,
+                parent.causal_snapshot_id,
+                parent.payload_hash,
+                f"claim-idempotency:{event_id}",
+                parent.priority,
+                parent.expires_at,
+                parent.payload_json,
+                parent.schema_version,
+                parent.created_at,
+            )
+        )
+        processing_rows.append((consumer_name, event_id, claimed_at, claimed_at))
+    conn.executemany(
+        """
+        INSERT OR IGNORE INTO opportunity_events (
+            event_id, event_type, entity_key, source, observed_at, available_at,
+            received_at, causal_snapshot_id, payload_hash, idempotency_key,
+            priority, expires_at, payload_json, schema_version, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        parent_rows,
+    )
     conn.executemany(
         """
         INSERT INTO opportunity_event_processing (
@@ -257,10 +299,7 @@ def _insert_processing_claims(
             claimed_at, updated_at
         ) VALUES (?, ?, 'processing', 1, ?, ?)
         """,
-        (
-            (consumer_name, event_id, claimed_at, claimed_at)
-            for event_id, claimed_at in claims.items()
-        ),
+        processing_rows,
     )
 
 
@@ -582,6 +621,10 @@ def test_archive_orphan_processing_rows_expires_only_rows_without_event_provenan
         "2026-05-24T04:16:00+00:00",
     )
     store.insert_or_ignore(live_event)
+    migration = importlib.import_module(
+        "scripts.migrations.202608_edli_active_redecision_projection"
+    )
+    migration.down(conn)
     conn.execute(
         """
         INSERT INTO opportunity_event_processing (
@@ -619,6 +662,17 @@ def test_archive_orphan_processing_rows_expires_only_rows_without_event_provenan
     assert rows[live_event.event_id] == "pending:"
     assert rows["missing-event-row"] == "expired:ORPHAN_EVENT_ROW_MISSING"
     assert rows["missing-processing-row"] == "expired:ORPHAN_EVENT_ROW_MISSING"
+
+    migration.up(conn)
+    with pytest.raises(sqlite3.IntegrityError, match="ACTIVE_PROCESSING_REQUIRES_APPEND_ONLY_EVENT"):
+        conn.execute(
+            """
+            INSERT INTO opportunity_event_processing (
+                consumer_name, event_id, processing_status, attempt_count, updated_at
+            ) VALUES (?, ?, 'pending', 1, ?)
+            """,
+            ("edli_reactor_v1", "new-active-orphan", "2026-05-24T04:17:00+00:00"),
+        )
 
 
 def test_archive_orphan_processing_rows_avoids_live_antijoin_scan():

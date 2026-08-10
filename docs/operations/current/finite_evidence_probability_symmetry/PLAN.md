@@ -4,6 +4,67 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-10 Exact-head temporal truth and required-CI closure
+
+The global-capital-auction exact head exposed two live-base defects while its
+required relationship jobs exercised the surrounding contracts.  First, the
+Day0 observation-print reducer replaced a source-issued report clock with an
+older event's local availability clock.  A corrected value for the same raw
+report therefore appeared to be a later physical observation instead of a
+later possession of the same observation.  The reducer now keeps
+`observation_time` on the source clock and `observation_available_at` on the
+current ledger fetch clock; correction identity remains
+`(channel, source_clock, conditioned value)`, so one correction emits once
+without inventing a new
+weather fact.  Second, terminal EventStore recovery counted SQLite trigger
+side effects through `total_changes`; it now reports only the direct archive
+UPDATE row count while retaining the append-only event and active-projection
+trigger law.
+
+The remaining required-job failures were stale or platform-bound test
+fixtures, not alternate runtime behavior.  EventStore fixtures create legal
+append-only parents (or explicitly enter the legacy migration shape), the
+reactor preemption test owns its monitor-debt authority instead of consulting a
+host DB, the market-snapshot fake returns the current capture result shape,
+and EDLI subprocess/bridge/source-shape tests use the running interpreter and
+current converged identities.  No runtime guard, source route, provider,
+settlement rule, execution gate, or workflow is weakened.
+
+The exact-head audit also found a read-side certificate vocabulary split left
+behind by the single-live-semantics cutover: the compiler persists
+`PreSubmitDecisionCertificate` under `pre_submit:` semantic keys, while the
+no-submit projection and opportunity report still queried the retired
+`NoSubmitDecisionCertificate` / `no_submit:` pair.  Those derived readers now
+join the current certificate type and key, so a verified decision is visible
+to readiness/reporting instead of being falsely reported absent.
+
+SCOPE is one Day0 source report/correction, one terminal-recovery batch, and
+one receipt-to-pre-submit-certificate derived join.  DRAIN is the next normal
+observation-print scan, recovery sweep, or report/projection read.  RESET is a
+fresh ledger possession clock, the next independently counted direct UPDATE,
+or a verified current `pre_submit:` certificate; there is no latch and
+unrelated families/events continue.  Acceptance requires
+the same-clock correction to retain the original source time and current fetch
+time, emit exactly once, EventStore to return one archive for one processing
+row despite projection triggers, append-only orphan guards to remain active,
+all thirteen initially visible required-job cases plus the full Reactor
+relationship suite to pass, and the exact PR head's required jobs to become
+green.
+
+Allowed files are
+`src/data/replacement_forecast_current_target_plan.py`,
+`src/events/event_store.py`,
+`src/events/no_submit_projection.py`,
+`src/analysis/event_opportunity_report.py`,
+`tests/events/test_day0_extreme_updated_trigger.py`,
+`tests/test_replacement_forecast_current_target_plan.py`,
+`tests/events/test_event_store_idempotency.py`, `tests/events/test_reactor.py`,
+`tests/test_market_scanner_provenance.py`,
+`tests/money_path/test_edli_bankroll_warm_cycle.py`,
+`tests/money_path/test_edli_durable_fill_bridge_scan.py`,
+`tests/money_path/test_edli_market_substrate_warm_cycle.py`,
+`architecture/test_topology.yaml`, this plan, and its `scope.yaml` companion.
+
 ## 2026-08-09 Current-value serving authority matches executable law
 
 The active replacement authority still describes `previous_runs` as a

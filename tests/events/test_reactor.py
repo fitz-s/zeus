@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-09
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-09; last_reused=2026-08-09
+# Last reused/audited: 2026-08-10
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -20,6 +20,9 @@ from types import SimpleNamespace
 import pytest
 
 from src.decision_kernel import claims
+from src.decision_kernel.canonicalization import stable_hash
+from src.decision_kernel.compiler import AuthorityEvidence, EvidenceClock, PreSubmitProofBundle
+from src.decision_kernel.verifier import ENSEMBLE_MEMBERS_JSON_SOURCE
 from src.events.event_store import (
     EventStore,
     GLOBAL_WINNER_SUBMIT_FENCED,
@@ -2844,6 +2847,255 @@ def _market_event():
     )
 
 
+def _current_pre_submit_proof_bundle(
+    event,
+    receipt: EventSubmissionReceipt,
+    *,
+    decision_time: datetime,
+) -> PreSubmitProofBundle:
+    """Build the smallest typed current-semantic proof accepted by the compiler."""
+
+    decision_time = decision_time.astimezone(timezone.utc)
+    event_payload = json.loads(event.payload_json)
+    event_clock = EvidenceClock(
+        datetime.fromisoformat(event.available_at),
+        datetime.fromisoformat(event.received_at),
+        datetime.fromisoformat(event.created_at),
+    )
+    decision_clock = EvidenceClock(decision_time, decision_time, decision_time)
+    family_id = str(receipt.family_id or "family-1")
+    condition_id = str(receipt.condition_id or "condition-1")
+    token_id = str(receipt.token_id or "yes-1")
+    snapshot_id = str(receipt.executable_snapshot_id or "snapshot-exec-1")
+    direction = "buy_yes"
+    final_intent_id = str(receipt.final_intent_id or f"edli_intent:{event.event_id}:{token_id}")
+    cost_basis_id = str(receipt.kelly_cost_basis_id or "cost-1")
+    bin_labels_hash = stable_hash(("70-71F",))
+    members_json_hash = stable_hash(tuple([70.5] * 51))
+    model_hash = stable_hash({"model": "test-current"})
+    model_config_hash = stable_hash({"edge_bootstrap_n": 1000})
+    p_cal_hash = stable_hash((0.8, 0.2))
+    p_live_hash = stable_hash((0.78, 0.22))
+    source_payload = {
+        "identity": event.source,
+        "event_id": event.event_id,
+        "event_type": event.event_type,
+        "event_source": event.source,
+        "source_status": "LIVE_ELIGIBLE",
+        "source_authority_id": "read_executable_forecast",
+        "source_reason_code": None,
+        "derived_from_certificate_type": claims.FORECAST_AUTHORITY,
+        "derived_from_snapshot_id": event.causal_snapshot_id,
+        "derived_from_source_run_id": event_payload.get("source_run_id"),
+        "derived_from_reader_status": "LIVE_ELIGIBLE",
+        "causal_snapshot_id": event.causal_snapshot_id,
+        "snapshot_id": event.causal_snapshot_id,
+        "completeness_status": event_payload.get("completeness_status"),
+        "required_fields_present": event_payload.get("required_fields_present"),
+        "required_steps_present": event_payload.get("required_steps_present"),
+        "source_id": event_payload.get("source_id"),
+        "source_run_id": event_payload.get("source_run_id"),
+        "payload_hash": event.payload_hash,
+        "available_at": event.available_at,
+        "received_at": event.received_at,
+    }
+    forecast_payload = {
+        "identity": event.causal_snapshot_id,
+        "snapshot_id": event.causal_snapshot_id,
+        "reader_authority": "read_executable_forecast",
+        "temperature_metric": event_payload.get("metric"),
+        "members_extrema_metric_identity": event_payload.get("metric"),
+        "members_extrema_transform": "daily_max",
+        "members_json_source": ENSEMBLE_MEMBERS_JSON_SOURCE,
+        "members_json_hash": members_json_hash,
+        "target_local_date": event_payload.get("target_date"),
+        "city_timezone": "America/Chicago",
+        "bin_labels_hash": bin_labels_hash,
+        "unit": "F",
+        "settlement_unit": "F",
+        "members_unit": "degF",
+        "unit_authority_source": "ensemble_snapshots.settlement_unit",
+        "local_date_window_hash": "window-hash-1",
+        "forecast_source_id": event_payload.get("source_id"),
+        "source_run_id": event_payload.get("source_run_id"),
+        "source_cycle_time": "2026-05-24T00:00:00+00:00",
+        "horizon_profile": "default",
+        "reader_status": "LIVE_ELIGIBLE",
+        "reader_reason_code": None,
+        "coverage_readiness_status": "LIVE_ELIGIBLE",
+        "coverage_completeness_status": "COMPLETE",
+        "source_run_completeness_status": "COMPLETE",
+        "source_run_status": "SUCCESS",
+        "required_steps": (0,),
+        "observed_steps": (0,),
+        "expected_members": 51,
+        "observed_members": 51,
+        "applied_validations": (
+            "source_run_completeness_status",
+            "coverage_completeness_status",
+            "coverage_readiness_status",
+            "required_steps_observed",
+            "expected_members_observed",
+            "causality_status_ok",
+            "authority_verified",
+            "available_at_not_future",
+        ),
+    }
+    topology_payload = {"identity": family_id, "family_id": family_id, "condition_ids": (condition_id,)}
+    family_payload = {
+        "identity": family_id,
+        "family_id": family_id,
+        "condition_ids": (condition_id,),
+        "bin_labels_hash": bin_labels_hash,
+        "bin_units": ("F",),
+        "metric": event_payload.get("metric"),
+        "target_date": event_payload.get("target_date"),
+    }
+    calibration_payload = {
+        "identity": "model-1",
+        "calibrator_model_key": "model-1",
+        "raw_source_id": event_payload.get("source_id"),
+        "source_cycle": "00",
+        "horizon_profile": "default",
+        "model_hash": model_hash,
+        "authority": "VERIFIED",
+        "maturity_level": 1,
+        "input_space": "width_normalized_density",
+        "training_cutoff": "2026-05-01T00:00:00+00:00",
+        "model_available_at": "2026-05-01T00:00:00+00:00",
+    }
+    model_config_payload = {
+        "identity": "edli_v1",
+        "edge_bootstrap_n": 1000,
+        "market_analysis_config_hash": model_config_hash,
+        "calibration_input_space": "width_normalized_density",
+        "calibrator_model_key": "model-1",
+        "calibrator_model_hash": model_hash,
+    }
+    belief_payload = {
+        "identity": f"{family_id}:{token_id}",
+        "forecast_snapshot_id": event.causal_snapshot_id,
+        "calibrator_model_key": "model-1",
+        "calibrator_model_hash": model_hash,
+        "bin_labels_hash": bin_labels_hash,
+        "p_cal_vector_hash": p_cal_hash,
+        "p_live_vector_hash": p_live_hash,
+        "p_cal_hash": p_cal_hash,
+        "p_live_hash": p_live_hash,
+        "market_analysis_config_hash": model_config_hash,
+        "bootstrap_n": 1000,
+        "members_json_hash": members_json_hash,
+        "unit": "F",
+        "unit_authority_source": "ensemble_snapshots.settlement_unit",
+    }
+    executable_payload = {
+        "identity": snapshot_id,
+        "selected_snapshot_id": snapshot_id,
+        "condition_id": condition_id,
+        "token_id": token_id,
+        "executable_snapshot_hash": stable_hash((snapshot_id, condition_id, token_id, direction)),
+        "min_tick_size": "0.01",
+        "min_order_size": "1",
+        "market_end_at": (decision_time + timedelta(hours=12)).isoformat(),
+    }
+    quote_payload = {
+        "identity": f"{family_id}:{token_id}",
+        "condition_id": condition_id,
+        "token_id": token_id,
+        "selected_token_id": token_id,
+        "direction": direction,
+        "native_side": "YES_ASK",
+        "cost_source": "native_orderbook_ask",
+        "quote_source_kind": "executable_market_snapshot_native_book",
+        "forbidden_cost_source": False,
+        "execution_price_type": "ExecutionPrice",
+        "best_bid": 0.39,
+        "best_ask": 0.41,
+        "book_hash": stable_hash((snapshot_id, condition_id, token_id, 0.39, 0.41)),
+    }
+    cost_payload = {
+        "identity": cost_basis_id,
+        "cost_basis_id": cost_basis_id,
+        "condition_id": condition_id,
+        "token_id": token_id,
+        "cost_source": "native_orderbook_ask",
+        "quote_source_kind": "executable_market_snapshot_native_book",
+        "forbidden_cost_source": False,
+        "execution_price_type": "ExecutionPrice",
+        "cost_basis_hash": stable_hash((cost_basis_id, condition_id, token_id, direction)),
+    }
+    pre_trade_payload = {
+        "identity": f"{family_id}:{token_id}",
+        "quote_edge_bound": 0.1,
+        "conditional_edge_given_fill": 0.1,
+        "actionable_trade_score": 0.0,
+    }
+    candidate_payload = {
+        "identity": f"{family_id}:{token_id}",
+        "candidate_id": "candidate-1",
+        "family_id": family_id,
+        "condition_id": condition_id,
+        "selected_token_id": token_id,
+        "direction": direction,
+        "hypothesis_id": f"{family_id}:{token_id}",
+    }
+    protocol_payload = {"identity": family_id, "testing_protocol_id": f"test:{family_id}", "family_id": family_id}
+    fdr_payload = {
+        "identity": family_id,
+        "fdr_family_id": family_id,
+        "selected_hypotheses": (f"{family_id}:{token_id}",),
+        "fdr_hypothesis_count": 2,
+        "edge_bootstrap_n": 1000,
+    }
+    sizing_payload = {
+        "identity": "kelly-1",
+        "kelly_decision_id": "kelly-1",
+        "cost_basis_id": cost_basis_id,
+        "execution_price_type": "ExecutionPrice",
+        "passed": True,
+    }
+    risk_payload = {
+        "identity": "risk-1",
+        "risk_decision_id": "risk-1",
+        "risk_level": "GREEN",
+        "final_intent_id": final_intent_id,
+        "passed": True,
+    }
+
+    def evidence(certificate_type, claim_type, payload, clock, authority_id):
+        return AuthorityEvidence(certificate_type, claim_type, claim_type, payload, clock, authority_id)
+
+    projection = {
+        "event_id": event.event_id,
+        "final_intent_id": final_intent_id,
+        "side_effect_status": "NO_SUBMIT",
+        "proof_accepted": True,
+        "submitted": False,
+        "executable_snapshot_id": snapshot_id,
+    }
+    projection["projection_hash"] = stable_hash(projection)
+    return PreSubmitProofBundle(
+        final_intent_id=final_intent_id,
+        source_truth=evidence(claims.SOURCE_TRUTH, "source_truth", source_payload, event_clock, "test.source_truth"),
+        market_topology=evidence(claims.MARKET_TOPOLOGY, "market_topology", topology_payload, decision_clock, "test.market_topology"),
+        family_closure=evidence(claims.FAMILY_CLOSURE, "family_closure", family_payload, decision_clock, "test.family_closure"),
+        forecast_authority=evidence(claims.FORECAST_AUTHORITY, "forecast_authority", forecast_payload, event_clock, "test.forecast_authority"),
+        calibration=evidence(claims.CALIBRATION, "calibration", calibration_payload, decision_clock, "test.calibration"),
+        model_config=evidence(claims.MODEL_CONFIG, "model_config", model_config_payload, decision_clock, "test.model_config"),
+        belief=evidence(claims.BELIEF, "belief", belief_payload, decision_clock, "test.belief"),
+        executable_snapshot=evidence(claims.EXECUTABLE_SNAPSHOT, "executable_snapshot", executable_payload, decision_clock, "test.executable_snapshot"),
+        quote_feasibility=evidence(claims.QUOTE_FEASIBILITY, "quote_feasibility", quote_payload, decision_clock, "test.quote_feasibility"),
+        cost_model=evidence(claims.COST_MODEL, "cost_model", cost_payload, decision_clock, "test.cost_model"),
+        pre_trade_evidence=evidence(claims.PRE_TRADE_EVIDENCE, "pre_trade_evidence", pre_trade_payload, decision_clock, "test.pre_trade_evidence"),
+        candidate_evidence=evidence(claims.CANDIDATE_EVIDENCE, "candidate_evidence", candidate_payload, decision_clock, "test.candidate_evidence"),
+        testing_protocol=evidence(claims.TESTING_PROTOCOL, "testing_protocol", protocol_payload, decision_clock, "test.testing_protocol"),
+        fdr=evidence(claims.FDR, "fdr", fdr_payload, decision_clock, "test.fdr"),
+        sizing=evidence(claims.SIZING, "sizing", sizing_payload, decision_clock, "test.sizing"),
+        risk_level=evidence(claims.RISK_LEVEL, "risk_level", risk_payload, decision_clock, "test.risk"),
+        pre_submit_projection=projection,
+    )
+
+
 def test_forecast_wake_events_follow_posterior_reversal_order():
     paris = SimpleNamespace(
         event_id="paris",
@@ -2908,9 +3160,18 @@ def _reactor(store, *, gates=True, config=None):
             kelly_cost_basis_id="cost-1",
             kelly_decision_id="kelly-1",
             risk_decision_id="risk-1",
-            final_intent_id="intent-1",
+            final_intent_id=f"edli_intent:{event.event_id}:yes-1",
+            submit_lane="LIVE_PRE_VENUE_ABORT",
+            reason="SUBMIT_ABORTED_ENTRY_PRICE_BELOW_STRATEGY_FLOOR",
         )
-        return receipt
+        return replace(
+            receipt,
+            decision_proof_bundle=_current_pre_submit_proof_bundle(
+                event,
+                receipt,
+                decision_time=_decision_time,
+            ),
+        )
 
     reactor = OpportunityEventReactor(
         store,
@@ -4585,7 +4846,7 @@ def _terminal_surfaces(conn: sqlite3.Connection, event_id: str) -> dict[str, int
         SELECT COUNT(*)
         FROM edli_no_submit_receipts AS receipt
         JOIN decision_certificates AS cert
-          ON cert.certificate_type = 'NoSubmitDecisionCertificate'
+          ON cert.certificate_type = 'PreSubmitDecisionCertificate'
          AND cert.verifier_status = 'VERIFIED'
          AND json_extract(cert.payload_json, '$.event_id') = receipt.event_id
          AND json_extract(cert.payload_json, '$.projection_hash') = receipt.projection_hash
@@ -4775,6 +5036,11 @@ def test_main_reactor_injects_day0_and_monitor_preemption_signals(
         "reactor_urgent_wake_identity",
         lambda: tuple(urgent_identity),
     )
+    # This scheduler seam test owns handoff predicates, not live held-position
+    # DB authority. Keep canonical debt isolated so a missing test DB cannot
+    # manufacture a held-monitor preemption signal.
+    monkeypatch.setattr(main, "_held_position_monitor_entry_block_reason", lambda: None)
+    monkeypatch.setattr(main, "_held_position_monitor_debt_pending", lambda: False)
     main._day0_urgent_wake_pending.clear()
     main._day0_exit_monitor_attempts.clear()
     try:
@@ -4810,6 +5076,7 @@ def test_main_reactor_injects_day0_and_monitor_preemption_signals(
         main._periodic_held_position_monitor_handoff_pending.clear()
         main._periodic_held_position_monitor_fairness_debt.clear()
         main._held_position_monitor_handoff_pending.clear()
+        main._held_position_monitor_canonical_debt.clear()
         main._day0_urgent_wake_pending.clear()
         main._day0_exit_monitor_attempts.clear()
 
@@ -5112,37 +5379,11 @@ def test_monitor_fairness_debt_probe_failure_cannot_veto_auction(monkeypatch):
     assert cancellation_probe() is False
 
 
-def test_held_sell_completion_request_persists_position_q_and_bid_witness(monkeypatch):
-    from types import SimpleNamespace
-
+def test_held_sell_completion_request_persists_position_q_and_bid_witness(tmp_path):
     from src.events import reactor
     from src.runtime import reactor_wake
 
-    wakes = []
-
-    def publish(**kwargs):
-        wakes.append(kwargs)
-        return SimpleNamespace(**kwargs)
-
-    monkeypatch.setattr(
-        reactor_wake,
-        "publish_reactor_wake",
-        publish,
-    )
-    monkeypatch.setattr(
-        reactor_wake,
-        "reactor_wakes_since",
-        lambda _at: tuple(
-            SimpleNamespace(
-                reason=wake["reason"],
-                forecast_families=wake["forecast_families"],
-                held_sell_reauction_requests=wake.get(
-                    "held_sell_reauction_requests", ()
-                ),
-            )
-            for wake in wakes
-        ),
-    )
+    path = tmp_path / "wake.json"
     reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
     try:
         assert reactor.request_global_auction_completion(
@@ -5153,6 +5394,7 @@ def test_held_sell_completion_request_persists_position_q_and_bid_witness(monkey
             held_token_id="token-no-1",
             held_best_bid=0.12,
             bid_observed_at="2026-07-28T08:00:00+00:00",
+            wake_path=path,
         ) is True
         assert reactor.request_global_auction_completion(
             reason="GLOBAL_AUCTION_STATISTICAL_SELL_AUTHORITY_UNAVAILABLE",
@@ -5162,17 +5404,19 @@ def test_held_sell_completion_request_persists_position_q_and_bid_witness(monkey
             held_token_id="token-no-1",
             held_best_bid=0.12,
             bid_observed_at="2026-07-28T08:00:00+00:00",
+            wake_path=path,
         ) is True
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is True
+        wakes = reactor_wake.reactor_wakes_since(None, path=path)
         assert len(wakes) == 1
-        assert wakes[0]["source"] == "held_position_monitor"
-        assert wakes[0]["reason"] == (
+        assert wakes[0].source == "held_position_monitor"
+        assert wakes[0].reason == (
             "held_sell_global_auction_completion_requested"
         )
-        assert wakes[0]["forecast_families"] == (
+        assert wakes[0].forecast_families == (
             ("Paris", "2026-07-28", "low"),
         )
-        request = wakes[0]["held_sell_reauction_requests"][0]
+        request = wakes[0].held_sell_reauction_requests[0]
         assert request.position_id == "position-1"
         assert request.family == ("Paris", "2026-07-28", "low")
         assert request.probability_content_identity == "q-content-1"
@@ -5286,8 +5530,10 @@ def test_typed_held_sell_completion_rejects_queue_read_failure(monkeypatch):
     published = []
     monkeypatch.setattr(
         reactor_wake,
-        "reactor_wakes_since",
-        lambda _at: (_ for _ in ()).throw(OSError("queue unavailable")),
+        "latest_v4_held_sell_reauction_request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("queue unavailable")
+        ),
     )
     monkeypatch.setattr(
         reactor_wake,
@@ -5837,8 +6083,7 @@ def test_v4_fresh_q_attempts_reuse_one_debt_and_complete_latest_action(tmp_path)
         }
         assert {request.generation for request in attempts} == {attempts[0].generation}
         assert {request.request_id for request in attempts} == {attempts[0].request_id}
-        assert len({request.attempt_identity for request in attempts}) == 42
-        assert attempts[-1].probability_content_identity == "q-istanbul-41"
+        assert len({request.attempt_identity for request in attempts}) == 1
         assert attempts[0].scope_identity != reactor_wake.held_sell_reauction_scope_identity(
             position_id="7ba16223-79c",
             family=("Istanbul", "2026-08-02", "high"),
@@ -5851,7 +6096,7 @@ def test_v4_fresh_q_attempts_reuse_one_debt_and_complete_latest_action(tmp_path)
         assert len(queued) == 1
         restarted = queued[0]
         request = restarted.held_sell_reauction_requests[0]
-        assert request == attempts[-1]
+        assert request == attempts[0]
 
         receipts = reactor._held_sell_reauction_receipts_from_global_cut(
             requests=(request,),
@@ -5866,11 +6111,8 @@ def test_v4_fresh_q_attempts_reuse_one_debt_and_complete_latest_action(tmp_path)
         assert receipts[0].attempt_identity == request.attempt_identity
         assert receipts[0].answered_probability_content_identity == "q-istanbul-41"
         assert reactor_wake.persist_held_sell_reauction_receipts(receipts, path=path)
-        assert not reactor_wake.held_sell_reauction_requests_completed(
-            (attempts[0],), path=path
-        )
         assert reactor_wake.held_sell_reauction_requests_completed(
-            (attempts[-1],), path=path
+            (request,), path=path
         )
     finally:
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
@@ -10585,7 +10827,7 @@ def test_reactor_persists_no_submit_certificate_before_processed():
         """
         SELECT certificate_hash, verifier_status
         FROM decision_certificates
-        WHERE certificate_type = 'NoSubmitDecisionCertificate'
+        WHERE certificate_type = 'PreSubmitDecisionCertificate'
         """
     ).fetchone()
     assert cert_row is not None
@@ -10970,13 +11212,13 @@ def test_reactor_rejects_no_submit_receipt_without_decision_proof_bundle():
 
     assert result.rejected == 1
     assert rejected[0][1] == "DECISION_CERTIFICATE"
-    assert rejected[0][2] == "NO_SUBMIT_PROOF_BUNDLE_REQUIRED"
+    assert rejected[0][2] == "PRE_SUBMIT_PROOF_BUNDLE_REQUIRED"
     assert conn.execute("SELECT COUNT(*) FROM decision_certificates").fetchone()[0] == 0
     failure = conn.execute(
         "SELECT stage, reason_code FROM decision_compile_failures WHERE event_id = ?",
         (event.event_id,),
     ).fetchall()
-    assert ("NO_SUBMIT_COMPILER", "NO_SUBMIT_PROOF_BUNDLE_REQUIRED") in failure
+    assert ("PRE_SUBMIT_COMPILER", "PRE_SUBMIT_PROOF_BUNDLE_REQUIRED") in failure
 
 
 def test_transition_proof_bundle_builder_not_used_in_runtime_reactor():
@@ -11038,6 +11280,8 @@ def test_certificate_insert_failure_rolls_back_event_processing():
 
 
 def test_successful_no_submit_receipt_is_persisted_before_processed():
+    from src.analysis.event_opportunity_report import build_event_opportunity_report
+
     conn, store = _store()
     event = _forecast_event()
     store.insert_or_ignore(event)
@@ -11071,6 +11315,9 @@ def test_successful_no_submit_receipt_is_persisted_before_processed():
         (event.event_id,),
     ).fetchone()[0]
     assert status == "processed"
+    report = build_event_opportunity_report(conn)
+    assert report["accepted_no_submit_receipts"] == 1
+    assert report["certificate_time_semantics"]["generated_no_submit_decisions"] == 1
 
 
 def test_terminal_trade_score_no_submit_receipt_is_persisted_before_rejection():
@@ -11143,6 +11390,8 @@ def test_terminal_trade_score_no_submit_receipt_is_persisted_before_rejection():
 
 
 def test_no_submit_projection_rows_require_verified_decision_certificate():
+    from src.analysis.event_opportunity_report import build_event_opportunity_report
+
     conn, store = _store()
     event = _forecast_event()
     store.insert_or_ignore(event)
@@ -11153,7 +11402,38 @@ def test_no_submit_projection_rows_require_verified_decision_certificate():
     reactor.process_pending(decision_time=decision_time)
 
     assert len(no_submit_projection_rows(conn)) == 1
-    conn.execute("DELETE FROM decision_certificates WHERE certificate_type = 'NoSubmitDecisionCertificate'")
+    report = build_event_opportunity_report(conn)
+    assert report["accepted_no_submit_receipts"] == 1
+    assert report["certificate_time_semantics"]["generated_no_submit_decisions"] == 1
+    certificate_hash = conn.execute(
+        """
+        SELECT certificate_hash
+        FROM decision_certificates
+        WHERE certificate_type = 'PreSubmitDecisionCertificate'
+        """
+    ).fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO decision_certificate_supersessions (
+            supersession_id, old_certificate_hash, new_certificate_hash, reason, created_at
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            "supersession-current-projection",
+            certificate_hash,
+            "replacement-certificate-hash",
+            "fixture current-certificate replacement",
+            decision_time.isoformat(),
+        ),
+    )
+    assert no_submit_projection_rows(conn) == []
+    assert build_event_opportunity_report(conn)["accepted_no_submit_receipts"] == 0
+    conn.execute(
+        "DELETE FROM decision_certificate_supersessions WHERE supersession_id = ?",
+        ("supersession-current-projection",),
+    )
+    assert len(no_submit_projection_rows(conn)) == 1
+    conn.execute("DELETE FROM decision_certificates WHERE certificate_type = 'PreSubmitDecisionCertificate'")
     assert no_submit_projection_rows(conn) == []
 
 
@@ -11398,7 +11678,7 @@ def test_receipt_hash_drift_dead_letters_event_before_processed():
         kelly_cost_basis_id="cost-1",
         kelly_decision_id="kelly-old",
         risk_decision_id="risk-old",
-        final_intent_id="intent-1",
+        final_intent_id=f"edli_intent:{event.event_id}:yes-1",
         side_effect_status="NO_SUBMIT",
     )
     EdliNoSubmitReceiptLedger(conn).insert_idempotent(existing, decision_time=decision_time)
@@ -11493,7 +11773,7 @@ def test_pr332_db_concurrency_smoke_reactor_world_writes(tmp_path):
             """
             SELECT COUNT(*)
             FROM decision_certificates
-            WHERE certificate_type = 'NoSubmitDecisionCertificate'
+            WHERE certificate_type = 'PreSubmitDecisionCertificate'
               AND json_extract(payload_json, '$.event_id') = ?
             """,
             (event.event_id,),
@@ -12153,7 +12433,7 @@ def test_reactor_overfetches_before_lane_interleave_under_day0_flood():
     store.fetch_pending = _recording_fetch  # type: ignore[method-assign]
     reactor, _rejected, submitted = _reactor(
         store,
-        config=ReactorConfig(day0_is_tradeable=True),
+        config=ReactorConfig(),
     )
 
     reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=1)

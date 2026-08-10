@@ -762,12 +762,9 @@ def _latest_authorized_day0_fact(
     ).strip().upper()
     decision_utc = decision_time.astimezone(timezone.utc)
     facts: list[dict[str, object]] = []
-    # A committed DAY0_EXTREME_UPDATED event owns the availability clock that
-    # the enqueue marker and posterior already bind.  The ledger may contain
-    # earlier/later duplicate renderings of that same raw METAR; retain this
-    # event clock when reducing the matching report below rather than moving a
-    # deployed marker backwards or forwards on a duplicate writer receipt.
-    event_availability_by_source_report: dict[tuple[str, str], str] = {}
+    # A committed DAY0_EXTREME_UPDATED event remains a separate candidate
+    # below.  Ledger rows retain their own source-issued and fetched clocks;
+    # an older event availability must not rewrite either one.
     if "observation_instants" in _table_names(conn):
         extreme_col = "running_min" if metric == "low" else "running_max"
         extreme_order = "ASC" if metric == "low" else "DESC"
@@ -1118,14 +1115,6 @@ def _latest_authorized_day0_fact(
                     ),
                 }
             )
-            event_key = (
-                event_source,
-                observation_time.isoformat(),
-            )
-            existing_event_clock = event_availability_by_source_report.get(event_key)
-            event_clock = observation_available_at.isoformat()
-            if existing_event_clock is None or event_clock > existing_event_clock:
-                event_availability_by_source_report[event_key] = event_clock
             break
 
     # LEDGER FACT (day0 defect-ledger, 2026-07-16): a third candidate, over
@@ -1267,7 +1256,6 @@ def _latest_authorized_day0_fact(
                     publish_ts = str(print_row["publish_ts_utc"])
                     fetched_at = str(print_row["fetched_at_utc"])
                     source_clock = publish_ts
-                    event_clock: str | None = None
                     if channel == FAST_OBS_SOURCE_ID:
                         try:
                             published_at = datetime.fromisoformat(
@@ -1284,11 +1272,8 @@ def _latest_authorized_day0_fact(
                                     ).isoformat()
                         except (TypeError, ValueError, OSError, OverflowError):
                             pass
-                    event_clock = event_availability_by_source_report.get(
-                        (channel, source_clock)
-                    )
-                    canonical_publish_ts = event_clock or publish_ts
-                    canonical_fetched_at = event_clock or fetched_at
+                    canonical_publish_ts = publish_ts
+                    canonical_fetched_at = fetched_at
                     print_identity = (channel, source_clock, float(value))
                     previous = canonical_prints.get(print_identity)
                     if previous is None or (

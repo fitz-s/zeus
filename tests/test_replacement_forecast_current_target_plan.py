@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-08
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-08; last_reused=2026-08-08
+# Last reused/audited: 2026-08-10
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: Protect current-market replacement forecast download and materialization planning.
 # Reuse: Run before changing current replacement target coverage or source-run matching.
 # Authority basis: Replacement forecast coverage must bind to the live baseline source_run, not stale city/date rows.

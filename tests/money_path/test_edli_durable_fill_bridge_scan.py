@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-07-30
+# Last reused/audited: 2026-08-10
 # P3 lift (system_decomposition_plan §8 Step 3): _edli_durable_fill_bridge_scan moved from
 #   src.main to src.ingest.price_channel_ingest (it WRITES the durable bridge in the P3
 #   reconcile cycle; src.main's boot recovery imports the SAME canonical copy). Logic unchanged.
@@ -515,6 +515,7 @@ class TestDurableFillBridgeScan:
                 "metric": "high",
                 "unit": "C",
                 "market_id": "mkt-MF1",
+                "executable_snapshot_id": "snap-mf1e",
             },
             source_authority="decision_kernel",
         )
@@ -543,9 +544,10 @@ class TestDurableFillBridgeScan:
         position_id = edli_bridge_position_id(aggregate_id)
         conn.execute(
             """INSERT INTO position_current
-               (position_id, phase, trade_id, strategy_key, updated_at, temperature_metric)
-               VALUES (?, 'active', ?, 'opening_inertia', '2026-06-01T00:00:00+00:00', 'high')""",
-            (position_id, position_id),
+               (position_id, phase, trade_id, strategy_key, updated_at, temperature_metric,
+                decision_snapshot_id)
+               VALUES (?, 'active', ?, 'opening_inertia', '2026-06-01T00:00:00+00:00', 'high', ?)""",
+            (position_id, position_id, "snap-mf1e"),
         )
         conn.execute(
             """

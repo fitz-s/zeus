@@ -22,6 +22,7 @@ in_scope:
 - src/data/replacement_forecast_seed_discovery.py
 - src/data/replacement_forecast_materialization_seed_builder.py
 - src/data/replacement_forecast_materialization_request_builder.py
+- src/data/replacement_forecast_current_target_plan.py
 - src/contracts/replacement_pipeline_files.py
 - src/contracts/strategy_capital_allocation.py
 - src/contracts/global_auction_receipt.py
@@ -48,6 +49,9 @@ in_scope:
 - src/engine/cycle_runtime.py
 - src/engine/event_reactor_adapter.py
 - src/events/day0_authority.py
+- src/events/event_store.py
+- src/events/no_submit_projection.py
+- src/analysis/event_opportunity_report.py
 - src/events/opportunity_event.py
 - src/events/triggers/day0_extreme_updated.py
 - src/decision_kernel/verifier.py
@@ -142,6 +146,12 @@ in_scope:
 - tests/test_hourly_clients_parse.py
 - tests/test_obs_v2_writer.py
 - tests/events/test_day0_extreme_updated_trigger.py
+- tests/events/test_event_store_idempotency.py
+- tests/events/test_reactor.py
+- tests/test_market_scanner_provenance.py
+- tests/money_path/test_edli_bankroll_warm_cycle.py
+- tests/money_path/test_edli_durable_fill_bridge_scan.py
+- tests/money_path/test_edli_market_substrate_warm_cycle.py
 - tests/test_day0_obs_fastlane_optionbc.py
 - tests/test_day0_fast_obs_lane.py
 - tests/test_day0_source_health.py

@@ -1,5 +1,5 @@
 # Created: 2026-06-01
-# Last reused/audited: 2026-08-05
+# Last reused/audited: 2026-08-10
 # Authority basis (2026-06-13 add): docs/archive/2026-Q2/operations_historical/live_inventory_warm_skip_2026-06-13.md —
 #   venue-close warm-skip relationship tests (live-inventory focus; market_phase.family_venue_closed).
 # Authority basis: src/main.py:_edli_event_reactor_cycle (historical inline substrate refresh
@@ -798,7 +798,8 @@ def test_continuous_redecision_confirms_money_path_before_emit():
     assert "confirmed_entry_scope = set(family_keys)" in screen_src
     assert "family_keys &= confirmed_entry_scope" in screen_src
     assert "rest_pull_families &= confirmed_rest_scope" in screen_src
-    assert "open_rest_condition_scope = _edli_open_rest_condition_scope(open_rests, all_beliefs)" in screen_src
+    assert "open_rest_condition_scope = _edli_open_rest_condition_scope(" in screen_src
+    assert "                management_beliefs,\n            )" in screen_src
     assert "_missing_scope(open_rest_condition_scope)" in screen_src
     assert "_edli_redecision_confirm_refresh_lock" in confirm_src
     assert "acquire(blocking=False)" in confirm_src
@@ -1188,11 +1189,14 @@ def test_forced_producer_recaptures_both_native_sides_from_network(
     monkeypatch.setattr(
         market_scanner,
         "capture_executable_market_snapshot",
-        lambda _conn, *, decision, **_kwargs: captured_tokens.append(
-            market_scanner._selected_token_for_direction(
-                market["outcomes"][0], decision.edge.direction
-            )
-        ),
+        lambda _conn, *, decision, **_kwargs: (
+            captured_tokens.append(
+                market_scanner._selected_token_for_direction(
+                    market["outcomes"][0], decision.edge.direction
+                )
+            ),
+            {"snapshot_persistence_tier": "full"},
+        )[1],
     )
 
     forced = market_scanner.refresh_executable_market_substrate_snapshots(
@@ -1653,7 +1657,7 @@ def test_substrate_refresh_wake_runs_screen_without_reactor(monkeypatch):
             return False
 
     calls: list[str] = []
-    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(
         reactor_wake,
         "acknowledge_reactor_wake",
@@ -1662,6 +1666,7 @@ def test_substrate_refresh_wake_runs_screen_without_reactor(monkeypatch):
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main_module, "_edli_redecision_screen_lock", _Lock())
     monkeypatch.setattr(main_module, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(
         main_module,
         "_dispatch_edli_redecision_screen_from_wake",
@@ -1726,7 +1731,7 @@ def test_forecast_wake_is_not_blocked_by_held_position_monitor(monkeypatch):
             return True
 
     calls: list[str] = []
-    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(
         reactor_wake,
         "acknowledge_reactor_wake",
@@ -1734,6 +1739,7 @@ def test_forecast_wake_is_not_blocked_by_held_position_monitor(monkeypatch):
     )
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main_module, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(
         main_module,
         "_edli_event_reactor_cycle",
@@ -1765,7 +1771,7 @@ def test_event_backed_wake_stays_queued_while_event_is_retryable(monkeypatch):
             return False
 
     calls: list[str] = []
-    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(
         reactor_wake,
         "acknowledge_reactor_wake",
@@ -1773,6 +1779,7 @@ def test_event_backed_wake_stays_queued_while_event_is_retryable(monkeypatch):
     )
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", _Lock())
     monkeypatch.setattr(main_module, "_held_position_monitor_active", _Held())
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(
         main_module,
         "_edli_event_reactor_cycle",
@@ -2134,7 +2141,7 @@ def test_held_position_monitor_only_pauses_lock_competing_decision_work():
         monitor_competing_jobs = {
             "edli_event_reactor",
             "market_discovery",
-            "EDLI mainstream warm",
+            "live_health_composite",
         }
         for job_name in monitor_competing_jobs:
             assert main_module._defer_for_held_position_monitor(job_name) is True
@@ -3511,6 +3518,8 @@ def test_discovery_yields_to_existing_priority_intent_before_writer_lock(monkeyp
     monkeypatch.setattr(substrate_observer, "_market_substrate_refresh_lock", _RejectWriterLock())
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
+    import src.data.market_scanner as market_scanner
+    monkeypatch.setattr(market_scanner, "find_weather_markets_or_raise", lambda **_kwargs: [])
 
     with acquire_market_substrate_turnstile(priority=True) as priority:
         assert priority.acquired
@@ -4257,7 +4266,7 @@ def test_paused_pending_urgency_preserves_mixed_exact_priority_scopes(monkeypatc
                 resolved_trigger,
             )
         )
-        return {"persisted": True}
+        return {"persisted": True, "snapshot_persistence_tier": "full"}
 
     monkeypatch.setattr(
         market_scanner,
@@ -4857,12 +4866,24 @@ def test_pending_family_refresh_filters_globally_stale_target_dates():
         plan = _explain_plan(conn, capture.sql, capture.params)
         assert "USING INDEX idx_opportunity_event_processing_status" in plan
         assert "LIMIT ?" in capture.sql
-        assert capture.params == (
-            "edli_reactor_v1",
-            "2026-06-05T12:00:00+00:00",
-            "2026-06-05",
-            2000,
+        expected_params = (
+            (
+                "edli_reactor_v1",
+                "2026-06-05T12:00:00+00:00",
+                "edli_reactor_v1",
+                "2026-06-05T12:00:00+00:00",
+                "2026-06-05",
+                2000,
+            )
+            if module is substrate_observer
+            else (
+                "edli_reactor_v1",
+                "2026-06-05T12:00:00+00:00",
+                "2026-06-05",
+                2000,
+            )
         )
+        assert capture.params == expected_params
 
 
 def test_pending_family_refresh_filters_city_local_past_frontier_band_dates():
