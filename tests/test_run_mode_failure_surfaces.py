@@ -1981,6 +1981,20 @@ def _write_sub_min_partial_position_db(
                 (now + timedelta(minutes=1)).isoformat(),
             ),
         )
+        trade_conn.execute(
+            """
+            CREATE TABLE executable_market_snapshot_latest (
+                condition_id TEXT,
+                selected_outcome_token_id TEXT,
+                snapshot_id TEXT,
+                PRIMARY KEY (condition_id, selected_outcome_token_id)
+            )
+            """
+        )
+        trade_conn.execute(
+            "INSERT INTO executable_market_snapshot_latest VALUES (?, ?, ?)",
+            ("cond-sub-min", "token-no-sub-min", "snap-sub-min"),
+        )
         trade_conn.commit()
     finally:
         trade_conn.close()
@@ -4804,6 +4818,10 @@ def test_sub_min_partial_position_reports_exact_count_when_sample_truncates(
                 """,
                 (f"snap-sub-min-{index}", condition_id, token_id),
             )
+            conn.execute(
+                "INSERT INTO executable_market_snapshot_latest VALUES (?, ?, ?)",
+                (condition_id, token_id, f"snap-sub-min-{index}"),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -4814,6 +4832,136 @@ def test_sub_min_partial_position_reports_exact_count_when_sample_truncates(
     assert surface["sub_min_partial_position_count"] == 11
     assert len(surface["sub_min_partial_position_sample"]) == 10
     assert surface["sub_min_partial_position_truncated"] is True
+
+
+def test_sub_min_partial_position_uses_projected_snapshot_not_newer_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        columns = [
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(executable_market_snapshots)"
+            ).fetchall()
+        ]
+        values = list(
+            conn.execute(
+                "SELECT * FROM executable_market_snapshots "
+                "WHERE snapshot_id = 'snap-sub-min'"
+            ).fetchone()
+        )
+        values[columns.index("snapshot_id")] = "snap-sub-min-newer-history"
+        values[columns.index("min_order_size")] = "2"
+        values[columns.index("captured_at")] = (now + timedelta(minutes=1)).isoformat()
+        conn.execute(
+            f"INSERT INTO executable_market_snapshots "
+            f"({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+            values,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["sub_min_partial_position"]
+    assert surface["sub_min_partial_position_count"] == 1
+    sample = surface["sub_min_partial_position_sample"][0]
+    assert sample["snapshot_id"] == "snap-sub-min"
+    assert sample["min_order_size"] == "5"
+
+
+def test_sub_min_partial_position_fails_closed_when_latest_projection_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute("DROP TABLE executable_market_snapshot_latest")
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["sub_min_partial_position"]
+    assert surface["ok"] is False
+    assert surface["evaluated"] is True
+    assert surface["issue"].endswith("EXECUTABLE_MARKET_SNAPSHOT_LATEST_TABLE_MISSING")
+
+
+def test_sub_min_partial_position_fails_closed_when_exact_latest_row_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute("DELETE FROM executable_market_snapshot_latest")
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["sub_min_partial_position"]
+    assert surface["ok"] is False
+    assert surface["evaluated"] is True
+    assert surface["issue"].endswith(
+        "EXECUTABLE_MARKET_SNAPSHOT_LATEST_EXACT_ROW_MISSING"
+    )
+
+
+def test_sub_min_partial_position_query_has_no_correlated_temp_sort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    captured: dict[str, object] = {}
+
+    def capture_query(path, sql, params=()):
+        captured["sql"] = sql
+        captured["params"] = params
+        return [], None
+
+    monkeypatch.setattr(live_health, "_sqlite_ro_rows", capture_query)
+    result = live_health._sub_min_partial_position_surface(sd, now)
+
+    assert result["ok"] is True
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN " + str(captured["sql"]),
+            tuple(captured["params"]),
+        ).fetchall()
+    finally:
+        conn.close()
+    plan_text = " ".join(str(row[3]) for row in plan).upper()
+    assert "CORRELATED" not in plan_text
+    assert "USE TEMP B-TREE" not in plan_text
 
 
 def test_day0_decision_trace_degrades_when_processed_day0_has_no_artifact(
