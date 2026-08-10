@@ -2041,6 +2041,20 @@ def _write_sub_min_partial_position_db(
                 (now + timedelta(minutes=1)).isoformat(),
             ),
         )
+        trade_conn.execute(
+            """
+            CREATE TABLE executable_market_snapshot_latest (
+                condition_id TEXT,
+                selected_outcome_token_id TEXT,
+                snapshot_id TEXT,
+                PRIMARY KEY (condition_id, selected_outcome_token_id)
+            )
+            """
+        )
+        trade_conn.execute(
+            "INSERT INTO executable_market_snapshot_latest VALUES (?, ?, ?)",
+            ("cond-sub-min", "token-no-sub-min", "snap-sub-min"),
+        )
         trade_conn.commit()
     finally:
         trade_conn.close()
@@ -4864,6 +4878,10 @@ def test_sub_min_partial_position_reports_exact_count_when_sample_truncates(
                 """,
                 (f"snap-sub-min-{index}", condition_id, token_id),
             )
+            conn.execute(
+                "INSERT INTO executable_market_snapshot_latest VALUES (?, ?, ?)",
+                (condition_id, token_id, f"snap-sub-min-{index}"),
+            )
         conn.commit()
     finally:
         conn.close()
@@ -4874,6 +4892,136 @@ def test_sub_min_partial_position_reports_exact_count_when_sample_truncates(
     assert surface["sub_min_partial_position_count"] == 11
     assert len(surface["sub_min_partial_position_sample"]) == 10
     assert surface["sub_min_partial_position_truncated"] is True
+
+
+def test_sub_min_partial_position_uses_projected_snapshot_not_newer_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        columns = [
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(executable_market_snapshots)"
+            ).fetchall()
+        ]
+        values = list(
+            conn.execute(
+                "SELECT * FROM executable_market_snapshots "
+                "WHERE snapshot_id = 'snap-sub-min'"
+            ).fetchone()
+        )
+        values[columns.index("snapshot_id")] = "snap-sub-min-newer-history"
+        values[columns.index("min_order_size")] = "2"
+        values[columns.index("captured_at")] = (now + timedelta(minutes=1)).isoformat()
+        conn.execute(
+            f"INSERT INTO executable_market_snapshots "
+            f"({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)})",
+            values,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["sub_min_partial_position"]
+    assert surface["sub_min_partial_position_count"] == 1
+    sample = surface["sub_min_partial_position_sample"][0]
+    assert sample["snapshot_id"] == "snap-sub-min"
+    assert sample["min_order_size"] == "5"
+
+
+def test_sub_min_partial_position_fails_closed_when_latest_projection_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute("DROP TABLE executable_market_snapshot_latest")
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["sub_min_partial_position"]
+    assert surface["ok"] is False
+    assert surface["evaluated"] is True
+    assert surface["issue"].endswith("EXECUTABLE_MARKET_SNAPSHOT_LATEST_TABLE_MISSING")
+
+
+def test_sub_min_partial_position_fails_closed_when_exact_latest_row_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute("DELETE FROM executable_market_snapshot_latest")
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = compute_composite_live_health(state_dir=sd, now=now)
+
+    surface = result["surfaces"]["sub_min_partial_position"]
+    assert surface["ok"] is False
+    assert surface["evaluated"] is True
+    assert surface["issue"].endswith(
+        "EXECUTABLE_MARKET_SNAPSHOT_LATEST_EXACT_ROW_MISSING"
+    )
+
+
+def test_sub_min_partial_position_query_has_no_correlated_temp_sort(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    captured: dict[str, object] = {}
+
+    def capture_query(path, sql, params=()):
+        captured["sql"] = sql
+        captured["params"] = params
+        return [], None
+
+    monkeypatch.setattr(live_health, "_sqlite_ro_rows", capture_query)
+    result = live_health._sub_min_partial_position_surface(sd, now)
+
+    assert result["ok"] is True
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN " + str(captured["sql"]),
+            tuple(captured["params"]),
+        ).fetchall()
+    finally:
+        conn.close()
+    plan_text = " ".join(str(row[3]) for row in plan).upper()
+    assert "CORRELATED" not in plan_text
+    assert "USE TEMP B-TREE" not in plan_text
 
 
 def test_day0_decision_trace_degrades_when_processed_day0_has_no_artifact(
@@ -8383,7 +8531,7 @@ def test_periodic_exit_monitor_yields_before_claim_to_urgent_day0_held_monitor(
     main_module._held_position_monitor_active.clear()
     main_module._held_position_monitor_bootstrap_complete.clear()
     main_module._day0_urgent_wake_pending.set()
-    main_module._periodic_exit_monitor_day0_yielded.clear()
+    main_module._periodic_exit_monitor_urgent_yielded.clear()
     main_module._day0_exit_monitor_attempts["wake-held"] = None
     monkeypatch.setattr(main_module, "_held_position_monitor_claim", UnexpectedClaim())
     try:
@@ -8391,7 +8539,7 @@ def test_periodic_exit_monitor_yields_before_claim_to_urgent_day0_held_monitor(
     finally:
         main_module._day0_urgent_wake_pending.clear()
         main_module._day0_exit_monitor_attempts.clear()
-        main_module._periodic_exit_monitor_day0_yielded.clear()
+        main_module._periodic_exit_monitor_urgent_yielded.clear()
 
     assert main_module._held_position_monitor_active.is_set() is False
     assert main_module._held_position_monitor_handoff_pending.is_set() is False
@@ -8422,26 +8570,26 @@ def test_periodic_exit_monitor_forces_full_book_after_one_continuous_day0_yield(
 
     main_module._held_position_monitor_active.clear()
     main_module._held_position_monitor_bootstrap_complete.clear()
-    main_module._periodic_exit_monitor_day0_yielded.clear()
+    main_module._periodic_exit_monitor_urgent_yielded.clear()
     main_module._day0_exit_monitor_attempts["continuous-day0"] = None
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
     monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
     try:
         assert main_module._exit_monitor_cycle() is True
         assert calls == []
-        assert main_module._periodic_exit_monitor_day0_yielded.is_set()
+        assert main_module._periodic_exit_monitor_urgent_yielded.is_set()
 
         assert main_module._exit_monitor_cycle() is True
         assert calls == ["run"]
         assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
-        assert not main_module._periodic_exit_monitor_day0_yielded.is_set()
+        assert not main_module._periodic_exit_monitor_urgent_yielded.is_set()
 
         assert main_module._exit_monitor_cycle() is True
         assert calls == ["run"]
-        assert main_module._periodic_exit_monitor_day0_yielded.is_set()
+        assert main_module._periodic_exit_monitor_urgent_yielded.is_set()
     finally:
         main_module._day0_exit_monitor_attempts.clear()
-        main_module._periodic_exit_monitor_day0_yielded.clear()
+        main_module._periodic_exit_monitor_urgent_yielded.clear()
 
 
 def test_day0_entry_wake_does_not_pause_unrelated_periodic_monitor(monkeypatch) -> None:
@@ -8516,6 +8664,99 @@ def test_periodic_exit_monitor_sees_urgent_held_claim_failure_preemption(
 
     assert main_module._held_position_monitor_active.is_set() is False
     assert main_module._day0_held_monitor_preempt_requested.is_set() is False
+
+
+def test_claim_busy_urgent_forecast_leaves_stable_preemption_debt() -> None:
+    import src.main as main_module
+
+    main_module._forecast_held_monitor_preempt_requested.clear()
+    assert main_module._held_position_monitor_claim.acquire(blocking=False)
+    try:
+        assert main_module._exit_monitor_cycle(
+            target_families=frozenset({("Paris", "2026-07-17", "high")}),
+            urgent_forecast=True,
+        ) is False
+        assert main_module._forecast_held_monitor_preempt_requested.is_set()
+    finally:
+        main_module._held_position_monitor_claim.release()
+        main_module._forecast_held_monitor_preempt_requested.clear()
+
+
+def test_periodic_exit_monitor_preempts_inflight_for_forecast_debt(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    def _run(**kwargs) -> bool:
+        assert main_module._exit_monitor_cycle(
+            target_families=frozenset({("Paris", "2026-07-17", "high")}),
+            urgent_forecast=True,
+        ) is False
+        assert kwargs["should_preempt_for_urgent_day0"]() is True
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    main_module._held_position_monitor_active.clear()
+    main_module._forecast_held_monitor_preempt_requested.clear()
+    main_module._periodic_exit_monitor_urgent_yielded.clear()
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
+    try:
+        assert main_module._exit_monitor_cycle() is True
+    finally:
+        main_module._forecast_held_monitor_preempt_requested.clear()
+        main_module._periodic_exit_monitor_urgent_yielded.clear()
+        main_module._held_position_monitor_active.clear()
+
+
+def test_periodic_exit_monitor_forces_full_book_after_one_forecast_yield(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    calls: list[str] = []
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    def _run(**kwargs) -> bool:
+        calls.append("run")
+        assert kwargs["target_families"] is None
+        assert kwargs["should_preempt_for_urgent_day0"]() is False
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    main_module._held_position_monitor_active.clear()
+    main_module._forecast_held_monitor_preempt_requested.set()
+    main_module._periodic_exit_monitor_urgent_yielded.clear()
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
+    try:
+        assert main_module._exit_monitor_cycle() is True
+        assert calls == []
+        assert main_module._periodic_exit_monitor_urgent_yielded.is_set()
+
+        assert main_module._exit_monitor_cycle() is True
+        assert calls == ["run"]
+        assert not main_module._periodic_exit_monitor_urgent_yielded.is_set()
+        assert not main_module._forecast_held_monitor_preempt_requested.is_set()
+    finally:
+        main_module._forecast_held_monitor_preempt_requested.clear()
+        main_module._periodic_exit_monitor_urgent_yielded.clear()
+        main_module._held_position_monitor_active.clear()
 
 
 def test_targeted_exit_monitor_does_not_complete_full_book_bootstrap(
@@ -8667,7 +8908,7 @@ def test_periodic_exit_monitor_yields_when_day0_arrives_during_handoff(
 
     main_module._held_position_monitor_active.clear()
     main_module._day0_urgent_wake_pending.clear()
-    main_module._periodic_exit_monitor_day0_yielded.clear()
+    main_module._periodic_exit_monitor_urgent_yielded.clear()
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
     monkeypatch.setattr(
         exit_module,
@@ -8679,7 +8920,7 @@ def test_periodic_exit_monitor_yields_when_day0_arrives_during_handoff(
     finally:
         main_module._day0_urgent_wake_pending.clear()
         main_module._day0_exit_monitor_attempts.clear()
-        main_module._periodic_exit_monitor_day0_yielded.clear()
+        main_module._periodic_exit_monitor_urgent_yielded.clear()
 
     assert calls == ["release"]
     assert main_module._held_position_monitor_active.is_set() is False
@@ -9576,7 +9817,7 @@ def test_periodic_full_book_timeout_fairness_debt_yields_reactor_until_coverage(
     main_module._held_position_monitor_bootstrap_complete.set()
     main_module._day0_urgent_wake_pending.clear()
     main_module._day0_held_monitor_preempt_requested.clear()
-    main_module._periodic_exit_monitor_day0_yielded.clear()
+    main_module._periodic_exit_monitor_urgent_yielded.clear()
     monkeypatch.setattr(
         main_module,
         "_current_periodic_monitor_obligation_count",
@@ -9617,7 +9858,7 @@ def test_periodic_full_book_timeout_fairness_debt_yields_reactor_until_coverage(
         main_module._held_position_monitor_bootstrap_complete.clear()
         main_module._day0_urgent_wake_pending.clear()
         main_module._day0_held_monitor_preempt_requested.clear()
-        main_module._periodic_exit_monitor_day0_yielded.clear()
+        main_module._periodic_exit_monitor_urgent_yielded.clear()
 
 
 def test_zero_obligation_periodic_monitor_clears_debt_without_reactor_handoff(
@@ -9952,7 +10193,7 @@ def test_periodic_monitor_handoff_clears_fairness_debt_before_incomplete_scan(
     main_module._periodic_held_position_monitor_fairness_debt.set()
     main_module._day0_urgent_wake_pending.clear()
     main_module._day0_held_monitor_preempt_requested.clear()
-    main_module._periodic_exit_monitor_day0_yielded.clear()
+    main_module._periodic_exit_monitor_urgent_yielded.clear()
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", IdleReactorGate())
     monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", lambda **_kwargs: False)
 
@@ -10303,7 +10544,7 @@ def test_full_book_monitor_without_canonical_progress_does_not_complete_bootstra
     main_module._held_position_monitor_bootstrap_complete.clear()
     main_module._day0_urgent_wake_pending.clear()
     main_module._day0_held_monitor_preempt_requested.clear()
-    main_module._periodic_exit_monitor_day0_yielded.clear()
+    main_module._periodic_exit_monitor_urgent_yielded.clear()
     main_module._day0_exit_monitor_attempts.clear()
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
     monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)

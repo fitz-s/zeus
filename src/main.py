@@ -104,7 +104,8 @@ _held_position_monitor_bootstrap_check_lock = threading.Lock()
 _held_position_monitor_bootstrap_last_check = 0.0
 _day0_urgent_wake_pending = threading.Event()
 _day0_held_monitor_preempt_requested = threading.Event()
-_periodic_exit_monitor_day0_yielded = threading.Event()
+_forecast_held_monitor_preempt_requested = threading.Event()
+_periodic_exit_monitor_urgent_yielded = threading.Event()
 _day0_exit_monitor_attempts_lock = threading.Lock()
 _day0_exit_monitor_attempts: dict[str, bool | None] = {}
 _forecast_exit_monitor_attempts_lock = threading.Lock()
@@ -4354,6 +4355,7 @@ def _edli_initialize_reactor_wake_cursor() -> None:
     _edli_last_collateral_authority_captured_at = None
     _day0_urgent_wake_pending.clear()
     _day0_held_monitor_preempt_requested.clear()
+    _forecast_held_monitor_preempt_requested.clear()
     with _day0_exit_monitor_attempts_lock:
         completed_wake_ids = tuple(
             wake_id
@@ -4808,12 +4810,30 @@ def _day0_exit_monitor_priority_pending() -> bool:
         return any(result is None for result in _day0_exit_monitor_attempts.values())
 
 
-def _periodic_exit_monitor_should_yield(day0_pending: bool) -> bool:
-    """Give Day0 one periodic turn without starving the full-book monitor."""
+def _forecast_exit_monitor_priority_pending() -> bool:
+    """Return whether an urgent forecast held-family monitor is pending."""
 
-    if not day0_pending or _periodic_exit_monitor_day0_yielded.is_set():
+    with _forecast_exit_monitor_attempts_lock:
+        return any(result is None for result in _forecast_exit_monitor_attempts.values())
+
+
+def _urgent_held_monitor_preemption_pending() -> bool:
+    """Return all urgent held-family priority and claim-preempt signals."""
+
+    return (
+        _day0_exit_monitor_priority_pending()
+        or _day0_held_monitor_preempt_requested.is_set()
+        or _forecast_exit_monitor_priority_pending()
+        or _forecast_held_monitor_preempt_requested.is_set()
+    )
+
+
+def _periodic_exit_monitor_should_yield(urgent_pending: bool) -> bool:
+    """Give one urgent held-family monitor turn without starving full-book work."""
+
+    if not urgent_pending or _periodic_exit_monitor_urgent_yielded.is_set():
         return False
-    _periodic_exit_monitor_day0_yielded.set()
+    _periodic_exit_monitor_urgent_yielded.set()
     return True
 
 
@@ -8742,14 +8762,31 @@ def _exit_monitor_cycle(
     urgent_fact = urgent_day0 or urgent_forecast
     periodic_full_book = target_families is None and not urgent_fact
     recovery_full_book = bool(recovery_full_book and periodic_full_book)
-    if urgent_forecast and _day0_exit_monitor_priority_pending():
+    if urgent_forecast and (
+        _day0_exit_monitor_priority_pending()
+        or _day0_held_monitor_preempt_requested.is_set()
+    ):
         logger.info("forecast exit monitor yielded to pending Day0 urgent wake")
         return False
-    if not urgent_fact and _periodic_exit_monitor_should_yield(
-        _day0_exit_monitor_priority_pending()
-    ):
-        logger.info("periodic exit_monitor yielded to urgent Day0 held-family monitor")
-        return True
+    if not urgent_fact:
+        urgent_pending = _urgent_held_monitor_preemption_pending()
+        if urgent_pending and _current_periodic_monitor_obligation_count() == 0:
+            # SCOPE: the current full-book pass has no positive exposure to
+            # monitor. DRAIN: the canonical zero-set removes the writer
+            # obligation immediately. RESET: a later positive exposure is
+            # re-read by the next periodic pass.
+            _periodic_held_position_monitor_fairness_debt.clear()
+            _day0_held_monitor_preempt_requested.clear()
+            _forecast_held_monitor_preempt_requested.clear()
+            _held_position_monitor_bootstrap_complete.set()
+            logger.info(
+                "periodic exit_monitor completed without claim: "
+                "canonical monitored exposure is empty"
+            )
+            return True
+        if _periodic_exit_monitor_should_yield(urgent_pending):
+            logger.info("periodic exit_monitor yielded to urgent held-family monitor")
+            return True
     if not _held_position_monitor_claim.acquire(blocking=False):
         if urgent_day0:
             # The wake was classified as held-family work, but another monitor
@@ -8757,6 +8794,12 @@ def _exit_monitor_cycle(
             # attempt flips None -> False so the current periodic holder cannot
             # miss the urgent handoff race.
             _day0_held_monitor_preempt_requested.set()
+        elif urgent_forecast:
+            # SCOPE: the currently queued held-family forecast wake. DRAIN: the
+            # current periodic monitor cooperatively preempts at its next
+            # position boundary. RESET: this urgent monitor acquires the claim,
+            # or a completed full-book pass proves its current coverage.
+            _forecast_held_monitor_preempt_requested.set()
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
         return False
 
@@ -8764,6 +8807,8 @@ def _exit_monitor_cycle(
         # Owning the claim satisfies any earlier request for the current holder
         # to yield. A newer urgent wake has its own revision/claim attempt.
         _day0_held_monitor_preempt_requested.clear()
+    elif urgent_forecast:
+        _forecast_held_monitor_preempt_requested.clear()
 
     monitor_claim_released = False
 
@@ -8788,6 +8833,7 @@ def _exit_monitor_cycle(
             # handoff is required. RESET: any later positive exposure is
             # re-read on the next periodic pass and regains normal handoff law.
             _periodic_held_position_monitor_fairness_debt.clear()
+            _forecast_held_monitor_preempt_requested.clear()
             _held_position_monitor_bootstrap_complete.set()
             _release_monitor_claim()
             logger.info(
@@ -8838,17 +8884,20 @@ def _exit_monitor_cycle(
             # missing fresh belief authority and the scan returns incomplete.
             _periodic_held_position_monitor_fairness_debt.clear()
         _held_position_monitor_handoff_pending.clear()
-        if urgent_forecast and _day0_exit_monitor_priority_pending():
+        if urgent_forecast and (
+            _day0_exit_monitor_priority_pending()
+            or _day0_held_monitor_preempt_requested.is_set()
+        ):
             logger.info(
                 "exit_monitor yielded after reactor handoff to urgent Day0 held-family monitor"
             )
             return False
         if not urgent_fact and _periodic_exit_monitor_should_yield(
-            _day0_exit_monitor_priority_pending()
+            _urgent_held_monitor_preemption_pending()
         ):
             logger.info(
                 "periodic exit_monitor yielded after reactor handoff to urgent "
-                "Day0 held-family monitor"
+                "held-family monitor"
             )
             return True
         should_preempt_for_urgent_day0 = None
@@ -8874,11 +8923,11 @@ def _exit_monitor_cycle(
         else:
             # One urgent held-family attempt may preempt a periodic pass. The
             # next pass ignores the same continuous pressure and completes the
-            # full book, whose own ordering still evaluates urgent Day0 first.
+            # full book. Day0 remains highest priority; forecast debt uses the
+            # same one-turn fairness gate and cannot interrupt urgent forecast.
             should_preempt_for_urgent_day0 = lambda: (
                 _periodic_exit_monitor_should_yield(
-                    _day0_exit_monitor_priority_pending()
-                    or _day0_held_monitor_preempt_requested.is_set()
+                    _urgent_held_monitor_preemption_pending()
                 )
             )
         monitor_succeeded = run_exit_monitor_cycle(
@@ -8900,7 +8949,8 @@ def _exit_monitor_cycle(
             # is the only bootstrap completion authority. A cycle may return
             # without a Python exception while every position was deferred for
             # missing executable books; that is not coverage.
-            _periodic_exit_monitor_day0_yielded.clear()
+            _periodic_exit_monitor_urgent_yielded.clear()
+            _forecast_held_monitor_preempt_requested.clear()
         return True
     finally:
         _release_monitor_claim()

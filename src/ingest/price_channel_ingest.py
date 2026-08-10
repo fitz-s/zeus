@@ -1388,10 +1388,24 @@ def _edli_trade_fact_bridge_candidates_read_only():
         if "world" not in attached:
             world_uri = f"{ZEUS_WORLD_DB_PATH.resolve().as_uri()}?mode=ro"
             conn.execute("ATTACH DATABASE ? AS world", (world_uri,))
-        confirmed_candidates = discover_confirmed_trade_fact_candidates(conn)
-        rest_orphan_candidates = discover_rest_filled_orphan_trade_fact_candidates(conn)
+        confirmed_candidates = discover_confirmed_trade_fact_candidates(
+            conn,
+            trade_schema="main",
+            event_schema="world",
+            projection_schema="world",
+        )
+        rest_orphan_candidates = discover_rest_filled_orphan_trade_fact_candidates(
+            conn,
+            trade_schema="main",
+            event_schema="world",
+            projection_schema="world",
+        )
         absorbed_fill_aggregate_ids = discover_absorbed_confirmed_fill_aggregate_ids(
-            conn
+            conn,
+            trade_schema="main",
+            event_schema="world",
+            projection_schema="world",
+            cap_schema="world",
         )
     finally:
         conn.close()

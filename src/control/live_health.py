@@ -3789,6 +3789,26 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
             "skip_reason": "POSITION_CURRENT_TABLE_MISSING",
         }
 
+    latest_columns, latest_column_err = _sqlite_ro_table_columns(
+        trade_db,
+        "executable_market_snapshot_latest",
+    )
+    if latest_column_err:
+        return {
+            "ok": False,
+            "issue": f"SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:{latest_column_err}",
+            "evaluated": True,
+        }
+    if not latest_columns:
+        return {
+            "ok": False,
+            "issue": (
+                "SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:"
+                "EXECUTABLE_MARKET_SNAPSHOT_LATEST_TABLE_MISSING"
+            ),
+            "evaluated": True,
+        }
+
     snapshot_columns, snapshot_column_err = _sqlite_ro_table_columns(
         trade_db,
         "executable_market_snapshots",
@@ -3801,10 +3821,12 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
         }
     if not snapshot_columns:
         return {
-            "ok": True,
-            "issue": None,
-            "evaluated": False,
-            "skip_reason": "EXECUTABLE_MARKET_SNAPSHOTS_TABLE_MISSING",
+            "ok": False,
+            "issue": (
+                "SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:"
+                "EXECUTABLE_MARKET_SNAPSHOTS_TABLE_MISSING"
+            ),
+            "evaluated": True,
         }
 
     required_position_columns = {
@@ -3826,16 +3848,25 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
         "captured_at",
         "freshness_deadline",
     }
+    required_latest_columns = {
+        "condition_id",
+        "selected_outcome_token_id",
+        "snapshot_id",
+    }
     missing_position_columns = sorted(required_position_columns - position_columns)
     missing_snapshot_columns = sorted(required_snapshot_columns - snapshot_columns)
-    if missing_position_columns or missing_snapshot_columns:
+    missing_latest_columns = sorted(required_latest_columns - latest_columns)
+    if missing_position_columns or missing_snapshot_columns or missing_latest_columns:
         return {
-            "ok": True,
-            "issue": None,
-            "evaluated": False,
-            "skip_reason": "SUB_MIN_PARTIAL_POSITION_COLUMN_MISSING",
+            "ok": False,
+            "issue": (
+                "SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:"
+                "SUB_MIN_PARTIAL_POSITION_COLUMN_MISSING"
+            ),
+            "evaluated": True,
             "missing_position_columns": missing_position_columns,
             "missing_snapshot_columns": missing_snapshot_columns,
+            "missing_latest_columns": missing_latest_columns,
         }
 
     optional_position_columns = (
@@ -3894,6 +3925,7 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
                ap.direction,
                ap.exit_reason,
                ap.updated_at,
+               l.snapshot_id AS latest_snapshot_id,
                s.snapshot_id,
                s.min_order_size,
                s.orderbook_top_bid,
@@ -3901,21 +3933,11 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
                s.captured_at AS snapshot_captured_at,
                s.freshness_deadline AS snapshot_freshness_deadline
           FROM active_positions ap
-          JOIN executable_market_snapshots s
-            ON s.rowid = (
-                SELECT s2.rowid
-                  FROM executable_market_snapshots s2
-                 WHERE s2.condition_id = ap.condition_id
-                   AND s2.selected_outcome_token_id = ap.token_id
-                   AND COALESCE(CAST(s2.min_order_size AS REAL), 0.0) > 0.0
-                 ORDER BY datetime(s2.captured_at) DESC, s2.rowid DESC
-                 LIMIT 1
-            )
-         WHERE ap.held_shares > 0.0
-           AND ap.held_shares < COALESCE(CAST(s.min_order_size AS REAL), 0.0)
-         ORDER BY ap.held_shares / COALESCE(CAST(s.min_order_size AS REAL), 1.0) ASC,
-                  datetime(s.captured_at) DESC,
-                  ap.position_id
+          LEFT JOIN executable_market_snapshot_latest l
+            ON l.condition_id = ap.condition_id
+           AND l.selected_outcome_token_id = ap.token_id
+          LEFT JOIN executable_market_snapshots s
+            ON s.snapshot_id = l.snapshot_id
         """,
         (),
     )
@@ -3925,16 +3947,70 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
             "issue": f"SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:{sample_err}",
             "evaluated": True,
         }
+    missing_exact_rows = [
+        row
+        for row in rows
+        if not str(row.get("latest_snapshot_id") or "").strip()
+        or not str(row.get("snapshot_id") or "").strip()
+    ]
+    if missing_exact_rows:
+        return {
+            "ok": False,
+            "issue": (
+                "SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:"
+                "EXECUTABLE_MARKET_SNAPSHOT_LATEST_EXACT_ROW_MISSING"
+            ),
+            "evaluated": True,
+            "missing_position_ids": [
+                str(row.get("position_id") or "") for row in missing_exact_rows
+            ],
+        }
+
+    partial_rows: list[dict] = []
     for row in rows:
+        try:
+            held_shares = float(row.get("held_shares") or 0.0)
+            min_order_size = float(row.get("min_order_size") or 0.0)
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "issue": (
+                    "SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:"
+                    "EXECUTABLE_MARKET_SNAPSHOT_MIN_ORDER_SIZE_INVALID"
+                ),
+                "evaluated": True,
+            }
+        if not math.isfinite(min_order_size) or min_order_size <= 0.0:
+            return {
+                "ok": False,
+                "issue": (
+                    "SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:"
+                    "EXECUTABLE_MARKET_SNAPSHOT_MIN_ORDER_SIZE_INVALID"
+                ),
+                "evaluated": True,
+            }
+        if held_shares <= 0.0 or held_shares >= min_order_size:
+            continue
         age_seconds = _age_seconds(str(row.get("snapshot_captured_at") or ""), now)
         row["snapshot_age_seconds"] = age_seconds
         row["snapshot_freshness_expired"] = (
             str(row.get("snapshot_freshness_deadline") or "")
             < now.astimezone(timezone.utc).isoformat()
         )
+        partial_rows.append(row)
 
-    count = len(rows)
-    sample = rows[:SUB_MIN_PARTIAL_POSITION_SAMPLE_LIMIT]
+    partial_rows.sort(key=lambda row: str(row.get("position_id") or ""))
+    partial_rows.sort(
+        key=lambda row: str(row.get("snapshot_captured_at") or ""),
+        reverse=True,
+    )
+    partial_rows.sort(
+        key=lambda row: float(row["held_shares"])
+        / float(row["min_order_size"]),
+    )
+
+    count = len(partial_rows)
+    sample = partial_rows[:SUB_MIN_PARTIAL_POSITION_SAMPLE_LIMIT]
     detail = {
         "evaluated": True,
         "sub_min_partial_position_count": count,
