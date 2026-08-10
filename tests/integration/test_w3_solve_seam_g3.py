@@ -13265,7 +13265,7 @@ def _install_global_jit_market_authority_fetches(
     return gamma_payload, clob_payload
 
 
-def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions(monkeypatch):
+def test_global_preflight_jit_worse_curve_replaces_and_reauctions(monkeypatch):
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     at = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)
     selected_curve = ExecutableCostCurve(
@@ -13328,7 +13328,7 @@ def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions(monkey
             "asset_id": token_id,
             "hash": "book-a",
             "bids": [{"price": "0.003", "size": "100"}],
-            "asks": [{"price": "0.004", "size": "217.68"}],
+            "asks": [{"price": "0.014", "size": "217.68"}],
         }
 
     _install_global_jit_market_authority_fetches(
@@ -13351,11 +13351,11 @@ def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions(monkey
     assert superseded.proof_accepted is False
     assert superseded.reason.startswith(
         "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:"
-        "curve_economics:jit_detail=fields="
+        "curve_economics:jit_detail="
     )
     assert superseded.global_jit_candidate is not None
     assert superseded.global_jit_candidate.candidate.executable_cost_curve.levels == (
-        BookLevel(price=Decimal("0.004"), size=Decimal("217.68")),
+        BookLevel(price=Decimal("0.014"), size=Decimal("217.68")),
     )
     status, replacement, reason = era._global_curve_supersession_from_receipt(
         superseded
@@ -13369,7 +13369,7 @@ def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions(monkey
         winner_event_id=event.event_id,
         decision=SimpleNamespace(
             candidate=replacement_candidate,
-            limit_price=Decimal("0.004"),
+            limit_price=Decimal("0.014"),
             shares=Decimal("190"),
         ),
     )
@@ -13399,7 +13399,7 @@ def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions(monkey
                 "asset_id": token_id,
                 "hash": "fresh-after-expiry",
                 "bids": [{"price": "0.003", "size": "100"}],
-                "asks": [{"price": "0.004", "size": "217.68"}],
+                "asks": [{"price": "0.014", "size": "217.68"}],
             }
         ),
         current_candidate_override=superseded.global_jit_candidate,
@@ -13422,8 +13422,7 @@ def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions(monkey
         },
     )
     assert stable is not receipt
-    assert stable.proof_accepted is False
-    assert stable.reason.startswith("GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:")
+    assert stable.proof_accepted is True
     assert isinstance(stable.global_jit_candidate, era._GlobalJitHandoff)
 
 

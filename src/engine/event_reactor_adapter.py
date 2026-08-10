@@ -11029,11 +11029,13 @@ def _global_selected_order_economics_drift(
     decision: object,
     current_candidate: object,
 ) -> str | None:
-    """Name any current curve change that can alter the global argmax.
+    """Reject a JIT BUY unless the selected fixed order still dominates.
 
-    Snapshot and book hashes are evidence carriers.  Every economic field is
-    exact: even a cheaper prefix or an unconsumed tail change can move the
-    Fractional-Kelly optimum and therefore requires a new complete auction.
+    The global auction selected one exact share count, not an immutable book
+    serialization. A hash or unconsumed ask-tail change is elapsed-time
+    evidence, not an economic veto. The fixed BUY remains submit-safe when
+    identity and venue terms are unchanged and the fresh curve fills the same
+    shares for no more all-in cost at no worse a limit.
     """
 
     selected_candidate = getattr(decision, "candidate", None)
@@ -11047,18 +11049,12 @@ def _global_selected_order_economics_drift(
         ("token", selected.token_id, current.token_id),
         ("side", selected.side, current.side),
         ("fee", selected.fee_model.fee_rate, current.fee_model.fee_rate),
-        ("book_hash", selected.book_hash, current.book_hash),
-        (
-            "fee_details",
-            dict(selected.fee_details or {}),
-            dict(current.fee_details or {}),
-        ),
         ("tick", selected.min_tick, current.min_tick),
         ("min_order", selected.min_order_size, current.min_order_size),
         (
-            "levels",
-            tuple((level.price, level.size) for level in selected.levels),
-            tuple((level.price, level.size) for level in current.levels),
+            "execution_mode",
+            str(getattr(selected_candidate, "execution_mode", "") or ""),
+            str(getattr(current_candidate, "execution_mode", "") or ""),
         ),
     ]
     # Generic curve comparisons remain useful to the non-production solver
@@ -11072,7 +11068,64 @@ def _global_selected_order_economics_drift(
         for name, selected_value, current_value in economic_fields
         if selected_value != current_value
     )
-    return f"fields={','.join(drift)}" if drift else None
+    if drift:
+        return f"fields={','.join(drift)}"
+
+    shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
+    selected_cost = Decimal(str(getattr(decision, "cost_usd", "0") or "0"))
+    selected_limit = Decimal(
+        str(getattr(decision, "limit_price", "0") or "0")
+    )
+    if shares == 0 and selected_cost == 0 and selected_limit == 0:
+        # Metadata-only callers use this helper to verify typed market-authority
+        # drift. Production GlobalSingleOrderDecision always carries all three.
+        return None
+    if shares <= 0 or selected_limit <= 0:
+        return "selected_economics_invalid"
+
+    def fixed_buy_economics(curve: object) -> tuple[Decimal, Decimal] | None:
+        remaining = shares
+        cost = Decimal("0")
+        limit = Decimal("0")
+        try:
+            for level in curve.levels:
+                take = min(level.size, remaining)
+                if take > 0:
+                    limit = level.price
+                    cost += take * curve.fee_model.all_in_price(level.price)
+                    remaining -= take
+                if remaining <= Decimal("1e-9"):
+                    break
+        except AttributeError:
+            return None
+        return None if remaining > Decimal("1e-9") else (cost, limit)
+
+    if selected_cost <= 0:
+        selected_curve = getattr(selected_candidate, "economic_cost_curve", selected)
+        selected_economics = fixed_buy_economics(selected_curve)
+        if selected_economics is None:
+            return "selected_economics_invalid:depth_infeasible"
+        selected_cost, _selected_curve_limit = selected_economics
+    curve = getattr(current_candidate, "economic_cost_curve", current)
+    current_economics = fixed_buy_economics(curve)
+    if current_economics is None:
+        return f"depth_infeasible:required={shares}"
+    current_cost, current_limit = current_economics
+    breaches = tuple(
+        name
+        for name, breached in (
+            ("all_in_cost", current_cost > selected_cost + Decimal("1e-9")),
+            ("limit", current_limit > selected_limit + Decimal("1e-9")),
+        )
+        if breached
+    )
+    if not breaches:
+        return None
+    return (
+        f"{','.join(breaches)}:shares={shares}:"
+        f"cost={selected_cost}->{current_cost}:"
+        f"limit={selected_limit}->{current_limit}"
+    )
 
 
 def _global_selected_order_economics_preserved(
