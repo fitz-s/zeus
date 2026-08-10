@@ -25,7 +25,7 @@ Critical invariant: **exit is not local close** (INV-01). A monitor decision pro
 
 ## Domain rules
 
-- **Limit orders ONLY** — never market orders. Zeus always provides liquidity on entry
+- **Every live submission is a finite-price limit inside inclusive `[0.05, 0.95]`.** ENTRY BUY may be post-only GTC/GTD maker or certified non-post-only FOK/FAK taker. EXIT SELL may be post-only GTC/GTD maker or non-post-only FAK taker. Non-post-only GTC/GTD, post-only immediate-or-cancel, and SELL FOK are forbidden.
 - Live Polymarket V2 placement must route through `src/venue/polymarket_v2_adapter.py` and preserve venue-command pre-side-effect persistence.
 - Batch submit/cancel (W2.1, `batch_order_submission.py`): persist N commands
   + N SUBMIT_REQUESTED/CANCEL_REQUESTED events per chunk, COMMITTED, before
@@ -37,7 +37,7 @@ Critical invariant: **exit is not local close** (INV-01). A monitor decision pro
 - Mode-based timeouts: Opening Hunt 4h, Update Reaction 1h, Day0 15min
 - Share quantization: BUY rounds UP, SELL rounds DOWN (0.01 increments)
 - Whale toxicity: cancel on adjacent bin sweeps (legacy predecessor lesson)
-- Dynamic limit: if within 5% of best ask, jump to ask for guaranteed fill
+- Dynamic repricing may move to best ask only when current slippage, tick, price-band, and economic gates pass; it never guarantees a fill (FAK may fill partially and FOK may be killed).
 - Live execution, backtest, audit replay, simulation, and test doubles are separate evidence classes; execution code must not route live orders through non-live evidence or test-double paths.
 - All probabilities in exit triggers are in NATIVE space of position direction (buy_yes→P(YES), buy_no→P(NO))
 - Settlement redemption side effects flow through `settlement_commands.py`; do not call adapter redeem paths directly from harvester or collateral code.

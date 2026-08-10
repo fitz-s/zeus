@@ -1,10 +1,12 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-06; last_reused=2026-08-06
+# Last reused/audited: 2026-08-10
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: R3 M2 unknown-side-effect semantics for post-POST submit uncertainty.
 # Reuse: Run when executor submit exception handling, venue command recovery,
 #        or idempotency/economic-intent duplicate blocking changes.
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/M2.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
+#                  + 2026-08-10 current WORLD/FORECAST certificate fixtures and final bounded-submit boundary.
 """M2: post-side-effect submit uncertainty must not become semantic rejection."""
 
 from __future__ import annotations
@@ -110,9 +112,23 @@ def _insert_actionable_certificate(conn: sqlite3.Connection, *, token_id: str, p
     payload_json = json.dumps(_actionable_payload(token_id=token_id, price=price), sort_keys=True)
     payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
     certificate_hash = hashlib.sha256(f"actionable:{token_id}:{price}".encode()).hexdigest()
-    conn.execute(
-        """
-        INSERT OR REPLACE INTO decision_certificates (
+    values = (
+        f"cert-{certificate_hash[:12]}",
+        f"actionable:{token_id}:{price}",
+        NOW.isoformat(),
+        NOW.isoformat(),
+        NOW.isoformat(),
+        NOW.isoformat(),
+        NOW.isoformat(),
+        NOW.isoformat(),
+        NOW.isoformat(),
+        payload_json,
+        payload_hash,
+        certificate_hash,
+        NOW.isoformat(),
+    )
+    certificate_sql = """
+        INSERT OR REPLACE INTO {table_ref} (
             certificate_id, certificate_type, schema_version, canonicalization_version,
             semantic_key, claim_type, mode, decision_time, source_available_at,
             agent_received_at, persisted_at, max_parent_source_available_at,
@@ -123,32 +139,79 @@ def _insert_actionable_certificate(conn: sqlite3.Connection, *, token_id: str, p
         ) VALUES (?, 'ActionableTradeCertificate', 1, 'test', ?, 'actionable_trade',
             'LIVE', ?, ?, ?, ?, ?, ?, ?, 'test-authority', 'test', 'test-algo',
             'test', NULL, NULL, ?, ?, ?, 'VERIFIED', ?)
-        """,
-        (
-            f"cert-{certificate_hash[:12]}",
-            f"actionable:{token_id}:{price}",
-            NOW.isoformat(),
-            NOW.isoformat(),
-            NOW.isoformat(),
-            NOW.isoformat(),
-            NOW.isoformat(),
-            NOW.isoformat(),
-            NOW.isoformat(),
-            payload_json,
-            payload_hash,
-            certificate_hash,
-            NOW.isoformat(),
-        ),
-    )
+        """
+    attached = {
+        str(row[1]).strip()
+        for row in conn.execute("PRAGMA database_list").fetchall()
+        if len(row) > 1
+    }
+    # Keep the fixture's legacy main-row witness for pre-submit certificate
+    # checks, and mirror it into the sanctioned attached WORLD ledger used by
+    # live ENTRY closure. Both rows are the same certificate identity.
+    table_refs = ["decision_certificates"]
+    if "world" in attached:
+        table_refs.append("world.decision_certificates")
+    for table_ref in table_refs:
+        conn.execute(certificate_sql.format(table_ref=table_ref), values)
     return certificate_hash
 
 
 @pytest.fixture
-def conn(monkeypatch):
+def conn(monkeypatch, tmp_path):
     """In-memory trades DB with live-money gates neutralized for unit tests."""
-    from src.state.db import init_schema, init_schema_trade_only
+    from src.state.db import init_schema, init_schema_forecasts, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
     from src.state.collateral_ledger import CollateralLedger, CollateralSnapshot
+
+    # ENTRY admission resolves the current weather family from the canonical
+    # forecasts DB, independently of the trade connection. Keep that authority
+    # surface real in this fixture: use an isolated on-disk DB under tmp_path,
+    # initialize the production forecasts schema, and seed the matching market
+    # identity. This lets each test reach its intended pre/post-network seam
+    # without mocking or weakening the family-identity gate.
+    forecasts_db_path = tmp_path / "zeus-forecasts.db"
+    world_db_path = tmp_path / "zeus-world.db"
+    monkeypatch.setattr("src.state.db.ZEUS_FORECASTS_DB_PATH", forecasts_db_path)
+    monkeypatch.setattr(
+        "src.state.db.ZEUS_WORLD_DB_PATH",
+        tmp_path / "world-schema-source-does-not-exist.db",
+    )
+    forecasts_conn = sqlite3.connect(forecasts_db_path)
+    try:
+        init_schema_forecasts(forecasts_conn)
+        forecasts_conn.execute(
+            """
+            INSERT INTO market_events (
+                market_slug, city, target_date, temperature_metric,
+                condition_id, token_id, range_label, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "weather-m2",
+                "Karachi",
+                "2026-05-17",
+                "high",
+                "condition-m2",
+                "tok-m2",
+                "test market",
+                NOW.isoformat(),
+            ),
+        )
+        forecasts_conn.commit()
+    finally:
+        forecasts_conn.close()
+
+    # ENTRY admission and certificate closure require the sanctioned attached
+    # WORLD authority. Build that canonical surface in the same isolated temp
+    # root and attach it to the in-memory trade handle below.
+    world_conn = sqlite3.connect(world_db_path)
+    try:
+        from src.state.db import init_schema_world_only
+
+        init_schema_world_only(world_conn)
+    finally:
+        world_conn.close()
+    monkeypatch.setattr("src.state.db.ZEUS_WORLD_DB_PATH", world_db_path)
 
     c = sqlite3.connect(":memory:")
     c.row_factory = sqlite3.Row
@@ -156,6 +219,7 @@ def conn(monkeypatch):
     init_schema(c)
     init_schema_trade_only(c)
     init_collateral_schema(c)
+    c.execute("ATTACH DATABASE ? AS world", (str(world_db_path),))
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)

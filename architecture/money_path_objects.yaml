@@ -101,6 +101,17 @@ state_machines:
       - ZEUS_REACTOR_GAMMA_EMPTY_BACKOFF_SECONDS
     invariant_tests:
       - tests/test_money_path_semantic_ci.py
+  executable_snapshot_capture_trigger:
+    owner: src/state/snapshot_repo.py
+    description: >
+      Provenance labels for immutable executable-market snapshot capture.
+      JIT_SUBMIT records that the full snapshot was captured at the final
+      submit boundary; it is not a lifecycle, venue-command, order, or fill
+      state.
+    states:
+      - JIT_SUBMIT
+    invariant_tests:
+      - tests/test_capture_policy_track_a.py
   venue_command:
     owner: src/state/venue_command_repo.py
     states:
@@ -1038,6 +1049,49 @@ state_machines:
       - tests/engine/test_mode_flip_and_recapture_semantics.py
       - tests/engine/test_event_reactor_live_qkernel_gate.py
       - tests/strategy/live_inference/test_source_clock_vnext.py
+
+  global_actuation_jit_book_authority_rejection_reason:
+    owner: src/engine/event_reactor_adapter.py
+    description: >
+      PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED is the fail-closed no-submit
+      reason emitted when a global actuation cannot obtain the typed current
+      JIT book authority required for final ranking and submit. It is not a
+      lifecycle, venue-command, order, or fill state.
+    states:
+      - PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED
+    invariant_tests:
+      - tests/engine/test_final_submit_mode_authority.py
+      - tests/events/test_reactor.py
+
+  sealed_pre_submit_book_rejection_reason:
+    owner: src/events/reactor.py
+    description: >
+      Fail-closed reasons for rejecting a sealed JIT book override whose
+      identity, causal freshness, depth payload, canonical hash, or executable
+      witness no longer matches the selected final intent. These are
+      final-submit rejection reasons, not lifecycle, venue-command, order, or
+      fill states.
+    states:
+      - PRE_SUBMIT_SEALED_BOOK_IDENTITY_MISMATCH
+      - PRE_SUBMIT_SEALED_BOOK_FRESHNESS_INVALID
+      - PRE_SUBMIT_SEALED_BOOK_DEPTH_INVALID
+      - PRE_SUBMIT_SEALED_BOOK_HASH_MISMATCH
+      - PRE_SUBMIT_SEALED_BOOK_WITNESS_MISMATCH
+    invariant_tests:
+      - tests/events/test_reactor.py
+
+  global_sell_receipt_audit_reason:
+    owner: src/analysis/settlement_skill_attribution.py
+    description: >
+      Read-only settlement-attribution audit reasons for an EXIT/SELL command
+      whose intent kind is wrong or whose canonical INTENT_CREATED event is
+      absent. They make the receipt INVALID without relabeling settlement,
+      supplying q, or becoming lifecycle, command, order, or fill states.
+    states:
+      - GLOBAL_SELL_RECEIPT_INTENT_KIND_MISMATCH
+      - GLOBAL_SELL_RECEIPT_AUDIT_INTENT_EVENT_MISSING
+    invariant_tests:
+      - tests/test_settlement_skill_attribution.py
 
   global_winner_claim_reason:
     owner: src/events/event_store.py

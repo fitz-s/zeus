@@ -2580,8 +2580,7 @@ class EventStore:
             )
         if not updates:
             return 0
-        before = self.conn.total_changes
-        self.conn.executemany(
+        cur = self.conn.executemany(
             """
             UPDATE opportunity_event_processing
                SET processing_status = 'expired',
@@ -2594,7 +2593,8 @@ class EventStore:
             """,
             updates,
         )
-        return int(self.conn.total_changes - before)
+        rowcount = cur.rowcount
+        return rowcount if isinstance(rowcount, int) and rowcount > 0 else 0
 
     @staticmethod
     def _strictly_past_in_tz(

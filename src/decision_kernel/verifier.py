@@ -8,6 +8,7 @@ import math
 import re
 from typing import Iterable, Mapping
 
+from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
 from src.contracts.settlement_semantics import settlement_preimage_offsets
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import (
@@ -743,6 +744,27 @@ def _verify_actionable_qkernel_economics(
     economics = payload.get("qkernel_execution_economics")
     if not isinstance(economics, dict):
         raise CertificateVerificationError("actionable qkernel_execution_economics missing")
+    global_marker = str(economics.get("global_actuation_identity") or "").strip()
+    if global_marker:
+        try:
+            nested_receipt = GlobalAuctionReceiptRef.from_payload(
+                economics.get("global_auction_receipt")
+            )
+            top_level_receipt = GlobalAuctionReceiptRef.from_payload(
+                payload.get("global_auction_receipt")
+            )
+        except ValueError as exc:
+            raise CertificateVerificationError(
+                f"actionable global auction receipt invalid:{exc}"
+            ) from None
+        if nested_receipt != top_level_receipt:
+            raise CertificateVerificationError(
+                "actionable global auction receipt top-level mismatch"
+            )
+    elif payload.get("global_auction_receipt") not in (None, ""):
+        raise CertificateVerificationError(
+            "actionable global auction receipt lacks global actuation"
+        )
     if str(economics.get("source") or "").strip() != "qkernel_spine":
         raise CertificateVerificationError("actionable qkernel source must be qkernel_spine")
     current_state_solve = _current_state_solve_payload(payload)

@@ -4,6 +4,322 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-10 Executable limit modes, fill convergence, and command ownership
+
+The current global auction ranks each independently executable maker or taker
+proposal, but the last persistence and venue boundaries still carried the
+retired blanket assumption that every ENTRY must be post-only.  That split made
+a globally selected, certificate-bound FOK/FAK BUY impossible to execute even
+when its finite limit, current book, fees, depth, Kelly target, wealth, and fill
+prefix were all proved.  The executable law remains limit-order only: every
+submitted unit price is finite and inside inclusive `[0.05, 0.95]`; Zeus never
+submits an unpriced market order.  The admitted shapes are now explicit and
+side-aware: ENTRY/BUY may be GTC/GTD post-only maker or FOK/FAK non-post-only
+certified taker; EXIT/SELL may be GTC/GTD post-only maker or FAK non-post-only
+taker.  Non-post-only GTC/GTD, post-only immediate-or-cancel shapes, and SELL
+FOK remain rejected.  Selection mode survives JIT rebinding and the executor
+still re-proves exact actionable probability, book, fee, depth, position,
+wealth, and envelope identity immediately before SDK contact.
+
+The same exact-head audit exposed two convergence gaps.  First, an authenticated
+late trade leg was appended but could be skipped by projection when a previous
+partial-fill transition already existed.  Reconciliation now projects the
+canonical command-level aggregate, replaces only that command's prior ENTRY
+economics, and applies the symmetric EXIT aggregate only against an exact exit
+intent.  Independent legs therefore converge once to one valid aggregate
+without double counting or inventing economic closure.  Second, heartbeat
+control imported SDK transport internals directly.  The venue adapter now owns
+the dedicated HTTP client swap and request-error cause preservation; control
+owns only timeout policy, delegation, and telemetry.
+
+The pre-SDK admission audit also found that constructing a connection-backed
+`CollateralLedger` after `BEGIN IMMEDIATE` ran schema `executescript()` and
+implicitly committed the command/envelope/events before the reservation CAS.
+A later collateral rejection could therefore leave a durable `SUBMITTING`
+command despite the claimed rollback.  ENTRY now uses the DDL-free
+`buy_preflight_in_transaction()` read path under the existing writer lock; a
+pre-side-effect failure rolls back command, event, envelope, and reservation as
+one unit.  The antibody traces SQL inside the open transaction and rejects any
+DDL or COMMIT.
+
+NC-18 additionally found three direct command-journal mutations outside the
+declared `venue_command_repo` writer: recovery of an already-existing EXIT
+order, absorption of an operator-confirmed external close, and mixed-token
+ENTRY command rehoming.  These are observation/repair facts, not new Zeus
+submits.  They move behind three narrow typed repo helpers.  Recovered order
+adoption and external-close absorption use explicit creation-only command
+events rather than fabricated `SUBMIT_*` history; mixed-token rehome performs
+command and execution-fact compare-and-swap in one nested savepoint.  No schema
+or migration is introduced, normal command transitions remain closed, and the
+AST ownership gate is not weakened.
+
+Recovered partial EXIT adoption also exposed a liveness/accounting defect.
+Recovery reduced the local holding to the first observed exchange residual but
+did not append per-leg partial-exit economics.  Later authenticated fills lacked
+an exact full-close intent, so reconcile and pending-exit monitoring correctly
+refused to invent closure but left the position, realized PnL, and capital
+release stranded.  The repair keeps one immutable pre-recovery holding/cost
+baseline, folds each authenticated `(command_id, trade_id)` exactly once through
+the existing partial-exit economic cursor, and projects only delta
+shares/cost/PnL.  It never emits `EXIT_ORDER_FILLED` without exact full intent.
+A sub-minimum residual remains its true size/cost and opens an idempotent typed
+`ReviewWorkItem`. Dust is decided only against the exact held token's latest
+current-time fresh, non-invalidated executable snapshot; missing authority keeps
+the position pending under `MISSING_FILL_AUTHORITY`. A later lower minimum
+resolves the debt only after canonical chain observation and an exact
+`EXIT_RETRY_RELEASED` event actually return the residual to redecision. That
+chain observation must be at least as new as both the terminal order fact and
+the command update; an older local residual cannot release capital.
+
+SCOPE is respectively one selected command envelope, one command's authenticated
+trade aggregate, the heartbeat transport instance, one recovered venue order,
+one deterministic external-close command, or one mixed-token source/target
+command pair.  Recovered partial-exit economics are scoped to one
+`command_id + position_id`; they never create a family/global entry latch.
+DRAIN is the next normal JIT auction, authenticated trade-leg reconciliation/recovery
+sweep, heartbeat installation attempt, or exact repair retry.  RESET is a fresh
+coherent submit witness, a newly observed canonical aggregate, a successfully
+delegated adapter transport, an atomic adoption/absorption commit, or a complete
+two-row rehome CAS.  A per-leg cursor makes replay a no-op; a tradable residual
+returns to ordinary redecision, while dust resolves on later executable truth
+or settlement.  A failed proof leaves only that command/order/repair
+unresolved; it does not block unrelated families, held monitoring, or CASH/HOLD.
+
+Acceptance requires mirrored maker/taker envelope and adapter antibodies,
+zero-command/zero-network rejection on any missing submit proof, full
+entry/exit late-leg convergence without double projection, SDK-import
+confinement, creation-event grammar and idempotency tests, transaction rollback
+for every partial repair failure, the NC-18 direct-mutation scan, the complete
+affected test files, semantic money-path classification, and exact-head CI.
+Allowed implementation/evidence surfaces are
+`src/contracts/venue_submission_envelope.py`, `src/execution/executor.py`,
+`src/venue/polymarket_v2_adapter.py`, `src/control/heartbeat_supervisor.py`,
+`src/execution/exchange_reconcile.py`, `src/execution/command_recovery.py`,
+`src/execution/command_bus.py`, `src/state/venue_command_repo.py`, their scoped
+router/reference/registry entries, `tests/test_unknown_side_effect.py`,
+`tests/test_v2_adapter.py`, `tests/test_heartbeat_supervisor.py`,
+`tests/test_executor_command_split.py`, `tests/test_exchange_reconcile.py`,
+`tests/test_command_recovery.py`, `tests/test_venue_command_repo.py`,
+`tests/test_command_bus_types.py`, `tests/test_command_grammar_amendment.py`,
+`src/state/collateral_ledger.py`, `tests/test_collateral_ledger.py`,
+`architecture/negative_constraints.yaml`, `architecture/invariants.yaml`, and
+their Semgrep/forbidden-pattern companions.  Recovered partial-exit convergence
+also requires `src/contracts/review_work_item.py`,
+`src/state/review_work_items.py`, the existing partial-economics/cursor seams,
+and focused exchange-reconcile/command-recovery antibodies proving per-leg PnL,
+replay idempotency, dust review, and no fabricated full close.
+
+## 2026-08-10 Exact-head temporal truth and required-CI closure
+
+The global-capital-auction exact head exposed two live-base defects while its
+required relationship jobs exercised the surrounding contracts.  First, the
+Day0 observation-print reducer replaced a source-issued report clock with an
+older event's local availability clock.  A corrected value for the same raw
+report therefore appeared to be a later physical observation instead of a
+later possession of the same observation.  The reducer now keeps
+`observation_time` on the source clock and `observation_available_at` on the
+current ledger fetch clock; correction identity remains
+`(channel, source_clock, conditioned value)`, so one correction emits once
+without inventing a new
+weather fact.  Second, terminal EventStore recovery counted SQLite trigger
+side effects through `total_changes`; it now reports only the direct archive
+UPDATE row count while retaining the append-only event and active-projection
+trigger law.
+
+The remaining required-job failures were stale or platform-bound test
+fixtures, not alternate runtime behavior.  EventStore fixtures create legal
+append-only parents (or explicitly enter the legacy migration shape), the
+reactor preemption test owns its monitor-debt authority instead of consulting a
+host DB, the market-snapshot fake returns the current capture result shape,
+Day0 live-order fixtures carry the current typed remaining-window probability
+authority, and EDLI subprocess/bridge/source-shape tests use the running
+interpreter and current converged identities.  No runtime guard, source route,
+provider, settlement rule, execution gate, or workflow is weakened.
+
+The exact-head audit also found a read-side certificate vocabulary split left
+behind by the single-live-semantics cutover: the compiler persists
+`PreSubmitDecisionCertificate` under `pre_submit:` semantic keys, while the
+no-submit projection and opportunity report still queried the retired
+`NoSubmitDecisionCertificate` / `no_submit:` pair.  Those derived readers now
+join the current certificate type and key, so a verified decision is visible
+to readiness/reporting instead of being falsely reported absent.
+
+SCOPE is one Day0 source report/correction, one terminal-recovery batch, and
+one receipt-to-pre-submit-certificate derived join.  DRAIN is the next normal
+observation-print scan, recovery sweep, or report/projection read.  RESET is a
+fresh ledger possession clock, the next independently counted direct UPDATE,
+or a verified current `pre_submit:` certificate; there is no latch and
+unrelated families/events continue.  Acceptance requires
+the same-clock correction to retain the original source time and current fetch
+time, emit exactly once, EventStore to return one archive for one processing
+row despite projection triggers, append-only orphan guards to remain active,
+all initially visible and semantic-classifier-selected required-job cases plus
+the full Reactor relationship suite to pass, and the exact PR head's required
+jobs to become green.
+
+Allowed files are
+`src/data/replacement_forecast_current_target_plan.py`,
+`src/events/event_store.py`,
+`src/events/no_submit_projection.py`,
+`src/analysis/event_opportunity_report.py`,
+`tests/events/test_day0_extreme_updated_trigger.py`,
+`tests/test_replacement_forecast_current_target_plan.py`,
+`tests/events/test_event_store_idempotency.py`, `tests/events/test_reactor.py`,
+`tests/events/test_live_order_aggregate.py`,
+`tests/test_market_scanner_provenance.py`,
+`tests/money_path/test_edli_bankroll_warm_cycle.py`,
+`tests/money_path/test_edli_durable_fill_bridge_scan.py`,
+`tests/money_path/test_edli_market_substrate_warm_cycle.py`,
+`architecture/test_topology.yaml`, this plan, and its `scope.yaml` companion.
+
+## 2026-08-09 Current-value serving authority matches executable law
+
+The active replacement authority still describes `previous_runs` as a
+GEM-only, exact-cycle exception.  The executable single-builder has since
+generalized that rule: carrier-bound reads prefer the selected-cycle
+`single_runs` row, then the selected-cycle `previous_runs` row, then the newest
+eligible prior-cycle row; source-clock live reads instead use each provider's
+newest same-product row possessed by decision time while ENS retains only the
+shape carrier clock.  Future rows, over-age captures, and the product-mismatched
+ECMWF `ifs025` history remain inadmissible, and every substitution is branded by
+`served_via` and `served_cycle`.
+
+This slice changes no selector behavior.  It aligns the active authority doc
+and the serving module's stale exact-cycle commentary with the already-tested
+single-builder, and registers that existing high-risk choke point in the source
+rationale/module manifest.  Acceptance is the existing generalized
+substitution, future-row, product-mismatch, provenance, and source-clock test
+suite passing without a runtime diff.
+
+## 2026-08-09 Current-cut global capital auction and strategy ownership
+
+The global selector previously collapsed venue affordability and Zeus utility
+ownership into one pUSD balance. That let co-tenant wallet cash change Zeus
+Kelly sizing and BUY/SELL ordering even when the operator's Zeus allocation was
+unchanged. It also left the new zero-wealth SELL case outside ordinary log
+utility and treated a fixed maker-fill prior as if it were current executable
+truth.
+
+One frozen allocation witness now names the distinct quantities used by every
+decision cut:
+
+- `C`: current venue-spendable cash;
+- `E`: Zeus-owned utility equity from `zeus_capital_allocation`;
+- `L`: effective BUY commitment ceiling, defaulting and capped to `E`;
+- `K`: active-position cost basis plus unresolved entry commitments;
+- `U=max(E-K,0)`: Zeus-owned liquid utility cash.
+
+Executable BUY capacity is `min(C,max(L-K,0))`. BUY and reduce-only SELL use the
+same portfolio endowment `U + H[a]`, with `H[a]` the exact current/pending
+same-family payoff in settlement atom `a`; venue cash is an affordability fact,
+never hidden utility wealth. `wallet_total` preserves historical parity when
+the complete owned basis is `C+K`. Allocation policy, all five values, remaining
+capacity, and their versioned identity are bound into the immutable wealth
+witness, its economic identity, the selection receipt, JIT certificate, and
+executor rebuild.
+
+CASH/HOLD remain the zero-action baseline. Every independently admitted BUY or
+SELL fixed proposal competes on one posterior-predictive-mean expected-log
+capital-growth basis after its own fees, depth, tick, price-band, Kelly, and
+direction law. Capital lock time determines the finite growth rate. A
+reduce-only SELL that improves an exact positive-probability zero-wealth atom
+uses the epsilon-free extended-log limit: raw ruin-probability reduction is the
+first lexicographic key, without rounding, tolerance collapse, or division by
+time; finite expected log growth per hour is considered only when ruin reduction
+is exactly equal. Negative or non-finite terminal wealth remains invalid, BUY
+may not introduce a zero atom, and positive EV remains an explicit independent
+policy gate.
+
+The same-family Kelly solve owns only the endowment-aware cumulative target
+vector. It does not preselect a "primary" token: every venue-legal positive
+target is rematerialized as its own fixed BUY proposal, kept in the receipt,
+and compared with every other BUY, SELL, HOLD, and CASH proposal by the same
+raw global comparator. No rounded efficiency shortcut may delete a sibling
+before that comparison.
+
+A scalar maker-fill prior is not current decision-time truth and partial fills
+change both terminal atoms and capital-release time. `CurrentMakerFillWitness`
+therefore binds one candidate, current book epoch, token/side, limit, rest
+deadline, training cutoff, issue/decision/expiry clocks, and a complete
+zero/partial/full fill-fraction distribution. Only a witness whose causal clock
+orders `training_cutoff <= issued <= decision <= expiry` and whose identity is
+present in the current book epoch may make its `MAKER_REST` BUY/SELL proposal
+rankable; a missing or mismatched witness excludes only that maker proposal with
+`CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE`, while its taker sibling remains
+eligible. The present live observation plane does not record enough causal
+queue/deadline/partial-fill facts to produce that distribution, so no production
+maker witness is fabricated: live remains taker-only until a reviewed current
+producer exists. A historical fill scalar is offline evidence, never a silent
+live fallback. This is an executable-set decision, not a preference for taker
+orders.
+
+At submit, the selected mode is preserved and probability, executable book,
+Gamma market state, CLOB market-info, fees, tradeability, `negRisk`, tick/min,
+wealth/allocation, position, terminal ruin reduction, utility basis, proposal
+growth, and capital horizon are canonically sealed and revalidated from one
+current Gamma+CLOB+raw-book snapshot. A metadata or selected SELL drift causes a
+complete global re-auction; a pure BUY depth overlay is allowed only when that
+same metadata authority is unchanged. The persisted executable snapshot commits
+all three raw payload hashes rather than retaining selection-time market
+metadata.
+The current receipt shape is schema 21 / canonical candidate encoding v13. A
+winning receipt now persists the winner event/candidate/actuation and a
+recomputable compact-row execution binding plus a hash of the exact persisted
+summary, then freezes the exact `decision_log` row ID, mode, logical receipt
+hash, execution-binding hash, persisted-summary hash, and selection epoch into
+the selected actuation and `ActionableTradeCertificate`. If claim-carrier
+rebinding changes the winner event or actuation identity, the runtime appends
+and commits a newly sealed receipt row that references the unchanged base cut;
+it never mutates or reuses the old binding. Entry command persistence re-reads
+that exact row before writing the command or position attribution. A selected
+SELL carries a typed receipt closure through `ExitIntent` and `ExitOrderIntent`;
+inside the command SAVEPOINT, persistence re-reads the exact receipt and checks
+its position, condition, token, action, execution mode, winner, and submission
+envelope before any command, event, provenance, or envelope row can exist. The
+canonical closure is then copied into the append-only `INTENT_CREATED` command
+event and provenance payload. Settlement skill attribution follows the existing
+exact `position_id -> certificate_hash` relation, revalidates the same entry
+receipt row, then consumes the frozen `q_live`, `q_lcb_5pct`, and
+`posterior_id`; missing, deleted, mutated, or mismatched global receipts produce
+`UNATTRIBUTABLE_Q_MISSING` with no inferred fallback. An orthogonal settlement
+audit follows `position_id -> EXIT/SELL command -> INTENT_CREATED closure` and
+then the exact `decision_log` row, reporting each global SELL receipt as valid
+or invalid without
+rewriting the entry-q grade. No bridge table or settlement schema migration is
+introduced.
+
+SCOPE is one candidate or one complete q/book/wealth auction cut: malformed or
+stale allocation blocks new BUY authority; unavailable maker-fill evidence
+blocks only maker-dependent proposals; a drifted selected identity blocks only
+that actuation. Taker siblings, CASH/HOLD, held monitoring, and unrelated
+families continue. DRAIN is the next normal complete auction and submit-time
+rebuild from current config, canonical commitments, probability and book.
+RESET is a fresh coherent witness or, for maker, a reviewed typed current
+partial-fill authority. Probability formulas, settlement, absolute order-price
+bands, RiskAllocator exposure caps, and lifecycle law are unchanged.
+
+Acceptance requires E/L/K/U math and co-tenant isolation, allocation-zero
+SELL/HOLD/CASH preservation, exact sub-femtoscale ruin ordering, negative-wealth
+rejection, malformed-config rejection, maker rejection with taker-sibling
+survival, retention of every family-joint target through the raw global
+comparator, allocation and comparison-field identity drift rejection at JIT
+and submit, schema-21/v13 health validation, exact receipt-to-actuation/certificate/
+command/settlement closure with mutation/deletion/mismatch antibodies, and
+focused global-auction/runtime regressions.
+
+The 2026-08-10 CI closeout harmonizes the already-executable global SELL
+receipt-audit reasons, `JIT_SUBMIT` snapshot-capture provenance, and JIT/sealed
+book final-submit rejection reasons with
+`architecture/money_path_objects.yaml`. They remain audit, provenance, and
+rejection vocabulary rather than lifecycle, command, order, or fill states.
+`MP-CI-001` is the governing invariant: a synthetic classifier antibody covers
+all nine registered values while unknown money-path objects remain fail-closed.
+The standard-market family-joint Kelly fixture also declares its required
+`neg_risk=False` authority instead of relying on an obsolete constructor shape.
+Allowed CI-closeout files are `architecture/money_path_objects.yaml`,
+`tests/test_money_path_semantic_ci.py`,
+`tests/engine/test_multiwinner_wealth_composition.py`, this plan, and its
+`scope.yaml` companion.
 ## 2026-08-10 Day0 HIGH peak state belongs inside the probability simplex
 
 A causal replay of San Francisco Aug-9 HIGH found that the latest same-station
@@ -45,7 +361,6 @@ LOW to remain unchanged pending its own trough-state law, the probability basis
 to invalidate prior witness semantics, and focused Day0/global-solve tests to
 pass. Live effectiveness still requires loaded-SHA, heartbeat, canonical
 monitor receipt, fresh q/book, and SELL intent-command-fill evidence.
-
 ## 2026-08-08 Day0 probability authority survives certificate compilation
 
 The live global auction produced a current Shanghai Day0 remaining-day witness,

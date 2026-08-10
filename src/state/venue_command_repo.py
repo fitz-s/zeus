@@ -41,6 +41,11 @@ from typing import Any, Iterable, Iterator, Mapping, Optional
 
 from src.architecture.decorators import capability, protects
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
+from src.contracts.global_auction_receipt import (
+    GlobalAuctionReceiptRef,
+    GlobalSellReceiptClosure,
+    assert_global_auction_receipt_artifact,
+)
 from src.venue.response_contracts import is_pre_sdk_no_side_effect_rejection
 
 UNRESOLVED_SIDE_EFFECT_STATES: tuple[str, ...] = (
@@ -1176,8 +1181,8 @@ def record_position_decision_attribution(
     on a retried command without collapsing distinct commands for one position.
     ``ensure_table`` is called here
     (not only at DB init) so this self-heals on any trade-shaped connection that
-    predates the LX-E migration (e.g. test fixtures built via ``init_schema()``
-    rather than ``init_schema_trade_only``).
+    predates the LX-E migration (e.g. test fixtures built via a legacy schema
+    initializer rather than the trade-only schema initializer).
     """
     from src.state.schema.position_decision_attribution_schema import ensure_table
 
@@ -1249,6 +1254,7 @@ def insert_command(
     venue_order_id: str | None = None,
     reason: str | None = None,
     decision_certificate_hash: str | None = None,
+    global_sell_receipt_closure: GlobalSellReceiptClosure | None = None,
 ) -> None:
     """INSERT a new venue_commands row in INTENT_CREATED state.
 
@@ -1264,8 +1270,8 @@ def insert_command(
     q_version (SCH-W1.2-ORDER-STATE): the forecast_posteriors.posterior_identity_hash
     of the q this command's decision was made against, write-once at creation.
     Required for live-mode ENTRY commands at this repo boundary; nullable only for
-    non-entry commands, offline fixtures/replay, and direct recovery/backfill
-    writes that intentionally bypass this function. Never re-stamped after insert.
+    non-entry commands, offline fixtures/replay, and the repository-owned typed
+    reconciliation creation helpers. Never re-stamped after insert.
 
     decision_certificate_hash anchors the command to its exact decision proof. ENTRY
     supplies it directly. Later live commands inherit the unique ATTRIBUTED entry
@@ -1284,6 +1290,14 @@ def insert_command(
         raise ValueError(
             f"side={side!r} must be 'BUY' or 'SELL'"
         )
+    if global_sell_receipt_closure is not None and not (
+        intent_kind == _IntentKind.EXIT.value and side == "SELL"
+    ):
+        raise ValueError(
+            "GLOBAL_SELL_RECEIPT_CLOSURE_FORBIDDEN: closure requires EXIT SELL"
+        )
+    if global_sell_receipt_closure is not None and type(global_sell_receipt_closure) is not GlobalSellReceiptClosure:
+        raise ValueError("GLOBAL_SELL_RECEIPT_CLOSURE_TYPE_INVALID")
     if intent_kind == _IntentKind.CANCEL.value:
         pass
     elif intent_kind in {
@@ -1330,11 +1344,15 @@ def insert_command(
             size=size,
         )
     )
-    if intent_kind == _IntentKind.ENTRY.value and submission_envelope is None:
+    if (
+        intent_kind == _IntentKind.ENTRY.value
+        and submission_envelope is None
+        and _strict_live_entry_q_version_required()
+    ):
         raise ValueError(
             "ENTRY venue command requires an unpersisted submission envelope"
         )
-    if intent_kind != _IntentKind.ENTRY.value and submission_envelope is not None:
+    if intent_kind != _IntentKind.ENTRY.value and submission_envelope is not None and global_sell_receipt_closure is None:
         raise ValueError(
             "unpersisted submission envelope is reserved for atomic ENTRY admission"
         )
@@ -1351,6 +1369,16 @@ def insert_command(
                 side=side,
                 price=price,
                 size=size,
+            )
+        if global_sell_receipt_closure is not None:
+            _assert_global_sell_receipt_closure(
+                conn,
+                closure=global_sell_receipt_closure,
+                position_id=position_id,
+                token_id=token_id,
+                side=side,
+                envelope=submission_envelope,
+                envelope_id=envelope_id_value,
             )
         resolved_certificate_hash = (
             str(decision_certificate_hash or "").strip() or None
@@ -1389,12 +1417,37 @@ def insert_command(
                 conn,
                 decision_certificate_hash=resolved_certificate_hash,
                 envelope=submission_envelope,
+                envelope_id=envelope_id_value,
             )
         if submission_envelope is not None:
             insert_submission_envelope(
                 conn,
                 submission_envelope,
                 envelope_id=envelope_id_value,
+            )
+        event_payload = (
+            {"global_sell_receipt_closure": global_sell_receipt_closure.as_payload()}
+            if global_sell_receipt_closure is not None
+            else None
+        )
+        provenance_payload = (
+            {
+                "state_after": "INTENT_CREATED",
+                "snapshot_id": snapshot_id_value,
+                "envelope_id": envelope_id_value,
+                "intent_kind": intent_kind,
+                "market_id": market_id,
+                "token_id": token_id,
+                "side": side,
+                "size": size,
+                "price": price,
+                "venue_order_id": venue_order_id,
+                "reason": reason,
+            }
+        )
+        if event_payload is not None:
+            provenance_payload["global_sell_receipt_closure"] = (
+                global_sell_receipt_closure.as_payload()
             )
         conn.execute(
             """
@@ -1435,13 +1488,18 @@ def insert_command(
                 occurred_at, payload_json, state_after
             ) VALUES (
                 :event_id, :command_id, 1, 'INTENT_CREATED',
-                :occurred_at, NULL, 'INTENT_CREATED'
+                :occurred_at, :payload_json, 'INTENT_CREATED'
             )
             """,
             {
                 "event_id": event_id,
                 "command_id": command_id,
                 "occurred_at": created_at,
+                "payload_json": (
+                    json.dumps(event_payload, sort_keys=True, separators=(",", ":"))
+                    if event_payload is not None
+                    else None
+                ),
             },
         )
         conn.execute(
@@ -1453,19 +1511,7 @@ def insert_command(
             command_id=command_id,
             event_type="INTENT_CREATED",
             occurred_at=created_at,
-            payload={
-                "state_after": "INTENT_CREATED",
-                "snapshot_id": snapshot_id_value,
-                "envelope_id": envelope_id_value,
-                "intent_kind": intent_kind,
-                "market_id": market_id,
-                "token_id": token_id,
-                "side": side,
-                "size": size,
-                "price": price,
-                "venue_order_id": venue_order_id,
-                "reason": reason,
-            },
+            payload=provenance_payload,
         )
         if resolved_certificate_hash:
             record_position_decision_attribution(
@@ -1485,6 +1531,477 @@ def insert_command(
                 created_at=created_at,
                 reason="legacy_position_certificate_missing_or_ambiguous",
             )
+
+
+def _typed_payload(value: Any) -> dict[str, Any]:
+    """Return a stable, JSON-safe provenance mapping for typed repair inputs."""
+    if value is None:
+        return {}
+    if isinstance(value, Mapping):
+        return dict(value)
+    try:
+        return dict(vars(value))
+    except TypeError:
+        raise TypeError("typed repair provenance must be a mapping")
+
+
+def _positive_repair_decimal(name: str, value: Any) -> Decimal:
+    parsed = _decimal_or_none(value)
+    if parsed is None or parsed <= Decimal("0"):
+        raise ValueError(f"{name} must be positive")
+    return parsed
+
+
+def _creation_command_event(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    event_type: str,
+    state: str,
+    created_at: str,
+    payload: Mapping[str, Any],
+) -> str:
+    """Create the sole initial event for a typed reconciliation command.
+
+    This deliberately does not call :func:`append_event`: creation-only facts
+    are not grammar transitions and must never acquire fabricated SUBMIT_* or
+    ACKED history.
+    """
+    event_id = _new_id()
+    conn.execute(
+        """
+        INSERT INTO venue_command_events (
+            event_id, command_id, sequence_no, event_type,
+            occurred_at, payload_json, state_after
+        ) VALUES (?, ?, 1, ?, ?, ?, ?)
+        """,
+        (
+            event_id,
+            command_id,
+            event_type,
+            created_at,
+            json.dumps(dict(payload), sort_keys=True, default=_payload_default),
+            state,
+        ),
+    )
+    conn.execute(
+        "UPDATE venue_commands SET last_event_id = ?, updated_at = ? WHERE command_id = ?",
+        (event_id, created_at, command_id),
+    )
+    _append_command_provenance_event(
+        conn,
+        command_id=command_id,
+        event_type=event_type,
+        occurred_at=created_at,
+        payload={"state_after": state, "payload": dict(payload)},
+    )
+    return event_id
+
+
+def adopt_recovered_exit_order(
+    conn: sqlite3.Connection,
+    adoption=None,
+    **kwargs,
+) -> dict[str, Any]:
+    """Atomically adopt one already-existing positive-match EXIT/SELL order.
+
+    The helper is journal-only: it performs no admission, reservation, venue
+    submission, or network operation.  Repeated exact evidence is idempotent;
+    a command/order collision with different economics fails closed.
+    """
+    from src.execution.command_bus import RecoveredExitOrderAdoption
+
+    if adoption is None:
+        adoption = RecoveredExitOrderAdoption(**kwargs)
+    if not isinstance(adoption, RecoveredExitOrderAdoption):
+        raise TypeError("adoption must be RecoveredExitOrderAdoption")
+    command_id = _require_nonempty("command_id", adoption.command_id)
+    order_id = _require_nonempty("venue_order_id", adoption.venue_order_id)
+    position_id = _require_nonempty("position_id", adoption.position_id)
+    token_id = _require_nonempty("token_id", adoption.token_id)
+    size = _positive_repair_decimal("size", adoption.size)
+    matched = _positive_repair_decimal("matched_size", adoption.matched_size)
+    remaining = _decimal_or_none(adoption.remaining_size)
+    if remaining is None or remaining <= 0 or matched + remaining != size:
+        raise ValueError("recovered EXIT order sizes are inconsistent")
+    price = _positive_repair_decimal("resting_order_price", adoption.resting_order_price)
+    occurred_at = _validate_observed_at(adoption.observed_at)
+    source_snapshot_id = _require_nonempty(
+        "source_entry_snapshot_id", adoption.source_entry_snapshot_id
+    )
+    source_envelope_id = _require_nonempty(
+        "source_entry_envelope_id", adoption.source_entry_envelope_id
+    )
+    source_entry_command_id = _require_nonempty(
+        "source_entry_command_id", adoption.source_entry_command_id
+    )
+    provenance = _typed_payload(adoption.provenance)
+    provenance.update(
+        {
+            "source": "recovered_exit_order_adoption",
+            "source_entry_command_id": source_entry_command_id,
+            "source_entry_snapshot_id": adoption.source_entry_snapshot_id,
+            "source_entry_envelope_id": adoption.source_entry_envelope_id,
+            "venue_order_id": order_id,
+            "matched_size": str(matched),
+            "remaining_size": str(remaining),
+            "resting_order_price": str(price),
+        }
+    )
+    state = "PARTIAL"
+    fact_state = "PARTIALLY_MATCHED" if remaining > 0 else "MATCHED"
+    with _savepoint_atomic(conn):
+        existing = conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ? OR venue_order_id = ? LIMIT 1",
+            (command_id, order_id),
+        ).fetchone()
+        if existing is not None:
+            row = dict(existing)
+            if not (
+                str(row.get("command_id") or "") == command_id
+                and str(row.get("venue_order_id") or "") == order_id
+                and str(row.get("position_id") or "") == position_id
+                and str(row.get("token_id") or "") == token_id
+                and str(row.get("market_id") or "") == str(adoption.market_id)
+                and str(row.get("snapshot_id") or "") == source_snapshot_id
+                and str(row.get("envelope_id") or "") == source_envelope_id
+                and str(row.get("intent_kind") or "").upper() == "EXIT"
+                and str(row.get("side") or "").upper() == "SELL"
+                and str(row.get("state") or "") == "PARTIAL"
+                and _decimal_text_equal(row.get("size"), size)
+                and _decimal_text_equal(row.get("price"), price)
+            ):
+                raise ValueError("recovered EXIT adoption identity mismatch")
+            event = conn.execute(
+                "SELECT state_after, payload_json FROM venue_command_events WHERE command_id = ? AND sequence_no = 1 AND event_type = 'VENUE_ORDER_ADOPTED'",
+                (command_id,),
+            ).fetchone()
+            fact = conn.execute(
+                "SELECT state, matched_size, remaining_size FROM venue_order_facts WHERE command_id = ? AND venue_order_id = ? ORDER BY local_sequence DESC LIMIT 1",
+                (command_id, order_id),
+            ).fetchone()
+            provenance_row = conn.execute(
+                "SELECT 1 FROM provenance_envelope_events WHERE subject_type = 'command' AND subject_id = ? AND event_type = 'VENUE_ORDER_ADOPTED' LIMIT 1",
+                (command_id,),
+            ).fetchone()
+            event_payload = _review_clearance_json_dict(event["payload_json"]) if event is not None else {}
+            if event is None or fact is None or provenance_row is None or str(event["state_after"] or "") != "PARTIAL" or str(event_payload.get("source_entry_command_id") or "") != source_entry_command_id or str(event_payload.get("position_id") or "") != position_id or not _decimal_text_equal(event_payload.get("matched_size"), matched) or not _decimal_text_equal(event_payload.get("remaining_size"), remaining) or str(fact["state"] or "") != fact_state or not _decimal_text_equal(fact["matched_size"], matched) or not _decimal_text_equal(fact["remaining_size"], remaining):
+                raise ValueError("recovered EXIT adoption is half-existing")
+            return row
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, snapshot_id, envelope_id, position_id, decision_id,
+                idempotency_key, intent_kind, market_id, token_id, side, size, price,
+                venue_order_id, state, last_event_id, created_at, updated_at,
+                review_required_reason, q_version
+            ) VALUES (?, ?, ?, ?, ?, ?, 'EXIT', ?, ?, 'SELL', ?, ?, ?, 'PARTIAL', NULL, ?, ?, ?, NULL)
+            """,
+            (
+                command_id,
+                source_snapshot_id,
+                source_envelope_id,
+                position_id,
+                adoption.decision_id,
+                command_id,
+                adoption.market_id,
+                token_id,
+                float(size),
+                float(price),
+                order_id,
+                occurred_at,
+                occurred_at,
+                "recovered_exit_order_adoption",
+            ),
+        )
+        _creation_command_event(
+            conn,
+            command_id=command_id,
+            event_type="VENUE_ORDER_ADOPTED",
+            state=state,
+            created_at=occurred_at,
+            payload=provenance,
+        )
+        append_order_fact(
+            conn,
+            venue_order_id=order_id,
+            command_id=command_id,
+            state=fact_state,
+            remaining_size=str(remaining),
+            matched_size=str(matched),
+            source="REST",
+            observed_at=occurred_at,
+            venue_timestamp=occurred_at,
+            raw_payload_hash=_payload_hash(provenance),
+            raw_payload_json=provenance,
+        )
+    row = conn.execute(
+        "SELECT * FROM venue_commands WHERE command_id = ?", (command_id,)
+    ).fetchone()
+    return dict(row) if row is not None else {"command_id": command_id}
+
+
+def absorb_external_operator_close(
+    conn: sqlite3.Connection,
+    absorption=None,
+    **kwargs,
+) -> dict[str, Any]:
+    """Atomically journal an operator-confirmed external EXIT/SELL close."""
+    from src.execution.command_bus import ExternalOperatorCloseAbsorption
+
+    if absorption is None:
+        absorption = ExternalOperatorCloseAbsorption(**kwargs)
+    if not isinstance(absorption, ExternalOperatorCloseAbsorption):
+        raise TypeError("absorption must be ExternalOperatorCloseAbsorption")
+    token_id = _require_nonempty("token_id", absorption.token_id)
+    position_id = _require_nonempty("position_id", absorption.position_id)
+    close_size = _positive_repair_decimal("close_size", absorption.close_size)
+    close_price = _positive_repair_decimal("close_price", absorption.close_price)
+    occurred_at = _validate_observed_at(absorption.observed_at)
+    source_snapshot_id = _require_nonempty(
+        "source_entry_snapshot_id", absorption.source_entry_snapshot_id
+    )
+    source_envelope_id = _require_nonempty(
+        "source_entry_envelope_id", absorption.source_entry_envelope_id
+    )
+    source_entry_command_id = _require_nonempty(
+        "source_entry_command_id", absorption.source_entry_command_id
+    )
+    identity_material = "|".join(
+        (
+            token_id,
+            position_id,
+            source_entry_command_id,
+        )
+    )
+    digest = hashlib.sha256(identity_material.encode()).hexdigest()[:24]
+    command_id = f"external_operator_close:{digest}"
+    trade_id = f"external_operator_close_fact:{digest}"
+    provenance = _typed_payload(absorption.provenance)
+    provenance.update(
+        {
+            "source": "external_operator_close_absorption",
+            "token_id": token_id,
+            "position_id": position_id,
+            "close_size": str(close_size),
+            "close_price": str(close_price),
+            "source_entry_command_id": source_entry_command_id,
+            "source_entry_snapshot_id": absorption.source_entry_snapshot_id,
+            "source_entry_envelope_id": absorption.source_entry_envelope_id,
+        }
+    )
+    with _savepoint_atomic(conn):
+        command = conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ?", (command_id,)
+        ).fetchone()
+        trade = conn.execute(
+            "SELECT * FROM venue_trade_facts WHERE trade_id = ?", (trade_id,)
+        ).fetchone()
+        if command is not None or trade is not None:
+            if command is None or trade is None:
+                raise ValueError("external operator close is half-existing")
+            row = dict(command)
+            if not (
+                str(row.get("intent_kind") or "").upper() == "EXIT"
+                and str(row.get("side") or "").upper() == "SELL"
+                and str(row.get("state") or "") == "FILLED"
+                and str(row.get("token_id") or "") == token_id
+                and str(row.get("position_id") or "") == position_id
+                and str(row.get("market_id") or "") == str(absorption.market_id)
+                and str(row.get("snapshot_id") or "") == source_snapshot_id
+                and str(row.get("envelope_id") or "") == source_envelope_id
+                and str(row.get("venue_order_id") or "") == str(absorption.venue_order_id or command_id)
+                and _decimal_text_equal(row.get("size"), close_size)
+                and _decimal_text_equal(row.get("price"), close_price)
+            ):
+                raise ValueError("external operator close identity mismatch")
+            event = conn.execute(
+                "SELECT state_after, payload_json FROM venue_command_events WHERE command_id = ? AND sequence_no = 1 AND event_type = 'EXTERNAL_OPERATOR_CLOSE_ABSORBED'",
+                (command_id,),
+            ).fetchone()
+            provenance_row = conn.execute(
+                "SELECT 1 FROM provenance_envelope_events WHERE subject_type = 'command' AND subject_id = ? AND event_type = 'EXTERNAL_OPERATOR_CLOSE_ABSORBED' LIMIT 1",
+                (command_id,),
+            ).fetchone()
+            if (
+                str(trade["command_id"] or "") != command_id
+                or str(trade["state"] or "") != "CONFIRMED"
+                or str(trade["venue_order_id"] or "") != str(absorption.venue_order_id or command_id)
+                or not _decimal_text_equal(trade["filled_size"], close_size)
+                or not _decimal_text_equal(trade["fill_price"], close_price)
+                or event is None
+                or provenance_row is None
+            ):
+                raise ValueError("external operator close trade mismatch")
+            event_payload = _review_clearance_json_dict(event["payload_json"]) if event is not None else {}
+            if (
+                event is None
+                or str(event["state_after"] or "") != "FILLED"
+                or str(event_payload.get("source_entry_command_id") or "") != source_entry_command_id
+                or str(event_payload.get("token_id") or "") != token_id
+                or str(event_payload.get("position_id") or "") != position_id
+                or not _decimal_text_equal(event_payload.get("close_size"), close_size)
+                or not _decimal_text_equal(event_payload.get("close_price"), close_price)
+            ):
+                raise ValueError("external operator close event provenance mismatch")
+            trade_payload = _review_clearance_json_dict(trade["raw_payload_json"])
+            if (
+                str(trade_payload.get("token_id") or "") != token_id
+                or str(trade_payload.get("source") or "") != "external_operator_close_absorption"
+            ):
+                raise ValueError("external operator close provenance mismatch")
+            return row
+        conn.execute(
+            """
+            INSERT INTO venue_commands (
+                command_id, snapshot_id, envelope_id, position_id, decision_id,
+                idempotency_key, intent_kind, market_id, token_id, side, size, price,
+                venue_order_id, state, last_event_id, created_at, updated_at,
+                review_required_reason, q_version
+            ) VALUES (?, ?, ?, ?, ?, ?, 'EXIT', ?, ?, 'SELL', ?, ?, ?, 'FILLED', NULL, ?, ?, ?, NULL)
+            """,
+            (
+                command_id,
+                source_snapshot_id,
+                source_envelope_id,
+                position_id,
+                f"external_operator_close:{digest}",
+                command_id,
+                absorption.market_id,
+                token_id,
+                float(close_size),
+                float(close_price),
+                absorption.venue_order_id or command_id,
+                occurred_at,
+                occurred_at,
+                "operator_external_close_absorption",
+            ),
+        )
+        _creation_command_event(
+            conn,
+            command_id=command_id,
+            event_type="EXTERNAL_OPERATOR_CLOSE_ABSORBED",
+            state="FILLED",
+            created_at=occurred_at,
+            payload=provenance,
+        )
+        append_trade_fact(
+            conn,
+            trade_id=trade_id,
+            venue_order_id=absorption.venue_order_id or command_id,
+            command_id=command_id,
+            state="CONFIRMED",
+            filled_size=str(close_size),
+            fill_price=str(close_price),
+            source="OPERATOR",
+            observed_at=occurred_at,
+            venue_timestamp=occurred_at,
+            raw_payload_hash=_payload_hash(provenance),
+            raw_payload_json=provenance,
+        )
+    row = conn.execute(
+        "SELECT * FROM venue_commands WHERE command_id = ?", (command_id,)
+    ).fetchone()
+    return dict(row) if row is not None else {"command_id": command_id}
+
+
+def rehome_mixed_token_entry_command(
+    conn: sqlite3.Connection,
+    rehome=None,
+    **kwargs,
+) -> bool:
+    """CAS one mixed-token ENTRY command and its one execution fact together."""
+    from src.execution.command_bus import MixedTokenCommandRehome
+
+    if rehome is None:
+        rehome = MixedTokenCommandRehome(**kwargs)
+    if not isinstance(rehome, MixedTokenCommandRehome):
+        raise TypeError("rehome must be MixedTokenCommandRehome")
+    if rehome.repair_kind != "mixed_token_entry_position_split_v1":
+        raise ValueError("unsupported mixed-token repair kind")
+    command_id = _require_nonempty("command_id", rehome.command_id)
+    source = _require_nonempty("source_position_id", rehome.source_position_id)
+    target = _require_nonempty("target_position_id", rehome.target_position_id)
+    occurred_at = _validate_observed_at(rehome.occurred_at)
+    if source == target:
+        raise ValueError("mixed-token rehome source and target must differ")
+    with _savepoint_atomic(conn):
+        required_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(venue_commands)")
+        }
+        if not {"position_id", "intent_kind", "side"}.issubset(required_columns):
+            raise ValueError("mixed-token rehome requires canonical venue command columns")
+        fact_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(execution_fact)")
+        }
+        if not {"intent_id", "position_id", "command_id", "order_role"}.issubset(fact_columns):
+            raise ValueError("mixed-token rehome requires canonical execution fact columns")
+        command = conn.execute(
+            "SELECT position_id, intent_kind, side FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        facts = conn.execute(
+            "SELECT intent_id, position_id, order_role FROM execution_fact WHERE command_id = ?",
+            (command_id,),
+        ).fetchall()
+        if command is None:
+            raise ValueError("mixed-token rehome command is missing")
+        if str(command["intent_kind"] or "").upper() != "ENTRY" or str(command["side"] or "").upper() != "BUY":
+            raise ValueError("mixed-token rehome requires ENTRY BUY command")
+        if len(facts) != 1 or str(facts[0]["order_role"] or "") != "entry":
+            raise ValueError("mixed-token rehome requires exactly one entry execution fact")
+        current = str(command["position_id"] or "")
+        fact_position = str(facts[0]["position_id"] or "")
+        desired_intent = f"{target}:entry"
+        if current == target and fact_position == target and str(facts[0]["intent_id"] or "") == desired_intent:
+            if not _review_clearance_table_exists(conn, "provenance_envelope_events"):
+                raise ValueError("mixed-token rehome requires provenance envelope table")
+            provenance_row = conn.execute(
+                "SELECT 1 FROM provenance_envelope_events WHERE subject_type = 'command' AND subject_id = ? AND event_type = 'MIXED_TOKEN_ENTRY_COMMAND_REHOMED' LIMIT 1",
+                (command_id,),
+            ).fetchone()
+            if provenance_row is None:
+                raise ValueError("mixed-token rehome is half-existing")
+            return True
+        if current != source or fact_position != source:
+            raise ValueError("mixed-token rehome half-existing or source mismatch")
+        collision = conn.execute(
+            "SELECT command_id FROM execution_fact WHERE intent_id = ? AND command_id <> ?",
+            (desired_intent, command_id),
+        ).fetchone()
+        if collision is not None:
+            raise ValueError("mixed-token rehome target intent collision")
+        if "updated_at" in required_columns:
+            changed_command = conn.execute(
+                "UPDATE venue_commands SET position_id = ?, updated_at = ? WHERE command_id = ? AND position_id = ?",
+                (target, occurred_at, command_id, source),
+            ).rowcount
+        else:
+            changed_command = conn.execute(
+                "UPDATE venue_commands SET position_id = ? WHERE command_id = ? AND position_id = ?",
+                (target, command_id, source),
+            ).rowcount
+        changed_fact = conn.execute(
+            "UPDATE execution_fact SET position_id = ?, intent_id = ? WHERE command_id = ? AND position_id = ? AND intent_id = ?",
+            (target, desired_intent, command_id, source, str(facts[0]["intent_id"] or "")),
+        ).rowcount
+        if changed_command != 1 or changed_fact != 1:
+            raise RuntimeError("mixed-token rehome CAS failed")
+        if not _review_clearance_table_exists(conn, "provenance_envelope_events"):
+            raise ValueError("mixed-token rehome requires provenance envelope table")
+        _append_command_provenance_event(
+            conn,
+            command_id=command_id,
+            event_type="MIXED_TOKEN_ENTRY_COMMAND_REHOMED",
+            occurred_at=occurred_at,
+            payload={
+                "repair_kind": rehome.repair_kind,
+                "source_position_id": source,
+                "target_position_id": target,
+                **_typed_payload(rehome.provenance),
+            },
+        )
+    return True
 
 
 def _assert_envelope_gate(
@@ -1528,17 +2045,20 @@ def _assert_envelope_gate(
         raise ValueError("venue command size does not match provenance envelope size")
     order_type = str(row["order_type"] or "").strip().upper()
     maker = bool(row["post_only"]) and order_type in {"GTC", "GTD"}
-    marketable_sell = (
-        str(row["side"]) == "SELL"
-        and not bool(row["post_only"])
-        and order_type == "FAK"
+    envelope_side = str(row["side"] or "").strip().upper()
+    marketable_taker = (
+        not bool(row["post_only"])
+        and (
+            (envelope_side == "BUY" and order_type in {"FOK", "FAK"})
+            or (envelope_side == "SELL" and order_type == "FAK")
+        )
     )
-    if not (maker or marketable_sell):
+    if not (maker or marketable_taker):
         # INV-47 SCOPE: only this token/side command is rejected.
         # DRAIN: the next decision may persist a certified execution envelope.
-        # RESET: no latch is stored; a legal maker or SELL FAK passes.
+        # RESET: no latch is stored; a legal maker or role-scoped taker passes.
         raise ValueError(
-            "live execution mode is invalid for persisted order: "
+            "persisted taker-capable order is not a legal live execution mode: "
             f"order_type={order_type or 'ABSENT'}:post_only={bool(row['post_only'])}"
         )
     if isinstance(snapshot_id, str) and snapshot_id.strip():
@@ -1574,7 +2094,14 @@ def _assert_in_memory_envelope_gate(
 
     if not isinstance(envelope, VenueSubmissionEnvelope):
         raise TypeError("submission_envelope must be a VenueSubmissionEnvelope")
-    envelope.assert_live_fill_price_bound()
+    try:
+        envelope.assert_live_fill_price_bound()
+    except ValueError as exc:
+        # Preserve the long-standing repo seam wording for callers/tests while
+        # retaining the envelope's detailed mode diagnostic.
+        if "execution mode is not authorized" in str(exc):
+            raise ValueError(f"live fill price is unbounded: {exc}") from None
+        raise
     if envelope.selected_outcome_token_id != str(token_id):
         raise ValueError(
             "venue command token_id does not match in-memory envelope selected token"
@@ -1608,14 +2135,16 @@ def _assert_entry_certificate_closure(
     *,
     decision_certificate_hash: str,
     envelope,
+    envelope_id: str | None = None,
 ) -> None:
     """Require an ENTRY's exact, live certificate in the attached WORLD ledger.
 
-    SCOPE: this command/envelope only.  DRAIN: none; a missing proof is not a
-    transient queue to bridge.  RESET: the caller retries only after the exact
-    certificate has been committed to WORLD and the sanctioned trade+world
-    connection attaches that authority.  This runs inside ``insert_command``'s
-    SAVEPOINT before any command, event, or attribution write.
+    SCOPE: this command/envelope only.  DRAIN: none; a missing certificate or
+    global-auction receipt is not a transient queue to bridge.  RESET: the
+    caller retries only after the exact certificate and referenced receipt have
+    committed through their sanctioned stores.  This runs inside
+    ``insert_command``'s SAVEPOINT before any command, event, or attribution
+    write.
     """
     schemas = {
         str(row[1]).strip()
@@ -1654,6 +2183,15 @@ def _assert_entry_certificate_closure(
     if not isinstance(payload, dict):
         raise ValueError("ENTRY certificate closure payload must be an object")
 
+    if envelope is None and envelope_id:
+        row = conn.execute(
+            "SELECT selected_outcome_token_id, condition_id, yes_token_id, no_token_id, side FROM venue_submission_envelopes WHERE envelope_id = ?",
+            (envelope_id,),
+        ).fetchone()
+        if row is not None:
+            envelope = type("PersistedEnvelopeIdentity", (), dict(row))()
+    if envelope is None:
+        raise ValueError("ENTRY certificate closure requires envelope identity")
     token_id = str(envelope.selected_outcome_token_id or "").strip()
     condition_id = str(envelope.condition_id or "").strip()
     yes_token_id = str(envelope.yes_token_id or "").strip()
@@ -1675,6 +2213,127 @@ def _assert_entry_certificate_closure(
         raise ValueError(
             "ENTRY certificate closure identity does not match command envelope"
         )
+
+    economics = payload.get("qkernel_execution_economics")
+    global_marker = (
+        str(economics.get("global_actuation_identity") or "").strip()
+        if isinstance(economics, dict)
+        else ""
+    )
+    receipt_payload = payload.get("global_auction_receipt")
+    if not global_marker:
+        if receipt_payload not in (None, ""):
+            raise ValueError(
+                "ENTRY certificate global receipt lacks global actuation"
+            )
+        return
+    try:
+        expected_receipt = GlobalAuctionReceiptRef.from_payload(receipt_payload)
+        nested_receipt = GlobalAuctionReceiptRef.from_payload(
+            economics.get("global_auction_receipt")
+        )
+        expected_receipt.assert_matches_actuation(
+            winner_event_id=economics.get("global_winner_event_id"),
+            winner_candidate_id=economics.get("global_candidate_id"),
+            winner_actuation_identity=global_marker,
+            selection_epoch_identity=economics.get(
+                "global_selection_epoch_identity"
+            ),
+        )
+    except ValueError as exc:
+        raise ValueError(f"ENTRY global auction receipt invalid: {exc}") from None
+    if nested_receipt != expected_receipt:
+        raise ValueError("ENTRY global auction receipt certificate mismatch")
+    with _row_factory_as(conn, sqlite3.Row):
+        receipt_row = conn.execute(
+            "SELECT mode, artifact_json FROM decision_log WHERE id = ?",
+            (expected_receipt.decision_log_id,),
+        ).fetchone()
+    if receipt_row is None:
+        raise ValueError("ENTRY global auction receipt row missing")
+    try:
+        assert_global_auction_receipt_artifact(
+            expected=expected_receipt,
+            decision_log_id=expected_receipt.decision_log_id,
+            decision_log_mode=str(receipt_row["mode"]),
+            artifact_json=receipt_row["artifact_json"],
+        )
+    except ValueError as exc:
+        raise ValueError(f"ENTRY global auction receipt closure failed: {exc}") from None
+
+
+def _assert_global_sell_receipt_closure(
+    conn: sqlite3.Connection,
+    *,
+    closure: GlobalSellReceiptClosure,
+    position_id: object,
+    token_id: object,
+    side: object,
+    envelope: object,
+    envelope_id: str | None,
+) -> None:
+    """Re-read and bind one global SELL receipt before any command writes.
+
+    INV-47 SCOPE: this exact EXIT/SELL command and referenced decision row.
+    DRAIN: no queue; the caller must produce a fresh committed receipt and
+    matching envelope.  RESET: a subsequent exact closure passes; no latch is
+    persisted.  This check intentionally runs inside the command SAVEPOINT.
+    """
+    if type(closure) is not GlobalSellReceiptClosure:
+        raise ValueError("GLOBAL_SELL_RECEIPT_CLOSURE_TYPE_INVALID")
+    if envelope is None:
+        if not isinstance(envelope_id, str) or not envelope_id.strip():
+            raise ValueError("GLOBAL_SELL_RECEIPT_ENVELOPE_MISSING")
+        try:
+            with _row_factory_as(conn, sqlite3.Row):
+                envelope = conn.execute(
+                    """
+                    SELECT condition_id, selected_outcome_token_id, side,
+                           order_type, post_only
+                      FROM venue_submission_envelopes
+                     WHERE envelope_id = ?
+                    """,
+                    (envelope_id.strip(),),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise ValueError(
+                "GLOBAL_SELL_RECEIPT_ENVELOPE_UNAVAILABLE"
+            ) from exc
+        if envelope is None:
+            raise ValueError("GLOBAL_SELL_RECEIPT_ENVELOPE_MISSING")
+    try:
+        closure.assert_matches_command(
+            position_id=position_id,
+            token_id=token_id,
+            side=side,
+            envelope=envelope,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if not message.startswith("GLOBAL_SELL_RECEIPT_"):
+            message = f"GLOBAL_SELL_RECEIPT_COMMAND_BINDING_INVALID: {message}"
+        raise ValueError(message) from None
+    try:
+        with _row_factory_as(conn, sqlite3.Row):
+            receipt_row = conn.execute(
+                "SELECT mode, artifact_json FROM decision_log WHERE id = ?",
+                (closure.receipt_ref.decision_log_id,),
+            ).fetchone()
+    except sqlite3.Error as exc:
+        raise ValueError("GLOBAL_SELL_RECEIPT_DECISION_LOG_UNAVAILABLE") from exc
+    if receipt_row is None:
+        raise ValueError("GLOBAL_SELL_RECEIPT_DECISION_LOG_MISSING")
+    try:
+        assert_global_auction_receipt_artifact(
+            expected=closure.receipt_ref,
+            decision_log_id=closure.receipt_ref.decision_log_id,
+            decision_log_mode=str(receipt_row["mode"]),
+            artifact_json=receipt_row["artifact_json"],
+        )
+    except ValueError as exc:
+        raise ValueError(
+            f"GLOBAL_SELL_RECEIPT_ARTIFACT_INVALID: {exc}"
+        ) from None
 
 
 def _decimal(value: Any) -> Decimal:

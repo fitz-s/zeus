@@ -1,6 +1,6 @@
 # Created: 2026-05-22
-# Last reused/audited: 2026-06-14
-# Lifecycle: created=2026-05-22; last_reviewed=2026-05-22; last_reused=never
+# Last reused/audited: 2026-08-09
+# Lifecycle: created=2026-05-22; last_reviewed=2026-08-09; last_reused=2026-08-09
 # Authority basis: Architecture code review 2026-05-22 — P1/P2 findings
 #   F1: day0_nowcast_entry strategy authority
 #   F2: EvidenceReport denominator scoping
@@ -167,7 +167,7 @@ _DC_INSERT = """
         authority_id, authority_version, algorithm_id, algorithm_version,
         payload_json, payload_hash, certificate_hash, verifier_status, created_at
     ) VALUES (?, 'FinalIntentCertificate', 1, '1.0',
-              ?, 'FINAL_INTENT', 'NO_SUBMIT', '2026-05-22T00:00:00Z',
+              ?, 'FINAL_INTENT', 'LIVE', '2026-05-22T00:00:00Z',
               'test_authority', '1.0', 'test_algorithm', '1.0',
               ?, 'hash_' || ?, 'cert_hash_' || ?, 'VERIFIED', '2026-05-22T00:00:00Z')
 """
@@ -290,8 +290,18 @@ class TestF3RegretJoinCorrectness:
 # ---------------------------------------------------------------------------
 
 def _make_tier_db() -> sqlite3.Connection:
+    """Install the archived evidence-tier lifecycle DDL explicitly.
+
+    Fresh ``init_schema`` deliberately does not create this retired table;
+    these tests exercise its retained reader/writer lifecycle contract.
+    """
+    from src.state.schema.phase6_evidence_schema import (
+        CREATE_EVIDENCE_TIER_ASSIGNMENTS_SQL,
+    )
+
     conn = sqlite3.connect(":memory:")
     init_schema(conn)
+    conn.execute(CREATE_EVIDENCE_TIER_ASSIGNMENTS_SQL)
     return conn
 
 

@@ -56,9 +56,9 @@ Execution is downstream of many stronger truth surfaces, but its errors are imme
 ## 9. Source files and their roles
 | File / surface | Role |
 |---|---|
-| `command_bus.py` | Closed command-side grammar and deterministic idempotency contract. M1 adds command states/events while keeping order/trade facts in U2. |
-| `executor.py` | Primary live-money actuation entrypoint. M2 maps exceptions after possible venue submit side effects to `OrderResult.status="unknown_side_effect"` and `SUBMIT_UNKNOWN_SIDE_EFFECT`, never semantic rejection. R3 A2 consults the global RiskAllocator before command persistence/SDK contact, persists/submits the selected maker/taker order type, and raises structured `AllocationDenied` when capacity/governor gates deny new risk. |
-| `exchange_reconcile.py` | R3 M5 read-only venue-vs-journal sweep. Writes findings and linkable missing trade facts; never creates `venue_commands` for exchange-only state. |
+| `command_bus.py` | Closed command-side grammar, deterministic idempotency contract, and typed creation inputs for recovered EXIT adoption, external-close absorption, and mixed-token command rehome. Creation-only reconciliation events are not ordinary command transitions. |
+| `executor.py` | Primary live-money actuation entrypoint. M2 maps exceptions after possible venue submit side effects to `OrderResult.status="unknown_side_effect"` and `SUBMIT_UNKNOWN_SIDE_EFFECT`, never semantic rejection. Every submit is a finite `[0.05,0.95]` limit: ENTRY BUY admits post-only GTC/GTD maker or certified non-post-only FOK/FAK taker; EXIT SELL admits post-only GTC/GTD maker or non-post-only FAK taker. R3 A2 consults the global RiskAllocator before command persistence/SDK contact and raises structured `AllocationDenied` when capacity/governor gates deny new risk. |
+| `exchange_reconcile.py` | R3 M5 venue-vs-journal sweep. Truly exchange-only state remains findings/linkable-fact only. Known-position recovered EXIT orders and operator-confirmed external closes route through typed repo helpers that atomically create the command and creation-only event without synthetic SUBMIT/ACK history or a live venue side effect. Recovered partial SELL legs then fold once per authenticated trade identity against the immutable lot baseline; current fresh token minimum plus canonical chain observation decide dust versus exact redecision release, never a fixed threshold or fabricated full close. |
 | `settlement_commands.py` | R3 R1 durable settlement/redeem command ledger. `REDEEM_TX_HASHED` is the crash-recovery anchor; Q-FX-1 gates pUSD redemption/accounting. |
 | `exit_triggers.py` | Where monitoring and execution semantics meet; extremely failure-prone. |
 | `exit_lifecycle.py` | Keeps exit intent and economic closure distinct. |
@@ -87,7 +87,8 @@ Execution is downstream of many stronger truth surfaces, but its errors are imme
 ## 11. Invariants
 - Exit intent is not closure; economic close is not settlement.
 - Execution must obey risk/control actuation; advisory-only risk is theater.
-- Resting GTC/GTD live orders must pass CutoverGuard, HeartbeatSupervisor, RiskAllocator/PortfolioGovernor, and CollateralLedger before venue-command persistence or SDK contact; missing heartbeat/collateral/allocation health is a hard pre-submit failure.
+- Every live BUY/SELL is a finite limit inside `[0.05,0.95]` and must pass CutoverGuard, HeartbeatSupervisor, RiskAllocator/PortfolioGovernor, and CollateralLedger before venue-command persistence or SDK contact. ENTRY BUY admits post-only GTC/GTD or certified non-post-only FOK/FAK; EXIT SELL admits post-only GTC/GTD or non-post-only FAK. Non-post-only GTC/GTD, post-only immediate-or-cancel, and SELL FOK are rejected.
+- ENTRY collateral admission uses `CollateralLedger.buy_preflight_in_transaction()` inside the existing writer transaction. It performs no schema initialization, DDL, or implicit commit, so any pre-SDK rejection rolls back command, event, envelope, and reservation together.
 - Monitoring triggers must be proven against the correct Day0 truth surface.
 - Fill tracking must not be mistaken for final outcome truth.
 - `RESTING`, `MATCHED`, `MINED`, and `CONFIRMED` are not `CommandState` values; they remain U2 order/trade facts.

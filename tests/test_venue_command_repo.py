@@ -1,8 +1,10 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-01; last_reused=2026-08-01
+# Last reused/audited: 2026-08-10
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: Lock venue command journal invariants, transitions, recovery, and U1 snapshot gate.
 # Reuse: Run when venue_command_repo, command schema, or executable snapshot gate changes.
-# Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S1
+# Authority basis: command-bus INV-28/NC-18 plus schema-21 global receipt closure;
+#                  2026-08-10 typed command creation/adoption/absorption helpers and legal taker persistence.
 """Tests for src/state/venue_command_repo.py (P1.S1 — INV-28 / NC-18)."""
 from __future__ import annotations
 
@@ -16,6 +18,11 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+
+from src.contracts.global_auction_receipt import (
+    GlobalAuctionReceiptRef,
+    GlobalSellReceiptClosure,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 _NOW = datetime(2026, 4, 26, tzinfo=timezone.utc)
@@ -62,7 +69,8 @@ def _insert(c, *, command_id="cmd-001", position_id="pos-001",
             intent_kind="ENTRY", market_id="mkt-001", token_id="tok-001",
             side="BUY", size=10.0, price=0.5,
             created_at="2026-04-26T00:00:00Z", q_version=None,
-            decision_certificate_hash=None):
+            decision_certificate_hash=None,
+            decision_certificate_payload_extra=None):
     from src.state.venue_command_repo import insert_command
     snapshot_id = _ensure_snapshot(c, token_id=token_id)
     envelope = _make_envelope(
@@ -87,6 +95,7 @@ def _insert(c, *, command_id="cmd-001", position_id="pos-001",
             c,
             certificate_hash=decision_certificate_hash,
             envelope=envelope,
+            payload_extra=decision_certificate_payload_extra,
         )
     insert_command(
         c,
@@ -126,10 +135,13 @@ class TestAbsoluteLivePriceBand:
             "price": pytest.approx(price),
         }
 
-    def test_taker_capable_envelope_rejects_before_command_persistence(self, conn):
+    @pytest.mark.parametrize("order_type", ["FOK", "FAK"])
+    def test_buy_taker_capable_envelope_persists_before_command(self, conn, order_type):
         from src.state.venue_command_repo import insert_command
 
-        envelope = _make_envelope(token_id="tok-taker").with_updates(post_only=False)
+        envelope = _make_envelope(token_id="tok-taker").with_updates(
+            order_type=order_type, post_only=False
+        )
         snapshot_id = _ensure_snapshot(conn, token_id="tok-taker")
         _ensure_entry_certificate(
             conn,
@@ -137,31 +149,30 @@ class TestAbsoluteLivePriceBand:
             envelope=envelope,
         )
 
-        with pytest.raises(ValueError, match="live fill price is unbounded"):
-            insert_command(
-                conn,
-                command_id="cmd-taker",
-                snapshot_id=snapshot_id,
-                envelope_id="env-taker",
-                submission_envelope=envelope,
-                position_id="pos-taker",
-                decision_id="dec-taker",
-                idempotency_key="idem-taker",
-                intent_kind="ENTRY",
-                market_id="mkt-taker",
-                token_id="tok-taker",
-                side="BUY",
-                size=10.0,
-                price=0.5,
-                created_at="2026-08-01T00:00:00Z",
-                decision_certificate_hash="cert-taker",
-            )
+        insert_command(
+            conn,
+            command_id=f"cmd-taker-{order_type.lower()}",
+            snapshot_id=snapshot_id,
+            envelope_id=f"env-taker-{order_type.lower()}",
+            submission_envelope=envelope,
+            position_id=f"pos-taker-{order_type.lower()}",
+            decision_id=f"dec-taker-{order_type.lower()}",
+            idempotency_key=f"idem-taker-{order_type.lower()}",
+            intent_kind="ENTRY",
+            market_id="mkt-taker",
+            token_id="tok-taker",
+            side="BUY",
+            size=10.0,
+            price=0.5,
+            created_at="2026-08-01T00:00:00Z",
+            decision_certificate_hash="cert-taker",
+        )
 
         assert conn.execute(
-            "SELECT COUNT(*) FROM venue_commands WHERE command_id='cmd-taker'"
-        ).fetchone()[0] == 0
+            "SELECT COUNT(*) FROM venue_commands WHERE command_id LIKE 'cmd-taker-%'"
+        ).fetchone()[0] == 1
 
-    def test_persisted_taker_exit_envelope_rejects_before_command_persistence(
+    def test_persisted_taker_exit_envelope_persists_before_command(
         self, conn
     ):
         from src.state.venue_command_repo import (
@@ -172,31 +183,30 @@ class TestAbsoluteLivePriceBand:
         envelope = _make_envelope(
             token_id="tok-exit-taker",
             side="SELL",
-        ).with_updates(post_only=False)
+        ).with_updates(order_type="FAK", post_only=False)
         insert_submission_envelope(conn, envelope, envelope_id="env-exit-taker")
         snapshot_id = _ensure_snapshot(conn, token_id="tok-exit-taker")
 
-        with pytest.raises(ValueError, match="persisted taker-capable order"):
-            insert_command(
-                conn,
-                command_id="cmd-exit-taker",
-                snapshot_id=snapshot_id,
-                envelope_id="env-exit-taker",
-                position_id="pos-exit-taker",
-                decision_id="dec-exit-taker",
-                idempotency_key="idem-exit-taker",
-                intent_kind="EXIT",
-                market_id="mkt-exit-taker",
-                token_id="tok-exit-taker",
-                side="SELL",
-                size=10.0,
-                price=0.5,
-                created_at="2026-08-01T00:00:00Z",
-            )
+        insert_command(
+            conn,
+            command_id="cmd-exit-taker",
+            snapshot_id=snapshot_id,
+            envelope_id="env-exit-taker",
+            position_id="pos-exit-taker",
+            decision_id="dec-exit-taker",
+            idempotency_key="idem-exit-taker",
+            intent_kind="EXIT",
+            market_id="mkt-exit-taker",
+            token_id="tok-exit-taker",
+            side="SELL",
+            size=10.0,
+            price=0.5,
+            created_at="2026-08-01T00:00:00Z",
+        )
 
         assert conn.execute(
             "SELECT COUNT(*) FROM venue_commands WHERE command_id='cmd-exit-taker'"
-        ).fetchone()[0] == 0
+        ).fetchone()[0] == 1
 
     @pytest.mark.parametrize("fill_price", ["0.049", "0.951", "0.999"])
     def test_out_of_band_trade_fact_persists_as_observed_truth(
@@ -467,11 +477,18 @@ def _ensure_entry_certificate(
     certificate_hash: str,
     envelope,
     direction: str | None = None,
+    payload_extra: dict | None = None,
 ) -> None:
     token_id = str(envelope.selected_outcome_token_id)
     direction = direction or (
         "buy_yes" if token_id == str(envelope.yes_token_id) else "buy_no"
     )
+    payload = {
+        "condition_id": str(envelope.condition_id),
+        "token_id": token_id,
+        "direction": direction,
+    }
+    payload.update(payload_extra or {})
     c.execute(
         """
         INSERT OR REPLACE INTO world.decision_certificates(
@@ -480,15 +497,382 @@ def _ensure_entry_certificate(
         """,
         (
             certificate_hash,
-            json.dumps(
-                {
-                    "condition_id": str(envelope.condition_id),
-                    "token_id": token_id,
-                    "direction": direction,
-                }
-            ),
+            json.dumps(payload),
         ),
     )
+
+
+def _insert_global_auction_receipt(c) -> GlobalAuctionReceiptRef:
+    from src.state.decision_chain import CycleArtifact, store_artifact
+
+    summary = {
+        "schema_version": 21,
+        "selection_epoch_identity": "epoch-command",
+        "selection_cut_at_utc": "2026-08-09T00:00:00+00:00",
+        "decision_at_utc": "2026-08-09T00:00:01+00:00",
+        "full_scope_identity": "scope-command",
+        "book_epoch_identity": "book-command",
+        "wealth_witness_identity": "wealth-command",
+        "wealth_economic_identity": "wealth-economic-command",
+        "winner_event_id": "event-command",
+        "winner_candidate_id": "candidate-command",
+        "winner_actuation_identity": "actuation-command",
+        "payload_identity": "1" * 64,
+        "decision_payload_identity": "2" * 64,
+        "audit_context_sha256": "3" * 64,
+        "book_native_side_states_sha256": "4" * 64,
+        "candidate_evaluations_sha256": "5" * 64,
+        "buy_minimum_marketable_repairs_sha256": "6" * 64,
+        "holding_auction_coverage_sha256": "7" * 64,
+        "receipt_hash": "8" * 64,
+    }
+    binding_fields = (
+        "schema_version",
+        "selection_epoch_identity",
+        "selection_cut_at_utc",
+        "decision_at_utc",
+        "full_scope_identity",
+        "book_epoch_identity",
+        "wealth_witness_identity",
+        "wealth_economic_identity",
+        "winner_event_id",
+        "winner_candidate_id",
+        "winner_actuation_identity",
+        "payload_identity",
+        "decision_payload_identity",
+        "audit_context_sha256",
+        "book_native_side_states_sha256",
+        "candidate_evaluations_sha256",
+        "buy_minimum_marketable_repairs_sha256",
+        "holding_auction_coverage_sha256",
+    )
+    binding_payload = {field: summary[field] for field in binding_fields}
+    binding_payload["binding_version"] = "global-auction-execution-binding-v1"
+    summary["execution_binding_hash"] = hashlib.sha256(
+        json.dumps(
+            binding_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    summary_for_hash = dict(summary)
+    summary_for_hash.pop("artifact_summary_hash", None)
+    summary["artifact_summary_hash"] = hashlib.sha256(
+        json.dumps(
+            summary_for_hash,
+            default=str,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    mode = "global_single_order_auction"
+    row_id = store_artifact(
+        c,
+        CycleArtifact(
+            mode=mode,
+            started_at="2026-08-09T00:00:00+00:00",
+            completed_at="2026-08-09T00:00:01+00:00",
+            skipped_reason="",
+            summary=summary,
+        ),
+    )
+    assert row_id is not None
+    return GlobalAuctionReceiptRef(
+        decision_log_id=row_id,
+        decision_log_mode=mode,
+        receipt_hash=str(summary["receipt_hash"]),
+        execution_binding_hash=str(summary["execution_binding_hash"]),
+        artifact_summary_hash=str(summary["artifact_summary_hash"]),
+        schema_version=21,
+        winner_event_id="event-command",
+        winner_candidate_id="candidate-command",
+        winner_actuation_identity="actuation-command",
+        selection_epoch_identity="epoch-command",
+    )
+
+
+def _global_certificate_payload(ref: GlobalAuctionReceiptRef) -> dict:
+    receipt_payload = ref.as_payload()
+    return {
+        "global_auction_receipt": receipt_payload,
+        "qkernel_execution_economics": {
+            "global_actuation_identity": ref.winner_actuation_identity,
+            "global_winner_event_id": ref.winner_event_id,
+            "global_candidate_id": ref.winner_candidate_id,
+            "global_selection_epoch_identity": ref.selection_epoch_identity,
+            "global_auction_receipt": receipt_payload,
+        },
+    }
+
+
+def _global_sell_closure(
+    ref: GlobalAuctionReceiptRef,
+    *,
+    position_id: str = "pos-sell-closure",
+    condition_id: str = "condition-test",
+    token_id: str = "tok-sell-closure",
+    execution_mode: str = "MAKER_REST",
+    **overrides,
+) -> GlobalSellReceiptClosure:
+    fields = {
+        "receipt_ref": ref,
+        "position_id": position_id,
+        "condition_id": condition_id,
+        "token_id": token_id,
+        "action": "SELL",
+        "execution_mode": execution_mode,
+        "winner_event_id": ref.winner_event_id,
+        "winner_candidate_id": ref.winner_candidate_id,
+        "winner_actuation_identity": ref.winner_actuation_identity,
+        "selection_epoch_identity": ref.selection_epoch_identity,
+    }
+    fields.update(overrides)
+    return GlobalSellReceiptClosure(**fields)
+
+
+class TestGlobalSellReceiptClosure:
+    def _insert_closure_command(self, conn, *, closure, envelope=None, **kwargs):
+        from src.state.venue_command_repo import insert_command
+
+        command_id = kwargs.pop("command_id", "cmd-global-sell-closure")
+        envelope_id = f"pre-submit:{command_id}"
+        token_id = str(kwargs.pop("token_id", closure.token_id))
+        position_id = str(kwargs.pop("position_id", closure.position_id))
+        snapshot_id = _ensure_snapshot(conn, token_id=token_id)
+        envelope = envelope or _make_envelope(token_id=token_id, side="SELL")
+        insert_command(
+            conn,
+            command_id=command_id,
+            snapshot_id=snapshot_id,
+            envelope_id=envelope_id,
+            submission_envelope=envelope,
+            position_id=position_id,
+            decision_id="decision-global-sell-closure",
+            idempotency_key=kwargs.pop("idempotency_key", "idem-global-sell-closure"),
+            intent_kind=kwargs.pop("intent_kind", "EXIT"),
+            market_id="market-global-sell-closure",
+            token_id=token_id,
+            side=kwargs.pop("side", "SELL"),
+            size=10.0,
+            price=0.5,
+            created_at="2026-08-09T00:00:00Z",
+            global_sell_receipt_closure=closure,
+            **kwargs,
+        )
+        return command_id, envelope_id
+
+    @staticmethod
+    def _assert_zero_rows(conn, *, command_id: str, envelope_id: str) -> None:
+        for table, column, value in (
+            ("venue_commands", "command_id", command_id),
+            ("venue_command_events", "command_id", command_id),
+            ("provenance_envelope_events", "subject_id", command_id),
+            ("venue_submission_envelopes", "envelope_id", envelope_id),
+        ):
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {column} = ?",
+                (value,),
+            ).fetchone()[0] == 0
+
+    def test_success_persists_exact_closure_event_and_provenance(self, conn):
+        ref = _insert_global_auction_receipt(conn)
+        closure = _global_sell_closure(ref)
+        self._insert_closure_command(conn, closure=closure)
+        expected = {"global_sell_receipt_closure": closure.as_payload()}
+        event = conn.execute(
+            "SELECT payload_json FROM venue_command_events WHERE command_id = ?",
+            ("cmd-global-sell-closure",),
+        ).fetchone()
+        provenance = conn.execute(
+            """
+            SELECT payload_json FROM provenance_envelope_events
+             WHERE subject_type = 'command' AND subject_id = ?
+               AND event_type = 'INTENT_CREATED'
+            """,
+            ("cmd-global-sell-closure",),
+        ).fetchone()
+        assert json.loads(event["payload_json"]) == expected
+        provenance_payload = json.loads(provenance["payload_json"])
+        assert provenance_payload["global_sell_receipt_closure"] == expected[
+            "global_sell_receipt_closure"
+        ]
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE command_id = ?",
+            ("cmd-global-sell-closure",),
+        ).fetchone()[0] == 1
+        assert GlobalSellReceiptClosure.from_payload(
+            json.loads(event["payload_json"])["global_sell_receipt_closure"]
+        ) == closure
+
+    def test_taker_limit_closure_persists_with_fak_mapping(self, conn):
+        ref = _insert_global_auction_receipt(conn)
+        closure = _global_sell_closure(
+            ref,
+            token_id="tok-sell-taker",
+            execution_mode="TAKER_LIMIT",
+        )
+        envelope = _make_envelope(
+            token_id="tok-sell-taker",
+            side="SELL",
+        ).with_updates(order_type="FAK", post_only=False)
+        command_id, _ = self._insert_closure_command(
+            conn,
+            closure=closure,
+            envelope=envelope,
+            command_id="cmd-global-sell-taker",
+            idempotency_key="idem-global-sell-taker",
+        )
+        row = conn.execute(
+            "SELECT intent_kind, side FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+        assert tuple(row) == ("EXIT", "SELL")
+
+    def test_closure_persisted_envelope_sqlite_row_binding(self, conn):
+        from src.state.venue_command_repo import insert_command
+
+        ref = _insert_global_auction_receipt(conn)
+        closure = _global_sell_closure(ref)
+        snapshot_id = _ensure_snapshot(conn, token_id=closure.token_id)
+        envelope_id = _ensure_envelope(
+            conn,
+            token_id=closure.token_id,
+            envelope_id="persisted-global-sell-envelope",
+            side="SELL",
+        )
+        insert_command(
+            conn,
+            command_id="cmd-global-sell-persisted",
+            snapshot_id=snapshot_id,
+            envelope_id=envelope_id,
+            position_id=closure.position_id,
+            decision_id="decision-global-sell-persisted",
+            idempotency_key="idem-global-sell-persisted",
+            intent_kind="EXIT",
+            market_id="market-global-sell-persisted",
+            token_id=closure.token_id,
+            side="SELL",
+            size=10.0,
+            price=0.5,
+            created_at="2026-08-09T00:00:00Z",
+            global_sell_receipt_closure=closure,
+        )
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE command_id = ?",
+            ("cmd-global-sell-persisted",),
+        ).fetchone()[0] == 1
+
+    def test_closure_rejects_string_post_only_and_accepts_sqlite_zero(self, conn):
+        ref = _insert_global_auction_receipt(conn)
+        closure = _global_sell_closure(ref, execution_mode="TAKER_LIMIT")
+        base = {
+            "condition_id": closure.condition_id,
+            "selected_outcome_token_id": closure.token_id,
+            "side": "SELL",
+            "order_type": "FAK",
+        }
+        with pytest.raises(ValueError, match="GLOBAL_SELL_RECEIPT_POST_ONLY_INVALID"):
+            closure.assert_matches_command(
+                position_id=closure.position_id,
+                token_id=closure.token_id,
+                side="SELL",
+                envelope={**base, "post_only": "0"},
+            )
+        closure.assert_matches_command(
+            position_id=closure.position_id,
+            token_id=closure.token_id,
+            side="SELL",
+            envelope={**base, "post_only": 0},
+        )
+        maker = _global_sell_closure(ref, execution_mode="MAKER_REST")
+        maker.assert_matches_command(
+            position_id=maker.position_id,
+            token_id=maker.token_id,
+            side="SELL",
+            envelope={
+                "condition_id": maker.condition_id,
+                "selected_outcome_token_id": maker.token_id,
+                "side": "SELL",
+                "order_type": "GTC",
+                "post_only": 1,
+            },
+        )
+
+    @pytest.mark.parametrize(
+        "fault",
+        (
+            "deleted",
+            "mutated",
+            "wrong_winner",
+            "wrong_position",
+            "wrong_token",
+            "wrong_condition",
+            "wrong_action",
+            "wrong_mode",
+            "non_exit",
+        ),
+    )
+    def test_closure_rejections_leave_zero_command_event_provenance_envelope(
+        self, conn, fault
+    ):
+        ref = _insert_global_auction_receipt(conn)
+        if fault == "deleted":
+            conn.execute("DELETE FROM decision_log WHERE id = ?", (ref.decision_log_id,))
+        elif fault == "mutated":
+            row = conn.execute(
+                "SELECT artifact_json FROM decision_log WHERE id = ?",
+                (ref.decision_log_id,),
+            ).fetchone()
+            artifact = json.loads(row[0])
+            artifact["summary"]["winner_candidate_id"] = "mutated"
+            conn.execute(
+                "UPDATE decision_log SET artifact_json = ? WHERE id = ?",
+                (json.dumps(artifact), ref.decision_log_id),
+            )
+        closure = _global_sell_closure(ref)
+        kwargs = {"command_id": f"cmd-global-sell-{fault}", "idempotency_key": f"idem-global-sell-{fault}"}
+        envelope_id = f"pre-submit:{kwargs['command_id']}"
+        envelope = None
+        if fault == "wrong_winner":
+            with pytest.raises(ValueError, match="GLOBAL_SELL_RECEIPT"):
+                _global_sell_closure(ref, winner_candidate_id="wrong")
+            self._assert_zero_rows(
+                conn,
+                command_id=kwargs["command_id"],
+                envelope_id=envelope_id,
+            )
+            return
+        elif fault == "wrong_position":
+            kwargs["position_id"] = "other-position"
+        elif fault == "wrong_token":
+            kwargs["token_id"] = "other-token"
+        elif fault == "wrong_condition":
+            closure = _global_sell_closure(ref, condition_id="other-condition")
+        elif fault == "wrong_action":
+            with pytest.raises(ValueError, match="GLOBAL_SELL_RECEIPT_ACTION_INVALID"):
+                _global_sell_closure(ref, action="BUY")
+            self._assert_zero_rows(
+                conn,
+                command_id=kwargs["command_id"],
+                envelope_id=envelope_id,
+            )
+            return
+        elif fault == "wrong_mode":
+            closure = _global_sell_closure(ref, execution_mode="TAKER_LIMIT")
+        elif fault == "non_exit":
+            kwargs["intent_kind"] = "ENTRY"
+            envelope = _make_envelope(token_id=closure.token_id, side="BUY")
+        with pytest.raises(ValueError, match="GLOBAL_SELL_RECEIPT"):
+            self._insert_closure_command(conn, closure=closure, envelope=envelope, **kwargs)
+        self._assert_zero_rows(
+            conn,
+            command_id=kwargs["command_id"],
+            envelope_id=envelope_id,
+        )
 
 
 def _signed_envelope(*, order_id="0xorder", token_id="tok-001", side="BUY"):
@@ -919,6 +1303,84 @@ class TestInsertCommandAtomicWithIntentCreatedEvent:
 class TestPositionDecisionAttributionAppendHook:
     """LX-E packet (2026-07-13): insert_command appends the permanent
     position -> decision_certificate_hash fact atomically with the command."""
+
+    def test_global_receipt_closes_before_command_and_attribution(self, conn):
+        receipt_ref = _insert_global_auction_receipt(conn)
+
+        _insert(
+            conn,
+            command_id="cmd-global-receipt",
+            position_id="pos-global-receipt",
+            idempotency_key="idem-global-receipt",
+            decision_certificate_hash="cert-global-receipt",
+            decision_certificate_payload_extra=_global_certificate_payload(
+                receipt_ref
+            ),
+        )
+
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE command_id = ?",
+            ("cmd-global-receipt",),
+        ).fetchone()[0] == 1
+        assert _attribution_row(conn, "pos-global-receipt") is not None
+
+    @pytest.mark.parametrize(
+        "fault",
+        (
+            "missing_ref",
+            "deleted",
+            "mutated",
+            "missing_binding_field",
+            "nonbinding_mutation",
+        ),
+    )
+    def test_global_receipt_fault_rolls_back_command_and_attribution(
+        self,
+        conn,
+        fault,
+    ):
+        receipt_ref = _insert_global_auction_receipt(conn)
+        payload_extra = _global_certificate_payload(receipt_ref)
+        if fault == "missing_ref":
+            payload_extra.pop("global_auction_receipt")
+        elif fault == "deleted":
+            conn.execute(
+                "DELETE FROM decision_log WHERE id = ?",
+                (receipt_ref.decision_log_id,),
+            )
+        else:
+            row = conn.execute(
+                "SELECT artifact_json FROM decision_log WHERE id = ?",
+                (receipt_ref.decision_log_id,),
+            ).fetchone()
+            artifact = json.loads(row[0])
+            if fault == "mutated":
+                artifact["summary"]["winner_candidate_id"] = "mutated-candidate"
+            elif fault == "missing_binding_field":
+                artifact["summary"].pop("wealth_economic_identity")
+                artifact["summary"]["execution_binding_hash"] = "f" * 64
+            else:
+                artifact["summary"]["no_trade_reason"] = "forged-reason"
+            conn.execute(
+                "UPDATE decision_log SET artifact_json = ? WHERE id = ?",
+                (json.dumps(artifact), receipt_ref.decision_log_id),
+            )
+
+        with pytest.raises(ValueError, match="global auction receipt"):
+            _insert(
+                conn,
+                command_id=f"cmd-global-{fault}",
+                position_id=f"pos-global-{fault}",
+                idempotency_key=f"idem-global-{fault}",
+                decision_certificate_hash=f"cert-global-{fault}",
+                decision_certificate_payload_extra=payload_extra,
+            )
+
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE command_id = ?",
+            (f"cmd-global-{fault}",),
+        ).fetchone()[0] == 0
+        assert _attribution_row(conn, f"pos-global-{fault}") is None
 
     def test_hash_given_writes_attribution_row(self, conn):
         _insert(

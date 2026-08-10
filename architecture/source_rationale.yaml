@@ -363,6 +363,15 @@ files:
     - src/events/reactor.py
     - src/engine/event_reactor_adapter.py
     - src/engine/monitor_refresh.py
+  src/data/replacement_current_value_serving.py:
+    zone: K2_runtime
+    authority_role: replacement_current_value_serving_selector
+    why: Single read-time authority for the deterministic provider value possessed at one carrier-bound or source-clock decision cut. It prefers current same-product single-runs evidence, admits only explicitly branded eligible previous-runs substitution, rejects future, over-age, and ECMWF ifs025-to-9km product mismatch, and keeps provider-value time separate from the ENS shape-carrier clock.
+    hazards:
+    - SOURCE_TRUTH_PLANE_COLLAPSE
+    downstream:
+    - src/data/replacement_forecast_materializer.py
+    - src/data/replacement_forecast_production.py
   src/data/replacement_forecast_materializer.py:
     zone: K2_runtime
     authority_role: replacement_forecast_posterior_writer
@@ -431,10 +440,11 @@ files:
   src/runtime/bankroll_provider.py:
     zone: K2_runtime
     authority_role: wallet_bankroll_provider
-    why: Preserves wallet-equity identity for runtime/reporting consumers and rejects retired config-literal capital as bankroll authority.
+    why: Preserves wallet-equity identity for runtime/reporting consumers, rejects retired config-literal capital as bankroll authority, and exposes the active explicit Zeus strategy-allocation setting through the same pure K0 allocation law consumed by the global auction wealth witness.
     downstream:
     - src/observability/status_summary.py
     - src/riskguard/riskguard.py
+    - src/engine/global_auction_universe.py
   src/runtime/reactor_wake.py:
     zone: K2_runtime
     authority_role: event_reactor_wake_hint
@@ -655,7 +665,7 @@ files:
   src/contracts/venue_submission_envelope.py:
     zone: K0_frozen_kernel
     authority_role: venue_submission_contract
-    why: Frozen provenance envelope for Polymarket V2 submissions; pins canonical pre-sign/request/response evidence and enforces both the non-waivable inclusive live unit-price band [0.05,0.95] and GTC/GTD post-only maker semantics required to bind actual fills to that two-sided band.
+    why: Frozen provenance envelope for Polymarket V2 submissions; pins canonical pre-sign/request/response evidence, enforces the non-waivable inclusive live unit-price band [0.05,0.95], and admits only post-only GTC/GTD makers, ENTRY BUY FOK/FAK takers, or EXIT SELL FAK takers.
     downstream:
     - src/venue/polymarket_v2_adapter.py
     - src/execution/executor.py
@@ -718,12 +728,36 @@ files:
   src/contracts/review_work_item.py:
     zone: K0_frozen_kernel
     authority_role: review_work_item_contract
-    why: "Quarantine excision foundation (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md Consult adjudication): the owner-local ReviewWorkItem protocol contract replacing scattered quarantine-state mechanisms — frozen dataclass, extensible ReviewReasonCode vocabulary (not DB-CHECK-constrained, see src/state/schema/review_work_items_schema.py docstring), closed WorkItemStatus (OPEN/RESOLVED/SUPERSEDED), and the ResolveWorkItemRequest operator-command shape T6 will bind to a live release valve. FamilyKey is a structural mirror of src.strategy.family_exclusive_dedup.WeatherFamilyKey (K0 must not import K3; src/state/review_work_items.py converts 1:1). T4 (2026-07-11) added TIMEOUT_ABSENCE_UNCONFIRMED (ambiguous pending-entry timeout awaiting chain confirmation; family-blocking) and is the first runtime consumer — MISSING_FILL_ECONOMICS/MISSING_FILL_AUTHORITY/LOCAL_WRITE_FAILURE were already-defined members it also now opens."
+    why: "Quarantine excision foundation (2026-07-11, docs/rebuild/quarantine_excision_2026-07-11.md Consult adjudication): the owner-local ReviewWorkItem protocol contract replacing scattered quarantine-state mechanisms — frozen dataclass, extensible ReviewReasonCode vocabulary (not DB-CHECK-constrained, see src/state/schema/review_work_items_schema.py docstring), closed WorkItemStatus (OPEN/RESOLVED/SUPERSEDED), and the ResolveWorkItemRequest operator-command shape T6 will bind to a live release valve. FamilyKey is a structural mirror of src.strategy.family_exclusive_dedup.WeatherFamilyKey (K0 must not import K3; src/state/review_work_items.py converts 1:1). T4 (2026-07-11) added TIMEOUT_ABSENCE_UNCONFIRMED (ambiguous pending-entry timeout awaiting chain confirmation; family-blocking). RECOVERED_EXIT_DUST_REMAINDER is deliberately position+command scoped and non-family-blocking: it preserves an authenticated residual without inventing economic closure."
     downstream:
     - src/state/review_work_items.py
     - src/state/schema/review_work_items_schema.py
     - src/contracts/entry_exposure_obligation.py
     - src/execution/fill_tracker.py
+  src/contracts/global_auction_receipt.py:
+    zone: K0_frozen_kernel
+    authority_role: global_auction_receipt_reference_contract
+    why: Freezes the exact trade.decision_log schema-21 row, logical receipt hash, recomputable compact-row execution binding, exact persisted-summary hash, winning event/candidate/actuation, and selection epoch into one immutable reference; command persistence and settlement attribution re-read that exact row and fail closed on deletion, mutation, or mismatch instead of guessing from derived identities.
+    downstream:
+    - src/engine/global_single_order_auction.py
+    - src/engine/global_batch_runtime.py
+    - src/engine/event_reactor_adapter.py
+    - src/decision_kernel/canonicalization.py
+    - src/decision_kernel/verifier.py
+    - src/state/venue_command_repo.py
+    - src/analysis/settlement_skill_attribution.py
+  src/contracts/strategy_capital_allocation.py:
+    zone: K0_frozen_kernel
+    authority_role: strategy_capital_allocation_contract
+    why: Separates venue spendable cash C, Zeus-owned utility equity E, BUY commitment ceiling L, current cost commitments K, and utility cash U=max(E-K,0); freezes their exact active policy and min(C,max(L-K,0)) BUY capacity into one immutable identity without suppressing HOLD or reducing SELL actions.
+    downstream:
+    - src/runtime/bankroll_provider.py
+    - src/solve/solver.py
+    - src/decision_kernel/canonicalization.py
+    - src/engine/global_auction_universe.py
+    - src/engine/global_single_order_auction.py
+    - src/engine/global_batch_runtime.py
+    - src/control/live_health.py
   src/contracts/semantic_types.py:
     zone: K0_frozen_kernel
     authority_role: semantic_atom_contracts
@@ -914,7 +948,7 @@ files:
   src/control/heartbeat_supervisor.py:
     zone: K1_governance
     authority_role: heartbeat_runtime_guard
-    why: R3 Z3 venue heartbeat supervisor that blocks resting live orders when venue heartbeat health is not HEALTHY and may restore a missing or heartbeat-stale live-trading launchd process from fresh sidecar liveness; code identity is deployment evidence, not market authority.
+    why: R3 Z3 venue heartbeat supervisor that blocks resting live orders when venue heartbeat health is not HEALTHY and may restore a missing or heartbeat-stale live-trading launchd process from fresh sidecar liveness. It owns timeout policy, install telemetry, and reset behavior while delegating all SDK transport construction/error classification to the venue adapter; code identity is deployment evidence, not market authority.
     hazards:
     - VENUS_CONTROL_ONLY
     write_routes:
@@ -1379,7 +1413,7 @@ files:
   src/venue/polymarket_v2_adapter.py:
     zone: K2_runtime
     authority_role: v2_venue_adapter
-    why: Sole Polymarket V2 live placement/cancel/query adapter and shared PolymarketV2AdapterProtocol; converts execution intent plus market snapshot into VenueSubmissionEnvelope and independently rejects submitted limits outside [0.05,0.95] or any taker-capable shape before SDK contact, then repeats the legal-limit plus GTC/GTD post-only maker check immediately before POST. Its account-truth read fully paginates orders then trades through one authenticated HTTP client, one server timestamp, endpoint-specific signatures, and one monotonic wall-clock deadline; incomplete transport or page truth never becomes an empty-account fact. Its chain collateral surface reads pUSD balance plus both executable allowances in one exact JSON-RPC batch, rejecting partial or duplicate response identities. Targeted CTF exit reads confirm a missing, unavailable, or zero CLOB balance through exact Polygon ERC-1155 balanceOf plus both venue-operator approvals; failure of both readers remains unknown instead of becoming a false zero. A synchronous CLOB 425 `order manager not ready, please retry` response is a deterministic whole-request rejection for both single and batch submission, while transport failures and unrecognized post-sign exceptions remain ambiguous.
+    why: Sole Polymarket V2 live placement/cancel/query adapter and shared PolymarketV2AdapterProtocol; converts execution intent plus market snapshot into VenueSubmissionEnvelope and independently rejects submitted limits outside [0.05,0.95] or illegal mode tuples before SDK contact, admitting only post-only GTC/GTD makers, ENTRY BUY FOK/FAK takers, or EXIT SELL FAK takers, then repeats the same checks immediately before POST. It also exclusively owns the dedicated heartbeat HTTP transport while control owns timeout policy and telemetry. Its account-truth read fully paginates orders then trades through one authenticated HTTP client, one server timestamp, endpoint-specific signatures, and one monotonic wall-clock deadline; incomplete transport or page truth never becomes an empty-account fact. Its chain collateral surface reads pUSD balance plus both executable allowances in one exact JSON-RPC batch, rejecting partial or duplicate response identities. Targeted CTF exit reads confirm a missing, unavailable, or zero CLOB balance through exact Polygon ERC-1155 balanceOf plus both venue-operator approvals; failure of both readers remains unknown instead of becoming a false zero. A synchronous CLOB 425 `order manager not ready, please retry` response is a deterministic whole-request rejection for both single and batch submission, while transport failures and unrecognized post-sign exceptions remain ambiguous.
     downstream:
     - src/execution/executor.py
     - src/data/polymarket_client.py
@@ -1674,6 +1708,8 @@ files:
       current BID depth is price provenance, never fictitious immediate-fill capacity.
       BUY and SELL branch wealth use one shared spendable-cash floor plus exact same-family lower
       payoffs; unrelated held-token upside cannot be coupled only to one candidate branch. A global
+      BUY's capital ceiling is the allocation witness's remaining BUY capacity, distinct from venue
+      cash, while SELL/HOLD remain feasible after that allocation is exhausted. A global
       BUY candidate also carries the same captured native bid levels as its executable ask curve;
       bids are execution-policy provenance, never a second probability or objective authority.
       SELL scoring rejects any maker proposal whose exact unit price is outside the absolute live
@@ -1752,7 +1788,7 @@ files:
   src/engine/cycle_runtime.py:
     zone: K2_runtime
     authority_role: runtime_helper
-    why: Extracted heavy helpers from cycle_runner; supports orchestration without becoming authority. R3 A2 threads candidate event/date/cluster allocation metadata into ExecutionIntent for live cap enforcement. Monitor receipts consume the same fresh position-stamped probability and edge as exit evaluation, including lossless reconstruction of exit-specific validation subsets indexed into the event's canonical monitor validation vector. Held-monitor recovery serves the least-recently persisted MONITOR_REFRESHED debt before optional tail work; production batch books use the DB-free killable reader, failure defers without singular fan-out, and quote/probability work shares one cycle deadline instead of resetting a budget per position. Deadline expiry revokes new I/O, not a preclassified local absorbing hard fact: one dead-bin rescue explicitly disables quote refresh and retry preflight while recording its direct exit/retry decision, then the next cycle retries executable truth.
+    why: "Extracted heavy helpers from cycle_runner; supports orchestration without becoming authority. R3 A2 threads candidate event/date/cluster allocation metadata into ExecutionIntent for live cap enforcement. Monitor receipts consume the same fresh position-stamped probability and edge as exit evaluation, including lossless reconstruction of exit-specific validation subsets indexed into the event's canonical monitor validation vector. Held-monitor recovery serves the least-recently persisted MONITOR_REFRESHED debt before optional tail work; production batch books use the DB-free killable reader, failure defers without singular fan-out, and quote/probability work shares one cycle deadline instead of resetting a budget per position. Deadline expiry revokes new I/O, not a preclassified local absorbing hard fact: one dead-bin rescue explicitly disables quote refresh and retry preflight while recording its direct exit/retry decision, then the next cycle retries executable truth."
   src/engine/discovery_mode.py:
     zone: K2_runtime
     authority_role: mode_enum
@@ -1835,14 +1871,14 @@ files:
   src/engine/global_single_order_auction.py:
     zone: K2_K3_coordination
     authority_role: global_single_order_auction_coordinator
-    why: Pure cross-family coordinator that refuses partial or malformed family sets, binds every prepared full-simplex family and native full-depth YES/NO order to one current portfolio witness, preserves each current asset's native bid levels for later execution-policy proof, binds SELL maker-rest terms into both economic and actuation identities, and returns at most one terminal-wealth-optimal winner; it performs no DB or venue I/O.
+    why: Pure cross-family coordinator that refuses partial or malformed family sets, binds every prepared full-simplex family and native full-depth YES/NO order to one current portfolio and strategy-capital-allocation witness, preserves each current asset's native bid levels for later execution-policy proof, binds SELL maker-rest terms into both economic and actuation identities, and returns at most one terminal-wealth-optimal winner; it performs no DB or venue I/O.
     downstream:
     - src/engine/event_reactor_adapter.py
     - src/events/reactor.py
   src/engine/global_auction_universe.py:
     zone: K2_K3_coordination
     authority_role: current_global_auction_scope_reader
-    why: Read-only independent enumeration of every current posterior-ready family plus every canonical runtime-open held-family probability obligation; binds full condition/native-token probability witnesses to current Gamma tradeability and captures each BUY asset's native ask curve together with the same book's bid levels, so neither a reactor queue page, local-date rollover, a closed sibling, nor an ask-only projection can silently erase a feasible action or falsify maker availability.
+    why: Read-only independent enumeration of every current posterior-ready family plus every canonical runtime-open held-family probability obligation; binds full condition/native-token probability witnesses to current Gamma tradeability, freezes current venue cash, cost commitments, and active strategy allocation into the portfolio wealth identity, and captures each BUY asset's native ask curve together with the same book's bid levels, so neither a reactor queue page, local-date rollover, a closed sibling, an allocation drift, nor an ask-only projection can silently erase or falsify the feasible action set.
     hazards:
     - NO_WRITE_PATH
     downstream:
@@ -2002,7 +2038,7 @@ files:
     zone: K2_runtime
     authority_role: venue_command_recovery
     why: >-
-      Scans unresolved durable venue commands and appends recovery events without bypassing command grammar. Confirmed maker fills become execution facts while their ACKED remainder is still resting, even when the initial LIVE order fact still reports zero matched; maker cancel races likewise aggregate all canonical confirmed trade legs for one order. Already-realized venue fill facts in the probability domain are projected even when their price is outside the new-order action band; that observation cannot authorize another out-of-band command. Authenticated terminal zero-fill evidence expires only that command commitment without voiding an older same-position fill; a global MAKER_REST held SELL atomically writes the existing V4 fresh-auction obligation before release. V4 keeps position/family/held-token/SELL debt scope and generation stable while q/book content is an attempt witness; append-only receipt lineage admits concurrent witnesses without allowing an old receipt to complete or roll back the newest durable attempt. Both its missing terminal-fact materialization and late local-orphan RESET are command-scoped and cannot depend on the aggregate position being empty, because other orders may own its existing shares. Deploy-time restart recovery runs that same point-order terminal proof before its read-only alignment gate and gives complete account pagination a separately bounded large-account deadline, while the scheduled live tick retains its short cadence budget. A point-in-time account snapshot never clears a post-submit unknown by token-level absence: without a command/order/trade fact causally bound to the original submit, duplicate and cap authority stay fail-closed. Terminal positive-fill EXIT remainders are selected by one shared candidate law; command recovery alone releases them while atomically persisting the V4 held-sell reauction obligation. Boot invalid-entry authority recovery ranks canonical order facts only for zero-exposure pending ENTRY commands, so historical fact volume cannot delay scheduler and held-position monitor startup. B71 additionally detects one open position_id carrying authenticated FILLED ENTRY BUY commands for multiple native held tokens, then in one append-first transaction reconstructs token-typed projections, rehomes only child commands/facts with CAS, and fails closed to review on topology, certificate, lifecycle, attribution, or rehome ambiguity; it never submits a venue action.
+      Scans unresolved durable venue commands and appends recovery events without bypassing command grammar. Mixed-token repair delegates its exact command/execution-fact rehome CAS and provenance to the typed venue_command_repo seam; an EDLI absorbed-fill marker suppresses generic reprojection only when proof hash, position, and current canonical aggregate all match. Confirmed maker fills become execution facts while their ACKED remainder is still resting, even when the initial LIVE order fact still reports zero matched; maker cancel races likewise aggregate all canonical confirmed trade legs for one order. Recovered partial SELLs fold each authenticated trade identity exactly once against an immutable pre-recovery lot baseline; canonical cumulative fills, order aggregate, and fresh residual must conserve, dust remains pending with a typed non-family-blocking review item, and no partial leg can manufacture economic closure. Already-realized venue fill facts in the probability domain are projected even when their price is outside the new-order action band; that observation cannot authorize another out-of-band command. Authenticated terminal zero-fill evidence expires only that command commitment without voiding an older same-position fill; a global MAKER_REST held SELL atomically writes the existing V4 fresh-auction obligation before release. V4 keeps position/family/held-token/SELL debt scope and generation stable while q/book content is an attempt witness; append-only receipt lineage admits concurrent witnesses without allowing an old receipt to complete or roll back the newest durable attempt. Both its missing terminal-fact materialization and late local-orphan RESET are command-scoped and cannot depend on the aggregate position being empty, because other orders may own its existing shares. Deploy-time restart recovery runs that same point-order terminal proof before its read-only alignment gate and gives complete account pagination a separately bounded large-account deadline, while the scheduled live tick retains its short cadence budget. A point-in-time account snapshot never clears a post-submit unknown by token-level absence: without a command/order/trade fact causally bound to the original submit, duplicate and cap authority stay fail-closed. Terminal positive-fill EXIT remainders are selected by one shared candidate law; command recovery alone releases them while atomically persisting the V4 held-sell reauction obligation. Boot invalid-entry authority recovery ranks canonical order facts only for zero-exposure pending ENTRY commands, so historical fact volume cannot delay scheduler and held-position monitor startup. B71 additionally detects one open position_id carrying authenticated FILLED ENTRY BUY commands for multiple native held tokens, then in one append-first transaction reconstructs token-typed projections, rehomes only child commands/facts with CAS, and fails closed to review on topology, certificate, lifecycle, attribution, or rehome ambiguity; it never submits a venue action.
     downstream:
     - src/engine/cycle_runner.py
     - src/state/venue_command_repo.py
@@ -2015,7 +2051,7 @@ files:
   src/execution/executor.py:
     zone: K2_runtime
     authority_role: live_order_executor
-    why: Places live CLOB limit orders; real-money boundary. R3 U2 persists pre-submit VenueSubmissionEnvelope provenance before SDK contact; R3 A2 consults RiskAllocator/PortfolioGovernor before command persistence or SDK contact. Live ENTRY/EXIT permits only GTC/GTD post-only maker submission because taker price improvement cannot be constrained to a two-sided actual-fill band; venue-reported fill prices are validated as probability-domain observations before normal fill projection, without confusing that fact validation with new-order action authority. Reduce-only SELL also rejects an out-of-band current executable best bid before command persistence even when its limit floor is legal. A committed V4 global-SELL publish claim is checked inside the same TRADE writer lease before EXIT command persistence, making command ownership and wake ownership mutually exclusive without holding a cross-DB lock during publish. ENTRY carries exact executable-snapshot family identity into the unresolved exposure reservation so the next global auction prices the correct correlated endowment; this metadata is not a sibling-token veto.
+    why: Places finite-price live CLOB limits at the real-money boundary. R3 U2 persists pre-submit VenueSubmissionEnvelope provenance before SDK contact; R3 A2 consults RiskAllocator/PortfolioGovernor before persistence or contact. Legal modes are post-only GTC/GTD maker, ENTRY BUY FOK/FAK certified taker, and EXIT SELL FAK taker; venue-reported fill prices remain observation truth, not new-order authority. ENTRY admission uses a DDL-free in-transaction collateral preflight so any pre-SDK failure atomically rolls back command, event, envelope, and reservation. Reduce-only SELL rejects an out-of-band executable best bid even when its floor is legal. A committed V4 global-SELL publish claim is checked inside the same TRADE writer lease before EXIT command persistence. ENTRY carries exact family identity into unresolved exposure so the next global auction prices the correlated endowment without a sibling-token veto.
     write_routes:
     - canonical_position_write
     downstream:
@@ -2024,7 +2060,7 @@ files:
   src/execution/exchange_reconcile.py:
     zone: K2_runtime
     authority_role: exchange_reconciliation_sweep
-    why: R3 M5 venue-vs-journal reconciliation sweep; writes findings and linkable missing trade facts without venue commands or live venue side effects. Positive finite fill facts within the venue probability domain remain reconciliation authority even outside the proposed-order action band. External-drift suppression is reason-typed so an automatic local/chain match cannot hide a later real drift.
+    why: R3 M5 venue-vs-journal reconciliation sweep; writes findings and linkable trade facts without live venue side effects. Truly exchange-only state does not become a command, while known-position recovered EXIT orders and operator-confirmed external closes use repo-owned typed adoption/absorption helpers with creation-only events and no fabricated SUBMIT history. Recovered EXIT adoption freezes its original lot/conservation proof; each later authenticated leg is handed to the shared partial-economics reducer, so actual-price PnL advances exactly once while dust remains real exposure rather than a fabricated close. Authenticated late trade legs converge to the canonical command aggregate and exact position projection without inventing closure. Positive finite fill facts remain observation authority even outside the proposed-order action band. External-drift suppression is reason-typed so an automatic local/chain match cannot hide a later real drift.
     hazards:
     - VENUS_CONTROL_ONLY
     write_routes:
@@ -2570,7 +2606,7 @@ files:
   src/state/collateral_ledger.py:
     zone: K2_runtime
     authority_role: collateral_runtime_truth
-    why: R3 Z4 pUSD/CTF collateral snapshot and reservation ledger; separates buy collateral from sell inventory, blocks double commitment, and exposes one snapshot-level SELL assertion shared by claim-time preflight and command-time CAS.
+    why: R3 Z4 pUSD/CTF collateral snapshot and reservation ledger; separates buy collateral from sell inventory, blocks double commitment, and exposes snapshot-level assertions shared by claim-time preflight and command-time CAS. `buy_preflight_in_transaction` reuses the initialized caller transaction without schema DDL or implicit commit, preserving atomic pre-SDK rollback.
     downstream:
     - src/execution/executor.py
     - src/execution/harvester.py
@@ -2585,7 +2621,7 @@ files:
   src/state/venue_command_repo.py:
     zone: K2_runtime
     authority_role: venue_command_journal
-    why: Durable venue command/event journal; insert_command rejects order-creating BUY/SELL commands outside inclusive [0.05,0.95], and its in-memory envelope gate rejects any live shape other than GTC/GTD post-only maker before persistence while preserving CANCEL. append_trade_fact instead preserves already-realized positive finite fill economics within the venue probability domain and marks whether the observed price was inside the action band; observation truth never grants submit authority. Every live nonterminal command records one exact decision-certificate attribution, with later position commands inheriting the unique entry certificate or failing closed; R3 Z4 terminal command transitions release collateral reservations atomically; authenticated already-canceled zero-fill clearance validates command-specific absence without confusing an older same-position fill for exposure from the canceled increment; R3 U1 requires fresh executable snapshot citation before insert; R3 U2 owns append-only venue_submission_envelopes, order facts, trade facts, position lots, and provenance envelope events. Per SCH-W1.2-ORDER-STATE, insert_command also stamps venue_commands.q_version (write-once beside snapshot_id; required for live-mode ENTRY, nullable for non-entry/recovery).
+    why: Durable venue command/event journal; insert_command rejects BUY/SELL prices outside inclusive [0.05,0.95] and admits only post-only GTC/GTD makers, ENTRY BUY FOK/FAK takers, or EXIT SELL FAK takers. Typed helpers exclusively own recovered EXIT adoption, external-close absorption, and mixed-token command/fact rehome through atomic creation events or CAS provenance; callers never write journal SQL directly. append_trade_fact preserves realized positive finite fill economics and marks whether the observation was inside the action band; observation truth never grants submit authority. Every live nonterminal command records one exact decision-certificate attribution, terminal transitions release collateral reservations atomically, authenticated canceled zero-fill clearance remains command-specific, R3 U1 requires a fresh executable snapshot, and R3 U2 owns envelopes/order/trade/lot/provenance facts. q_version is write-once and required for live ENTRY but nullable for non-entry/recovery.
     write_routes:
     - venue_command_write
     downstream:

@@ -1,5 +1,5 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-08-03
+# Last reused or audited: 2026-08-09
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
 #
@@ -24,9 +24,20 @@ import tempfile
 import time
 import zlib
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Mapping, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from src.contracts.global_auction_receipt import (
+    assert_global_auction_summary_integrity,
+    global_auction_execution_binding_hash,
+    global_auction_receipt_ref_from_summary,
+)
+from src.contracts.strategy_capital_allocation import (
+    STRATEGY_LOG_UTILITY_BASIS,
+    StrategyCapitalAllocationWitness,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -6096,6 +6107,74 @@ def _current_global_auction_candidate_payload(
     )
 
 
+def _global_auction_strategy_allocation_valid(summary: Mapping[str, object]) -> bool:
+    """Rebuild the schema-21 allocation witness instead of trusting receipt text."""
+
+    raw = summary.get("strategy_capital_allocation")
+    if not isinstance(raw, Mapping):
+        return False
+    try:
+        mode = str(raw["mode"])
+        configured_value = raw["configured_value"]
+        configured_limit = raw["configured_buy_commitment_limit_usd"]
+        allocation: dict[str, object] = {"mode": mode}
+        if configured_value is not None:
+            allocation["value"] = configured_value
+        if configured_limit is not None:
+            allocation["buy_commitment_limit_usd"] = configured_limit
+        witness = StrategyCapitalAllocationWitness.build(
+            capital_basis_usd=raw["capital_basis_usd"],
+            committed_capital_usd=raw["committed_capital_usd"],
+            venue_spendable_cash_usd=raw["venue_spendable_cash_usd"],
+            allocation=allocation,
+        )
+        numeric_fields = (
+            "capital_basis_usd",
+            "allocated_equity_usd",
+            "buy_commitment_limit_usd",
+            "committed_capital_usd",
+            "utility_liquid_cash_usd",
+            "venue_spendable_cash_usd",
+            "remaining_buy_capacity_usd",
+        )
+        if any(
+            Decimal(str(raw[field])) != getattr(witness, field)
+            for field in numeric_fields
+        ):
+            return False
+        if configured_value is None:
+            configured_value_valid = witness.configured_value is None
+        else:
+            configured_value_valid = (
+                Decimal(str(configured_value)) == witness.configured_value
+            )
+        if configured_limit is None:
+            configured_limit_valid = (
+                witness.configured_buy_commitment_limit_usd is None
+            )
+        else:
+            configured_limit_valid = (
+                Decimal(str(configured_limit))
+                == witness.configured_buy_commitment_limit_usd
+            )
+        return bool(
+            configured_value_valid
+            and configured_limit_valid
+            and raw.get("allocation_version") == witness.allocation_version
+            and raw.get("capital_basis_semantics")
+            == witness.capital_basis_semantics
+            and raw.get("source") == witness.source
+            and raw.get("witness_identity") == witness.witness_identity
+        )
+    except (
+        InvalidOperation,
+        KeyError,
+        TypeError,
+        ValueError,
+    ):
+        return False
+
+
 def _latest_global_auction_candidate_counts(
     conn: object,
     *,
@@ -6146,6 +6225,51 @@ def _latest_global_auction_candidate_counts(
         schema_version = int(summary.get("schema_version") or 0)
         if schema_version < 5:
             return invalid("SCHEMA_VERSION")
+        winner_identity_present = any(
+            str(summary.get(field) or "").strip()
+            for field in (
+                "winner_event_id",
+                "winner_candidate_id",
+                "winner_actuation_identity",
+            )
+        )
+        if winner_identity_present and schema_version != 21:
+            # Schema 17-20 receipts remain readable as no-trade telemetry only;
+            # a winner identity on those rows is not an actionable receipt.
+            return invalid("WINNER_SCHEMA_VERSION")
+        if schema_version == 21:
+            try:
+                expected_execution_binding_hash = (
+                    global_auction_execution_binding_hash(summary)
+                )
+            except ValueError:
+                return invalid("EXECUTION_BINDING_FIELDS")
+            if (
+                summary.get("execution_binding_hash")
+                != expected_execution_binding_hash
+            ):
+                return invalid("EXECUTION_BINDING_HASH")
+            try:
+                assert_global_auction_summary_integrity(summary)
+            except ValueError:
+                return invalid("ARTIFACT_SUMMARY_HASH")
+            winner_candidate_id = str(
+                summary.get("winner_candidate_id") or ""
+            ).strip()
+            winner_event_id = str(summary.get("winner_event_id") or "").strip()
+            winner_actuation_identity = str(
+                summary.get("winner_actuation_identity") or ""
+            ).strip()
+            if bool(winner_candidate_id) != bool(
+                winner_event_id and winner_actuation_identity
+            ):
+                return invalid("WINNER_EXECUTION_BINDING")
+            if winner_candidate_id:
+                global_auction_receipt_ref_from_summary(
+                    decision_log_id=int(receipt_id),
+                    decision_log_mode=str(row["mode"]),
+                    summary=summary,
+                )
         if summary.get("candidate_coverage_complete") is not True:
             return invalid("COVERAGE_INCOMPLETE")
         if summary.get("candidate_condition_index_complete") is not True:
@@ -6161,21 +6285,28 @@ def _latest_global_auction_candidate_counts(
             "zlib+base64+canonical-json-v10",
             "zlib+base64+canonical-json-v11",
             "zlib+base64+canonical-json-v12",
+            "zlib+base64+canonical-json-v13",
         }:
             return invalid("ENCODING")
         holding_payload = None
         current_candidate_encodings = {
             "zlib+base64+canonical-json-v11",
             "zlib+base64+canonical-json-v12",
+            "zlib+base64+canonical-json-v13",
         }
         if candidate_encoding in current_candidate_encodings:
-            expected_schema_versions = (
-                {17, 18}
-                if candidate_encoding == "zlib+base64+canonical-json-v11"
-                else {19, 20}
-            )
+            expected_schema_versions = {
+                "zlib+base64+canonical-json-v11": {17, 18},
+                "zlib+base64+canonical-json-v12": {19, 20},
+                "zlib+base64+canonical-json-v13": {21},
+            }[candidate_encoding]
             if schema_version not in expected_schema_versions:
                 return invalid("SCHEMA_VERSION_CONTRACT")
+            if (
+                candidate_encoding == "zlib+base64+canonical-json-v13"
+                and not _global_auction_strategy_allocation_valid(summary)
+            ):
+                return invalid("STRATEGY_CAPITAL_ALLOCATION")
             if summary.get("holding_auction_coverage_encoding") != (
                 "zlib+base64+canonical-json-v2"
             ):
@@ -6203,7 +6334,10 @@ def _latest_global_auction_candidate_counts(
     try:
         rejected_indexes: set[int] = set()
         buy_candidate_ids: tuple[str, ...] = ()
-        if candidate_encoding == "zlib+base64+canonical-json-v12":
+        if candidate_encoding in {
+            "zlib+base64+canonical-json-v12",
+            "zlib+base64+canonical-json-v13",
+        }:
             buy_index = payload["buy_candidate_index"]
             expected_buy_index_size = 7 if schema_version >= 20 else 6
             if not isinstance(buy_index, list) or any(
@@ -6224,7 +6358,10 @@ def _latest_global_auction_candidate_counts(
                 return invalid("BUY_CANDIDATE_INDEX_INVALID")
         buy_candidate_count = len(buy_candidate_ids)
         for group in payload["rejected_groups"]:
-            if candidate_encoding == "zlib+base64+canonical-json-v12":
+            if candidate_encoding in {
+                "zlib+base64+canonical-json-v12",
+                "zlib+base64+canonical-json-v13",
+            }:
                 candidate_indexes = [
                     int(value) for value in group["candidate_indexes"]
                 ]
@@ -6253,7 +6390,55 @@ def _latest_global_auction_candidate_counts(
         for evaluation in payload["detailed"]:
             covered += 1
             if (
-                candidate_encoding == "zlib+base64+canonical-json-v12"
+                candidate_encoding == "zlib+base64+canonical-json-v13"
+                and evaluation.get("status") in {"SCORED", "SELECTED"}
+            ):
+                expected_growth = evaluation.get("expected_growth")
+                if not isinstance(expected_growth, dict):
+                    return invalid("EXPECTED_GROWTH_MISSING")
+                try:
+                    ruin_reduction = float(
+                        expected_growth["ruin_probability_reduction"]
+                    )
+                    evaluation_ruin_reduction = float(
+                        evaluation["ruin_probability_reduction"]
+                    )
+                except (KeyError, TypeError, ValueError):
+                    return invalid("EXPECTED_GROWTH_RUIN_INVALID")
+                if (
+                    expected_growth.get("utility_basis")
+                    != STRATEGY_LOG_UTILITY_BASIS
+                    or not math.isfinite(ruin_reduction)
+                    or not 0.0 <= ruin_reduction <= 1.0
+                    or ruin_reduction != evaluation_ruin_reduction
+                ):
+                    return invalid("EXPECTED_GROWTH_RUIN_INVALID")
+            if candidate_encoding == "zlib+base64+canonical-json-v13":
+                point_counterfactual = evaluation.get(
+                    "sell_point_counterfactual"
+                )
+                if isinstance(point_counterfactual, dict):
+                    try:
+                        point_ruin = float(
+                            point_counterfactual[
+                                "ruin_probability_reduction"
+                            ]
+                        )
+                    except (KeyError, TypeError, ValueError):
+                        return invalid("SELL_POINT_RUIN_INVALID")
+                    if (
+                        point_counterfactual.get("utility_basis")
+                        != STRATEGY_LOG_UTILITY_BASIS
+                        or not math.isfinite(point_ruin)
+                        or not 0.0 <= point_ruin <= 1.0
+                    ):
+                        return invalid("SELL_POINT_RUIN_INVALID")
+            if (
+                candidate_encoding
+                in {
+                    "zlib+base64+canonical-json-v12",
+                    "zlib+base64+canonical-json-v13",
+                }
                 and evaluation.get("action") == "BUY"
             ):
                 candidate_id = str(evaluation.get("candidate_id") or "")
@@ -6314,7 +6499,10 @@ def _latest_global_auction_candidate_counts(
                     )
                 ):
                     return invalid("SELL_EXPECTED_AUTHORITY")
-        if candidate_encoding == "zlib+base64+canonical-json-v12":
+        if candidate_encoding in {
+            "zlib+base64+canonical-json-v12",
+            "zlib+base64+canonical-json-v13",
+        }:
             rejected_ids = {
                 buy_candidate_ids[index] for index in rejected_indexes
             }

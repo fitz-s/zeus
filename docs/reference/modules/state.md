@@ -53,7 +53,7 @@ This is the strongest code truth surface after executable tests. Delivery law al
 | File / surface | Role |
 |---|---|
 | `db.py` | Canonical write API and high-blast-radius state anchor, including R3 M5 `exchange_reconcile_findings` and R3 R1 `settlement_commands` schema. |
-| `write_coordinator.py` | Runtime DB write coordinator: one writer gate per DB file across LIVE/BULK classes, canonical DB-set lease order, single-DB `BEGIN IMMEDIATE` transactions, and lease telemetry. Price-channel world+trade write units are migrated; remaining production writers still need coverage. |
+| `write_coordinator.py` | Runtime DB write coordinator: one writer gate per DB file across LIVE/BULK classes, canonical DB-set lease order, single-DB `BEGIN IMMEDIATE` transactions, and lease telemetry. Pre-SDK pUSD admission uses a DDL-free collateral read so schema initialization cannot implicitly commit that transaction. Price-channel world+trade write units are migrated; remaining production writers still need coverage. |
 | `schema/execution_feasibility_evidence_schema.py` | Trade quote evidence append table plus compact latest-state mirror for hot pre-submit freshness reads. |
 | `snapshot_repo.py` | Append-only executable market snapshot journal plus `executable_market_snapshot_latest`, a compact latest-state mirror for bounded refresh-priority reads. |
 | `ledger.py` | Append-only economic/lifecycle event substrate. |
@@ -64,7 +64,7 @@ This is the strongest code truth surface after executable tests. Delivery law al
 | `portfolio.py / portfolio_loader_policy.py` | Read model and load policy for live holdings. |
 | `canonical_write.py / chronicler.py / truth_files.py` | Write discipline, chronicle, and derived compatibility surfaces. |
 | `collateral_ledger.py` | Z4 pUSD/CTF collateral snapshots and reservations; fail-closed pre-submit truth. |
-| `venue_command_repo.py` | Durable venue command/event journal plus R3 U2 raw provenance projections (`venue_submission_envelopes`, order facts, trade facts, position lots, provenance envelope events). R3 M1 keeps command-side transitions grammar-additive and leaves order/trade facts in U2. R3 M2 adds economic-intent duplicate lookup for unresolved `SUBMIT_UNKNOWN_SIDE_EFFECT` commands and persists acked `venue_order_id` from append-event payloads. |
+| `venue_command_repo.py` | Durable venue command/event journal plus R3 U2 raw provenance projections (`venue_submission_envelopes`, order facts, trade facts, position lots, provenance envelope events). It exclusively owns typed `VENUE_ORDER_ADOPTED` / `EXTERNAL_OPERATOR_CLOSE_ABSORBED` creation events and the atomic mixed-token command/fact rehome CAS; these repair facts never forge ordinary SUBMIT/ACK transitions. R3 M2 adds economic-intent duplicate lookup for unresolved `SUBMIT_UNKNOWN_SIDE_EFFECT` commands and persists acked `venue_order_id` from append-event payloads. |
 | `job_run_repo.py / source_run_repo.py / readiness_repo.py / market_topology_repo.py` | PR45b data-daemon readiness substrate: durable job/source run provenance, scoped readiness verdicts, and current market-topology authority state. Missing or expired readiness defaults to `UNKNOWN_BLOCKED`. |
 
 ## 10. Relevant tests
@@ -93,9 +93,10 @@ This is the strongest code truth surface after executable tests. Delivery law al
 - Append event before projection; never let derived JSON outrank canonical DB/event truth.
 - Unknown chain status is not the same as known-empty chain status.
 - Lifecycle phases are enum-backed and bounded by law, not arbitrary strings.
-- Void/quarantine/admin-close are not ordinary holding states.
+- `voided` and `admin_closed` are terminal phases. `quarantined` is retired from `LifecyclePhase` and no writer may mint it; disputes retain their true phase and use a typed `ReviewWorkItem`.
 - pUSD buy collateral and CTF sell inventory are distinct state truths; neither substitutes for the other.
 - Terminal venue command states must release collateral reservations in the same append-event transaction.
+- Late authenticated trade legs converge through the deduplicated canonical command aggregate and position projection; out-of-order legs never mint an invented closure or terminal event.
 - A post-side-effect submit exception is not semantic rejection; it blocks duplicate submits until recovery proves venue state or records safe-replay permission.
 - RED force-exit durable CANCEL proxy commands are emitted only through `cycle_runner._execute_force_exit_sweep`; RiskGuard does not write venue commands directly.
 - Settlement/redeem command failure is not lifecycle settlement; only canonical settlement paths may terminalize positions.

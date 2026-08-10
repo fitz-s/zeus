@@ -8,7 +8,9 @@ import math
 import pytest
 
 from src.contracts import Direction, ExecutionIntent
+from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
 from src.contracts.slippage_bps import SlippageBps
+from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.decision_kernel.canonicalization import (
     qkernel_current_state_identity_hash,
     qkernel_global_current_state_rejection_reason,
@@ -46,6 +48,27 @@ def _econ(**overrides) -> dict:
     return payload
 
 
+def _global_receipt_payload(
+    *,
+    winner_event_id: str,
+    winner_candidate_id: str,
+    winner_actuation_identity: str,
+    selection_epoch_identity: str,
+) -> dict[str, object]:
+    return GlobalAuctionReceiptRef(
+        decision_log_id=41,
+        decision_log_mode="global_single_order_auction",
+        receipt_hash="a" * 64,
+        execution_binding_hash="b" * 64,
+        artifact_summary_hash="c" * 64,
+        schema_version=21,
+        winner_event_id=winner_event_id,
+        winner_candidate_id=winner_candidate_id,
+        winner_actuation_identity=winner_actuation_identity,
+        selection_epoch_identity=selection_epoch_identity,
+    ).as_payload()
+
+
 def _current_state_econ(**overrides) -> dict:
     current = dict(
         decision_id="decision-current-1",
@@ -60,8 +83,10 @@ def _current_state_econ(**overrides) -> dict:
         selection_guard_cell_key="current-sample-1",
         selection_guard_n=64,
         global_actuation_identity="global-current-1",
+        global_winner_event_id="event-current-1",
         global_economic_identity="global-economic-current-1",
         global_optimum_semantics="CUT_TIME_GLOBAL_OPTIMUM",
+        global_execution_mode="TAKER_LIMIT",
         global_candidate_id="candidate-current-1",
         global_bin_id="bin-1",
         global_universe_witness_identity="universe-current-1",
@@ -96,6 +121,35 @@ def _current_state_econ(**overrides) -> dict:
         global_terminal_payoff_semantics="BINARY_0_1",
     )
     current.update(overrides)
+    current.setdefault("global_ruin_probability_reduction", 0.0)
+    current.setdefault("global_terminal_ruin_probability_reduction", 0.0)
+    current.setdefault(
+        "global_proposal_expected_delta_log_wealth",
+        current["global_robust_delta_log_wealth"],
+    )
+    current.setdefault(
+        "global_proposal_expected_ev_usd",
+        current["global_robust_ev_usd"],
+    )
+    current.setdefault("global_proposal_capital_lock_hours", 1.0)
+    current.setdefault(
+        "global_proposal_expected_log_growth_per_hour",
+        current["global_proposal_expected_delta_log_wealth"]
+        / current["global_proposal_capital_lock_hours"],
+    )
+    current.setdefault(
+        "global_proposal_expected_capital_efficiency",
+        current["global_proposal_expected_delta_log_wealth"]
+        / float(current["global_expected_cost_usd"]),
+    )
+    current.setdefault("global_proposal_fill_semantics", "IMMEDIATE_FILL")
+    current.setdefault("global_utility_basis", STRATEGY_LOG_UTILITY_BASIS)
+    current["global_auction_receipt"] = _global_receipt_payload(
+        winner_event_id=current["global_winner_event_id"],
+        winner_candidate_id=current["global_candidate_id"],
+        winner_actuation_identity=current["global_actuation_identity"],
+        selection_epoch_identity=current["global_selection_epoch_identity"],
+    )
     payload = _econ(**current)
     for legacy_field in (
         "delta_u_at_min",
@@ -155,6 +209,10 @@ def _current_state_mean_buy_econ(**overrides) -> dict:
         global_expected_delta_log_wealth=expected_du,
         global_expected_ev_usd=action * shares - expected_cost,
         global_expected_capital_efficiency=expected_du / expected_cost,
+        global_proposal_expected_delta_log_wealth=expected_du,
+        global_proposal_expected_ev_usd=action * shares - expected_cost,
+        global_proposal_expected_log_growth_per_hour=expected_du,
+        global_proposal_expected_capital_efficiency=expected_du / expected_cost,
         global_cut_time_win_probability_mean=action,
         global_cut_time_loss_probability_mean=1.0 - action,
         global_terminal_win_probability_mean=action,
@@ -1093,7 +1151,7 @@ def test_entry_economics_current_state_winner_ignores_legacy_profit_density_floo
     ("price", "q_lcb", "shares"),
     ((0.001, 0.80, 1000.0), (0.999, 1.0, 10.0)),
 )
-def test_entry_economics_current_state_tail_price_requires_economics_not_nominal_band(
+def test_entry_economics_current_state_tail_price_cannot_bypass_absolute_band(
     direction,
     side,
     price,
@@ -1144,15 +1202,14 @@ def test_entry_economics_current_state_tail_price_requires_economics_not_nominal
         actionable_payload={"qkernel_execution_economics": economics},
     )
 
-    assert verdict["allowed"] is True
-    assert verdict["details"]["global_limit_bound_authorized"] is True
-    assert verdict["details"]["submit_edge"] == pytest.approx(edge)
+    assert verdict["allowed"] is False
+    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
 
 
 def test_entry_economics_current_state_tail_still_requires_positive_robust_utility():
-    price = 0.999
+    price = 0.95
     q_lcb = 1.0
-    edge = 0.001
+    edge = 0.05
     shares = 10.0
     economics = _current_state_econ(
         side="YES",
@@ -1188,6 +1245,7 @@ def test_entry_economics_current_state_tail_still_requires_positive_robust_utili
             q_lcb_5pct=q_lcb,
             expected_edge=edge,
             min_entry_price=0.10,
+            min_expected_profit_usd=1.0,
             executable_snapshot_min_tick_size="0.001",
             qkernel_execution_economics=economics,
         ),
@@ -1260,6 +1318,7 @@ def test_current_state_mean_buy_accepts_positive_expected_edge_with_negative_lcb
             "direction": "buy_yes",
             "selection_authority_applied": "qkernel_spine",
             "qkernel_execution_economics": economics,
+            "global_auction_receipt": economics["global_auction_receipt"],
         },
         q_live=0.70,
         q_lcb=0.35,
@@ -1287,7 +1346,7 @@ def test_current_state_mean_buy_accepts_positive_expected_edge_with_negative_lcb
     assert taker_quality["allowed"] is True
 
 
-def test_current_state_mean_maker_binds_fill_weighted_objective():
+def test_current_state_mean_maker_requires_current_fill_witness():
     fill_probability = 0.19
     capital_lock_hours = 2.0
     economics = _current_state_mean_buy_econ(
@@ -1324,24 +1383,7 @@ def test_current_state_mean_maker_binds_fill_weighted_objective():
             economics,
             direction="buy_yes",
         )
-        is None
-    )
-
-    tampered = dict(
-        economics,
-        global_proposal_expected_ev_usd=(
-            economics["global_proposal_expected_ev_usd"] + 0.01
-        ),
-    )
-    tampered["current_state_identity_hash"] = qkernel_current_state_identity_hash(
-        tampered
-    )
-    assert (
-        qkernel_global_current_state_rejection_reason(
-            tampered,
-            direction="buy_yes",
-        )
-        == "maker_objective_identity"
+        == "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
     )
 
 

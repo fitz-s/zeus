@@ -41,11 +41,12 @@ does NOT try to distinguish "structurally unpublished at this cycle" (JMA at 06Z
 "transient mid-capture failure at a cycle the provider normally publishes" (gfs HTTP 400 at
 00Z). Building that distinction would require a per-provider publication-cadence table — a new
 guessed-constant authority of exactly the class the 2026-06-11 run-selection rework killed.
-Instead the freshness horizon admits both: the previous_runs row must sit at the SAME
-source_cycle_time (the primary freshness anchor — a different cycle's row never leaks, pinned
-since edc598b440) AND its capture must be recent relative to that cycle
+Instead the freshness horizon admits both: a carrier-bound row must not be newer than the
+selected cycle, and a source-clock row must have been possessed by the decision instant.  The
+selected-cycle row wins when present; otherwise the newest eligible prior cycle may serve, and
+its capture must be recent relative to its own served cycle
 (``PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS``). A transiently-failed provider is therefore
-served from its freshest possessed run too — 没有新的就用老的: serving the one-run-older value
+served from its freshest eligible possessed run too — 没有新的就用老的: serving the one-run-older value
 of the SAME de-biased product beats dropping the instrument and inflating sigma, and the honest
 ``served_via`` provenance + the lead-bucketed residual variance carry the cost. The horizon is
 belt-and-suspenders against anomalous stale-keyed rows (e.g. a backfill captured a day after
@@ -59,9 +60,9 @@ from dataclasses import dataclass
 from datetime import datetime
 
 # Freshness horizon for a previous_runs substitution: the row's captured_at may be at most this
-# many hours after its (== the selected) source_cycle_time. Live extras captures land 0-9h after
-# the cycle (e.g. Beijing 06Z captured 14:06Z = 8.1h); anything beyond 24h is an anomalous
-# stale-keyed row, not a live capture, and is rejected. Cycles themselves are bounded at 30h by
+# many hours after its served source_cycle_time. Live extras captures land 0-9h after the cycle
+# (e.g. Beijing 06Z captured 14:06Z = 8.1h); anything beyond 24h is an anomalous stale-keyed row,
+# not a live capture, and is rejected. Cycles themselves are bounded at 30h by
 # replacement_source_cycle_max_age_hours, so 24h post-cycle capture recency is strictly tighter.
 PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS = 24.0
 

@@ -1,17 +1,19 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-01; last_reused=2026-08-01
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-01
+# Last reused/audited: 2026-08-10
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + 2026-05-17 public CLOB HTTP reuse for live opening_hunt backpressure.
+#                  + 2026-08-10 certified taker/maker mode matrix and adapter-owned heartbeat transport.
 """R3 Z2 Polymarket V2 adapter antibodies."""
 
 from __future__ import annotations
 
 import asyncio
+import ast
 import hashlib
 import importlib
 import json
@@ -2003,6 +2005,7 @@ def test_polymarket_client_honors_q1_egress_evidence_env(monkeypatch, tmp_path):
         lambda: {"private_key": "0xabc", "funder_address": "0xfunder"},
     )
     monkeypatch.setenv("POLYMARKET_CLOB_V2_Q1_EGRESS_EVIDENCE", str(evidence))
+    monkeypatch.setenv("POLYMARKET_CLOB_V2_SIGNATURE_TYPE", "2")
 
     adapter = pm.PolymarketClient()._ensure_v2_adapter()
 
@@ -2031,8 +2034,17 @@ def test_adapter_module_imports_without_py_clob_client_v2_installed(monkeypatch)
 def test_py_clob_client_v2_import_is_confined_to_venue_adapter():
     offenders = []
     for path in Path("src").rglob("*.py"):
-        text = path.read_text()
-        if "py_clob_client_v2" in text and path.as_posix() != "src/venue/polymarket_v2_adapter.py":
+        tree = ast.parse(path.read_text(), filename=path.as_posix())
+        imported_modules = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported_modules.append(node.module)
+        if any(
+            module == "py_clob_client_v2" or module.startswith("py_clob_client_v2.")
+            for module in imported_modules
+        ) and path.as_posix() != "src/venue/polymarket_v2_adapter.py":
             offenders.append(path.as_posix())
     assert offenders == []
 
@@ -2899,19 +2911,28 @@ def test_fak_no_match_400_classifier_remains_available_for_recovery():
 
 
 @pytest.mark.parametrize("order_type", ["FAK", "FOK"])
-def test_taker_capable_order_rejects_before_signing_or_post(tmp_path, order_type):
+def test_buy_taker_capable_order_crosses_all_sdk_boundaries(
+    tmp_path, monkeypatch, order_type
+):
     fake = FakeTwoStepClient()
     adapter, _ = _adapter(tmp_path, fake)
     envelope = adapter.create_submission_envelope(
         _intent(), FakeSnapshot(), order_type=order_type, post_only=False
     )
+    monkeypatch.setattr(
+        "src.venue.polymarket_v2_adapter._deterministic_v2_order_id",
+        lambda *args, **kwargs: "ord-two-step",
+    )
 
     result = _submit(adapter, envelope)
 
-    assert result.status == "rejected"
-    assert result.error_code == "LIVE_FILL_PRICE_UNBOUNDED"
-    assert f"order_type={order_type}:post_only=False" in (result.error_message or "")
-    assert fake.calls == []
+    assert result.status == "accepted"
+    assert result.envelope.order_id == "ord-two-step"
+    assert any(call[0] == "create_order" for call in fake.calls)
+    assert any(
+        call[0] == "post_order" and call[2] == order_type and call[3] is False
+        for call in fake.calls
+    )
 
 
 def test_final_sdk_boundary_independently_rejects_non_maker_before_post(
@@ -2943,6 +2964,26 @@ def test_final_sdk_boundary_independently_rejects_non_maker_before_post(
     assert "LIVE_FILL_PRICE_UNBOUNDED:FINAL_SDK_BOUNDARY" in (result.error_message or "")
     assert any(call[0] == "create_order" for call in fake.calls)
     assert not any(call[0] == "post_order" for call in fake.calls)
+
+
+@pytest.mark.parametrize(
+    ("side", "order_type"),
+    [("BUY", "GTC"), ("BUY", "GTD"), ("SELL", "FOK")],
+)
+def test_illegal_side_order_type_tuple_fails_closed_before_sdk(
+    tmp_path, side, order_type
+):
+    fake = FakeTwoStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type=order_type, post_only=False
+    ).with_updates(side=side)
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "LIVE_FILL_PRICE_UNBOUNDED"
+    assert fake.calls == []
 
 
 def test_final_sdk_boundary_allows_fak_sell_with_limit_price_floor(
@@ -2985,8 +3026,8 @@ def test_fok_one_step_only_client_fails_closed_before_submit(tmp_path):
     result = _submit(adapter, envelope)
 
     assert result.status == "rejected"
-    assert result.error_code == "LIVE_FILL_PRICE_UNBOUNDED"
-    assert "order_type=FOK:post_only=False" in (result.error_message or "")
+    assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
+    assert "pre-POST signed identity persistence" in (result.error_message or "")
     assert not any(call[0] == "create_and_post_order" for call in fake.calls)
 
 
@@ -3717,6 +3758,8 @@ def test_polymarket_client_requires_pre_post_identity_persister(tmp_path):
 def test_polymarket_client_fee_rate_accepts_current_base_fee_shape(monkeypatch):
     from src.data import polymarket_client as pm
 
+    pm._FEE_RATE_CACHE.clear()
+
     class Response:
         def raise_for_status(self):
             return None
@@ -3736,14 +3779,13 @@ def test_polymarket_client_fee_rate_accepts_current_base_fee_shape(monkeypatch):
 
     assert client.get_fee_rate("token-1") == pytest.approx(0.003)
     assert client.get_fee_rate_details("token-1")["fee_rate_bps"] == pytest.approx(30.0)
-    assert calls == [
-        (f"{pm.CLOB_BASE}/fee-rate", {"token_id": "token-1"}),
-        (f"{pm.CLOB_BASE}/fee-rate", {"token_id": "token-1"}),
-    ]
+    assert calls == [(f"{pm.CLOB_BASE}/fee-rate", {"token_id": "token-1"})]
 
 
 def test_polymarket_client_fee_rate_rejects_malformed_shape(monkeypatch):
     from src.data import polymarket_client as pm
+
+    pm._FEE_RATE_CACHE.clear()
 
     class Response:
         def raise_for_status(self):
@@ -3766,6 +3808,8 @@ def test_polymarket_client_fee_rate_rejects_malformed_shape(monkeypatch):
 
 def test_polymarket_client_reuses_public_http_client_for_clob_reads(monkeypatch):
     from src.data import polymarket_client as pm
+
+    pm._FEE_RATE_CACHE.clear()
 
     class Response:
         def __init__(self, payload):
@@ -4065,9 +4109,22 @@ def test_old_v1_sdk_import_is_removed_from_live_client_paths():
     live_paths = [
         Path("src/data/polymarket_client.py"),
         Path("src/execution/executor.py"),
-        Path("src/execution/exit_triggers.py"),
+        Path("src/execution/exit_lifecycle.py"),
     ]
-    offenders = [path.as_posix() for path in live_paths if "py_clob_client" in path.read_text()]
+    offenders = []
+    for path in live_paths:
+        tree = ast.parse(path.read_text(), filename=path.as_posix())
+        imported_modules = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported_modules.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported_modules.append(node.module)
+        if any(
+            module == "py_clob_client" or module.startswith("py_clob_client.")
+            for module in imported_modules
+        ):
+            offenders.append(path.as_posix())
     assert offenders == []
 
 
@@ -4298,7 +4355,7 @@ class TestSubmitBatch:
         assert all(r.status == "rejected" and r.error_code == "V2_PRE_SUBMIT_EXCEPTION" for r in results)
         assert not any(c[0] == "post_orders" for c in fake.calls)
 
-    def test_fok_batch_rejects_before_signing_or_post(self, tmp_path):
+    def test_fok_batch_crosses_final_sdk_boundary(self, tmp_path):
         fake = FakeBatchTwoStepClient(
             post_orders_response=[{"orderID": "ord-0", "status": "LIVE"}]
         )
@@ -4309,11 +4366,11 @@ class TestSubmitBatch:
 
         results = adapter.submit_batch([envelope])
 
-        assert results[0].status == "rejected"
-        assert results[0].error_code == "LIVE_FILL_PRICE_UNBOUNDED"
-        assert fake.calls == []
+        assert results[0].status == "accepted"
+        assert any(c[0] == "create_order" for c in fake.calls)
+        assert any(c[0] == "post_orders" for c in fake.calls)
 
-    def test_fok_batch_rejects_without_book_or_post(self, tmp_path):
+    def test_fok_batch_does_not_reintroduce_legacy_book_gate(self, tmp_path):
         class ThinBatchClient(FakeBatchTwoStepClient):
             def get_order_book(self, token_id):
                 self.calls.append(("get_order_book", token_id))
@@ -4331,9 +4388,9 @@ class TestSubmitBatch:
 
         results = adapter.submit_batch([envelope])
 
-        assert results[0].status == "rejected"
-        assert results[0].error_code == "LIVE_FILL_PRICE_UNBOUNDED"
-        assert fake.calls == []
+        assert results[0].status == "unmapped"
+        assert results[0].error_code == "BATCH_RESPONSE_UNMAPPED"
+        assert any(c[0] == "post_orders" for c in fake.calls)
 
     def test_post_orders_exception_propagates_as_ambiguous_side_effect(self, tmp_path):
         fake = FakePostOrdersExceptionClient()

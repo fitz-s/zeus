@@ -552,6 +552,34 @@ def run_reconcile_sweep(
         order_id = _order_id(order)
         if not order_id:
             continue
+        # Re-snapshot adopted ghost EXIT orders so the reducer has an
+        # authenticated order aggregate for every RESTING/TERMINAL tick.  The
+        # first adoption already writes this fact; subsequent fresh reads must
+        # advance it before durable trade-leg economics are folded.
+        existing_local = local_by_order.get(order_id)
+        if existing_local is not None and str(existing_local.get("command_id") or "").startswith("recovered_exit:"):
+            raw_local = _raw(order)
+            matched_local = _order_matched_size(raw_local)
+            original_local = _positive_decimal_or_none(
+                _first_present(raw_local, "original_size", "size", default=None)
+            )
+            if original_local is not None and matched_local > Decimal("0"):
+                remaining_local = max(original_local - matched_local, Decimal("0"))
+                from src.state.venue_command_repo import append_order_fact
+
+                append_order_fact(
+                    conn,
+                    venue_order_id=order_id,
+                    command_id=str(existing_local["command_id"]),
+                    state=("MATCHED" if remaining_local == Decimal("0") else "PARTIALLY_MATCHED"),
+                    remaining_size=_decimal_text(remaining_local),
+                    matched_size=_decimal_text(matched_local),
+                    source="REST",
+                    observed_at=observed,
+                    venue_timestamp=observed,
+                    raw_payload_hash=_hash_payload(raw_local),
+                    raw_payload_json=raw_local,
+                )
         if order_id not in local_by_order:
             raw = _raw(order)
             recovered = _recover_live_ghost_sell_order_for_known_position(
@@ -730,6 +758,22 @@ def run_reconcile_sweep(
         adapter, conn, open_order_ids, trades=trades if trades_available else None, observed_at=observed
     )
     reconcile_recorded_maker_fill_economics(conn, observed_at=observed)
+    # Fold adopted ghost-SELL economics only after every generic projection
+    # writer has finished. The fresh account residual and its chain timestamp
+    # must be the final canonical projection of this account snapshot; an
+    # earlier fold could be overwritten by the normal fill-reconcile lane.
+    try:
+        from src.execution.command_recovery import reconcile_recovered_partial_exit_economics
+
+        reconcile_recovered_partial_exit_economics(
+            conn,
+            observed_at=observed.isoformat(),
+            fresh_exchange_positions=(
+                exchange_positions if positions_available else None
+            ),
+        )
+    except Exception:
+        logger.exception("exchange_reconcile: recovered partial EXIT reducer failed")
     return findings
 
 
@@ -1126,15 +1170,35 @@ def _recover_live_ghost_sell_order_for_known_position(
         return None
 
     command_id = "recovered_exit:" + sha256(order_id.encode()).hexdigest()[:24]
-    existing = conn.execute(
-        "SELECT * FROM venue_commands WHERE command_id = ? OR venue_order_id = ? LIMIT 1",
-        (command_id, order_id),
-    ).fetchone()
-    if existing is not None:
-        return dict(existing)
-
     observed_text = observed_at.isoformat()
     decision_id = str(entry["decision_id"] or f"m5_recovered_exit:{order_id}")
+    remaining_size = max(original_size - matched_size, Decimal("0"))
+    baseline_shares = _position_shares_for_recovery(position_map)
+    baseline_cost_basis = _positive_decimal_or_none(position_map.get("cost_basis_usd"))
+    baseline_entry_price = _positive_decimal_or_none(position_map.get("entry_price"))
+    # A recovered EXIT is admissible only with a complete immutable lot basis.
+    # The conservation proof is captured before the position is reduced to the
+    # fresh exchange residual and is later consumed by command_recovery's
+    # exactly-once economics reducer.
+    baseline = {
+        "position_id": str(position_map["position_id"]),
+        "command_id": command_id,
+        "venue_order_id": order_id,
+        "baseline_shares": _decimal_text(baseline_shares),
+        "baseline_cost_basis_usd": (
+            _decimal_text(baseline_cost_basis) if baseline_cost_basis is not None else None
+        ),
+        "baseline_entry_price": (
+            _decimal_text(baseline_entry_price) if baseline_entry_price is not None else None
+        ),
+        "matched_sell_shares": _decimal_text(matched_size),
+        "first_conservation_proof": {
+            "baseline_shares": _decimal_text(baseline_shares),
+            "exchange_residual_shares": _decimal_text(exchange_size),
+            "matched_sell_shares": _decimal_text(matched_size),
+            "equation": "baseline_shares=exchange_residual_shares+matched_sell_shares",
+        },
+    }
     recovery_payload = {
         "schema_version": 1,
         "reason": "m5_live_ghost_sell_order_recovered_for_known_position",
@@ -1146,87 +1210,31 @@ def _recover_live_ghost_sell_order_for_known_position(
         "matched_sell_size": _decimal_text(matched_size),
         "known_position_shares": _decimal_text(_position_shares_for_recovery(position_map)),
         "source_entry_command_id": entry["command_id"],
+        "exchange_order": dict(raw),
+        "recovered_exit_baseline": baseline,
     }
-    conn.execute(
-        """
-        INSERT INTO venue_commands (
-            command_id, snapshot_id, envelope_id, position_id, decision_id,
-            idempotency_key, intent_kind, market_id, token_id, side, size, price,
-            venue_order_id, state, created_at, updated_at, review_required_reason
-        ) VALUES (?, ?, ?, ?, ?, ?, 'EXIT', ?, ?, 'SELL', ?, ?, ?, 'INTENT_CREATED', ?, ?, ?)
-        """,
-        (
-            command_id,
-            str(entry["snapshot_id"]),
-            str(entry["envelope_id"]),
-            str(position_map["position_id"]),
-            decision_id,
-            command_id,
-            str(entry["market_id"] or raw.get("market") or token_id),
-            token_id,
-            float(original_size),
-            float(price),
-            order_id,
-            observed_text,
-            observed_text,
-            "m5_live_ghost_sell_recovery",
-        ),
-    )
-    conn.execute(
-        """
-        INSERT INTO venue_command_events (
-            event_id, command_id, sequence_no, event_type, occurred_at, payload_json, state_after
-        ) VALUES (?, ?, 1, 'INTENT_CREATED', ?, ?, 'INTENT_CREATED')
-        """,
-        (
-            uuid.uuid4().hex[:16],
-            command_id,
-            observed_text,
-            json.dumps(recovery_payload, sort_keys=True),
-        ),
-    )
+    from src.execution.command_bus import RecoveredExitOrderAdoption
+    from src.state.venue_command_repo import adopt_recovered_exit_order
 
-    from src.state.venue_command_repo import append_event, append_order_fact
-
-    append_event(
+    adopt_recovered_exit_order(
         conn,
-        command_id=command_id,
-        event_type="SUBMIT_REQUESTED",
-        occurred_at=observed_text,
-        payload=recovery_payload,
-    )
-    append_event(
-        conn,
-        command_id=command_id,
-        event_type="SUBMIT_ACKED",
-        occurred_at=observed_text,
-        payload={"venue_order_id": order_id, **recovery_payload},
-    )
-    remaining_size = max(original_size - matched_size, Decimal("0"))
-    append_order_fact(
-        conn,
-        venue_order_id=order_id,
-        command_id=command_id,
-        state="PARTIALLY_MATCHED",
-        remaining_size=_decimal_text(remaining_size),
-        matched_size=_decimal_text(matched_size),
-        source="REST",
-        observed_at=observed_at,
-        venue_timestamp=observed_at,
-        raw_payload_hash=_hash_payload({"exchange_order": dict(raw), **recovery_payload}),
-        raw_payload_json={"exchange_order": dict(raw), **recovery_payload},
-    )
-    append_event(
-        conn,
-        command_id=command_id,
-        event_type="PARTIAL_FILL_OBSERVED",
-        occurred_at=observed_text,
-        payload={
-            "venue_order_id": order_id,
-            "matched_size": _decimal_text(matched_size),
-            "remaining_size": _decimal_text(remaining_size),
-            **recovery_payload,
-        },
+        RecoveredExitOrderAdoption(
+            command_id=command_id,
+            venue_order_id=order_id,
+            position_id=str(position_map["position_id"]),
+            decision_id=decision_id,
+            market_id=str(entry["market_id"] or raw.get("market") or token_id),
+            token_id=token_id,
+            size=str(original_size),
+            matched_size=str(matched_size),
+            remaining_size=str(remaining_size),
+            resting_order_price=str(price),
+            observed_at=observed_text,
+            source_entry_command_id=str(entry["command_id"]),
+            source_entry_snapshot_id=str(entry["snapshot_id"] or "") or None,
+            source_entry_envelope_id=str(entry["envelope_id"] or "") or None,
+            provenance=recovery_payload,
+        ),
     )
     _restore_position_to_pending_exit_for_recovered_sell(
         conn,
@@ -1408,6 +1416,16 @@ def _restore_position_to_pending_exit_for_recovered_sell(
     else:
         remaining_cost_basis = exchange_size * entry_price
     observed_text = observed_at.isoformat()
+    existing_recovery_event = conn.execute(
+        """
+        SELECT 1 FROM position_events
+         WHERE position_id = ? AND command_id = ?
+           AND event_type = 'EXIT_INTENT'
+           AND caused_by = 'm5_live_ghost_sell_recovery'
+         LIMIT 1
+        """,
+        (position_id, command_id),
+    ).fetchone()
     conn.execute(
         """
         UPDATE position_current
@@ -1415,6 +1433,7 @@ def _restore_position_to_pending_exit_for_recovered_sell(
                shares = ?,
                chain_shares = ?,
                cost_basis_usd = ?,
+               chain_cost_basis_usd = ?,
                exit_reason = ?,
                order_id = ?,
                order_status = 'sell_pending_confirmation',
@@ -1426,12 +1445,15 @@ def _restore_position_to_pending_exit_for_recovered_sell(
             float(exchange_size),
             float(exchange_size),
             float(remaining_cost_basis) if remaining_cost_basis is not None else None,
+            float(remaining_cost_basis) if remaining_cost_basis is not None else None,
             "M5_LIVE_GHOST_SELL_RECOVERY",
             venue_order_id,
             observed_text,
             position_id,
         ),
     )
+    if existing_recovery_event is not None:
+        return
     seq_row = conn.execute(
         "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events WHERE position_id = ?",
         (position_id,),
@@ -1454,6 +1476,29 @@ def _restore_position_to_pending_exit_for_recovered_sell(
         "phase_before": phase_before,
         "phase_after": "pending_exit",
         "source_module": "src.execution.exchange_reconcile",
+        "recovered_exit_baseline": {
+            "position_id": position_id,
+            "command_id": command_id,
+            "venue_order_id": venue_order_id,
+            "baseline_shares": _decimal_text(_position_shares_for_recovery(position)),
+            "baseline_cost_basis_usd": (
+                _decimal_text(_positive_decimal_or_none(position.get("cost_basis_usd")))
+                if _positive_decimal_or_none(position.get("cost_basis_usd")) is not None
+                else None
+            ),
+            "baseline_entry_price": (
+                _decimal_text(_positive_decimal_or_none(position.get("entry_price")))
+                if _positive_decimal_or_none(position.get("entry_price")) is not None
+                else None
+            ),
+            "matched_sell_shares": _decimal_text(matched_size),
+            "first_conservation_proof": {
+                "baseline_shares": _decimal_text(_position_shares_for_recovery(position)),
+                "exchange_residual_shares": _decimal_text(exchange_size),
+                "matched_sell_shares": _decimal_text(matched_size),
+                "equation": "baseline_shares=exchange_residual_shares+matched_sell_shares",
+            },
+        },
     }
     conn.execute(
         """
@@ -1640,11 +1685,12 @@ def _absorb_operator_external_close(
 
 
 def _assert_no_live_reservation_for_carve_out(conn: sqlite3.Connection, command_id: str) -> None:
-    """Write-gate for the sole terminalization-centrality carve-out (SCH-W1.1-CAS-LEDGER).
+    """Caller-side incident guard for an operator absorption repair.
 
-    Raises if a live (unreleased, unconverted) collateral reservation exists for
-    a command_id about to be minted terminal by a direct write instead of
-    append_event.
+    The typed repository helper owns the command/trade journal write.  This
+    exchange-reconcile check remains outside the repo because it protects the
+    operator-specific carve-out from an unexpected reservation before that
+    helper is invoked; ordinary repo callers do not perform this assertion.
     """
     try:
         row = conn.execute(
@@ -1680,8 +1726,6 @@ def _book_external_operator_close_exit_fact(
     deterministic command_id / trade_id, so a re-sweep does not double-book.
     """
 
-    from src.state.venue_command_repo import append_trade_fact
-
     entry = conn.execute(
         """
         SELECT command_id, snapshot_id, envelope_id, position_id, decision_id,
@@ -1697,57 +1741,9 @@ def _book_external_operator_close_exit_fact(
     ).fetchone()
     if entry is None:
         return False
-    command_id = "external_operator_close:" + sha256(token_id.encode()).hexdigest()[:24]
-    trade_id = "external_operator_close_fact:" + sha256(token_id.encode()).hexdigest()[:24]
-    existing = conn.execute(
-        "SELECT 1 FROM venue_trade_facts WHERE trade_id = ? LIMIT 1",
-        (trade_id,),
-    ).fetchone()
-    if existing is not None:
-        return False
-    # Insert the synthetic EXIT/SELL command via a DIRECT write, NOT insert_command():
-    # insert_command is the U1 pre-side-effect SUBMISSION gate (snapshot freshness, tick
-    # alignment, price-in-(0,1)) — entirely inappropriate for a reconciliation correction
-    # and would CRASH the sweep on a long-stale snapshot. This row is journal-only truth
-    # (a SELL side for _journal_positions_by_token to net the buy claim), never submitted.
-    # It reuses the entry command's valid snapshot/envelope FKs.
-    if conn.execute(
-        "SELECT 1 FROM venue_commands WHERE command_id = ? LIMIT 1", (command_id,)
-    ).fetchone() is None:
-        # SCH-W1.1-CAS-LEDGER terminalization-centrality invariant: this synthetic
-        # command is born already-terminal via this DIRECT write, bypassing
-        # append_event (the sole seam that converts/releases collateral). It is
-        # the ONE sanctioned carve-out — an externally-closed foreign order was
-        # never reserve-backed by Zeus, so no live reservation can legitimately
-        # exist for this command_id. If one does, that is a real incident: fail
-        # loudly instead of silently minting a synthetic terminal command over a
-        # phantom hold.
-        _assert_no_live_reservation_for_carve_out(conn, command_id)
-        conn.execute(
-            """
-            INSERT INTO venue_commands (
-                command_id, snapshot_id, envelope_id, position_id, decision_id,
-                idempotency_key, intent_kind, market_id, token_id, side, size, price,
-                venue_order_id, state, created_at, updated_at, review_required_reason
-            ) VALUES (?, ?, ?, ?, ?, ?, 'EXIT', ?, ?, 'SELL', ?, ?, ?, 'FILLED', ?, ?, ?)
-            """,
-            (
-                command_id,
-                str(entry["snapshot_id"]),
-                str(entry["envelope_id"]),
-                str(entry["position_id"] or ""),
-                str(entry["decision_id"] or f"dec-{command_id}"),
-                command_id,
-                str(entry["market_id"] or token_id),
-                token_id,
-                float(close_size),
-                float(close_price),
-                str(entry["venue_order_id"] or "") or None,
-                observed_at.isoformat(),
-                observed_at.isoformat(),
-                "operator_external_close_absorption",
-            ),
-        )
+    from src.execution.command_bus import ExternalOperatorCloseAbsorption
+    from src.state.venue_command_repo import absorb_external_operator_close
+
     payload = {
         "schema_version": 1,
         "reason": "operator_external_close_absorption",
@@ -1758,20 +1754,37 @@ def _book_external_operator_close_exit_fact(
         "price_basis": _OPERATOR_EXTERNAL_CLOSE_PRICE_BASIS,
         "classification": "external_operator_close",
         "source_entry_command_id": entry["command_id"],
+        "source_entry_snapshot_id": entry["snapshot_id"],
+        "source_entry_envelope_id": entry["envelope_id"],
     }
-    append_trade_fact(
+    # The operator path retains its caller-side incident guard.  The typed repo
+    # helper itself remains free of reservation assertions so it is reusable by
+    # deterministic backfill/replay fixtures.
+    identity_material = "|".join(
+        (token_id, str(entry["position_id"] or ""), str(entry["command_id"] or ""))
+    )
+    synthetic_command_id = "external_operator_close:" + sha256(identity_material.encode()).hexdigest()[:24]
+    _assert_no_live_reservation_for_carve_out(conn, synthetic_command_id)
+    # Compatibility with the pre-typed carve-out guard: older reservations were
+    # keyed by token alone and must still fail closed rather than being bypassed.
+    _assert_no_live_reservation_for_carve_out(
+        conn, "external_operator_close:" + sha256(token_id.encode()).hexdigest()[:24]
+    )
+    absorb_external_operator_close(
         conn,
-        trade_id=trade_id,
-        venue_order_id=str(entry["venue_order_id"] or ""),
-        command_id=command_id,
-        state="CONFIRMED",
-        filled_size=str(close_size),
-        fill_price=str(close_price),
-        source="OPERATOR",
-        observed_at=observed_at,
-        venue_timestamp=observed_at,
-        raw_payload_hash=_hash_payload(payload),
-        raw_payload_json=payload,
+        ExternalOperatorCloseAbsorption(
+            token_id=token_id,
+            position_id=str(entry["position_id"] or ""),
+            market_id=str(entry["market_id"] or token_id),
+            close_size=str(close_size),
+            close_price=str(close_price),
+            observed_at=observed_at.isoformat(),
+            source_entry_command_id=str(entry["command_id"]),
+            source_entry_snapshot_id=str(entry["snapshot_id"] or "") or None,
+            source_entry_envelope_id=str(entry["envelope_id"] or "") or None,
+            venue_order_id=None,
+            provenance=payload,
+        ),
     )
     logger.warning(
         "operator_external_close: booked external close exit fact for token %s "
@@ -4076,6 +4089,18 @@ def _pending_exit_optimistic_sell_offsets_confirmed_position(
     return row is not None
 
 
+def _canonical_event_filled_size(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    fallback: str,
+) -> str:
+    """Use the command's deduplicated trade-leg aggregate for event grammar."""
+
+    aggregate = _canonical_filled_size_for_command(conn, command_id)
+    return _decimal_text(aggregate) if aggregate > Decimal("0") else fallback
+
+
 def _append_linkable_trade_fact_if_missing(
     conn: sqlite3.Connection,
     command: Mapping[str, Any],
@@ -4159,7 +4184,15 @@ def _append_linkable_trade_fact_if_missing(
                     resolution="trade_finality_confirmed",
                     resolved_at=observed_at,
                 )
-            existing_event = _fill_event_for_command(command, filled_size, trade_state=state)
+            existing_event = _fill_event_for_command(
+                command,
+                _canonical_event_filled_size(
+                    conn,
+                    command_id=str(command["command_id"]),
+                    fallback=filled_size,
+                ),
+                trade_state=state,
+            )
             if existing_event is not None:
                 try:
                     append_event(
@@ -4312,7 +4345,15 @@ def _append_linkable_trade_fact_if_missing(
     latest = get_command(conn, str(command["command_id"]))
     if latest is None:
         return finality_finding
-    event = _fill_event_for_command(latest, filled_size, trade_state=state)
+    event = _fill_event_for_command(
+        latest,
+        _canonical_event_filled_size(
+            conn,
+            command_id=str(latest["command_id"]),
+            fallback=filled_size,
+        ),
+        trade_state=state,
+    )
     if event is None:
         _ensure_entry_fill_position_event(
             conn,
@@ -4324,6 +4365,16 @@ def _append_linkable_trade_fact_if_missing(
             command_event=None,
             order_fact_source="REST",
             context=context,
+        )
+        _ensure_exit_fill_position_event(
+            conn,
+            command=latest,
+            venue_order_id=order_id,
+            filled_size=filled_size,
+            fill_price=fill_price,
+            observed_at=observed_at,
+            command_event=None,
+            venue_order_payload=raw,
         )
         return finality_finding
     try:
@@ -4344,7 +4395,7 @@ def _append_linkable_trade_fact_if_missing(
         # The fact is still append-only venue truth.  Illegal command-state
         # transitions stay fail-closed by not inventing grammar or forcing a
         # local command mutation.
-        return finality_finding
+        event = None
     _ensure_entry_fill_position_event(
         conn,
         command=latest,
@@ -5018,7 +5069,6 @@ def _ensure_entry_fill_position_event(
         return
     shares_dec, entry_price_dec, cost_basis_dec = fill_economics
     shares = _decimal_text(shares_dec)
-    entry_price = _decimal_text(entry_price_dec)
     cost_basis = _decimal_text(cost_basis_dec)
     order_status = "filled" if _entry_fill_covers_command(conn, command, shares_dec) else "partial"
     if command_event == "PARTIAL_FILL_OBSERVED":
@@ -5224,6 +5274,40 @@ def _ensure_entry_fill_position_event(
             # the same result until the command becomes terminal.
             projection_shares += shares_dec
             projection_cost += cost_basis_dec
+        else:
+            # The current command's execution_fact is the durable projection
+            # written by this helper. Reconcile can receive a newer
+            # append-only trade-leg aggregate before that row is refreshed;
+            # replace the command's prior execution economics rather than
+            # treating the stale row as already represented. Invalid prior
+            # economics fail closed at the exact command/token scope.
+            prior = conn.execute(
+                """
+                SELECT shares, fill_price
+                  FROM execution_fact
+                 WHERE position_id = ?
+                   AND command_id = ?
+                   AND order_role = 'entry'
+                   AND voided_at IS NULL
+                 ORDER BY filled_at DESC, intent_id
+                 LIMIT 1
+                """,
+                (position_id, current_command_id),
+            ).fetchone()
+            prior_shares = _positive_decimal_or_none(prior["shares"]) if prior else None
+            prior_price = _positive_decimal_or_none(prior["fill_price"]) if prior else None
+            if prior_shares is None or prior_price is None:
+                logger.error(
+                    "exchange_reconcile: refuse entry increment replacement "
+                    "without prior command economics position_id=%s command_id=%s",
+                    position_id,
+                    current_command_id,
+                )
+                return
+            projection_shares -= prior_shares
+            projection_cost -= prior_shares * prior_price
+            projection_shares += shares_dec
+            projection_cost += cost_basis_dec
 
         # Chain truth can land before the command/event fold.  Consume it
         # only when it covers the entire command-derived aggregate; never
@@ -5249,6 +5333,16 @@ def _ensure_entry_fill_position_event(
                     chain_shares,
                 )
                 return
+        if projection_shares <= Decimal("0") or projection_cost <= Decimal("0"):
+            logger.error(
+                "exchange_reconcile: refuse non-positive entry increment "
+                "replacement position_id=%s command_id=%s shares=%s cost=%s",
+                position_id,
+                current_command_id,
+                projection_shares,
+                projection_cost,
+            )
+            return
         projection_entry_price = projection_cost / projection_shares
         projection_order_id = str(current.get("order_id") or venue_order_id)
         projection_order_status = str(current.get("order_status") or "filled")

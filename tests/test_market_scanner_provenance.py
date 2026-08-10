@@ -1,7 +1,7 @@
 # Created: 2026-04-17
-# Last reused or audited: 2026-07-28
+# Last reused or audited: 2026-08-10
 # Authority basis: AGENTS.md money path; S1 market source-proof persistence via market_topology_state.
-# Lifecycle: created=2026-04-17; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-04-17; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: Lock market_scanner provenance, source-contract drift behavior, and Venus diagnostic authority labels.
 # Reuse: Inspect src/data/market_scanner.py and scripts/watch_source_contract.py before relying on these assertions.
 # Authority basis: audit bug B017 (STILL_OPEN P1 SD-H), Fitz methodology constraint #4 "Data Provenance > Code Correctness"; Wave16 object-meaning diagnostic authority repair.
@@ -482,6 +482,7 @@ def test_snapshot_refresh_stops_when_budget_is_exhausted(monkeypatch):
     def fake_capture(conn, *, market, decision, clob, captured_at, scan_authority, execution_side, **kwargs):
         captured.append(decision.tokens["market_id"])
         clock["now"] += 2.0
+        return {"snapshot_persistence_tier": "full"}
 
     monkeypatch.setattr(ms.time, "monotonic", lambda: clock["now"])
     monkeypatch.setattr(ms, "capture_executable_market_snapshot", fake_capture)

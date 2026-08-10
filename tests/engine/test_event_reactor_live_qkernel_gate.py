@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-08-07
+# Last reused/audited: 2026-08-09
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -37,6 +37,8 @@ from src.events.day0_authority import assert_live_day0_entry_provenance
 from src.events.reactor import EventSubmissionReceipt, _is_transient_money_path_reason
 from src.riskguard.risk_level import RiskLevel
 from src.contracts.execution_intent import DecisionSourceContext
+from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
+from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.certificate import build_certificate
@@ -163,6 +165,21 @@ def _seal_current_qkernel_cert(cert: dict) -> None:
     cert["current_state_identity_hash"] = era.qkernel_current_state_identity_hash(cert)
 
 
+def _global_receipt_payload() -> dict[str, object]:
+    return GlobalAuctionReceiptRef(
+        decision_log_id=41,
+        decision_log_mode="global_single_order_auction",
+        receipt_hash="a" * 64,
+        execution_binding_hash="b" * 64,
+        artifact_summary_hash="c" * 64,
+        schema_version=21,
+        winner_event_id="global-event-1",
+        winner_candidate_id="global-candidate-1",
+        winner_actuation_identity="global-actuation-1",
+        selection_epoch_identity="global-epoch-1",
+    ).as_payload()
+
+
 def _global_current_qkernel_cert(*, side: str = "YES") -> dict:
     cert = _current_qkernel_cert(side=side)
     for field in (
@@ -182,6 +199,8 @@ def _global_current_qkernel_cert(*, side: str = "YES") -> dict:
         cost=0.05,
         edge_lcb=0.55,
         global_actuation_identity="global-actuation-1",
+        global_winner_event_id="global-event-1",
+        global_auction_receipt=_global_receipt_payload(),
         global_economic_identity="global-economic-1",
         global_optimum_semantics="CUT_TIME_GLOBAL_OPTIMUM",
         global_candidate_id="global-candidate-1",
@@ -200,6 +219,15 @@ def _global_current_qkernel_cert(*, side: str = "YES") -> dict:
         global_target_shares="20",
         global_expected_cost_usd="1",
         global_max_spend_usd="1",
+        global_ruin_probability_reduction=0.0,
+        global_terminal_ruin_probability_reduction=0.0,
+        global_utility_basis=STRATEGY_LOG_UTILITY_BASIS,
+        global_proposal_expected_delta_log_wealth=0.01,
+        global_proposal_expected_ev_usd=11.0,
+        global_proposal_expected_log_growth_per_hour=0.01 / 24.0,
+        global_proposal_expected_capital_efficiency=0.01,
+        global_proposal_capital_lock_hours=24.0,
+        global_proposal_fill_semantics="IMMEDIATE_FILL",
         global_robust_delta_log_wealth=0.01,
         global_robust_ev_usd=11.0,
         global_cut_time_win_probability_lcb=0.60,
@@ -215,6 +243,50 @@ def _global_current_qkernel_cert(*, side: str = "YES") -> dict:
         global_expected_value_usd=11.0,
         global_expected_value_semantics="POINT_EVIDENCE_EXPECTATION_NOT_REALIZED_GAIN",
         global_terminal_payoff_semantics="BINARY_0_1",
+    )
+    _seal_current_qkernel_cert(cert)
+    return cert
+
+
+def _global_mean_current_qkernel_cert(*, side: str = "YES") -> dict:
+    cert = _global_current_qkernel_cert(side=side)
+    for field in (
+        "global_robust_delta_log_wealth",
+        "global_robust_ev_usd",
+        "global_cut_time_win_probability_lcb",
+        "global_cut_time_loss_probability_ucb",
+        "global_terminal_win_probability_lcb",
+        "global_terminal_loss_probability_ucb",
+    ):
+        cert.pop(field)
+    payoff_q = 0.70
+    shares = 20.0
+    expected_cost = 1.0
+    expected_du = (1.0 - payoff_q) * math.log(99.0 / 100.0) + (
+        payoff_q * math.log(119.0 / 100.0)
+    )
+    expected_ev = payoff_q * shares - expected_cost
+    cert.update(
+        global_probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        selection_guard_basis="CURRENT_POSTERIOR_PREDICTIVE_MEAN",
+        selection_guard_q_safe=payoff_q,
+        payoff_q_action=payoff_q,
+        global_current_sample_payoff_q_mean=payoff_q,
+        edge_expected=payoff_q - 0.05,
+        global_expected_delta_log_wealth=expected_du,
+        global_expected_ev_usd=expected_ev,
+        global_expected_capital_efficiency=expected_du / expected_cost,
+        global_cut_time_win_probability_mean=payoff_q,
+        global_cut_time_loss_probability_mean=1.0 - payoff_q,
+        global_terminal_win_probability_mean=payoff_q,
+        global_terminal_loss_probability_mean=1.0 - payoff_q,
+        global_cut_time_expected_value_usd=expected_ev,
+        global_expected_value_usd=expected_ev,
+        global_proposal_expected_delta_log_wealth=expected_du,
+        global_proposal_expected_ev_usd=expected_ev,
+        global_proposal_expected_log_growth_per_hour=expected_du / 24.0,
+        global_proposal_expected_capital_efficiency=expected_du / expected_cost,
+        global_proposal_capital_lock_hours=24.0,
     )
     _seal_current_qkernel_cert(cert)
     return cert
@@ -2027,6 +2099,25 @@ def test_global_taker_action_cannot_be_rewritten_as_resting_maker():
     assert era._qkernel_current_state_solve_economics(stripped) is False
 
 
+def test_global_current_state_rejects_resealed_missing_execution_mode():
+    cert = _global_current_qkernel_cert(side="NO")
+    cert.pop("global_execution_mode")
+    _seal_current_qkernel_cert(cert)
+
+    assert (
+        era._qkernel_current_state_solve_economics_rejection_reason(cert)
+        == "global_execution_mode"
+    )
+    assert era.qkernel_global_current_state_rejection_reason(
+        cert,
+        direction="buy_no",
+    ) == "current_state:global_execution_mode"
+    assert era._global_current_state_execution_economics_rejection_reason(
+        cert,
+        direction="buy_no",
+    ) == "current_state:global_execution_mode"
+
+
 def test_global_taker_action_fresh_revalidation_never_downgrades_to_maker():
     cert = dict(
         _global_current_qkernel_cert(side="NO"),
@@ -2687,6 +2778,26 @@ def test_global_current_certificate_rejects_missing_or_forged_terminal_branch(
     )
 
 
+@pytest.mark.parametrize("mutation", ("missing", "winner_mismatch"))
+def test_global_current_certificate_rejects_unbound_auction_receipt(mutation):
+    cert = _global_current_qkernel_cert()
+    if mutation == "missing":
+        cert.pop("global_auction_receipt")
+    else:
+        forged = dict(cert["global_auction_receipt"])
+        forged["winner_candidate_id"] = "different-candidate"
+        cert["global_auction_receipt"] = forged
+    _seal_current_qkernel_cert(cert)
+
+    assert (
+        era._global_current_state_execution_economics_rejection_reason(
+            cert,
+            direction="buy_yes",
+        )
+        == "global_auction_receipt"
+    )
+
+
 def test_broken_global_certificate_cannot_fall_back_to_legacy_route_fields():
     cert = _global_current_qkernel_cert()
     cert.update(
@@ -2762,6 +2873,7 @@ def test_actionable_payload_preserves_sealed_global_execution_economics(
     payload["event_type"] = "FORECAST_SNAPSHOT_READY"
 
     assert payload["qkernel_execution_economics"] == cert
+    assert payload["global_auction_receipt"] == cert["global_auction_receipt"]
     assert payload["_edli_q_source"] == "replacement_0_1"
     with pytest.raises(
         ValueError,
@@ -2795,6 +2907,103 @@ def test_global_bin_identity_mutation_breaks_current_state_seal():
         )
         is None
     )
+
+
+def test_global_ruin_and_utility_comparator_fields_are_semantically_bound():
+    cert = _global_current_qkernel_cert()
+    sealed = cert["current_state_identity_hash"]
+
+    cert["global_ruin_probability_reduction"] = 1e-16
+    assert era.qkernel_current_state_identity_hash(cert) != sealed
+    _seal_current_qkernel_cert(cert)
+    assert era.qkernel_global_current_state_rejection_reason(
+        cert,
+        direction="buy_yes",
+    ) == "global_expected_growth_identity"
+
+    cert = _global_current_qkernel_cert()
+    cert["global_utility_basis"] = "SHARED_WALLET_CASH"
+    _seal_current_qkernel_cert(cert)
+    assert era.qkernel_global_current_state_rejection_reason(
+        cert,
+        direction="buy_yes",
+    ) == "global_utility_basis"
+
+
+def test_global_taker_fill_semantics_are_revalidated_after_reseal():
+    cert = _global_current_qkernel_cert()
+    cert["global_proposal_fill_semantics"] = (
+        "FILL_WEIGHTED_ZERO_CONTINUATION_LOWER_BOUND"
+    )
+    _seal_current_qkernel_cert(cert)
+
+    assert era.qkernel_global_current_state_rejection_reason(
+        cert,
+        direction="buy_yes",
+    ) == "global_proposal_fill_semantics"
+
+
+@pytest.mark.parametrize(
+    ("field", "reason"),
+    (
+        (
+            "global_proposal_expected_delta_log_wealth",
+            "global_expected_growth_identity",
+        ),
+        ("global_proposal_expected_ev_usd", "global_mean_proposal_identity"),
+        (
+            "global_proposal_expected_log_growth_per_hour",
+            "global_expected_growth_identity",
+        ),
+        (
+            "global_proposal_expected_capital_efficiency",
+            "global_mean_proposal_identity",
+        ),
+    ),
+)
+def test_global_mean_proposal_mirrors_reject_sub_picounit_resealed_drift(
+    field,
+    reason,
+):
+    cert = _global_mean_current_qkernel_cert()
+    assert era.qkernel_global_current_state_rejection_reason(
+        cert,
+        direction="buy_yes",
+    ) is None
+
+    cert[field] = float(cert[field]) + 5e-13
+    _seal_current_qkernel_cert(cert)
+
+    assert era.qkernel_global_current_state_rejection_reason(
+        cert,
+        direction="buy_yes",
+    ) == reason
+
+
+@pytest.mark.parametrize(
+    "functional",
+    ("LOWER_CVAR_PARAMETER_DRAWS", "POSTERIOR_PREDICTIVE_MEAN"),
+)
+def test_global_maker_certificate_is_rejected_before_functional_dispatch(
+    functional,
+):
+    cert = _global_current_qkernel_cert()
+    cert.update(
+        global_execution_mode="MAKER_REST",
+        global_probability_functional=functional,
+        global_fill_probability=0.19,
+        global_fill_probability_source="legacy_scalar_not_current_authority",
+        global_rest_deadline_minutes=20.0,
+        global_proposal_fill_semantics=(
+            "FILL_WEIGHTED_ZERO_CONTINUATION_LOWER_BOUND"
+        ),
+    )
+    _seal_current_qkernel_cert(cert)
+
+    assert era.qkernel_global_current_state_rejection_reason(
+        cert,
+        direction="buy_yes",
+    ) == "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
 
 
 def test_global_actuation_submit_revalidates_current_wealth_economics(monkeypatch):
@@ -2959,6 +3168,7 @@ def test_global_actuation_current_band_missing_prior_still_accepts_low_probabili
     cert.update(
         global_actuation_identity="global-actuation-1",
         global_economic_identity="global-economic-1",
+        global_execution_mode="TAKER_LIMIT",
         pre_qkernel_q_lcb_5pct=0.12,
     )
     decision = _global_decision(shares="100", cost="5", q="0.10")

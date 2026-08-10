@@ -260,7 +260,7 @@ EB bias correction and the bias_treatment_v2 branches are deleted with their cod
 | Role | Model(s) | Domain / lead cap |
 |---|---|---|
 | Anchor (prior) | `ecmwf_ifs` | global, all leads |
-| DECORR_GLOBALS | `gfs_global`, `icon_global`, `gem_global`, `jma_seamless`, `ukmo_global_deterministic_10km` | global; gem previous_runs only (K2) |
+| DECORR_GLOBALS | `gfs_global`, `icon_global`, `gem_global`, `jma_seamless`, `ukmo_global_deterministic_10km` | global; current values may use the eligible same-product `previous_runs` serving law below (K2) |
 | GLOBAL_LIKELIHOOD | DECORR_GLOBALS + `icon_eu` + `ncep_nbm_conus` | per-polygon for domain-gated |
 | REGIONAL | `icon_d2` (2km, Central-EU, lead≤1), `meteofrance_arome_france_hd` (1.3km, France, lead≤1), `ukmo_uk_deterministic_2km` (2km, UK, lead≤2) | own polygon gates |
 | icon_eu | `icon_eu` (7km, lat 29–71N / lon −24–45E, lead≤3) | restored 2026-06-09 (6860f00a21) |
@@ -272,7 +272,7 @@ EB bias correction and the bias_treatment_v2 branches are deleted with their cod
 
 **Coordinate authority:** `config/cities.json` is the SINGLE coordinate source. 5 coarse coordinates re-pinned to verified WU/METAR station ARPs 2026-06-09 (e80c101c4c): Amsterdam EHAM (52.3086/4.7639), Chengdu ZUUU, Istanbul LTFM, Shanghai ZSPD, Zhengzhou ZHCC. Amsterdam was the material case (1.9 km off, inside icon_d2 2km domain).
 
-**gem_global current-value rule (K2, commit edc598b440):** open-meteo single-runs API does NOT serve `cmc_gem_gdps_15km` (curl-verified; modelRunUnavailable even at 00z). gem is served from its `previous_runs` row at the SAME natural key `(city, metric, target_date, source_cycle_time)` — source-identical to its de-bias history, zero bridge mismatch. Any other model missing single_runs remains LOUD (no masking).
+**Generalized current-value serving rule (K2; GEM was the first instance):** the single serving builder admits only the same model/product, city, metric, and target date.  A carrier-bound read prefers selected-cycle `single_runs`, then selected-cycle `previous_runs`, then the newest eligible prior-cycle row no later than the carrier.  A source-clock live read instead serves each provider's newest row possessed by decision time; the ECMWF ENS cycle remains the shape carrier, not a ceiling on deterministic provider values.  Missing, future, over-age, or product-mismatched rows stay dropped; in particular, ECMWF `ifs025` history cannot stand in for the 9 km live center.  Every admitted row preserves its real `served_via` and `served_cycle`, so substitution is explicit rather than silent.
 
 **K3 provider completeness:** 5 declared providers — NOAA/gfs|nbm, DWD-ICON one-of-{d2,eu,global}, CMC/gem, JMA/jma_seamless, UKMO one-of-{global,uk2km}. Family-aware check; ≥ 4/5 required or WARNING emitted. Commit 2b6936d3b5 surfaces subprocess WARNINGs to daemon log.
 
@@ -422,7 +422,7 @@ provider-completeness requirement.
 |---|---|
 | `tests/test_bayes_precision_fusion_persisted_read_lead_robust.py` | Lead-calendar mismatch makes fusion fire on 0 cells (140d75ff6d) |
 | `tests/test_bayes_precision_fusion_thin_anchor_retained.py` | Anchor center dropped from EQUAL_WEIGHT cells (49492f1528) |
-| `tests/test_bayes_precision_fusion_gem_current_value_previous_runs_fallback.py` | gem single_runs dead leg silently shrinks ensemble 4→3 (edc598b440) |
+| `tests/test_bayes_precision_fusion_gem_current_value_previous_runs_fallback.py`, `tests/data/test_previous_runs_substitution.py`, `tests/data/test_fusion_upgrade_trigger.py` | Generalized same-product current-value serving: `single_runs` preference, eligible prior `previous_runs`, source-clock newest-possession selection, explicit provenance, and rejection of future or product-mismatched ECMWF `ifs025` rows |
 | `tests/test_replacement_download_cycle_currency_gate.py` | Coverage-vs-currency conflation freezes anchor indefinitely (94b584cc3f) |
 | `tests/test_stale_cycle_download_includes_covered_targets.py` | Covered-target filter starves new-cycle raw inputs (9c594c9fc3) |
 | `tests/test_download_row_level_skip_only_missing_fetches.py` | Coverage filter on extras download; instance 5 coverage!=currency (df8199ef8e) |

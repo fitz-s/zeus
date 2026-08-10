@@ -158,15 +158,20 @@ class VenueSubmissionEnvelope:
         self.assert_live_submit_bound()
         order_type = str(self.order_type or "").strip().upper()
         maker = self.post_only and order_type in {"GTC", "GTD"}
-        marketable_sell = (
-            self.side == "SELL" and not self.post_only and order_type == "FAK"
+        marketable_taker = (
+            not self.post_only
+            and (
+                (self.side == "BUY" and order_type in {"FOK", "FAK"})
+                or (self.side == "SELL" and order_type == "FAK")
+            )
         )
-        if not (maker or marketable_sell):
+        if not (maker or marketable_taker):
             # INV-47 SCOPE: only this token/side order is rejected.
-            # DRAIN: the next decision may emit a certified GTC/GTD post-only order.
-            # RESET: no latch is stored; a maker-only envelope passes immediately.
+            # DRAIN: the next decision may emit a certified legal execution mode.
+            # RESET: no latch is stored; a legal maker or role-scoped taker passes.
             raise ValueError(
-                "live execution mode is not authorized by the envelope: "
+                "live fill price is unbounded: execution mode is not authorized "
+                "by the envelope: "
                 f"order_type={order_type or 'ABSENT'}:post_only={self.post_only}"
             )
 

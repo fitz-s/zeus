@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-09; last_reused=2026-08-09
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-08-09
+# Last reused/audited: 2026-08-10
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -279,12 +279,24 @@ def test_mixed_token_entry_repair_splits_authenticated_groups_idempotently_and_r
     conn.row_factory = sqlite3.Row
     conn.executescript(
         """
-        CREATE TABLE position_events (position_id TEXT, event_type TEXT, sequence_no INTEGER);
-        CREATE TABLE venue_commands (command_id TEXT PRIMARY KEY, position_id TEXT);
-        CREATE TABLE execution_fact (intent_id TEXT PRIMARY KEY, command_id TEXT, position_id TEXT);
-        INSERT INTO venue_commands VALUES ('no-cmd', 'root'), ('yes-cmd', 'root');
-            INSERT INTO execution_fact VALUES ('root:no-entry', 'no-cmd', 'root'),
-                                              ('root:yes-entry', 'yes-cmd', 'root');
+            CREATE TABLE position_events (position_id TEXT, event_type TEXT, sequence_no INTEGER);
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY, position_id TEXT,
+                intent_kind TEXT DEFAULT 'ENTRY', side TEXT DEFAULT 'BUY'
+            );
+            CREATE TABLE execution_fact (
+                intent_id TEXT PRIMARY KEY, command_id TEXT, position_id TEXT,
+                order_role TEXT DEFAULT 'entry'
+            );
+            CREATE TABLE provenance_envelope_events (
+                subject_type TEXT NOT NULL, subject_id TEXT NOT NULL,
+                event_type TEXT NOT NULL, payload_hash TEXT NOT NULL,
+                payload_json TEXT, source TEXT NOT NULL, observed_at TEXT NOT NULL,
+                venue_timestamp TEXT, local_sequence INTEGER NOT NULL
+            );
+            INSERT INTO venue_commands (command_id, position_id) VALUES ('no-cmd', 'root'), ('yes-cmd', 'root');
+                INSERT INTO execution_fact (intent_id, command_id, position_id) VALUES ('root:no-entry', 'no-cmd', 'root'),
+                                                  ('root:yes-entry', 'yes-cmd', 'root');
         """
     )
     rows = [
@@ -645,6 +657,10 @@ def _valid_day0_pre_submit_payload(**overrides):
         "source_authorized_status": "AUTHORIZED",
         "day0_q_source": "day0_remaining_day",
         "day0_q_mode": "remaining_day",
+        "_edli_q_source": "day0_remaining_day",
+        "q_source": "day0_remaining_day",
+        "_edli_day0_q_mode": "remaining_day",
+        "probability_authority": "day0_remaining_day_global_probability_v1",
         "day0_remaining_models": 37,
         "rounded_value": 72.0,
         **provenance,
@@ -1933,7 +1949,9 @@ def test_live_tick_current_q_fast_lane_survives_capital_lane_budget_defer(
     def _terminal_interrupt(_conn, _client):
         calls.append("terminal_point_recovery_fast")
         now[0] = 1.0
-        raise sqlite3.OperationalError("interrupted")
+        raise command_recovery._LiveTickDBBudgetExhausted(
+            "terminal-point recovery budget exhausted"
+        )
 
     def _posterior_candidates(_conn):
         return [{"position_id": "pos-current-q"}]
@@ -3437,7 +3455,9 @@ def _seed_edli_absorbed_fill_recovery(
                chain_seen_at = '2026-07-17T09:43:10+00:00'
          WHERE position_id = ?
         """,
-        (yes_token_id, no_token_id, position_id),
+        # The absorbed aggregate is for the command's selected NO token.
+        # Keeping this aligned avoids triggering the mixed-token repair lane.
+        (no_token_id, no_token_id, position_id),
     )
     _open_test_entry_obligation(conn, command_id)
     legs = [
@@ -5883,6 +5903,57 @@ def _seed_cancel_pending_partial_exit_dust_case(
     )
 
 
+def test_terminal_partial_exit_release_waits_for_post_terminal_chain_observation(
+    conn,
+    mock_client,
+    monkeypatch,
+):
+    from src.execution import command_recovery
+
+    _seed_partial_exit_dust_case(conn)
+    conn.execute(
+        "UPDATE position_current SET chain_seen_at = ? WHERE position_id = 'pos-001'",
+        ("2026-04-26T00:04:00+00:00",),
+    )
+    _configure_partial_exit_dust_client(
+        mock_client,
+        point_status="CANCELED",
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_now_iso",
+        lambda: "2026-04-26T00:09:00+00:00",
+    )
+
+    terminalized = command_recovery.reconcile_partial_remainders(
+        conn,
+        mock_client,
+        live_tick_scope=True,
+    )
+    stale_release = command_recovery.reconcile_pending_exit_terminal_order_releases(
+        conn,
+    )
+
+    assert terminalized == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+    assert stale_release == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    assert conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = 'pos-001'",
+    ).fetchone()[0] == "pending_exit"
+
+    conn.execute(
+        "UPDATE position_current SET chain_seen_at = ? WHERE position_id = 'pos-001'",
+        ("2026-04-26T00:10:00+00:00",),
+    )
+    fresh_release = command_recovery.reconcile_pending_exit_terminal_order_releases(
+        conn,
+    )
+
+    assert fresh_release == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+    assert conn.execute(
+        "SELECT phase FROM position_current WHERE position_id = 'pos-001'",
+    ).fetchone()[0] == "active"
+
+
 def _connect_file_db(path):
     from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
@@ -6180,7 +6251,7 @@ class TestRecoveryResolutionTable:
         assert payload["reason"] == "safe_replay_permitted_no_order_found"
         assert payload["safe_replay_permitted"] is True
         assert payload["recovered_from_state"] == "SUBMITTING"
-        assert payload["lookup_method"] == "idempotency_key"
+        assert payload["lookup_method"] == "authenticated_venue_absence"
 
     def test_submitting_without_order_id_waits_for_safe_replay_window(self, conn):
         created_at = datetime.now(timezone.utc).isoformat()
@@ -6380,8 +6451,13 @@ class TestRecoveryResolutionTable:
                 "get_order",
                 "get_open_orders",
                 "get_trades",
+                "get_account_truth",
                 "get_clob_market_info",
             ]
+        )
+        client.get_account_truth.return_value = SimpleNamespace(
+            open_orders=[],
+            trades=[],
         )
         client.get_open_orders.return_value = []
         client.get_trades.return_value = []
@@ -6624,6 +6700,61 @@ class TestRecoveryResolutionTable:
             "stayed": 0,
             "errors": 0,
         }
+
+    def test_edli_absorbed_marker_with_mismatched_position_does_not_suppress_projection(
+        self, conn
+    ):
+        seeded = _seed_edli_absorbed_fill_recovery(conn)
+        from src.execution.command_recovery import (
+            _latest_unprojected_filled_entry_candidates,
+            reconcile_edli_confirmed_legacy_command_repairs,
+        )
+
+        assert reconcile_edli_confirmed_legacy_command_repairs(conn)["advanced"] == 1
+        event = conn.execute(
+            """
+            SELECT event_id, payload_json
+             FROM venue_command_events
+             WHERE command_id = ? AND event_type = 'FILL_CONFIRMED'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (seeded["command_id"],),
+        ).fetchone()
+        payload = json.loads(event["payload_json"])
+        payload["absorbed_position_id"] = "different-position"
+        conn.execute(
+            "UPDATE venue_command_events SET payload_json = ? WHERE event_id = ?",
+            (json.dumps(payload, sort_keys=True), event["event_id"]),
+        )
+
+        candidates = _latest_unprojected_filled_entry_candidates(conn)
+        assert len(candidates) == 1
+        assert candidates[0]["command_id"] == seeded["command_id"]
+        assert candidates[0]["fill_filled_size"] == pytest.approx(5.6)
+
+    def test_edli_absorbed_marker_does_not_suppress_later_aggregate_drift(self, conn):
+        seeded = _seed_edli_absorbed_fill_recovery(conn)
+        from src.execution.command_recovery import (
+            _latest_unprojected_filled_entry_candidates,
+            reconcile_edli_confirmed_legacy_command_repairs,
+        )
+
+        assert reconcile_edli_confirmed_legacy_command_repairs(conn)["advanced"] == 1
+        _append_trade_fact(
+            conn,
+            command_id=seeded["command_id"],
+            order_id=seeded["venue_order_id"],
+            trade_id="later-trade-after-absorbed-repair",
+            state="CONFIRMED",
+            filled_size="1.0",
+            fill_price="0.70",
+        )
+
+        candidates = _latest_unprojected_filled_entry_candidates(conn)
+        assert len(candidates) == 1
+        assert candidates[0]["command_id"] == seeded["command_id"]
+        assert candidates[0]["fill_filled_size"] == pytest.approx(6.6)
 
     def test_terminal_entry_obligation_releases_when_execution_aggregate_is_absorbed(
         self,
@@ -8010,7 +8141,11 @@ class TestRecoveryResolutionTable:
 
         assert _get_state(conn, "cmd-post-ack-fill") == "REVIEW_REQUIRED"
         assert summary["advanced"] == 0
-        assert summary["stayed"] == 1
+        # The terminal-review resolver and the causal filled-entry projection
+        # scan both retain this command: the authenticated trade fact prevents
+        # a no-fill terminalization, while absent canonical market identity
+        # prevents a projection repair.
+        assert summary["stayed"] == 2
 
     def test_cancel_unknown_review_required_matched_order_with_confirmed_trade_fills(self, conn, mock_client):
         _insert(conn, intent_kind="EXIT", side="SELL", size=5, price=0.55)
@@ -9922,7 +10057,10 @@ class TestRecoveryResolutionTable:
         [
             ("10", "0", "economically_closed", False),
             ("8", "2", "economically_closed", True),
-            ("10", "0", "active", False),
+            # An active position with no folded shares still needs the
+            # current causal fill-projection pass, even for a fully matched
+            # order.
+            ("10", "0", "active", True),
         ],
     )
     def test_live_tick_primes_filled_order_only_for_canonical_partial_coverage(
@@ -10447,12 +10585,15 @@ class TestRecoveryResolutionTable:
         finally:
             verified.close()
 
-        assert command["state"] == "CANCEL_PENDING"
-        assert latest_event["event_type"] == "CANCEL_REQUESTED"
-        assert current["phase"] == "pending_entry"
+        # Durable local CANCEL_CONFIRMED truth is now folded before the
+        # external snapshot attempt, so this preserves the terminal command
+        # instead of delaying it behind failed venue I/O.
+        assert command["state"] == "CANCELLED"
+        assert latest_event["event_type"] == "CANCEL_ACKED"
+        assert current["phase"] == "voided"
         assert Decimal(str(current["shares"])) == Decimal("0")
         assert Decimal(str(current["cost_basis_usd"])) == Decimal("0")
-        assert current["order_status"] == "pending"
+        assert current["order_status"] == "canceled"
 
     def test_acked_terminal_point_order_missing_matched_size_stays(
         self,
@@ -11670,7 +11811,7 @@ class TestRecoveryResolutionTable:
         summary = reconcile_unresolved_commands(conn, mock_client)
 
         assert summary["matched_order_facts"]["advanced"] == 1
-        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        assert _get_state(conn, "cmd-001") == "PARTIAL"
         events = _get_events(conn, "cmd-001")
         assert events[-1]["event_type"] == "PARTIAL_FILL_OBSERVED"
         latest_order_fact = conn.execute(
@@ -12376,15 +12517,19 @@ class TestRecoveryResolutionTable:
         )
         client = MagicMock(
             spec_set=[
+                "get_account_truth",
                 "get_order",
                 "get_open_orders",
                 "get_trades",
                 "get_clob_market_info",
             ]
         )
+        client.get_account_truth.return_value = SimpleNamespace(
+            open_orders=[],
+            trades=[],
+        )
         client.get_open_orders.return_value = []
         client.get_trades.return_value = []
-
         summary = command_recovery.reconcile_unresolved_commands(
             client=client,
             scope=scope,
@@ -12802,6 +12947,7 @@ class TestRecoveryResolutionTable:
             position_id="pos-exit",
             command_id="cmd-entry",
             order_id="ord-entry",
+            token_id="tok-exit",
         )
         seed.execute(
             """
@@ -12863,14 +13009,23 @@ class TestRecoveryResolutionTable:
         monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
         client = MagicMock(
             spec_set=[
+                "get_account_truth",
                 "get_order",
                 "get_open_orders",
                 "get_trades",
                 "get_clob_market_info",
             ]
         )
+        client.get_account_truth.return_value = SimpleNamespace(
+            open_orders=[],
+            trades=[],
+        )
         client.get_open_orders.return_value = []
         client.get_trades.return_value = []
+        if scope == "live_tick":
+            # This behavior test must reach the exit-projection pass; dedicated
+            # budget tests cover bounded deferral under a zero/tiny budget.
+            monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "5")
 
         summary = command_recovery.reconcile_unresolved_commands(
             client=client,
@@ -13059,8 +13214,13 @@ class TestRecoveryResolutionTable:
                 "get_order",
                 "get_open_orders",
                 "get_trades",
+                "get_account_truth",
                 "get_clob_market_info",
             ]
+        )
+        client.get_account_truth.return_value = SimpleNamespace(
+            open_orders=[],
+            trades=[],
         )
         client.get_open_orders.return_value = []
         client.get_trades.return_value = []
@@ -13171,8 +13331,13 @@ class TestRecoveryResolutionTable:
                 "get_order",
                 "get_open_orders",
                 "get_trades",
+                "get_account_truth",
                 "get_clob_market_info",
             ]
+        )
+        client.get_account_truth.return_value = SimpleNamespace(
+            open_orders=[],
+            trades=[],
         )
         client.get_open_orders.return_value = []
         client.get_trades.return_value = []
@@ -13307,11 +13472,20 @@ class TestRecoveryResolutionTable:
                 "get_order",
                 "get_open_orders",
                 "get_trades",
+                "get_account_truth",
                 "get_clob_market_info",
             ]
         )
+        client.get_account_truth.return_value = SimpleNamespace(
+            open_orders=[],
+            trades=[],
+        )
         client.get_open_orders.return_value = []
         client.get_trades.return_value = []
+        if scope == "live_tick":
+            # This behavior test must reach the terminal-positive repair pass;
+            # dedicated budget tests cover deferral under a zero/tiny budget.
+            monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "5")
 
         summary = command_recovery.reconcile_unresolved_commands(
             client=client,
@@ -16161,8 +16335,8 @@ class TestRecoveryResolutionTable:
         }
         obligation = reconcile_terminal_entry_exposure_obligations(conn)
         assert obligation == {
-            "scanned": 1,
-            "advanced": 1,
+            "scanned": 0,
+            "advanced": 0,
             "stayed": 0,
             "errors": 0,
         }
@@ -16721,7 +16895,18 @@ class TestRecoveryResolutionTable:
             _conn_factory,
         )
         monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
-        mock_client.get_order.return_value = None
+        terminal_order = {
+            "orderID": "ord-partial",
+            "status": "CANCELED",
+            "original_size": "8.25",
+            "size_matched": "1.149423",
+        }
+        # Scheduled live recovery derives exact order rows from its one complete
+        # account snapshot; it deliberately performs no separate point read.
+        mock_client.get_account_truth.return_value = SimpleNamespace(
+            open_orders=[terminal_order],
+            trades=[],
+        )
         mock_client.get_open_orders.return_value = []
         mock_client.get_trades.return_value = []
 
@@ -16821,7 +17006,9 @@ class TestRecoveryResolutionTable:
 
         def _terminal_interrupt(_conn, _client):
             now[0] = 1.0
-            raise sqlite3.OperationalError("interrupted")
+            raise command_recovery._LiveTickDBBudgetExhausted(
+                "terminal-point recovery budget exhausted"
+            )
 
         monkeypatch.setattr(
             venue_sync_contract,
@@ -17200,6 +17387,9 @@ class TestRecoveryResolutionTable:
             filled_size="5",
             fill_price="0.34",
         )
+        command_snapshot_id = conn.execute(
+            "SELECT snapshot_id FROM venue_commands WHERE command_id = 'cmd-001'"
+        ).fetchone()[0]
         conn.execute(
             """
             INSERT INTO position_current (
@@ -17214,12 +17404,13 @@ class TestRecoveryResolutionTable:
                 'canonical-pos-001', 'active', 'canonical-pos-001',
                 'condition-test', 'Shanghai', 'Shanghai', '2026-04-27',
                 'Will high be 29°C?', 'buy_no', 'C', 1.7, 5, 1.7, 0.34,
-                0.8, NULL, NULL, NULL, 'snap-1', 'ens_member_counting',
+                0.8, NULL, NULL, NULL, ?, 'ens_member_counting',
                 'opening_inertia', 'opening_inertia', 'opening_hunt',
                 'synced', 'tok-001', 'tok-001-no', 'condition-test',
                 'ord-001', 'filled', '2026-04-26T00:06:00Z', 'high'
             )
-            """
+            """,
+            (command_snapshot_id,),
         )
         from src.execution.command_recovery import reconcile_filled_entry_position_link_repairs
 
@@ -17286,6 +17477,13 @@ class TestRecoveryResolutionTable:
             outcome_label="NO",
             size=6.0,
             price=0.87,
+        )
+        command_snapshot_id = conn.execute(
+            "SELECT snapshot_id FROM venue_commands WHERE command_id = 'cmd-chain-fill'"
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE position_current SET decision_snapshot_id = ? WHERE position_id = 'canonical-pos-001'",
+            (command_snapshot_id,),
         )
         _advance_to_acked(
             conn,
@@ -20428,8 +20626,8 @@ class TestRecoveryResolutionTable:
         summary = reconcile_unresolved_commands(conn, mock_client)
 
         assert summary["filled_entry_execution_fact_repair"] == {
-            "scanned": 1,
-            "advanced": 1,
+            "scanned": 0,
+            "advanced": 0,
             "stayed": 0,
             "errors": 0,
         }
@@ -21617,8 +21815,8 @@ class TestRecoveryResolutionTable:
         summary = reconcile_unresolved_commands(conn, mock_client)
 
         assert summary["filled_entry_execution_fact_repair"] == {
-            "scanned": 1,
-            "advanced": 1,
+            "scanned": 0,
+            "advanced": 0,
             "stayed": 0,
             "errors": 0,
         }
@@ -24947,9 +25145,9 @@ class TestRecoveryResolutionTable:
         )
 
         assert reconcile_exit_lifecycle_alignment_repairs(conn) == {
-            "scanned": 0,
+            "scanned": 1,
             "advanced": 0,
-            "stayed": 0,
+            "stayed": 1,
             "errors": 0,
         }
         current = conn.execute(
@@ -27457,6 +27655,10 @@ class TestRecoveryResolutionTable:
             "_now_iso",
             lambda: "2026-05-16T12:00:00+00:00",
         )
+        conn.execute(
+            "UPDATE position_current SET chain_seen_at = ? WHERE position_id = 'pos-001'",
+            ("2026-05-16T12:00:00+00:00",),
+        )
 
         summary = command_recovery.reconcile_partial_remainders(
             conn,
@@ -27640,6 +27842,11 @@ class TestRecoveryResolutionTable:
             "_backfill_terminal_exit_trade_facts",
             counted_backfill,
         )
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-04-26T00:09:00+00:00",
+        )
         first = command_recovery.reconcile_partial_remainders(conn, mock_client, live_tick_scope=True)
         second = command_recovery.reconcile_partial_remainders(conn, mock_client, live_tick_scope=True)
 
@@ -27663,6 +27870,7 @@ class TestRecoveryResolutionTable:
         self,
         conn,
         mock_client,
+        monkeypatch,
     ):
         from src.execution import command_recovery
 
@@ -27704,6 +27912,11 @@ class TestRecoveryResolutionTable:
                 ("trade-dust-b", "56.6", "0xdustb"),
             )
         ]
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-04-26T00:09:00+00:00",
+        )
 
         first = command_recovery.reconcile_partial_remainders(
             conn,
@@ -27728,7 +27941,12 @@ class TestRecoveryResolutionTable:
             "WHERE position_id = 'pos-001'"
         ).fetchone()[0] == pytest.approx(-14.094)
 
-    def test_cancel_pending_partial_exit_accepts_preliminary_null_tx_fact(self, conn, mock_client):
+    def test_cancel_pending_partial_exit_accepts_preliminary_null_tx_fact(
+        self,
+        conn,
+        mock_client,
+        monkeypatch,
+    ):
         from src.execution import command_recovery
 
         _seed_cancel_pending_partial_exit_dust_case(conn, preliminary_trade=True)
@@ -27736,6 +27954,11 @@ class TestRecoveryResolutionTable:
             mock_client,
             point_status="CANCELED",
             point_remaining="0",
+        )
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-04-26T00:09:00+00:00",
         )
 
         summary = command_recovery.reconcile_partial_remainders(conn, mock_client, live_tick_scope=True)
@@ -27859,6 +28082,7 @@ class TestRecoveryResolutionTable:
         self,
         conn,
         mock_client,
+        monkeypatch,
     ):
         from src.execution import command_recovery
 
@@ -27904,6 +28128,11 @@ class TestRecoveryResolutionTable:
             mock_client,
             point_status="CANCELED",
             point_remaining="0",
+        )
+        monkeypatch.setattr(
+            command_recovery,
+            "_now_iso",
+            lambda: "2026-04-26T00:09:00+00:00",
         )
 
         summary = command_recovery.reconcile_partial_remainders(
@@ -29197,7 +29426,7 @@ def test_unavailable_identity_submit_does_not_starve_durable_terminal_capital_re
     monkeypatch.setattr(
         command_recovery,
         "_read_identity_bound_point_orders",
-        lambda _order_ids: ({}, False),
+        lambda _order_ids, *, timeout_seconds: ({}, False),
     )
     monkeypatch.setattr(
         venue_sync_contract,
@@ -29271,7 +29500,8 @@ def test_proven_fill_obligation_releases_before_identity_point_read(
         conn.row_factory = sqlite3.Row
         return conn
 
-    def _point_read(_order_ids):
+    def _point_read(_order_ids, *, timeout_seconds):
+        assert timeout_seconds > 0
         observed = _conn_factory()
         try:
             assert observed.execute(

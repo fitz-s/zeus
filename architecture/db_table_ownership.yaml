@@ -2604,9 +2604,9 @@ tables:
     db: trade
     schema_class: trade_class
     schema_version_owner: null
-    created_by: init_schema_pre_pr_s4b
-    pk_col: null
-    notes: Ghost on zeus_trades.db from pre-PR-S4b init_schema(trade_conn). Drop after 2026-08-09.
+    created_by: init_schema_trade_only
+    pk_col: id
+    notes: Canonical append-only decision and cycle receipt journal. Schema-21 global-auction winners bind this exact retained row and its content hashes into ActionableTradeCertificate; command persistence and settlement attribution re-read it, so these referenced rows are durable execution evidence and must not be inferred or dropped.
 
   # 2026-06-18 live boot recovery: additional residual world-class ghosts observed
   # on state/zeus_trades.db after the registry boot assertion was re-enabled. These

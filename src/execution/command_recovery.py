@@ -4032,6 +4032,31 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                       )
                   )
            )
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM venue_command_events absorbed_event
+                WHERE absorbed_event.command_id = cmd.command_id
+                  AND absorbed_event.event_type = 'FILL_CONFIRMED'
+                  AND json_extract(absorbed_event.payload_json, '$.recovered_from') =
+                      'edli_confirmed_fill_already_absorbed'
+                  AND json_type(absorbed_event.payload_json, '$.proof_hash') = 'text'
+                  AND NULLIF(TRIM(CAST(json_extract(
+                      absorbed_event.payload_json, '$.proof_hash'
+                  ) AS TEXT)), '') IS NOT NULL
+                  AND json_type(absorbed_event.payload_json, '$.absorbed_position_id') =
+                      'text'
+                  AND json_extract(absorbed_event.payload_json, '$.absorbed_position_id') =
+                      cmd.position_id
+                  AND json_type(absorbed_event.payload_json, '$.filled_size') IN (
+                      'integer', 'real', 'text'
+                  )
+                  AND CAST(COALESCE(json_extract(
+                      absorbed_event.payload_json, '$.filled_size'
+                  ), '0') AS REAL) > 0
+                  AND CAST(json_extract(
+                      absorbed_event.payload_json, '$.filled_size'
+                  ) AS REAL) = CAST(entry_fill.filled_size AS REAL)
+           )
          ORDER BY entry_fill.observed_at, cmd.command_id
         """
     )
@@ -6991,17 +7016,23 @@ def reconcile_mixed_token_entry_position_repairs(conn: sqlite3.Connection, clien
                     command_ids=command_ids, evidence=evidence, sequence_no=latest + 1, phase=root_phase)], projection)
                 applied = True
                 if target != root:
+                    from src.execution.command_bus import MixedTokenCommandRehome
+                    from src.state.venue_command_repo import rehome_mixed_token_entry_command
                     for member in members:
-                        changed = conn.execute("UPDATE venue_commands SET position_id = ? WHERE command_id = ? AND position_id = ?", (target, member.command_id, root)).rowcount
-                        if changed != 1:
-                            raise RuntimeError(f"command-rebind-cas-failed:{member.command_id}")
-                        rehomed = conn.execute(
-                            "UPDATE execution_fact SET position_id = ?, intent_id = ? "
-                            "WHERE command_id = ? AND position_id = ?",
-                            (target, f"{target}:entry", member.command_id, root),
-                        ).rowcount
-                        if rehomed != 1:
-                            raise RuntimeError(f"execution-fact-rehome-cas-failed:{member.command_id}")
+                        rehome_mixed_token_entry_command(
+                            conn,
+                            MixedTokenCommandRehome(
+                                command_id=str(member.command_id),
+                                source_position_id=root,
+                                target_position_id=target,
+                                repair_kind="mixed_token_entry_position_split_v1",
+                                occurred_at=str(seed.entered_at),
+                                provenance={
+                                    "root_position_id": root,
+                                    "held_token_id": held,
+                                },
+                            ),
+                        )
                 _record_exact_split_attribution(
                     conn,
                     position_id=target,
@@ -15596,6 +15627,8 @@ def _append_unrecorded_partial_exit_economics(
     venue_order_id: str,
     expected_filled_size: Decimal,
     observed_at: str,
+    recovered_baseline: Mapping[str, object] | None = None,
+    fresh_chain_seen_at: str | None = None,
 ) -> int:
     """Book authenticated partial SELL economics without changing exposure.
 
@@ -15607,7 +15640,10 @@ def _append_unrecorded_partial_exit_economics(
     command cancellation, and pending-exit release are one atomic unit.
     """
 
-    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+    from src.engine.lifecycle_events import (
+        build_chain_economics_observed_canonical_write,
+        build_monitor_refreshed_canonical_write,
+    )
     from src.state.db import append_many_and_project
     from src.state.fill_dedup import (
         PartialExitEconomicDebtError,
@@ -15640,6 +15676,37 @@ def _append_unrecorded_partial_exit_economics(
         raise PartialExitEconomicDebtError(
             f"partial EXIT residual basis missing or divergent: position_id={position_id}"
         )
+
+    # Recovered ghost SELLs carry an immutable pre-recovery conservation
+    # certificate.  Their position projection already contains the venue
+    # residual, so economics must be folded against that baseline rather than
+    # treating the residual as the original lot (which would overstate basis
+    # and strand the next authenticated leg).
+    baseline_shares: Decimal | None = None
+    baseline_cost: Decimal | None = None
+    baseline_entry: Decimal | None = None
+    if recovered_baseline is not None:
+        baseline_shares = _positive_decimal_or_none(recovered_baseline.get("baseline_shares"))
+        baseline_cost = _decimal_or_none(recovered_baseline.get("baseline_cost_basis_usd"))
+        baseline_entry = _positive_decimal_or_none(recovered_baseline.get("baseline_entry_price"))
+        proof = recovered_baseline.get("first_conservation_proof")
+        proof_exchange = _decimal_or_none(proof.get("exchange_residual_shares")) if isinstance(proof, Mapping) else None
+        proof_matched = _decimal_or_none(proof.get("matched_sell_shares")) if isinstance(proof, Mapping) else None
+        if (
+            baseline_shares is None
+            or baseline_cost is None
+            or baseline_cost < 0
+            or baseline_entry is None
+            or not isinstance(proof, Mapping)
+            or not _decimal_matches(proof.get("baseline_shares"), baseline_shares)
+            or not _decimal_matches(proof.get("matched_sell_shares"), recovered_baseline.get("matched_sell_shares"))
+            or proof_exchange is None
+            or proof_matched is None
+            or baseline_shares != proof_exchange + proof_matched
+        ):
+            raise PartialExitEconomicDebtError(
+                f"recovered partial EXIT baseline/conservation proof invalid: position_id={position_id}"
+            )
 
     fills = [
         fill
@@ -15732,19 +15799,85 @@ def _append_unrecorded_partial_exit_economics(
             f"position_id={position_id} order_id={venue_order_id}"
         )
     cumulative_realized = partial_exit_realized_pnl_fold(conn, position_id)
-    if not slices:
-        return 0
-
-    unit_cost = residual_cost / residual_shares
-    unrecorded_quantity = sum((item[1] for item in slices), Decimal("0"))
-    remaining_quantity = unrecorded_quantity
-    remaining_cost = residual_cost + unrecorded_quantity * unit_cost
     position_row = dict(current)
     position_row["env"] = _latest_position_env(conn, position_id)
     position = _position_from_projection_row(position_row, current_mode="live")
+    if not slices:
+        if baseline_shares is not None:
+            cumulative_sold = canonical_total
+            expected_residual = baseline_shares - cumulative_sold
+            if expected_residual < -basis_tolerance or abs(expected_residual - residual_shares) > basis_tolerance:
+                raise PartialExitEconomicDebtError(
+                    "recovered partial EXIT residual does not match baseline cumulative fills: "
+                    f"position_id={position_id} baseline={baseline_shares} sold={cumulative_sold} "
+                    f"residual={residual_shares}"
+                )
+        if fresh_chain_seen_at and str(current.get("chain_seen_at") or "") != fresh_chain_seen_at:
+            sequence_no = _latest_position_sequence(conn, position_id) + 1
+            built, projection = build_chain_economics_observed_canonical_write(
+                position,
+                chain_observed_at=fresh_chain_seen_at,
+                sequence_no=sequence_no,
+                phase_after=phase,
+                source_module="src.execution.command_recovery",
+                chain_shares_before=float(chain_shares),
+            )
+            event = dict(built[0])
+            payload = _json_dict(event.get("payload_json"))
+            payload.update(
+                {
+                    "semantic_event": "RECOVERED_EXIT_RESIDUAL_CONFIRMED",
+                    "proof_class": "fresh_account_snapshot_exact_token_balance",
+                    "command_id": command_id,
+                    "venue_order_id": venue_order_id,
+                    "residual_shares": canonical_decimal_text(chain_shares),
+                    "chain_seen_at": fresh_chain_seen_at,
+                    "position_lifecycle_unchanged": True,
+                }
+            )
+            event["caused_by"] = "recovered_exit_residual_confirmation"
+            event["command_id"] = command_id
+            event["order_id"] = venue_order_id
+            event["payload_json"] = json.dumps(payload, sort_keys=True)
+            projection.update(
+                {
+                    "phase": phase,
+                    "shares": canonical_decimal_text(residual_shares),
+                    "chain_shares": canonical_decimal_text(chain_shares),
+                    "cost_basis_usd": canonical_decimal_text(residual_cost),
+                    "chain_cost_basis_usd": canonical_decimal_text(chain_cost),
+                    "realized_pnl_usd": canonical_decimal_text(cumulative_realized),
+                    "chain_seen_at": fresh_chain_seen_at,
+                    "updated_at": observed_at,
+                }
+            )
+            append_many_and_project(conn, [event], projection)
+            return 1
+        return 0
+
+    if baseline_shares is not None:
+        expected_current_residual = baseline_shares - canonical_total
+        if expected_current_residual < -basis_tolerance or abs(expected_current_residual - chain_shares) > basis_tolerance:
+            raise PartialExitEconomicDebtError(
+                "recovered partial EXIT residual does not match baseline cumulative fills: "
+                f"position_id={position_id} baseline={baseline_shares} sold={canonical_total} "
+                f"residual={chain_shares}"
+            )
+
+    unit_cost = (
+        baseline_cost / baseline_shares
+        if baseline_shares is not None and baseline_cost is not None
+        else residual_cost / residual_shares
+    )
+    unrecorded_quantity = sum((item[1] for item in slices), Decimal("0"))
+    remaining_quantity = unrecorded_quantity
+    remaining_cost = residual_cost + unrecorded_quantity * unit_cost
     sequence_no = _latest_position_sequence(conn, position_id) + 1
     events: list[dict[str, object]] = []
     projection: dict[str, object] | None = None
+    prior_sold_for_recovered = (
+        canonical_total - unrecorded_quantity if baseline_shares is not None else Decimal("0")
+    )
     for offset, (fill, delta_qty, delta_notional) in enumerate(slices):
         allocated_cost = delta_qty * unit_cost
         pnl_delta = delta_notional - allocated_cost
@@ -15760,6 +15893,18 @@ def _append_unrecorded_partial_exit_economics(
         )
         event = dict(built[0])
         payload = _json_dict(event.get("payload_json"))
+        if baseline_shares is not None:
+            prior_sold_for_recovered += delta_qty
+        remaining_shares_value = (
+            baseline_shares - prior_sold_for_recovered
+            if baseline_shares is not None
+            else residual_shares + remaining_quantity
+        )
+        remaining_cost_value = (
+            baseline_cost - prior_sold_for_recovered * unit_cost
+            if baseline_cost is not None
+            else remaining_cost
+        )
         payload.update(
             {
                 "semantic_event": "PARTIAL_EXIT_ECONOMICS_REPAIRED",
@@ -15781,10 +15926,8 @@ def _append_unrecorded_partial_exit_economics(
                 "cumulative_realized_pnl_usd": canonical_decimal_text(
                     cumulative_realized
                 ),
-                "remaining_shares": canonical_decimal_text(
-                    residual_shares + remaining_quantity
-                ),
-                "remaining_cost_basis_usd": canonical_decimal_text(remaining_cost),
+                "remaining_shares": canonical_decimal_text(remaining_shares_value),
+                "remaining_cost_basis_usd": canonical_decimal_text(remaining_cost_value),
                 "position_lifecycle_unchanged": True,
             }
         )
@@ -15801,13 +15944,559 @@ def _append_unrecorded_partial_exit_economics(
     if projection is None:
         raise RuntimeError("partial EXIT economics projection missing")
     projection["phase"] = phase
-    projection["shares"] = canonical_decimal_text(residual_shares)
-    projection["cost_basis_usd"] = canonical_decimal_text(residual_cost)
+    if baseline_shares is not None and baseline_cost is not None:
+        final_residual_shares = baseline_shares - canonical_total
+        final_residual_cost = baseline_cost - canonical_total * unit_cost
+        if final_residual_shares < -basis_tolerance or final_residual_cost < -basis_tolerance:
+            raise PartialExitEconomicDebtError(
+                f"recovered partial EXIT oversold baseline: position_id={position_id}"
+            )
+        projection["shares"] = canonical_decimal_text(max(final_residual_shares, Decimal("0")))
+        projection["chain_shares"] = canonical_decimal_text(max(final_residual_shares, Decimal("0")))
+        projection["cost_basis_usd"] = canonical_decimal_text(max(final_residual_cost, Decimal("0")))
+        projection["chain_cost_basis_usd"] = canonical_decimal_text(max(final_residual_cost, Decimal("0")))
+    else:
+        projection["shares"] = canonical_decimal_text(residual_shares)
+        projection["cost_basis_usd"] = canonical_decimal_text(residual_cost)
     projection["realized_pnl_usd"] = canonical_decimal_text(cumulative_realized)
+    if fresh_chain_seen_at:
+        chain_built, chain_projection = build_chain_economics_observed_canonical_write(
+            position,
+            chain_observed_at=fresh_chain_seen_at,
+            sequence_no=sequence_no + len(events),
+            phase_after=phase,
+            source_module="src.execution.command_recovery",
+            chain_shares_before=float(chain_shares),
+        )
+        chain_event = dict(chain_built[0])
+        chain_payload = _json_dict(chain_event.get("payload_json"))
+        chain_payload.update(
+            {
+                "semantic_event": "RECOVERED_EXIT_RESIDUAL_CONFIRMED",
+                "proof_class": "fresh_account_snapshot_exact_token_balance",
+                "command_id": command_id,
+                "venue_order_id": venue_order_id,
+                "residual_shares": canonical_decimal_text(
+                    projection.get("chain_shares")
+                ),
+                "position_lifecycle_unchanged": True,
+            }
+        )
+        chain_event["caused_by"] = "recovered_exit_residual_confirmation"
+        chain_event["command_id"] = command_id
+        chain_event["order_id"] = venue_order_id
+        chain_event["payload_json"] = json.dumps(chain_payload, sort_keys=True)
+        events.append(chain_event)
+        for field in (
+            "phase",
+            "shares",
+            "chain_shares",
+            "cost_basis_usd",
+            "chain_cost_basis_usd",
+            "realized_pnl_usd",
+        ):
+            chain_projection[field] = projection[field]
+        chain_projection["chain_seen_at"] = fresh_chain_seen_at
+        projection = chain_projection
     projection["updated_at"] = observed_at
     append_many_and_project(conn, events, projection)
     partial_exit_realized_pnl_fold(conn, position_id)
     return len(events)
+
+
+def _recovered_exit_baseline(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    position_id: str,
+) -> dict[str, object] | None:
+    """Load the immutable baseline certificate written at ghost adoption."""
+
+    rows = conn.execute(
+        """
+        SELECT payload_json
+          FROM position_events
+         WHERE position_id = ? AND command_id = ? AND event_type = 'EXIT_INTENT'
+         ORDER BY sequence_no ASC
+        """,
+        (position_id, command_id),
+    ).fetchall()
+    for row in rows:
+        payload = _json_dict(row[0])
+        baseline = payload.get("recovered_exit_baseline")
+        if isinstance(baseline, Mapping):
+            return dict(baseline)
+    rows = conn.execute(
+        """
+        SELECT payload_json
+          FROM venue_command_events
+         WHERE command_id = ? AND event_type = 'VENUE_ORDER_ADOPTED'
+         ORDER BY sequence_no ASC
+        """,
+        (command_id,),
+    ).fetchall()
+    for row in rows:
+        payload = _json_dict(row[0])
+        baseline = payload.get("recovered_exit_baseline")
+        if isinstance(baseline, Mapping):
+            return dict(baseline)
+    return None
+
+
+def _open_recovered_exit_review_item(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    command_id: str,
+    reason_code: str,
+    reason: str,
+    residual_shares: object,
+    residual_cost_basis: object,
+    evidence: Mapping[str, object],
+    authority_revision: int,
+) -> None:
+    """Open one position+command review item without family blocking."""
+
+    from src.contracts.review_work_item import ReviewReasonCode
+    from src.state.review_work_items import open_work_item, supersede_on_new_revision
+    from src.state.schema.review_work_items_schema import ensure_table
+
+    ensure_table(conn)
+    residual_cost = _decimal_or_none(residual_cost_basis)
+    reason = ReviewReasonCode(reason_code)
+    supersede_on_new_revision(
+        conn,
+        owner_table="recovered_exit",
+        subject_id=f"{position_id}:{command_id}",
+        reason_code=reason,
+        new_authority_revision=authority_revision,
+    )
+    open_work_item(
+        conn,
+        owner_domain="trade",
+        owner_table="recovered_exit",
+        subject_id=f"{position_id}:{command_id}",
+        reason_code=reason,
+        authority_revision=authority_revision,
+        evidence_refs=(position_id, command_id, reason),
+        evidence_hash=stable_hash(dict(evidence)),
+        family_key=None,
+        exposure_bound_usd=float(max(residual_cost or Decimal("0"), Decimal("0"))),
+        unbounded=False,
+        last_error_class="RECOVERED_EXIT_RECONCILE",
+        last_error_detail=json.dumps(dict(evidence), sort_keys=True, default=str),
+    )
+
+
+def _recovered_exit_review_revision(observed_at: str) -> int:
+    """Monotonic microsecond revision for one causal recovery observation."""
+
+    parsed = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.astimezone(timezone.utc).timestamp() * 1_000_000)
+
+
+def _safe_open_recovered_exit_review_item(
+    conn: sqlite3.Connection,
+    **kwargs: object,
+) -> None:
+    """Best-effort review bookkeeping; never turn a zero-write into a write."""
+
+    try:
+        _open_recovered_exit_review_item(conn, **kwargs)
+    except Exception:
+        logger.exception(
+            "recovery: failed to open recovered EXIT review item position=%s command=%s",
+            kwargs.get("position_id"),
+            kwargs.get("command_id"),
+        )
+
+
+def _resolve_recovered_exit_reviews_after_release(
+    conn: sqlite3.Connection,
+    *,
+    position_id: str,
+    command_id: str,
+    residual: Decimal,
+    observed_at: str,
+) -> None:
+    """RESET recovered-EXIT debt only after exact redecision release exists."""
+
+    try:
+        from src.state.review_work_items import resolve_work_item
+
+        subject = f"{position_id}:{command_id}"
+        rows = conn.execute(
+            """
+            SELECT work_id, authority_revision
+             FROM review_work_items
+             WHERE owner_table = 'recovered_exit'
+               AND subject_id = ?
+               AND reason_code IN (
+                    'RECOVERED_EXIT_DUST_REMAINDER',
+                    'MISSING_FILL_AUTHORITY',
+                    'MISSING_FILL_ECONOMICS'
+               )
+               AND status = 'OPEN'
+            """,
+            (subject,),
+        ).fetchall()
+        for row in rows:
+            resolve_work_item(
+                conn,
+                work_id=str(row["work_id"]),
+                authority_revision=int(row["authority_revision"]),
+                resolver_identity="src.execution.command_recovery",
+                resolution_evidence=(
+                    f"exact_redecision_release:residual={residual};observed_at={observed_at}"
+                ),
+                resolved_at=observed_at,
+            )
+    except Exception:
+        logger.exception(
+            "recovery: failed to reset recovered EXIT review items position=%s command=%s",
+            position_id,
+            command_id,
+        )
+
+
+def reconcile_recovered_partial_exit_economics(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str | None = None,
+    observed_at: str | None = None,
+    fresh_exchange_positions: Mapping[str, Decimal] | None = None,
+) -> dict[str, int]:
+    """Fold durable fills for adopted partial SELLs and preserve residual liveness.
+
+    This reducer is deliberately command-scoped.  It never synthesizes a close
+    event: full closure remains owned by the existing exact EXIT_INTENT lane.
+    """
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    if not _table_exists(conn, "venue_commands"):
+        return summary
+    params: tuple[object, ...] = (command_id,) if command_id else ()
+    where = "AND cmd.command_id = ?" if command_id else ""
+    rows = conn.execute(
+        f"""
+        SELECT cmd.command_id, cmd.venue_order_id, cmd.position_id, cmd.state,
+               cmd.token_id AS command_token_id,
+               cmd.intent_kind, cmd.side, pc.*
+          FROM venue_commands cmd
+          JOIN position_current pc ON pc.position_id = cmd.position_id
+         WHERE cmd.intent_kind = 'EXIT' AND cmd.side = 'SELL'
+           AND COALESCE(cmd.venue_order_id, '') <> ''
+           AND EXISTS (
+               SELECT 1 FROM venue_command_events adopted
+                WHERE adopted.command_id = cmd.command_id
+                  AND adopted.event_type = 'VENUE_ORDER_ADOPTED'
+           )
+           {where}
+         ORDER BY cmd.updated_at, cmd.command_id
+        """,
+        params,
+    ).fetchall()
+    at = observed_at or _now_iso()
+    review_revision = _recovered_exit_review_revision(at)
+    for raw in rows:
+        command = dict(raw)
+        summary["scanned"] += 1
+        position_id = str(command.get("position_id") or "")
+        command_id_value = str(command.get("command_id") or "")
+        order_id = str(command.get("venue_order_id") or "")
+        baseline = _recovered_exit_baseline(
+            conn, command_id=command_id_value, position_id=position_id
+        )
+        if baseline is None:
+            _safe_open_recovered_exit_review_item(
+                conn,
+                position_id=position_id,
+                command_id=command_id_value,
+                reason_code="MISSING_FILL_ECONOMICS",
+                reason="missing_immutable_baseline",
+                residual_shares=command.get("chain_shares"),
+                residual_cost_basis=command.get("cost_basis_usd"),
+                evidence={
+                    "reason": "recovered_exit_missing_immutable_baseline",
+                    "position_id": position_id,
+                    "command_id": command_id_value,
+                    "venue_order_id": order_id,
+                    "economic_write": False,
+                },
+                authority_revision=review_revision,
+            )
+            summary["stayed"] += 1
+            continue
+        review_reason_code = "MISSING_FILL_ECONOMICS"
+        try:
+            from src.state.fill_dedup import (
+                PartialExitEconomicDebtError,
+                economic_exit_fills_for_position,
+            )
+
+            fills = [
+                fill
+                for fill in economic_exit_fills_for_position(
+                    conn, position_id, venue_order_id=order_id
+                )
+                if fill.command_id == command_id_value
+            ]
+            if not fills:
+                _safe_open_recovered_exit_review_item(
+                    conn,
+                    position_id=position_id,
+                    command_id=command_id_value,
+                    reason_code="MISSING_FILL_ECONOMICS",
+                    reason="no_authenticated_trade_economics",
+                    residual_shares=command.get("chain_shares"),
+                    residual_cost_basis=command.get("cost_basis_usd"),
+                    evidence={
+                        "reason": "recovered_exit_missing_authenticated_trade_economics",
+                        "position_id": position_id,
+                        "command_id": command_id_value,
+                        "venue_order_id": order_id,
+                        "economic_write": False,
+                    },
+                    authority_revision=review_revision,
+                )
+                summary["stayed"] += 1
+                continue
+            expected = sum((fill.quantity for fill in fills), Decimal("0"))
+            latest_order_fact = conn.execute(
+                """
+                SELECT state, matched_size, remaining_size
+                  FROM venue_order_facts
+                 WHERE command_id = ? AND venue_order_id = ?
+                 ORDER BY local_sequence DESC, fact_id DESC
+                 LIMIT 1
+                """,
+                (command_id_value, order_id),
+            ).fetchone()
+            review_reason_code = "MISSING_FILL_AUTHORITY"
+            if latest_order_fact is None:
+                raise PartialExitEconomicDebtError(
+                    "recovered EXIT has no authenticated order aggregate"
+                )
+            aggregate = _decimal_or_none(latest_order_fact["matched_size"])
+            if aggregate is None or aggregate != expected:
+                raise PartialExitEconomicDebtError(
+                    "recovered EXIT canonical fills disagree with authenticated order aggregate"
+                )
+            position_current_row = conn.execute(
+                "SELECT * FROM position_current WHERE position_id = ? LIMIT 1",
+                (position_id,),
+            ).fetchone()
+            if position_current_row is None:
+                raise PartialExitEconomicDebtError(
+                    "recovered EXIT position projection disappeared during reconcile"
+                )
+            if fresh_exchange_positions is None:
+                _safe_open_recovered_exit_review_item(
+                    conn,
+                    position_id=position_id,
+                    command_id=command_id_value,
+                    reason_code="MISSING_FILL_AUTHORITY",
+                    reason="fresh_account_positions_unavailable",
+                    residual_shares=position_current_row["chain_shares"],
+                    residual_cost_basis=position_current_row["cost_basis_usd"],
+                    evidence={
+                        "reason": "recovered_exit_fresh_account_positions_unavailable",
+                        "position_id": position_id,
+                        "command_id": command_id_value,
+                        "venue_order_id": order_id,
+                        "economic_write": False,
+                    },
+                    authority_revision=review_revision,
+                )
+                summary["stayed"] += 1
+                continue
+            token_id = str(command.get("command_token_id") or "").strip()
+            projected_residual = _decimal_or_none(
+                position_current_row["chain_shares"]
+            )
+            exchange_residual = fresh_exchange_positions.get(token_id)
+            if (
+                not token_id
+                or projected_residual is None
+                or exchange_residual is None
+                or not _decimal_matches(projected_residual, exchange_residual)
+            ):
+                raise PartialExitEconomicDebtError(
+                    "recovered EXIT projection disagrees with fresh account token balance"
+                )
+            review_reason_code = "MISSING_FILL_ECONOMICS"
+            changed = _append_unrecorded_partial_exit_economics(
+                conn,
+                current=dict(position_current_row),
+                command_id=command_id_value,
+                venue_order_id=order_id,
+                expected_filled_size=expected,
+                observed_at=at,
+                recovered_baseline=baseline,
+                fresh_chain_seen_at=at,
+            )
+            current = conn.execute(
+                "SELECT shares, chain_shares, cost_basis_usd, phase, chain_seen_at "
+                "FROM position_current WHERE position_id = ?",
+                (position_id,),
+            ).fetchone()
+            residual = _decimal_or_none(current["chain_shares"] if current else None)
+            residual_cost = _decimal_or_none(current["cost_basis_usd"] if current else None)
+            if residual is None:
+                raise PartialExitEconomicDebtError(
+                    "recovered EXIT residual projection is not numeric"
+                )
+            terminal_state = str(command.get("state") or "") in {
+                "FILLED",
+                "CANCELLED",
+                "EXPIRED",
+            }
+            if not terminal_state or residual <= Decimal("0"):
+                summary["advanced"] += changed
+                continue
+
+            review_reason_code = "MISSING_FILL_AUTHORITY"
+            from src.execution.exit_lifecycle import (
+                _latest_fresh_snapshot_min_order_for_token,
+            )
+
+            fresh_min_order = _latest_fresh_snapshot_min_order_for_token(
+                str(command.get("command_token_id") or ""),
+                conn=conn,
+            )
+            if fresh_min_order is None:
+                _safe_open_recovered_exit_review_item(
+                    conn,
+                    position_id=position_id,
+                    command_id=command_id_value,
+                    reason_code="MISSING_FILL_AUTHORITY",
+                    reason="current_min_order_authority_unavailable",
+                    residual_shares=residual,
+                    residual_cost_basis=residual_cost,
+                    evidence={
+                        "reason": "recovered_exit_current_min_order_authority_unavailable",
+                        "position_id": position_id,
+                        "command_id": command_id_value,
+                        "venue_order_id": order_id,
+                        "token_id": command.get("command_token_id"),
+                        "residual_shares": str(residual),
+                        "economic_write_count": changed,
+                    },
+                    authority_revision=review_revision,
+                )
+                summary["advanced"] += changed
+                summary["stayed"] += 1
+                continue
+
+            if residual < fresh_min_order:
+                _safe_open_recovered_exit_review_item(
+                    conn,
+                    position_id=position_id,
+                    command_id=command_id_value,
+                    reason_code="RECOVERED_EXIT_DUST_REMAINDER",
+                    reason="dust_residual",
+                    residual_shares=residual,
+                    residual_cost_basis=residual_cost,
+                    evidence={
+                        "reason": "RECOVERED_EXIT_DUST_REMAINDER",
+                        "position_id": position_id,
+                        "command_id": command_id_value,
+                        "venue_order_id": order_id,
+                        "residual_shares": str(residual),
+                        "residual_cost_basis_usd": str(residual_cost),
+                        "current_min_order_size": str(fresh_min_order),
+                    },
+                    authority_revision=review_revision,
+                )
+                summary["stayed"] += 1
+            else:
+                release = reconcile_pending_exit_terminal_order_releases(
+                    conn,
+                    position_id=position_id,
+                )
+                release_proof = conn.execute(
+                    """
+                    SELECT pc.phase,
+                           EXISTS (
+                               SELECT 1 FROM position_events released
+                                WHERE released.position_id = pc.position_id
+                                  AND released.command_id = ?
+                                  AND released.event_type = 'EXIT_RETRY_RELEASED'
+                                  AND released.source_module = 'src.execution.command_recovery'
+                                  AND released.caused_by = 'venue_command:' || ?
+                           ) AS exact_release_event
+                      FROM position_current pc
+                     WHERE pc.position_id = ?
+                    """,
+                    (command_id_value, command_id_value, position_id),
+                ).fetchone()
+                released = bool(
+                    release_proof is not None
+                    and str(release_proof["phase"] or "") != "pending_exit"
+                    and int(release_proof["exact_release_event"] or 0) == 1
+                    and not release["errors"]
+                    and not release["stayed"]
+                )
+                if released:
+                    summary["advanced"] += int(release["advanced"] or 0)
+                    _resolve_recovered_exit_reviews_after_release(
+                        conn,
+                        position_id=position_id,
+                        command_id=command_id_value,
+                        residual=residual,
+                        observed_at=at,
+                    )
+                else:
+                    _safe_open_recovered_exit_review_item(
+                        conn,
+                        position_id=position_id,
+                        command_id=command_id_value,
+                        reason_code="MISSING_FILL_AUTHORITY",
+                        reason="exact_redecision_release_unproved",
+                        residual_shares=residual,
+                        residual_cost_basis=residual_cost,
+                        evidence={
+                            "reason": "recovered_exit_exact_redecision_release_unproved",
+                            "position_id": position_id,
+                            "command_id": command_id_value,
+                            "venue_order_id": order_id,
+                            "residual_shares": str(residual),
+                            "current_min_order_size": str(fresh_min_order),
+                            "release_summary": release,
+                            "release_event_proved": bool(release_proof),
+                        },
+                        authority_revision=review_revision,
+                    )
+                    summary["stayed"] += 1
+            summary["advanced"] += changed
+        except Exception as exc:
+            summary["errors"] += 1
+            _safe_open_recovered_exit_review_item(
+                conn,
+                position_id=position_id,
+                command_id=command_id_value,
+                reason_code=review_reason_code,
+                reason="recovered_exit_reconcile_conflict",
+                residual_shares=command.get("chain_shares"),
+                residual_cost_basis=command.get("cost_basis_usd"),
+                evidence={
+                    "reason": "recovered_exit_reconcile_conflict",
+                    "error": str(exc),
+                    "position_id": position_id,
+                    "command_id": command_id_value,
+                    "venue_order_id": order_id,
+                    "economic_write": False,
+                },
+                authority_revision=review_revision,
+            )
+            logger.warning(
+                "recovery: recovered partial EXIT stayed pending_exit command=%s: %s",
+                command_id_value,
+                exc,
+            )
+    return summary
 
 
 def reconcile_partial_remainders(
@@ -16203,11 +16892,11 @@ def _pending_exit_terminal_order_release_rows(
                         CAST(COALESCE(pc.shares, '0') AS REAL)
                         - CAST(COALESCE(pc.chain_shares, '0') AS REAL)
                     ) <= 0.011
-                    AND COALESCE(pc.chain_seen_at, '') != ''
-                    AND datetime(pc.chain_seen_at) >= datetime(fact.observed_at)
-                    AND datetime(pc.chain_seen_at) >= datetime(cmd.updated_at)
                 )
            )
+           AND COALESCE(pc.chain_seen_at, '') != ''
+           AND datetime(pc.chain_seen_at) >= datetime(fact.observed_at)
+           AND datetime(pc.chain_seen_at) >= datetime(cmd.updated_at)
            AND (
                 (
                     pc.phase = 'pending_exit'
@@ -23905,6 +24594,14 @@ def _reconcile_passes_inline(
         summary["stayed"] += exit_lifecycle_alignment_summary["stayed"]
         summary["errors"] += exit_lifecycle_alignment_summary["errors"]
 
+        recovered_partial_exit_summary = reconcile_recovered_partial_exit_economics(
+            conn, observed_at=started_at
+        )
+        summary["recovered_partial_exit_economics"] = recovered_partial_exit_summary
+        summary["advanced"] += recovered_partial_exit_summary["advanced"]
+        summary["stayed"] += recovered_partial_exit_summary["stayed"]
+        summary["errors"] += recovered_partial_exit_summary["errors"]
+
         confirmed_phantom_void_summary = repair_confirmed_phantom_voids(conn)
         summary["confirmed_phantom_void_repair"] = confirmed_phantom_void_summary
         summary["advanced"] += confirmed_phantom_void_summary["advanced"]
@@ -26121,6 +26818,12 @@ def _reconcile_passes_short_conn(
             reconcile_exit_lifecycle_alignment_repairs,
             "exit_lifecycle_alignment_repair",
         )
+        _db_pass(
+            "recovered_partial_exit_economics",
+            reconcile_recovered_partial_exit_economics,
+            "recovered_partial_exit_economics",
+            observed_at=started_at,
+        )
 
     if scope == "restart_preflight":
         _db_pass(
@@ -26563,6 +27266,12 @@ def _reconcile_passes_short_conn(
             "exit_lifecycle_alignment_repair",
             reconcile_exit_lifecycle_alignment_repairs,
             "exit_lifecycle_alignment_repair",
+        )
+        _db_pass(
+            "recovered_partial_exit_economics",
+            reconcile_recovered_partial_exit_economics,
+            "recovered_partial_exit_economics",
+            observed_at=started_at,
         )
         if scope != "live_tick":
             _db_pass(

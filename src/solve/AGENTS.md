@@ -54,8 +54,12 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
   in each branch. Cross-family holdings enter neither branch until a joint law exists; coupling a
   candidate loss to the global floor and its win to the unrelated portfolio ceiling invents a
   correlation and can make an existing winner freeze every new family. Cross-family exposure stays
-  on the correlation-cap rail. Stale, mismatched, maker-contingent, or
-  non-positive candidates are unrankable. Before sizing a new BUY, the current owner strategy's
+  on the correlation-cap rail. Stale, mismatched, non-positive, or unwitnessed/
+  witness-mismatched maker-contingent candidates are unrankable. A maker may be
+  ranked only from a candidate-, current-book-epoch-, limit-, and deadline-bound
+  `CurrentMakerFillWitness` with a causal zero/partial/full fill distribution;
+  a historical scalar or implicit full fill is never current executable truth.
+  Before sizing a new BUY, the current owner strategy's
   native entry-price floor removes unlicensed longshots from the feasible set. Inside that set,
   admission is posterior predictive mean `q > fee-inclusive executable cost` plus positive
   expected delta-log wealth and EV, never a price-independent `q > 0.5` wall; `q_lcb/q_ucb`
@@ -106,8 +110,19 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
   `LegacyDecisionProjection` re-scoring the primary leg STANDALONE at its post-haircut size;
   if that ΔU ≤ 0 → no-trade in phase 1. Promotion evidence NEVER grades
   `SolutionPlan.expected_delta_log_wealth`.
-- **Log-domain safety.** A non-positive endowment atom is refused up front
-  (`ZeroWealthOutcomeError`); coordinate feasibility bounds keep `W_end(a) > 0` strictly.
+- **Log-domain safety.** The general optimiser and every BUY refuse a
+  non-positive endowment atom up front (`ZeroWealthOutcomeError`); coordinate
+  feasibility bounds keep `W_end(a) > 0` strictly. A global reduce-only SELL is
+  the sole typed exception: exact zero atoms use the `epsilon -> 0` extended-log
+  limit, with raw ruin-probability reduction as the first lexicographic key and
+  finite expected log growth per capital-hour only after exact equality. Never
+  round, tolerance-collapse, or time-normalize the ruin key. Negative or
+  non-finite terminal wealth always fails closed; maker zero-atom SELL requires
+  a current partial-fill distribution and otherwise remains unavailable.
+- **Capital ownership.** Venue cash proves affordability, not utility ownership.
+  BUY and SELL share the Zeus-owned endowment `U + H[a]`, where
+  `U=max(E-K,0)` and `H[a]` is the exact same-family payoff. BUY capacity is
+  `min(C,max(L-K,0))`; co-tenant wallet cash never enters Zeus log utility.
 - **Coherence lockstep (§4 decision 1).** The shim emits `coherence_allows=True`; the
   overlay's COHERENCE_BLOCKED guard retires in the flag-ON packet. Do not add a coherence
   veto here.

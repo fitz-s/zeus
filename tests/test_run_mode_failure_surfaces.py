@@ -45,6 +45,10 @@ import pytest
 
 from src.control import live_health
 from src.control.live_health import compute_composite_live_health, STATUS_FRESH_BUDGET_SECONDS
+from src.contracts.global_auction_receipt import (
+    global_auction_artifact_summary_hash,
+    global_auction_execution_binding_hash,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -548,9 +552,13 @@ def _write_high_yes_edge_dbs(
             v12 = global_auction_encoding == (
                 "zlib+base64+canonical-json-v12"
             )
+            v13 = global_auction_encoding == (
+                "zlib+base64+canonical-json-v13"
+            )
+            indexed = v12 or v13
             rejection_identity = (
                 {"candidate_indexes": [0]}
-                if v12
+                if indexed
                 else {"candidate_ids": ["candidate-high-yes-1"]}
             )
             evaluation_payload = {
@@ -565,7 +573,7 @@ def _write_high_yes_edge_dbs(
                 "detailed": [],
                 "buy_condition_side_masks": [[condition_id, 1]],
             }
-            if v12:
+            if indexed:
                 evaluation_payload["buy_candidate_index"] = [
                     [
                         "candidate-high-yes-1",
@@ -585,12 +593,14 @@ def _write_high_yes_edge_dbs(
             v11 = global_auction_encoding == (
                 "zlib+base64+canonical-json-v11"
             )
-            current_encoding = v11 or v12
+            current_encoding = v11 or indexed
             holding_json = b"[]"
             decision_at = (now - timedelta(minutes=1)).isoformat()
             artifact = {
                 "summary": {
-                    "schema_version": 20 if v12 else (18 if v11 else 5),
+                    "schema_version": (
+                        21 if v13 else 20 if v12 else 18 if v11 else 5
+                    ),
                     "decision_at_utc": decision_at,
                     "candidate_coverage_complete": True,
                     "candidate_condition_index_complete": True,
@@ -620,6 +630,56 @@ def _write_high_yes_edge_dbs(
                     ).decode(),
                 }
             }
+            if v13:
+                from types import SimpleNamespace
+
+                from src.contracts.strategy_capital_allocation import (
+                    StrategyCapitalAllocationWitness,
+                )
+                from src.engine.global_batch_runtime import (
+                    _strategy_capital_allocation_receipt,
+                )
+
+                allocation = StrategyCapitalAllocationWitness.build(
+                    capital_basis_usd="1",
+                    committed_capital_usd="0",
+                    venue_spendable_cash_usd="1",
+                    allocation={"mode": "wallet_total"},
+                )
+                artifact["summary"]["strategy_capital_allocation"] = (
+                    _strategy_capital_allocation_receipt(
+                        SimpleNamespace(strategy_capital_allocation=allocation)
+                    )
+                )
+                # Canonical schema-21 receipt identity.  This fixture has no
+                # winner (the candidate is a pause/no-trade telemetry row), so
+                # winner fields are intentionally empty; all binding/hash fields
+                # still exist and are verified by the production parser.
+                artifact["summary"].update(
+                    {
+                        "selection_epoch_identity": "epoch-high-yes-1",
+                        "selection_cut_at_utc": decision_at,
+                        "full_scope_identity": "scope-high-yes-1",
+                        "book_epoch_identity": "book-high-yes-1",
+                        "wealth_witness_identity": "wealth-high-yes-1",
+                        "wealth_economic_identity": "wealth-economic-high-yes-1",
+                        "winner_event_id": "",
+                        "winner_candidate_id": "",
+                        "winner_actuation_identity": "",
+                        "payload_identity": "1" * 64,
+                        "decision_payload_identity": "2" * 64,
+                        "audit_context_sha256": "3" * 64,
+                        "book_native_side_states_sha256": "4" * 64,
+                        "buy_minimum_marketable_repairs_sha256": "5" * 64,
+                        "receipt_hash": "6" * 64,
+                    }
+                )
+                artifact["summary"]["execution_binding_hash"] = (
+                    global_auction_execution_binding_hash(artifact["summary"])
+                )
+                artifact["summary"]["artifact_summary_hash"] = (
+                    global_auction_artifact_summary_hash(artifact["summary"])
+                )
             trade_conn.execute(
                 "INSERT INTO decision_log VALUES "
                 "(1, 'global_single_order_auction', ?, ?)",
@@ -5306,6 +5366,7 @@ def test_high_yes_edge_accepts_canonical_global_entry_pause(
         "zlib+base64+canonical-json-v10",
         "zlib+base64+canonical-json-v11",
         "zlib+base64+canonical-json-v12",
+        "zlib+base64+canonical-json-v13",
     ),
 )
 def test_high_yes_edge_accepts_current_global_auction_candidate(
@@ -5335,6 +5396,104 @@ def test_high_yes_edge_accepts_current_global_auction_candidate(
     assert evidence["receipt_id"] == 1
     assert evidence["candidate_evaluation_count"] == 1
     assert evidence["yes_condition_count"] == 1
+
+
+def test_schema20_global_winner_identity_is_read_only_telemetry_only(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(
+        sd,
+        with_global_auction_candidate=True,
+        global_auction_encoding="zlib+base64+canonical-json-v12",
+    )
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        artifact = json.loads(
+            conn.execute(
+                "SELECT artifact_json FROM decision_log WHERE id = 1"
+            ).fetchone()[0]
+        )
+        artifact["summary"].update(
+            {
+                "winner_event_id": "event-schema20",
+                "winner_candidate_id": "candidate-schema20",
+                "winner_actuation_identity": "actuation-schema20",
+            }
+        )
+        conn.execute(
+            "UPDATE decision_log SET artifact_json = ? WHERE id = 1",
+            (json.dumps(artifact),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    conn.row_factory = sqlite3.Row
+    try:
+        yes, no, evidence = live_health._latest_global_auction_candidate_counts(
+            conn,
+            cutoff=_now_iso(-48 * 3600),
+        )
+    finally:
+        conn.close()
+
+    assert yes == {}
+    assert no == {}
+    assert evidence["issue"] == (
+        "GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:WINNER_SCHEMA_VERSION"
+    )
+
+
+def test_v13_global_auction_rejects_tampered_strategy_allocation(
+    tmp_path: Path,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _write_high_yes_edge_dbs(
+        sd,
+        with_global_auction_candidate=True,
+        global_auction_encoding="zlib+base64+canonical-json-v13",
+    )
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        artifact = json.loads(
+            conn.execute(
+                "SELECT artifact_json FROM decision_log WHERE id = 1"
+            ).fetchone()[0]
+        )
+        artifact["summary"]["strategy_capital_allocation"][
+            "utility_liquid_cash_usd"
+        ] = "2"
+        artifact["summary"]["artifact_summary_hash"] = (
+            global_auction_artifact_summary_hash(artifact["summary"])
+        )
+        conn.execute(
+            "UPDATE decision_log SET artifact_json = ? WHERE id = 1",
+            (json.dumps(artifact),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    conn.row_factory = sqlite3.Row
+    try:
+        yes, no, evidence = live_health._latest_global_auction_candidate_counts(
+            conn,
+            cutoff=_now_iso(-48 * 3600),
+        )
+    finally:
+        conn.close()
+
+    assert yes == {}
+    assert no == {}
+    assert evidence["issue"] == (
+        "GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID:"
+        "STRATEGY_CAPITAL_ALLOCATION"
+    )
 
 
 def test_global_auction_holding_authority_accepts_all_fixed_sell_modes() -> None:
@@ -5925,6 +6084,7 @@ def test_live_health_reconstructs_engine_candidate_keyed_delta_v3() -> None:
         "condition_id",
         "side",
         "token_id",
+        "execution_mode",
     ]
     base = {
         "rejected_groups": [],
@@ -5935,8 +6095,24 @@ def test_live_health_reconstructs_engine_candidate_keyed_delta_v3() -> None:
         ],
         "buy_candidate_index_fields": fields,
         "buy_candidate_index": [
-            ["candidate-a", "family-a", "bin-a", "condition-a", "YES", "token-a"],
-            ["candidate-b", "family-b", "bin-b", "condition-b", "NO", "token-b"],
+            [
+                "candidate-a",
+                "family-a",
+                "bin-a",
+                "condition-a",
+                "YES",
+                "token-a",
+                "TAKER_LIMIT",
+            ],
+            [
+                "candidate-b",
+                "family-b",
+                "bin-b",
+                "condition-b",
+                "NO",
+                "token-b",
+                "TAKER_LIMIT",
+            ],
         ],
     }
     current = {
@@ -5953,8 +6129,17 @@ def test_live_health_reconstructs_engine_candidate_keyed_delta_v3() -> None:
                 "condition-a",
                 "YES",
                 "token-a",
+                "TAKER_LIMIT",
             ],
-            ["candidate-b", "family-b", "bin-b", "condition-b", "NO", "token-b"],
+            [
+                "candidate-b",
+                "family-b",
+                "bin-b",
+                "condition-b",
+                "NO",
+                "token-b",
+                "TAKER_LIMIT",
+            ],
         ],
     }
     receipt = global_batch_runtime._candidate_evaluations_delta_receipt(
@@ -8839,7 +9024,7 @@ def test_day0_wake_does_not_ack_incomplete_exit_monitor(monkeypatch) -> None:
         def is_set(self) -> bool:
             return False
 
-    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(
         wake_module,
         "acknowledge_reactor_wake",
@@ -8904,7 +9089,7 @@ def test_held_sell_completion_wake_stays_durable_until_economic_cut(
         "_exit_monitor_excluded_wake_ids",
         lambda: frozenset(),
     )
-    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(
         wake_module,
         "coalescible_reactor_wakes",
@@ -8933,6 +9118,7 @@ def test_held_sell_completion_wake_stays_durable_until_economic_cut(
             "producer_wake_published_at": wake.published_at,
             "producer_wake_event_ids": (),
             "producer_wake_families": family_wake.forecast_families,
+            "allow_paused_forecast_snapshot_completion": False,
         }
     ]
 
@@ -8972,7 +9158,7 @@ def test_position_held_sell_reauction_wake_does_not_ack_generic_reactor_run(
         lambda _job: False,
     )
     monkeypatch.setattr(main_module, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
-    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(wake_module, "coalescible_reactor_wakes", lambda _wake: (wake,))
     monkeypatch.setattr(
         wake_module,
@@ -9029,7 +9215,7 @@ def test_position_held_sell_reauction_wake_acks_after_typed_receipt(monkeypatch)
         lambda _job: False,
     )
     monkeypatch.setattr(main_module, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
-    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda: wake)
+    monkeypatch.setattr(wake_module, "read_reactor_wake", lambda **_kwargs: wake)
     monkeypatch.setattr(wake_module, "coalescible_reactor_wakes", lambda _wake: (wake,))
     monkeypatch.setattr(
         wake_module,
@@ -10070,8 +10256,8 @@ def test_reactor_rechecks_monitor_priority_after_active_lock_claim() -> None:
     source = inspect.getsource(reactor_module.run_edli_event_reactor_cycle)
     defer_call = '_defer_for_held_position_monitor("edli_event_reactor")'
     first_check = source.index(defer_call)
-    lock_claim = source.index("active_lock.acquire(blocking=False)")
-    second_check = source.index(defer_call, first_check + len(defer_call))
+    lock_claim = source.index("if not active_lock.acquire(blocking=False):")
+    second_check = source.index(defer_call, lock_claim)
 
     assert first_check < lock_claim < second_check
 
@@ -10532,14 +10718,17 @@ def test_edli_command_recovery_emits_terminal_no_fill_continuation(monkeypatch) 
     import src.execution.command_recovery as command_recovery
     import src.main as main_module
     import src.state.db as state_db
+    import src.state.portfolio as portfolio
 
     class FakeConn:
         closed = False
 
+        def set_progress_handler(self, *_args) -> None:
+            return None
+
         def close(self) -> None:
             self.closed = True
 
-    trade_refresh_conn = FakeConn()
     trade_ro = FakeConn()
     forecasts_ro = FakeConn()
     summary = {
@@ -10567,11 +10756,6 @@ def test_edli_command_recovery_emits_terminal_no_fill_continuation(monkeypatch) 
     )
     monkeypatch.setattr(
         state_db,
-        "get_trade_connection_with_world_required",
-        lambda write_class=None: trade_refresh_conn,
-    )
-    monkeypatch.setattr(
-        state_db,
         "get_trade_connection_read_only",
         lambda: trade_ro,
     )
@@ -10581,9 +10765,19 @@ def test_edli_command_recovery_emits_terminal_no_fill_continuation(monkeypatch) 
         lambda: forecasts_ro,
     )
     monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_cancel_command_count",
+        lambda _conn: 0,
+    )
+    monkeypatch.setattr(
+        portfolio,
+        "load_runtime_open_portfolio",
+        lambda _conn: {},
+    )
+    monkeypatch.setattr(
         main_module,
         "_edli_refresh_global_allocator",
-        lambda conn: {"configured": True},
+        lambda conn, **_kwargs: {"configured": True},
     )
     monkeypatch.setattr(
         main_module,
@@ -10598,18 +10792,17 @@ def test_edli_command_recovery_emits_terminal_no_fill_continuation(monkeypatch) 
     monkeypatch.setattr(
         main_module,
         "_emit_terminal_no_fill_redecision_continuations",
-        lambda observed_families, decision_time, received_at: (
+        lambda observed_families, decision_time, received_at, **_kwargs: (
             emitted_calls.append((set(observed_families), str(received_at))) or 1
         ),
     )
 
     main_module._edli_command_recovery_cycle()
 
-    assert trade_refresh_conn.closed is True
     assert trade_ro.closed is True
     assert forecasts_ro.closed is True
-    assert clear_calls == [families]
-    assert emitted_calls and emitted_calls[0][0] == families
+    assert clear_calls and all(call == families for call in clear_calls)
+    assert emitted_calls and all(call[0] == families for call in emitted_calls)
 
 
 def test_terminal_no_fill_continuation_accepts_direct_family_identity() -> None:
@@ -10689,7 +10882,7 @@ def test_boot_auto_resolution_continuation_is_emitted_before_first_tick(monkeypa
     monkeypatch.setattr(
         main_module,
         "_emit_terminal_no_fill_redecision_continuations",
-        lambda observed_families, decision_time, received_at: (
+        lambda observed_families, decision_time, received_at, **_kwargs: (
             emitted_calls.append(set(observed_families)) or 1
         ),
     )

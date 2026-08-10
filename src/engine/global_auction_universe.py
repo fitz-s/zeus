@@ -13,10 +13,11 @@ import json
 import sqlite3
 import threading
 import time as _time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
 from functools import cached_property
+from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
@@ -26,6 +27,9 @@ from src.contracts.executable_market_snapshot import (
     fee_rate_fraction_from_details,
 )
 from src.contracts.fee_authority import resolve_taker_fee_fraction
+from src.contracts.strategy_capital_allocation import (
+    StrategyCapitalAllocationWitness,
+)
 from src.events.candidate_binding import weather_family_id
 from src.events.event_writer import EventWriter
 from src.events.opportunity_event import OpportunityEvent
@@ -113,6 +117,7 @@ class CurrentGlobalBookAsset:
     token_id: str
     curve: ExecutableCostCurve
     captured_at_utc: datetime
+    neg_risk: bool
     bid_levels: tuple[BookLevel, ...] = ()
 
     def __post_init__(self) -> None:
@@ -132,6 +137,7 @@ class CurrentGlobalBookAsset:
             or self.curve.side != self.side
             or self.curve.token_id != self.token_id
             or self.captured_at_utc.tzinfo is None
+            or type(self.neg_risk) is not bool
         ):
             raise ValueError("GLOBAL_BOOK_ASSET_INVALID")
 
@@ -149,6 +155,7 @@ class CurrentGlobalSellAsset:
     token_id: str
     curve: ExecutableSellCurve
     captured_at_utc: datetime
+    neg_risk: bool
 
     def __post_init__(self) -> None:
         if (
@@ -167,6 +174,7 @@ class CurrentGlobalSellAsset:
             or self.curve.side != self.side
             or self.curve.token_id != self.token_id
             or self.captured_at_utc.tzinfo is None
+            or type(self.neg_risk) is not bool
         ):
             raise ValueError("GLOBAL_SELL_BOOK_ASSET_INVALID")
 
@@ -196,6 +204,9 @@ class CurrentGlobalBookEpoch:
     max_age: timedelta
     witness_identity: str
     sell_assets: tuple[CurrentGlobalSellAsset, ...] = ()
+    maker_fill_witness_identities: Mapping[
+        tuple[str, str, str, str, str | None], str
+    ] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         states = tuple(sorted(tuple(str(value) for value in row) for row in self.asset_states))
@@ -203,12 +214,23 @@ class CurrentGlobalBookEpoch:
             (asset.family_key, asset.bin_id, asset.side, asset.token_id)
             for asset in self.sell_assets
         )
+        maker_witnesses = {
+            tuple(key): str(identity)
+            for key, identity in self.maker_fill_witness_identities.items()
+        }
         if (
             not states
             or len(set(states)) != len(states)
             or len(set(sell_keys)) != len(sell_keys)
             or self.captured_at_utc.tzinfo is None
             or self.max_age <= timedelta(0)
+            or any(
+                not isinstance(key, tuple)
+                or len(key) != 5
+                or not all(str(value or "").strip() for value in key[:4])
+                or not identity.strip()
+                for key, identity in maker_witnesses.items()
+            )
         ):
             raise ValueError("GLOBAL_BOOK_EPOCH_INVALID")
         expected = current_global_book_epoch_identity(
@@ -218,6 +240,11 @@ class CurrentGlobalBookEpoch:
         if self.witness_identity != expected:
             raise ValueError("GLOBAL_BOOK_EPOCH_IDENTITY_MISMATCH")
         object.__setattr__(self, "asset_states", states)
+        object.__setattr__(
+            self,
+            "maker_fill_witness_identities",
+            MappingProxyType(maker_witnesses),
+        )
 
     @cached_property
     def asset_by_key(self) -> Mapping[tuple[str, str, str, str], CurrentGlobalBookAsset]:
@@ -267,12 +294,24 @@ class CurrentGlobalBookEpoch:
         )
         if asset is None:
             return None
+        maker_witness_identity = None
+        if action == "BUY" and getattr(candidate, "execution_mode", None) == "MAKER_REST":
+            maker_witness_identity = self.maker_fill_witness_identities.get(
+                (*key, None)
+            )
+        elif action == "SELL" and getattr(candidate, "execution_mode", None) == "MAKER_REST":
+            maker_witness_identity = self.maker_fill_witness_identities.get(
+                (*key, getattr(candidate, "position_id", None))
+            )
         return CurrentExecutionAuthority(
             token_id=asset.token_id,
             side=asset.side,  # type: ignore[arg-type]
             book_snapshot_id=asset.curve.snapshot_id,
             execution_curve_identity=executable_curve_identity(asset.curve),
             action=action,  # type: ignore[arg-type]
+            neg_risk=asset.neg_risk,
+            asset_epoch_identity=self.witness_identity,
+            maker_witness_identity=maker_witness_identity,
         )
 
 
@@ -365,6 +404,7 @@ def _global_book_snapshot_rows(
                    s.accepting_orders,
                    s.min_tick_size,
                    s.min_order_size,
+                   s.neg_risk,
                    s.fee_details_json,
                    s.tradeability_status_json,
                    s.captured_at,
@@ -676,6 +716,10 @@ def _current_global_book_asset_state(
         raise ValueError(f"GLOBAL_BOOK_GAMMA_MARKET_ID_MISSING:{condition_id}:{token_id}")
     if not market_event_id:
         raise ValueError(f"GLOBAL_BOOK_MARKET_EVENT_ID_MISSING:{condition_id}:{token_id}")
+    raw_neg_risk = metadata.get("neg_risk")
+    if raw_neg_risk not in {True, False, 0, 1}:
+        raise ValueError(f"GLOBAL_BOOK_NEG_RISK_MISSING:{condition_id}:{token_id}")
+    neg_risk = bool(raw_neg_risk)
 
     metadata_current = _global_book_metadata_is_current(
         metadata,
@@ -743,6 +787,7 @@ def _current_global_book_asset_state(
         book_hash,
         market_event_id,
         gamma_market_id,
+        str(neg_risk),
     )
     asset = (
         CurrentGlobalBookAsset(
@@ -758,6 +803,7 @@ def _current_global_book_asset_state(
             bid_levels=(
                 tuple(sell_curve.levels) if sell_curve is not None else ()
             ),
+            neg_risk=neg_risk,
         )
         if curve is not None
         else None
@@ -773,6 +819,7 @@ def _current_global_book_asset_state(
             token_id=token_id,
             curve=sell_curve,
             captured_at_utc=captured_at_utc,
+            neg_risk=neg_risk,
         )
         if sell_curve is not None
         else None
@@ -1844,6 +1891,13 @@ def bind_current_global_probability_tokens(
                             "acceptingOrders",
                             "accepting_orders",
                         )
+                        neg_risk = _boolish_market_field(
+                            raw, "negRisk", "neg_risk", "negative_risk"
+                        )
+                        if neg_risk is None:
+                            raise ValueError(
+                                f"GLOBAL_GAMMA_NEG_RISK_MISSING:{condition_id}"
+                            )
                         executable_allowed = (
                             enable_orderbook is True
                             and active is True
@@ -1871,6 +1925,7 @@ def bind_current_global_probability_tokens(
                             "active": active is True,
                             "closed": closed is True,
                             "accepting_orders": accepting_orders is True,
+                            "neg_risk": bool(neg_risk),
                             "market_end_at": str(
                                 outcome.get("market_end_at")
                                 or raw.get("endDate")
@@ -2992,6 +3047,7 @@ def current_portfolio_wealth_witness(
     decision_at_utc: datetime,
     max_age: timedelta,
     portfolio_state: object | None = None,
+    capital_allocation: Mapping[str, object] | None = None,
 ) -> PortfolioWealthWitness:
     """Build one current terminal-wealth bound from chain collateral and positions.
 
@@ -3322,6 +3378,35 @@ def current_portfolio_wealth_witness(
         )
         spendable = Decimal(spendable_micro) / Decimal("1000000")
         reservations = Decimal(cash_at_risk_micro) / Decimal("1000000")
+        committed_capital = sum(
+            (
+                Decimal(amount) / Decimal("1000000")
+                for amount in native_commitments_micro.values()
+            ),
+            Decimal("0"),
+        )
+        if capital_allocation is None:
+            from src.runtime.bankroll_provider import (
+                current_zeus_capital_allocation_setting,
+            )
+
+            active_capital_allocation = (
+                current_zeus_capital_allocation_setting()
+            )
+        else:
+            active_capital_allocation = capital_allocation
+        # Fail-closed allocation gate (INV-47):
+        # SCOPE — only new BUY capacity for this complete auction epoch.
+        # DRAIN — every selection/preflight/final executor recapture rebuilds
+        # this witness and a changed identity supersedes the full ranking.
+        # RESET — a valid active setting plus current collateral/commitments
+        # rebuilds a coherent witness; SELL/HOLD never depend on positive room.
+        strategy_capital_allocation = StrategyCapitalAllocationWitness.build(
+            capital_basis_usd=floor + committed_capital,
+            committed_capital_usd=committed_capital,
+            venue_spendable_cash_usd=spendable,
+            allocation=active_capital_allocation,
+        )
 
         ledger_snapshot_id = hashlib.sha256(
             repr(
@@ -3358,6 +3443,9 @@ def current_portfolio_wealth_witness(
             spendable_cash_usd=spendable,
             reservations_usd=reservations,
             collateral_authority=authority,
+            strategy_capital_allocation_identity=(
+                strategy_capital_allocation.witness_identity
+            ),
             captured_at_utc=captured_at,
         )
         return PortfolioWealthWitness(
@@ -3368,6 +3456,7 @@ def current_portfolio_wealth_witness(
             spendable_cash_usd=spendable,
             reservations_usd=reservations,
             collateral_authority=authority,
+            strategy_capital_allocation=strategy_capital_allocation,
             captured_at_utc=captured_at,
             max_age=max_age,
             witness_identity=identity,

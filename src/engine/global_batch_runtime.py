@@ -21,6 +21,11 @@ from typing import Callable, Mapping, Sequence
 
 from src.contracts.executable_cost_curve import ExecutableCostCurve
 from src.contracts.executable_market_snapshot import FRESHNESS_WINDOW_DEFAULT
+from src.contracts.global_auction_receipt import (
+    global_auction_artifact_summary_hash,
+    global_auction_execution_binding_hash,
+    global_auction_receipt_ref_from_artifact,
+)
 from src.data.market_topology_rows import prime_frozen_schema_reads
 from src.engine.global_auction_universe import (
     CurrentGlobalAuctionScope,
@@ -255,12 +260,49 @@ def _wealth_reauction_changed_fields(
         "native_holdings_micro",
         "pending_entry_endowments_micro",
         "native_commitments_micro",
+        "strategy_capital_allocation",
     )
     return tuple(
         field
         for field in fields
         if getattr(previous, field, None) != getattr(current, field, None)
     )
+
+
+def _strategy_capital_allocation_receipt(wealth_witness: object) -> dict[str, object]:
+    allocation = getattr(wealth_witness, "strategy_capital_allocation", None)
+    if allocation is None:
+        raise ValueError("GLOBAL_AUCTION_STRATEGY_CAPITAL_ALLOCATION_MISSING")
+    return {
+        "allocation_version": allocation.allocation_version,
+        "capital_basis_semantics": allocation.capital_basis_semantics,
+        "source": allocation.source,
+        "mode": allocation.mode,
+        "configured_value": (
+            str(allocation.configured_value)
+            if allocation.configured_value is not None
+            else None
+        ),
+        "capital_basis_usd": str(allocation.capital_basis_usd),
+        "allocated_equity_usd": str(allocation.allocated_equity_usd),
+        "configured_buy_commitment_limit_usd": (
+            str(allocation.configured_buy_commitment_limit_usd)
+            if allocation.configured_buy_commitment_limit_usd is not None
+            else None
+        ),
+        "buy_commitment_limit_usd": str(
+            allocation.buy_commitment_limit_usd
+        ),
+        "committed_capital_usd": str(allocation.committed_capital_usd),
+        "utility_liquid_cash_usd": str(
+            allocation.utility_liquid_cash_usd
+        ),
+        "venue_spendable_cash_usd": str(allocation.venue_spendable_cash_usd),
+        "remaining_buy_capacity_usd": str(
+            allocation.remaining_buy_capacity_usd
+        ),
+        "witness_identity": allocation.witness_identity,
+    }
 
 
 _GLOBAL_AUCTION_PAYLOAD_REFS: dict[str, _GlobalAuctionPayloadRef] = {}
@@ -972,6 +1014,7 @@ class GlobalWinnerPreflight:
         if self.status not in {
             "STABLE",
             "CURVE_SUPERSEDED",
+            "MARKET_AUTHORITY_SUPERSEDED",
             "PROBABILITY_TIGHTENED",
             "PROBABILITY_SUPERSEDED",
             "WEALTH_SUPERSEDED",
@@ -986,6 +1029,11 @@ class GlobalWinnerPreflight:
             self.replacement_candidate is not None
         ):
             raise ValueError("GLOBAL_WINNER_PREFLIGHT_REPLACEMENT_INVALID")
+        if self.status == "MARKET_AUTHORITY_SUPERSEDED" and (
+            self.replacement_candidate is not None
+            or self.probability_tightening is not None
+        ):
+            raise ValueError("GLOBAL_WINNER_PREFLIGHT_MARKET_AUTHORITY_INVALID")
         if (self.status == "PROBABILITY_TIGHTENED") != (
             self.probability_tightening is not None
         ):
@@ -2836,6 +2884,17 @@ def _store_global_auction_receipt(
     )
     winner = getattr(decision, "candidate", None)
     winner_id = str(getattr(winner, "candidate_id", "") or "")
+    winner_event_id = str(getattr(selected, "winner_event_id", "") or "")
+    winner_actuation = getattr(selected, "actuation", None)
+    winner_actuation_identity = str(
+        getattr(winner_actuation, "actuation_identity", "") or ""
+    )
+    if winner is not None and not all(
+        (winner_id, winner_event_id, winner_actuation_identity)
+    ):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_WINNER_BINDING_INCOMPLETE")
+    if winner is None and any((winner_event_id, winner_actuation_identity)):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_NO_TRADE_WINNER_PRESENT")
     candidate_input_count = getattr(decision, "candidate_input_count", None)
     condition_index_complete = all(condition_ids) and all(
         row.get("action") != "BUY" or row.get("side") in {"YES", "NO"}
@@ -2855,7 +2914,7 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 20,
+        "schema_version": 21,
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -2904,6 +2963,9 @@ def _store_global_auction_receipt(
         "wealth_economic_identity": str(
             getattr(wealth_witness, "economic_identity", "") or ""
         ),
+        "strategy_capital_allocation": (
+            _strategy_capital_allocation_receipt(wealth_witness)
+        ),
         "wealth_reauction": (
             asdict(wealth_reauction_audit)
             if wealth_reauction_audit is not None
@@ -2915,7 +2977,9 @@ def _store_global_auction_receipt(
             "robust_ev_usd": "0",
             "selected": winner is None,
         },
+        "winner_event_id": winner_event_id or None,
         "winner_candidate_id": winner_id or None,
+        "winner_actuation_identity": winner_actuation_identity or None,
         "no_trade_reason": getattr(decision, "no_trade_reason", None),
         "candidate_evaluation_count": len(evaluation_rows),
         "candidate_input_count": candidate_input_count,
@@ -2970,7 +3034,7 @@ def _store_global_auction_receipt(
         "buy_condition_membership_count": sum(
             1 + (mask == 3) for mask in buy_condition_masks.values()
         ),
-        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v12",
+        "candidate_evaluation_encoding": "zlib+base64+canonical-json-v13",
         "candidate_evaluations_sha256": hashlib.sha256(
             evaluation_json
         ).hexdigest(),
@@ -3008,6 +3072,17 @@ def _store_global_auction_receipt(
             ).decode("ascii"),
         }
     )
+    payload_identity = _global_auction_payload_identity(receipt)
+    decision_payload_identity = _global_auction_decision_payload_identity(receipt)
+    receipt.update(
+        {
+            "payload_identity": payload_identity,
+            "decision_payload_identity": decision_payload_identity,
+        }
+    )
+    receipt["execution_binding_hash"] = (
+        global_auction_execution_binding_hash(receipt)
+    )
     encoded = json.dumps(
         receipt,
         default=str,
@@ -3015,8 +3090,6 @@ def _store_global_auction_receipt(
         separators=(",", ":"),
     ).encode("utf-8")
     receipt["receipt_hash"] = hashlib.sha256(encoded).hexdigest()
-    payload_identity = _global_auction_payload_identity(receipt)
-    decision_payload_identity = _global_auction_decision_payload_identity(receipt)
     current_book_rows = (
         tuple(
             sorted(
@@ -3353,6 +3426,9 @@ def _store_global_auction_receipt(
                     and audit_context_exact_reference
                     else "global_single_order_auction_delta"
                 )
+                compact_receipt["artifact_summary_hash"] = (
+                    global_auction_artifact_summary_hash(compact_receipt)
+                )
                 row_id = store_artifact(
                     conn,
                     CycleArtifact(
@@ -3455,6 +3531,9 @@ def _store_global_auction_receipt(
                 compact_bytes,
             )
 
+        receipt["artifact_summary_hash"] = (
+            global_auction_artifact_summary_hash(receipt)
+        )
         row_id = store_artifact(
             conn,
             CycleArtifact(
@@ -3530,6 +3609,129 @@ def _store_global_auction_receipt(
         receipt["receipt_hash"],
     )
     return row_id
+
+
+def _bind_stored_global_auction_receipt(
+    conn: sqlite3.Connection,
+    *,
+    selected: object,
+    decision_log_id: int,
+) -> object:
+    """Bind the committed receipt row to the immutable selected actuation."""
+
+    actuation = getattr(selected, "actuation", None)
+    if actuation is None:
+        return selected
+    row = conn.execute(
+        "SELECT mode, artifact_json FROM decision_log WHERE id = ?",
+        (decision_log_id,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("GLOBAL_AUCTION_WINNER_RECEIPT_ROW_MISSING")
+    receipt_ref = global_auction_receipt_ref_from_artifact(
+        decision_log_id=decision_log_id,
+        decision_log_mode=str(row[0]),
+        artifact_json=row[1],
+    )
+    return replace(
+        selected,
+        actuation=replace(actuation, auction_receipt_ref=receipt_ref),
+    )
+
+
+def _store_global_claim_carrier_rebound_receipt(
+    conn: sqlite3.Connection,
+    *,
+    selected: object,
+    base_decision_log_id: int,
+) -> tuple[object, int]:
+    """Append and bind the final carrier identity without mutating its base cut."""
+
+    from src.state.decision_chain import CycleArtifact, store_artifact
+
+    actuation = getattr(selected, "actuation", None)
+    candidate = getattr(getattr(selected, "decision", None), "candidate", None)
+    if actuation is None or candidate is None:
+        raise ValueError("GLOBAL_CARRIER_REBOUND_ACTUATION_MISSING")
+    if getattr(actuation, "auction_receipt_ref", None) is not None:
+        raise ValueError("GLOBAL_CARRIER_REBOUND_RECEIPT_ALREADY_BOUND")
+    row = conn.execute(
+        "SELECT mode, artifact_json FROM decision_log WHERE id = ?",
+        (base_decision_log_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError("GLOBAL_CARRIER_REBOUND_BASE_RECEIPT_MISSING")
+    mode = str(row[0])
+    base_ref = global_auction_receipt_ref_from_artifact(
+        decision_log_id=base_decision_log_id,
+        decision_log_mode=mode,
+        artifact_json=row[1],
+    )
+    candidate_id = str(getattr(candidate, "candidate_id", "") or "").strip()
+    selection_epoch_identity = str(
+        getattr(actuation, "selection_epoch_identity", "") or ""
+    ).strip()
+    if (
+        base_ref.winner_candidate_id != candidate_id
+        or base_ref.selection_epoch_identity != selection_epoch_identity
+    ):
+        raise ValueError("GLOBAL_CARRIER_REBOUND_BASE_SELECTION_MISMATCH")
+    try:
+        artifact = json.loads(str(row[1]))
+        summary = dict(artifact["summary"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("GLOBAL_CARRIER_REBOUND_BASE_ARTIFACT_INVALID") from exc
+    summary.pop("artifact_summary_hash", None)
+    base_receipt_hash = str(summary.get("receipt_hash") or "")
+    summary.update(
+        {
+            "winner_event_id": str(
+                getattr(actuation, "winner_event_id", "") or ""
+            ),
+            "winner_candidate_id": candidate_id,
+            "winner_actuation_identity": str(
+                getattr(actuation, "actuation_identity", "") or ""
+            ),
+            "claim_carrier_rebound": {
+                "version": "global-auction-claim-carrier-rebound-v1",
+                "base_decision_log_id": base_decision_log_id,
+                "base_decision_log_mode": mode,
+                "base_receipt_hash": base_receipt_hash,
+                "base_execution_binding_hash": base_ref.execution_binding_hash,
+                "base_artifact_summary_hash": base_ref.artifact_summary_hash,
+            },
+        }
+    )
+    summary["execution_binding_hash"] = global_auction_execution_binding_hash(
+        summary
+    )
+    summary.pop("receipt_hash", None)
+    summary["receipt_hash"] = hashlib.sha256(
+        _canonical_json_bytes(summary)
+    ).hexdigest()
+    summary["artifact_summary_hash"] = global_auction_artifact_summary_hash(
+        summary
+    )
+    row_id = store_artifact(
+        conn,
+        CycleArtifact(
+            mode=mode,
+            started_at=str(summary["selection_cut_at_utc"]),
+            completed_at=str(summary["decision_at_utc"]),
+            skipped_reason=str(summary.get("no_trade_reason") or ""),
+            summary=summary,
+        ),
+    )
+    if row_id is None:
+        raise RuntimeError("GLOBAL_CARRIER_REBOUND_RECEIPT_ID_MISSING")
+    return (
+        _bind_stored_global_auction_receipt(
+            conn,
+            selected=selected,
+            decision_log_id=row_id,
+        ),
+        row_id,
+    )
 
 
 def _store_global_preflight_receipt(
@@ -3730,6 +3932,14 @@ def _book_epoch_with_replacement_candidate(
         != str(getattr(selected_candidate, "ledger_snapshot_id", "") or "")
     ):
         raise ValueError("GLOBAL_REAUCTION_REPLACEMENT_IDENTITY_MISMATCH")
+    selected_neg_risk = getattr(selected_candidate, "neg_risk", None)
+    replacement_neg_risk = getattr(replacement_candidate, "neg_risk", None)
+    if (
+        not isinstance(selected_neg_risk, bool)
+        or not isinstance(replacement_neg_risk, bool)
+        or selected_neg_risk != replacement_neg_risk
+    ):
+        raise ValueError("GLOBAL_REAUCTION_REPLACEMENT_MARKET_AUTHORITY_MISMATCH")
 
     curve_field = (
         "executable_sell_curve"
@@ -3839,6 +4049,7 @@ def _book_epoch_with_replacement_candidate(
             curve=cost_curve,
             captured_at_utc=captured_at,
             bid_levels=bid_levels,
+            neg_risk=replacement_neg_risk,
         )
     if sell_curve is None:
         sell_assets_by_key.pop(selected_key, None)
@@ -3853,6 +4064,7 @@ def _book_epoch_with_replacement_candidate(
             token_id=base.token_id,
             curve=sell_curve,
             captured_at_utc=captured_at,
+            neg_risk=replacement_neg_risk,
         )
 
     states = []
@@ -4286,6 +4498,7 @@ def process_current_global_batch(
     final_actuation_cancelled: Callable[[], bool] | None = None,
     restrict_to_family_keys: frozenset[str] | None = None,
     _probability_supersession_reauction_count: int = 0,
+    _market_authority_supersession_reauction_count: int = 0,
 ) -> GlobalBatchSubmitResult:
     """Select once from every family holding a current q certificate."""
 
@@ -4520,6 +4733,7 @@ def process_current_global_batch(
             rebound_actuation = replace(
                 actuation,
                 winner_event_id=target.event_id,
+                auction_receipt_ref=None,
                 actuation_identity=global_single_order_actuation_identity(
                     decision=actuation.decision,
                     winner_event_id=target.event_id,
@@ -5244,6 +5458,46 @@ def process_current_global_batch(
         log_stage(initial_book_stage, families=len(prepared_by_event))
         probability_manifest = _probability_manifest(probabilities)
         last_selection_receipt_row_id: int | None = None
+
+        def bind_rebound_receipt(
+            selected: object,
+            *,
+            base_actuation_identity: str,
+            probability_witnesses: Mapping[str, object],
+        ) -> object:
+            """Seal a new row only when carrier rebinding changed actuation identity."""
+
+            nonlocal last_selection_receipt_row_id
+            actuation = getattr(selected, "actuation", None)
+            actuation_identity = str(
+                getattr(actuation, "actuation_identity", "") or ""
+            )
+            if (
+                actuation is None
+                or actuation_identity == base_actuation_identity
+                or getattr(actuation, "auction_receipt_ref", None) is not None
+                or not isinstance(trade_conn, sqlite3.Connection)
+            ):
+                return selected
+            if last_selection_receipt_row_id is None:
+                raise RuntimeError("GLOBAL_CARRIER_REBOUND_BASE_RECEIPT_ID_MISSING")
+            selected, rebound_row_id = (
+                _store_global_claim_carrier_rebound_receipt(
+                    trade_conn,
+                    selected=selected,
+                    base_decision_log_id=last_selection_receipt_row_id,
+                )
+            )
+            trade_conn.commit()
+            last_selection_receipt_row_id = rebound_row_id
+            if holding_obligations:
+                _publish_global_holding_coverage(
+                    selected.holding_coverage,
+                    expected_obligations=holding_obligations,
+                    probability_witnesses=probability_witnesses,
+                    decision_log_id=rebound_row_id,
+                )
+            return selected
         # Selection is a comparison over one immutable information vector.  Scope and
         # q are frozen at ``scope_at``; the complete native YES/NO book and wealth
         # witnesses join that vector below.  A later family update belongs to the next
@@ -5382,7 +5636,10 @@ def process_current_global_batch(
                 current_execution_resolver=execution_resolver,
                 current_wealth_identity_resolver=lambda: selection_wealth.economic_identity,
                 wealth_witness=selection_wealth,
-                capital_limit_usd=selection_wealth.spendable_cash_usd,
+                capital_limit_usd=(
+                    selection_wealth.strategy_capital_allocation
+                    .remaining_buy_capacity_usd
+                ),
                 fractional_kelly_multiplier=fractional_kelly_multiplier,
                 decision_at_utc=selection_at,
                 book_epoch=attempt_book_epoch,
@@ -5549,6 +5806,22 @@ def process_current_global_batch(
                     "global auction receipt commit completed: elapsed_s=%.3f",
                     time.monotonic() - receipt_commit_started,
                 )
+            if getattr(selected, "actuation", None) is not None:
+                # Read-only coordinators may supply a non-SQLite stand-in; they
+                # can inspect selection but cannot create an actionable
+                # certificate because the adapter independently requires the
+                # bound ref. The sanctioned live trade connection is SQLite and
+                # closes the row binding here before actuation.
+                if isinstance(trade_conn, sqlite3.Connection):
+                    if receipt_row_id is None:
+                        raise RuntimeError(
+                            "GLOBAL_AUCTION_WINNER_RECEIPT_ID_MISSING"
+                        )
+                    selected = _bind_stored_global_auction_receipt(
+                        trade_conn,
+                        selected=selected,
+                        decision_log_id=receipt_row_id,
+                    )
             if holding_obligations:
                 if receipt_row_id is None:
                     raise RuntimeError("GLOBAL_HOLDING_COVERAGE_RECEIPT_ID_MISSING")
@@ -5597,7 +5870,17 @@ def process_current_global_batch(
             None,
         )
         if preflight_winner is None:
+            base_actuation_identity = str(
+                getattr(selected.actuation, "actuation_identity", "") or ""
+            )
             selected, winner, next_claim = bind_selected_winner(selected)
+            if winner is not None:
+                selected = bind_rebound_receipt(
+                    selected,
+                    base_actuation_identity=base_actuation_identity,
+                    probability_witnesses=probabilities,
+                )
+                latest_selected = selected
             if winner is None:
                 if next_claim is None:
                     return reject("GLOBAL_WINNER_IDENTITY_MISSING")
@@ -5618,7 +5901,17 @@ def process_current_global_batch(
             probabilities_fence = probabilities
             book_epoch_fence = book_epoch
             prepared_fence = prepared_by_event
+            base_actuation_identity = str(
+                getattr(selected.actuation, "actuation_identity", "") or ""
+            )
             selected, winner, next_claim = bind_selected_winner(selected)
+            if winner is not None:
+                selected = bind_rebound_receipt(
+                    selected,
+                    base_actuation_identity=base_actuation_identity,
+                    probability_witnesses=probabilities_fence,
+                )
+                latest_selected = selected
             # Preflight has the opposite job from selection: re-read submit-time
             # probability truth and refute the immutable cut when a newer
             # posterior or Day0 observation landed during book/solve work. The
@@ -5709,8 +6002,17 @@ def process_current_global_batch(
                     )
                     if selected.actuation is None:
                         return reject("GLOBAL_REAUCTION_ACTUATION_MISSING")
+                    base_actuation_identity = str(
+                        getattr(selected.actuation, "actuation_identity", "") or ""
+                    )
                     selected, winner, next_claim = bind_selected_winner(selected)
                     if winner is not None:
+                        selected = bind_rebound_receipt(
+                            selected,
+                            base_actuation_identity=base_actuation_identity,
+                            probability_witnesses=probabilities_fence,
+                        )
+                        latest_selected = selected
                         winner_id = winner.event_id
                         return None
                     if next_claim is None:
@@ -5991,25 +6293,39 @@ def process_current_global_batch(
                         "GLOBAL_PREFLIGHT_BATCH_BLOCKED:"
                         f"{preflight.reason or preflight.status}"
                     )
-                if preflight.status == "PROBABILITY_SUPERSEDED":
-                    if (
-                        _probability_supersession_reauction_count
-                        >= _PROBABILITY_SUPERSESSION_REAUCTION_MAX_ATTEMPTS
-                    ):
-                        return reject(
-                            "GLOBAL_REAUCTION_PROBABILITY_UNSTABLE:"
-                            f"{preflight.reason or preflight.status}"
+                if preflight.status in {
+                    "PROBABILITY_SUPERSEDED",
+                    "MARKET_AUTHORITY_SUPERSEDED",
+                }:
+                    market_authority_superseded = (
+                        preflight.status == "MARKET_AUTHORITY_SUPERSEDED"
+                    )
+                    reauction_count = (
+                        _market_authority_supersession_reauction_count
+                        if market_authority_superseded
+                        else _probability_supersession_reauction_count
+                    )
+                    if reauction_count >= _PROBABILITY_SUPERSESSION_REAUCTION_MAX_ATTEMPTS:
+                        unstable_prefix = (
+                            "GLOBAL_REAUCTION_MARKET_AUTHORITY_UNSTABLE:"
+                            if market_authority_superseded
+                            else "GLOBAL_REAUCTION_PROBABILITY_UNSTABLE:"
                         )
-                    # SCOPE: the old winner's q witness is invalid, and that
-                    # makes the frozen global objective incomparable. DRAIN:
-                    # one bounded recursive cut re-scans every family and
-                    # rebuilds q, book, wealth, BUY, SELL, HOLD, and CASH
-                    # before any venue call. RESET: only its fresh cut may
-                    # actuate; a second drift fails closed for the next wake.
+                        return reject(
+                            f"{unstable_prefix}{preflight.reason or preflight.status}"
+                        )
+                    # SCOPE: either the winner's q proof or its Gamma/CLOB/raw
+                    # book market authority changed. Both invalidate
+                    # comparability of the frozen global objective. DRAIN: one
+                    # bounded cut rebuilds every Gamma+CLOB+raw book, q/wealth,
+                    # BUY/SELL/HOLD/CASH input.
+                    # RESET: only that fresh cut may actuate; repeat drift is
+                    # fail-closed for the next wake.
                     _LOG.warning(
-                        "global batch probability superseded; rebuilding full "
-                        "current-state auction: attempt=%d event=%s reason=%s",
-                        _probability_supersession_reauction_count + 1,
+                        "global batch %s superseded; rebuilding full current-state "
+                        "auction: attempt=%d event=%s reason=%s",
+                        "market authority" if market_authority_superseded else "probability",
+                        reauction_count + 1,
                         winner_id,
                         preflight.reason,
                     )
@@ -6049,7 +6365,12 @@ def process_current_global_batch(
                         final_actuation_cancelled=final_actuation_cancelled,
                         restrict_to_family_keys=restrict_to_family_keys,
                         _probability_supersession_reauction_count=(
-                            _probability_supersession_reauction_count + 1
+                            _probability_supersession_reauction_count
+                            + (0 if market_authority_superseded else 1)
+                        ),
+                        _market_authority_supersession_reauction_count=(
+                            _market_authority_supersession_reauction_count
+                            + (1 if market_authority_superseded else 0)
                         ),
                     )
                 if preflight.status == "CANDIDATE_BLOCKED":

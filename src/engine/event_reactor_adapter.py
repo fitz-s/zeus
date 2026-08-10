@@ -164,9 +164,9 @@ from datetime import date, datetime, time, timedelta, timezone
 from enum import StrEnum
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
-from decimal import Decimal, ROUND_FLOOR
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Any, Callable, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, Callable, Protocol, TypeVar, get_args
 
 import numpy as np
 
@@ -183,6 +183,11 @@ from src.contracts.day0_payoff_truth import (
 )
 from src.contracts.execution_intent import ExecutableCostBasis
 from src.contracts.execution_price import ExecutionPrice, ExecutionPriceContractError
+from src.contracts.global_auction_receipt import (
+    GlobalAuctionReceiptRef,
+    GlobalSellReceiptClosure,
+)
+from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.contracts.venue_submission_envelope import assert_live_order_unit_price
 from src.contracts.executable_cost_curve import (
     BookLevel,
@@ -205,6 +210,7 @@ from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import (
     qkernel_declares_current_state,
     qkernel_current_state_identity_hash,
+    qkernel_current_state_rejection_reason,
     qkernel_global_buy_fak_prefix_rejection_reason,
     qkernel_global_current_state_rejection_reason,
     stable_hash,
@@ -288,6 +294,7 @@ from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
 
 if TYPE_CHECKING:
     from src.risk_allocator import AuctionCapitalAuthority
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
 from src.strategy.market_phase import (
     MarketPhase,
     FORECAST_ONLY_ADMIT_PHASES as _FORECAST_ONLY_ADMIT_PHASES,
@@ -473,29 +480,188 @@ def _governed_global_gamma_get(
     )
 
 
-def _current_global_sell_fee_fraction(
+@dataclass(frozen=True)
+class _CurrentGlobalMarketAuthority:
+    """One full current Gamma+CLOB+book submit authority cut."""
+
+    snapshot: "ExecutableMarketSnapshot"
+    fee_rate: Decimal
+
+    @property
+    def fee_details(self) -> Mapping[str, object]:
+        return self.snapshot.fee_details
+
+    @property
+    def min_tick(self) -> Decimal:
+        return self.snapshot.min_tick_size
+
+    @property
+    def min_order_size(self) -> Decimal:
+        return self.snapshot.min_order_size
+
+    @property
+    def neg_risk(self) -> bool:
+        return self.snapshot.neg_risk
+
+
+@dataclass(frozen=True)
+class _GlobalJitHandoff:
+    """Typed preflight->actuation carrier for one exact JIT venue cut."""
+
+    candidate: object
+    authority: _CurrentGlobalMarketAuthority
+    raw_book_json: str
+
+    def __post_init__(self) -> None:
+        snapshot_id = str(self.authority.snapshot.snapshot_id or "")
+        candidate_snapshot_id = str(
+            getattr(self.candidate, "book_snapshot_id", "") or ""
+        )
+        curve = getattr(self.candidate, "executable_cost_curve", None)
+        if curve is None:
+            curve = getattr(self.candidate, "executable_sell_curve", None)
+        curve_snapshot_id = str(getattr(curve, "snapshot_id", "") or "")
+        if not snapshot_id or candidate_snapshot_id != snapshot_id or curve_snapshot_id != snapshot_id:
+            raise ValueError("GLOBAL_JIT_CANDIDATE_SNAPSHOT_BINDING_MISMATCH")
+        try:
+            book = json.loads(self.raw_book_json)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("GLOBAL_JIT_RAW_BOOK_CANONICAL_INVALID") from exc
+        if not isinstance(book, Mapping) or _hash_jsonish(book) != self.authority.snapshot.raw_orderbook_hash:
+            raise ValueError("GLOBAL_JIT_RAW_BOOK_HASH_MISMATCH")
+
+    @property
+    def raw_book(self) -> Mapping[str, object]:
+        """Return a fresh view of the sealed canonical book bytes."""
+
+        try:
+            book = json.loads(self.raw_book_json)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("GLOBAL_JIT_RAW_BOOK_CANONICAL_INVALID") from exc
+        if not isinstance(book, Mapping):
+            raise ValueError("GLOBAL_JIT_RAW_BOOK_MAPPING_REQUIRED")
+        if _hash_jsonish(book) != self.authority.snapshot.raw_orderbook_hash:
+            raise ValueError("GLOBAL_JIT_RAW_BOOK_HASH_MISMATCH")
+        return book
+
+def _persist_global_jit_authority_snapshot(
+    trade_conn: sqlite3.Connection,
+    authority: _CurrentGlobalMarketAuthority,
+) -> object:
+    """Append the exact Gamma+CLOB+raw-book snapshot before submit."""
+
+    from src.state.snapshot_repo import get_snapshot, insert_snapshot
+
+    snapshot = authority.snapshot
+    existing = get_snapshot(trade_conn, snapshot.snapshot_id)
+    if existing is None:
+        insert_snapshot(trade_conn, snapshot, capture_trigger="JIT_SUBMIT")
+    elif (
+        existing.raw_gamma_payload_hash != snapshot.raw_gamma_payload_hash
+        or existing.raw_clob_market_info_hash != snapshot.raw_clob_market_info_hash
+        or existing.raw_orderbook_hash != snapshot.raw_orderbook_hash
+        or existing.condition_id != snapshot.condition_id
+        or existing.selected_outcome_token_id != snapshot.selected_outcome_token_id
+        or existing.outcome_label != snapshot.outcome_label
+        or existing.captured_at != snapshot.captured_at
+    ):
+        raise ValueError("GLOBAL_JIT_SNAPSHOT_ID_COLLISION")
+    trade_conn.commit()
+    return snapshot
+
+
+def _canonical_global_jit_raw_book(raw_book: Mapping[str, object]) -> str:
+    """Freeze one raw venue book as canonical JSON for the typed handoff."""
+
+    return json.dumps(
+        raw_book,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        default=str,
+    )
+
+
+def _is_global_jit_authority_failure(reason: object) -> bool:
+    text = str(reason or "")
+    markers = (
+        "GLOBAL_JIT_RAW_BOOK_UNAVAILABLE",
+        "GLOBAL_JIT_GAMMA_MARKET_UNAVAILABLE",
+        "GLOBAL_JIT_CLOB_MARKET_UNAVAILABLE",
+        "GLOBAL_JIT_MARKET_",
+        "GLOBAL_JIT_CLOB_MARKET_",
+        "GLOBAL_BUY_JIT_CLOCK_INVALID",
+        "GLOBAL_BUY_JIT_NEG_RISK_AUTHORITY_MISSING",
+        "GLOBAL_BUY_JIT_TOKEN_MISMATCH",
+        "GLOBAL_BUY_JIT_ASKS_MISSING",
+        "GLOBAL_BUY_JIT_BID_LEVEL_INVALID",
+        "GLOBAL_BUY_JIT_ASK_LEVEL_INVALID",
+        "GLOBAL_BUY_JIT_MARKET_METADATA_CONFLICT",
+        "GLOBAL_SELL_JIT_CLOCK_INVALID",
+        "GLOBAL_SELL_JIT_NEG_RISK_AUTHORITY_MISSING",
+        "GLOBAL_SELL_JIT_TOKEN_MISMATCH",
+        "GLOBAL_SELL_JIT_BIDS_MISSING",
+        "GLOBAL_SELL_JIT_BID_LEVEL_INVALID",
+        "GLOBAL_SELL_JIT_ASK_LEVEL_INVALID",
+        "GLOBAL_SELL_JIT_MARKET_METADATA_CONFLICT",
+        "GLOBAL_SELL_JIT_MAKER_WITNESS_SUPERSEDED",
+        "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE",
+        "GLOBAL_SELL_EXECUTION_MAKER_WITNESS_INVALID",
+        "GLOBAL_SELL_EXECUTION_MAKER_WITNESS_SUPERSEDED",
+        "GLOBAL_SELL_JIT_FEE_FULL_MARKET_AUTHORITY_REQUIRED",
+        "PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED",
+    )
+    return any(text.startswith(marker) or f":{marker}" in text for marker in markers)
+
+
+def _current_global_market_authority(
     *,
     condition_id: str,
     token_id: str,
+    side: str,
     gamma_get: Callable[..., object],
+    clob_market_get: Callable[..., object],
+    raw_book: Mapping[str, object],
+    captured_at_utc: datetime,
     timeout: float,
-) -> Decimal:
-    """Read the selected market's current V2 fee schedule or fail closed."""
+) -> _CurrentGlobalMarketAuthority:
+    """Capture exact current Gamma/CLOB/book submit authority.
+
+    SCOPE: one ``(condition_id, token_id)`` global candidate.  DRAIN: the next
+    auction cut refetches Gamma+CLOB+raw book after the venue changes.  RESET: only one
+    current, tradeable market owning this token rebuilds the candidate.
+    """
 
     from src.contracts.executable_market_snapshot import (
+        ExecutableMarketSnapshot,
+        FRESHNESS_WINDOW_DEFAULT,
         fee_details_from_gamma_fee_schedule,
         fee_rate_fraction_from_details,
     )
     from src.contracts.fee_authority import resolve_taker_fee_fraction
+    from src.data.market_scanner import (
+        _build_executable_tradeability_status,
+        _boolish_market_field,
+        _canonical_json,
+        _market_token_strings_from_payload,
+        _optional_top_book_level_decimal,
+        _required_bool_fact,
+        _required_decimal_fact,
+        _sha256_json,
+        ExecutableSnapshotCaptureError,
+    )
     from src.engine.global_auction_universe import fetch_current_gamma_markets
 
-    markets, _request_count = fetch_current_gamma_markets(
-        [condition_id],
-        gamma_get=gamma_get,
-        timeout=float(timeout),
-        chunk_size=1,
-        max_workers=1,
-    )
+    try:
+        markets, _request_count = fetch_current_gamma_markets(
+            [condition_id],
+            gamma_get=gamma_get,
+            timeout=float(timeout),
+            chunk_size=1,
+            max_workers=1,
+        )
+    except Exception as exc:  # noqa: BLE001 - authority transport is fail closed
+        raise ValueError("GLOBAL_JIT_GAMMA_MARKET_UNAVAILABLE") from exc
     matching = tuple(
         market
         for market in markets
@@ -507,19 +673,214 @@ def _current_global_sell_fee_fraction(
         == condition_id
     )
     if len(matching) != 1:
-        raise ValueError("GLOBAL_SELL_JIT_FEE_MARKET_IDENTITY_INVALID")
+        raise ValueError("GLOBAL_JIT_MARKET_IDENTITY_INVALID")
     market = matching[0]
-    schedule = market.get("feeSchedule") or market.get("fee_schedule")
-    details = fee_details_from_gamma_fee_schedule(
-        schedule,
-        source="global_sell_jit_gamma_fee_schedule",
-        token_id=token_id,
-        fee_type=str(market.get("feeType") or market.get("fee_type") or "")
-        or None,
-    )
-    schedule_fee = fee_rate_fraction_from_details(details)
-    fee_rate, _fee_source = resolve_taker_fee_fraction(schedule_fee)
-    return Decimal(str(fee_rate))
+    gamma_tokens = _market_token_strings_from_payload(dict(market))
+    if token_id not in gamma_tokens or len(gamma_tokens) != 2:
+        raise ValueError("GLOBAL_JIT_MARKET_TOKEN_OWNERSHIP_INVALID")
+    selected_side = str(side or "").strip().upper()
+    if selected_side not in {"YES", "NO"}:
+        raise ValueError("GLOBAL_JIT_MARKET_SIDE_INVALID")
+    if not isinstance(raw_book, Mapping):
+        raise ValueError("GLOBAL_JIT_MARKET_BOOK_INVALID")
+    if captured_at_utc.tzinfo is None:
+        raise ValueError("GLOBAL_JIT_MARKET_CLOCK_INVALID")
+    try:
+        raw_clob_market = clob_market_get(condition_id, timeout=float(timeout))
+    except Exception as exc:  # noqa: BLE001 - authority transport is fail closed
+        raise ValueError("GLOBAL_JIT_CLOB_MARKET_UNAVAILABLE") from exc
+    raw_clob_market = getattr(raw_clob_market, "raw", raw_clob_market)
+    if not isinstance(raw_clob_market, Mapping):
+        raise ValueError("GLOBAL_JIT_CLOB_MARKET_INVALID")
+    raw_clob_market = dict(raw_clob_market)
+    clob_condition = str(
+        raw_clob_market.get("condition_id")
+        or raw_clob_market.get("conditionId")
+        or raw_clob_market.get("conditionID")
+        or raw_clob_market.get("market")
+        or ""
+    ).strip()
+    if clob_condition != condition_id:
+        raise ValueError("GLOBAL_JIT_CLOB_MARKET_IDENTITY_INVALID")
+    clob_tokens = _market_token_strings_from_payload(raw_clob_market)
+    if clob_tokens != gamma_tokens:
+        raise ValueError("GLOBAL_JIT_CLOB_MARKET_TOKEN_OWNERSHIP_INVALID")
+    market_active = _boolish_market_field(dict(market), "active", "isActive")
+    market_closed = _boolish_market_field(dict(market), "closed", "isClosed")
+    if market_active is None or market_closed is None:
+        raise ValueError("GLOBAL_JIT_MARKET_LIFECYCLE_INVALID")
+    for field, names, expected in (
+        ("accepting_orders", ("acceptingOrders", "accepting_orders"), True),
+        (
+            "enable_orderbook",
+            ("enableOrderBook", "enable_orderbook", "orderbookEnabled"),
+            True,
+        ),
+    ):
+        if _boolish_market_field(dict(market), *names) is not expected:
+            raise ValueError(f"GLOBAL_JIT_MARKET_{field.upper()}_INVALID")
+    try:
+        min_tick = Decimal(
+            str(
+                market.get("orderPriceMinTickSize")
+                or market.get("min_tick_size")
+                or market.get("minTickSize")
+                or ""
+            )
+        )
+        min_order_size = Decimal(
+            str(
+                market.get("orderMinSize")
+                or market.get("min_order_size")
+                or market.get("minOrderSize")
+                or ""
+            )
+        )
+        neg_risk = _boolish_market_field(
+            dict(market), "negRisk", "neg_risk", "negative_risk"
+        )
+        if (
+            not min_tick.is_finite()
+            or min_tick <= 0
+            or not min_order_size.is_finite()
+            or min_order_size <= 0
+            or neg_risk is None
+        ):
+            raise ValueError("invalid market rules")
+        clob_accepting = _boolish_market_field(
+            raw_clob_market, "accepting_orders", "acceptingOrders"
+        )
+        clob_orderbook = _boolish_market_field(
+            raw_clob_market,
+            "enable_order_book",
+            "enableOrderBook",
+            "orderbookEnabled",
+        )
+        clob_archived = _boolish_market_field(
+            raw_clob_market, "archived", "isArchived"
+        )
+        if (
+            clob_accepting is not True
+            or clob_orderbook is not True
+            or clob_archived is not False
+        ):
+            raise ValueError("invalid CLOB tradeability")
+        clob_tick = _required_decimal_fact(
+            (raw_clob_market,),
+            ("tick_size", "min_tick_size", "minimum_tick_size", "minTickSize"),
+        )
+        clob_min_order = _required_decimal_fact(
+            (raw_clob_market,),
+            ("min_order_size", "minimum_order_size", "minOrderSize"),
+        )
+        clob_neg_risk = _required_bool_fact(
+            (raw_clob_market,), ("neg_risk", "negRisk", "negative_risk")
+        )
+        if (
+            clob_tick != min_tick
+            or clob_min_order != min_order_size
+            or clob_neg_risk != neg_risk
+        ):
+            raise ValueError("Gamma/CLOB market rules conflict")
+        details = fee_details_from_gamma_fee_schedule(
+            market.get("feeSchedule") or market.get("fee_schedule"),
+            source="global_current_gamma_fee_schedule",
+            token_id=token_id,
+            fee_type=str(market.get("feeType") or market.get("fee_type") or "")
+            or None,
+        )
+        schedule_fee = fee_rate_fraction_from_details(details)
+        fee_rate, _fee_source = resolve_taker_fee_fraction(schedule_fee)
+        rate = Decimal(str(fee_rate))
+        if not rate.is_finite() or rate < 0 or rate > 1:
+            raise ValueError("invalid fee rate")
+        other_token = next(token for token in gamma_tokens if token != token_id)
+        yes_token, no_token = (
+            (token_id, other_token)
+            if selected_side == "YES"
+            else (other_token, token_id)
+        )
+        top_bid, _ = _optional_top_book_level_decimal(dict(raw_book), "bids")
+        top_ask, _ = _optional_top_book_level_decimal(dict(raw_book), "asks")
+        raw_gamma_hash = _sha256_json(dict(market))
+        raw_clob_hash = _sha256_json(raw_clob_market)
+        raw_book_hash = _sha256_json(dict(raw_book))
+        snapshot = ExecutableMarketSnapshot(
+            snapshot_id=_sha256_json(
+                (
+                    condition_id,
+                    token_id,
+                    selected_side,
+                    captured_at_utc.isoformat(),
+                    raw_gamma_hash,
+                    raw_clob_hash,
+                    raw_book_hash,
+                )
+            ),
+            gamma_market_id=str(market.get("id") or condition_id),
+            event_id=str(market.get("eventId") or market.get("event_id") or condition_id),
+            event_slug=str(market.get("slug") or condition_id),
+            condition_id=condition_id,
+            question_id=str(market.get("questionID") or market.get("question_id") or condition_id),
+            yes_token_id=yes_token,
+            no_token_id=no_token,
+            selected_outcome_token_id=token_id,
+            outcome_label=selected_side,
+            enable_orderbook=True,
+            active=bool(market_active),
+            closed=bool(market_closed),
+            accepting_orders=True,
+            market_start_at=None,
+            market_end_at=None,
+            market_close_at=None,
+            sports_start_at=None,
+            min_tick_size=min_tick,
+            min_order_size=min_order_size,
+            fee_details=details,
+            token_map_raw={"YES": yes_token, "NO": no_token},
+            rfqe=None,
+            neg_risk=bool(neg_risk),
+            orderbook_top_bid=top_bid,
+            orderbook_top_ask=top_ask,
+            orderbook_depth_jsonb=_canonical_json(dict(raw_book)),
+            raw_gamma_payload_hash=raw_gamma_hash,
+            raw_clob_market_info_hash=raw_clob_hash,
+            raw_orderbook_hash=raw_book_hash,
+            authority_tier="CLOB",
+            captured_at=captured_at_utc,
+            freshness_deadline=captured_at_utc + FRESHNESS_WINDOW_DEFAULT,
+            tradeability_status=_build_executable_tradeability_status(
+                parent_market=dict(market),
+                child_outcome=dict(market),
+                gamma_market_raw=dict(market),
+                raw_clob_market=raw_clob_market,
+                accepting_orders=True,
+                child_active=bool(market_active),
+                child_closed=bool(market_closed),
+                require_explicit_clob_tradeability=True,
+            ),
+        )
+    except (
+        ValueError,
+        TypeError,
+        InvalidOperation,
+        ExecutableSnapshotCaptureError,
+    ) as exc:
+        raise ValueError("GLOBAL_JIT_MARKET_METADATA_INVALID") from exc
+    return _CurrentGlobalMarketAuthority(snapshot=snapshot, fee_rate=rate)
+
+
+def _current_global_sell_fee_fraction(
+    *,
+    condition_id: str,
+    token_id: str,
+    gamma_get: Callable[..., object],
+    timeout: float,
+) -> Decimal:
+    """Retired partial fee seam; submit requires complete market authority."""
+
+    _ = condition_id, token_id, gamma_get, timeout
+    raise ValueError("GLOBAL_SELL_JIT_FEE_FULL_MARKET_AUTHORITY_REQUIRED")
 
 
 def _global_probability_family_cache_namespace(
@@ -1467,7 +1828,7 @@ def _global_book_receipt_token_pairs(
             compressed_b64,
         ) = receipt_row
         if (
-            schema_version not in {12, 13, 14, 15, 16, 17, 18, 19, 20}
+            schema_version not in {12, 13, 14, 15, 16, 17, 18, 19, 20, 21}
             or coverage_status != "COMPLETE"
             or coverage_complete != 1
             or encoding != "zlib+base64+canonical-json-v1"
@@ -2931,6 +3292,7 @@ class _GlobalWinnerBindingToken:
     issued_at: datetime
     expires_at: datetime
     receipt: EventSubmissionReceipt
+    jit_handoff: _GlobalJitHandoff | None = None
 
 
 def _global_preflight_token_window(
@@ -3193,6 +3555,51 @@ class PreSubmitAuthorityWitness:
     orderbook_depth_jsonb: str | None = None
     checked_at: str | None = None
     max_quote_age_ms: int = 1000
+
+
+@dataclass(frozen=True)
+class SealedBookOverride:
+    """Typed sealed-book cut used by the live non-book authority provider."""
+
+    token_id: str
+    side: str
+    snapshot_id: str
+    raw_orderbook_hash: str
+    orderbook_depth_jsonb: str
+    best_bid: float | None
+    best_ask: float | None
+    tick_size: float
+    min_order_size: float
+    neg_risk: bool
+    captured_at: str
+    freshness_deadline: str
+    curve_ttl_seconds: float
+
+
+@dataclass(frozen=True)
+class SealedBookObservation:
+    """Narrow provisional book-only evidence; no non-book authority claims."""
+
+    quote_seen_at: str
+    book_hash: str
+    current_best_bid: float | None
+    current_best_ask: float | None
+    tick_size: float
+    min_order_size: float
+    neg_risk: bool
+    book_authority_id: str
+    book_captured_at: str
+    orderbook_depth_jsonb: str | None
+    checked_at: str | None = None
+
+
+class SealedBookEvidence(Protocol):
+    quote_seen_at: str
+    book_hash: str
+    current_best_bid: float | None
+    current_best_ask: float | None
+    book_captured_at: str
+    checked_at: str | None
 
 
 # K=1 STAGE 1 (docs/archive/2026-Q2/operations_historical/k1_final_snapshot_authority_plan_2026-06-11.md §4):
@@ -5743,6 +6150,9 @@ def _qkernel_current_state_solve_economics(cert: Any) -> bool:
 def _qkernel_current_state_solve_economics_rejection_reason(cert: Any) -> str | None:
     """Return the exact broken identity field for a current-band certificate."""
 
+    canonical_reason = qkernel_current_state_rejection_reason(cert)
+    if canonical_reason is not None:
+        return canonical_reason
     if not isinstance(cert, Mapping):
         return "payload_not_mapping"
     band_basis = "CURRENT_POSTERIOR_BAND"
@@ -6533,6 +6943,7 @@ def event_bound_live_adapter_from_trade_conn(
         preflight_receipt: EventSubmissionReceipt | None,
         final_authority_deadline: datetime | None,
         hard_authority_cancelled: Callable[[], bool] | None,
+        jit_handoff: _GlobalJitHandoff | None = None,
     ) -> EventSubmissionReceipt:
         receipt = _submit_current_global_sell(
             event,
@@ -6551,6 +6962,7 @@ def event_bound_live_adapter_from_trade_conn(
             global_claim_attempt_count=_global_claim_attempt_counts.get(
                 event.event_id
             ),
+            jit_handoff=jit_handoff,
         )
         if not preflight_only and receipt.venue_call_started:
             _live_submit_count[0] += 1
@@ -6648,6 +7060,7 @@ def event_bound_live_adapter_from_trade_conn(
         preflight_receipt: EventSubmissionReceipt | None = None,
         final_authority_deadline: datetime | None = None,
         hard_authority_cancelled: Callable[[], bool] | None = None,
+        jit_handoff: _GlobalJitHandoff | None = None,
     ) -> EventSubmissionReceipt:
         # Both forecast and Day0 events continue into the one live candidate
         # proof/submit path; unknown event types are rejected.
@@ -6688,6 +7101,7 @@ def event_bound_live_adapter_from_trade_conn(
                 preflight_receipt=preflight_receipt,
                 final_authority_deadline=final_authority_deadline,
                 hard_authority_cancelled=hard_authority_cancelled,
+                jit_handoff=jit_handoff,
             )
         if entry_submit_block_reason is not None:
             return EventSubmissionReceipt(
@@ -6960,6 +7374,7 @@ def event_bound_live_adapter_from_trade_conn(
                     global_claim_attempt_count=_global_claim_attempt_counts.get(
                         event.event_id
                     ),
+                    global_jit_handoff=jit_handoff,
                 )
                 _live_order_build_phase = "live_order_certificates_built"
                 final_intent = _required_cert(command_certificates, claims.FINAL_INTENT)
@@ -7768,15 +8183,46 @@ def event_bound_live_adapter_from_trade_conn(
             return _prepared_global_event_receipt(event, prepared)
 
         def _actuate(event, actuation, at):
-            return _stamp_live_adapter_lane(_submit_inner(event, at, global_actuation=actuation))
+            return _stamp_live_adapter_lane(
+                _submit_inner(event, at, global_actuation=actuation)
+            )
 
-        pending_preflight_jit_candidate: object | None = None
+        pending_preflight_jit_handoff: _GlobalJitHandoff | None = None
 
         def _preflight(event, actuation, at, authority):
-            nonlocal pending_preflight_jit_candidate
+            nonlocal pending_preflight_jit_handoff
             _stable_preflight_monitor_handoff[0] = False
-            jit_candidate = pending_preflight_jit_candidate
-            pending_preflight_jit_candidate = None
+            jit_handoff = pending_preflight_jit_handoff
+            pending_preflight_jit_handoff = None
+            selected_candidate = getattr(
+                getattr(actuation, "decision", None), "candidate", None
+            )
+            if jit_handoff is not None:
+                handoff_candidate = jit_handoff.candidate
+                identity_fields = (
+                    "candidate_id", "family_key", "bin_id", "condition_id",
+                    "side", "token_id", "probability_witness_identity",
+                    "resolution_identity", "ledger_snapshot_id", "book_snapshot_id",
+                    "execution_curve_identity",
+                )
+                identity_matches = selected_candidate is not None and all(
+                    str(getattr(handoff_candidate, field, "") or "")
+                    == str(getattr(selected_candidate, field, "") or "")
+                    for field in identity_fields
+                )
+                curve = getattr(handoff_candidate, "executable_cost_curve", None)
+                quote_ttl = getattr(curve, "quote_ttl", None)
+                captured = jit_handoff.authority.snapshot.captured_at
+                deadline = jit_handoff.authority.snapshot.freshness_deadline
+                ttl_ok = (
+                    isinstance(captured, datetime)
+                    and isinstance(deadline, datetime)
+                    and at.astimezone(UTC) <= deadline.astimezone(UTC)
+                    and isinstance(quote_ttl, timedelta)
+                    and at.astimezone(UTC) <= captured.astimezone(UTC) + quote_ttl
+                )
+                if not identity_matches or not ttl_ok:
+                    jit_handoff = None
             receipt = _global_preflight_candidate_receipt(
                 _submit_inner,
                 event=event,
@@ -7802,11 +8248,10 @@ def event_bound_live_adapter_from_trade_conn(
                     receipt,
                     global_actuation=actuation,
                     book_quote_provider=pre_submit_book_quote_provider,
-                    current_candidate_override=jit_candidate,
+                    current_candidate_override=jit_handoff,
                     checked_at_utc=datetime.now(UTC),
+                    trade_conn=trade_conn,
                 )
-            if receipt.global_jit_candidate is not None:
-                pending_preflight_jit_candidate = receipt.global_jit_candidate
             reason = str(receipt.reason or "")
             if receipt.proof_accepted is True and (
                 receipt.decision_proof_bundle is not None
@@ -7849,11 +8294,23 @@ def event_bound_live_adapter_from_trade_conn(
                         issued_at=issued_at,
                         expires_at=expires_at,
                         receipt=receipt,
+                        jit_handoff=(
+                            receipt.global_jit_candidate
+                            if isinstance(
+                                receipt.global_jit_candidate, _GlobalJitHandoff
+                            )
+                            else None
+                        ),
                     ),
                 )
             curve_supersession = _global_curve_supersession_from_receipt(receipt)
             if curve_supersession is not None:
                 status, replacement_candidate, preflight_reason = curve_supersession
+                if (
+                    status == "CURVE_SUPERSEDED"
+                    and isinstance(receipt.global_jit_candidate, _GlobalJitHandoff)
+                ):
+                    pending_preflight_jit_handoff = receipt.global_jit_candidate
                 return GlobalWinnerPreflight(
                     status=status,
                     replacement_candidate=replacement_candidate,
@@ -7992,6 +8449,7 @@ def event_bound_live_adapter_from_trade_conn(
                     preflight_receipt=token.receipt,
                     final_authority_deadline=token.expires_at,
                     hard_authority_cancelled=_hard_day0_authority_cancelled,
+                    jit_handoff=token.jit_handoff,
                 )
             )
 
@@ -10566,10 +11024,18 @@ def _global_selected_order_economics_drift(
     current = getattr(current_candidate, "executable_cost_curve", None)
     if selected is None or current is None:
         return "curve_missing"
-    economic_fields = (
+    selected_neg_risk = getattr(selected_candidate, "neg_risk", None)
+    current_neg_risk = getattr(current_candidate, "neg_risk", None)
+    economic_fields = [
         ("token", selected.token_id, current.token_id),
         ("side", selected.side, current.side),
         ("fee", selected.fee_model.fee_rate, current.fee_model.fee_rate),
+        ("book_hash", selected.book_hash, current.book_hash),
+        (
+            "fee_details",
+            dict(selected.fee_details or {}),
+            dict(current.fee_details or {}),
+        ),
         ("tick", selected.min_tick, current.min_tick),
         ("min_order", selected.min_order_size, current.min_order_size),
         (
@@ -10577,7 +11043,13 @@ def _global_selected_order_economics_drift(
             tuple((level.price, level.size) for level in selected.levels),
             tuple((level.price, level.size) for level in current.levels),
         ),
-    )
+    ]
+    # Generic curve comparisons remain useful to the non-production solver
+    # tests. Actual JIT rebinding below requires typed negRisk authority before
+    # a candidate can reach submit; when both sides carry it, it is exact
+    # economics and any change requires re-auction.
+    if isinstance(selected_neg_risk, bool) and isinstance(current_neg_risk, bool):
+        economic_fields.append(("neg_risk", selected_neg_risk, current_neg_risk))
     drift = tuple(
         name
         for name, selected_value, current_value in economic_fields
@@ -10607,6 +11079,7 @@ def _global_buy_candidate_from_raw_book(
     raw_book: Mapping[str, object],
     *,
     captured_at_utc: datetime,
+    market_authority: _CurrentGlobalMarketAuthority,
 ) -> object:
     """Replace one BUY candidate with the exact full JIT ask curve."""
 
@@ -10622,6 +11095,8 @@ def _global_buy_candidate_from_raw_book(
     ).strip()
     if selected_curve is None or not token_id:
         raise ValueError("GLOBAL_BUY_SELECTED_CURVE_MISSING")
+    if not isinstance(getattr(candidate, "neg_risk", None), bool):
+        raise ValueError("GLOBAL_BUY_JIT_NEG_RISK_AUTHORITY_MISSING")
     if raw_token != token_id:
         raise ValueError("GLOBAL_BUY_JIT_TOKEN_MISMATCH")
     raw_asks = raw_book.get("asks")
@@ -10662,41 +11137,41 @@ def _global_buy_candidate_from_raw_book(
         raise ValueError("GLOBAL_BUY_JIT_BID_LEVEL_INVALID") from exc
     if len(bid_levels) != len(raw_bids or ()):
         raise ValueError("GLOBAL_BUY_JIT_BID_LEVEL_INVALID")
-    try:
-        min_tick = Decimal(
-            str(raw_book.get("tick_size") or selected_curve.min_tick)
+    for raw_names, current in (
+        (("tick_size", "min_tick_size", "minTickSize"), market_authority.min_tick),
+        (
+            ("min_order_size", "minOrderSize", "order_min_size"),
+            market_authority.min_order_size,
+        ),
+    ):
+        raw_value = next(
+            (raw_book[name] for name in raw_names if raw_book.get(name) not in (None, "")),
+            None,
         )
-        min_order_size = Decimal(
-            str(raw_book.get("min_order_size") or selected_curve.min_order_size)
-        )
-    except (ArithmeticError, TypeError, ValueError) as exc:
-        raise ValueError("GLOBAL_BUY_JIT_MARKET_RULE_INVALID") from exc
+        if raw_value is not None and Decimal(str(raw_value)) != current:
+            raise ValueError("GLOBAL_BUY_JIT_MARKET_METADATA_CONFLICT")
+    raw_neg_risk_names = ("neg_risk", "negRisk", "negative_risk")
+    if any(raw_book.get(name) is not None for name in raw_neg_risk_names):
+        from src.data.market_scanner import _boolish_market_field
+
+        raw_neg_risk = _boolish_market_field(dict(raw_book), *raw_neg_risk_names)
+        if raw_neg_risk is None or raw_neg_risk != market_authority.neg_risk:
+            raise ValueError("GLOBAL_BUY_JIT_MARKET_METADATA_CONFLICT")
     # Venue ``hash`` is opaque and is not guaranteed to be a SHA-256 digest.
     # Snapshot authority requires the digest of the actual raw book payload.
-    book_hash = stable_hash(dict(raw_book))
-    snapshot_id = stable_hash(
-        (
-            "global-buy-jit",
-            getattr(candidate, "family_key", ""),
-            getattr(candidate, "bin_id", ""),
-            getattr(candidate, "condition_id", ""),
-            getattr(candidate, "side", ""),
-            token_id,
-            book_hash,
-            captured_at_utc.isoformat(),
-        )
-    )
+    book_hash = market_authority.snapshot.raw_orderbook_hash
+    snapshot_id = market_authority.snapshot.snapshot_id
     curve = ExecutableCostCurve(
         token_id=token_id,
         side=getattr(candidate, "side"),
         snapshot_id=snapshot_id,
         book_hash=book_hash,
         levels=levels,
-        fee_model=selected_curve.fee_model,
-        min_tick=min_tick,
-        min_order_size=min_order_size,
+        fee_model=FeeModel(fee_rate=market_authority.fee_rate),
+        min_tick=market_authority.min_tick,
+        min_order_size=market_authority.min_order_size,
         quote_ttl=selected_curve.quote_ttl,
-        fee_details=selected_curve.fee_details,
+        fee_details=market_authority.fee_details,
     )
     from src.solve.solver import executable_curve_identity
 
@@ -10707,6 +11182,7 @@ def _global_buy_candidate_from_raw_book(
         execution_curve_identity=executable_curve_identity(curve),
         executable_cost_curve=curve,
         native_bid_levels=bid_levels,
+        neg_risk=market_authority.neg_risk,
         eligibility_reason=None,
     )
 
@@ -10717,6 +11193,7 @@ def _persist_global_candidate_executable_snapshot(
     proof: "_CandidateProof",
     candidate: object,
     decision_time: datetime,
+    market_authority: _CurrentGlobalMarketAuthority | None = None,
 ) -> tuple[object, dict[str, Any]]:
     """Persist the selected global curve as the snapshot cited by execution.
 
@@ -10749,6 +11226,28 @@ def _persist_global_candidate_executable_snapshot(
         != str(getattr(curve, "snapshot_id", "") or "")
     ):
         raise ValueError("GLOBAL_JIT_SNAPSHOT_IDENTITY_INVALID")
+    if market_authority is not None:
+        snapshot = market_authority.snapshot
+        if (
+            snapshot.condition_id != candidate_condition
+            or snapshot.selected_outcome_token_id != candidate_token
+            or snapshot.outcome_label != candidate_side
+            or snapshot.raw_orderbook_hash != str(getattr(curve, "book_hash", "") or "")
+        ):
+            raise ValueError("GLOBAL_JIT_SNAPSHOT_MARKET_MISMATCH")
+        _persist_global_jit_authority_snapshot(trade_conn, market_authority)
+        saved_factory = trade_conn.row_factory
+        trade_conn.row_factory = sqlite3.Row
+        try:
+            row = trade_conn.execute(
+                "SELECT * FROM executable_market_snapshots WHERE snapshot_id = ?",
+                (snapshot.snapshot_id,),
+            ).fetchone()
+        finally:
+            trade_conn.row_factory = saved_factory
+        if row is None:
+            raise ValueError("GLOBAL_JIT_SNAPSHOT_PERSISTENCE_FAILED")
+        return snapshot, dict(row)
     base_id = str(getattr(proof, "executable_snapshot_id", "") or "")
     base = get_snapshot(trade_conn, base_id) if base_id else None
     if base is None:
@@ -10970,6 +11469,7 @@ def _global_sell_receipt(
     proof_accepted: bool,
     submitted: bool = False,
     jit_candidate: object | None = None,
+    jit_handoff: _GlobalJitHandoff | None = None,
     venue_call_started: bool = False,
     venue_ack_received: bool = False,
     venue_command_id: str = "",
@@ -10998,7 +11498,7 @@ def _global_sell_receipt(
         reason=reason,
         proof_accepted=proof_accepted,
         global_actuation=global_actuation,
-        global_jit_candidate=jit_candidate,
+        global_jit_candidate=jit_handoff or jit_candidate,
         venue_call_started=venue_call_started,
         venue_ack_received=venue_ack_received,
         venue_command_id=venue_command_id or None,
@@ -11140,14 +11640,18 @@ def _global_sell_candidate_from_raw_book(
     raw_book: Mapping[str, object],
     *,
     captured_at_utc: datetime,
+    market_authority: _CurrentGlobalMarketAuthority,
 ):
     """Rebind a selected SELL to one freshly fetched native BID ladder."""
 
     from src.solve.solver import (
         BookLevel,
+        CurrentMakerFillWitness,
         ExecutableSellCurve,
+        current_maker_fill_witness_identity,
         executable_curve_identity,
         global_sell_execution_terms,
+        maker_fill_candidate_binding_identity,
     )
 
     if captured_at_utc.tzinfo is None:
@@ -11201,37 +11705,35 @@ def _global_sell_candidate_from_raw_book(
     selected_curve = getattr(candidate, "executable_sell_curve", None)
     if selected_curve is None:
         raise ValueError("GLOBAL_SELL_SELECTED_CURVE_MISSING")
-    for raw_name, selected_value in (
-        ("tick_size", selected_curve.min_tick),
-        ("min_order_size", selected_curve.min_order_size),
+    if not isinstance(getattr(candidate, "neg_risk", None), bool):
+        raise ValueError("GLOBAL_SELL_JIT_NEG_RISK_AUTHORITY_MISSING")
+    for raw_name, current_value in (
+        ("tick_size", market_authority.min_tick),
+        ("min_order_size", market_authority.min_order_size),
     ):
         raw_value = raw_book.get(raw_name)
         if raw_value not in (None, "") and Decimal(str(raw_value)) != Decimal(
-            selected_value
+            current_value
         ):
-            raise ValueError(f"GLOBAL_SELL_JIT_{raw_name.upper()}_SUPERSEDED")
-    book_hash = stable_hash(dict(raw_book))
-    snapshot_id = stable_hash(
-        (
-            "global-sell-jit",
-            getattr(candidate, "family_key", ""),
-            getattr(candidate, "bin_id", ""),
-            getattr(candidate, "condition_id", ""),
-            getattr(candidate, "side", ""),
-            token_id,
-            book_hash,
-            captured_at_utc.isoformat(),
-        )
-    )
+            raise ValueError(f"GLOBAL_SELL_JIT_{raw_name.upper()}_METADATA_CONFLICT")
+    raw_neg_risk_names = ("neg_risk", "negRisk", "negative_risk")
+    if any(raw_book.get(name) is not None for name in raw_neg_risk_names):
+        from src.data.market_scanner import _boolish_market_field
+
+        raw_neg_risk = _boolish_market_field(dict(raw_book), *raw_neg_risk_names)
+        if raw_neg_risk is None or raw_neg_risk != market_authority.neg_risk:
+            raise ValueError("GLOBAL_SELL_JIT_MARKET_METADATA_CONFLICT")
+    book_hash = market_authority.snapshot.raw_orderbook_hash
+    snapshot_id = market_authority.snapshot.snapshot_id
     curve = ExecutableSellCurve(
         token_id=token_id,
         side=getattr(candidate, "side"),
         snapshot_id=snapshot_id,
         book_hash=book_hash,
         levels=levels,
-        fee_model=selected_curve.fee_model,
-        min_tick=selected_curve.min_tick,
-        min_order_size=selected_curve.min_order_size,
+        fee_model=FeeModel(fee_rate=market_authority.fee_rate),
+        min_tick=market_authority.min_tick,
+        min_order_size=market_authority.min_order_size,
         quote_ttl=selected_curve.quote_ttl,
     )
     selected_execution_mode = str(
@@ -11239,6 +11741,127 @@ def _global_sell_candidate_from_raw_book(
     ).strip().upper()
     if selected_execution_mode not in {"TAKER_LIMIT", "MAKER_REST"}:
         raise ValueError("GLOBAL_SELL_SELECTED_EXECUTION_MODE_INVALID")
+    maker_fill_witness = None
+    if selected_execution_mode == "MAKER_REST":
+        selected_witness = getattr(candidate, "maker_fill_witness", None)
+        asset_epoch_identity = str(
+            getattr(candidate, "asset_epoch_identity", "") or ""
+        ).strip()
+        selected_proposal = getattr(candidate, "proposal_sell_curve", None)
+        selected_deadline = getattr(candidate, "rest_deadline_minutes", None)
+        selected_source = str(
+            getattr(candidate, "fill_probability_source", "") or ""
+        ).strip()
+        selected_capacity = Decimal(
+            str(getattr(candidate, "held_shares", "0") or "0")
+        )
+        try:
+            if (
+                not isinstance(selected_witness, CurrentMakerFillWitness)
+                or selected_proposal is None
+                or not asset_epoch_identity
+                or selected_deadline is None
+                or selected_source != selected_witness.witness_identity
+            ):
+                raise ValueError("selected_witness_missing_or_unbound")
+            selected_binding = maker_fill_candidate_binding_identity(
+                action="SELL",
+                family_key=str(getattr(candidate, "family_key", "") or ""),
+                bin_id=str(getattr(candidate, "bin_id", "") or ""),
+                condition_id=str(getattr(candidate, "condition_id", "") or ""),
+                side=str(getattr(candidate, "side", "") or ""),
+                token_id=token_id,
+                ledger_snapshot_id=str(
+                    getattr(candidate, "ledger_snapshot_id", "") or ""
+                ),
+                position_id=str(getattr(candidate, "position_id", "") or "")
+                or None,
+                held_shares=selected_capacity,
+                asset_epoch_identity=asset_epoch_identity,
+                proposal_identity=executable_curve_identity(selected_proposal),
+            )
+            if (
+                selected_witness.candidate_binding_identity != selected_binding
+                or selected_witness.asset_epoch_identity != asset_epoch_identity
+                or selected_witness.book_snapshot_id != selected_proposal.snapshot_id
+                or selected_witness.book_hash != selected_proposal.book_hash
+                or selected_witness.limit_price != selected_proposal.levels[0].price
+                or selected_witness.rest_deadline_minutes != selected_deadline
+                or not math.isclose(
+                    selected_witness.fill_probability,
+                    float(getattr(candidate, "fill_probability", 0.0)),
+                )
+                or any(
+                    outcome.fill_fraction > 0
+                    and outcome.proceeds_per_share_usd
+                    != selected_proposal.levels[0].price
+                    for outcome in selected_witness.outcomes
+                )
+            ):
+                raise ValueError("selected_witness_economics_mismatch")
+            selected_witness.assert_current_at(captured_at_utc)
+            current_proposal, *_ = global_sell_execution_terms(
+                curve,
+                capacity=selected_capacity,
+                required_mode="MAKER_REST",
+                maker_fill_witness=selected_witness,
+            )
+            if (
+                current_proposal is None
+                or current_proposal.levels[0].price != selected_witness.limit_price
+            ):
+                raise ValueError("current_limit_or_cashflow_changed")
+            current_binding = maker_fill_candidate_binding_identity(
+                action="SELL",
+                family_key=str(getattr(candidate, "family_key", "") or ""),
+                bin_id=str(getattr(candidate, "bin_id", "") or ""),
+                condition_id=str(getattr(candidate, "condition_id", "") or ""),
+                side=str(getattr(candidate, "side", "") or ""),
+                token_id=token_id,
+                ledger_snapshot_id=str(
+                    getattr(candidate, "ledger_snapshot_id", "") or ""
+                ),
+                position_id=str(getattr(candidate, "position_id", "") or "")
+                or None,
+                held_shares=selected_capacity,
+                asset_epoch_identity=asset_epoch_identity,
+                proposal_identity=executable_curve_identity(current_proposal),
+            )
+            maker_fill_witness = CurrentMakerFillWitness(
+                witness_identity=current_maker_fill_witness_identity(
+                    candidate_binding_identity=current_binding,
+                    asset_epoch_identity=asset_epoch_identity,
+                    book_snapshot_id=snapshot_id,
+                    book_hash=book_hash,
+                    limit_price=current_proposal.levels[0].price,
+                    rest_deadline_minutes=selected_witness.rest_deadline_minutes,
+                    source_identity=selected_witness.source_identity,
+                    model_identity=selected_witness.model_identity,
+                    sample_identity=selected_witness.sample_identity,
+                    training_cutoff_at_utc=selected_witness.training_cutoff_at_utc,
+                    issued_at_utc=selected_witness.issued_at_utc,
+                    valid_until_at_utc=selected_witness.valid_until_at_utc,
+                    outcomes=selected_witness.outcomes,
+                ),
+                candidate_binding_identity=current_binding,
+                asset_epoch_identity=asset_epoch_identity,
+                book_snapshot_id=snapshot_id,
+                book_hash=book_hash,
+                limit_price=current_proposal.levels[0].price,
+                rest_deadline_minutes=selected_witness.rest_deadline_minutes,
+                outcomes=selected_witness.outcomes,
+                source_identity=selected_witness.source_identity,
+                model_identity=selected_witness.model_identity,
+                sample_identity=selected_witness.sample_identity,
+                training_cutoff_at_utc=selected_witness.training_cutoff_at_utc,
+                issued_at_utc=selected_witness.issued_at_utc,
+                valid_until_at_utc=selected_witness.valid_until_at_utc,
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "GLOBAL_SELL_JIT_MAKER_WITNESS_SUPERSEDED:"
+                f"{type(exc).__name__}:{exc}"
+            ) from exc
     (
         proposal,
         execution_mode,
@@ -11249,6 +11872,7 @@ def _global_sell_candidate_from_raw_book(
         curve,
         capacity=Decimal(str(getattr(candidate, "held_shares", "0") or "0")),
         required_mode=selected_execution_mode,
+        maker_fill_witness=maker_fill_witness,
     )
     if proposal is None or execution_mode != selected_execution_mode:
         raise ValueError(
@@ -11266,7 +11890,9 @@ def _global_sell_candidate_from_raw_book(
         fill_probability=fill_probability,
         fill_probability_source=fill_probability_source,
         rest_deadline_minutes=rest_deadline_minutes,
+        maker_fill_witness=maker_fill_witness,
         native_ask_levels=ask_levels,
+        neg_risk=market_authority.neg_risk,
         eligibility_reason=(
             None if proposal is not None else "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
         ),
@@ -11280,6 +11906,38 @@ def _global_sell_execution_economics_drift(
 ) -> str | None:
     """Reject any current maker proposal that worsens selected SELL economics."""
 
+    selected_candidate = getattr(decision, "candidate", None)
+    selected_neg_risk = getattr(selected_candidate, "neg_risk", None)
+    current_neg_risk = getattr(current_candidate, "neg_risk", None)
+    if not isinstance(selected_neg_risk, bool) or not isinstance(
+        current_neg_risk, bool
+    ):
+        return "neg_risk_authority_missing"
+    if selected_neg_risk != current_neg_risk:
+        return "neg_risk"
+    selected_curve = getattr(selected_candidate, "executable_sell_curve", None)
+    current_curve = getattr(current_candidate, "executable_sell_curve", None)
+    if selected_curve is None or current_curve is None:
+        return "curve_missing"
+    curve_fields = (
+        ("token", selected_curve.token_id, current_curve.token_id),
+        ("side", selected_curve.side, current_curve.side),
+        ("book_hash", selected_curve.book_hash, current_curve.book_hash),
+        ("fee", selected_curve.fee_model.fee_rate, current_curve.fee_model.fee_rate),
+        ("tick", selected_curve.min_tick, current_curve.min_tick),
+        ("min_order", selected_curve.min_order_size, current_curve.min_order_size),
+        (
+            "levels",
+            tuple((level.price, level.size) for level in selected_curve.levels),
+            tuple((level.price, level.size) for level in current_curve.levels),
+        ),
+    )
+    curve_drift = tuple(
+        name for name, selected_value, current_value in curve_fields
+        if selected_value != current_value
+    )
+    if curve_drift:
+        return f"fields={','.join(curve_drift)}"
     shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
     selected_proceeds = Decimal(
         str(getattr(decision, "cash_proceeds_usd", "0") or "0")
@@ -11341,6 +11999,7 @@ def _submit_current_global_sell(
     hard_authority_cancelled: Callable[[], bool] | None = None,
     global_claimed_at: str | None = None,
     global_claim_attempt_count: int | None = None,
+    jit_handoff: _GlobalJitHandoff | None = None,
 ) -> EventSubmissionReceipt:
     """Preflight or actuate one exact global SELL through reduce-only exit law."""
 
@@ -11461,54 +12120,83 @@ def _submit_current_global_sell(
             public_http_timeout=timeout,
             public_request_priority=RequestPriority.HELD_REDUCE_ONLY,
         ) as clob:
-            books = clob.get_orderbook_snapshots(
-                [str(getattr(candidate, "token_id", "") or "")],
-                timeout=timeout,
-            )
-            book_captured_at_utc = datetime.now(UTC)
-            raw_book = books.get(str(getattr(candidate, "token_id", "") or ""))
-            if not isinstance(raw_book, Mapping):
-                raise ValueError("GLOBAL_SELL_JIT_BOOK_MISSING")
-            gamma = _global_current_gamma_client(timeout_seconds=timeout)
+            if jit_handoff is not None:
+                # The preflight token already owns this exact Gamma+CLOB+book
+                # cut. Actuation may create the submit client, but it must not
+                # fetch a second authority instant.
+                current_candidate = jit_handoff.candidate
+                raw_book = dict(jit_handoff.raw_book)
+                market_authority = jit_handoff.authority
+                book_captured_at_utc = market_authority.snapshot.captured_at
+            else:
+                try:
+                    books = clob.get_orderbook_snapshots(
+                        [str(getattr(candidate, "token_id", "") or "")],
+                        timeout=timeout,
+                    )
+                except Exception as exc:  # noqa: BLE001 - authority transport
+                    raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE") from exc
+                book_captured_at_utc = datetime.now(UTC)
+                raw_book = books.get(str(getattr(candidate, "token_id", "") or ""))
+                if not isinstance(raw_book, Mapping):
+                    raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE")
+                try:
+                    gamma = _global_current_gamma_client(timeout_seconds=timeout)
+                except Exception as exc:  # noqa: BLE001 - authority transport
+                    raise ValueError("GLOBAL_JIT_GAMMA_MARKET_UNAVAILABLE") from exc
 
-            def _held_gamma_get(path, *, params=None, timeout):
-                return _governed_global_gamma_get(
-                    gamma,
-                    path,
-                    params=params,
-                    timeout=float(timeout),
-                    priority=RequestPriority.HELD_REDUCE_ONLY,
-                )
+                def _held_gamma_get(path, *, params=None, timeout):
+                    return _governed_global_gamma_get(
+                        gamma,
+                        path,
+                        params=params,
+                        timeout=float(timeout),
+                        priority=RequestPriority.HELD_REDUCE_ONLY,
+                    )
 
-            current_fee = _current_global_sell_fee_fraction(
-                condition_id=str(
-                    getattr(candidate, "condition_id", "") or ""
-                ),
-                token_id=str(getattr(candidate, "token_id", "") or ""),
-                gamma_get=_held_gamma_get,
-                timeout=timeout,
-            )
-            if current_fee != Decimal(
-                candidate.executable_sell_curve.fee_model.fee_rate
-            ):
-                raise ValueError("GLOBAL_SELL_JIT_FEE_SUPERSEDED")
-            try:
-                current_candidate = _global_sell_candidate_from_raw_book(
-                    candidate,
-                    raw_book,
+                market_authority = _current_global_market_authority(
+                    condition_id=str(
+                        getattr(candidate, "condition_id", "") or ""
+                    ),
+                    token_id=str(getattr(candidate, "token_id", "") or ""),
+                    side=str(getattr(candidate, "side", "") or ""),
+                    gamma_get=_held_gamma_get,
+                    clob_market_get=clob.get_held_clob_market_info,
+                    raw_book=raw_book,
                     captured_at_utc=book_captured_at_utc,
+                    timeout=timeout,
                 )
-            except ValueError as exc:
-                if not str(exc).startswith(
-                    "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:"
-                ):
-                    raise
-                return _global_sell_receipt(
-                    event,
-                    global_actuation=global_actuation,
-                    reason=str(exc),
-                    proof_accepted=False,
-                )
+                try:
+                    current_candidate = _global_sell_candidate_from_raw_book(
+                        candidate,
+                        raw_book,
+                        captured_at_utc=book_captured_at_utc,
+                        market_authority=market_authority,
+                    )
+                except ValueError as exc:
+                    if not str(exc).startswith(
+                        (
+                            "GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:",
+                            "GLOBAL_SELL_JIT_MAKER_WITNESS_SUPERSEDED:",
+                        )
+                    ):
+                        raise
+                    return _global_sell_receipt(
+                        event,
+                        global_actuation=global_actuation,
+                        reason=(
+                            "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+                            f"{exc}"
+                        ),
+                        proof_accepted=False,
+                        jit_handoff=jit_handoff,
+                    )
+            _persist_global_jit_authority_snapshot(trade_conn, market_authority)
+            jit_handoff = jit_handoff or _GlobalJitHandoff(
+                candidate=current_candidate,
+                authority=market_authority,
+                raw_book_json=_canonical_global_jit_raw_book(raw_book),
+            )
             drift = _global_sell_execution_economics_drift(
                 decision=decision,
                 current_candidate=current_candidate,
@@ -11523,6 +12211,7 @@ def _submit_current_global_sell(
                     ),
                     proof_accepted=False,
                     jit_candidate=current_candidate,
+                    jit_handoff=jit_handoff,
                 )
             from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
 
@@ -11542,6 +12231,49 @@ def _submit_current_global_sell(
                     reason=f"GLOBAL_SELL_LEGAL_PRICE_UNAVAILABLE:{exc}",
                     proof_accepted=False,
                     jit_candidate=current_candidate,
+                )
+            try:
+                receipt_ref = getattr(global_actuation, "auction_receipt_ref", None)
+                if type(receipt_ref) is not GlobalAuctionReceiptRef:
+                    raise ValueError("GLOBAL_SELL_RECEIPT_REF_MISSING")
+                receipt_ref.assert_matches_actuation(
+                    winner_event_id=global_actuation.winner_event_id,
+                    winner_candidate_id=candidate.candidate_id,
+                    winner_actuation_identity=global_actuation.actuation_identity,
+                    selection_epoch_identity=global_actuation.selection_epoch_identity,
+                )
+                closure_token_id = (
+                    str(getattr(position, "token_id", "") or "")
+                    if str(getattr(candidate, "side", "") or "") == "YES"
+                    else str(getattr(position, "no_token_id", "") or "")
+                )
+                receipt_closure = GlobalSellReceiptClosure(
+                    receipt_ref=receipt_ref,
+                    position_id=str(getattr(position, "trade_id", "") or ""),
+                    condition_id=str(getattr(position, "condition_id", "") or ""),
+                    token_id=closure_token_id,
+                    action="SELL",
+                    execution_mode=str(
+                        getattr(current_candidate, "execution_mode", "") or ""
+                    ),
+                    winner_event_id=str(global_actuation.winner_event_id),
+                    winner_candidate_id=str(candidate.candidate_id),
+                    winner_actuation_identity=str(global_actuation.actuation_identity),
+                    selection_epoch_identity=str(
+                        global_actuation.selection_epoch_identity
+                    ),
+                )
+            except (AttributeError, TypeError, ValueError) as exc:
+                # INV-47 SCOPE: only this global SELL candidate is blocked.
+                # DRAIN: the next auction actuation must carry its exact receipt.
+                # RESET: a matching typed receipt reference rebuilds the closure.
+                return _global_sell_receipt(
+                    event,
+                    global_actuation=global_actuation,
+                    reason=f"GLOBAL_SELL_RECEIPT_CLOSURE_INVALID:{type(exc).__name__}:{exc}",
+                    proof_accepted=False,
+                    jit_candidate=current_candidate,
+                    jit_handoff=jit_handoff,
                 )
             if preflight_only:
                 from src.execution.collateral import (
@@ -11579,12 +12311,14 @@ def _submit_current_global_sell(
                         reason=f"GLOBAL_SELL_COLLATERAL_UNAVAILABLE:{exc}",
                         proof_accepted=False,
                         jit_candidate=current_candidate,
+                        jit_handoff=jit_handoff,
                     )
                 return _global_sell_receipt(
                     event,
                     global_actuation=global_actuation,
                     reason="GLOBAL_SELL_PREFLIGHT_STABLE",
                     proof_accepted=True,
+                    jit_handoff=jit_handoff,
                 )
             from src.execution.exit_lifecycle import (
                 ExitExecutionEvidence,
@@ -11614,6 +12348,8 @@ def _submit_current_global_sell(
             )
             if expected_growth is None:
                 raise ValueError("GLOBAL_SELL_EXPECTED_COMPARISON_MISSING")
+            if expected_growth.utility_basis != STRATEGY_LOG_UTILITY_BASIS:
+                raise ValueError("GLOBAL_SELL_UTILITY_BASIS_INVALID")
             if candidate.probability_functional == "POSTERIOR_PREDICTIVE_MEAN":
                 if expected_terminal is None:
                     raise ValueError("GLOBAL_SELL_EXPECTED_ECONOMICS_MISSING")
@@ -11631,6 +12367,9 @@ def _submit_current_global_sell(
                     "expected_sell_ev_usd": float(
                         expected_terminal.expected_ev_usd
                     ),
+                    "sell_ruin_probability_reduction": float(
+                        expected_terminal.ruin_probability_reduction
+                    ),
                 }
             else:
                 capital_economics = {
@@ -11641,6 +12380,9 @@ def _submit_current_global_sell(
                         getattr(decision, "robust_delta_log_wealth")
                     ),
                     "robust_ev_usd": float(getattr(decision, "robust_ev_usd")),
+                    "sell_ruin_probability_reduction": float(
+                        getattr(decision, "ruin_probability_reduction")
+                    ),
                 }
             capital_economics.update(
                 {
@@ -11653,6 +12395,16 @@ def _submit_current_global_sell(
                     "expected_comparison_log_growth_per_hour": float(
                         expected_growth.expected_log_growth_per_hour
                     ),
+                    "expected_comparison_capital_efficiency": float(
+                        expected_growth.expected_capital_efficiency
+                    ),
+                    "expected_comparison_capital_lock_hours": float(
+                        expected_growth.capital_lock_hours
+                    ),
+                    "ruin_probability_reduction": float(
+                        expected_growth.ruin_probability_reduction
+                    ),
+                    "utility_basis": expected_growth.utility_basis,
                 }
             )
             exit_context = ExitContext(
@@ -11774,7 +12526,9 @@ def _submit_current_global_sell(
                         if candidate.execution_mode == "TAKER_LIMIT"
                         else "single_price_maker_fill_all_prefixes_positive"
                     ),
+                    "global_auction_receipt": receipt_ref.as_payload(),
                 },
+                global_sell_receipt_closure=receipt_closure,
             )
             exit_evidence = ExitExecutionEvidence()
             if (
@@ -11830,6 +12584,9 @@ def _submit_current_global_sell(
                 execution_evidence=exit_evidence,
                 global_sell_authority=execution_authority,
                 global_sell_prefetched_orderbook=raw_book,
+                global_sell_required_snapshot_id=str(
+                    market_authority.snapshot.snapshot_id
+                ),
             )
     except Exception as exc:  # noqa: BLE001 - exit safety remains fail closed
         if exit_evidence is not None and exit_evidence.venue_call_started:
@@ -11856,11 +12613,26 @@ def _submit_current_global_sell(
                 venue_command_state=exit_evidence.command_state,
                 venue_order_type=exit_evidence.order_type,
             )
+        failure_text = f"{type(exc).__name__}:{exc}"
+        if _is_global_jit_authority_failure(failure_text) and not (
+            exit_evidence is not None and exit_evidence.venue_call_started
+        ):
+            return _global_sell_receipt(
+                event,
+                global_actuation=global_actuation,
+                reason=(
+                    "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+                    f"{failure_text}"
+                ),
+                proof_accepted=False,
+                jit_handoff=jit_handoff,
+            )
         return _global_sell_receipt(
             event,
             global_actuation=global_actuation,
-            reason=f"GLOBAL_SELL_EXECUTION_FAILED:{type(exc).__name__}:{exc}",
+            reason=f"GLOBAL_SELL_EXECUTION_FAILED:{failure_text}",
             proof_accepted=False,
+            jit_handoff=jit_handoff,
         )
 
     outcome_text = str(outcome)
@@ -11896,12 +12668,27 @@ def _global_curve_supersession_from_receipt(
     """Lift a typed current curve into the side-effect-free global preflight."""
 
     reason = str(receipt.reason or "")
+    market_prefix = "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+    if reason.startswith(market_prefix):
+        return "MARKET_AUTHORITY_SUPERSEDED", None, reason
     prefix = "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:curve_economics:"
     if not reason.startswith(prefix):
         return None
+    metadata_fields = {"fee", "fee_details", "tick", "min_order", "neg_risk"}
+    fields_marker = "jit_detail=fields="
+    field_text = reason.split(fields_marker, 1)[1].split(":", 1)[0] if fields_marker in reason else ""
+    if metadata_fields.intersection(field_text.split(",")):
+        return "MARKET_AUTHORITY_SUPERSEDED", None, reason
     replacement = receipt.global_jit_candidate
     if replacement is None:
         return "BLOCKED", None, f"{reason}:replacement_candidate_missing"
+    if isinstance(replacement, _GlobalJitHandoff):
+        replacement = replacement.candidate
+    # A SELL curve does not carry canonical fee_details for its synthetic BUY
+    # twin.  A local overlay would retain the prior BUY fee payload without a
+    # proof that it is still current, so only a complete venue cut may use it.
+    if str(getattr(replacement, "action", "BUY") or "BUY").upper() == "SELL":
+        return "MARKET_AUTHORITY_SUPERSEDED", None, reason
     return "CURVE_SUPERSEDED", replacement, reason
 
 
@@ -12191,6 +12978,172 @@ def _global_preflight_entry_authority_receipt(
     return receipt
 
 
+def _rebind_global_jit_receipt_snapshot(
+    receipt: EventSubmissionReceipt,
+    handoff: _GlobalJitHandoff,
+    *,
+    trade_conn: sqlite3.Connection,
+) -> EventSubmissionReceipt:
+    """Rebind every executor-facing BUY reference to one exact JIT row."""
+
+    from src.state.snapshot_repo import get_snapshot
+
+    snapshot = get_snapshot(trade_conn, handoff.authority.snapshot.snapshot_id)
+    if snapshot is None:
+        raise ValueError("GLOBAL_JIT_SNAPSHOT_PERSISTENCE_FAILED")
+    bundle = receipt.decision_proof_bundle
+    if bundle is None:
+        return receipt
+    execution_price = ExecutionPrice(
+        value=float(receipt.c_fee_adjusted or 0.0),
+        price_type="fee_adjusted",
+        fee_deducted=True,
+        currency="probability_units",
+    )
+    direction = str(receipt.direction or "buy_yes")
+    cost_basis = _require_cost_basis(
+        snapshot,
+        direction=direction,
+        size_usd=float(receipt.kelly_size_usd or 0.01),
+        execution_price=execution_price,
+    )
+    executable = bundle.executable_snapshot
+    executable_payload = dict(executable.payload)
+    executable_payload.update(
+        {
+            "identity": snapshot.snapshot_id,
+            "selected_snapshot_id": snapshot.snapshot_id,
+            "condition_id": snapshot.condition_id,
+            "token_id": snapshot.selected_outcome_token_id,
+            "orderbook_hash": snapshot.raw_orderbook_hash,
+            "fee_details_hash": _hash_jsonish(snapshot.fee_details),
+            "min_tick_size": str(snapshot.min_tick_size),
+            "min_order_size": str(snapshot.min_order_size),
+            "neg_risk": snapshot.neg_risk,
+            "captured_at": snapshot.captured_at.isoformat(),
+            "freshness_deadline": snapshot.freshness_deadline.isoformat(),
+            "active": snapshot.active,
+            "closed": snapshot.closed,
+            "executable_snapshot_hash": snapshot.executable_snapshot_hash,
+        }
+    )
+    jit_clock = EvidenceClock(
+        snapshot.captured_at,
+        snapshot.captured_at,
+        snapshot.captured_at,
+    )
+    executable = dataclass_replace(
+        executable,
+        payload=executable_payload,
+        clock=jit_clock,
+    )
+    quote = bundle.quote_feasibility
+    quote_payload = dict(quote.payload)
+    quote_payload.update(
+        {
+            "quote_book_condition_id": snapshot.condition_id,
+            "quote_book_token_id": snapshot.selected_outcome_token_id,
+            "quote_depth_hash": snapshot.raw_orderbook_hash,
+            "best_bid": float(snapshot.orderbook_top_bid) if snapshot.orderbook_top_bid is not None else None,
+            "best_ask": float(snapshot.orderbook_top_ask) if snapshot.orderbook_top_ask is not None else None,
+        }
+    )
+    quote = dataclass_replace(quote, payload=quote_payload, clock=jit_clock)
+    cost = bundle.cost_model
+    cost_payload = dict(cost.payload)
+    cost_payload.update(
+        {
+            "identity": cost_basis.cost_basis_id,
+            "cost_basis_id": cost_basis.cost_basis_id,
+            "cost_basis_hash": cost_basis.cost_basis_hash,
+        }
+    )
+    cost = dataclass_replace(cost, payload=cost_payload, clock=jit_clock)
+    sizing = bundle.sizing
+    sizing_payload = dict(sizing.payload)
+    sizing_payload["cost_basis_id"] = cost_basis.cost_basis_id
+    sizing = dataclass_replace(sizing, payload=sizing_payload)
+    projection = dict(bundle.pre_submit_projection)
+    projection["executable_snapshot_id"] = snapshot.snapshot_id
+    projection["projection_hash"] = stable_hash(projection)
+    executable_payload["family_snapshot_ids"] = tuple(
+        sorted(
+            set(executable_payload.get("family_snapshot_ids") or ())
+            | {snapshot.snapshot_id}
+        )
+    )
+    executable = dataclass_replace(executable, payload=executable_payload)
+    rebound_bundle = dataclass_replace(
+        bundle,
+        executable_snapshot=executable,
+        quote_feasibility=quote,
+        cost_model=cost,
+        sizing=sizing,
+        pre_submit_projection=projection,
+    )
+    economics = receipt.qkernel_execution_economics
+    if isinstance(economics, Mapping):
+        economics = dict(economics)
+        economics.update(
+            {
+                "global_jit_book_snapshot_id": snapshot.snapshot_id,
+                "global_jit_book_hash": snapshot.raw_orderbook_hash,
+                "global_jit_venue_book_hash": snapshot.raw_orderbook_hash,
+                "global_jit_execution_curve_identity": str(
+                    getattr(handoff.candidate, "execution_curve_identity", "") or ""
+                ),
+            }
+        )
+        # The JIT authority fields are part of the qkernel certificate identity;
+        # recompute the digest after rebinding them and mirror it on BELIEF.
+        curve_identity = str(
+            getattr(handoff.candidate, "execution_curve_identity", "") or ""
+        )
+        if "global_buy_fak_execution_curve_identity" in economics:
+            economics["global_buy_fak_execution_curve_identity"] = curve_identity
+        economics["current_state_identity_hash"] = qkernel_current_state_identity_hash(
+            economics
+        )
+        belief = rebound_bundle.belief
+        belief_payload = dict(belief.payload)
+        belief_payload[
+            "qkernel_current_state_identity_hash"
+        ] = economics["current_state_identity_hash"]
+        rebound_bundle = dataclass_replace(
+            rebound_bundle,
+            belief=dataclass_replace(belief, payload=belief_payload),
+        )
+    rebound = dataclass_replace(
+        receipt,
+        executable_snapshot_id=snapshot.snapshot_id,
+        kelly_cost_basis_id=cost_basis.cost_basis_id,
+        neg_risk=snapshot.neg_risk,
+        qkernel_execution_economics=economics,
+        decision_proof_bundle=rebound_bundle,
+    )
+    rebound_snapshot_id = str(
+        rebound_bundle.executable_snapshot.payload.get("selected_snapshot_id") or ""
+    )
+    projection_snapshot_id = str(
+        rebound_bundle.pre_submit_projection.get("executable_snapshot_id") or ""
+    )
+    qkernel_snapshot_id = str(
+        (economics or {}).get("global_jit_book_snapshot_id") or ""
+        if isinstance(economics, Mapping)
+        else ""
+    )
+    if not (
+        rebound.executable_snapshot_id
+        == rebound_snapshot_id
+        == projection_snapshot_id
+        == qkernel_snapshot_id
+        == str(handoff.authority.snapshot.snapshot_id)
+        == str(getattr(handoff.candidate, "book_snapshot_id", "") or "")
+    ):
+        raise ValueError("GLOBAL_JIT_RECEIPT_SNAPSHOT_BINDING_MISMATCH")
+    return rebound
+
+
 def _global_preflight_entry_jit_receipt(
     event: OpportunityEvent,
     receipt: EventSubmissionReceipt,
@@ -12199,6 +13152,7 @@ def _global_preflight_entry_jit_receipt(
     book_quote_provider: Callable[[str], Mapping[str, object]] | None,
     current_candidate_override: object | None = None,
     checked_at_utc: datetime | None = None,
+    trade_conn: sqlite3.Connection | None = None,
 ) -> EventSubmissionReceipt:
     """Bind selected BUY to the full JIT curve before any persistence."""
 
@@ -12228,11 +13182,16 @@ def _global_preflight_entry_jit_receipt(
     try:
         from src.events.reactor import _edli_pre_submit_book_from_jit_fetch
 
-        current_candidate = _reusable_global_preflight_jit_candidate(
-            candidate,
-            current_candidate_override,
-            checked_at_utc=checked_at_utc,
+        # SCOPE: this exact global BUY. DRAIN: the next auction cut repeats
+        # Gamma+CLOB+raw book reads. RESET: only one current raw book plus one current
+        # Gamma market can rebind the selected curve.  A prior JIT candidate is a
+        # re-auction hint, never submit authority.
+        handoff = (
+            current_candidate_override
+            if isinstance(current_candidate_override, _GlobalJitHandoff)
+            else None
         )
+        current_candidate = handoff.candidate if handoff is not None else None
         fresh_best_bid: float | None = None
         fresh_best_ask: float | None = None
         mode_checked_at = checked_at_utc
@@ -12249,7 +13208,10 @@ def _global_preflight_entry_jit_receipt(
                     else None
                 )
                 if response is None:
-                    response = book_quote_provider(token_id)
+                    try:
+                        response = book_quote_provider(token_id)
+                    except Exception as exc:  # noqa: BLE001 - authority transport
+                        raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE") from exc
                     if callable(consume_last):
                         consume_last(token_id)
                 current = dict(
@@ -12267,10 +13229,50 @@ def _global_preflight_entry_jit_receipt(
             )
             if jit is None:
                 raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
+            from src.data.polymarket_client import PolymarketClient
+            from src.data.polymarket_request_governor import RequestPriority
+
+            timeout = max(
+                1.0,
+                float(os.environ.get("ZEUS_GLOBAL_AUCTION_BOOK_TIMEOUT_SECONDS", "8.0")),
+            )
+            try:
+                gamma = _global_current_gamma_client(timeout_seconds=timeout)
+            except Exception as exc:  # noqa: BLE001 - authority transport
+                raise ValueError("GLOBAL_JIT_GAMMA_MARKET_UNAVAILABLE") from exc
+
+            def _entry_gamma_get(path, *, params=None, timeout):
+                return _governed_global_gamma_get(
+                    gamma,
+                    path,
+                    params=params,
+                    timeout=float(timeout),
+                    priority=RequestPriority.SUBMIT_JIT,
+                )
+
+            with PolymarketClient(public_http_timeout=timeout) as authority_clob:
+                market_authority = _current_global_market_authority(
+                    condition_id=str(
+                        getattr(candidate, "condition_id", "") or ""
+                    ),
+                    token_id=str(getattr(candidate, "token_id", "") or ""),
+                    side=str(getattr(candidate, "side", "") or ""),
+                    gamma_get=_entry_gamma_get,
+                    clob_market_get=authority_clob.get_clob_market_info,
+                    raw_book=raw_book,
+                    captured_at_utc=jit[3],
+                    timeout=timeout,
+                )
             current_candidate = _global_buy_candidate_from_raw_book(
                 candidate,
                 raw_book,
                 captured_at_utc=jit[3],
+                market_authority=market_authority,
+            )
+            handoff = _GlobalJitHandoff(
+                candidate=current_candidate,
+                authority=market_authority,
+                raw_book_json=_canonical_global_jit_raw_book(raw_book),
             )
             fresh_best_bid = jit[0]
             fresh_best_ask = jit[1]
@@ -12314,7 +13316,7 @@ def _global_preflight_entry_jit_receipt(
                     f"current={current_candidate.execution_curve_identity}"
                 ),
                 proof_accepted=False,
-                global_jit_candidate=current_candidate,
+                global_jit_candidate=handoff,
             )
         shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
         limit = Decimal(str(getattr(decision, "limit_price", "0") or "0"))
@@ -12337,15 +13339,47 @@ def _global_preflight_entry_jit_receipt(
                     f"token_id={candidate.token_id}:limit_price={limit}:"
                     f"required_shares={shares}:executable_shares={executable_shares}"
                 )
+        if handoff is None:
+            raise ValueError("GLOBAL_JIT_HANDOFF_MISSING")
+        if trade_conn is not None:
+            _persist_global_jit_authority_snapshot(trade_conn, handoff.authority)
     except Exception as exc:  # noqa: BLE001 - typed fail-closed preflight receipt
+        reason = str(exc)
+        if _is_global_jit_authority_failure(reason):
+            if reason == "PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED":
+                reason = "GLOBAL_JIT_RAW_BOOK_UNAVAILABLE"
+            reason = f"GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:{reason}"
+        else:
+            reason = f"EDLI_LIVE_CERTIFICATE_BUILD_FAILED:{reason}"
         return dataclass_replace(
             receipt,
             submitted=False,
             side_effect_status="NO_SUBMIT",
-            reason=f"EDLI_LIVE_CERTIFICATE_BUILD_FAILED:{exc}",
+            reason=reason,
             proof_accepted=False,
         )
-    return receipt
+    if trade_conn is not None and handoff is not None:
+        try:
+            receipt = _rebind_global_jit_receipt_snapshot(
+                receipt,
+                handoff,
+                trade_conn=trade_conn,
+            )
+        except Exception as exc:  # noqa: BLE001 - final JIT binding is fail closed
+            reason = str(exc)
+            if not _is_global_jit_authority_failure(reason):
+                reason = f"EDLI_LIVE_CERTIFICATE_BUILD_FAILED:{reason}"
+            else:
+                reason = f"GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:{reason}"
+            return dataclass_replace(
+                receipt,
+                submitted=False,
+                side_effect_status="NO_SUBMIT",
+                reason=reason,
+                proof_accepted=False,
+                global_jit_candidate=handoff,
+            )
+    return dataclass_replace(receipt, global_jit_candidate=handoff)
 
 
 def _global_preflight_candidate_mode_receipt(
@@ -12419,6 +13453,7 @@ def _global_preflight_candidate_mode_receipt(
             fresh_best_bid=fresh_best_bid,
             fresh_best_ask=fresh_best_ask,
             tick_size=float(curve.min_tick),
+            taker_fee_rate=float(curve.fee_model.fee_rate),
             decision_time=checked_at_utc,
         )
         if fresh_mode == "NO_TRADE":
@@ -13543,8 +14578,21 @@ def _global_actuation_selected_proof(
     candidate = getattr(decision, "candidate", None)
     prepared_witness = getattr(prepared_global_family, "probability_witness", None)
     witness = getattr(global_actuation, "probability_witness", None)
+    receipt_ref = getattr(global_actuation, "auction_receipt_ref", None)
     if candidate is None or witness is None or prepared_witness is None:
         raise ValueError("GLOBAL_ACTUATION_AUTHORITY_MISSING")
+    if not isinstance(receipt_ref, GlobalAuctionReceiptRef):
+        raise ValueError("GLOBAL_ACTUATION_RECEIPT_REF_MISSING")
+    receipt_ref.assert_matches_actuation(
+        winner_event_id=getattr(global_actuation, "winner_event_id", None),
+        winner_candidate_id=getattr(candidate, "candidate_id", None),
+        winner_actuation_identity=getattr(
+            global_actuation, "actuation_identity", None
+        ),
+        selection_epoch_identity=getattr(
+            global_actuation, "selection_epoch_identity", None
+        ),
+    )
     probability_fields = (
         "family_key",
         "q_version",
@@ -13659,6 +14707,10 @@ def _global_actuation_selected_proof(
             "global_actuation_identity": str(
                 getattr(global_actuation, "actuation_identity", "") or ""
             ),
+            "global_winner_event_id": str(
+                getattr(global_actuation, "winner_event_id", "") or ""
+            ),
+            "global_auction_receipt": receipt_ref.as_payload(),
             "global_economic_identity": str(
                 getattr(global_actuation, "economic_identity", "") or ""
             ),
@@ -13723,6 +14775,8 @@ def _global_actuation_selected_proof(
     if global_execution_mode == "MAKER_REST" and expected_growth is None:
         raise ValueError("GLOBAL_MAKER_REST_COMPARISON_MISSING")
     if expected_growth is not None:
+        if expected_growth.utility_basis != STRATEGY_LOG_UTILITY_BASIS:
+            raise ValueError("GLOBAL_EXPECTED_GROWTH_UTILITY_BASIS_INVALID")
         cert.update(
             {
                 "global_proposal_expected_delta_log_wealth": (
@@ -13737,6 +14791,10 @@ def _global_actuation_selected_proof(
                 "global_proposal_expected_capital_efficiency": (
                     expected_growth.expected_capital_efficiency
                 ),
+                "global_ruin_probability_reduction": (
+                    expected_growth.ruin_probability_reduction
+                ),
+                "global_utility_basis": expected_growth.utility_basis,
                 "global_proposal_capital_lock_hours": (
                     expected_growth.capital_lock_hours
                 ),
@@ -13758,6 +14816,9 @@ def _global_actuation_selected_proof(
                     expected_terminal.expected_delta_log_wealth
                 ),
                 "global_expected_ev_usd": expected_terminal.expected_ev_usd,
+                "global_terminal_ruin_probability_reduction": (
+                    expected_terminal.ruin_probability_reduction
+                ),
                 "global_expected_capital_efficiency": (
                     expected_terminal.expected_delta_log_wealth
                     / float(decision.cost_usd)
@@ -13775,6 +14836,9 @@ def _global_actuation_selected_proof(
                 ),
                 "global_robust_ev_usd": decision.robust_ev_usd,
                 "global_capital_efficiency": decision.capital_efficiency,
+                "global_terminal_ruin_probability_reduction": (
+                    decision.ruin_probability_reduction
+                ),
             }
         )
     prefix = _global_buy_prefix_certificate_for_proof(
@@ -17299,6 +18363,27 @@ def _execution_command_id_from_command_certificate(command: DecisionCertificate)
 # source of truth for the reason string is _SUBMIT_ABORT_RECEIPT_REASON keyed on
 # CandidateLifecycleState.SUBMIT_ABORTED_MODE_FLIPPED.
 _MODE_FLIPPED_ABORT_PREFIX = "SUBMIT_ABORTED_MODE_FLIPPED"
+_CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE = (
+    "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
+)
+
+
+def _current_maker_fill_authority_rejection_reason(
+    *,
+    proof_mode: str | None,
+    fresh_mode: str | None,
+) -> str | None:
+    """Reject any maker-dependent submit until a typed current witness exists."""
+
+    modes = {
+        str(value or "").strip().upper()
+        for value in (proof_mode, fresh_mode)
+    }
+    return (
+        _CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+        if "MAKER" in modes
+        else None
+    )
 _PRICE_MOVED_ABORT_PREFIX = "SUBMIT_ABORTED_PRICE_MOVED"
 
 
@@ -17396,6 +18481,7 @@ def _fresh_rest_then_cross_mode(
     fresh_best_ask: float | None,
     tick_size: float,
     decision_time: datetime,
+    taker_fee_rate: float | None = None,
 ) -> str:
     """Fresh-book mode via the SAME K4.0 rest-then-cross policy as the proof.
 
@@ -17435,10 +18521,23 @@ def _fresh_rest_then_cross_mode(
     escalated_after_rest = proof_policy == POLICY_TAKER_ESCALATED_AFTER_REST
     q_lcb = _optional_float(actionable_payload.get("q_lcb_5pct"))
     reservation = _optional_float(actionable_payload.get("c_fee_adjusted"))
+    economics = actionable_payload.get("qkernel_execution_economics")
+    global_jit_mode = (
+        isinstance(economics, Mapping)
+        and str(economics.get("global_execution_mode") or "").strip().upper()
+        in {"MAKER_REST", "TAKER_LIMIT"}
+    )
+    if global_jit_mode:
+        fee_rate = _optional_float(taker_fee_rate)
+        if fee_rate is None or not math.isfinite(fee_rate) or fee_rate < 0.0:
+            return "NO_TRADE"
+    else:
+        # Non-global callers retain their established compatibility behavior.
+        fee_rate = 0.05
     taker_all_in = None
     if fresh_best_ask is not None and 0.0 < float(fresh_best_ask) < 1.0:
         ask = float(fresh_best_ask)
-        taker_all_in = ask + 0.05 * ask * (1.0 - ask)
+        taker_all_in = ask + fee_rate * ask * (1.0 - ask)
     minutes_to_event_end: float | None = None
     market_end_raw = executable_snapshot.payload.get("market_end_at")
     end_dt = _parse_utc(str(market_end_raw)) if market_end_raw else None
@@ -17446,7 +18545,6 @@ def _fresh_rest_then_cross_mode(
         minutes_to_event_end = max(
             0.0, (end_dt - decision_time.astimezone(UTC)).total_seconds() / 60.0
         )
-    economics = actionable_payload.get("qkernel_execution_economics")
     if (
         isinstance(economics, Mapping)
         and str(economics.get("global_execution_mode") or "").strip().upper()
@@ -18150,7 +19248,7 @@ def _day0_live_submit_admission_rejection_reason(
     *,
     event: OpportunityEvent,
     actionable_payload: Mapping[str, object],
-    authority_witness: PreSubmitAuthorityWitness,
+    authority_witness: SealedBookEvidence,
     order_mode: str,
     decision_time: datetime,
     world_conn: sqlite3.Connection | None = None,
@@ -18287,6 +19385,7 @@ def _build_live_execution_command_certificates(
     live_order_schema_initialized: bool = False,
     global_claimed_at: str | None = None,
     global_claim_attempt_count: int | None = None,
+    global_jit_handoff: _GlobalJitHandoff | None = None,
 ) -> tuple[DecisionCertificate, ...]:
     global_actuation = receipt.global_actuation
     global_decision = (
@@ -18385,6 +19484,26 @@ def _build_live_execution_command_certificates(
             )
         from types import SimpleNamespace
 
+        sealed_book_override = None
+        if global_jit_handoff is not None and global_candidate is not None:
+            snap = global_jit_handoff.authority.snapshot
+            curve = getattr(global_jit_handoff.candidate, "executable_cost_curve", None)
+            sealed_book_override = SealedBookOverride(
+                token_id=str(snap.selected_outcome_token_id),
+                side="BUY",
+                snapshot_id=str(snap.snapshot_id),
+                raw_orderbook_hash=str(snap.raw_orderbook_hash),
+                orderbook_depth_jsonb=str(snap.orderbook_depth_jsonb),
+                best_bid=float(snap.orderbook_top_bid) if snap.orderbook_top_bid is not None else None,
+                best_ask=float(snap.orderbook_top_ask) if snap.orderbook_top_ask is not None else None,
+                tick_size=float(snap.min_tick_size),
+                min_order_size=float(snap.min_order_size),
+                neg_risk=bool(snap.neg_risk),
+                captured_at=snap.captured_at.isoformat(),
+                freshness_deadline=snap.freshness_deadline.isoformat(),
+                curve_ttl_seconds=float(getattr(curve, "quote_ttl", timedelta()).total_seconds()),
+            )
+
         side = "BUY" if str(actionable.payload.get("direction")) in {"buy_yes", "buy_no"} else "SELL"
         provisional_final_intent = SimpleNamespace(
             payload={
@@ -18395,12 +19514,29 @@ def _build_live_execution_command_certificates(
                 "neg_risk": bool(actionable.payload.get("neg_risk", False)),
             }
         )
-        authority_witness = _require_pre_submit_authority_witness(
-            pre_submit_authority_provider,
-            provisional_final_intent,
-            executable_snapshot,
-            decision_time,
-        )
+        if sealed_book_override is None:
+            authority_witness = _require_pre_submit_authority_witness(
+                pre_submit_authority_provider,
+                provisional_final_intent,
+                executable_snapshot,
+                decision_time,
+            )
+        else:
+            # Global BUY provisional mode needs only the already-sealed book
+            # touch/depth. Non-book gates run once, against the exact final intent.
+            authority_witness = SealedBookObservation(
+                quote_seen_at=sealed_book_override.captured_at,
+                book_hash=sealed_book_override.raw_orderbook_hash,
+                current_best_bid=sealed_book_override.best_bid,
+                current_best_ask=sealed_book_override.best_ask,
+                tick_size=sealed_book_override.tick_size,
+                min_order_size=sealed_book_override.min_order_size,
+                neg_risk=sealed_book_override.neg_risk,
+                book_authority_id="clob_jit_book",
+                book_captured_at=sealed_book_override.captured_at,
+                orderbook_depth_jsonb=sealed_book_override.orderbook_depth_jsonb,
+                checked_at=sealed_book_override.captured_at,
+            )
         fresh_best_bid = _optional_float(authority_witness.current_best_bid)
         fresh_best_ask = _optional_float(authority_witness.current_best_ask)
         best_bid = _optional_float(quote_payload.get("best_bid"))
@@ -18416,11 +19552,27 @@ def _build_live_execution_command_certificates(
             fresh_best_ask=fresh_best_ask,
             tick_size=float(provisional_final_intent.payload["tick_size"]),
             decision_time=decision_time,
+            taker_fee_rate=(
+                float(global_candidate.executable_cost_curve.fee_model.fee_rate)
+                if global_candidate is not None
+                and getattr(global_candidate, "executable_cost_curve", None) is not None
+                else None
+            ),
         )
         proof_order_mode = (
             str(actionable.payload.get("proof_execution_mode_intent") or "").strip().upper()
             or None
         )
+        maker_fill_rejection = _current_maker_fill_authority_rejection_reason(
+            proof_mode=proof_order_mode,
+            fresh_mode=_fresh_mode,
+        )
+        if maker_fill_rejection is not None:
+            # SCOPE — this new maker-dependent entry only; taker candidates and
+            # held-position monitoring continue. DRAIN — the next full decision
+            # cut rebuilds the candidate and fresh book. RESET — only a reviewed,
+            # candidate-bound current maker-fill witness can remove this wall.
+            raise ValueError(maker_fill_rejection)
         order_mode = _validate_final_order_mode_or_abort(
             proof_mode=proof_order_mode,
             fresh_mode=_fresh_mode,
@@ -18833,6 +19985,7 @@ def _build_live_execution_command_certificates(
             final_intent,
             executable_snapshot,
             decision_time,
+            sealed_book_override=sealed_book_override,
         )
         _assert_final_jit_witness_revalidates_intent(
             provisional=authority_witness,
@@ -19438,6 +20591,11 @@ def _actionable_payload_from_receipt(
         # qkernel cert to THIS selected leg across the two candidate_id namespaces.
         "candidate_bin_id": receipt.candidate_bin_id,
         "qkernel_execution_economics": qkernel_execution_economics,
+        "global_auction_receipt": (
+            qkernel_execution_economics.get("global_auction_receipt")
+            if isinstance(qkernel_execution_economics, dict)
+            else None
+        ),
         "day0_probability_authority": day0_probability_authority,
         # Keep the internal provenance projection byte-consistent with the
         # receipt's canonical probability witness. Day0 may carry a more
@@ -20322,14 +21480,24 @@ def _pre_submit_expected_edge(
 
 
 def _require_pre_submit_authority_witness(
-    provider: Callable[[DecisionCertificate, DecisionCertificate, datetime], PreSubmitAuthorityWitness] | None,
+    provider: Callable[..., PreSubmitAuthorityWitness] | None,
     final_intent: DecisionCertificate,
     executable_snapshot: DecisionCertificate,
     decision_time: datetime,
+    *,
+    sealed_book_override: SealedBookOverride | None = None,
 ) -> PreSubmitAuthorityWitness:
     if provider is None:
         raise ValueError("PRE_SUBMIT_AUTHORITY_WITNESS_REQUIRED")
-    witness = provider(final_intent, executable_snapshot, decision_time)
+    if sealed_book_override is None:
+        witness = provider(final_intent, executable_snapshot, decision_time)
+    else:
+        witness = provider(
+            final_intent,
+            executable_snapshot,
+            decision_time,
+            sealed_book_override=sealed_book_override,
+        )
     if not isinstance(witness, PreSubmitAuthorityWitness):
         raise ValueError("PRE_SUBMIT_AUTHORITY_WITNESS_REQUIRED")
     required_text_fields = {
@@ -20353,19 +21521,15 @@ def _require_pre_submit_authority_witness(
 
 def _assert_final_jit_witness_revalidates_intent(
     *,
-    provisional: PreSubmitAuthorityWitness,
+    provisional: SealedBookEvidence,
     final: PreSubmitAuthorityWitness,
 ) -> None:
-    """Require two current executable-book observations without freezing the book.
+    """Require the sealed preflight book plus one complete final witness.
 
-    The provisional fetch supplies the touch used to build the intent.  The
-    final fetch independently validates that exact side, limit, and size against
-    current depth in the provider.  The provider may serve a fresh canonical
-    price-channel projection, continuity-proven channel depth, or a direct CLOB
-    fetch; all three are current venue-book authorities and run the same final
-    depth validation.  Requiring identical hashes, source routes, or opposite-
-    side prices after that validation rejects harmless book movement and adds no
-    execution guarantee.
+    Global JIT binds the provisional intent to a sealed book observation, then
+    the provider revalidates the exact final intent and all non-book gates once.
+    Non-global routes may obtain their own current book observation in the
+    provider; no hash/source equality is required across harmless book motion.
     """
 
     current_book_authorities = {
@@ -20809,7 +21973,7 @@ def _passive_maker_context_from_authorities(
     quote_feasibility_cert: DecisionCertificate,
     executable_snapshot_cert: DecisionCertificate,
     decision_time: datetime,
-    fresh_authority_witness: PreSubmitAuthorityWitness | None = None,
+    fresh_authority_witness: SealedBookEvidence | None = None,
 ) -> dict[str, object]:
     """Build one passive context, optionally from the fresh submit-time book."""
 
@@ -26865,6 +28029,15 @@ def _generate_candidate_proofs(
                 unexpired_family_rest=_rtc_unexpired_rest,
                 escalated_after_rest=_rtc_escalated,
             )
+            maker_fill_authority_reason = (
+                _CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+                if mode_ev is not None
+                and (
+                    str(mode_ev.chosen_mode).strip().upper() == "MAKER"
+                    or _day0_proof_maker_only
+                )
+                else None
+            )
             if mode_ev is not None:
                 if _day0_proof_maker_only:
                     try:
@@ -26882,6 +28055,10 @@ def _generate_candidate_proofs(
                     c_cost_95pct=c_cost_95pct,
                     p_fill_lcb=p_fill_lcb,
                 )
+            if maker_fill_authority_reason is not None:
+                score = 0.0
+                if missing_reason is None:
+                    missing_reason = maker_fill_authority_reason
             # REMOVED 2026-06-08 (S4; "bin selection.md" §6/§9 Hidden #3/#10/§13 +
             # operator directive): the scalar market-disagreement buy_no demotion
             # (cheap-NO-overconfidence -> score=0) is GONE. It is SUBSUMED by the
@@ -26959,6 +28136,7 @@ def _generate_candidate_proofs(
                 capital_efficiency_reason is not None
                 or buy_no_conservative_evidence_reason is not None
                 or direction_law_reason is not None
+                or maker_fill_authority_reason is not None
             ):
                 passed_prefilter = False
             proof_execution_mode_intent = (
@@ -28096,7 +29274,12 @@ def _robust_marginal_utility_stake_and_price(
                     "payoff_q_action" if mean_action else "payoff_q_lcb"
                 ]
             )
+            # Preserve the complete frozen certificate.  This provenance mapping
+            # may be inspected independently of the final receipt, so retaining a
+            # global actuation marker without its exact auction receipt would create
+            # a second, unverifiable representation of the selected action.
             stake_floor_out["qkernel_execution_economics"] = {
+                **global_qkernel_cert,
                 "payoff_q_lcb": float(global_qkernel_cert["payoff_q_lcb"]),
                 "payoff_q_point": float(global_qkernel_cert["payoff_q_point"]),
                 "payoff_q_action": action_q,
@@ -28105,9 +29288,6 @@ def _robust_marginal_utility_stake_and_price(
                 "global_expected_cost_usd": float(target_cost),
                 "global_target_shares": float(
                     global_qkernel_cert["global_target_shares"]
-                ),
-                "global_actuation_identity": global_qkernel_cert.get(
-                    "global_actuation_identity"
                 ),
             }
         return float(chosen), price
@@ -38738,13 +39918,11 @@ def current_global_execution_authority(
         return None
     if (
         _optional_bool(row.get("enable_orderbook")) is not True
-        or _optional_bool(row.get("active")) is not True
-        or _optional_bool(row.get("closed")) is not False
         or _optional_bool(row.get("accepting_orders")) is not True
     ):
         return None
     tradeability = _json_object(row.get("tradeability_status_json") or {})
-    if tradeability.get("executable_allowed") is False:
+    if tradeability.get("executable_allowed") is not True:
         return None
     expected_token = str(
         (
@@ -38764,11 +39942,19 @@ def current_global_execution_authority(
         )
     except (KeyError, TypeError, ValueError):
         return None
+    raw_neg_risk = row.get("neg_risk")
+    if isinstance(raw_neg_risk, bool):
+        neg_risk = raw_neg_risk
+    elif isinstance(raw_neg_risk, int) and raw_neg_risk in (0, 1):
+        neg_risk = bool(raw_neg_risk)
+    else:
+        return None
     return CurrentExecutionAuthority(
         token_id=token_id,
         side=side,
         book_snapshot_id=str(row.get("snapshot_id") or ""),
         execution_curve_identity=executable_curve_identity(curve),
+        neg_risk=neg_risk,
     )
 
 
@@ -38818,7 +40004,13 @@ def _native_quote_book_from_snapshot_row(row: dict[str, Any]):
     fee_rate, _fee_source = resolve_taker_fee_fraction(
         fee_rate_fraction_from_details(fee_details)
     )
-    neg_risk = bool(_optional_bool(row.get("neg_risk")) or False)
+    raw_neg_risk = row.get("neg_risk")
+    if isinstance(raw_neg_risk, bool):
+        neg_risk = raw_neg_risk
+    elif isinstance(raw_neg_risk, int) and raw_neg_risk in (0, 1):
+        neg_risk = bool(raw_neg_risk)
+    else:
+        raise ValueError("current executable snapshot neg_risk authority missing")
     depth = _json_object(row.get("orderbook_depth_json") or row.get("orderbook_depth_jsonb") or {})
     yes_token_id = str(row.get("yes_token_id") or "")
     no_token_id = str(row.get("no_token_id") or "")

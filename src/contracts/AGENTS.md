@@ -19,6 +19,8 @@ Without typed contracts, Zeus degrades into "just a bunch of floats" where no on
 | `edge_context.py` | Edge provenance (source, confidence, costs) | HIGH — INV-12 enforcement |
 | `epistemic_context.py` | Cross-layer uncertainty context | HIGH |
 | `execution_intent.py` | Entry/exit intent typing | HIGH |
+| `strategy_capital_allocation.py` | Frozen E/L/K/U strategy ownership and BUY-capacity witness | HIGH — venue cash must not become utility equity |
+| `global_auction_receipt.py` | Immutable schema-21 row, execution-binding, and persisted-summary reference | HIGH — certificate/command/settlement attribution chain |
 | `venue_submission_envelope.py` | Polymarket V2 submission provenance envelope | HIGH — live venue provenance contract |
 | `fx_classification.py` | Operator-selected pUSD/USDC.e accounting enum gate | HIGH — no stringly redemption accounting |
 | `alpha_decision.py` | Alpha target declaration | MEDIUM |
@@ -39,6 +41,8 @@ Without typed contracts, Zeus degrades into "just a bunch of floats" where no on
 - `assert_settlement_value()` MUST gate every DB write of a settlement value — no exceptions
 - Price direction matters: buy_yes prices and buy_no prices are semantically different — always use typed wrappers
 - `FXClassification` enum values are the only accepted redemption/accounting gate values; raw strings must be rejected.
+- Venue-spendable cash is affordability evidence, not Zeus utility ownership; use the frozen strategy-capital allocation witness for E/L/K/U and remaining BUY capacity.
+- A global winner is not actionable until its committed schema-21 row, logical receipt hash, execution binding, and exact persisted-summary hash are frozen into the actuation and certificate.
 - Contracts are **frozen dataclasses** — immutability is intentional
 - This is K0 (kernel) — changes here require planning lock and packet discipline
 

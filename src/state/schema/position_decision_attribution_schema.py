@@ -26,10 +26,10 @@ Two distinct resolutions, both explicit (never a silent NULL guess):
                      join returned zero or more than one distinct certificate hash.
                      decision_certificate_hash is NULL; resolution_reason names why.
 
-Absence of a row entirely means the position predates this table's existence AND the
-one-time backfill has not (yet) covered it — the reader falls back to the legacy
-(condition_id, direction) inference for those, logging the fallback. A present
-UNATTRIBUTABLE row is never guessed around.
+Absence of an ENTRY row is an explicit unresolved state for settlement readers:
+the reader never falls back to a ``(condition_id, direction)`` inference. A
+present UNATTRIBUTABLE row is likewise never guessed around; only an exact row
+can lead to the certificate/receipt chain.
 """
 
 from __future__ import annotations

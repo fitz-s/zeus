@@ -13,7 +13,7 @@ import sqlite3
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import pytest
 
@@ -50,6 +50,22 @@ def allow_cancel_cutover_for_exit_safety_tests(monkeypatch):
 
 def _ctf_units(shares: float) -> int:
     return int(round(float(shares) * _CTF_SCALE))
+
+
+def _fresh_exit_collateral_payload(
+    *,
+    token_id: str = YES_TOKEN,
+    shares: float = 50.0,
+) -> dict[str, object]:
+    units = _ctf_units(shares)
+    return {
+        "pusd_balance_micro": 1_000_000_000,
+        "pusd_allowance_micro": 1_000_000_000,
+        "usdc_e_legacy_balance_micro": 0,
+        "ctf_token_balances_units": {token_id: units},
+        "ctf_token_allowances_units": {token_id: units},
+        "authority_tier": "CHAIN",
+    }
 
 
 def _execution_facts(conn, position_id: str) -> list[sqlite3.Row]:
@@ -4167,7 +4183,9 @@ def test_pending_exit_without_order_releases_for_redecision(conn):
 
 def test_pending_exit_phantom_sell_projection_releases_before_no_order_retry(conn):
     from src.execution import exit_lifecycle
+    from src.engine.lifecycle_events import build_position_current_projection
     from src.state.portfolio import PortfolioState, Position
+    from src.state.projection import upsert_position_current
 
     position = Position(
         trade_id="pos-phantom-sell-projection",
@@ -4184,6 +4202,7 @@ def test_pending_exit_phantom_sell_projection_releases_before_no_order_retry(con
         cost_basis_usd=4.34,
         state="pending_exit",
         pre_exit_state="entered",
+        entered_at=_NOW.isoformat(),
         exit_state="sell_placed",
         order_status="sell_placed",
         order_id="0xphantom-exit-order",
@@ -4192,6 +4211,7 @@ def test_pending_exit_phantom_sell_projection_releases_before_no_order_retry(con
         no_token_id=NO_TOKEN,
         condition_id="condition-phantom-sell-projection",
     )
+    upsert_position_current(conn, build_position_current_projection(position))
 
     class FakeClob:
         def get_order_status(self, order_id):
@@ -4726,8 +4746,10 @@ def test_exit_lifecycle_does_not_treat_closed_string_as_terminal(conn):
 
 
 def test_pending_exit_does_not_poll_entry_order_as_exit_order(conn):
+    from src.engine.lifecycle_events import build_position_current_projection
     from src.execution import exit_lifecycle
     from src.state.portfolio import PortfolioState, Position
+    from src.state.projection import upsert_position_current
 
     position = Position(
         trade_id="pos-entry-order-not-exit",
@@ -4750,7 +4772,9 @@ def test_pending_exit_does_not_poll_entry_order_as_exit_order(conn):
         token_id=YES_TOKEN,
         no_token_id=NO_TOKEN,
         condition_id="condition-entry-order-not-exit",
+        entered_at=_NOW.isoformat(),
     )
+    upsert_position_current(conn, build_position_current_projection(position))
     portfolio = PortfolioState(positions=[position])
 
     class FakeClob:
@@ -4784,8 +4808,10 @@ def test_pending_exit_does_not_poll_entry_order_as_exit_order(conn):
 
 
 def test_pending_exit_releases_terminal_exit_order_without_polling_it(conn):
+    from src.engine.lifecycle_events import build_position_current_projection
     from src.execution import exit_lifecycle
     from src.state.portfolio import PortfolioState, Position
+    from src.state.projection import upsert_position_current
     from src.state.venue_command_repo import append_event
 
     position = Position(
@@ -4810,14 +4836,16 @@ def test_pending_exit_releases_terminal_exit_order_without_polling_it(conn):
         token_id=YES_TOKEN,
         no_token_id=NO_TOKEN,
         condition_id="condition-terminal-exit-order-release",
+        entered_at=_NOW.isoformat(),
     )
+    upsert_position_current(conn, build_position_current_projection(position))
     _insert_exit_command(
         conn,
         command_id="cmd-terminal-exit-order-release",
         position_id=position.trade_id,
         venue_order_id=position.last_exit_order_id,
         size=37.2,
-        price=0.99,
+        price=0.95,
     )
     _ack_exit(
         conn,
@@ -5529,6 +5557,12 @@ def test_two_exit_requests_for_same_position_collapse_into_one_durable_chain(con
         def bind_submission_envelope(self, envelope):
             self.bound_envelope = envelope
 
+        def bind_signed_submission_identity_persister(self, persister):
+            self.signed_identity_persister = persister
+
+        def get_collateral_payload(self):
+            return _fresh_exit_collateral_payload()
+
         def place_limit_order(self, **kwargs):
             calls.append(kwargs)
             return _fake_submit_result(self.bound_envelope, order_id="ord-1")
@@ -5597,6 +5631,9 @@ def test_execute_exit_order_uses_snapshot_tick_for_sell_price_planning(conn, mon
 
         def bind_signed_submission_identity_persister(self, persister):
             self.signed_identity_persister = persister
+
+        def get_collateral_payload(self):
+            return _fresh_exit_collateral_payload()
 
         def place_limit_order(self, **kwargs):
             calls.append(kwargs)
@@ -5972,6 +6009,12 @@ def test_exit_authority_deadline_is_rechecked_at_final_venue_seam(conn, monkeypa
         def bind_submission_envelope(self, envelope):
             self.bound_envelope = envelope
 
+        def bind_signed_submission_identity_persister(self, persister):
+            self.signed_identity_persister = persister
+
+        def get_collateral_payload(self):
+            return _fresh_exit_collateral_payload()
+
         def place_limit_order(self, **kwargs):
             venue_calls.append(kwargs)
             raise AssertionError("expired authority reached the venue")
@@ -6036,6 +6079,12 @@ def test_exit_snapshot_deadline_cannot_be_extended_by_caller(conn, monkeypatch):
         def bind_submission_envelope(self, envelope):
             self.bound_envelope = envelope
             bound["value"] = True
+
+        def bind_signed_submission_identity_persister(self, persister):
+            self.signed_identity_persister = persister
+
+        def get_collateral_payload(self):
+            return _fresh_exit_collateral_payload()
 
         def place_limit_order(self, **kwargs):
             venue_calls.append(kwargs)
@@ -6208,6 +6257,12 @@ def test_execute_exit_order_retries_after_no_side_effect_reject_with_new_exit_sn
         def bind_submission_envelope(self, envelope):
             self.bound_envelope = envelope
 
+        def bind_signed_submission_identity_persister(self, persister):
+            self.signed_identity_persister = persister
+
+        def get_collateral_payload(self):
+            return _fresh_exit_collateral_payload()
+
         def place_limit_order(self, **kwargs):
             calls.append(kwargs)
             if len(calls) == 1:
@@ -6279,6 +6334,12 @@ def test_execute_exit_order_rejects_economic_unknown_with_old_exit_snapshot_iden
     class TimeoutClient:
         def bind_submission_envelope(self, envelope):
             self.bound_envelope = envelope
+
+        def bind_signed_submission_identity_persister(self, persister):
+            self.signed_identity_persister = persister
+
+        def get_collateral_payload(self):
+            return _fresh_exit_collateral_payload()
 
         def place_limit_order(self, **kwargs):
             calls.append(kwargs)
@@ -6538,6 +6599,83 @@ def test_exit_lifecycle_requires_snapshot_selected_token_for_native_side(conn):
     assert context["executable_snapshot_hash"] == _snapshot_hash(conn, no_snapshot_id)
 
 
+def test_exit_snapshot_context_rejects_later_market_invalidation(conn):
+    from src.execution import exit_lifecycle
+    from src.state.snapshot_repo import record_snapshot_invalidation
+
+    snapshot_id = _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        snapshot_id="snap-exit-invalidated",
+        captured_at=_NOW,
+        freshness_deadline=_NOW + timedelta(minutes=5),
+    )
+    record_snapshot_invalidation(
+        conn,
+        condition_id="condition-test",
+        token_id=YES_TOKEN,
+        reason="tick_size_change",
+        invalidated_at=_NOW + timedelta(seconds=1),
+    )
+    checked_at = _NOW + timedelta(seconds=2)
+
+    assert (
+        exit_lifecycle._latest_exit_snapshot_context(
+            conn,
+            YES_TOKEN,
+            now=checked_at,
+        )
+        == {}
+    )
+    assert (
+        exit_lifecycle._exact_exit_snapshot_context(
+            conn,
+            YES_TOKEN,
+            snapshot_id,
+            "c" * 64,
+            now=checked_at,
+        )
+        == {}
+    )
+
+
+def test_exit_snapshot_helpers_fail_closed_on_malformed_decimal(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+
+    snapshot_id = _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        snapshot_id="snap-exit-malformed-decimal",
+        freshness_deadline=_NOW + timedelta(minutes=5),
+    )
+
+    def malformed_snapshot(*_args, **_kwargs):
+        raise InvalidOperation("malformed snapshot decimal")
+
+    monkeypatch.setattr("src.state.snapshot_repo.get_snapshot", malformed_snapshot)
+
+    assert exit_lifecycle._positive_decimal("NaN") is None
+    assert (
+        exit_lifecycle._latest_fresh_snapshot_min_order_for_token(
+            YES_TOKEN,
+            conn=conn,
+            now=_NOW,
+        )
+        is None
+    )
+    assert exit_lifecycle._latest_exit_snapshot_context(conn, YES_TOKEN, now=_NOW) == {}
+    assert (
+        exit_lifecycle._exact_exit_snapshot_context(
+            conn,
+            YES_TOKEN,
+            snapshot_id,
+            "c" * 64,
+            now=_NOW,
+        )
+        == {}
+    )
+
+
 def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeypatch):
     from src.execution import exit_lifecycle
     from src.state.portfolio import ExitContext, PortfolioState, Position
@@ -6557,6 +6695,7 @@ def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeyp
         size_usd=10.0,
         shares=20.0,
         cost_basis_usd=10.0,
+        env="test",
     )
     portfolio = PortfolioState(positions=[position])
     exit_context = ExitContext(
@@ -6665,8 +6804,10 @@ def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeyp
     )
 
     assert result == "sell_pending: order=ord-exit-refresh, status=OPEN"
+    assert str(captured.pop("decision_id")).startswith(
+        "exit:pos-exit-refresh:"
+    )
     assert captured == {
-        "decision_id": "exit:pos-exit-refresh",
         "snapshot_id": "snap-exit-captured",
         "snapshot_hash": _snapshot_hash(conn, "snap-exit-captured"),
         "min_tick": "0.01",
@@ -7321,6 +7462,7 @@ def test_live_exit_quick_confirmed_without_explicit_fill_price_does_not_close(mo
         size_usd=10.0,
         shares=20.0,
         cost_basis_usd=10.0,
+        env="test",
     )
     portfolio = PortfolioState(positions=[position])
     exit_context = ExitContext(
@@ -7391,6 +7533,7 @@ def test_live_exit_delegates_collateral_authority_to_executor(conn, monkeypatch)
         cost_basis_usd=10.0,
         state="holding",
         strategy_key="opening_inertia",
+        env="test",
     )
     portfolio = PortfolioState(positions=[position])
     exit_context = ExitContext(
@@ -7439,7 +7582,6 @@ def test_live_exit_delegates_collateral_authority_to_executor(conn, monkeypatch)
             )
         ),
     )
-
     outcome = exit_lifecycle.execute_exit(
         portfolio,
         position,
@@ -7474,6 +7616,7 @@ def test_live_exit_executor_collateral_refresh_failure_retries(conn, monkeypatch
         cost_basis_usd=10.0,
         state="holding",
         strategy_key="opening_inertia",
+        env="test",
     )
     portfolio = PortfolioState(positions=[position])
     exit_context = ExitContext(
@@ -7536,6 +7679,7 @@ def test_live_exit_missing_executable_snapshot_retries_before_executor(conn, mon
         cost_basis_usd=10.0,
         state="holding",
         strategy_key="opening_inertia",
+        env="test",
     )
     portfolio = PortfolioState(positions=[position])
     exit_context = ExitContext(
@@ -7785,6 +7929,11 @@ def test_live_exit_with_fresh_snapshot_but_no_bid_records_liquidity_block(
             AssertionError("no-bid liquidity block must preempt executor")
         ),
     )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_hard_fact_sell_authority_valid",
+        lambda *args, **kwargs: True,
+    )
 
     outcome = exit_lifecycle.execute_exit(
         portfolio,
@@ -7792,6 +7941,7 @@ def test_live_exit_with_fresh_snapshot_but_no_bid_records_liquidity_block(
         exit_context,
         clob=None,
         conn=conn,
+        hard_fact_authority=object(),
     )
 
     assert outcome == "exit_blocked: no_executable_bid"
@@ -7941,6 +8091,11 @@ def test_live_exit_sub_floor_bid_waits_without_submit_or_retry_budget(conn, monk
             AssertionError("sub-floor liquidity wait must not submit")
         ),
     )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_hard_fact_sell_authority_valid",
+        lambda *args, **kwargs: True,
+    )
 
     outcome = exit_lifecycle.execute_exit(
         PortfolioState(positions=[position]),
@@ -7954,6 +8109,7 @@ def test_live_exit_sub_floor_bid_waits_without_submit_or_retry_budget(conn, monk
         ),
         clob=None,
         conn=conn,
+        hard_fact_authority=object(),
     )
 
     assert outcome == "exit_blocked: no_in_band_bid"
@@ -8065,8 +8221,15 @@ def test_backoff_exhausted_sub_floor_rejection_reenters_liquidity_wait(conn):
 
 def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, monkeypatch):
     from src.execution import exit_lifecycle
+    from src.riskguard.risk_level import RiskLevel
     from src.state.portfolio import ExitContext, PortfolioState, Position
 
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        min_order_size="5",
+        snapshot_id="snap-live-exit-below-min-order",
+    )
     position = Position(
         trade_id="pos-dust-below-min-order",
         market_id="condition-test",
@@ -8085,9 +8248,10 @@ def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, mo
         state="day0_window",
         strategy_key="opening_inertia",
     )
+    position.exit_reason = "red_force_exit"
     portfolio = PortfolioState(positions=[position])
     exit_context = ExitContext(
-        exit_reason="SETTLEMENT_IMMINENT",
+        exit_reason="RED_FORCE_EXIT",
         current_market_price=0.99,
         current_market_price_is_fresh=True,
         best_bid=0.99,
@@ -8098,6 +8262,10 @@ def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, mo
     error = "executable_snapshot_gate: size 1.5873 is below snapshot min_order_size 5"
 
     monkeypatch.setattr(exit_lifecycle, "check_sell_collateral", lambda *args, **kwargs: (True, ""))
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: RiskLevel.RED,
+    )
     monkeypatch.setattr(exit_lifecycle, "_refresh_exit_collateral_snapshot_for_submit", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         exit_lifecycle,
@@ -8608,6 +8776,66 @@ def test_existing_canonical_dust_hold_requires_fresh_snapshot_evidence(conn):
     )
 
 
+def test_existing_canonical_dust_hold_rejects_invalidated_snapshot(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+    from src.state.snapshot_repo import record_snapshot_invalidation
+
+    error = "executable_snapshot_gate: size 1.0 is below snapshot min_order_size 5"
+    position = Position(
+        trade_id="pos-dust-existing-invalidated-snapshot",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="asia",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=0.64,
+        shares=1.0,
+        chain_shares=1.0,
+        cost_basis_usd=0.64,
+        state="day0_window",
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+    )
+    exit_lifecycle._mark_exit_dust_hold(
+        position,
+        reason=f"DAY0_ZERO_PROBABILITY_SELL_VALUE_DOMINATES [DUST: {error}]",
+        error=error,
+        conn=conn,
+    )
+    _ensure_snapshot(
+        conn,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        selected_outcome_token_id=NO_TOKEN,
+        min_order_size="5",
+        snapshot_id="snap-dust-existing-canonical-invalidated",
+        captured_at=_NOW,
+        freshness_deadline=_NOW + timedelta(minutes=5),
+    )
+    record_snapshot_invalidation(
+        conn,
+        condition_id="condition-test",
+        token_id=NO_TOKEN,
+        reason="min_order_change",
+        invalidated_at=_NOW + timedelta(seconds=1),
+    )
+
+    assert (
+        exit_lifecycle._canonical_non_executable_dust_hold(
+            position,
+            conn=conn,
+            now=_NOW + timedelta(seconds=2),
+        )
+        is None
+    )
+
+
 def test_backoff_release_blocks_snapshot_min_order_dust_without_reason_marker(conn):
     from src.execution import exit_lifecycle
     from src.state.portfolio import Position
@@ -8667,6 +8895,51 @@ def test_backoff_release_blocks_snapshot_min_order_dust_without_reason_marker(co
         (position.trade_id,),
     ).fetchone()[0]
     assert released == 0
+
+
+def test_backoff_release_ignores_historical_dust_without_current_snapshot(conn):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+    from src.state.projection import upsert_position_current
+
+    position = Position(
+        trade_id="pos-historical-dust-needs-current-authority",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="asia",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=0.64,
+        shares=1.0,
+        chain_shares=1.0,
+        cost_basis_usd=0.64,
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        chain_state="synced",
+        strategy_key="forecast_qkernel_entry",
+        exit_state="backoff_exhausted",
+        order_status="backoff_exhausted",
+        exit_reason="EXIT_CHAIN_DUST_STILL_HELD",
+        last_exit_error=(
+            "executable_snapshot_gate: size 1 is below snapshot min_order_size 5"
+        ),
+        entered_at=_NOW.isoformat(),
+        env="live",
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+
+    assert exit_lifecycle.release_backoff_exhausted_pending_exit_for_redecision(
+        position,
+        conn=conn,
+    )
+    assert position.state == "day0_window"
+    assert position.exit_state == ""
 
 
 def test_retry_pending_snapshot_min_order_dust_becomes_hold_not_release(conn):
@@ -8749,6 +9022,7 @@ def test_retry_pending_snapshot_min_order_dust_becomes_hold_not_release(conn):
 
 def test_live_exit_snapshot_min_order_dust_hold_preempts_stale_collateral(conn, monkeypatch):
     from src.execution import exit_lifecycle
+    from src.riskguard.risk_level import RiskLevel
     from src.state.portfolio import ExitContext, PortfolioState, Position
 
     position = Position(
@@ -8769,9 +9043,10 @@ def test_live_exit_snapshot_min_order_dust_hold_preempts_stale_collateral(conn, 
         state="day0_window",
         strategy_key="opening_inertia",
     )
+    position.exit_reason = "red_force_exit"
     portfolio = PortfolioState(positions=[position])
     exit_context = ExitContext(
-        exit_reason="FLASH_CRASH_PANIC",
+        exit_reason="RED_FORCE_EXIT",
         current_market_price=0.99,
         current_market_price_is_fresh=True,
         best_bid=0.99,
@@ -8783,6 +9058,10 @@ def test_live_exit_snapshot_min_order_dust_hold_preempts_stale_collateral(conn, 
         exit_lifecycle,
         "_latest_or_capture_exit_snapshot_context",
         lambda *args, **kwargs: {"executable_snapshot_min_order_size": "5"},
+    )
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: RiskLevel.RED,
     )
 
     def stale_collateral(*args, **kwargs):
@@ -9595,8 +9874,8 @@ def test_monitor_refreshed_explicit_time_overrides_stale_position_monitor_time()
         token_id="yes-token",
         no_token_id="no-token",
         condition_id="condition-test",
-        state="quarantined",
-        chain_state="entry_authority_quarantined",
+        state="active",
+        chain_state="synced",
         shares=12.0,
         chain_shares=12.0,
         cost_basis_usd=8.4,
@@ -9610,7 +9889,7 @@ def test_monitor_refreshed_explicit_time_overrides_stale_position_monitor_time()
     events, projection = build_monitor_refreshed_canonical_write(
         pos,
         sequence_no=9,
-        phase_after="quarantined",
+        phase_after="active",
         source_module="test",
         occurred_at="2026-07-02T20:10:00+00:00",
     )
@@ -10667,7 +10946,10 @@ def test_persisted_exit_envelope_rejects_non_maker_non_fak_mode(conn):
     from src.state.venue_command_repo import insert_command
 
     token_id = "yes-token-invalid-mode"
-    with pytest.raises(ValueError, match="live execution mode is invalid"):
+    with pytest.raises(
+        ValueError,
+        match="persisted taker-capable order is not a legal live execution mode",
+    ):
         insert_command(
             conn,
             command_id="cmd-invalid-mode",
@@ -12008,28 +12290,43 @@ def test_execute_exit_preserves_adopted_order_when_bid_is_sub_floor(
         hard_fact_authority=hard_fact_authority,
     )
 
-    assert result == "exit_blocked: no_in_band_bid"
     assert pos.last_exit_order_id == "ord-venue-open-exit"
-    assert pos.exit_state == "sell_pending"
-    assert pos.order_status == "sell_pending_confirmation"
     assert pos.exit_retry_count == 1
-    assert pos.last_exit_error == "exit_no_in_band_bid"
-    assert pos.next_exit_retry_at == ""
-    payload = json.loads(
-        conn.execute(
-            "SELECT payload_json FROM position_events WHERE position_id = ? "
-            "ORDER BY sequence_no DESC LIMIT 1",
+    if authority_path == "global":
+        assert result == "exit_blocked: global_sell_execution_authority_required"
+        assert pos.exit_state == "retry_pending"
+        assert pos.order_status == "retry_pending"
+        assert pos.last_exit_error in ("", None)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
             (pos.trade_id,),
-        ).fetchone()[0]
-    )
-    assert payload["status"] == "resting_exit_liquidity_wait"
-    assert payload["resting_exit_order_preserved"] is True
+        ).fetchone()[0] == 0
+    else:
+        assert result == "exit_blocked: no_in_band_bid"
+        assert pos.exit_state == "sell_pending"
+        assert pos.order_status == "sell_pending_confirmation"
+        assert pos.last_exit_error == "exit_no_in_band_bid"
+        assert pos.next_exit_retry_at == ""
+        payload = json.loads(
+            conn.execute(
+                "SELECT payload_json FROM position_events WHERE position_id = ? "
+                "ORDER BY sequence_no DESC LIMIT 1",
+                (pos.trade_id,),
+            ).fetchone()[0]
+        )
+        assert payload["status"] == "resting_exit_liquidity_wait"
+        assert payload["resting_exit_order_preserved"] is True
 
     stats = exit_lifecycle.check_pending_exits(portfolio, FakeClob(), conn=conn)
 
-    assert stats["filled"] == 1
-    assert pos.state == "economically_closed"
-    assert pos.exit_state == "sell_filled"
+    if authority_path == "global":
+        assert stats["filled"] == 0
+        assert pos.state == "pending_exit"
+        assert pos.exit_state == "retry_pending"
+    else:
+        assert stats["filled"] == 1
+        assert pos.state == "economically_closed"
+        assert pos.exit_state == "sell_filled"
 
 
 def test_exit_active_order_lock_retry_does_not_consume_backoff_budget(conn):

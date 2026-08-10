@@ -1,11 +1,12 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-07-30; last_reused=2026-07-30
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: Lock R3 Z3 HeartbeatSupervisor fail-closed resting-order gate behavior.
 # Reuse: Run when heartbeat supervision, executor submit gating, or R3 live-money readiness changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-07-30
+# Last reused/audited: 2026-08-10
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z3.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + 2026-05-17 CLOB venue-heartbeat critical-path split
+#                  + 2026-08-10 adapter-owned SDK transport isolation and supervisor timeout/reset contract.
 """R3 Z3 HeartbeatSupervisor antibodies."""
 
 from __future__ import annotations
@@ -733,6 +734,33 @@ def test_heartbeat_timeout_env_cannot_consume_most_of_cadence(monkeypatch):
         heartbeat_http_timeout_seconds_from_env(5)
 
 
+def test_install_dedicated_heartbeat_timeout_delegates_precomputed_timeout(monkeypatch):
+    """Control owns cadence/env policy; the venue adapter owns SDK transport."""
+
+    observed: list[float] = []
+
+    def fake_install(*, timeout_seconds: float) -> bool:
+        observed.append(timeout_seconds)
+        return True
+
+    monkeypatch.delenv("ZEUS_HEARTBEAT_HTTP_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setattr(
+        "src.venue.polymarket_v2_adapter.install_dedicated_heartbeat_http_transport",
+        fake_install,
+    )
+    monkeypatch.setattr(
+        heartbeat_supervisor_module,
+        "_HEARTBEAT_REQUEST_CAUSE_PRESERVED",
+        False,
+    )
+
+    assert install_dedicated_heartbeat_http_timeout(cadence_seconds=4) is True
+    assert observed == [1.0]
+    assert heartbeat_supervisor_module.heartbeat_transport_telemetry()[
+        "request_cause_preserved"
+    ] is True
+
+
 def test_install_dedicated_heartbeat_timeout_replaces_sdk_http_client(monkeypatch):
     """RELATIONSHIP: keeper timeout config -> actual SDK heartbeat transport."""
 
@@ -785,7 +813,7 @@ def test_install_dedicated_heartbeat_timeout_preserves_request_error_cause(monke
             delattr(heartbeat_http_helpers, "_zeus_request_cause_preserved")
         heartbeat_supervisor_module._HEARTBEAT_REQUEST_CAUSE_PRESERVED = False
         install_dedicated_heartbeat_http_timeout(cadence_seconds=2)
-        assert heartbeat_supervisor_module.heartbeat_transport_diagnostics() == {
+        assert heartbeat_supervisor_module.heartbeat_transport_telemetry() == {
             "request_cause_preserved": True,
             "transport_reset_count": old_reset_count,
             "last_transport_reset_reason": old_reset_reason,
@@ -1216,7 +1244,6 @@ def test_lost_summary_allows_immediate_entry_but_blocks_resting_type():
         governor_status={"entry": {"allow_submit": True}},
         current_posture="NORMAL",
         chain_ready=True,
-        force_exit=False,
         freshness_allows_entries=True,
         entry_bankroll=1.0,
         exposure_gate_hit=False,
@@ -1680,10 +1707,10 @@ def test_heartbeat_keeper_writes_status_without_order_side_effects(tmp_path):
     assert payload["owner"] == "zeus-venue-heartbeat"
     assert payload["schema_version"] == 2
     assert isinstance(
-        payload["transport_diagnostics"]["request_cause_preserved"],
+        payload["transport_telemetry"]["request_cause_preserved"],
         bool,
     )
-    assert isinstance(payload["transport_diagnostics"]["transport_reset_count"], int)
+    assert isinstance(payload["transport_telemetry"]["transport_reset_count"], int)
     assert payload["health"] == "HEALTHY"
     assert payload["heartbeat_id"] == "keeper-A"
     assert payload["last_error"] is None
@@ -1913,12 +1940,11 @@ def test_main_starts_venue_heartbeat_before_boot_http():
     main_body = source[source.index("def main():"):]
     heartbeat_start = main_body.index("_start_venue_heartbeat_loop_if_needed()")
 
-    # Efficiency #3 (warm-overlap): the boot wallet RPC moved from an inline
-    # _bankroll_current() call into the background warm thread spawned by
-    # _start_boot_wallet_warm(). That spawn is now the FIRST boot wallet HTTP —
-    # it must still come after the venue heartbeat (heartbeat-before-boot-http
-    # invariant unchanged; only the call site moved).
-    assert heartbeat_start < main_body.index("_start_boot_wallet_warm()")
+    # Wallet warm is scheduler-owned now: the order daemon stays cold through
+    # pre-scheduler boot work, then the recurring EDLI bankroll warm job runs.
+    scheduler_warm = main_body.index('id="edli_bankroll_warm"')
+    assert heartbeat_start < scheduler_warm
+    assert "_start_boot_wallet_warm()" not in main_body[:scheduler_warm]
     assert heartbeat_start < main_body.index("_startup_wallet_check(")
 
 
@@ -2161,72 +2187,39 @@ def test_post_reactor_maintenance_starts_only_when_m5_required(monkeypatch):
     assert calls == [adapter, adapter]
 
 
-def test_collateral_background_refresh_defers_when_edli_pending_backlog_exists(monkeypatch):
+def test_collateral_background_refresh_reports_sidecar_owner(monkeypatch):
     from src import main
 
     adapter = object()
     calls = []
 
-    monkeypatch.setattr(main, "_edli_reactor_pending_backlog_exists", lambda: True)
     monkeypatch.setattr(
         main,
         "_refresh_global_collateral_snapshot_if_due",
         lambda active_adapter: calls.append(active_adapter),
     )
 
-    assert main._start_collateral_background_refresh_async(adapter) == "deferred_edli_pending_backlog"
+    assert main._start_collateral_background_refresh_async(adapter) == "owned_by_post_trade_capital"
     assert calls == []
 
 
-def test_collateral_background_refresh_runs_for_degraded_snapshot_despite_edli_backlog(monkeypatch):
+def test_collateral_background_refresh_noop_ignores_degraded_snapshot(monkeypatch):
     from src import main
-    from src.state.collateral_ledger import (
-        CollateralLedger,
-        CollateralSnapshot,
-        configure_global_ledger,
-    )
 
     adapter = object()
     calls = []
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    ledger = CollateralLedger(conn)
-    ledger.set_snapshot(
-        CollateralSnapshot(
-            pusd_balance_micro=0,
-            pusd_allowance_micro=0,
-            usdc_e_legacy_balance_micro=0,
-            ctf_token_balances={},
-            ctf_token_allowances={},
-            reserved_pusd_for_buys_micro=0,
-            reserved_tokens_for_sells={},
-            captured_at=datetime.now(timezone.utc),
-            authority_tier="DEGRADED",
-        )
-    )
-    configure_global_ledger(ledger)
 
-    class InlineThread:
-        def __init__(self, *, target, name, daemon):
-            self._target = target
-
-        def start(self):
-            self._target()
-
-    monkeypatch.setattr(main, "_edli_reactor_pending_backlog_exists", lambda: True)
     monkeypatch.setattr(
         main,
         "_refresh_global_collateral_snapshot_if_due",
         lambda active_adapter: calls.append(active_adapter),
     )
-    monkeypatch.setattr(main.threading, "Thread", InlineThread)
-    main._last_collateral_heartbeat_refresh_attempt_at = None
 
-    assert main._start_collateral_background_refresh_async(adapter) == "started"
-    assert calls == [adapter]
+    assert main._start_collateral_background_refresh_async(adapter) == "owned_by_post_trade_capital"
+    assert calls == []
 
 
-def test_collateral_background_refresh_is_not_blocked_by_slow_venue_maintenance(monkeypatch):
+def test_collateral_background_refresh_noop_ignores_venue_maintenance(monkeypatch):
     from src import main
 
     adapter = object()
@@ -2236,25 +2229,10 @@ def test_collateral_background_refresh_is_not_blocked_by_slow_venue_maintenance(
         calls.append(active_adapter)
         return True
 
-    class InlineThread:
-        def __init__(self, *, target, name, daemon):
-            self._target = target
-
-        def start(self):
-            self._target()
-
     monkeypatch.setattr(main, "_refresh_global_collateral_snapshot_if_due", _refresh)
-    monkeypatch.setattr(main.threading, "Thread", InlineThread)
-    main._last_venue_background_maintenance_attempt_at = None
 
-    assert main._venue_background_maintenance_lock.acquire(blocking=False)
-    try:
-        assert main._start_venue_background_maintenance_async(adapter) == "already_running"
-        assert main._start_collateral_background_refresh_async(adapter) == "started"
-    finally:
-        main._venue_background_maintenance_lock.release()
-
-    assert calls == [adapter]
+    assert main._start_collateral_background_refresh_async(adapter) == "owned_by_post_trade_capital"
+    assert calls == []
 
 
 def test_external_heartbeat_defers_background_db_work_while_cycle_runs(monkeypatch):
@@ -2417,73 +2395,33 @@ def test_venue_background_maintenance_refreshes_findings_before_ws_latch_clear(m
 
     monkeypatch.setattr(main, "_refresh_reconcile_findings_if_required", _refresh)
     monkeypatch.setattr(main, "_run_ws_gap_reconcile_if_required", _ws_gap)
-    monkeypatch.setattr(
-        main,
-        "_refresh_global_collateral_snapshot_if_due",
-        lambda active_adapter: calls.append("collateral") or False,
-    )
 
     result = main._run_venue_background_maintenance_once(adapter)
 
     assert result["status"] == "ok"
     assert result["reconcile_findings_refresh"]["status"] == "resolved"
     assert result["ws_gap_reconcile"]["status"] == "cleared"
-    assert calls == ["refresh", "ws_gap", "collateral"]
+    assert result["collateral_refreshed"] == "owned_by_post_trade_capital"
+    assert calls == ["refresh", "ws_gap"]
 
 
-def test_venue_background_maintenance_refreshes_stale_global_collateral(monkeypatch):
+def test_venue_background_maintenance_reports_collateral_sidecar_owner(monkeypatch):
     from src import main
-    from src.state.collateral_ledger import (
-        CollateralLedger,
-        CollateralSnapshot,
-        configure_global_ledger,
+
+    monkeypatch.setattr(
+        main,
+        "_refresh_reconcile_findings_if_required",
+        lambda _adapter: {"status": "noop"},
     )
-
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    ledger = CollateralLedger(conn)
-    ledger.set_snapshot(
-        CollateralSnapshot(
-            pusd_balance_micro=1_000_000,
-            pusd_allowance_micro=1_000_000,
-            usdc_e_legacy_balance_micro=0,
-            ctf_token_balances={},
-            ctf_token_allowances={},
-            reserved_pusd_for_buys_micro=0,
-            reserved_tokens_for_sells={},
-            captured_at=datetime.now(timezone.utc) - timedelta(seconds=31),
-            authority_tier="CHAIN",
-        )
+    monkeypatch.setattr(
+        main,
+        "_run_ws_gap_reconcile_if_required",
+        lambda _adapter: {"status": "noop"},
     )
-    configure_global_ledger(ledger)
-
-    class Adapter(FakeHeartbeatAdapter):
-        def __init__(self):
-            super().__init__([HeartbeatAck(ok=True, raw={"heartbeat_id": "session-A"})])
-            self.collateral_refreshes = 0
-
-        def get_collateral_payload(self):
-            self.collateral_refreshes += 1
-            return {
-                "pusd_balance_micro": 199_396_602,
-                "pusd_allowance_micro": 9_000_000,
-                "usdc_e_legacy_balance_micro": 0,
-                "ctf_token_balances": {},
-                "ctf_token_allowances": {},
-                "authority_tier": "CHAIN",
-            }
-
-    adapter = Adapter()
-
-    main._last_collateral_heartbeat_refresh_attempt_at = None
-
-    result = main._run_venue_background_maintenance_once(adapter)
+    result = main._run_venue_background_maintenance_once(object())
 
     assert result["status"] == "ok"
-    assert adapter.collateral_refreshes == 1
-    snapshot = ledger.snapshot()
-    assert snapshot.pusd_balance_micro == 199_396_602
-    assert snapshot.pusd_allowance_micro == 9_000_000
+    assert result["collateral_refreshed"] == "owned_by_post_trade_capital"
 
 
 def test_venue_background_maintenance_skips_recent_global_collateral(monkeypatch):
@@ -2531,57 +2469,13 @@ def test_venue_background_maintenance_skips_recent_global_collateral(monkeypatch
     assert adapter.collateral_refreshes == 0
 
 
-def test_venue_background_maintenance_throttles_degraded_collateral_refresh_attempts(monkeypatch):
+def test_venue_background_maintenance_does_not_refresh_degraded_collateral(monkeypatch):
     from src import main
-    from src.state.collateral_ledger import (
-        CollateralLedger,
-        CollateralSnapshot,
-        configure_global_ledger,
-    )
 
-    conn = sqlite3.connect(":memory:")
-    conn.row_factory = sqlite3.Row
-    ledger = CollateralLedger(conn)
-    ledger.set_snapshot(
-        CollateralSnapshot(
-            pusd_balance_micro=0,
-            pusd_allowance_micro=0,
-            usdc_e_legacy_balance_micro=0,
-            ctf_token_balances={},
-            ctf_token_allowances={},
-            reserved_pusd_for_buys_micro=0,
-            reserved_tokens_for_sells={},
-            captured_at=datetime.now(timezone.utc) - timedelta(minutes=5),
-            authority_tier="DEGRADED",
-        )
-    )
-    configure_global_ledger(ledger)
+    result = main._run_venue_background_maintenance_once(object())
 
-    class Adapter(FakeHeartbeatAdapter):
-        def __init__(self):
-            super().__init__(
-                [
-                    HeartbeatAck(ok=True, raw={"heartbeat_id": "session-A"}),
-                    HeartbeatAck(ok=True, raw={"heartbeat_id": "session-B"}),
-                ]
-            )
-            self.collateral_refreshes = 0
-
-        def get_collateral_payload(self):
-            self.collateral_refreshes += 1
-            raise RuntimeError("simulated collateral refresh failure")
-
-    adapter = Adapter()
-
-    main._last_collateral_heartbeat_refresh_attempt_at = None
-
-    main._run_venue_background_maintenance_once(adapter)
-    first_snapshot = ledger.snapshot()
-    main._run_venue_background_maintenance_once(adapter)
-
-    assert adapter.collateral_refreshes == 1
-    assert first_snapshot.authority_tier == "DEGRADED"
-    assert ledger.snapshot().authority_tier == "DEGRADED"
+    assert result["status"] == "ok"
+    assert result["collateral_refreshed"] == "owned_by_post_trade_capital"
 
 
 def test_venue_background_m5_reconcile_cold_boot_failure_keeps_latch(monkeypatch):
@@ -2683,7 +2577,7 @@ def test_market_discovery_scheduler_refreshes_market_substrate_outside_cycle(mon
     monkeypatch.setattr(substrate_observer, "money_path_substrate_priority_active", lambda: False)
     monkeypatch.setattr(
         "src.data.job_lock.acquire_lock",
-        lambda _name: contextlib.nullcontext(True),
+        lambda _name, *, shared=False, _locks_dir_override=None: contextlib.nullcontext(True),
     )
 
     substrate_observer._market_discovery_cycle()
@@ -2745,7 +2639,7 @@ def test_market_discovery_scheduler_runs_while_cycle_lock_is_held(monkeypatch):
     monkeypatch.setattr(substrate_observer, "_market_discovery_last_completed_monotonic", None)
     monkeypatch.setattr(
         "src.data.job_lock.acquire_lock",
-        lambda _name: contextlib.nullcontext(True),
+        lambda _name, *, shared=False, _locks_dir_override=None: contextlib.nullcontext(True),
     )
 
     assert main._cycle_lock.acquire(blocking=False)

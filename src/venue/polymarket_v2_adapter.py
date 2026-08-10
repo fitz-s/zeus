@@ -76,6 +76,119 @@ _ABSOLUTE_LIVE_PRICE_MAX = Decimal("0.95")
 _ACCOUNT_TRUTH_MAX_PAGES = 100
 
 
+def install_dedicated_heartbeat_http_transport(*, timeout_seconds: float) -> bool:
+    """Install the heartbeat keeper's bounded, single-connection SDK transport.
+
+    Heartbeat supervision owns cadence and timeout policy; this adapter owns the
+    SDK's process-global HTTP helper, including request error cause preservation.
+    The operation is intentionally idempotent: every install replaces and closes
+    the previous dedicated client, while the request wrapper is marked once.
+    """
+
+    try:
+        import httpx
+        from py_clob_client_v2.http_helpers import helpers as heartbeat_http_helpers
+    except Exception as exc:  # pragma: no cover - dependency absence is runtime-specific
+        logger.warning("heartbeat HTTP transport install skipped: %s", exc)
+        return False
+
+    try:
+        timeout_value = float(timeout_seconds)
+    except (TypeError, ValueError):
+        logger.warning("heartbeat HTTP transport install skipped: invalid timeout=%r", timeout_seconds)
+        return False
+    if not timeout_value > 0:
+        logger.warning("heartbeat HTTP transport install skipped: invalid timeout=%r", timeout_seconds)
+        return False
+
+    old_client = getattr(heartbeat_http_helpers, "_http_client", None)
+    heartbeat_http_helpers._http_client = httpx.Client(
+        http2=False,
+        timeout=httpx.Timeout(timeout_value),
+        limits=httpx.Limits(
+            max_connections=1,
+            max_keepalive_connections=1,
+            keepalive_expiry=30.0,
+        ),
+    )
+    close = getattr(old_client, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            logger.debug("old heartbeat HTTP client close failed", exc_info=True)
+
+    if getattr(heartbeat_http_helpers, "_zeus_request_cause_preserved", False):
+        return True
+
+    def _request_with_cause(endpoint: str, method: str, headers=None, data=None, params=None):
+        overloaded_headers = heartbeat_http_helpers._overload_headers(method, headers)
+        try:
+            if isinstance(data, str):
+                resp = heartbeat_http_helpers._http_client.request(
+                    method=method,
+                    url=endpoint,
+                    headers=overloaded_headers,
+                    content=data.encode("utf-8"),
+                    params=params,
+                )
+            else:
+                resp = heartbeat_http_helpers._http_client.request(
+                    method=method,
+                    url=endpoint,
+                    headers=overloaded_headers,
+                    json=data,
+                    params=params,
+                )
+
+            if resp.status_code != 200:
+                heartbeat_http_helpers.logger.error(
+                    "[py_clob_client_v2] request error status=%s url=%s body=%s",
+                    resp.status_code,
+                    endpoint,
+                    resp.text,
+                )
+                raise PolyApiException(resp)
+
+            try:
+                return resp.json()
+            except ValueError:
+                return resp.text
+        except PolyApiException:
+            raise
+        except httpx.RequestError as exc:
+            heartbeat_http_helpers.logger.error("[py_clob_client_v2] request error: %s", exc)
+            raise PolyApiException(
+                error_msg=f"Request exception: {type(exc).__name__}"
+            ) from exc
+
+    heartbeat_http_helpers.request = _request_with_cause
+    heartbeat_http_helpers._zeus_request_cause_preserved = True
+    return True
+
+
+def is_heartbeat_transport_error(exc: BaseException) -> bool:
+    """Recognize an HTTP transport failure through its cause/context chain."""
+
+    try:
+        import httpx
+    except Exception:  # pragma: no cover - dependency absence is runtime-specific
+        return False
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, httpx.RequestError):
+            return True
+        cause = getattr(current, "__cause__", None)
+        context = getattr(current, "__context__", None)
+        current = cause if isinstance(cause, BaseException) else context
+        if not isinstance(current, BaseException):
+            current = None
+    return False
+
+
 def _assert_absolute_live_price_before_sdk(price: Decimal | str | float) -> Decimal:
     """Independent final SDK-boundary guard; no live order may bypass it."""
 
@@ -3394,16 +3507,18 @@ def _assert_final_executable_price_bound(
     _assert_absolute_live_price_before_sdk(envelope.price)
     order_type = str(envelope.order_type or "").strip().upper()
     maker = envelope.post_only and order_type in {"GTC", "GTD"}
-    marketable_sell = (
-        envelope.side == "SELL"
-        and not envelope.post_only
-        and order_type == "FAK"
+    marketable_taker = (
+        not envelope.post_only
+        and (
+            (envelope.side == "BUY" and order_type in {"FOK", "FAK"})
+            or (envelope.side == "SELL" and order_type == "FAK")
+        )
     )
-    if not (maker or marketable_sell):
+    if not (maker or marketable_taker):
         # INV-47 SCOPE: only this token/side submission (or its atomic batch)
         # is rejected. DRAIN: the next submit may carry a certified maker or
-        # marketable SELL envelope. RESET: no latch is stored; a direction-aware
-        # bounded-fill mode passes immediately.
+        # role-scoped marketable envelope. RESET: no latch is stored; a
+        # direction-aware bounded-fill mode passes immediately.
         raise ValueError(
             "LIVE_FILL_PRICE_UNBOUNDED:FINAL_SDK_BOUNDARY:"
             f"side={envelope.side}:order_type={order_type or 'ABSENT'}:"

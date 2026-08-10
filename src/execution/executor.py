@@ -46,6 +46,7 @@ from src.contracts.execution_intent import (
     POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD,
 )
 from src.contracts.venue_submission_envelope import assert_live_order_unit_price
+from src.contracts.global_auction_receipt import GlobalSellReceiptClosure
 from src.contracts.position_truth import (
     CURRENT_MONEY_RISK_CHAIN_STATES,
     NO_CURRENT_MONEY_RISK_CHAIN_STATES,
@@ -3234,7 +3235,11 @@ def _assert_collateral_allows_buy(
     from src.state.collateral_ledger import CollateralLedger, assert_buy_preflight
 
     if conn is not None:
-        CollateralLedger(conn).buy_preflight(intent, spend_micro=spend_micro)
+        CollateralLedger.buy_preflight_in_transaction(
+            conn,
+            intent,
+            spend_micro=spend_micro,
+        )
     else:
         assert_buy_preflight(intent, spend_micro=spend_micro)
     return _capability_component("collateral_ledger", collateral="pUSD", spend_micro=spend_micro or 0)
@@ -5063,9 +5068,11 @@ class ExitOrderIntent:
     executable_snapshot_min_order_size: Decimal | str | None = None
     executable_snapshot_neg_risk: bool | None = None
     marketable_sell_execution_authority: object | None = None
+    global_sell_execution_authority: object | None = None
     marketable_sell_certificate: Mapping[str, object] | None = None
     marketable_sell_certificate_identity: str = ""
     execution_authority_deadline_utc: str = ""
+    global_sell_receipt_closure: GlobalSellReceiptClosure | None = None
 
 
 def marketable_sell_certificate_identity(
@@ -5198,6 +5205,96 @@ def _marketable_sell_certificate_error(
         != Decimal(str(intent.best_bid))
     ):
         return "marketable_sell_certificate_snapshot_superseded"
+    return None
+
+
+def _global_sell_receipt_closure_error(
+    intent: ExitOrderIntent,
+    *,
+    order_type: str,
+) -> str | None:
+    """Require exact typed receipt closure for every marked global SELL.
+
+    The explicit ``global_sell_execution_authority`` marker is the canonical
+    maker/taker marker.  ``marketable_sell_execution_authority`` remains a
+    compatibility marker for existing FAK callers.  Once either marker is
+    present, this check is deliberately before envelope construction and
+    command/event persistence; a closure is not an optional audit projection.
+    """
+
+    explicit = intent.global_sell_execution_authority
+    compatible = intent.marketable_sell_execution_authority
+    authority = explicit if explicit is not None else compatible
+    closure = intent.global_sell_receipt_closure
+
+    if authority is None:
+        if closure is not None:
+            return "global_sell_execution_authority_required"
+        return None
+    if closure is None:
+        # INV-47 SCOPE: this marked token's SELL attempt only.
+        # DRAIN: global redecision emits a new authority + typed closure.
+        # RESET: no latch is persisted; an exact closure passes this gate.
+        return "global_sell_receipt_closure_required"
+
+    from src.execution.exit_lifecycle import (
+        _global_sell_execution_authority_shape_error,
+    )
+
+    authority_error = _global_sell_execution_authority_shape_error(authority)
+    if authority_error is not None:
+        return authority_error
+    if compatible is not None and explicit is not None:
+        compatible_error = _global_sell_execution_authority_shape_error(compatible)
+        if compatible_error is not None:
+            return compatible_error
+        if str(getattr(compatible, "authority_identity", "")) != str(
+            getattr(authority, "authority_identity", "")
+        ):
+            return "global_sell_execution_authority_binding_mismatch"
+    if type(closure) is not GlobalSellReceiptClosure:
+        return "global_sell_receipt_closure_invalid"
+    try:
+        closure.__post_init__()
+        authority.__post_init__()
+        actuation = authority.actuation
+        candidate = actuation.decision.candidate
+        closure.receipt_ref.assert_matches_actuation(
+            winner_event_id=actuation.winner_event_id,
+            winner_candidate_id=candidate.candidate_id,
+            winner_actuation_identity=actuation.actuation_identity,
+            selection_epoch_identity=actuation.selection_epoch_identity,
+        )
+    except (AttributeError, TypeError, ValueError):
+        return "global_sell_receipt_closure_invalid"
+
+    expected_order_type = {
+        "TAKER_LIMIT": "FAK",
+        "MAKER_REST": {"GTC", "GTD"},
+    }.get(str(getattr(candidate, "execution_mode", "") or ""))
+    if expected_order_type is None:
+        return "global_sell_receipt_closure_invalid"
+    valid_order_type = (
+        order_type == expected_order_type
+        if isinstance(expected_order_type, str)
+        else order_type in expected_order_type
+    )
+    if not valid_order_type:
+        return "global_sell_receipt_closure_execution_mode_mismatch"
+    if (
+        closure.position_id != str(intent.trade_id)
+        or closure.token_id != str(intent.token_id)
+        or closure.condition_id != str(getattr(candidate, "condition_id", "") or "")
+        or closure.action != "SELL"
+        or closure.execution_mode != str(getattr(candidate, "execution_mode", "") or "")
+        or closure.winner_event_id != str(getattr(actuation, "winner_event_id", "") or "")
+        or closure.winner_candidate_id != str(getattr(candidate, "candidate_id", "") or "")
+        or closure.winner_actuation_identity
+        != str(getattr(actuation, "actuation_identity", "") or "")
+        or closure.selection_epoch_identity
+        != str(getattr(actuation, "selection_epoch_identity", "") or "")
+    ):
+        return "global_sell_receipt_closure_identity_mismatch"
     return None
 
 
@@ -6153,7 +6250,9 @@ def create_exit_order_intent(
     marketable_sell_certificate: Mapping[str, object] | None = None,
     marketable_sell_certificate_identity: str = "",
     marketable_sell_execution_authority: object | None = None,
+    global_sell_execution_authority: object | None = None,
     execution_authority_deadline_utc: str = "",
+    global_sell_receipt_closure: GlobalSellReceiptClosure | None = None,
 ) -> ExitOrderIntent:
     """Build the explicit executor contract for a live sell/exit order."""
 
@@ -6179,7 +6278,9 @@ def create_exit_order_intent(
         ),
         marketable_sell_certificate_identity=marketable_sell_certificate_identity,
         marketable_sell_execution_authority=marketable_sell_execution_authority,
+        global_sell_execution_authority=global_sell_execution_authority,
         execution_authority_deadline_utc=execution_authority_deadline_utc,
+        global_sell_receipt_closure=global_sell_receipt_closure,
     )
 
 
@@ -6495,6 +6596,24 @@ def execute_exit_order(
                 idempotency_key=idem.value,
             )
         marketable_sell = order_type == "FAK"
+        global_receipt_closure_error = _global_sell_receipt_closure_error(
+            intent,
+            order_type=order_type,
+        )
+        if global_receipt_closure_error is not None:
+            # This is intentionally before any envelope, command, event, or
+            # SDK work.  The repository repeats the receipt/artifact check in
+            # its SAVEPOINT as the second, durable boundary.
+            return OrderResult(
+                trade_id=intent.trade_id,
+                status="rejected",
+                reason=global_receipt_closure_error,
+                submitted_price=limit_price,
+                shares=shares,
+                order_role="exit",
+                intent_id=intent.intent_id,
+                idempotency_key=idem.value,
+            )
         if (
             order_type in {"GTC", "GTD"}
             and best_bid is not None
@@ -6780,17 +6899,28 @@ def execute_exit_order(
                     order_type=order_type,
                     post_only=order_type in {"GTC", "GTD"},
                     captured_at=now_str,
+                    intent_kind=IntentKind.EXIT.value,
                 )
-                envelope_id = _persist_prebuilt_submit_envelope(
-                    conn,
-                    pre_submit_envelope,
-                    command_id=command_id,
-                )
+                if intent.global_sell_receipt_closure is not None:
+                    # The closure must be validated in insert_command's own
+                    # SAVEPOINT before either the envelope or command exists.
+                    # Keep the exact in-memory envelope and deterministic id
+                    # together so a failed receipt check leaves zero rows.
+                    envelope_id = f"pre-submit:{command_id}"
+                    submission_envelope = pre_submit_envelope
+                else:
+                    envelope_id = _persist_prebuilt_submit_envelope(
+                        conn,
+                        pre_submit_envelope,
+                        command_id=command_id,
+                    )
+                    submission_envelope = None
                 insert_command(
                     conn,
                     command_id=command_id,
                     snapshot_id=intent.executable_snapshot_id,
                     envelope_id=envelope_id,
+                    submission_envelope=submission_envelope,
                     position_id=intent.trade_id,
                     decision_id=effective_decision_id,
                     idempotency_key=idem.value,
@@ -6806,6 +6936,7 @@ def execute_exit_order(
                     expected_min_tick_size=intent.executable_snapshot_min_tick_size,
                     expected_min_order_size=intent.executable_snapshot_min_order_size,
                     expected_neg_risk=intent.executable_snapshot_neg_risk,
+                    global_sell_receipt_closure=intent.global_sell_receipt_closure,
                 )
                 if not ExitMutex(conn).acquire(intent.trade_id, intent.token_id, command_id):
                     append_event(
@@ -7910,24 +8041,6 @@ def _live_order(
                 shares=shares,
                 order_role="entry",
                 idempotency_key=idem.value,
-            )
-        if not submit_post_only:
-            # INV-47 SCOPE: only this token's taker-capable BUY is rejected.
-            # DRAIN: the next redecision may emit a maker-only GTC/GTD entry.
-            # RESET: no latch is stored; a post-only entry passes this gate.
-            return OrderResult(
-                trade_id=trade_id,
-                status="rejected",
-                reason=(
-                    "live_fill_price_unbounded_taker_order:"
-                    f"order_type={effective_order_type}:post_only=False"
-                ),
-                submitted_price=intent.limit_price,
-                shares=shares,
-                order_role="entry",
-                idempotency_key=idem.value,
-                command_id=command_id,
-                command_state="REJECTED",
             )
         taker_quality_component = _entry_taker_quality_component(
             effective_order_type=effective_order_type,
