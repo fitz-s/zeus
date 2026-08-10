@@ -12947,6 +12947,7 @@ class TestRecoveryResolutionTable:
             position_id="pos-exit",
             command_id="cmd-entry",
             order_id="ord-entry",
+            token_id="tok-exit",
         )
         seed.execute(
             """
@@ -13021,6 +13022,10 @@ class TestRecoveryResolutionTable:
         )
         client.get_open_orders.return_value = []
         client.get_trades.return_value = []
+        if scope == "live_tick":
+            # This behavior test must reach the exit-projection pass; dedicated
+            # budget tests cover bounded deferral under a zero/tiny budget.
+            monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "5")
 
         summary = command_recovery.reconcile_unresolved_commands(
             client=client,
