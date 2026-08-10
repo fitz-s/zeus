@@ -1654,6 +1654,7 @@ def test_madrid_partial_exit_realized_pnl_is_canonical_and_settlement_adds_resid
 def test_settlement_accepts_chain_confirmed_partial_residual_over_stale_runtime(conn):
     """Chain may refine residual precision, not invent missing exit economics."""
     from src.engine.lifecycle_events import (
+        build_chain_economics_observed_canonical_write,
         build_chain_size_corrected_canonical_write,
         build_position_current_projection,
     )
@@ -1732,6 +1733,25 @@ def test_settlement_accepts_chain_confirmed_partial_residual_over_stale_runtime(
         local_shares_before=10.0,
         sequence_no=2,
         phase_after="pending_exit",
+        source_module="src.state.chain_reconciliation",
+    )
+    append_many_and_project(conn, events, projection)
+
+    rounded_projection = replace(
+        canonical,
+        shares=0.0045,
+        chain_shares=0.0045,
+        size_usd=0.00225,
+        cost_basis_usd=0.00225,
+        chain_cost_basis_usd=0.00225,
+        chain_verified_at=(_NOW + timedelta(seconds=2)).isoformat(),
+    )
+    events, projection = build_chain_economics_observed_canonical_write(
+        rounded_projection,
+        chain_observed_at=rounded_projection.chain_verified_at,
+        sequence_no=3,
+        phase_after="pending_exit",
+        chain_shares_before=0.004544,
         source_module="src.state.chain_reconciliation",
     )
     append_many_and_project(conn, events, projection)

@@ -505,7 +505,23 @@ def _canonical_partial_exit_residual_basis(
         current_cost = Decimal(str(current_row["cost_basis_usd"]))
     except (TypeError, ValueError, ArithmeticError):
         return shares, cost, False
-    if current_shares != corrected_shares or current_cost != corrected_cost:
+    if corrected_shares == 0:
+        current_matches = current_shares == 0 and current_cost == 0
+    else:
+        current_quantum = Decimal(1).scaleb(current_shares.as_tuple().exponent)
+        current_share_tolerance = min(Decimal("0.0001"), current_quantum / 2)
+        expected_current_cost = current_shares * (
+            corrected_cost / corrected_shares
+        )
+        current_cost_tolerance = max(
+            Decimal("0.00000001"),
+            abs(expected_current_cost) * Decimal("0.000001"),
+        )
+        current_matches = (
+            abs(current_shares - corrected_shares) <= current_share_tolerance
+            and abs(current_cost - expected_current_cost) <= current_cost_tolerance
+        )
+    if not current_matches:
         raise PartialExitEconomicDebtError(
             "partial EXIT chain correction conflicts with canonical projection: "
             f"position_id={position_id} chain_shares={corrected_shares} "
