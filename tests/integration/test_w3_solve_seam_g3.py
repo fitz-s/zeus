@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-09
+# Last reused/audited: 2026-08-10
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -9829,6 +9829,7 @@ def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
             "hash-yes-b",
             "event-b",
             "market-b",
+            "False",
         ),
         (
             "family",
@@ -9840,6 +9841,7 @@ def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
             "hash-no-b",
             "event-b",
             "market-b",
+            "False",
         ),
     )
     at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
@@ -9920,6 +9922,104 @@ def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
         ),
     )
     trade.close()
+
+
+def test_book_receipt_token_hint_enforces_versioned_state_shape():
+    current_fields = list(global_batch_runtime._BOOK_NATIVE_SIDE_STATE_FIELDS)
+    current_rows = [
+        [
+            "family",
+            "bin",
+            "condition",
+            "YES",
+            "yes-token",
+            "EXECUTABLE",
+            "yes-book",
+            "event",
+            "gamma",
+            "False",
+        ],
+        [
+            "family",
+            "bin",
+            "condition",
+            "NO",
+            "no-token",
+            "NO_ASK",
+            "no-book",
+            "event",
+            "gamma",
+            "False",
+        ],
+    ]
+
+    def read_pairs(*, schema_version, fields, rows):
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            """
+            CREATE TABLE decision_log (
+                id INTEGER PRIMARY KEY,
+                mode TEXT NOT NULL,
+                artifact_json TEXT NOT NULL
+            )
+            """
+        )
+        encoded = json.dumps(
+            {"fields": fields, "rows": rows},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        summary = {
+            "schema_version": schema_version,
+            "book_native_side_candidate_coverage_status": "COMPLETE",
+            "book_native_side_candidate_coverage_complete": True,
+            "book_native_side_encoding": "zlib+base64+canonical-json-v1",
+            "book_native_side_state_count": len(rows),
+            "book_native_side_states_sha256": hashlib.sha256(encoded).hexdigest(),
+            "book_native_side_states_zlib_b64": base64.b64encode(
+                zlib.compress(encoded)
+            ).decode(),
+        }
+        conn.execute(
+            "INSERT INTO decision_log VALUES (1, ?, ?)",
+            (
+                "global_single_order_auction",
+                json.dumps({"summary": summary}),
+            ),
+        )
+        pairs = era._global_book_receipt_token_pairs(
+            conn,
+            condition_ids=("condition",),
+        )
+        conn.close()
+        return pairs
+
+    expected = {"condition": ("yes-token", "no-token")}
+    assert read_pairs(
+        schema_version=21,
+        fields=current_fields,
+        rows=current_rows,
+    ) == expected
+    assert read_pairs(
+        schema_version=21,
+        fields=current_fields[:-1],
+        rows=[row[:-1] for row in current_rows],
+    ) == {}
+    assert read_pairs(
+        schema_version=21,
+        fields=current_fields,
+        rows=[[*row[:-1], True] for row in current_rows],
+    ) == {}
+    assert read_pairs(
+        schema_version=21,
+        fields=current_fields,
+        rows=[[*row[:-1], "0"] for row in current_rows],
+    ) == {}
+    assert read_pairs(
+        schema_version=20,
+        fields=current_fields[:-1],
+        rows=[row[:-1] for row in current_rows],
+    ) == expected
 
 
 def test_speculative_topology_ignores_corrupt_receipt():
@@ -11608,6 +11708,7 @@ def test_exact_token_refresh_keeps_returned_and_cached_book_scope_aligned(
             f"hash-{token_id}",
             f"event-{family_key}",
             f"market-{family_key}",
+            "False",
         )
         for family_key, probability in probabilities.items()
         for binding in probability.bindings
@@ -11802,6 +11903,7 @@ def test_family_delta_cache_keeps_full_current_q_and_expires_oldest_book(
                 f"book-{marker}-{token_id}",
                 f"event-{family_key}",
                 f"market-{family_key}",
+                "False",
             )
             for family_key, witness in probabilities.items()
             for binding in witness.bindings
@@ -15174,6 +15276,21 @@ def test_current_global_book_epoch_reads_yes_and_no_symmetrically():
     assert all(
         asset.curve.token_id == asset.token_id for asset in epoch.sell_assets
     )
+    book_receipt = global_batch_runtime._book_native_side_receipt(
+        asset_states=epoch.asset_states,
+        probability_keys=(probability.family_key,),
+        buy_candidate_index=tuple(
+            ("BUY",) + state[:5] for state in epoch.asset_states
+        ),
+        excluded_by_family={},
+    )
+    encoded_states = json.loads(
+        zlib.decompress(
+            base64.b64decode(book_receipt["book_native_side_states_zlib_b64"])
+        )
+    )
+    assert encoded_states["fields"][-1] == "neg_risk"
+    assert {row[-1] for row in encoded_states["rows"]} == {"False"}
 
     required_conn = _global_book_metadata_conn(probability)
     denied_columns.clear()
@@ -18502,6 +18619,7 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
             asset.curve.book_hash,
             asset.market_event_id,
             asset.gamma_market_id,
+            str(asset.neg_risk),
         )
         for asset in assets
     )

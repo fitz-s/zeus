@@ -1806,7 +1806,7 @@ def _global_book_receipt_token_pairs(
     except sqlite3.Error:
         return {}
 
-    fields = (
+    legacy_fields = (
         "family_key",
         "bin_id",
         "condition_id",
@@ -1817,6 +1817,7 @@ def _global_book_receipt_token_pairs(
         "market_event_id",
         "gamma_market_id",
     )
+    current_fields = (*legacy_fields, "neg_risk")
     for receipt_row in receipt_rows:
         (
             schema_version,
@@ -1853,6 +1854,7 @@ def _global_book_receipt_token_pairs(
             continue
         if hashlib.sha256(encoded).hexdigest() != expected_hash:
             continue
+        fields = current_fields if schema_version == 21 else legacy_fields
         if (
             not isinstance(payload, dict)
             or tuple(payload.get("fields") or ()) != fields
@@ -1866,6 +1868,12 @@ def _global_book_receipt_token_pairs(
         valid = True
         for raw_row in payload["rows"]:
             if not isinstance(raw_row, (list, tuple)) or len(raw_row) != len(fields):
+                valid = False
+                break
+            if schema_version == 21 and (
+                type(raw_row[-1]) is not str
+                or raw_row[-1] not in {"False", "True"}
+            ):
                 valid = False
                 break
             row = tuple(str(value or "").strip() for value in raw_row)
