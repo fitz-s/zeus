@@ -2221,7 +2221,7 @@ test_metadata:
       active; no skip when operator freeze absent; log warning emitted on skip;
       in-memory state restored to operator values after skip (not auto_exception).
     created: 2026-05-18
-    last_reused_or_audited: 2026-05-18
+    last_reused_or_audited: 2026-08-10
 
   tests/test_day0_bound_classification.py:
     modules: [contracts, signal]

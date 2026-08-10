@@ -538,12 +538,14 @@ def _restart_guard_queue_evidence(conn, *, issued_at: str, now: datetime) -> dic
         ("edli_reactor_v1", (now - timedelta(seconds=300.0)).isoformat()),
     ).fetchone() is not None
 
-    # SCOPE: only event rows the reactor can currently claim.  DRAIN: the
-    # reactor consumes or terminalizes them.  RESET: fetch_pending returns no
-    # current candidate (or post-issued progress proves the drain advanced).
+    # SCOPE: report only event rows the reactor could claim after the deploy
+    # guard resets. DRAIN: the guard itself pauses those entry claims, so
+    # claimable unowned work is telemetry, not reset debt; only stale in-flight
+    # ownership must drain. RESET: the post-reactor proof combines this bounded
+    # stale check with loaded-SHA and complete fresh-monitor evidence, then the
+    # existing witness-bound CAS expires exactly this invocation's guard.
     # Reuse the reactor's read-floor so historical rows outside its expiry,
-    # selection-window, and per-city timeliness predicates cannot ratchet this
-    # global restart guard into a permanent pause.
+    # selection-window, and per-city timeliness predicates remain invisible.
     claimable_pending = bool(
         EventStore(conn, consumer_name="edli_reactor_v1").fetch_pending(
             decision_time=now.isoformat(),
@@ -588,7 +590,7 @@ def _restart_guard_queue_evidence(conn, *, issued_at: str, now: datetime) -> dic
         "stale_processing": stale,
         "claimable_pending": claimable_pending,
         "post_issued_progress": progress,
-        "green": not stale and (progress or not claimable_pending),
+        "green": not stale,
     }
 
 

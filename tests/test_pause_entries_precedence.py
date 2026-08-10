@@ -1,6 +1,6 @@
 # Created: 2026-05-18
-# Last reused/audited: 2026-08-08
-# Authority basis: RESTART_READINESS_PLAN.md §3 PRECEDENCE-1; JOB fda4e853 audit_2026_05_17
+# Last reused/audited: 2026-08-10
+# Authority basis: active finite-evidence plan restart-guard SCOPE/DRAIN/RESET; PRECEDENCE-1
 """Antibody tests for PRECEDENCE-1: pause_entries operator precedence guard.
 
 Tests verify that system_auto_pause cannot overwrite an operator indefinite
@@ -504,14 +504,15 @@ def test_restart_guard_allows_healthy_open_exposure_and_resets_once(monkeypatch)
         lambda *_args, **_kwargs: {
             "stale_processing": False,
             "claimable_pending": True,
-            "post_issued_progress": True,
+            "post_issued_progress": False,
             "green": True,
         },
     )
     proof = cp.prove_deploy_live_restart_guard(witness)
     assert proof["green"] is True
     assert proof["monitor"]["open_position_count"] == 1
-    assert proof["queue"]["post_issued_progress"] is True
+    assert proof["queue"]["claimable_pending"] is True
+    assert proof["queue"]["post_issued_progress"] is False
     result = cp.reset_deploy_live_restart_guard(witness, proof=proof)
     assert result["status"] == "reset"
     assert cp.reset_deploy_live_restart_guard(witness, proof=proof)["status"] == "noop"
@@ -709,8 +710,8 @@ def test_restart_guard_queue_probe_accepts_a_truly_idle_queue():
     conn.close()
 
 
-def test_restart_guard_queue_evidence_ignores_historical_pending_and_blocks_current_claim():
-    """The guard must follow the reactor's current claim floor, not raw pending debt."""
+def test_restart_guard_queue_evidence_reports_current_claim_without_reset_ratchet():
+    """Paused claimable entries are telemetry; stale ownership alone blocks reset."""
     now = datetime.fromisoformat("2026-08-08T00:01:00+00:00")
     conn = get_world_connection()
     init_schema(conn)
@@ -774,6 +775,6 @@ def test_restart_guard_queue_evidence_ignores_historical_pending_and_blocks_curr
         "stale_processing": False,
         "claimable_pending": True,
         "post_issued_progress": False,
-        "green": False,
+        "green": True,
     }
     conn.close()

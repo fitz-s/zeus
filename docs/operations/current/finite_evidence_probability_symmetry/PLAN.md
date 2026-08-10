@@ -4,6 +4,25 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-10 Deploy restart guard reset without entry-queue circularity
+
+The invocation-scoped deploy guard pauses new entries while the replacement
+runtime proves its loaded SHA and refreshes every canonical open position.  A
+claimable entry queue is therefore expected during the guard: requiring one of
+those rows to make post-issue processing progress before reset makes DRAIN
+depend on the action the guard itself forbids.  Production reproduced that
+ratchet with loaded-SHA and 7/7 monitor evidence green, no stale processing,
+and 196 claimable entry rows, while the reactor correctly parked the paused
+entry wake.
+
+SCOPE remains this deploy invocation's global entry pause. DRAIN is loaded-SHA
+identity, complete fresh monitor evidence, and absence of stale in-flight
+reactor ownership; claimable unowned entry work is telemetry, not debt that may
+hold the guard. RESET is the existing witness-bound CAS expiry. Operator and
+newer pause overrides retain precedence.  No command vocabulary, durable
+storage shape, risk semantics, monitor/exit behavior, or manual resume path is
+changed.
+
 ## 2026-08-10 Held-monitor deadline begins at ownership claim
 
 Post-deploy verification reopened this slice: the first deadline propagation
