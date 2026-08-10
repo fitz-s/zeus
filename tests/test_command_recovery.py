@@ -3740,16 +3740,24 @@ def _advance_to_cancel_unknown_review_required(conn, command_id="cmd-001", venue
     )
 
 
-def _advance_to_acked(conn, command_id="cmd-001", venue_order_id="ord-001"):
+def _advance_to_acked(
+    conn,
+    command_id="cmd-001",
+    venue_order_id="ord-001",
+    order_type=None,
+):
     from src.state.venue_command_repo import append_event
 
     _advance_to_submitting(conn, command_id=command_id)
+    payload = {"venue_order_id": venue_order_id, "venue_status": "accepted"}
+    if order_type is not None:
+        payload["order_type"] = order_type
     append_event(
         conn,
         command_id=command_id,
         event_type="SUBMIT_ACKED",
         occurred_at="2026-04-26T00:02:00Z",
-        payload={"venue_order_id": venue_order_id, "venue_status": "accepted"},
+        payload=payload,
     )
 
 
@@ -15839,11 +15847,13 @@ class TestRecoveryResolutionTable:
 
     @pytest.mark.parametrize("terminal_phase", ("settled", "economically_closed"))
     @pytest.mark.parametrize("point_remaining", ("0", None))
+    @pytest.mark.parametrize("review_shape", ("point_order", "cancel_failed"))
     def test_terminal_fak_partial_exit_terminal_phase_drains_ctf_reservation(
         self,
         conn,
         terminal_phase,
         point_remaining,
+        review_shape,
     ):
         """Terminal position proof drains only the matched CTF collateral."""
         _insert(
@@ -15902,6 +15912,7 @@ class TestRecoveryResolutionTable:
             conn,
             command_id="cmd-terminal-exit",
             venue_order_id="ord-terminal-exit",
+            order_type="FAK",
         )
         from src.state.venue_command_repo import append_event
 
@@ -15933,9 +15944,9 @@ class TestRecoveryResolutionTable:
             conn,
             command_id="cmd-terminal-exit",
             order_id="ord-terminal-exit",
-            state="MATCHED",
+            state="MATCHED" if review_shape == "point_order" else "PARTIALLY_MATCHED",
             matched_size="2",
-            remaining_size="0",
+            remaining_size="0" if review_shape == "point_order" else "4",
         )
         _append_trade_fact(
             conn,
@@ -15955,18 +15966,42 @@ class TestRecoveryResolutionTable:
             """,
             (datetime.now(timezone.utc).isoformat(),),
         )
-        append_event(
-            conn,
-            command_id="cmd-terminal-exit",
-            event_type="REVIEW_REQUIRED",
-            occurred_at="2026-04-26T00:08:00Z",
-            payload={
-                "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
-                "venue_order_id": "ord-terminal-exit",
-                "point_order_status": "MATCHED",
-                "point_order": point_order,
-            },
-        )
+        if review_shape == "point_order":
+            append_event(
+                conn,
+                command_id="cmd-terminal-exit",
+                event_type="REVIEW_REQUIRED",
+                occurred_at="2026-04-26T00:08:00Z",
+                payload={
+                    "reason": "partial_remainder_point_order_filled_without_full_trade_fact",
+                    "venue_order_id": "ord-terminal-exit",
+                    "point_order_status": "MATCHED",
+                    "point_order": point_order,
+                },
+            )
+        else:
+            append_event(
+                conn,
+                command_id="cmd-terminal-exit",
+                event_type="CANCEL_REQUESTED",
+                occurred_at="2026-04-26T00:07:00Z",
+                payload={"venue_order_id": "ord-terminal-exit"},
+            )
+            append_event(
+                conn,
+                command_id="cmd-terminal-exit",
+                event_type="CANCEL_FAILED",
+                occurred_at="2026-04-26T00:08:00Z",
+                payload={
+                    "venue_order_id": "ord-terminal-exit",
+                    "reason": "order can't be found - already canceled or matched",
+                    "cancel_outcome": {
+                        "orderID": "ord-terminal-exit",
+                        "status": "NOT_CANCELED",
+                        "errorMessage": "order can't be found - already canceled or matched",
+                    },
+                },
+            )
         from src.execution.command_recovery import (
             reconcile_matched_cancel_review_required_entries,
         )
@@ -15984,6 +16019,20 @@ class TestRecoveryResolutionTable:
         assert terminal_payload["required_predicates"][
             "active_ctf_reservation_matches_requested_size"
         ] is True
+        if review_shape == "cancel_failed":
+            order_proof_row = conn.execute(
+                """
+                SELECT raw_payload_json
+                  FROM venue_order_facts
+                 WHERE command_id = 'cmd-terminal-exit'
+                 ORDER BY local_sequence DESC
+                 LIMIT 1
+                """
+            ).fetchone()
+            order_proof = json.loads(order_proof_row["raw_payload_json"])
+            assert order_proof["terminal_fak_cancel_proof"]["proof_class"] == (
+                "fak_submit_ack_cancel_failed_terminal_remainder"
+            )
         assert conn.execute(
             "SELECT phase FROM position_current WHERE position_id = ?",
             ("pos-terminal-partial",),

@@ -12443,11 +12443,12 @@ def _clear_review_required_terminal_fak_partial_exit(
 ) -> bool:
     """Convert an exact terminal FAK partial review into non-live fill truth.
 
-    SCOPE: one EXIT/SELL command whose latest review was raised only because a
-    MATCHED point order arrived before its complete trade fact.
-    DRAIN: canonical confirmed trade facts and the persisted FAK point payload
-    must agree on the exact partial fill; terminal positions additionally need
-    an active, identity-matched CTF reservation as the drain target.
+    SCOPE: one EXIT/SELL command whose review boundary is backed by either a
+    MATCHED point order or the exact FAK submit/cancel race that cannot leave a
+    resting remainder.
+    DRAIN: canonical confirmed trade facts and exact FAK order facts must agree
+    on the partial fill; terminal positions additionally need an active,
+    identity-matched CTF reservation as the drain target.
     RESET: one transaction records the terminal partial and advances
     REVIEW_REQUIRED -> PARTIAL -> EXPIRED so only the positive residual remains.
     """
@@ -12473,12 +12474,81 @@ def _clear_review_required_terminal_fak_partial_exit(
     ).fetchone()
     review_row_dict = _dict_row(review_row)
     review = _json_dict(review_row_dict.get("payload_json"))
-    if review.get("reason") != "partial_remainder_point_order_filled_without_full_trade_fact":
-        return False
     point_order = review.get("point_order")
-    if not isinstance(point_order, Mapping):
-        return False
-    point = dict(point_order)
+    point_order_review = bool(
+        review.get("reason")
+        == "partial_remainder_point_order_filled_without_full_trade_fact"
+        and isinstance(point_order, Mapping)
+    )
+    cancel_failed_fak_proof: dict[str, object] | None = None
+    if point_order_review:
+        point = dict(point_order)
+    else:
+        latest_event_row = conn.execute(
+            """
+            SELECT event_type, payload_json
+              FROM venue_command_events
+             WHERE command_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        latest_event = _dict_row(latest_event_row)
+        latest_payload = _json_dict(latest_event.get("payload_json"))
+        order_fact = _latest_order_fact_for_command_order(
+            conn,
+            command_id=command_id,
+            venue_order_id=venue_order_id,
+        )
+        ack_row = conn.execute(
+            """
+            SELECT payload_json
+              FROM venue_command_events
+             WHERE command_id = ?
+               AND event_type = 'SUBMIT_ACKED'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        ack = _json_dict(_dict_row(ack_row).get("payload_json"))
+        requested = _positive_decimal_or_none(command.get("size"))
+        fact_matched = _positive_decimal_or_none(order_fact.get("matched_size"))
+        fact_remaining = _decimal_or_none(order_fact.get("remaining_size"))
+        events = _command_events(conn, command_id)
+        if not (
+            str(latest_event.get("event_type") or "").upper() == "CANCEL_FAILED"
+            and _cancel_failed_already_canceled_payload(events) is not None
+            and str(ack.get("order_type") or "").upper() == "FAK"
+            and str(ack.get("venue_order_id") or "") == venue_order_id
+            and str(order_fact.get("state") or "").upper() == "PARTIALLY_MATCHED"
+            and str(order_fact.get("source") or "").upper() in {"REST", "WS_USER"}
+            and requested is not None
+            and fact_matched is not None
+            and fact_remaining is not None
+            and fact_remaining > 0
+            and abs(fact_matched + fact_remaining - requested) <= Decimal("0.011")
+        ):
+            return False
+        cancel_failed_fak_proof = {
+            "proof_class": "fak_submit_ack_cancel_failed_terminal_remainder",
+            "submit_acked_order_type": "FAK",
+            "cancel_failed_reason": latest_payload.get("reason"),
+            "canonical_order_fact_id": order_fact.get("fact_id"),
+            "canonical_order_fact_state": order_fact.get("state"),
+            "canonical_order_fact_matched_size": _decimal_text(fact_matched),
+            "canonical_order_fact_remaining_size": _decimal_text(fact_remaining),
+        }
+        point = {
+            "orderID": venue_order_id,
+            "status": "MATCHED",
+            "order_type": "FAK",
+            "side": "SELL",
+            "asset_id": str(command.get("token_id") or ""),
+            "original_size": _decimal_text(requested),
+            "size_matched": _decimal_text(fact_matched),
+        }
     point_remaining_raw = _first_present(
         point,
         "remaining_size",
@@ -12569,7 +12639,8 @@ def _clear_review_required_terminal_fak_partial_exit(
         "remaining_size": "0",
         "requested_size": _decimal_text(requested),
         "point_order_status": _order_status(point),
-        "point_order": point,
+        "point_order": point if point_order_review else None,
+        "terminal_fak_cancel_proof": cancel_failed_fak_proof,
         "required_predicates": {
             "terminal_order_remainder_zero": True,
             "canonical_trade_facts_match_terminal_order_fact": True,
