@@ -1,6 +1,6 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-07-15
-# Lifecycle: created=2026-03-30; last_reviewed=2026-07-15; last_reused=2026-07-15
+# Last reused/audited: 2026-08-10
+# Lifecycle: created=2026-03-30; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: Protect DB schema bootstrap contracts, daily revision-history DDL, and fact-smoke authority labels.
 # Reuse: Audit touched schema assertions and high-sensitivity skip metadata before closeout.
 # Authority basis: P2 4.4.A2 daily observation revision-history schema packet; Wave16 object-meaning fact-smoke authority repair; PR90 latest-event env authority review fix; 2026-05-16 live-continuous Phase B event-status boundary; 2026-07-09 portfolio-loader event-spine read indexes.
@@ -1978,6 +1978,63 @@ def test_portfolio_loader_open_only_retains_transition_hints(tmp_path):
     assert view["open_positions_only"] is True
     assert [row["position_id"] for row in view["positions"]] == ["pending-exit-position"]
     assert view["positions"][0]["exit_state"] == "retry_pending"
+
+
+def test_transitional_hints_ignore_dense_monitor_history_with_bounded_work(tmp_path):
+    from src.state.db import _query_transitional_position_hints, init_schema_trade_only
+
+    conn = get_connection(tmp_path / "bounded-transition-hints.db")
+    init_schema_trade_only(conn)
+    position_id = "dense-monitor-history"
+    _insert_current_position_for_fill_authority_view_test(
+        conn,
+        position_id=position_id,
+        phase="pending_exit",
+    )
+    _insert_status_position_event_for_view_test(
+        conn,
+        position_id=position_id,
+        event_type="EXIT_ORDER_REJECTED",
+        status="retry_pending",
+        occurred_at="2026-04-01T00:05:00+00:00",
+    )
+    conn.executemany(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type, occurred_at,
+            phase_before, phase_after, strategy_key, decision_id, snapshot_id, order_id,
+            command_id, caused_by, idempotency_key, venue_status, source_module, env, payload_json
+        ) VALUES (?, ?, 1, ?, 'MONITOR_REFRESHED', ?, 'pending_exit', 'pending_exit',
+                  'center_buy', NULL, 'snap-fill', NULL, NULL, 'test', ?, NULL,
+                  'tests', 'test', '{}')
+        """,
+        (
+            (
+                f"{position_id}:monitor:{sequence_no}",
+                position_id,
+                sequence_no,
+                f"2026-04-01T00:{sequence_no // 60:02d}:{sequence_no % 60:02d}+00:00",
+                f"{position_id}:monitor:{sequence_no}",
+            )
+            for sequence_no in range(2, 3002)
+        ),
+    )
+    conn.commit()
+
+    progress_calls = 0
+
+    def interrupt_unbounded_scan() -> int:
+        nonlocal progress_calls
+        progress_calls += 1
+        return int(progress_calls > 500)
+
+    conn.set_progress_handler(interrupt_unbounded_scan, 100)
+    hints = _query_transitional_position_hints(conn, [position_id])
+    conn.set_progress_handler(None, 0)
+    conn.close()
+
+    assert hints[position_id]["exit_state"] == "retry_pending"
+    assert progress_calls <= 500
 
 
 def test_portfolio_loader_open_only_filters_target_families_in_sql(tmp_path):

@@ -13540,6 +13540,15 @@ def _query_transitional_position_hints(
         return {}
     columns = _table_columns(conn, "position_events")
     if {"position_id", "payload_json", "occurred_at"}.issubset(columns):
+        transition_index = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+            ("idx_position_events_position_type_sequence",),
+        ).fetchone()
+        index_clause = (
+            " INDEXED BY idx_position_events_position_type_sequence"
+            if transition_index is not None
+            else ""
+        )
         event_placeholders = ", ".join("?" for _ in _TRANSITIONAL_HINT_EVENT_TYPES)
         shared_params = (
             *_TRANSITIONAL_HINT_EVENT_TYPES,
@@ -13556,7 +13565,7 @@ def _query_transitional_position_hints(
                            event_type,
                            payload_json AS payload,
                            occurred_at
-                      FROM position_events
+                      FROM position_events{index_clause}
                      WHERE position_id = ?
                        AND event_type IN ({event_placeholders})
                      ORDER BY sequence_no DESC
