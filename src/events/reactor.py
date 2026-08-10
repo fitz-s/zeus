@@ -6515,12 +6515,41 @@ def _process_pending_cancelled(
     producer_fast_path: bool,
     urgent_wake_pending: Callable[[], bool],
     urgent_day0_pending: Callable[[], bool] | None,
+    held_position_monitor_debt_pending: Callable[[], bool] | None = None,
+    exact_held_completion: bool = False,
 ) -> Callable[[], bool] | None:
     if committed_day0_wake:
         return None
-    if producer_fast_path:
-        return urgent_day0_pending
-    return urgent_wake_pending
+    base_cancelled = urgent_day0_pending if producer_fast_path else urgent_wake_pending
+    if exact_held_completion or held_position_monitor_debt_pending is None:
+        return base_cancelled
+
+    def cancelled() -> bool:
+        if base_cancelled is not None and base_cancelled():
+            return True
+        return _held_position_monitor_preemption_pending(
+            None,
+            held_position_monitor_debt_pending,
+        )
+
+    return cancelled
+
+
+def _held_position_monitor_preemption_pending(
+    monitor_pending: Callable[[], bool] | None,
+    monitor_debt_pending: Callable[[], bool] | None,
+) -> bool:
+    """Read scheduler monitor pressure without letting a failed hint veto work."""
+
+    for probe in (monitor_debt_pending, monitor_pending):
+        if probe is None:
+            continue
+        try:
+            if probe():
+                return True
+        except Exception:  # noqa: BLE001 - scheduler hint failure cannot veto trading.
+            continue
+    return False
 
 
 def _reactor_wake_cancellation_probe(
@@ -7179,6 +7208,7 @@ def _global_auction_monitor_cancellation_probe(
     *,
     monitor_debt_pending: Callable[[], bool] | None = None,
     completion_due: bool = False,
+    exact_held_completion: bool = False,
 ) -> tuple[bool, Callable[[], bool]]:
     """Allow one periodic-monitor preemption, then reserve auction completion."""
 
@@ -7205,7 +7235,7 @@ def _global_auction_monitor_cancellation_probe(
             except Exception:  # noqa: BLE001 - scheduler hint failure cannot veto trading.
                 debt_pending = False
         if completion_due_at_start:
-            if debt_pending:
+            if debt_pending and not exact_held_completion:
                 # SCOPE: only this in-flight selection. DRAIN: the already-set
                 # completion debt keeps one economic cut queued after monitor
                 # handoff. RESET: successful full-book handoff clears monitor
@@ -7571,6 +7601,35 @@ def run_edli_event_reactor_cycle(
         (completion_wake and producer_held_sell_reauction_requests)
         or durable_exact_held_completion_pending
     )
+
+    def _yield_for_held_position_monitor(stage: str) -> bool:
+        if held_sell_completion_cycle or committed_day0_wake:
+            return False
+        if not _held_position_monitor_preemption_pending(
+            held_position_monitor_pending,
+            held_position_monitor_debt_pending,
+        ):
+            return False
+        _log.info(
+            "EDLI reactor yielded before %s for held-position monitor pressure",
+            stage,
+        )
+        return True
+
+    def _ordinary_stage_cancelled() -> bool:
+        return _urgent_wake_pending() or _held_position_monitor_preemption_pending(
+            (
+                None
+                if held_sell_completion_cycle or committed_day0_wake
+                else held_position_monitor_pending
+            ),
+            (
+                None
+                if held_sell_completion_cycle or committed_day0_wake
+                else held_position_monitor_debt_pending
+            ),
+        )
+
     completion_recovery_cycle = bool(
         held_sell_completion_cycle
         or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
@@ -7578,6 +7637,8 @@ def run_edli_event_reactor_cycle(
     paused_forecast_carrier = (
         allow_paused_forecast_snapshot_completion and forecast_posterior_wake
     )
+    if _yield_for_held_position_monitor("paused-entry/runtime setup"):
+        return False
     if (
         get_current_level() != RiskLevel.GREEN
         and not completion_recovery_cycle
@@ -7634,6 +7695,9 @@ def run_edli_event_reactor_cycle(
             active_lock.release()
             return False
         if _defer_for_held_position_monitor("edli_event_reactor"):
+            active_lock.release()
+            return False
+        if _yield_for_held_position_monitor("runtime_db_setup"):
             active_lock.release()
             return False
     except BaseException:
@@ -7715,6 +7779,8 @@ def run_edli_event_reactor_cycle(
         store = EventStore(conn)
         targeted_event_ids = set(producer_wake_event_ids)
         catchup_day0_event_ids: tuple[str, ...] = ()
+        if _yield_for_held_position_monitor("day0_ledger_sync"):
+            return False
         if not producer_fast_path:
             try:
                 from src.config import runtime_cities as _runtime_cities
@@ -7736,6 +7802,8 @@ def run_edli_event_reactor_cycle(
                     _day0_sync_exc,
                 )
         _log_stage("day0_ledger_sync")
+        if _yield_for_held_position_monitor("day0_admission_and_prune"):
+            return False
         _day0_family_admission: _Day0LiveFamilyAdmission | None = None
         if not producer_fast_path:
             try:
@@ -7787,7 +7855,7 @@ def run_edli_event_reactor_cycle(
                     store,
                     decision_time=now,
                     day0_family_admission=_day0_family_admission,
-                    urgent_wake_pending=_urgent_wake_pending,
+                    urgent_wake_pending=_ordinary_stage_cancelled,
                     yield_write_lease=_yield_prune_write_lease,
                 )
                 if _prune_lease_held:
@@ -7807,6 +7875,8 @@ def run_edli_event_reactor_cycle(
                 "before processing fresh fact"
             )
         _log_stage("pending_prune")
+        if _yield_for_held_position_monitor("forecast_snapshot_build"):
+            return False
         if not producer_fast_path and _urgent_wake_pending():
             _log.info(
                 "EDLI reactor maintenance preempted after prune by urgent producer wake"
@@ -7832,7 +7902,7 @@ def run_edli_event_reactor_cycle(
                             if _pending_key_budget_s > 0
                             else None
                         ),
-                        cancelled=_urgent_wake_pending,
+                        cancelled=_ordinary_stage_cancelled,
                     )
                 _day0_posterior_wake_families = (
                     _day0_redecision_carrier_families(
@@ -7858,7 +7928,7 @@ def run_edli_event_reactor_cycle(
                         if targeted_forecast_wake
                         else None
                     ),
-                    cancelled=_urgent_wake_pending,
+                    cancelled=_ordinary_stage_cancelled,
                 )
                 if _day0_posterior_wake_families:
                     _day0_posterior_carriers = (
@@ -7877,7 +7947,7 @@ def run_edli_event_reactor_cycle(
                             phase_filter_exempt_families=(
                                 _day0_posterior_wake_families
                             ),
-                            cancelled=_urgent_wake_pending,
+                            cancelled=_ordinary_stage_cancelled,
                         )
                     )
                     _fsr_events.extend(
@@ -7919,6 +7989,8 @@ def run_edli_event_reactor_cycle(
                 "EDLI reactor maintenance preempted after forecast discovery "
                 "by urgent producer wake"
             )
+            return False
+        if _yield_for_held_position_monitor("forecast_snapshot_emit"):
             return False
         # EDLI live contention fix (2026-05-31): the FSR/Day0/redecision
         # EMIT block writes opportunity_events to the WAL zeus-world.db shared
@@ -7990,7 +8062,7 @@ def run_edli_event_reactor_cycle(
                                 limit=day0_emit_limit,
                                 budget_seconds=_edli_day0_emit_budget_seconds(edli_cfg),
                                 family_admission=_day0_family_admission,
-                                urgent_wake_pending=_urgent_wake_pending,
+                                urgent_wake_pending=_ordinary_stage_cancelled,
                             )
                             _log_stage("day0_emit")
                         except sqlite3.OperationalError as _day0_emit_lock_exc:
@@ -8071,6 +8143,8 @@ def run_edli_event_reactor_cycle(
             _log.info(
                 "EDLI reactor maintenance preempted after emit by urgent producer wake"
             )
+            return False
+        if _yield_for_held_position_monitor("reactor_construct"):
             return False
         # THROUGHPUT STRUCTURAL FIX (2026-06-01): the executable-snapshot refresh
         # (_refresh_pending_family_snapshots) runs a full-universe Gamma scan
@@ -8220,6 +8294,7 @@ def run_edli_event_reactor_cycle(
                 completion_wake
                 or durable_exact_held_completion
             ),
+            exact_held_completion=active_held_sell_completion_cycle,
         )
         _monitor_completion_mode = (
             _global_auction_completion_mode(
@@ -8346,6 +8421,8 @@ def run_edli_event_reactor_cycle(
                 producer_fast_path=producer_fast_path,
                 urgent_wake_pending=_urgent_wake_pending,
                 urgent_day0_pending=urgent_day0_pending,
+                held_position_monitor_debt_pending=held_position_monitor_debt_pending,
+                exact_held_completion=active_held_sell_completion_cycle,
             ),
         )
         terminal_no_book_completion = False
