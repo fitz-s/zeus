@@ -15,6 +15,8 @@ in_scope:
 - docs/authority/regime_unification_2026-06-12.md
 - docs/reference/zeus_math_spec.md
 - docs/reference/zeus_execution_lifecycle_reference.md
+- docs/reference/modules/execution.md
+- docs/reference/modules/state.md
 - docs/reference/AGENTS.md
 - config/settings.example.json
 - src/data/replacement_forecast_materializer.py
@@ -63,7 +65,9 @@ in_scope:
 - src/events/reactor.py
 - src/events/edli_trade_fact_bridge.py
 - src/execution/command_recovery.py
+- src/execution/command_bus.py
 - src/execution/exchange_reconcile.py
+- src/execution/AGENTS.md
 - src/execution/executor.py
 - src/execution/exit_lifecycle.py
 - src/execution/day0_hard_fact_exit.py
@@ -73,6 +77,7 @@ in_scope:
 - src/state/ledger.py
 - src/state/chain_reconciliation.py
 - src/state/fill_dedup.py
+- src/state/review_work_items.py
 - src/state/venue_command_repo.py
 - src/analysis/settlement_skill_attribution.py
 - src/state/collateral_ledger.py
@@ -175,10 +180,15 @@ in_scope:
 - architecture/db_table_ownership.yaml
 - architecture/script_manifest.yaml
 - src/contracts/venue_submission_envelope.py
+- src/venue/polymarket_v2_adapter.py
 - src/contracts/position_truth.py
+- src/contracts/review_work_item.py
 - src/decision/family_decision_engine.py
 - src/engine/evaluator.py
 - architecture/invariants.yaml
+- architecture/negative_constraints.yaml
+- architecture/ast_rules/semgrep_zeus.yml
+- architecture/ast_rules/forbidden_patterns.md
 - docs/authority/zeus_current_architecture.md
 - tests/test_v2_adapter.py
 - tests/engine/test_q_exec_lcb_event_seam.py
@@ -187,6 +197,9 @@ in_scope:
 - tests/execution/test_entry_economics_submit_gate.py
 - tests/decision_kernel/test_execution_command_certificate.py
 - tests/events/test_live_order_aggregate.py
+- tests/test_unknown_side_effect.py
+- tests/test_command_bus_types.py
+- tests/test_command_grammar_amendment.py
 - src/strategy/strategy_profile.py
 - src/data/polymarket_client.py
 - src/events/live_order_aggregate.py

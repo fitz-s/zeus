@@ -1,8 +1,10 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-09; last_reused=2026-08-09
+# Last reused/audited: 2026-08-10
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: Lock venue command journal invariants, transitions, recovery, and U1 snapshot gate.
 # Reuse: Run when venue_command_repo, command schema, or executable snapshot gate changes.
-# Authority basis: command-bus INV-28/NC-18 plus schema-21 global receipt closure.
+# Authority basis: command-bus INV-28/NC-18 plus schema-21 global receipt closure;
+#                  2026-08-10 typed command creation/adoption/absorption helpers and legal taker persistence.
 """Tests for src/state/venue_command_repo.py (P1.S1 — INV-28 / NC-18)."""
 from __future__ import annotations
 
@@ -133,10 +135,13 @@ class TestAbsoluteLivePriceBand:
             "price": pytest.approx(price),
         }
 
-    def test_taker_capable_envelope_rejects_before_command_persistence(self, conn):
+    @pytest.mark.parametrize("order_type", ["FOK", "FAK"])
+    def test_buy_taker_capable_envelope_persists_before_command(self, conn, order_type):
         from src.state.venue_command_repo import insert_command
 
-        envelope = _make_envelope(token_id="tok-taker").with_updates(post_only=False)
+        envelope = _make_envelope(token_id="tok-taker").with_updates(
+            order_type=order_type, post_only=False
+        )
         snapshot_id = _ensure_snapshot(conn, token_id="tok-taker")
         _ensure_entry_certificate(
             conn,
@@ -144,31 +149,30 @@ class TestAbsoluteLivePriceBand:
             envelope=envelope,
         )
 
-        with pytest.raises(ValueError, match="live fill price is unbounded"):
-            insert_command(
-                conn,
-                command_id="cmd-taker",
-                snapshot_id=snapshot_id,
-                envelope_id="env-taker",
-                submission_envelope=envelope,
-                position_id="pos-taker",
-                decision_id="dec-taker",
-                idempotency_key="idem-taker",
-                intent_kind="ENTRY",
-                market_id="mkt-taker",
-                token_id="tok-taker",
-                side="BUY",
-                size=10.0,
-                price=0.5,
-                created_at="2026-08-01T00:00:00Z",
-                decision_certificate_hash="cert-taker",
-            )
+        insert_command(
+            conn,
+            command_id=f"cmd-taker-{order_type.lower()}",
+            snapshot_id=snapshot_id,
+            envelope_id=f"env-taker-{order_type.lower()}",
+            submission_envelope=envelope,
+            position_id=f"pos-taker-{order_type.lower()}",
+            decision_id=f"dec-taker-{order_type.lower()}",
+            idempotency_key=f"idem-taker-{order_type.lower()}",
+            intent_kind="ENTRY",
+            market_id="mkt-taker",
+            token_id="tok-taker",
+            side="BUY",
+            size=10.0,
+            price=0.5,
+            created_at="2026-08-01T00:00:00Z",
+            decision_certificate_hash="cert-taker",
+        )
 
         assert conn.execute(
-            "SELECT COUNT(*) FROM venue_commands WHERE command_id='cmd-taker'"
-        ).fetchone()[0] == 0
+            "SELECT COUNT(*) FROM venue_commands WHERE command_id LIKE 'cmd-taker-%'"
+        ).fetchone()[0] == 1
 
-    def test_persisted_taker_exit_envelope_rejects_before_command_persistence(
+    def test_persisted_taker_exit_envelope_persists_before_command(
         self, conn
     ):
         from src.state.venue_command_repo import (
@@ -179,31 +183,30 @@ class TestAbsoluteLivePriceBand:
         envelope = _make_envelope(
             token_id="tok-exit-taker",
             side="SELL",
-        ).with_updates(post_only=False)
+        ).with_updates(order_type="FAK", post_only=False)
         insert_submission_envelope(conn, envelope, envelope_id="env-exit-taker")
         snapshot_id = _ensure_snapshot(conn, token_id="tok-exit-taker")
 
-        with pytest.raises(ValueError, match="persisted taker-capable order"):
-            insert_command(
-                conn,
-                command_id="cmd-exit-taker",
-                snapshot_id=snapshot_id,
-                envelope_id="env-exit-taker",
-                position_id="pos-exit-taker",
-                decision_id="dec-exit-taker",
-                idempotency_key="idem-exit-taker",
-                intent_kind="EXIT",
-                market_id="mkt-exit-taker",
-                token_id="tok-exit-taker",
-                side="SELL",
-                size=10.0,
-                price=0.5,
-                created_at="2026-08-01T00:00:00Z",
-            )
+        insert_command(
+            conn,
+            command_id="cmd-exit-taker",
+            snapshot_id=snapshot_id,
+            envelope_id="env-exit-taker",
+            position_id="pos-exit-taker",
+            decision_id="dec-exit-taker",
+            idempotency_key="idem-exit-taker",
+            intent_kind="EXIT",
+            market_id="mkt-exit-taker",
+            token_id="tok-exit-taker",
+            side="SELL",
+            size=10.0,
+            price=0.5,
+            created_at="2026-08-01T00:00:00Z",
+        )
 
         assert conn.execute(
             "SELECT COUNT(*) FROM venue_commands WHERE command_id='cmd-exit-taker'"
-        ).fetchone()[0] == 0
+        ).fetchone()[0] == 1
 
     @pytest.mark.parametrize("fill_price", ["0.049", "0.951", "0.999"])
     def test_out_of_band_trade_fact_persists_as_observed_truth(

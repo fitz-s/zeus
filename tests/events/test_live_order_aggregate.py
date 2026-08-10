@@ -1,5 +1,6 @@
 # Created: 2026-05-25
-# Last reused/audited: 2026-07-29
+# Last reused/audited: 2026-08-10
+# Lifecycle: created=2026-05-25; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Authority basis: PR332 full-live split verdict; live-order aggregate substrate PR A.
 from __future__ import annotations
 
@@ -2435,7 +2436,30 @@ def test_pre_submit_mean_winner_binds_action_probability_through_all_verifiers()
         "edge_lcb": lcb - cost,
         "edge_expected": action - cost,
         "global_actuation_identity": "actuation-mean",
+        "global_execution_mode": "TAKER_LIMIT",
         "global_economic_identity": "economic-mean",
+        "global_auction_receipt": GlobalAuctionReceiptRef(
+            decision_log_id=1,
+            decision_log_mode="global_single_order_auction",
+            receipt_hash="a" * 64,
+            execution_binding_hash="b" * 64,
+            artifact_summary_hash="c" * 64,
+            schema_version=21,
+            winner_event_id="event-1",
+            winner_candidate_id="global-candidate-mean",
+            winner_actuation_identity="actuation-mean",
+            selection_epoch_identity="epoch-mean",
+        ).as_payload(),
+        "global_winner_event_id": "event-1",
+        "global_utility_basis": STRATEGY_LOG_UTILITY_BASIS,
+        "global_ruin_probability_reduction": 0.0,
+        "global_terminal_ruin_probability_reduction": 0.0,
+        "global_proposal_expected_delta_log_wealth": expected_du,
+        "global_proposal_expected_ev_usd": expected_ev,
+        "global_proposal_capital_lock_hours": 1.0,
+        "global_proposal_expected_log_growth_per_hour": expected_du,
+        "global_proposal_expected_capital_efficiency": expected_du / expected_cost,
+        "global_proposal_fill_semantics": "IMMEDIATE_FILL",
         "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
         "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
         "global_candidate_id": "global-candidate-mean",
@@ -2571,6 +2595,7 @@ def _day0_probability_authority(
     payload = {
         "q_source": "day0_remaining_day",
         "q_mode": "remaining_day",
+        "probability_authority": "day0_remaining_day_global_probability_v1",
         "remaining_model_names": ["ecmwf", "gfs", "icon"],
         "remaining_source_cycle_time_utc": "2026-05-25T12:00:00+00:00",
         "remaining_capture_times_utc": ["2026-05-25T12:20:00+00:00"],

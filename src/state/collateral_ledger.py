@@ -471,6 +471,17 @@ class CollateralLedger:
     def buy_preflight(self, intent: ExecutionIntent, *, spend_micro: int | None = None) -> bool:
         snapshot = self.snapshot()
         required = spend_micro if spend_micro is not None else _intent_worst_case_spend_micro(intent)
+        return self._assert_snapshot_allows_buy(snapshot, required_micro=required)
+
+    @staticmethod
+    def _assert_snapshot_allows_buy(
+        snapshot: CollateralSnapshot,
+        *,
+        required_micro: int,
+    ) -> bool:
+        """Validate one pUSD spend against an exact collateral snapshot."""
+
+        required = _positive_int(required_micro, "required_micro")
         if snapshot.authority_tier == "DEGRADED":
             raise CollateralInsufficient("collateral_snapshot_degraded")
         _assert_snapshot_fresh(snapshot)
@@ -487,6 +498,39 @@ class CollateralLedger:
                 f"allowance_micro={snapshot.pusd_allowance_micro}"
             )
         return True
+
+    @staticmethod
+    def buy_preflight_in_transaction(
+        conn: sqlite3.Connection,
+        intent: ExecutionIntent,
+        *,
+        spend_micro: int | None = None,
+    ) -> bool:
+        """Run pUSD preflight without schema initialization or a commit.
+
+        Live ENTRY admission already owns a ``BEGIN IMMEDIATE`` transaction.
+        Constructing ``CollateralLedger(conn)`` there would run
+        ``executescript()`` and implicitly commit the command transaction.
+        This read-only path preserves that atomic boundary.
+        """
+
+        snapshot = load_latest_collateral_snapshot_read_only(conn)
+        if snapshot is None:
+            raise CollateralInsufficient("collateral_snapshot_degraded")
+        snapshot = replace(
+            snapshot,
+            reserved_pusd_for_buys_micro=_reserved_pusd_for_connection(conn),
+            reserved_tokens_for_sells=_reserved_tokens_for_connection(conn),
+        )
+        required = (
+            spend_micro
+            if spend_micro is not None
+            else _intent_worst_case_spend_micro(intent)
+        )
+        return CollateralLedger._assert_snapshot_allows_buy(
+            snapshot,
+            required_micro=required,
+        )
 
     def sell_preflight(
         self,

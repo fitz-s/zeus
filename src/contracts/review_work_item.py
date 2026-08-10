@@ -1,7 +1,8 @@
 # Created: 2026-07-11
-# Last reused or audited: 2026-07-11
+# Last reused or audited: 2026-08-10
 # Authority basis: docs/rebuild/quarantine_excision_2026-07-11.md "Consult adjudication"
 #   (GPT-5.6 Pro deep review, adopted target shape) BLOCKER-1/BLOCKER-3, critic I-1.
+#   docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 
 """ReviewWorkItem — the owner-local review/retry/operator-resolution protocol.
 
@@ -85,6 +86,10 @@ class ReviewReasonCode(str, Enum):
     # (missing / stale / not post-command-watermarked). Chain is the arbiter —
     # this position stays pending_tracked, never force-voided on ambiguity.
     TIMEOUT_ABSENCE_UNCONFIRMED = "TIMEOUT_ABSENCE_UNCONFIRMED"
+    # Recovered partial SELL left only a venue-minimum-ineligible residual.
+    # This is position+command scoped review debt, never a family admission
+    # block: the chain still owns the real residual exposure.
+    RECOVERED_EXIT_DUST_REMAINDER = "RECOVERED_EXIT_DUST_REMAINDER"
 
 
 # Reason codes whose open work items represent REAL or UNKNOWN exposure on a

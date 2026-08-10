@@ -196,6 +196,11 @@ position is not aggregate-backed):
   row for this `position_id` picks the correction back up. No quarantine, no
   invented state.
 
+Late authenticated trade legs fold into the deduplicated canonical aggregate
+for their command and then into the position projection. Re-observation or
+out-of-order arrival replaces only that command's prior projected economics;
+it never mints an unproved close or terminal event.
+
 **Rule 2: Local but NOT on chain → VOID.**
 Only fires when the per-cycle classifier reports `ChainSnapshotCompleteness.
 CHAIN_EMPTY` (fresh, complete, authoritatively empty). `CHAIN_UNKNOWN`
@@ -544,12 +549,14 @@ entry/exit, single/batch order must have a finite unit price inside inclusive
 `[0.05, 0.95]`. A SELL limit is only a floor and a BUY limit is only a ceiling,
 so a legal taker limit cannot constrain favorable price improvement to the same
 two-sided band. Clamping `0.999` to a legal `0.95` SELL floor is therefore
-forbidden. Live orders must use GTC/GTD post-only maker semantics; FAK/FOK and
-non-post-only orders fail closed before command persistence. The order must also
-be tick-aligned and in-range for the current executable snapshot.
+forbidden. The admitted finite-limit modes are side-aware: ENTRY BUY may use
+post-only GTC/GTD maker or certified non-post-only FOK/FAK taker; EXIT SELL may
+use post-only GTC/GTD maker or non-post-only FAK taker. Non-post-only GTC/GTD,
+post-only immediate-or-cancel, and SELL FOK fail closed. The order must also be
+tick-aligned and in-range for the current executable snapshot.
 `VenueSubmissionEnvelope.assert_live_fill_price_bound()` enforces this contract,
 command persistence repeats it, and the adapter independently checks the legal
-limit plus maker-only shape immediately before the SDK POST. Tick legality,
+limit plus exact role/mode tuple immediately before the SDK POST. Tick legality,
 minimum size, identity, tradeability, fees/depth, and economic proof remain
 additional requirements and cannot waive the band (INV-43).
 
@@ -557,16 +564,25 @@ The absolute price band authorizes proposed/submitted orders, not observations.
 Venue-reported positive finite fill prices are preserved in the durable trade-fact
 journal and folded into actual shares/PnL even when outside that band; provenance
 marks the breach for alerting and review. Observed facts never authorize another
-out-of-band order. Likewise, an open SELL may
-be adopted as an existing exit only when its price, GTC/GTD type, and post-only
-flag are all explicit and legal; an unproved matching open order is canceled.
+out-of-band order. Recovered venue orders and externally confirmed closes are
+journal-only facts. Typed repo helpers atomically create their command plus a
+creation-only event; they never fabricate generic SUBMIT/ACK history or invent
+economic closure. A recovered partial SELL carries its immutable pre-recovery
+shares, cost basis, entry price, and conservation proof. Every authenticated
+trade leg advances actual-price PnL exactly once through the shared fill cursor;
+the residual is `baseline - cumulative sold`. A non-executable dust residual
+remains real `pending_exit` exposure under a position+command-scoped
+`RECOVERED_EXIT_DUST_REMAINDER` work item, never a family veto or a synthetic
+`EXIT_ORDER_FILLED` event.
 
 Same-family exposure is portfolio endowment, not an entry prohibition. Before
 ranking a sibling-bin BUY, the global auction projects every current
 same-family YES/NO holding plus unresolved entry commitment onto the exhaustive
-family outcomes. The order remains eligible only when its marginal robust
-delta-log-wealth and EV are positive after fees, depth, affordability, and the
-cumulative Kelly target. Venue-command persistence must not impose a blanket
+family outcomes. After each action passes its own law, every fixed BUY, SELL,
+CASH, and HOLD proposal shares one posterior-predictive-mean net expected
+delta-log-capital-growth and EV comparison, including fees, depth, capital-lock
+horizon, and the current portfolio endowment. Fixed-action `robust_*` values are
+not the cross-action comparator. Venue-command persistence must not impose a blanket
 one-position or one-token family veto (INV-45).
 
 ### 7.2 Kelly safety gate

@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-07-15
+# Last reused/audited: 2026-08-10
 # Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
 #   2026-06-08 audit (no-bypass 4-test slice): re-authored test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask
 #   to the complement-immunity ban (014408394f/cbc454e17e); updated two selector tests to the buy_no independent-YES-posterior
@@ -462,6 +462,7 @@ def _trade_conn_with_snapshot(
     depth_json: str | None = None,
     tradeability_status_json: str = "{}",
     attach_world_for_qkernel: bool = True,
+    escalated_after_rest: bool = False,
 ):
     if snapshot_condition_count is None:
         snapshot_condition_count = condition_count
@@ -862,6 +863,42 @@ def _trade_conn_with_snapshot(
     )
     _insert_platt_model(conn)
     _insert_replacement_forecast_fixture(conn)
+    if escalated_after_rest:
+        # Match the production _family_rest_state() query with the smallest
+        # durable command/fact shape.  The cancelled rest is older than the
+        # measured maker-window floor, so the current candidate may lawfully
+        # cross as TAKER_LIMIT without a maker-fill witness.
+        conn.executescript(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                venue_order_id TEXT,
+                token_id TEXT NOT NULL,
+                intent_kind TEXT NOT NULL,
+                state TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE venue_order_facts (
+                venue_order_id TEXT NOT NULL,
+                state TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                matched_size TEXT,
+                local_sequence INTEGER NOT NULL
+            );
+            INSERT INTO venue_commands (
+                command_id, venue_order_id, token_id, intent_kind, state, created_at
+            ) VALUES (
+                'fixture-cancelled-rest', 'fixture-rest-order', 'yes-1',
+                'ENTRY', 'CANCELLED', '2026-05-24T07:00:00+00:00'
+            );
+            INSERT INTO venue_order_facts (
+                venue_order_id, state, observed_at, matched_size, local_sequence
+            ) VALUES (
+                'fixture-rest-order', 'CANCEL_CONFIRMED',
+                '2026-05-24T08:00:00+00:00', '0', 1
+            );
+            """
+        )
     if attach_world_for_qkernel:
         _attach_qkernel_world(conn)
     return conn
@@ -1373,6 +1410,26 @@ def _trade_conn_with_live_replacement_snapshot(**kwargs) -> sqlite3.Connection:
     return conn
 
 
+def _trade_conn_with_live_replacement_taker_snapshot(**kwargs) -> sqlite3.Connection:
+    """Return the live replacement fixture with a real deadline-cross witness.
+
+    These receipt tests exercise forecast/topology/calibration contracts, not
+    maker-fill certification.  A cancelled ENTRY command with a durable
+    ``CANCEL_CONFIRMED`` fact after a real rest window is the production
+    ``TAKER_LIMIT`` escalation input; it does not manufacture a maker witness.
+    """
+
+    kwargs["escalated_after_rest"] = True
+    return _trade_conn_with_live_replacement_snapshot(**kwargs)
+
+
+def _trade_conn_with_taker_snapshot(**kwargs) -> sqlite3.Connection:
+    """Return the base fixture with durable rest-to-cross escalation evidence."""
+
+    kwargs["escalated_after_rest"] = True
+    return _trade_conn_with_snapshot(**kwargs)
+
+
 def _calibration_conn_with_platt_model() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -1526,7 +1583,7 @@ def test_adapter_trade_score_gate_treats_trigger_events_as_hydration_inputs():
 
 def test_runtime_receipt_uses_event_bound_final_intent_contract():
     event = _bound_replacement_forecast_event()
-    receipt = _receipt(event, _trade_conn_with_live_replacement_snapshot())
+    receipt = _receipt(event, _trade_conn_with_live_replacement_taker_snapshot())
 
     assert receipt.proof_accepted is True
     assert receipt.submitted is False
@@ -1581,7 +1638,7 @@ def test_runtime_receipt_does_not_fit_platt_models(monkeypatch):
     monkeypatch.setattr("src.calibration.manager.get_calibrator", _forbid_runtime_fit)
 
     event = _bound_replacement_forecast_event()
-    receipt = _receipt(event, _trade_conn_with_live_replacement_snapshot())
+    receipt = _receipt(event, _trade_conn_with_live_replacement_taker_snapshot())
 
     assert receipt.proof_accepted is True
     assert receipt.decision_proof_bundle is not None
@@ -1591,7 +1648,7 @@ def test_runtime_receipt_does_not_fit_platt_models(monkeypatch):
 
 def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_receipt():
     event = _replacement_forecast_event()
-    receipt = _receipt(event, _trade_conn_with_live_replacement_snapshot(), decision_time=DECISION_TIME)
+    receipt = _receipt(event, _trade_conn_with_live_replacement_taker_snapshot(), decision_time=DECISION_TIME)
 
     assert receipt.proof_accepted is True
     assert receipt.token_id == "yes-1"
@@ -1605,7 +1662,7 @@ def test_forecast_trigger_event_without_q_or_token_fields_builds_no_submit_recei
 
 def test_legacy_platt_materialization_time_does_not_affect_replacement_live_certificate():
     event = _replacement_forecast_event()
-    conn = _trade_conn_with_live_replacement_snapshot()
+    conn = _trade_conn_with_live_replacement_taker_snapshot()
     conn.execute(
         """
         UPDATE platt_models
@@ -1627,7 +1684,7 @@ def test_legacy_platt_materialization_time_does_not_affect_replacement_live_cert
 
 def test_legacy_platt_training_cutoff_after_decision_cannot_poison_replacement_live_certificate():
     event = _replacement_forecast_event()
-    conn = _trade_conn_with_live_replacement_snapshot()
+    conn = _trade_conn_with_live_replacement_taker_snapshot()
     conn.execute("ALTER TABLE platt_models ADD COLUMN training_cutoff TEXT")
     conn.execute(
         """
@@ -1647,7 +1704,7 @@ def test_legacy_platt_training_cutoff_after_decision_cannot_poison_replacement_l
 
 def test_market_topology_certificate_uses_topology_row_clock_not_event_clock():
     event = _replacement_forecast_event()
-    conn = _trade_conn_with_live_replacement_snapshot()
+    conn = _trade_conn_with_live_replacement_taker_snapshot()
     conn.execute("UPDATE market_events SET created_at = '2026-05-24T08:11:00+00:00'")
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
@@ -1660,7 +1717,7 @@ def test_market_topology_certificate_uses_topology_row_clock_not_event_clock():
 
 def test_topology_persisted_after_decision_blocks_certificate():
     event = _replacement_forecast_event()
-    conn = _trade_conn_with_live_replacement_snapshot()
+    conn = _trade_conn_with_live_replacement_taker_snapshot()
     conn.execute("UPDATE market_events SET created_at = '2026-05-24T08:13:00+00:00'")
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
@@ -1677,7 +1734,7 @@ def test_topology_persisted_after_decision_blocks_certificate():
 
 def test_topology_clock_missing_blocks_certificate():
     event = _replacement_forecast_event()
-    conn = _trade_conn_with_live_replacement_snapshot()
+    conn = _trade_conn_with_live_replacement_taker_snapshot()
     conn.execute("UPDATE market_events SET created_at = NULL")
 
     with pytest.raises(ValueError, match="TOPOLOGY_CLOCK_MISSING"):
@@ -1817,7 +1874,7 @@ def test_non_accepting_snapshot_is_admitted_as_current_non_executable_state():
 
 def test_adapter_source_truth_status_comes_from_forecast_authority():
     event = _forecast_event()
-    conn = _enable_qkernel_fixture(_trade_conn_with_snapshot())
+    conn = _enable_qkernel_fixture(_trade_conn_with_taker_snapshot())
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
@@ -1838,7 +1895,7 @@ def test_adapter_source_truth_authority_tracks_replacement_forecast_authority(mo
         lambda **_: False,
     )
     event = _replacement_forecast_event()
-    conn = _trade_conn_with_live_replacement_snapshot()
+    conn = _trade_conn_with_live_replacement_taker_snapshot()
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
@@ -1958,7 +2015,7 @@ def test_market_events_authority_rows_have_topology_clock_fields():
 
 def test_no_submit_receipt_succeeds_with_production_market_events_clock_shape():
     event = _forecast_event()
-    conn = _trade_conn_with_snapshot()
+    conn = _trade_conn_with_taker_snapshot()
     conn.execute("UPDATE market_events SET created_at = '2026-05-24T08:11:00+00:00'")
     conn = _enable_qkernel_fixture(conn)
 
@@ -1971,7 +2028,7 @@ def test_no_submit_receipt_succeeds_with_production_market_events_clock_shape():
 
 def test_topology_clock_missing_blocks_with_topology_clock_missing_reason():
     event = _forecast_event()
-    conn = _trade_conn_with_snapshot()
+    conn = _trade_conn_with_taker_snapshot()
     conn.execute("UPDATE market_events SET created_at = NULL")
     conn = _enable_qkernel_fixture(conn)
 
@@ -1981,7 +2038,7 @@ def test_topology_clock_missing_blocks_with_topology_clock_missing_reason():
 
 def test_cost_model_certificate_records_native_cost_source():
     event = _forecast_event()
-    conn = _enable_qkernel_fixture(_trade_conn_with_snapshot())
+    conn = _enable_qkernel_fixture(_trade_conn_with_taker_snapshot())
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
@@ -2023,7 +2080,7 @@ def test_adapter_does_not_synthesize_forecast_applied_validations():
 
 def test_family_closure_clock_missing_blocks_certificate():
     event = _forecast_event()
-    conn = _trade_conn_with_snapshot()
+    conn = _trade_conn_with_taker_snapshot()
     conn.execute("UPDATE market_events SET created_at = ''")
 
     with pytest.raises(ValueError, match="TOPOLOGY_CLOCK_MISSING"):
@@ -2164,7 +2221,7 @@ def test_edli_p_cal_matches_existing_evaluator_platt_path_for_same_snapshot_and_
 
 def test_family_candidates_use_market_event_range_bounds_not_payload_default():
     event = _forecast_event()
-    receipt = _receipt(event, _trade_conn_with_snapshot())
+    receipt = _receipt(event, _trade_conn_with_taker_snapshot())
 
     assert receipt.bin_label == "70-71°F"
     assert receipt.bin_label != "0-1°F"
@@ -2253,7 +2310,7 @@ def test_runtime_receipt_accepts_family_with_missing_sibling_snapshot_as_non_tra
     and shrinking fdr_hypothesis_count from 5 to 4 — both unsafe.
     """
     event = _bound_forecast_event(fdr_condition_count=3)
-    receipt = _receipt(event, _trade_conn_with_snapshot(condition_count=3, snapshot_condition_count=2))
+    receipt = _receipt(event, _trade_conn_with_taker_snapshot(condition_count=3, snapshot_condition_count=2))
 
     # Full-family: receipt must not be rejected for missing sibling snapshot
     assert receipt.reason != "FDR_FULL_FAMILY_PROOF_MISSING"
@@ -2271,7 +2328,7 @@ def test_runtime_receipt_generates_fdr_from_family_not_event_payload():
     payload.pop("fdr_hypotheses", None)
     event = replace(event, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
-    receipt = _receipt(event, _trade_conn_with_snapshot())
+    receipt = _receipt(event, _trade_conn_with_taker_snapshot())
 
     assert receipt.fdr_hypothesis_count == 4
     assert receipt.reason != "FDR_FULL_FAMILY_PROOF_MISSING"
@@ -2279,7 +2336,7 @@ def test_runtime_receipt_generates_fdr_from_family_not_event_payload():
 
 def test_forecast_receipt_does_not_require_old_probability_or_selection_facts():
     event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
+    conn = _trade_conn_with_taker_snapshot()
     conn.execute("DROP TABLE probability_trace_fact")
     conn.execute("DROP TABLE selection_hypothesis_fact")
     conn.execute("DROP TABLE selection_family_fact")
@@ -2295,7 +2352,7 @@ def test_forecast_receipt_does_not_require_old_probability_or_selection_facts():
 
 def test_forecast_receipt_uses_separate_forecast_authority_connection():
     event = _bound_forecast_event()
-    trade_conn = _trade_conn_with_snapshot()
+    trade_conn = _trade_conn_with_taker_snapshot()
     forecast_conn = _trade_conn_with_snapshot()
     forecast_conn.execute("DROP TABLE executable_market_snapshots")
     trade_conn.execute("DROP TABLE ensemble_snapshots")
@@ -2423,7 +2480,7 @@ def test_receipt_requires_explicit_forecast_and_topology_authority_connections()
 
 def test_receipt_uses_world_calibration_authority_not_forecast_conn():
     event = _bound_forecast_event()
-    trade_conn = _trade_conn_with_snapshot()
+    trade_conn = _trade_conn_with_taker_snapshot()
     forecast_conn = _trade_conn_with_snapshot()
     calibration_conn = _calibration_conn_with_platt_model()
     forecast_conn.execute("DROP TABLE executable_market_snapshots")
@@ -2448,7 +2505,7 @@ def test_receipt_uses_world_calibration_authority_not_forecast_conn():
 
 def test_p_cal_json_available_after_event_is_ignored_when_calibrator_authority_exists():
     event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
+    conn = _trade_conn_with_taker_snapshot()
     conn.execute("UPDATE ensemble_snapshots SET p_cal_available_at = '2026-05-24T08:11:00+00:00'")
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
@@ -2613,7 +2670,7 @@ def test_snapshot_lead_days_falls_back_to_day0_observation_time():
 
 def test_executable_snapshot_freshness_uses_reactor_decision_time():
     event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot(freshness_deadline="2026-05-24T08:12:30+00:00")
+    conn = _trade_conn_with_taker_snapshot(freshness_deadline="2026-05-24T08:12:30+00:00")
 
     receipt = _receipt(event, conn, decision_time=datetime(2026, 5, 24, 8, 12, tzinfo=timezone.utc))
 
@@ -2626,7 +2683,7 @@ def test_price_stale_selected_snapshot_stays_no_submit_when_live_proof_is_valid(
     event = _bound_forecast_event()
     # captured_at before freshness_deadline (invariant: deadline >= captured);
     # freshness_deadline is before decision_time (08:12) — simulates price-stale snapshot.
-    conn = _trade_conn_with_snapshot(
+    conn = _trade_conn_with_taker_snapshot(
         captured_at="2026-05-24T08:10:00+00:00",
         freshness_deadline="2026-05-24T08:11:59+00:00",
     )
@@ -2731,6 +2788,7 @@ def test_native_costs_use_token_side_snapshot_rows_not_first_condition_row():
         "min_tick_size": "0.01",
         "min_order_size": "5",
         "fee_details_json": json.dumps({"fee_rate_fraction": 0.0}),
+        "neg_risk": False,
         "orderbook_depth_json": "{}",
     }
     yes_row = {
@@ -3392,7 +3450,7 @@ def test_executable_allowed_true_snapshot_with_depth_still_creates_fillable_quot
     # native quote and an accepted proof — proving the guard does not regress any
     # legitimate executable quote.
     event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot(
+    conn = _trade_conn_with_taker_snapshot(
         selected_ask="0.40",
         tradeability_status_json=json.dumps(
             {
@@ -3419,7 +3477,7 @@ def test_absent_tradeability_status_snapshot_with_depth_is_byte_identical_fillab
     # byte-identical to pre-guard — the guard is strictly-more-restrictive and
     # must NOT touch snapshots that lack the field.
     event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot(selected_ask="0.40")  # tradeability_status_json="{}" -> field absent
+    conn = _trade_conn_with_taker_snapshot(selected_ask="0.40")  # tradeability_status_json="{}" -> field absent
 
     receipt = _receipt(event, conn, decision_time=DECISION_TIME)
 
@@ -3454,7 +3512,7 @@ def test_no_submit_default_bankroll_path_does_not_live_fetch_wallet(monkeypatch)
     from src.runtime import bankroll_provider
 
     event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
+    conn = _trade_conn_with_taker_snapshot()
 
     def _explode_current(**_kwargs):
         raise AssertionError("no-submit proof must not live-fetch wallet bankroll")
@@ -3560,7 +3618,7 @@ def test_runtime_bankroll_basis_excludes_blip_held_phantom(monkeypatch):
 
 def test_forecast_receipt_uses_attached_forecasts_market_topology():
     event = _bound_forecast_event()
-    conn = _trade_conn_with_snapshot()
+    conn = _trade_conn_with_taker_snapshot()
     conn.execute("ALTER TABLE market_events RENAME TO attached_market_events")
     conn.execute("ATTACH DATABASE ':memory:' AS forecasts")
     conn.execute("CREATE TABLE forecasts.ensemble_snapshots AS SELECT * FROM ensemble_snapshots")
@@ -3625,7 +3683,13 @@ def test_runtime_receipt_rejects_missing_native_ask_instead_of_defaulting_midpoi
     # so condition-2's hardcoded depth does not let the ranker skip condition-1.
     event = _bound_forecast_event()
     receipt = _receipt(
-        event, _trade_conn_with_snapshot(selected_ask="", snapshot_condition_count=1, include_no_snapshot=False)
+        event,
+        _trade_conn_with_taker_snapshot(
+            selected_ask="",
+            no_selected_bid="",
+            snapshot_condition_count=1,
+            include_no_snapshot=False,
+        ),
     )
 
     assert receipt.submitted is False
@@ -3633,6 +3697,7 @@ def test_runtime_receipt_rejects_missing_native_ask_instead_of_defaulting_midpoi
         (
             "QKERNEL_SPINE_NO_TRADE:NO_POSITIVE_EDGE_CANDIDATE",
             "QKERNEL_SPINE_NO_TRADE:NO_ROI_FRONTIER_USEFUL_CANDIDATE",
+            "EVENT_BOUND_SELECTED_CANDIDATE_MISSING:",
         )
     )
 
@@ -3644,7 +3709,7 @@ def test_runtime_receipt_uses_runtime_kelly_authority_not_event_payload():
     payload["kelly_multiplier"] = 0
     event = replace(event, payload_json=json.dumps(payload, sort_keys=True, separators=(",", ":")))
 
-    receipt = _receipt(event, _trade_conn_with_snapshot())
+    receipt = _receipt(event, _trade_conn_with_taker_snapshot())
 
     assert receipt.kelly_pass is True
     assert receipt.kelly_size_usd > 0
@@ -3682,7 +3747,7 @@ def test_107_receipt_unwired_provider_equals_single_kelly_modulo_cap():
     event = _bound_forecast_event()
     receipt = _receipt(
         event,
-        _trade_conn_with_snapshot(),
+        _trade_conn_with_taker_snapshot(),
         bankroll_usd_provider=lambda: 170.0,
     )
     assert receipt.kelly_pass is True
@@ -3707,7 +3772,7 @@ def test_107_receipt_fractional_kelly_is_not_single_position_clipped():
     bankroll = 170.0
     receipt = _receipt(
         _bound_forecast_event(),
-        _trade_conn_with_snapshot(),
+        _trade_conn_with_taker_snapshot(),
         bankroll_usd_provider=lambda: bankroll,
         portfolio_state_provider=lambda: PortfolioState(positions=[]),
     )
@@ -4415,7 +4480,7 @@ def test_refresh_failure_falls_through_to_stale_rejection():
 def test_fresh_row_skips_refresh():
     """Already-fresh elected row ⇒ refresher NOT called (rate budget)."""
     decision_time = DECISION_TIME
-    conn = _trade_conn_with_snapshot(
+    conn = _trade_conn_with_taker_snapshot(
         freshness_deadline=_fresh_freshness_deadline_for(decision_time),
     )
 

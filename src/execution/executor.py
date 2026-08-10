@@ -3235,7 +3235,11 @@ def _assert_collateral_allows_buy(
     from src.state.collateral_ledger import CollateralLedger, assert_buy_preflight
 
     if conn is not None:
-        CollateralLedger(conn).buy_preflight(intent, spend_micro=spend_micro)
+        CollateralLedger.buy_preflight_in_transaction(
+            conn,
+            intent,
+            spend_micro=spend_micro,
+        )
     else:
         assert_buy_preflight(intent, spend_micro=spend_micro)
     return _capability_component("collateral_ledger", collateral="pUSD", spend_micro=spend_micro or 0)
@@ -8037,24 +8041,6 @@ def _live_order(
                 shares=shares,
                 order_role="entry",
                 idempotency_key=idem.value,
-            )
-        if not submit_post_only:
-            # INV-47 SCOPE: only this token's taker-capable BUY is rejected.
-            # DRAIN: the next redecision may emit a maker-only GTC/GTD entry.
-            # RESET: no latch is stored; a post-only entry passes this gate.
-            return OrderResult(
-                trade_id=trade_id,
-                status="rejected",
-                reason=(
-                    "live_fill_price_unbounded_taker_order:"
-                    f"order_type={effective_order_type}:post_only=False"
-                ),
-                submitted_price=intent.limit_price,
-                shares=shares,
-                order_role="entry",
-                idempotency_key=idem.value,
-                command_id=command_id,
-                command_state="REJECTED",
             )
         taker_quality_component = _entry_taker_quality_component(
             effective_order_type=effective_order_type,

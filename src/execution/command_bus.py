@@ -39,6 +39,9 @@ __all__ = [
     "VenueCommand",
     "IN_FLIGHT_STATES",
     "TERMINAL_STATES",
+    "RecoveredExitOrderAdoption",
+    "ExternalOperatorCloseAbsorption",
+    "MixedTokenCommandRehome",
 ]
 
 
@@ -92,6 +95,11 @@ class CommandEventType(str, Enum):
     REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT = "REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT"
     REVIEW_CLEARED_NO_VENUE_EXPOSURE = "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
     REVIEW_CLEARED_VENUE_ORDER_LIVE = "REVIEW_CLEARED_VENUE_ORDER_LIVE"
+    # Creation-only reconciliation facts.  These are intentionally not part of
+    # the transition table: a repo helper creates the command and its initial
+    # event atomically, so callers cannot forge a normal submit history.
+    VENUE_ORDER_ADOPTED = "VENUE_ORDER_ADOPTED"
+    EXTERNAL_OPERATOR_CLOSE_ABSORBED = "EXTERNAL_OPERATOR_CLOSE_ABSORBED"
 
 
 class IntentKind(str, Enum):
@@ -100,6 +108,56 @@ class IntentKind(str, Enum):
     EXIT = "EXIT"
     CANCEL = "CANCEL"
     DERISK = "DERISK"
+
+
+@dataclass(frozen=True)
+class RecoveredExitOrderAdoption:
+    """Typed evidence for adopting an already-existing venue EXIT order."""
+
+    command_id: str
+    venue_order_id: str
+    position_id: str
+    decision_id: str
+    market_id: str
+    token_id: str
+    size: str | float
+    matched_size: str | float
+    remaining_size: str | float
+    resting_order_price: str | float
+    observed_at: str
+    source_entry_command_id: str | None = None
+    source_entry_snapshot_id: str | None = None
+    source_entry_envelope_id: str | None = None
+    provenance: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class ExternalOperatorCloseAbsorption:
+    """Typed evidence for a deterministic operator-confirmed external close."""
+
+    token_id: str
+    position_id: str
+    market_id: str
+    close_size: str | float
+    close_price: str | float
+    observed_at: str
+    source_entry_command_id: str | None = None
+    source_entry_snapshot_id: str | None = None
+    source_entry_envelope_id: str | None = None
+    venue_order_id: str | None = None
+    provenance: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class MixedTokenCommandRehome:
+    """Typed compare-and-swap repair for one mixed-token ENTRY command."""
+
+    command_id: str
+    source_position_id: str
+    target_position_id: str
+    repair_kind: str
+    occurred_at: str
+    provenance: Mapping[str, Any] | None = None
 
 
 # Recovery loop categories. Used by P1.S4 command_recovery to decide what to

@@ -309,16 +309,20 @@ inclusive absolute range `[0.05, 0.95]`. This applies symmetrically to every
 entry, reduce-only exit, single-order, and batch order. Anything below `0.05`
 or above `0.95` is rejected at command persistence, by the canonical envelope,
 and again by an independent final SDK-boundary guard. Current tick alignment,
-minimum size, identity, tradeability, fees, depth, robust delta-log-wealth/EV,
+minimum size, identity, tradeability, fees, depth, expected-log-growth/EV,
 Kelly, strategy, risk, lifecycle, and current-state proof cannot waive the band.
 The official restart preflight must reject a live-trading boot if the active
 config is not exactly `0.05/0.95` or any independent guard accepts a forbidden
 sample (INV-43).
 
-Price alone does not authorize an entry: the global auction separately requires a strict
-current-evidence robust win majority, positive robust EV and delta log wealth,
-and only the remaining shares below the cumulative Fractional Kelly final-
-holding target. These economic conditions apply symmetrically to YES and NO.
+Price alone does not authorize an entry. Each action first passes its own
+probability-witness, positive-EV, executable-book, fee/depth, wealth, and
+cumulative Fractional Kelly law. Every admitted fixed BUY/SELL proposal then
+competes with CASH/HOLD on one posterior-predictive-mean net expected
+delta-log-capital-growth and EV basis carrying its capital-lock horizon and
+current portfolio endowment. Fixed-action `robust_*` values are confidence
+evidence, not the cross-action comparator. These conditions apply symmetrically
+to YES and NO.
 
 ### 10.3 Same-Family Portfolio Capital Objective
 
@@ -327,8 +331,10 @@ Zeus may hold or buy multiple outcome tokens inside one
 `(city, target_date, temperature_metric)` family when the marginal order
 improves the full current portfolio objective. The auction must project all
 same-family YES/NO holdings and unresolved entry commitments onto the
-exhaustive outcome set, then require positive robust delta log wealth and EV
-after fees, depth, affordability, and the cumulative Fractional Kelly target.
+exhaustive outcome set, then require positive posterior-predictive-mean expected
+delta log wealth and EV after fees, depth, affordability, and the cumulative
+Fractional Kelly target. Each fixed proposal carries its capital-lock horizon
+and exact endowment into the common global comparator.
 That joint solve sizes the target vector; it does not choose a primary order.
 Every positive venue-legal target remains a separate fixed BUY proposal until
 the common raw global BUY/SELL/CASH/HOLD comparator chooses the one order.

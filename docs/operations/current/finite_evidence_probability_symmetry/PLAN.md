@@ -4,6 +4,105 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-10 Executable limit modes, fill convergence, and command ownership
+
+The current global auction ranks each independently executable maker or taker
+proposal, but the last persistence and venue boundaries still carried the
+retired blanket assumption that every ENTRY must be post-only.  That split made
+a globally selected, certificate-bound FOK/FAK BUY impossible to execute even
+when its finite limit, current book, fees, depth, Kelly target, wealth, and fill
+prefix were all proved.  The executable law remains limit-order only: every
+submitted unit price is finite and inside inclusive `[0.05, 0.95]`; Zeus never
+submits an unpriced market order.  The admitted shapes are now explicit and
+side-aware: ENTRY/BUY may be GTC/GTD post-only maker or FOK/FAK non-post-only
+certified taker; EXIT/SELL may be GTC/GTD post-only maker or FAK non-post-only
+taker.  Non-post-only GTC/GTD, post-only immediate-or-cancel shapes, and SELL
+FOK remain rejected.  Selection mode survives JIT rebinding and the executor
+still re-proves exact actionable probability, book, fee, depth, position,
+wealth, and envelope identity immediately before SDK contact.
+
+The same exact-head audit exposed two convergence gaps.  First, an authenticated
+late trade leg was appended but could be skipped by projection when a previous
+partial-fill transition already existed.  Reconciliation now projects the
+canonical command-level aggregate, replaces only that command's prior ENTRY
+economics, and applies the symmetric EXIT aggregate only against an exact exit
+intent.  Independent legs therefore converge once to one valid aggregate
+without double counting or inventing economic closure.  Second, heartbeat
+control imported SDK transport internals directly.  The venue adapter now owns
+the dedicated HTTP client swap and request-error cause preservation; control
+owns only timeout policy, delegation, and telemetry.
+
+The pre-SDK admission audit also found that constructing a connection-backed
+`CollateralLedger` after `BEGIN IMMEDIATE` ran schema `executescript()` and
+implicitly committed the command/envelope/events before the reservation CAS.
+A later collateral rejection could therefore leave a durable `SUBMITTING`
+command despite the claimed rollback.  ENTRY now uses the DDL-free
+`buy_preflight_in_transaction()` read path under the existing writer lock; a
+pre-side-effect failure rolls back command, event, envelope, and reservation as
+one unit.  The antibody traces SQL inside the open transaction and rejects any
+DDL or COMMIT.
+
+NC-18 additionally found three direct command-journal mutations outside the
+declared `venue_command_repo` writer: recovery of an already-existing EXIT
+order, absorption of an operator-confirmed external close, and mixed-token
+ENTRY command rehoming.  These are observation/repair facts, not new Zeus
+submits.  They move behind three narrow typed repo helpers.  Recovered order
+adoption and external-close absorption use explicit creation-only command
+events rather than fabricated `SUBMIT_*` history; mixed-token rehome performs
+command and execution-fact compare-and-swap in one nested savepoint.  No schema
+or migration is introduced, normal command transitions remain closed, and the
+AST ownership gate is not weakened.
+
+Recovered partial EXIT adoption also exposed a liveness/accounting defect.
+Recovery reduced the local holding to the first observed exchange residual but
+did not append per-leg partial-exit economics.  Later authenticated fills lacked
+an exact full-close intent, so reconcile and pending-exit monitoring correctly
+refused to invent closure but left the position, realized PnL, and capital
+release stranded.  The repair keeps one immutable pre-recovery holding/cost
+baseline, folds each authenticated `(command_id, trade_id)` exactly once through
+the existing partial-exit economic cursor, and projects only delta
+shares/cost/PnL.  It never emits `EXIT_ORDER_FILLED` without exact full intent.
+A sub-minimum residual remains its true size/cost and opens an idempotent typed
+`ReviewWorkItem`; later executable residual truth or settlement resolves it.
+
+SCOPE is respectively one selected command envelope, one command's authenticated
+trade aggregate, the heartbeat transport instance, one recovered venue order,
+one deterministic external-close command, or one mixed-token source/target
+command pair.  Recovered partial-exit economics are scoped to one
+`command_id + position_id`; they never create a family/global entry latch.
+DRAIN is the next normal JIT auction, authenticated trade-leg reconciliation/recovery
+sweep, heartbeat installation attempt, or exact repair retry.  RESET is a fresh
+coherent submit witness, a newly observed canonical aggregate, a successfully
+delegated adapter transport, an atomic adoption/absorption commit, or a complete
+two-row rehome CAS.  A per-leg cursor makes replay a no-op; a tradable residual
+returns to ordinary redecision, while dust resolves on later executable truth
+or settlement.  A failed proof leaves only that command/order/repair
+unresolved; it does not block unrelated families, held monitoring, or CASH/HOLD.
+
+Acceptance requires mirrored maker/taker envelope and adapter antibodies,
+zero-command/zero-network rejection on any missing submit proof, full
+entry/exit late-leg convergence without double projection, SDK-import
+confinement, creation-event grammar and idempotency tests, transaction rollback
+for every partial repair failure, the NC-18 direct-mutation scan, the complete
+affected test files, semantic money-path classification, and exact-head CI.
+Allowed implementation/evidence surfaces are
+`src/contracts/venue_submission_envelope.py`, `src/execution/executor.py`,
+`src/venue/polymarket_v2_adapter.py`, `src/control/heartbeat_supervisor.py`,
+`src/execution/exchange_reconcile.py`, `src/execution/command_recovery.py`,
+`src/execution/command_bus.py`, `src/state/venue_command_repo.py`, their scoped
+router/reference/registry entries, `tests/test_unknown_side_effect.py`,
+`tests/test_v2_adapter.py`, `tests/test_heartbeat_supervisor.py`,
+`tests/test_executor_command_split.py`, `tests/test_exchange_reconcile.py`,
+`tests/test_command_recovery.py`, `tests/test_venue_command_repo.py`,
+`tests/test_command_bus_types.py`, `tests/test_command_grammar_amendment.py`,
+`src/state/collateral_ledger.py`, `tests/test_collateral_ledger.py`,
+`architecture/negative_constraints.yaml`, `architecture/invariants.yaml`, and
+their Semgrep/forbidden-pattern companions.  Recovered partial-exit convergence
+also requires `src/contracts/review_work_item.py`,
+`src/state/review_work_items.py`, the existing partial-economics/cursor seams,
+and focused exchange-reconcile/command-recovery antibodies proving per-leg PnL,
+replay idempotency, dust review, and no fabricated full close.
+
 ## 2026-08-10 Exact-head temporal truth and required-CI closure
 
 The global-capital-auction exact head exposed two live-base defects while its
@@ -26,9 +125,10 @@ fixtures, not alternate runtime behavior.  EventStore fixtures create legal
 append-only parents (or explicitly enter the legacy migration shape), the
 reactor preemption test owns its monitor-debt authority instead of consulting a
 host DB, the market-snapshot fake returns the current capture result shape,
-and EDLI subprocess/bridge/source-shape tests use the running interpreter and
-current converged identities.  No runtime guard, source route, provider,
-settlement rule, execution gate, or workflow is weakened.
+Day0 live-order fixtures carry the current typed remaining-window probability
+authority, and EDLI subprocess/bridge/source-shape tests use the running
+interpreter and current converged identities.  No runtime guard, source route,
+provider, settlement rule, execution gate, or workflow is weakened.
 
 The exact-head audit also found a read-side certificate vocabulary split left
 behind by the single-live-semantics cutover: the compiler persists
@@ -47,9 +147,9 @@ unrelated families/events continue.  Acceptance requires
 the same-clock correction to retain the original source time and current fetch
 time, emit exactly once, EventStore to return one archive for one processing
 row despite projection triggers, append-only orphan guards to remain active,
-all thirteen initially visible required-job cases plus the full Reactor
-relationship suite to pass, and the exact PR head's required jobs to become
-green.
+all initially visible and semantic-classifier-selected required-job cases plus
+the full Reactor relationship suite to pass, and the exact PR head's required
+jobs to become green.
 
 Allowed files are
 `src/data/replacement_forecast_current_target_plan.py`,
@@ -59,6 +159,7 @@ Allowed files are
 `tests/events/test_day0_extreme_updated_trigger.py`,
 `tests/test_replacement_forecast_current_target_plan.py`,
 `tests/events/test_event_store_idempotency.py`, `tests/events/test_reactor.py`,
+`tests/events/test_live_order_aggregate.py`,
 `tests/test_market_scanner_provenance.py`,
 `tests/money_path/test_edli_bankroll_warm_cycle.py`,
 `tests/money_path/test_edli_durable_fill_bridge_scan.py`,
