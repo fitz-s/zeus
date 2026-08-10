@@ -5002,6 +5002,41 @@ def _below_snapshot_min_order_error(
     return f"executable_snapshot_gate: size {selected} is below snapshot min_order_size {min_order}"
 
 
+def _global_sell_partial_residual_min_order_error(
+    exit_intent: ExitIntent,
+    authority: GlobalSellExecutionAuthority,
+    snapshot_context: Mapping[str, object],
+) -> str:
+    """Reject a global partial SELL that strands fresh-snapshot dust."""
+
+    if exit_intent.close_position:
+        return ""
+    try:
+        held = Decimal(str(authority.jit_candidate.held_shares))
+        sold = Decimal(str(exit_intent.shares))
+    except (AttributeError, InvalidOperation, TypeError, ValueError):
+        return "global_sell_partial_residual_holding_unavailable"
+    if not held.is_finite() or not sold.is_finite() or held <= 0 or sold <= 0:
+        return "global_sell_partial_residual_holding_unavailable"
+    residual = held - sold
+    tolerance = Decimal("0.000001")
+    if abs(residual) <= tolerance:
+        return ""
+    if residual < 0:
+        return "global_sell_partial_residual_holding_mismatch"
+    min_order = _positive_decimal(
+        snapshot_context.get("executable_snapshot_min_order_size")
+    )
+    if min_order is None:
+        return "global_sell_partial_residual_snapshot_min_order_size_unavailable"
+    if residual < min_order - tolerance:
+        return (
+            "global_sell_partial_residual_below_snapshot_min_order_size: "
+            f"residual {residual} is below snapshot min_order_size {min_order}"
+        )
+    return ""
+
+
 def _latest_snapshot_min_order_dust_error(
     position: Position,
     *,
@@ -5508,6 +5543,17 @@ def _execute_live_exit(
                 authority_error,
             )
             return f"exit_blocked: {authority_error}"
+    if global_authorized and global_sell_authority is not None:
+        residual_error = _global_sell_partial_residual_min_order_error(
+            exit_intent,
+            global_sell_authority,
+            snapshot_context,
+        )
+        if residual_error:
+            # INV-47 SCOPE: this selected partial SELL only. DRAIN: the next
+            # global redecision binds current held shares and a fresh snapshot.
+            # RESET: a full close or residual meeting that snapshot's minimum.
+            return f"exit_blocked: {residual_error}"
 
     dust_error = _below_snapshot_min_order_error(
         position,

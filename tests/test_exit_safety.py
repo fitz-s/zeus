@@ -11221,6 +11221,168 @@ def test_live_global_sell_rejects_fak_for_maker_authority_before_snapshot_or_ven
     assert result == "exit_blocked: global_sell_execution_authority_invalid"
     assert position.exit_retry_count == 0
 
+
+@pytest.mark.parametrize(
+    ("held_shares", "planned_shares", "min_order_size", "close_position", "expected"),
+    (
+        ("20.999023", "9.33", "5", False, ""),
+        (
+            "15",
+            "10.17",
+            "5",
+            False,
+            "global_sell_partial_residual_below_snapshot_min_order_size",
+        ),
+        ("15", "10.17", "4", False, ""),
+        (
+            "15",
+            "10.17",
+            None,
+            False,
+            "global_sell_partial_residual_snapshot_min_order_size_unavailable",
+        ),
+        ("15", "15.0000000005", "5", True, ""),
+    ),
+)
+def test_global_sell_partial_residual_uses_fresh_snapshot_minimum(
+    held_shares,
+    planned_shares,
+    min_order_size,
+    close_position,
+    expected,
+):
+    from types import SimpleNamespace
+
+    from src.execution import exit_lifecycle
+
+    authority = SimpleNamespace(
+        jit_candidate=SimpleNamespace(held_shares=Decimal(held_shares))
+    )
+    intent = exit_lifecycle.ExitIntent(
+        trade_id="global-sell-residual",
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        token_id=YES_TOKEN,
+        shares=float(planned_shares),
+        current_market_price=0.50,
+        best_bid=0.50,
+        close_position=close_position,
+    )
+
+    error = exit_lifecycle._global_sell_partial_residual_min_order_error(
+        intent,
+        authority,
+        {"executable_snapshot_min_order_size": min_order_size},
+    )
+
+    if expected:
+        assert error.startswith(expected)
+    else:
+        assert error == ""
+
+
+def test_live_global_sell_partial_residual_does_not_reach_venue(conn, monkeypatch):
+    from types import SimpleNamespace
+
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    position = Position(
+        trade_id="chongqing-global-partial-residual",
+        market_id="condition-global-partial-residual",
+        condition_id="condition-global-partial-residual",
+        city="Chongqing",
+        cluster="China",
+        target_date="2026-08-10",
+        temperature_metric="high",
+        bin_label="35C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        state="holding",
+        chain_state="synced",
+        shares=15.0,
+        chain_shares=15.0,
+        cost_basis_usd=9.0,
+        env="live",
+    )
+    intent = exit_lifecycle.ExitIntent(
+        trade_id=position.trade_id,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        token_id=YES_TOKEN,
+        shares=10.17,
+        current_market_price=0.50,
+        best_bid=0.50,
+        exact_limit_price=0.50,
+        submit_order_type="GTC",
+        close_position=False,
+    )
+    authority = SimpleNamespace(
+        jit_candidate=SimpleNamespace(
+            execution_mode="MAKER_REST",
+            held_shares=Decimal("15"),
+            book_captured_at_utc=_NOW,
+            executable_sell_curve=SimpleNamespace(book_hash="fresh-chongqing-book"),
+        )
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_global_sell_execution_authority_shape_error",
+        lambda _authority: None,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_global_sell_receipt_closure_error",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_record_exit_intent_before_execution_gates",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *_args, **_kwargs: {
+            "executable_snapshot_id": "fresh-chongqing-snapshot",
+            "executable_snapshot_min_order_size": "5",
+        },
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_global_sell_capital_certificate_error",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "place_sell_order",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("dust residual must not reach the venue")
+        ),
+    )
+
+    result = exit_lifecycle._execute_live_exit(
+        PortfolioState(positions=[position]),
+        position,
+        ExitContext(
+            exit_reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+            current_market_price=0.50,
+            current_market_price_is_fresh=True,
+            best_bid=0.50,
+        ),
+        intent,
+        object(),
+        conn=conn,
+        execution_evidence=exit_lifecycle.ExitExecutionEvidence(),
+        is_red_force_exit=False,
+        global_sell_authority=authority,
+        hard_fact_authority=None,
+    )
+
+    assert result.startswith(
+        "exit_blocked: global_sell_partial_residual_below_snapshot_min_order_size"
+    )
+
+
 def test_no_bid_retry_waits_for_fresh_positive_bid_before_release(conn):
     from src.engine.lifecycle_events import build_position_current_projection
     from src.execution.exit_lifecycle import check_pending_retries
