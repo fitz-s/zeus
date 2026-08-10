@@ -3508,11 +3508,15 @@ _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS = frozenset(
 # propose a SELL, but only the global auction carries current depth, fees,
 # correlated endowment, and capital ranking. Statistical authority is therefore
 # the default, not an allowlist: a new trigger must not fall through to a local
-# submit that the execution boundary will reject. RED and recomputed absorbing
-# Day0 facts are the only direct reduce-only authorities.
+# submit that the execution boundary will reject. RED, recomputed absorbing
+# Day0 facts, and an exact zero-support posterior are the only direct
+# reduce-only authorities. The last case is statistical in provenance but
+# deterministic in action: positive cash strictly dominates a zero-payoff token
+# in every represented branch.
 _DIRECT_REDUCE_ONLY_SELL_TRIGGERS = (
     "RED_FORCE_EXIT",
     "DAY0_HARD_FACT_BIN_DEAD",
+    "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
 )
 
 _FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_USD = 0.05
@@ -3834,6 +3838,33 @@ def _global_auction_owns_statistical_sell(exit_decision, exit_reason: str) -> bo
         getattr(exit_decision, "trigger", "") or exit_reason or ""
     ).strip()
     return trigger not in _DIRECT_REDUCE_ONLY_SELL_TRIGGERS
+
+
+def _posterior_support_zero_sell_dominates(pos, exit_context) -> bool:
+    """Return whether legal SELL proceeds dominate HOLD in every current draw."""
+
+    if not (
+        bool(getattr(exit_context, "fresh_prob_is_fresh", False))
+        and bool(getattr(exit_context, "current_market_price_is_fresh", False))
+    ):
+        return False
+    fresh_prob = _finite_float_or_none(getattr(exit_context, "fresh_prob", None))
+    best_bid = _finite_float_or_none(getattr(exit_context, "best_bid", None))
+    if fresh_prob is None or fresh_prob > 1e-12:
+        return False
+    if best_bid is None or not 0.05 <= best_bid <= 0.95:
+        return False
+    raw_samples = getattr(pos, "_current_global_held_probability_samples", None)
+    if raw_samples is None:
+        return False
+    try:
+        samples = tuple(float(value) for value in raw_samples)
+    except (TypeError, ValueError):
+        return False
+    return bool(samples) and all(
+        math.isfinite(value) and 0.0 <= value <= 1e-12
+        for value in samples
+    )
 
 
 def _apply_family_monitor_overlay(
@@ -7587,8 +7618,29 @@ def execute_monitoring_phase(
             # with exact terminal value zero, so it must not wait behind the
             # full-universe auction.
             local_exit_trigger = _effective_exit_trigger(exit_decision, exit_reason)
+            posterior_support_zero_direct_sell = (
+                should_exit
+                and local_exit_trigger == "SELL_REVERSAL"
+                and _posterior_support_zero_sell_dominates(pos, exit_context)
+            )
+            if posterior_support_zero_direct_sell:
+                exit_reason = "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+                local_exit_trigger = exit_reason
+                pos.applied_validations = list(
+                    dict.fromkeys(
+                        [
+                            *(pos.applied_validations or []),
+                            "posterior_support_zero_sell_dominates",
+                            "global_auction_comparison_inapplicable:branchwise_dominance",
+                        ]
+                    )
+                )
+                summary["monitor_branchwise_dominant_direct_sells"] = (
+                    summary.get("monitor_branchwise_dominant_direct_sells", 0) + 1
+                )
             statistical_sell_requires_global = (
                 should_exit
+                and not posterior_support_zero_direct_sell
                 and _global_auction_owns_statistical_sell(
                     exit_decision,
                     exit_reason,
@@ -7719,9 +7771,7 @@ def execute_monitoring_phase(
                 ),
             )
             if (
-                should_exit
-                and local_exit_trigger != "RED_FORCE_EXIT"
-                and local_exit_trigger != "DAY0_HARD_FACT_BIN_DEAD"
+                statistical_sell_requires_global
                 and getattr(pos, _GLOBAL_MONITOR_SAMPLES_ATTR, None) is not None
             ):
                 if probability_content_identity:
@@ -7762,12 +7812,7 @@ def execute_monitoring_phase(
                     # monitor decision or canonical payload.
                     if coverage_result is not None:
                         global_holding_coverage = coverage_result
-            if (
-                should_exit
-                and local_exit_trigger != "RED_FORCE_EXIT"
-                and local_exit_trigger != "DAY0_HARD_FACT_BIN_DEAD"
-                and global_holding_coverage.covered
-            ):
+            if statistical_sell_requires_global and global_holding_coverage.covered:
                 coverage = global_holding_coverage.coverage
                 coverage_receipt_id = global_holding_coverage.decision_log_id
                 assert coverage is not None and coverage_receipt_id is not None

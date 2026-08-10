@@ -6328,7 +6328,7 @@ def test_pending_exit_backoff_exhausted_reenters_redecision_when_still_held(monk
         ("RED_FORCE_EXIT", True, True, "direct", False, False),
         ("DAY0_HARD_FACT_BIN_DEAD", True, True, "direct", False, False),
         ("EDGE_REVERSAL", False, True, "blocked", True, False),
-        ("SELL_REVERSAL", False, True, "blocked", False, True),
+        ("SELL_REVERSAL", False, True, "direct", False, True),
         ("EDGE_REVERSAL", False, True, "dust", False, False),
     ),
 )
@@ -6804,12 +6804,54 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         ) == 0
         assert summary["exits"] == 1
         assert results[0].should_exit is True
-        assert results[0].exit_reason == trigger
+        assert results[0].exit_reason == (
+            "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
+            if posterior_support_zero
+            else trigger
+        )
+        if posterior_support_zero:
+            assert summary["monitor_branchwise_dominant_direct_sells"] == 1
+            assert "posterior_support_zero_sell_dominates" in (
+                pos.applied_validations
+            )
         assert execute_calls == [pos]
     if outcome not in {"blocked", "request_failed", "dust"}:
         assert auction_completion_requests == []
     assert invalidations == ([] if outcome != "direct" else ["venue_side_effect"])
     conn.close()
+
+
+@pytest.mark.parametrize(
+    ("samples", "fresh_prob", "best_bid", "fresh", "expected"),
+    (
+        ((0.0, 0.0), 0.0, 0.05, True, True),
+        ((0.0, 1e-6), 5e-7, 0.05, True, False),
+        ((0.0, 0.0), 0.0, 0.049, True, False),
+        ((0.0, 0.0), 0.0, 0.05, False, False),
+        ((), 0.0, 0.05, True, False),
+    ),
+)
+def test_branchwise_dominant_sell_requires_zero_support_and_legal_fresh_bid(
+    samples,
+    fresh_prob,
+    best_bid,
+    fresh,
+    expected,
+):
+    from src.engine import cycle_runtime
+
+    pos = SimpleNamespace(_current_global_held_probability_samples=samples)
+    context = SimpleNamespace(
+        fresh_prob=fresh_prob,
+        fresh_prob_is_fresh=fresh,
+        current_market_price_is_fresh=fresh,
+        best_bid=best_bid,
+    )
+
+    assert (
+        cycle_runtime._posterior_support_zero_sell_dominates(pos, context)
+        is expected
+    )
 
 
 def test_held_monitor_quote_preserves_current_book_min_order_size():
