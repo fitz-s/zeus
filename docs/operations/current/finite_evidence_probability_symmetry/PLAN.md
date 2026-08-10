@@ -4,6 +4,26 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-10 Current maker witness survives global-to-JIT handoff
+
+Production repeatedly selected one positive posterior-mean global BUY while the
+winner preflight rejected all 21 reconstructed family proofs as
+`CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE`.  The global auction can select
+`MAKER_REST` only with a typed, current `CurrentMakerFillWitness`, but the JIT
+family proof builder intentionally has no local maker authority and the existing
+selected-proof rebind covers only `TAKER_LIMIT`.  The same valid global maker
+authority is therefore lost between selection and preflight.
+
+The repair binds only the exact selected BUY proof when the sealed candidate is
+`MAKER_REST` and the solver's complete maker-witness validator succeeds at the
+JIT decision time.  It copies the witnessed limit, fill probability, source,
+and deadline into that proof; absent, mismatched, or expired witnesses remain
+blocked.  Taker, SELL, siblings, and unwitnessed maker behavior are unchanged.
+Acceptance requires an antibody proving both the valid handoff and fail-closed
+invalid-witness twin, the focused integration slice, planning lock, and a live
+receipt showing the old all-candidate maker-witness rejection has disappeared
+without any maker submit lacking typed authority.
+
 ## 2026-08-10 Deploy restart guard reset without entry-queue circularity
 
 The invocation-scoped deploy guard pauses new entries while the replacement

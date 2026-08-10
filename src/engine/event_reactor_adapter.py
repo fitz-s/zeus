@@ -14897,6 +14897,7 @@ def _global_actuation_current_admission_proofs(
     prepared_global_family: object,
     family: object,
     day0_payload: Mapping[str, object] | None = None,
+    decision_time: datetime | None = None,
 ) -> tuple["_CandidateProof", ...]:
     """Rebind only the selected proof to its sealed current global authority."""
 
@@ -14917,7 +14918,7 @@ def _global_actuation_current_admission_proofs(
     if (
         not cap_rows
         and not day0_payload
-        and global_execution_mode != "TAKER_LIMIT"
+        and global_execution_mode not in {"TAKER_LIMIT", "MAKER_REST"}
     ):
         return proofs
     side = str(getattr(candidate, "side", "") or "").strip().upper()
@@ -14969,6 +14970,52 @@ def _global_actuation_current_admission_proofs(
             rest_then_cross_policy="GLOBAL_TAKER_LIMIT",
             taker_forbidden_reason=None,
             p_fill_lcb=1.0,
+            missing_reason=None,
+        )
+    elif (
+        global_execution_mode == "MAKER_REST"
+        and str(getattr(selected, "execution_mode_intent", "") or "")
+        .strip()
+        .upper()
+        == "MAKER"
+        and str(getattr(selected, "missing_reason", "") or "").strip()
+        == _CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+        and decision_time is not None
+    ):
+        # Local family reconstruction deliberately owns no maker-fill model, so
+        # it marks every local MAKER proof unavailable.  A globally selected
+        # MAKER_REST candidate is different: it carries the typed witness that
+        # won the complete BUY/SELL/HOLD/CASH comparison.  Preserve that exact
+        # authority across the JIT handoff, but only after re-running the
+        # solver's full binding/book/limit/deadline/temporal validator now.
+        from src.solve.solver import _maker_witness_rejection
+
+        maker_rejection = _maker_witness_rejection(
+            candidate,
+            decision_at_utc=decision_time,
+        )
+        if maker_rejection is not None:
+            raise ValueError(
+                "GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"
+                f"{maker_rejection}"
+            )
+        proposal = getattr(candidate, "economic_cost_curve", None)
+        levels = tuple(getattr(proposal, "levels", ()) or ())
+        if len(levels) != 1:
+            raise ValueError(
+                "GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"
+                "CURRENT_MAKER_PROPOSAL_INVALID"
+            )
+        selected = dataclass_replace(
+            selected,
+            execution_mode_intent="MAKER",
+            rest_then_cross_policy="REST_DEFAULT",
+            maker_limit_price=float(levels[0].price),
+            maker_fill_probability=float(candidate.fill_probability),
+            maker_fill_probability_source=str(candidate.fill_probability_source),
+            rest_escalation_deadline_minutes=float(candidate.rest_deadline_minutes),
+            taker_forbidden_reason=None,
+            p_fill_lcb=float(candidate.fill_probability),
             missing_reason=None,
         )
     current_q_source = ""
@@ -15798,15 +15845,21 @@ def _build_event_bound_no_submit_receipt_core(
                 prepared_global_family=current_actuation_family,
                 family=family,
                 day0_payload=current_actuation_day0_payload,
+                decision_time=decision_time,
             )
         except ValueError as exc:
+            reason = str(exc)
             return EventSubmissionReceipt(
                 False,
                 event.event_id,
                 event.causal_snapshot_id,
                 reason=(
-                    "GLOBAL_ACTUATION_CURRENT_ADMISSION_REBIND_FAILED:"
-                    f"{exc}"
+                    reason
+                    if reason.startswith("GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:")
+                    else (
+                        "GLOBAL_ACTUATION_CURRENT_ADMISSION_REBIND_FAILED:"
+                        f"{reason}"
+                    )
                 ),
                 city=family.city,
                 target_date=family.target_date,

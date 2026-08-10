@@ -16694,7 +16694,7 @@ def test_global_taker_winner_rebinds_local_maker_rejection_without_witness_bypas
         enforce_win_rate_floor=False,
     ) == rebound
 
-    maker = era._global_actuation_current_admission_proofs(
+    maker_without_current_authority = era._global_actuation_current_admission_proofs(
         proofs=(proof,),
         global_actuation=SimpleNamespace(
             decision=SimpleNamespace(candidate=selected_candidate("MAKER_REST"))
@@ -16702,8 +16702,113 @@ def test_global_taker_winner_rebinds_local_maker_rejection_without_witness_bypas
         prepared_global_family=prepared,
         family=family,
     )
-    assert maker == (proof,)
-    assert maker[0].missing_reason == era._CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+    assert maker_without_current_authority == (proof,)
+    assert maker_without_current_authority[0].missing_reason == (
+        era._CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+    )
+
+    decision_time = _dt.datetime(2026, 8, 10, 18, 30, tzinfo=_dt.timezone.utc)
+    proposal = ExecutableCostCurve(
+        token_id=binding.yes_token_id,
+        side="YES",
+        snapshot_id="maker-book-current",
+        book_hash="maker-book-hash-current",
+        levels=(BookLevel(price=Decimal("0.14"), size=Decimal("100")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    asset_epoch_identity = "maker-asset-epoch-current"
+    ledger_snapshot_id = "maker-ledger-current"
+    binding_identity = maker_fill_candidate_binding_identity(
+        action="BUY",
+        family_key=witness.family_key,
+        bin_id=binding.bin_id,
+        condition_id=binding.condition_id,
+        side="YES",
+        token_id=binding.yes_token_id,
+        ledger_snapshot_id=ledger_snapshot_id,
+        position_id=None,
+        held_shares=None,
+        asset_epoch_identity=asset_epoch_identity,
+        proposal_identity=executable_curve_identity(proposal),
+    )
+    outcomes = (
+        MakerFillOutcome(Decimal("0.25"), Decimal("1"), Decimal("-0.14")),
+        MakerFillOutcome(Decimal("0.75"), Decimal("0"), Decimal("0")),
+    )
+    witness_fields = {
+        "candidate_binding_identity": binding_identity,
+        "asset_epoch_identity": asset_epoch_identity,
+        "book_snapshot_id": proposal.snapshot_id,
+        "book_hash": proposal.book_hash,
+        "limit_price": proposal.levels[0].price,
+        "rest_deadline_minutes": 20.0,
+        "source_identity": "maker-source-current",
+        "model_identity": "maker-model-current",
+        "sample_identity": "maker-sample-current",
+        "training_cutoff_at_utc": decision_time - _dt.timedelta(hours=2),
+        "issued_at_utc": decision_time - _dt.timedelta(minutes=1),
+        "valid_until_at_utc": decision_time + _dt.timedelta(minutes=1),
+        "outcomes": outcomes,
+    }
+    maker_witness = CurrentMakerFillWitness(
+        witness_identity=current_maker_fill_witness_identity(**witness_fields),
+        **witness_fields,
+    )
+    current_maker_candidate = SimpleNamespace(
+        **vars(selected_candidate("MAKER_REST")),
+        ledger_snapshot_id=ledger_snapshot_id,
+        economic_cost_curve=proposal,
+        maker_fill_witness=maker_witness,
+        asset_epoch_identity=asset_epoch_identity,
+        fill_probability=0.25,
+        fill_probability_source=maker_witness.witness_identity,
+        rest_deadline_minutes=20.0,
+    )
+    maker = era._global_actuation_current_admission_proofs(
+        proofs=(proof,),
+        global_actuation=SimpleNamespace(
+            decision=SimpleNamespace(candidate=current_maker_candidate)
+        ),
+        prepared_global_family=prepared,
+        family=family,
+        decision_time=decision_time,
+    )
+    assert maker[0].missing_reason is None
+    assert maker[0].execution_mode_intent == "MAKER"
+    assert maker[0].maker_limit_price == pytest.approx(0.14)
+    assert maker[0].maker_fill_probability == pytest.approx(0.25)
+    assert maker[0].maker_fill_probability_source == maker_witness.witness_identity
+    assert maker[0].rest_escalation_deadline_minutes == pytest.approx(20.0)
+    assert era._selection_scoped_proofs(
+        proofs=maker,
+        honor_admission_rejections=False,
+        allow_global_current_state_rebind=True,
+        enforce_win_rate_floor=False,
+    ) == maker
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"
+            "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
+        ),
+    ):
+        era._global_actuation_current_admission_proofs(
+            proofs=(proof,),
+            global_actuation=SimpleNamespace(
+                decision=SimpleNamespace(candidate=selected_candidate("MAKER_REST"))
+            ),
+            prepared_global_family=prepared,
+            family=family,
+            decision_time=decision_time,
+        )
+    assert era._global_preflight_block_status(
+        "GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"
+        "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
+    ) == "CANDIDATE_BLOCKED"
 
     sell = era._global_actuation_current_admission_proofs(
         proofs=(proof,),
