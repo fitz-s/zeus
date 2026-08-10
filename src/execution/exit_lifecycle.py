@@ -1127,6 +1127,159 @@ def _relinquished_global_sell_command_id(
     obligation = latest_held_sell_reauction_obligation(conn, position)
     if obligation.get("schema_version") != 4:
         return ""
+    residual = obligation.get("residual_proof")
+    if isinstance(residual, dict):
+        residual_command_id = str(residual.get("command_id") or "").strip()
+        try:
+            residual_row = conn.execute(
+                """
+                SELECT command_id, caused_by, venue_status, source_module,
+                       payload_json
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND event_type = 'EXIT_RETRY_RELEASED'
+                   AND command_id = ?
+                   AND source_module = 'src.execution.command_recovery'
+                 ORDER BY sequence_no DESC, datetime(occurred_at) DESC
+                 LIMIT 1
+                """,
+                (position_id, residual_command_id),
+            ).fetchone()
+            residual_payload = (
+                json.loads(str(residual_row[4] or "{}"))
+                if residual_row is not None
+                else {}
+            )
+        except (sqlite3.Error, TypeError, json.JSONDecodeError):
+            return ""
+        released_obligation = (
+            residual_payload.get("held_sell_reauction_obligation")
+            if isinstance(residual_payload, dict)
+            else None
+        )
+        if (
+            residual_row is None
+            or not residual_command_id
+            or not isinstance(released_obligation, dict)
+            or released_obligation.get("residual_proof") != residual
+            or str(residual_row[1] or "")
+            != f"venue_command:{residual_command_id}"
+        ):
+            return ""
+        proof_class = str(residual_payload.get("proof_class") or "")
+        obligation_token_id = str(obligation.get("held_token_id") or "").strip()
+        if (
+            proof_class
+            not in {
+                "post_fill_chain_confirmed_positive_remainder",
+                "cancel_pending_partial_exit_authenticated_remainder",
+                "terminal_positive_exit_order_fact",
+            }
+            or obligation_token_id != held_token_id
+            or str(residual.get("command_token_id") or "").strip()
+            != obligation_token_id
+            or not str(residual_payload.get("command_state") or "").strip()
+            or not _is_exact_held_sell_command(
+                conn,
+                position_id=position_id,
+                command_id=residual_command_id,
+                held_token_id=obligation_token_id,
+                expected_state=str(residual_payload.get("command_state") or ""),
+            )
+        ):
+            return ""
+        try:
+            from src.execution.command_recovery import _canonical_order_truth_cte
+
+            truth = conn.execute(
+                "WITH "
+                + _canonical_order_truth_cte()
+                + """
+                SELECT cmd.token_id, cmd.state, cmd.size,
+                       fact.fact_id, fact.state, fact.matched_size,
+                       fact.remaining_size,
+                       CASE WHEN LOWER(COALESCE(pc.direction, '')) = 'buy_no'
+                            THEN pc.no_token_id ELSE pc.token_id END,
+                       pc.shares, pc.chain_shares, pc.chain_state
+                  FROM venue_commands cmd
+                  JOIN canonical_order_truth fact
+                    ON fact.command_id = cmd.command_id
+                   AND fact.venue_order_id = cmd.venue_order_id
+                  JOIN position_current pc
+                    ON pc.position_id = cmd.position_id
+                 WHERE cmd.position_id = ? AND cmd.command_id = ?
+                 LIMIT 1
+                """,
+                (position_id, residual_command_id),
+            ).fetchone()
+            command_size = Decimal(str(truth[2]))
+            matched_size = Decimal(str(truth[5]))
+            remaining_size = Decimal(str(truth[6]))
+            current_shares = Decimal(str(truth[8]))
+            current_chain_shares = Decimal(str(truth[9]))
+            proof_matched_size = Decimal(str(residual.get("matched_size")))
+            proof_remaining_size = Decimal(
+                str(residual.get("order_remaining_size"))
+            )
+            proof_residual_shares = Decimal(str(residual.get("residual_shares")))
+        except (
+            AttributeError,
+            InvalidOperation,
+            sqlite3.Error,
+            TypeError,
+            ValueError,
+        ):
+            return ""
+        exact_tolerance = Decimal("0.000000001")
+        share_tolerance = Decimal("0.011")
+        command_state = str(truth[1] or "").upper()
+        order_fact_state = str(truth[4] or "").upper()
+        proof_shape_valid = (
+            proof_class == "post_fill_chain_confirmed_positive_remainder"
+            and command_state == "FILLED"
+            and order_fact_state == "MATCHED"
+            and command_size > 0
+            and abs(command_size - matched_size) <= exact_tolerance
+            and abs(remaining_size) <= exact_tolerance
+        ) or (
+            proof_class == "cancel_pending_partial_exit_authenticated_remainder"
+            and command_state == "CANCELLED"
+            and order_fact_state == "PARTIALLY_MATCHED"
+            and command_size > matched_size > 0
+            and abs(remaining_size) <= exact_tolerance
+            and abs(
+                current_chain_shares - (command_size - matched_size)
+            ) <= exact_tolerance
+        ) or (
+            proof_class == "terminal_positive_exit_order_fact"
+            and command_state in {"CANCELLED", "EXPIRED"}
+            and order_fact_state in {
+                "CANCEL_CONFIRMED",
+                "EXPIRED",
+                "VENUE_WIPED",
+            }
+            and command_size >= matched_size > 0
+        )
+        if (
+            truth is None
+            or str(truth[0] or "").strip() != obligation_token_id
+            or command_state
+            != str(residual_payload.get("command_state") or "").upper()
+            or str(truth[3] or "") != str(residual.get("order_fact_id") or "")
+            or order_fact_state
+            != str(residual.get("order_fact_state") or "").upper()
+            or str(truth[7] or "").strip() != obligation_token_id
+            or str(truth[10] or "").lower() != "synced"
+            or not proof_shape_valid
+            or abs(matched_size - proof_matched_size) > exact_tolerance
+            or abs(remaining_size - proof_remaining_size) > exact_tolerance
+            or current_chain_shares <= 0
+            or abs(current_shares - current_chain_shares) > share_tolerance
+            or abs(current_chain_shares - proof_residual_shares) > share_tolerance
+        ):
+            return ""
+        return residual_command_id
+
     try:
         row = conn.execute(
             """
@@ -1194,31 +1347,7 @@ def _relinquished_global_sell_command_id(
             return ""
         return command_id
 
-    residual = obligation.get("residual_proof")
-    if not isinstance(residual, dict):
-        return ""
-    if str(residual.get("command_id") or "").strip() != command_id:
-        return ""
-    if (
-        str(residual.get("command_token_id") or "").strip()
-        != obligation_token_id
-        or not str(payload.get("command_state") or "").strip()
-        or not _is_exact_held_sell_command(
-            conn,
-            position_id=position_id,
-            command_id=command_id,
-            held_token_id=obligation_token_id,
-            expected_state=str(payload.get("command_state") or ""),
-        )
-    ):
-        return ""
-    if proof_class not in {
-        "post_fill_chain_confirmed_positive_remainder",
-        "cancel_pending_partial_exit_authenticated_remainder",
-        "terminal_positive_exit_order_fact",
-    }:
-        return ""
-    return command_id
+    return ""
 
 
 def has_global_sell_snapshot_reauction_retry(
