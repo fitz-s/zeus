@@ -14906,7 +14906,19 @@ def _global_actuation_current_admission_proofs(
     cap_rows = tuple(
         getattr(prepared_global_family, "candidate_payoff_q_lcb_caps", ()) or ()
     )
-    if candidate is None or witness is None or (not cap_rows and not day0_payload):
+    if candidate is None or witness is None:
+        return proofs
+    global_action = str(getattr(candidate, "action", "BUY") or "BUY").strip().upper()
+    if global_action != "BUY":
+        return proofs
+    global_execution_mode = str(
+        getattr(candidate, "execution_mode", "") or ""
+    ).strip().upper()
+    if (
+        not cap_rows
+        and not day0_payload
+        and global_execution_mode != "TAKER_LIMIT"
+    ):
         return proofs
     side = str(getattr(candidate, "side", "") or "").strip().upper()
     direction = {"YES": "buy_yes", "NO": "buy_no"}.get(side)
@@ -14937,6 +14949,28 @@ def _global_actuation_current_admission_proofs(
         raise ValueError("GLOBAL_ACTUATION_CURRENT_ADMISSION_PROOF_MISSING")
     selected_proof = matches[0]
     selected = selected_proof
+    if (
+        global_execution_mode == "TAKER_LIMIT"
+        and str(getattr(selected, "execution_mode_intent", "") or "")
+        .strip()
+        .upper()
+        == "MAKER"
+        and str(getattr(selected, "missing_reason", "") or "").strip()
+        == _CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+    ):
+        # The complete global cut ranked this exact candidate as an immediate
+        # taker. Local proof reconstruction may independently prefer MAKER and
+        # attach the maker-witness wall before it sees that sealed decision. Bind
+        # only the exact selected TAKER_LIMIT mode here; a MAKER_REST winner still
+        # requires its typed CurrentMakerFillWitness and remains fail closed.
+        selected = dataclass_replace(
+            selected,
+            execution_mode_intent="TAKER",
+            rest_then_cross_policy="GLOBAL_TAKER_LIMIT",
+            taker_forbidden_reason=None,
+            p_fill_lcb=1.0,
+            missing_reason=None,
+        )
     current_q_source = ""
     current_probability_authority = ""
     if day0_payload:

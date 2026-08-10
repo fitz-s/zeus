@@ -16635,6 +16635,89 @@ def test_global_actuation_rebinds_day0_probability_type_without_cap_rows():
     assert rebound[1] is sibling
 
 
+def test_global_taker_winner_rebinds_local_maker_rejection_without_witness_bypass():
+    witness = _current_global_book_probability()
+    family, proofs, _ = _corpus()[0]
+    binding = witness.bindings[0]
+    proof = next(
+        row
+        for row in proofs
+        if str(row.candidate.condition_id) == binding.condition_id
+        and row.direction == "buy_yes"
+    )
+    proof = replace(
+        proof,
+        execution_mode_intent="MAKER",
+        rest_then_cross_policy="REST_DEFAULT",
+        p_fill_lcb=0.2,
+        trade_score=0.0,
+        passed_prefilter=False,
+        missing_reason=era._CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE,
+    )
+
+    def selected_candidate(execution_mode, *, action="BUY"):
+        return SimpleNamespace(
+            candidate_id="selected-yes",
+            family_key=witness.family_key,
+            bin_id=binding.bin_id,
+            condition_id=binding.condition_id,
+            side="YES",
+            token_id=binding.yes_token_id,
+            probability_witness_identity=witness.witness_identity,
+            execution_mode=execution_mode,
+            action=action,
+        )
+
+    prepared = bridge.PreparedGlobalFamily(
+        decision_id="current-global-taker",
+        probability_witness=witness,
+        candidate_seeds=(),
+        candidate_payoff_q_lcb_caps=(),
+    )
+    rebound = era._global_actuation_current_admission_proofs(
+        proofs=(proof,),
+        global_actuation=SimpleNamespace(
+            decision=SimpleNamespace(candidate=selected_candidate("TAKER_LIMIT"))
+        ),
+        prepared_global_family=prepared,
+        family=family,
+    )
+
+    assert rebound[0].missing_reason is None
+    assert rebound[0].execution_mode_intent == "TAKER"
+    assert rebound[0].rest_then_cross_policy == "GLOBAL_TAKER_LIMIT"
+    assert rebound[0].p_fill_lcb == pytest.approx(1.0)
+    assert era._selection_scoped_proofs(
+        proofs=rebound,
+        honor_admission_rejections=False,
+        allow_global_current_state_rebind=True,
+        enforce_win_rate_floor=False,
+    ) == rebound
+
+    maker = era._global_actuation_current_admission_proofs(
+        proofs=(proof,),
+        global_actuation=SimpleNamespace(
+            decision=SimpleNamespace(candidate=selected_candidate("MAKER_REST"))
+        ),
+        prepared_global_family=prepared,
+        family=family,
+    )
+    assert maker == (proof,)
+    assert maker[0].missing_reason == era._CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+
+    sell = era._global_actuation_current_admission_proofs(
+        proofs=(proof,),
+        global_actuation=SimpleNamespace(
+            decision=SimpleNamespace(
+                candidate=selected_candidate("TAKER_LIMIT", action="SELL")
+            )
+        ),
+        prepared_global_family=prepared,
+        family=family,
+    )
+    assert sell == (proof,)
+
+
 def test_global_current_buy_no_receipt_separates_action_and_point_parents():
     _family, proofs, _payload = _corpus()[0]
     proof = next(row for row in proofs if row.direction == "buy_no")
