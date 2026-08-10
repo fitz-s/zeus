@@ -544,10 +544,10 @@ def _causal_market_velocity_1h(
     *,
     token_id: str,
     current_price: float,
-    observed_at: str,
+    observed_at: str | None,
 ) -> float:
     """Return the held-token price change from the latest causal 1h baseline."""
-    if conn is None:
+    if conn is None or not observed_at:
         return 0.0
     try:
         as_of = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
@@ -6094,7 +6094,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             conn,
             token_id=tid,
             current_price=current_p_market,
-            observed_at=quote.source_timestamp,
+            observed_at=getattr(quote, "source_timestamp", None),
         )
 
     # Wrap into verified EdgeContext

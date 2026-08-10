@@ -18621,3 +18621,18 @@ def test_market_velocity_without_trade_db_is_non_authoritative():
         current_price=0.20,
         observed_at="2026-08-10T12:00:00+00:00",
     ) == 0.0
+
+
+def test_market_velocity_without_executable_quote_time_is_non_authoritative(tmp_path):
+    from src.engine.monitor_refresh import _causal_market_velocity_1h
+    from src.state.db import get_connection, init_schema
+
+    conn = get_connection(tmp_path / "closed-market-velocity.db")
+    init_schema(conn)
+
+    assert _causal_market_velocity_1h(
+        conn,
+        token_id="closed-held-token",
+        current_price=float("nan"),
+        observed_at=None,
+    ) == 0.0
