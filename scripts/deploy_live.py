@@ -1838,30 +1838,6 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
     preflight_prerequisite_labels = [
         label for label in non_live_labels if label not in post_live_labels
     ]
-    if includes_live_trading:
-        ok, detail = _stop_label(LIVE_TRADING_LABEL)
-        if ok:
-            print(detail)
-        else:
-            print(detail, file=sys.stderr)
-            return 1
-        for label in non_live_labels:
-            ok, detail = _stop_label(label)
-            if ok:
-                print(detail)
-            else:
-                print(detail, file=sys.stderr)
-                return 1
-
-    recovery_ok, recovery_detail = _run_restart_recovery_if_needed(labels)
-    if not recovery_ok:
-        print("REFUSING to restart — live restart recovery is not green:")
-        print(recovery_detail)
-        if includes_live_trading:
-            print("live-trading left stopped; fix restart recovery blockers before starting it.", file=sys.stderr)
-        return 1
-    print(recovery_detail)
-
     prerequisite_launch_started_at = datetime.now(timezone.utc)
     for label in preflight_prerequisite_labels:
         ok, detail = _launch_or_restart_label(label)
@@ -1888,11 +1864,39 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
             print("REFUSING to restart — live prerequisite code identity is not ready:")
             print(prerequisite_detail)
             print(
-                "live-trading left stopped; fix prerequisite daemon startup before starting it.",
+                "live-trading left running with entries paused; fix prerequisite daemon startup before retrying.",
                 file=sys.stderr,
             )
             return 1
         print(prerequisite_detail)
+
+        # Keep the currently loaded order daemon monitoring held capital while
+        # new-code prerequisites become ready.  Stopping it before sidecar
+        # reload/identity waits created multi-minute MONITOR_REFRESHED blackouts
+        # during which Day0 evidence and executable bids could both move.  The
+        # process-absent window starts only after every prerequisite is ready.
+        ok, detail = _stop_label(LIVE_TRADING_LABEL)
+        if ok:
+            print(detail)
+        else:
+            print(detail, file=sys.stderr)
+            return 1
+        for label in post_live_labels:
+            ok, detail = _stop_label(label)
+            if ok:
+                print(detail)
+            else:
+                print(detail, file=sys.stderr)
+                return 1
+
+    recovery_ok, recovery_detail = _run_restart_recovery_if_needed(labels)
+    if not recovery_ok:
+        print("REFUSING to restart — live restart recovery is not green:")
+        print(recovery_detail)
+        if includes_live_trading:
+            print("live-trading left stopped; fix restart recovery blockers before starting it.", file=sys.stderr)
+        return 1
+    print(recovery_detail)
 
     preflight_ok, preflight_detail = _run_restart_preflight_if_needed(labels)
     if not preflight_ok:
