@@ -31208,7 +31208,7 @@ _GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS = (
     "day0_deterministic_bin_payoff_v1"
 )
 _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
-    "current_coherent_day0_remaining_model_bootstrap_v3"
+    "current_coherent_day0_peak_state_remaining_model_bootstrap_v4"
 )
 _GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_BAND_BASIS = (
     "current_coherent_day0_conditioned_replacement_simplex_v1"
@@ -31220,6 +31220,156 @@ _GLOBAL_DAY0_ABSORBING_EXACT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
     "day0_absorbing_observation_exact_settlement_simplex_v1"
 )
 _GLOBAL_CURRENT_EVIDENCE_TAIL_ALPHA = 0.05
+_DAY0_PEAK_SET_MIN_EMPIRICAL_SAMPLES = 30
+_DAY0_PEAK_SET_PROBABILITY_BASIS = "monthly_empirical_jeffreys_v1"
+_DAY0_PEAK_SET_MIXTURE_BASIS = (
+    "peak_set_atom_plus_truncated_remaining_path_v1"
+)
+
+
+def _day0_empirical_peak_set_probability(
+    *,
+    temporal_context: object,
+    world_conn: sqlite3.Connection | None,
+    city: str,
+    month: int,
+) -> tuple[float, int, str] | None:
+    """Return a finite-evidence probability that today's HIGH is already set."""
+
+    source = str(
+        getattr(temporal_context, "confidence_source", "") or ""
+    ).strip()
+    if source != "monthly_empirical" or world_conn is None:
+        return None
+    local_hour = float(getattr(temporal_context, "current_local_hour", math.nan))
+    if not math.isfinite(local_hour):
+        return None
+    lower_hour = int(math.floor(local_hour))
+    upper_hour = int(math.ceil(local_hour))
+    hours = (lower_hour,) if lower_hour == upper_hour else (lower_hour, upper_hour)
+    placeholders = ",".join("?" for _ in hours)
+    try:
+        rows = world_conn.execute(
+            "SELECT hour, p_high_set, n_obs FROM diurnal_peak_prob "
+            "WHERE city = ? AND month = ? "
+            f"AND hour IN ({placeholders})",
+            (city, month, *hours),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    empirical_by_hour: dict[int, tuple[float, int]] = {}
+    for row in rows:
+        try:
+            row_hour = int(row[0])
+            probability = float(row[1])
+            sample_count = int(row[2])
+        except (IndexError, TypeError, ValueError):
+            continue
+        if sample_count > 0 and math.isfinite(probability) and 0.0 <= probability <= 1.0:
+            empirical_by_hour[row_hour] = (probability, sample_count)
+    if set(empirical_by_hour) != set(hours):
+        return None
+    sample_count = min(empirical_by_hour[hour][1] for hour in hours)
+    if sample_count < _DAY0_PEAK_SET_MIN_EMPIRICAL_SAMPLES:
+        return None
+    lower_probability = empirical_by_hour[lower_hour][0]
+    if upper_hour == lower_hour:
+        raw_probability = lower_probability
+    else:
+        upper_probability = empirical_by_hour[upper_hour][0]
+        weight = min(1.0, max(0.0, local_hour - lower_hour))
+        raw_probability = lower_probability + (
+            upper_probability - lower_probability
+        ) * weight
+    # The empirical cell may contain 0/1.  A Jeffreys update preserves the
+    # finite observation count without turning historical frequency into an
+    # impossible certainty about today's unresolved weather path.
+    probability = (raw_probability * sample_count + 0.5) / (sample_count + 1.0)
+    return probability, sample_count, _DAY0_PEAK_SET_PROBABILITY_BASIS
+
+
+def _day0_peak_set_probability_for_distribution(
+    *,
+    payload: dict[str, object],
+    metric: str,
+) -> float | None:
+    """Validate the latent peak-set probability used by the HIGH generator."""
+
+    basis = str(payload.get("_edli_day0_peak_set_probability_basis") or "").strip()
+    if metric != "high" or not basis:
+        return None
+    if basis != _DAY0_PEAK_SET_PROBABILITY_BASIS:
+        raise ValueError("GLOBAL_DAY0_PEAK_SET_PROBABILITY_BASIS_INVALID")
+    from src.events.day0_authority import (
+        DAY0_ABSORBING_FINALITIES,
+        day0_evidence_finality,
+    )
+
+    if day0_evidence_finality(payload) not in DAY0_ABSORBING_FINALITIES:
+        return None
+    try:
+        peak_set_probability = float(
+            payload["_edli_day0_peak_set_probability"]
+        )
+        sample_count = int(payload["_edli_day0_peak_set_sample_count"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("GLOBAL_DAY0_PEAK_SET_EVIDENCE_INVALID") from exc
+    if (
+        not math.isfinite(peak_set_probability)
+        or not 0.0 < peak_set_probability < 1.0
+        or sample_count < _DAY0_PEAK_SET_MIN_EMPIRICAL_SAMPLES
+    ):
+        raise ValueError("GLOBAL_DAY0_PEAK_SET_EVIDENCE_INVALID")
+    return peak_set_probability
+
+
+def _sample_day0_extreme_with_peak_state(
+    *,
+    rng: np.random.Generator,
+    member_means: np.ndarray,
+    sigma: float,
+    movement_boundary: float,
+    peak_set_atom: float,
+    metric: str,
+    peak_set_probability: float,
+) -> np.ndarray:
+    """Draw one coherent latent state, conditioning the other state to move."""
+
+    means = np.asarray(member_means, dtype=np.float64)
+    if (
+        means.size == 0
+        or not np.isfinite(means).all()
+        or not math.isfinite(sigma)
+        or sigma <= 0.0
+        or not math.isfinite(movement_boundary)
+        or not math.isfinite(peak_set_atom)
+        or metric not in {"high", "low"}
+        or not 0.0 < peak_set_probability < 1.0
+    ):
+        raise ValueError("DAY0_PEAK_STATE_GENERATOR_INPUT_INVALID")
+    from scipy.special import ndtr, ndtri
+
+    boundary_cdf = ndtr((movement_boundary - means) / sigma)
+    uniforms = rng.random(means.shape)
+    eps = np.finfo(np.float64).eps
+    if metric == "high":
+        conditional_u = boundary_cdf + uniforms * (1.0 - boundary_cdf)
+        conditional_u = np.clip(conditional_u, eps, 1.0 - eps)
+        moving = means + sigma * ndtri(conditional_u)
+        moving = np.maximum(
+            moving,
+            np.nextafter(movement_boundary, math.inf),
+        )
+    else:
+        conditional_u = uniforms * boundary_cdf
+        conditional_u = np.clip(conditional_u, eps, 1.0 - eps)
+        moving = means + sigma * ndtri(conditional_u)
+        moving = np.minimum(
+            moving,
+            np.nextafter(movement_boundary, -math.inf),
+        )
+    peak_is_set = rng.random(means.shape) < peak_set_probability
+    return np.where(peak_is_set, peak_set_atom, moving)
 
 
 def _final_daily_exact_probability_components(
@@ -32936,6 +33086,11 @@ def _prepare_current_global_probability_family(
             "_edli_day0_source_clock_bound_basis",
             "_edli_day0_provisional_revision_likelihood",
             "_edli_day0_provisional_boundary_survival_probability",
+            "_edli_day0_post_peak_confidence_source",
+            "_edli_day0_peak_set_probability",
+            "_edli_day0_peak_set_sample_count",
+            "_edli_day0_peak_set_probability_basis",
+            "_edli_day0_peak_set_mixture_basis",
         ):
             if key in payload:
                 day0_payload_out[key] = payload[key]
@@ -32979,6 +33134,18 @@ def _prepare_current_global_probability_family(
             ),
             "provisional_boundary_survival_probability": payload.get(
                 "_edli_day0_provisional_boundary_survival_probability"
+            ),
+            "peak_set_probability": payload.get(
+                "_edli_day0_peak_set_probability"
+            ),
+            "peak_set_sample_count": payload.get(
+                "_edli_day0_peak_set_sample_count"
+            ),
+            "peak_set_probability_basis": payload.get(
+                "_edli_day0_peak_set_probability_basis"
+            ),
+            "peak_set_mixture_basis": payload.get(
+                "_edli_day0_peak_set_mixture_basis"
             ),
             "source_clock_bound_identity": (
                 day0_source_clock_bound_identity or None
@@ -35134,6 +35301,43 @@ class _Day0BootstrapSampler:
     metric: str
     sigma: float
     mask: np.ndarray
+    peak_set_probability: float | None = None
+    peak_set_atom: float | None = None
+
+    def _sample_member_draws(
+        self,
+        analysis,
+        *,
+        members_per_row: int,
+    ) -> np.ndarray:
+        idx = analysis._rng.integers(
+            0,
+            self.members.size,
+            members_per_row,
+        )
+        means = self.members[idx]
+        if self.peak_set_probability is not None:
+            if (
+                self.rounded is None
+                or self.peak_set_atom is None
+                or self.boundary_survival_probability < 1.0
+            ):
+                raise ValueError("DAY0_PEAK_STATE_BOUNDARY_INVALID")
+            return _sample_day0_extreme_with_peak_state(
+                rng=analysis._rng,
+                member_means=means,
+                sigma=self.sigma,
+                movement_boundary=self.rounded,
+                peak_set_atom=self.peak_set_atom,
+                metric=self.metric,
+                peak_set_probability=self.peak_set_probability,
+            )
+        draws = means + analysis._rng.normal(
+            0.0,
+            self.sigma,
+            members_per_row,
+        )
+        return self._apply_probability_boundary(analysis, draws)
 
     def _apply_probability_boundary(self, analysis, draws: np.ndarray) -> np.ndarray:
         if self.rounded is None:
@@ -35153,9 +35357,10 @@ class _Day0BootstrapSampler:
 
     def __call__(self, analysis, n_members):
         n = max(1, int(n_members))
-        idx = analysis._rng.integers(0, self.members.size, n)
-        draws = self.members[idx] + analysis._rng.normal(0.0, self.sigma, n)
-        draws = self._apply_probability_boundary(analysis, draws)
+        draws = self._sample_member_draws(
+            analysis,
+            members_per_row=n,
+        )
         measured = analysis._settle(draws)
         vec = bin_counts_from_array(measured, analysis.bins).astype(float)
         vec /= float(len(measured))
@@ -35174,14 +35379,9 @@ class _Day0BootstrapSampler:
         members_per_row = max(1, int(n_members))
         draws = np.empty((rows, members_per_row), dtype=np.float64)
         for row in range(rows):
-            idx = analysis._rng.integers(0, self.members.size, members_per_row)
-            draws[row] = (
-                self.members[idx]
-                + analysis._rng.normal(0.0, self.sigma, members_per_row)
-            )
-            draws[row] = self._apply_probability_boundary(
+            draws[row] = self._sample_member_draws(
                 analysis,
-                draws[row],
+                members_per_row=members_per_row,
             )
         return self._probability_matrix(analysis, draws)
 
@@ -35202,14 +35402,9 @@ class _Day0BootstrapSampler:
         draws = np.empty((rows, members_per_row), dtype=np.float64)
         noise = np.empty((rows, width), dtype=np.float64)
         for row in range(rows):
-            idx = analysis._rng.integers(0, self.members.size, members_per_row)
-            draws[row] = (
-                self.members[idx]
-                + analysis._rng.normal(0.0, self.sigma, members_per_row)
-            )
-            draws[row] = self._apply_probability_boundary(
+            draws[row] = self._sample_member_draws(
                 analysis,
-                draws[row],
+                members_per_row=members_per_row,
             )
             noise[row] = analysis._rng.normal(0.0, normal_sigma, width)
         return self._probability_matrix(analysis, draws), noise
@@ -35309,6 +35504,15 @@ def _make_day0_bootstrap_sampler(
         )
         return None
 
+    peak_set_probability = _day0_peak_set_probability_for_distribution(
+        payload=payload,
+        metric=metric,
+    )
+    peak_set_atom = None
+    if peak_set_probability is not None:
+        peak_set_atom = _optional_float(payload.get("rounded_value"))
+        if peak_set_atom is None:
+            raise ValueError("DAY0_PEAK_STATE_SETTLEMENT_ATOM_MISSING")
     return _Day0BootstrapSampler(
         members=members,
         rounded=probability_boundary,
@@ -35316,6 +35520,8 @@ def _make_day0_bootstrap_sampler(
         metric=metric,
         sigma=float(sigma),
         mask=np.asarray(mask, dtype=float),
+        peak_set_probability=peak_set_probability,
+        peak_set_atom=peak_set_atom,
     )
 
 
@@ -36470,20 +36676,43 @@ def _day0_remaining_p_raw_vector(
         )
     seed = int(stable_hash(seed_payload)[:16], 16)
     rng = np.random.default_rng(seed)
-    future = members + rng.normal(0.0, sigma, (n_mc, members.size))
-    bounded = (
-        np.maximum(future, probability_boundary)
-        if metric == "high"
-        else np.minimum(future, probability_boundary)
+    peak_set_probability = _day0_peak_set_probability_for_distribution(
+        payload=payload,
+        metric=metric,
     )
-    if boundary_survival_probability < 1.0:
-        survives = (
-            rng.random((n_mc, members.size))
-            < boundary_survival_probability
+    if peak_set_probability is not None:
+        if boundary_survival_probability < 1.0:
+            raise ValueError("DAY0_PEAK_STATE_PROVISIONAL_BOUNDARY_INVALID")
+        peak_set_atom = _optional_float(payload.get("rounded_value"))
+        if peak_set_atom is None:
+            raise ValueError("DAY0_PEAK_STATE_SETTLEMENT_ATOM_MISSING")
+        final = _sample_day0_extreme_with_peak_state(
+            rng=rng,
+            member_means=np.broadcast_to(members, (n_mc, members.size)),
+            sigma=sigma,
+            movement_boundary=probability_boundary,
+            peak_set_atom=peak_set_atom,
+            metric=metric,
+            peak_set_probability=peak_set_probability,
         )
-        final = np.where(survives, bounded, future)
+        payload["_edli_day0_peak_set_mixture_basis"] = (
+            _DAY0_PEAK_SET_MIXTURE_BASIS
+        )
     else:
-        final = bounded
+        future = members + rng.normal(0.0, sigma, (n_mc, members.size))
+        bounded = (
+            np.maximum(future, probability_boundary)
+            if metric == "high"
+            else np.minimum(future, probability_boundary)
+        )
+        if boundary_survival_probability < 1.0:
+            survives = (
+                rng.random((n_mc, members.size))
+                < boundary_survival_probability
+            )
+            final = np.where(survives, bounded, future)
+        else:
+            final = bounded
     measured = settlement_semantics.round_values(final)
     probabilities = bin_counts_from_array(measured.reshape(-1), bins).astype(float)
     probabilities /= float(n_mc * members.size)
@@ -36491,9 +36720,13 @@ def _day0_remaining_p_raw_vector(
     if total > 0.0:
         probabilities /= total
     payload["_edli_day0_probability_operator"] = (
-        "revision_mixture_extreme_observed_then_noisy_future_v2"
-        if boundary_survival_probability < 1.0
-        else "extreme_observed_then_noisy_future_v1"
+        "peak_set_atom_plus_truncated_remaining_path_v1"
+        if peak_set_probability is not None
+        else (
+            "revision_mixture_extreme_observed_then_noisy_future_v2"
+            if boundary_survival_probability < 1.0
+            else "extreme_observed_then_noisy_future_v1"
+        )
     )
     return probabilities
 
@@ -36999,8 +37232,27 @@ def _record_day0_temporal_exit_authority(
             post_peak_confidence = float(
                 getattr(temporal_context, "post_peak_confidence", 0.0) or 0.0
             )
+            confidence_source = str(
+                getattr(temporal_context, "confidence_source", "") or ""
+            ).strip()
             payload["_edli_day0_daypart"] = daypart
             payload["_edli_day0_post_peak_confidence"] = post_peak_confidence
+            payload["_edli_day0_post_peak_confidence_source"] = confidence_source
+            peak_set_evidence = _day0_empirical_peak_set_probability(
+                temporal_context=temporal_context,
+                world_conn=world_conn,
+                city=str(family.city),
+                month=target.month,
+            )
+            if peak_set_evidence is not None:
+                probability, sample_count, probability_basis = peak_set_evidence
+                payload.update(
+                    {
+                        "_edli_day0_peak_set_probability": probability,
+                        "_edli_day0_peak_set_sample_count": sample_count,
+                        "_edli_day0_peak_set_probability_basis": probability_basis,
+                    }
+                )
             if daypart == "post_peak" and post_peak_confidence >= 0.5:
                 payload[status_key] = "mature"
                 payload[reason_key] = "day0_high_extreme_post_peak"

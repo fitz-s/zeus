@@ -4,6 +4,48 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-10 Day0 HIGH peak state belongs inside the probability simplex
+
+A causal replay of San Francisco Aug-9 HIGH found that the latest same-station
+METAR temperature and current provider trajectories were refreshed before the
+last executable 5-cent bid. The remaining-path q still assigned 0.23585 to a
+future settlement above 75F. At the same decision instant Zeus separately
+computed empirical `P(daily high already set | city, month, local hour)` near
+0.91 from 70 observations, but used it only to label SELL authority mature. A
+state probability that cannot change the settlement distribution leaves the
+engine knowingly pricing the wrong random variable.
+
+The correction represents two mutually exclusive causal states in one MECE
+simplex: when the HIGH is already set, final settlement is the observed
+settlement-channel running maximum; otherwise future extrema are drawn from the
+current conditioned remaining-path model conditional on moving beyond that
+running maximum. Conditioning the second branch is required: the old
+`max(observed, future)` distribution already included peak-set outcomes, so
+mixing it directly would double-count the same state. The empirical weight is accepted only
+from the monthly empirical source with at least 30 observations and receives a
+Jeffreys finite-evidence update so a historical 0/1 cell cannot create certainty
+about unresolved weather. The point operator and every bootstrap row use the
+same latent-state generator, preserve the simplex, and enter the probability
+and witness identities. Heuristic/solar-only confidence cannot modify q. This is a
+continuous-time weather-state correction, not a market-price stop or a patch
+conditioned on the eventual result.
+
+SCOPE is a current target-day HIGH family with fresh authorized observation,
+current remaining-hour paths, and qualified empirical peak-set evidence. DRAIN
+is every normal held-position/global-auction redecision, which rebuilds the
+mixture from the newest observation, wall clock, paths, and book. RESET is the
+next redecision or loss of qualified evidence; LOW, non-Day0, final settlement,
+and deterministic absorbing facts retain their own laws. No price band, Kelly,
+capital objective, venue mode, or settlement semantics changes.
+
+Acceptance requires a San Francisco last-legal-bid causal snapshot to move the
+held `NO >75F` probability below 0.05 before book collapse, every transformed
+sample and point q to remain a valid simplex, non-MECE topology to fail closed,
+LOW to remain unchanged pending its own trough-state law, the probability basis
+to invalidate prior witness semantics, and focused Day0/global-solve tests to
+pass. Live effectiveness still requires loaded-SHA, heartbeat, canonical
+monitor receipt, fresh q/book, and SELL intent-command-fill evidence.
+
 ## 2026-08-08 Day0 probability authority survives certificate compilation
 
 The live global auction produced a current Shanghai Day0 remaining-day witness,
