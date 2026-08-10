@@ -3122,11 +3122,11 @@ def current_portfolio_wealth_witness(
                 shares = Decimal(micro) / Decimal("1000000")
                 evidence = "collateral_snapshot"
             else:
-                shares = Decimal(str(getattr(position, "chain_shares", 0) or 0))
                 causal_shares = Decimal(
                     str(current_tradable_exposure_shares(position))
                 )
-                if shares <= 0 and causal_shares > 0:
+                shares = Decimal(str(getattr(position, "chain_shares", 0) or 0))
+                if causal_shares > 0:
                     shares = causal_shares
                 elif shares <= 0 and has_verified_trade_fill(position):
                     shares = Decimal(str(getattr(position, "shares", 0) or 0))
@@ -3135,7 +3135,7 @@ def current_portfolio_wealth_witness(
                 micro = int((shares * Decimal("1000000")).to_integral_value())
                 evidence = (
                     "causal_venue_exposure"
-                    if causal_shares > 0 and chain_state == "local_only"
+                    if causal_shares > 0 and has_verified_trade_fill(position)
                     else "uncertain_local_claim"
                 )
                 try:

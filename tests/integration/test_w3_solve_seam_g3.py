@@ -19154,17 +19154,23 @@ def test_current_portfolio_wealth_binds_verified_fill_as_non_sellable_endowment(
 
 
 @pytest.mark.parametrize(
-    ("direction", "held_token"),
+    ("direction", "held_token", "chain_state", "chain_shares"),
     (
-        (Direction.YES, "yes-token"),
-        (Direction.NO, "no-token"),
+        (Direction.YES, "yes-token", "local_only", 0.0),
+        (Direction.NO, "no-token", "local_only", 0.0),
+        (Direction.YES, "yes-token", "synced", 4.0),
+        (Direction.NO, "no-token", "synced", 4.0),
+        (Direction.YES, "yes-token", "synced", 20.0),
+        (Direction.NO, "no-token", "synced", 20.0),
     ),
 )
-def test_current_portfolio_wealth_makes_local_only_venue_fill_sellable(
+def test_current_portfolio_wealth_makes_causal_venue_fill_sellable(
     direction,
     held_token,
+    chain_state,
+    chain_shares,
 ):
-    """Newer CLOB fill truth must not wait for the chain projection cadence."""
+    """Newer CLOB fill truth must not wait for zero or positive stale chain state."""
 
     decision_at = _dt.datetime(2026, 8, 9, 20, 54, tzinfo=_dt.timezone.utc)
     conn = _wealth_test_conn(captured_at=decision_at)
@@ -19175,8 +19181,8 @@ def test_current_portfolio_wealth_makes_local_only_venue_fill_sellable(
         direction=direction,
         token_id="yes-token",
         no_token_id="no-token",
-        chain_state="local_only",
-        chain_shares=0.0,
+        chain_state=chain_state,
+        chain_shares=chain_shares,
         shares=14.589284,
         effective_shares=14.589284,
         cost_basis_usd=10.0,
@@ -19203,7 +19209,15 @@ def test_current_portfolio_wealth_makes_local_only_venue_fill_sellable(
     assert witness.native_commitments_micro == ((held_token, 10_000_000),)
 
 
-def test_global_sell_jit_accepts_local_only_venue_confirmed_shares(monkeypatch):
+@pytest.mark.parametrize(
+    ("chain_state", "chain_shares"),
+    (("local_only", 0.0), ("synced", 4.0), ("synced", 20.0)),
+)
+def test_global_sell_jit_accepts_causal_venue_confirmed_shares(
+    monkeypatch,
+    chain_state,
+    chain_shares,
+):
     """Selection and JIT must use the same causal exposure while chain lags."""
 
     from src.engine import event_reactor_adapter as era
@@ -19215,8 +19229,8 @@ def test_global_sell_jit_accepts_local_only_venue_confirmed_shares(monkeypatch):
         token_id="yes-token",
         no_token_id="no-token",
         condition_id="condition-local-fill",
-        chain_state="local_only",
-        chain_shares=0.0,
+        chain_state=chain_state,
+        chain_shares=chain_shares,
         shares=14.589284,
         effective_shares=14.589284,
         fill_authority="venue_confirmed_full",
@@ -28041,8 +28055,10 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         token_id="yes-token",
         no_token_id="no-token",
         condition_id="condition-1",
+        chain_state="synced",
         chain_shares=10.0066,
         effective_shares=10.006602,
+        fill_authority="venue_confirmed_full",
         exit_state="",
         last_exit_order_id="",
         state="holding",

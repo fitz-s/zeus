@@ -2529,12 +2529,11 @@ def _positive_chain_exposure_shares(pos: "Position") -> float:
 def current_tradable_exposure_shares(pos: "Position") -> float:
     """Return shares backed by the newest causal venue exposure fact.
 
-    Positive chain inventory remains the strongest source.  Before the slower
-    chain projection catches up, a typed venue-confirmed fill (or a
-    venue-position observation) is still real capital at risk and must enter
-    sizing, monitoring, and SELL selection immediately.  Optimistic submitted
-    orders never pass ``has_tradable_exposure`` and therefore cannot mint
-    inventory here.
+    A venue-confirmed trade owns its current open shares even while the slower
+    chain projection still shows the balance before a BUY or SELL fill.  A
+    balance-only recovery continues to use chain shares.  Explicit no-exposure
+    chain states win over stale local numbers.  Optimistic submitted orders
+    never pass these authorities and therefore cannot mint inventory here.
     """
 
     chain_state = _semantic_value(getattr(pos, "chain_state", ""))
@@ -2543,21 +2542,23 @@ def current_tradable_exposure_shares(pos: "Position") -> float:
         and chain_state != VenueVisibilityStatus.LOCAL_ONLY.value
     ):
         return 0.0
+    if (
+        chain_state not in CURRENT_MONEY_RISK_CHAIN_STATES
+        and chain_state != VenueVisibilityStatus.LOCAL_ONLY.value
+    ):
+        return 0.0
+    if has_verified_trade_fill(pos):
+        try:
+            shares = float(getattr(pos, "effective_shares", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+        if math.isfinite(shares) and shares > _POSITIVE_CHAIN_EXPOSURE_EPS:
+            return shares
+        return 0.0
     chain_shares = _positive_chain_exposure_shares(pos)
     if chain_shares > 0.0:
         return chain_shares
-    if (
-        chain_state != VenueVisibilityStatus.LOCAL_ONLY.value
-        or not has_tradable_exposure(pos)
-    ):
-        return 0.0
-    try:
-        shares = float(getattr(pos, "effective_shares", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-    if not math.isfinite(shares) or shares <= _POSITIVE_CHAIN_EXPOSURE_EPS:
-        return 0.0
-    return shares
+    return 0.0
 
 
 def _semantic_value(value: object) -> str:
