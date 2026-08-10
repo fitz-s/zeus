@@ -5877,6 +5877,27 @@ def _yield_incomplete_global_completion_once(
         exact_held_sell_completion_wake_ids,
     )
 
+    # SCOPE: only an incomplete exact held-SELL debt whose monitor snapshot had
+    # a legally executable bid. DRAIN: repeated reduce-only global cuts answer
+    # it with ACTUATED, CAPITAL_REJECTED, or a fresh NO_EXECUTABLE_BOOK receipt.
+    # RESET: once every pending request is non-executable/terminal, the existing
+    # one-turn fairness yield resumes. Letting ordinary auction work consume a
+    # disappearing executable window is not fairness; it is capital starvation.
+    executable_debt = any(
+        int(getattr(request, "schema_version", 1) or 1) >= 4
+        and str(getattr(request, "book_state", "") or "").upper() == "EXECUTABLE"
+        and (bid := getattr(request, "held_best_bid", None)) is not None
+        and math.isfinite(float(bid))
+        and float(bid) >= 0.05
+        for request in pending_requests
+    )
+    if executable_debt:
+        logger.info(
+            "exact held SELL debt retained without ordinary-turn yield: "
+            "current request had executable >=5c bid"
+        )
+        return
+
     if (
         str(getattr(wake, "reason", "") or "")
         == GLOBAL_AUCTION_COMPLETION_WAKE_REASON

@@ -11011,9 +11011,12 @@ def _current_global_sell_position(
     trade_conn: sqlite3.Connection,
     candidate: object,
 ):
-    """Bind SELL to one current canonical position and exact chain shares."""
+    """Bind SELL to one current canonical position and causal venue shares."""
 
-    from src.state.portfolio import load_runtime_open_portfolio
+    from src.state.portfolio import (
+        current_tradable_exposure_shares,
+        load_runtime_open_portfolio,
+    )
 
     portfolio = load_runtime_open_portfolio(trade_conn)
     if (
@@ -11048,18 +11051,18 @@ def _current_global_sell_position(
     ):
         raise ValueError("GLOBAL_SELL_POSITION_TOKEN_SUPERSEDED")
     sellable = Decimal(str(getattr(candidate, "held_shares", "0") or "0"))
-    chain = Decimal(str(getattr(position, "chain_shares", 0) or 0))
+    current_exposure = Decimal(str(current_tradable_exposure_shares(position)))
     effective = Decimal(str(getattr(position, "effective_shares", 0) or 0))
     share_step = Decimal("0.01")
-    chain_sellable = chain.quantize(share_step, rounding=ROUND_FLOOR)
+    current_sellable = current_exposure.quantize(share_step, rounding=ROUND_FLOOR)
     effective_sellable = effective.quantize(share_step, rounding=ROUND_FLOOR)
     if (
         not all(
             value.is_finite() and value > 0
-            for value in (sellable, chain, effective)
+            for value in (sellable, current_exposure, effective)
         )
-        or chain_sellable != effective_sellable
-        or sellable != chain_sellable
+        or current_sellable != effective_sellable
+        or sellable != current_sellable
     ):
         raise ValueError("GLOBAL_SELL_POSITION_SHARES_SUPERSEDED")
     if _global_sell_command_blocks_reauction(

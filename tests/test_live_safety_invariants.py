@@ -125,7 +125,7 @@ def test_operator_scripts_filter_verified_settlement_rows_before_outputs_or_back
 # below.
 
 
-def test_monitor_selection_keeps_unprojected_venue_confirmed_local_fill_with_canonical_db():
+def test_monitor_selection_opens_unprojected_venue_confirmed_local_fill():
     from src.engine import cycle_runtime
     from src.state.portfolio import get_open_positions
 
@@ -159,7 +159,7 @@ def test_monitor_selection_keeps_unprojected_venue_confirmed_local_fill_with_can
     )
     portfolio = _make_portfolio(pos)
 
-    assert get_open_positions(portfolio) == []
+    assert get_open_positions(portfolio) == [pos]
     assert cycle_runtime._monitoring_phase_positions(portfolio, conn=conn) == [pos]
 
 
@@ -12369,17 +12369,17 @@ def test_chain_projection_preserves_fresh_monitor_snapshot(tmp_path):
     conn.close()
 
 
-def test_venue_confirmed_local_only_fill_is_monitored_without_reclassifying_open_set(
+def test_venue_confirmed_local_only_fill_enters_open_set_before_chain_sync(
     tmp_path,
     monkeypatch,
 ):
-    """Venue-confirmed fills need monitor/redecision before chain sync catches up."""
+    """A newer venue fill is capital exposure before chain projection catches up."""
     from src.contracts import EdgeContext, EntryMethod
     from src.engine import cycle_runtime
     from src.engine.lifecycle_events import build_entry_canonical_write
     from src.state.db import append_many_and_project, get_connection, init_schema
     from src.state.lifecycle_manager import LifecyclePhase
-    from src.state.portfolio import get_open_positions
+    from src.state.portfolio import get_open_positions, load_runtime_open_portfolio
 
     conn = get_connection(tmp_path / "local-only-confirmed-fill-monitor.db")
     init_schema(conn)
@@ -12417,7 +12417,11 @@ def test_venue_confirmed_local_only_fill_is_monitored_without_reclassifying_open
     append_many_and_project(conn, entry_events, entry_projection)
     portfolio = _make_portfolio(pos)
 
-    assert get_open_positions(portfolio) == []
+    assert get_open_positions(portfolio) == [pos]
+    runtime = load_runtime_open_portfolio(conn)
+    assert [current.trade_id for current in runtime.positions] == [pos.trade_id]
+    assert runtime.positions[0].chain_shares == pytest.approx(0.0)
+    assert runtime.positions[0].effective_shares == pytest.approx(69.34)
     assert cycle_runtime._monitoring_phase_positions(portfolio) == [pos]
 
     def fake_refresh(conn_arg, clob_arg, position):
