@@ -540,13 +540,15 @@ def _compute_divergence_score(p_posterior: float, p_market: float, *, available:
 
 
 def _causal_market_velocity_1h(
-    conn: sqlite3.Connection,
+    conn: sqlite3.Connection | None,
     *,
     token_id: str,
     current_price: float,
     observed_at: str,
 ) -> float:
     """Return the held-token price change from the latest causal 1h baseline."""
+    if conn is None:
+        return 0.0
     try:
         as_of = datetime.fromisoformat(str(observed_at).replace("Z", "+00:00"))
         if as_of.tzinfo is None:

@@ -18610,3 +18610,14 @@ def test_market_velocity_uses_causal_source_time_not_legacy_text_order(tmp_path)
     )
 
     assert velocity == pytest.approx(-0.60)
+
+
+def test_market_velocity_without_trade_db_is_non_authoritative():
+    from src.engine.monitor_refresh import _causal_market_velocity_1h
+
+    assert _causal_market_velocity_1h(
+        None,
+        token_id="held-token",
+        current_price=0.20,
+        observed_at="2026-08-10T12:00:00+00:00",
+    ) == 0.0
