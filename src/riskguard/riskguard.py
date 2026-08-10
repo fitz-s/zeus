@@ -3148,13 +3148,26 @@ def _tick_once() -> RiskLevel:
         portfolio_brier_thin_sample = (
             0 < len(p_forecasts) < _STRATEGY_BRIER_MIN_SAMPLE
         )
-        # Settled Brier grades frozen past decisions. It is learning telemetry,
-        # not current decision-time truth, so it may not veto a replacement q
-        # built from the current source shape or refresh a self-perpetuating
-        # strategy gate. Current probability/source identity failures remain
-        # behavioral through probability_semantics_level below.
-        portfolio_brier_level = RiskLevel.GREEN
-        brier_level = RiskLevel.GREEN
+        # Only rows carrying the currently executable decision-law identity
+        # reach ``brier_actuating_rows``.  Once that same law has enough
+        # settled evidence, discarding a threshold breach would sever the
+        # settlement -> learning -> admission feedback loop and turn
+        # RiskGuard into telemetry.  Thin samples remain record-only; proven
+        # breaches actuate below, scoped to exact canonical strategy keys when
+        # attribution is complete.  A strategy-local Brier breach governs new
+        # exposure only -- it never fabricates price-insensitive SELL authority.
+        #
+        # SCOPE: current-law strategies represented by actuating settlement rows.
+        # DRAIN: every 60-second tick rebinds immutable fill q identities and
+        # recomputes the bounded settlement sample.
+        # RESET: a strategy gate expires when its current-law verdict clears;
+        # superseded/unstamped laws are excluded before this point.
+        portfolio_brier_level = (
+            RiskLevel.GREEN
+            if portfolio_brier_thin_sample
+            else portfolio_brier_raw_level
+        )
+        brier_level = portfolio_brier_level
         brier_strategy_breakdown = _strategy_brier_breakdown(brier_actuating_rows, thresholds) if p_forecasts else {
             "by_strategy": {},
             "by_mechanism": {},
@@ -3163,8 +3176,12 @@ def _tick_once() -> RiskLevel:
             "classified_count": 0,
         }
         brier_strategy_localization: dict[str, object] = {
-            "status": "record_only_current_truth_selection",
-            "reason": "settled_brier_is_learning_evidence_not_decision_time_truth",
+            "status": "not_applicable",
+            "reason": (
+                "portfolio_brier_thin_sample_no_verdict"
+                if portfolio_brier_thin_sample
+                else "portfolio_brier_green"
+            ),
         }
         settlement_quality_level = RiskLevel.GREEN
         if settlement_rows and not settlement_economic_ready_rows:
@@ -3184,6 +3201,72 @@ def _tick_once() -> RiskLevel:
                 "forecast_qkernel_entry",
                 "probability_semantics_authority_unavailable",
             )
+        degraded_brier_strategies = brier_strategy_breakdown.get(
+            "degraded_strategies", {}
+        )
+        clean_brier_attribution = (
+            isinstance(degraded_brier_strategies, dict)
+            and bool(degraded_brier_strategies)
+            and int(brier_strategy_breakdown.get("unclassified_count", 0) or 0) == 0
+            and all(
+                str(strategy) in CANONICAL_STRATEGY_KEYS
+                for strategy in degraded_brier_strategies
+            )
+        )
+
+        def _append_brier_degraded_gate_reasons() -> None:
+            for strategy, payload in sorted(degraded_brier_strategies.items()):
+                if not isinstance(payload, dict):
+                    continue
+                cohort = payload.get("cohort")
+                cohort_suffix = f",cohort={cohort}" if cohort else ""
+                _append_reason(
+                    recommended_strategy_gate_reasons,
+                    str(strategy),
+                    (
+                        "brier_degraded("
+                        f"level={payload.get('level')},"
+                        f"brier={payload.get('brier')},"
+                        f"sample={payload.get('sample_size')}"
+                        f"{cohort_suffix}"
+                        ")"
+                    ),
+                )
+
+        if portfolio_brier_level == RiskLevel.YELLOW and clean_brier_attribution:
+            brier_strategy_localization = {
+                "status": "pending_durable_strategy_gate",
+                "gated_strategies": sorted(
+                    str(strategy) for strategy in degraded_brier_strategies
+                ),
+            }
+            _append_brier_degraded_gate_reasons()
+        elif (
+            portfolio_brier_level in {RiskLevel.ORANGE, RiskLevel.RED}
+            and clean_brier_attribution
+        ):
+            strength = portfolio_brier_level.value.lower()
+            brier_strategy_localization = {
+                "status": f"pending_durable_strategy_gate_{strength}",
+                "gated_strategies": sorted(
+                    str(strategy) for strategy in degraded_brier_strategies
+                ),
+            }
+            _append_brier_degraded_gate_reasons()
+        elif portfolio_brier_level != RiskLevel.GREEN:
+            brier_strategy_localization = {
+                "status": "not_localized",
+                "reason": "portfolio_brier_requires_global_level",
+                "portfolio_brier_level": portfolio_brier_level.value,
+                "unclassified_count": int(
+                    brier_strategy_breakdown.get("unclassified_count", 0) or 0
+                ),
+                "degraded_strategy_count": (
+                    len(degraded_brier_strategies)
+                    if isinstance(degraded_brier_strategies, dict)
+                    else 0
+                ),
+            }
         # execution_quality_level stays GREEN: a low maker fill-rate is NOT a
         # risk condition (2026-07-05, INV-05). REMOVED the assignment that set
         # execution_quality_level=YELLOW + recommended tighten_risk when

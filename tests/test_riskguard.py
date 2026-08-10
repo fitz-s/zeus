@@ -1,8 +1,8 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-08-05
+# Last reused/audited: 2026-08-10
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-07-31; last_reused=2026-07-31
+# Lifecycle: created=2026-03-30; last_reviewed=2026-08-10; last_reused=2026-08-10
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
@@ -2929,13 +2929,14 @@ def _patch_riskguard_bankroll(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestRiskGuardOrangeLocalization:
-    """Settled Brier remains learning telemetry, never current selection law.
+    """Current-law Brier breaches must alter strategy admission.
 
     Test data: 45 opening_inertia rows at p=0.58/outcome=0 (per-row squared
     error 0.3364, individually ORANGE) + 5 center_buy rows at p=0.80/outcome=1
     (per-row squared error 0.04, individually GREEN) pool to a portfolio Brier
-    of ~0.3068 (ORANGE). The raw level must remain observable without emitting
-    a durable gate or changing live risk.
+    of ~0.3068 (ORANGE). Exact strategy attribution may localize that breach
+    only after the durable gate is confirmed and the residual portfolio is
+    independently GREEN.
     """
 
     def _orange_rows(self, *, unclassified_count: int = 0) -> list[dict]:
@@ -3006,16 +3007,20 @@ class TestRiskGuardOrangeLocalization:
 
         assert level == RiskLevel.GREEN
         assert risk_row["level"] == RiskLevel.GREEN.value
-        assert details["portfolio_brier_level"] == "GREEN"
+        assert details["portfolio_brier_level"] == "ORANGE"
         assert details["brier_level"] == "GREEN"
         assert details["brier_all_strategies_level"] == "ORANGE"
         assert details["brier_active_portfolio_level"] == "GREEN"
-        assert details["localized_orange_scope"] is False
-        assert details["brier_strategy_localization"] == {
-            "status": "record_only_current_truth_selection",
-            "reason": "settled_brier_is_learning_evidence_not_decision_time_truth",
+        assert details["localized_orange_scope"] is True
+        assert details["brier_strategy_localization"]["status"] == "localized_orange_scope"
+        assert details["brier_strategy_localization"]["gated_strategies"] == ["opening_inertia"]
+        assert details["brier_strategy_localization"]["gate_confirmation"] == {
+            "opening_inertia": True
         }
-        assert gate_row is None
+        assert dict(gate_row) == {
+            "strategy_key": "opening_inertia",
+            "status": "active",
+        }
 
     def test_unlabeled_legacy_rows_do_not_veto_current_law_localization(
         self, monkeypatch, tmp_path
@@ -3049,16 +3054,13 @@ class TestRiskGuardOrangeLocalization:
 
         assert level == RiskLevel.GREEN
         assert risk_row["level"] == RiskLevel.GREEN.value
-        assert details["portfolio_brier_level"] == "GREEN"
+        assert details["portfolio_brier_level"] == "ORANGE"
         assert details["portfolio_brier_raw_level"] == "ORANGE"
         assert details["brier_all_strategies_level"] == "ORANGE"
         assert details["brier_level"] == "GREEN"
         assert details["brier_active_portfolio_level"] == "GREEN"
-        assert details["localized_orange_scope"] is False
-        assert details["brier_strategy_localization"] == {
-            "status": "record_only_current_truth_selection",
-            "reason": "settled_brier_is_learning_evidence_not_decision_time_truth",
-        }
+        assert details["localized_orange_scope"] is True
+        assert details["brier_strategy_localization"]["status"] == "localized_orange_scope"
         assert details["brier_strategy_breakdown"]["unclassified_count"] == 0
         assert details["brier_observed_all_lineage_sample_size"] == 50
         assert details["brier_actuating_sample_size"] == 47
@@ -3095,15 +3097,16 @@ class TestRiskGuardOrangeLocalization:
         ).fetchone()
         details = json.loads(risk_row["details_json"])
 
-        assert level == RiskLevel.GREEN
-        assert risk_row["level"] == RiskLevel.GREEN.value
+        assert level == RiskLevel.ORANGE
+        assert risk_row["level"] == RiskLevel.ORANGE.value
         assert details["portfolio_brier_raw_level"] == "ORANGE"
-        assert details["brier_level"] == "GREEN"
+        assert details["brier_level"] == "ORANGE"
         assert details["localized_orange_scope"] is False
-        assert details["brier_strategy_localization"] == {
-            "status": "record_only_current_truth_selection",
-            "reason": "settled_brier_is_learning_evidence_not_decision_time_truth",
-        }
+        assert (
+            details["brier_strategy_localization"]["status"]
+            == "durable_strategy_gate_unconfirmed_global_orange"
+        )
+        assert details["brier_strategy_localization"]["durable_risk_action_status"] == "skipped_dependency_lock"
         assert details["durable_risk_action_emission_status"] == "skipped_dependency_lock"
 
     def test_orange_stays_global_when_residual_portfolio_is_not_green(self, monkeypatch, tmp_path):
@@ -3144,14 +3147,15 @@ class TestRiskGuardOrangeLocalization:
         ).fetchone()
         details = json.loads(risk_row["details_json"])
 
-        assert level == RiskLevel.GREEN
-        assert risk_row["level"] == RiskLevel.GREEN.value
+        assert level == RiskLevel.ORANGE
+        assert risk_row["level"] == RiskLevel.ORANGE.value
         assert details["portfolio_brier_raw_level"] == "ORANGE"
-        assert details["brier_level"] == "GREEN"
+        assert details["brier_level"] == "ORANGE"
         assert details["localized_orange_scope"] is False
-        assert details["brier_strategy_localization"] == {
-            "status": "record_only_current_truth_selection",
-            "reason": "settled_brier_is_learning_evidence_not_decision_time_truth",
+        assert details["brier_strategy_localization"]["status"] == "orange_residual_portfolio_not_green"
+        assert details["brier_strategy_localization"]["residual_brier_level"] == "ORANGE"
+        assert details["brier_strategy_localization"]["gate_confirmation"] == {
+            "opening_inertia": True
         }
 
     def test_red_localizes_when_clean_attribution_gate_confirmed_and_residual_green(
@@ -3211,18 +3215,21 @@ class TestRiskGuardOrangeLocalization:
 
         assert level == RiskLevel.GREEN
         assert risk_row["level"] == RiskLevel.GREEN.value
-        assert details["portfolio_brier_level"] == "GREEN"
+        assert details["portfolio_brier_level"] == "RED"
         assert details["portfolio_brier_raw_level"] == "RED"
         assert details["brier_level"] == "GREEN"
         assert details["brier_all_strategies_level"] == "RED"
         assert details["brier_active_portfolio_level"] == "GREEN"
         assert details["localized_orange_scope"] is False
-        assert details["localized_red_scope"] is False
-        assert details["brier_strategy_localization"] == {
-            "status": "record_only_current_truth_selection",
-            "reason": "settled_brier_is_learning_evidence_not_decision_time_truth",
+        assert details["localized_red_scope"] is True
+        assert details["brier_strategy_localization"]["status"] == "localized_red_scope"
+        assert details["brier_strategy_localization"]["gate_confirmation"] == {
+            "opening_inertia": True
         }
-        assert gate_row is None
+        assert dict(gate_row) == {
+            "strategy_key": "opening_inertia",
+            "status": "active",
+        }
 
     def test_red_stays_global_when_durable_gate_write_is_skipped(
         self, monkeypatch, tmp_path
@@ -3287,16 +3294,16 @@ class TestRiskGuardOrangeLocalization:
         ).fetchone()
         details = json.loads(risk_row["details_json"])
 
-        assert level == RiskLevel.GREEN
-        assert risk_row["level"] == RiskLevel.GREEN.value
-        assert details["portfolio_brier_level"] == "GREEN"
+        assert level == RiskLevel.YELLOW
+        assert risk_row["level"] == RiskLevel.YELLOW.value
+        assert details["portfolio_brier_level"] == "RED"
         assert details["portfolio_brier_raw_level"] == "RED"
-        assert details["brier_level"] == "GREEN"
+        assert details["brier_level"] == "YELLOW"
         assert details["localized_red_scope"] is False
-        assert details["brier_strategy_localization"] == {
-            "status": "record_only_current_truth_selection",
-            "reason": "settled_brier_is_learning_evidence_not_decision_time_truth",
-        }
+        assert (
+            details["brier_strategy_localization"]["status"]
+            == "durable_strategy_gate_unconfirmed_global_entry_block"
+        )
 
     def test_orange_stays_global_when_read_after_write_confirmation_finds_no_gate_row(
         self, monkeypatch, tmp_path,
@@ -3339,15 +3346,19 @@ class TestRiskGuardOrangeLocalization:
         ).fetchone()
 
         assert gate_row is None
-        assert level == RiskLevel.GREEN
-        assert risk_row["level"] == RiskLevel.GREEN.value
+        assert level == RiskLevel.ORANGE
+        assert risk_row["level"] == RiskLevel.ORANGE.value
         assert details["portfolio_brier_raw_level"] == "ORANGE"
-        assert details["brier_level"] == "GREEN"
+        assert details["brier_level"] == "ORANGE"
         assert details["localized_orange_scope"] is False
-        assert details["brier_strategy_localization"] == {
-            "status": "record_only_current_truth_selection",
-            "reason": "settled_brier_is_learning_evidence_not_decision_time_truth",
+        assert (
+            details["brier_strategy_localization"]["status"]
+            == "durable_strategy_gate_unconfirmed_global_orange"
+        )
+        assert details["brier_strategy_localization"]["gate_confirmation"] == {
+            "opening_inertia": False
         }
+        assert details["brier_strategy_localization"]["durable_risk_action_status"] == "emitted"
 
 
 class TestResidualBrierMinSample:
@@ -3772,18 +3783,18 @@ class TestStrategyBrierMinSample:
         assert out["degraded_strategies"] == {}
 
     @pytest.mark.parametrize(
-        ("p_posterior", "expected_raw_level"),
+        ("p_posterior", "expected_level"),
         [
             (0.51, RiskLevel.YELLOW),
             (0.56, RiskLevel.ORANGE),
         ],
     )
-    def test_current_law_brier_breach_is_record_only_without_law_gate_consumer(
+    def test_current_law_brier_breach_stays_global_without_law_gate_consumer(
         self,
         monkeypatch,
         tmp_path,
         p_posterior,
-        expected_raw_level,
+        expected_level,
     ):
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
@@ -3835,14 +3846,9 @@ class TestStrategyBrierMinSample:
             """
         ).fetchone()
 
-        assert level == RiskLevel.GREEN
-        assert details["portfolio_brier_raw_level"] == expected_raw_level.value
-        assert details["portfolio_brier_level"] == RiskLevel.GREEN.value
-        assert details["brier_level"] == RiskLevel.GREEN.value
-        assert details["brier_strategy_localization"] == {
-            "status": "record_only_current_truth_selection",
-            "reason": "settled_brier_is_learning_evidence_not_decision_time_truth",
-        }
+        assert level == expected_level
+        assert details["brier_level"] == expected_level.value
+        assert details["brier_strategy_localization"]["status"] == "not_localized"
         assert set(details["brier_strategy_breakdown"]["degraded_strategies"]) == {
             "law:predicted_bin_ev_v1"
         }
@@ -3851,11 +3857,29 @@ class TestStrategyBrierMinSample:
     @pytest.mark.parametrize(
         (
             "sample_size",
+            "expected_portfolio_level",
+            "expected_active_level",
             "expected_thin",
+            "expected_status",
+            "expected_reason",
         ),
         [
-            (1, True),
-            (10, False),
+            (
+                1,
+                RiskLevel.GREEN,
+                RiskLevel.GREEN,
+                True,
+                "not_applicable",
+                "portfolio_brier_thin_sample_no_verdict",
+            ),
+            (
+                10,
+                RiskLevel.RED,
+                RiskLevel.GREEN,
+                False,
+                "localized_red_scope",
+                None,
+            ),
         ],
     )
     def test_portfolio_brier_requires_minimum_evidence(
@@ -3863,7 +3887,11 @@ class TestStrategyBrierMinSample:
         monkeypatch,
         tmp_path,
         sample_size,
+        expected_portfolio_level,
+        expected_active_level,
         expected_thin,
+        expected_status,
+        expected_reason,
     ):
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
@@ -3910,16 +3938,17 @@ class TestStrategyBrierMinSample:
 
         assert row["brier"] > 0.8
         assert details["portfolio_brier_raw_level"] == "RED"
-        assert details["portfolio_brier_level"] == RiskLevel.GREEN.value
-        assert details["brier_level"] == RiskLevel.GREEN.value
+        assert details["portfolio_brier_level"] == expected_portfolio_level.value
+        assert details["brier_level"] == expected_active_level.value
         assert details["portfolio_brier_thin_sample_no_verdict"] is expected_thin
-        assert details["brier_strategy_localization"] == {
-            "status": "record_only_current_truth_selection",
-            "reason": "settled_brier_is_learning_evidence_not_decision_time_truth",
-        }
-        assert details["recommended_strategy_gates"] == []
-        assert level == RiskLevel.GREEN
-        assert row["level"] == RiskLevel.GREEN.value
+        assert details["brier_strategy_localization"]["status"] == expected_status
+        if expected_reason is not None:
+            assert details["brier_strategy_localization"]["reason"] == expected_reason
+        assert details["recommended_strategy_gates"] == (
+            [] if expected_thin else ["forecast_qkernel_entry"]
+        )
+        assert level == expected_active_level
+        assert row["level"] == expected_active_level.value
 
 
 class TestRiskGuardExecutionQualityLocalization:
@@ -4564,7 +4593,7 @@ class TestStrategyPolicyResolver:
         assert details["durable_risk_action_emitted_count"] == 0
         assert details["durable_risk_action_expired_count"] == 0
 
-    def test_tick_records_yellow_brier_without_durable_strategy_gate(self, monkeypatch, tmp_path):
+    def test_tick_localizes_yellow_brier_to_durable_strategy_gate(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
@@ -4628,18 +4657,25 @@ class TestStrategyPolicyResolver:
         assert level == RiskLevel.GREEN
         assert risk_row["level"] == RiskLevel.GREEN.value
         assert risk_row["brier"] > 0.25
-        assert details["portfolio_brier_level"] == "GREEN"
+        assert details["portfolio_brier_level"] == "YELLOW"
         assert details["portfolio_brier_raw_level"] == "YELLOW"
         assert details["brier_level"] == "GREEN"
-        assert details["brier_strategy_localization"] == {
-            "status": "record_only_current_truth_selection",
-            "reason": "settled_brier_is_learning_evidence_not_decision_time_truth",
-        }
-        assert details["recommended_strategy_gates"] == []
+        assert details["brier_strategy_localization"]["status"] == "localized_to_durable_strategy_gates"
+        assert details["recommended_strategy_gates"] == ["opening_inertia"]
+        assert details["recommended_strategy_gate_reasons"]["opening_inertia"] == [
+            "brier_degraded(level=YELLOW,brier=0.2809,sample=45)"
+        ]
         assert details["brier_strategy_breakdown"]["by_strategy"]["center_buy"]["level"] == "GREEN"
-        assert gate_row is None
+        assert dict(gate_row) == {
+            "strategy_key": "opening_inertia",
+            "action_type": "gate",
+            "value": "true",
+            "source": "riskguard",
+            "status": "active",
+            "reason": "brier_degraded(level=YELLOW,brier=0.2809,sample=45)",
+        }
 
-    def test_tick_keeps_brier_record_only_when_risk_action_table_is_missing(self, monkeypatch, tmp_path):
+    def test_tick_keeps_global_yellow_when_brier_strategy_gate_cannot_persist(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
 
@@ -4693,18 +4729,18 @@ class TestStrategyPolicyResolver:
         ).fetchone()
         details = json.loads(risk_row["details_json"])
 
-        assert level == RiskLevel.GREEN
-        assert risk_row["level"] == RiskLevel.GREEN.value
+        assert level == RiskLevel.YELLOW
+        assert risk_row["level"] == RiskLevel.YELLOW.value
         assert risk_row["brier"] > 0.25
-        assert details["portfolio_brier_level"] == "GREEN"
+        assert details["portfolio_brier_level"] == "YELLOW"
         assert details["portfolio_brier_raw_level"] == "YELLOW"
-        assert details["brier_level"] == "GREEN"
-        assert details["brier_strategy_localization"] == {
-            "status": "record_only_current_truth_selection",
-            "reason": "settled_brier_is_learning_evidence_not_decision_time_truth",
-        }
+        assert details["brier_level"] == "YELLOW"
+        assert (
+            details["brier_strategy_localization"]["status"]
+            == "durable_strategy_gate_unavailable_global_yellow"
+        )
         assert details["durable_risk_action_emission_status"] == "skipped_missing_table"
-        assert details["recommended_strategy_gates"] == []
+        assert details["recommended_strategy_gates"] == ["opening_inertia"]
 
     def test_tick_records_strategy_tracker_failure_without_actuating(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"
