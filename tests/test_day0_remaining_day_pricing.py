@@ -948,6 +948,90 @@ class TestRemainingDayMembers:
     def _family(self):
         return SimpleNamespace(city="Paris", target_date="2026-06-10", metric="high")
 
+    def test_same_provider_trajectories_contribute_one_center(self, monkeypatch):
+        """Regional/global siblings are correlated centers, not independent outcomes."""
+        import src.engine.event_reactor_adapter as era
+
+        vectors = [
+            _vector(model="icon_d2", temps=[27.0] * 24),
+            _vector(model="icon_global", temps=[26.0] * 24),
+            _vector(model="ecmwf_ifs", temps=[25.0] * 24),
+        ]
+        monkeypatch.setattr(era, "runtime_cities_by_name", lambda: {"Paris": _paris()})
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.read_freshest_day0_hourly_vectors",
+            lambda **_kwargs: vectors,
+        )
+        payload = {
+            "metric": "high",
+            "rounded_value": 20.0,
+            "observation_time": "2026-06-10T13:00:00+00:00",
+        }
+
+        members = era._day0_remaining_day_members(
+            payload=payload,
+            family=self._family(),
+            unit="C",
+            decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+        )
+
+        assert members is not None
+        assert members.tolist() == [27.0, 25.0]
+        assert payload["_edli_day0_provider_representative_models"] == [
+            "icon_d2",
+            "ecmwf_ifs",
+        ]
+        assert payload["_edli_day0_remaining_model_names"] == [
+            "icon_d2",
+            "ecmwf_ifs",
+        ]
+
+    def test_source_clock_predictive_sigma_is_day0_process_floor(self):
+        import src.engine.event_reactor_adapter as era
+
+        payload = {
+            "metric": "high",
+            "observation_time": "2026-06-10T14:55:00+00:00",
+            "_edli_day0_source_clock_predictive_sigma_native": 1.4,
+        }
+        family = SimpleNamespace(city="Paris")
+
+        sigma = era._day0_process_sigma_native(
+            payload=payload,
+            family=family,
+            unit="C",
+            decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+        )
+
+        assert sigma == pytest.approx(1.4)
+        assert payload["_edli_day0_process_sigma_basis"] == (
+            "source_clock_predictive_error_floor_plus_observation_latency_v1"
+        )
+        assert era._day0_extra_member_sigma_native(
+            payload=payload,
+            family=family,
+            unit="C",
+            decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+        ) > 0.0
+
+    def test_invalid_bound_source_clock_sigma_fails_closed(self):
+        import src.engine.event_reactor_adapter as era
+
+        with pytest.raises(
+            ValueError,
+            match="DAY0_SOURCE_CLOCK_PREDICTIVE_SIGMA_INVALID",
+        ):
+            era._day0_extra_member_sigma_native(
+                payload={
+                    "metric": "high",
+                    "observation_time": "2026-06-10T14:55:00+00:00",
+                    "_edli_day0_source_clock_predictive_sigma_native": "bad",
+                },
+                family=SimpleNamespace(city="Paris"),
+                unit="C",
+                decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
+            )
+
     def test_current_state_conditioning_is_causal_and_decays(self):
         from src.signal.day0_window import (
             condition_day0_hourly_members_on_current_state,
@@ -1934,6 +2018,18 @@ class TestRemainingDayMembers:
                     "icon_global": -3.3,
                 },
                 "_edli_day0_current_state_innovation_e_fold_hours": 4.2,
+                "_edli_day0_provider_representative_models": [
+                    "ecmwf_ifs",
+                    "icon_global",
+                ],
+                "_edli_day0_source_clock_predictive_sigma_native": 1.2,
+                "_edli_day0_source_clock_predictive_sigma_basis": (
+                    "replacement_current_evidence_predictive_sigma_v1"
+                ),
+                "_edli_day0_process_sigma_native": 1.2,
+                "_edli_day0_process_sigma_basis": (
+                    "source_clock_predictive_error_floor_plus_observation_latency_v1"
+                ),
             }
         )
 
@@ -1950,6 +2046,12 @@ class TestRemainingDayMembers:
             "icon_global": -3.3,
         }
         assert authority["current_state_innovation_e_fold_hours"] == 4.2
+        assert authority["provider_representative_models"] == [
+            "ecmwf_ifs",
+            "icon_global",
+        ]
+        assert authority["source_clock_predictive_sigma_native"] == 1.2
+        assert authority["process_sigma_native"] == 1.2
 
     def test_f_city_members_are_converted_at_the_seam(self, monkeypatch):
         vectors = [_vector(model="ncep_nbm_conus", temps=[25.0] * 24)]

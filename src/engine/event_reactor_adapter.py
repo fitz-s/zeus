@@ -32424,6 +32424,10 @@ def _global_day0_probability_authority_payload(
             ("remaining_models", "_edli_day0_remaining_models"),
             ("remaining_model_names", "_edli_day0_remaining_model_names"),
             (
+                "provider_representative_models",
+                "_edli_day0_provider_representative_models",
+            ),
+            (
                 "remaining_source_cycle_time_utc",
                 "_edli_day0_remaining_source_cycle_time_utc",
             ),
@@ -32453,6 +32457,16 @@ def _global_day0_probability_authority_payload(
                 "current_state_innovation_e_fold_hours",
                 "_edli_day0_current_state_innovation_e_fold_hours",
             ),
+            (
+                "source_clock_predictive_sigma_native",
+                "_edli_day0_source_clock_predictive_sigma_native",
+            ),
+            (
+                "source_clock_predictive_sigma_basis",
+                "_edli_day0_source_clock_predictive_sigma_basis",
+            ),
+            ("process_sigma_native", "_edli_day0_process_sigma_native"),
+            ("process_sigma_basis", "_edli_day0_process_sigma_basis"),
             ("exit_authority_status", "_edli_day0_exit_authority_status"),
             ("exit_authority_reason", "_edli_day0_exit_authority_reason"),
             ("bound_classification", "_edli_day0_bound_classification"),
@@ -33852,6 +33866,41 @@ def _prepare_current_global_probability_family(
                         bundle,
                         current_day0_payload,
                     )
+            predictive_sigma_c = _amber_inflated_predictive_sigma_c(
+                bundle,
+                family=family,
+                decision_time=decision_time,
+            )
+            if predictive_sigma_c is None:
+                raise ValueError(
+                    "GLOBAL_DAY0_SOURCE_CLOCK_PREDICTIVE_SIGMA_MISSING"
+                )
+            settlement_unit = str(
+                getattr(city, "settlement_unit", "") or ""
+            ).strip().upper()
+            predictive_sigma_native = (
+                float(predictive_sigma_c) * 9.0 / 5.0
+                if settlement_unit == "F"
+                else float(predictive_sigma_c)
+            )
+            if not (
+                settlement_unit in {"C", "F"}
+                and predictive_sigma_native > 0.0
+                and math.isfinite(predictive_sigma_native)
+            ):
+                raise ValueError(
+                    "GLOBAL_DAY0_SOURCE_CLOCK_PREDICTIVE_SIGMA_INVALID"
+                )
+            current_day0_payload.update(
+                {
+                    "_edli_day0_source_clock_predictive_sigma_native": (
+                        predictive_sigma_native
+                    ),
+                    "_edli_day0_source_clock_predictive_sigma_basis": (
+                        "replacement_current_evidence_predictive_sigma_v1"
+                    ),
+                }
+            )
         payload.update(current_day0_payload)
         if day0_payload_out is not None:
             day0_payload_out.update(current_day0_payload)
@@ -34435,6 +34484,7 @@ def _prepare_current_global_probability_family(
             "_edli_day0_q_mode",
             "_edli_day0_remaining_models",
             "_edli_day0_remaining_model_names",
+            "_edli_day0_provider_representative_models",
             "_edli_day0_remaining_source_cycle_time_utc",
             "_edli_day0_remaining_capture_times_utc",
             "_edli_day0_remaining_expected_models",
@@ -34446,6 +34496,9 @@ def _prepare_current_global_probability_family(
             "_edli_day0_current_state_innovation_e_fold_hours",
             "_edli_day0_probability_clock_utc",
             "_edli_day0_process_sigma_native",
+            "_edli_day0_process_sigma_basis",
+            "_edli_day0_source_clock_predictive_sigma_native",
+            "_edli_day0_source_clock_predictive_sigma_basis",
             "_edli_day0_exit_authority_status",
             "_edli_day0_exit_authority_reason",
             "_edli_day0_bound_classification",
@@ -34497,6 +34550,15 @@ def _prepare_current_global_probability_family(
             ),
             "process_sigma_native": payload.get(
                 "_edli_day0_process_sigma_native"
+            ),
+            "process_sigma_basis": payload.get(
+                "_edli_day0_process_sigma_basis"
+            ),
+            "source_clock_predictive_sigma_native": payload.get(
+                "_edli_day0_source_clock_predictive_sigma_native"
+            ),
+            "source_clock_predictive_sigma_basis": payload.get(
+                "_edli_day0_source_clock_predictive_sigma_basis"
             ),
             "provisional_revision_likelihood": payload.get(
                 "_edli_day0_provisional_revision_likelihood"
@@ -36622,6 +36684,20 @@ def _day0_process_sigma_native(
         sigma = float(np.sqrt(base_sigma ** 2 + (margin / 2.0) ** 2))
     except Exception:  # noqa: BLE001 - caller turns absence into typed no-trade/log evidence.
         return None
+    source_clock_sigma_raw = payload.get(
+        "_edli_day0_source_clock_predictive_sigma_native"
+    )
+    if source_clock_sigma_raw is not None:
+        try:
+            source_clock_sigma = float(source_clock_sigma_raw)
+        except (TypeError, ValueError):
+            return None
+        if not (source_clock_sigma > 0.0 and np.isfinite(source_clock_sigma)):
+            return None
+        sigma = max(sigma, source_clock_sigma)
+        payload["_edli_day0_process_sigma_basis"] = (
+            "source_clock_predictive_error_floor_plus_observation_latency_v1"
+        )
     if not (sigma > 0.0 and np.isfinite(sigma)):
         return None
     payload["_edli_day0_process_sigma_native"] = sigma
@@ -36651,6 +36727,8 @@ def _day0_extra_member_sigma_native(
         decision_time=decision_time,
     )
     if sigma is None:
+        if "_edli_day0_source_clock_predictive_sigma_native" in payload:
+            raise ValueError("DAY0_SOURCE_CLOCK_PREDICTIVE_SIGMA_INVALID")
         return 0.0
     try:
         from src.signal.forecast_uncertainty import sigma_instrument
@@ -39066,6 +39144,26 @@ def _day0_remaining_day_members(
                 payload["_edli_day0_remaining_expected_models"] = list(expected_models)
                 payload["_edli_day0_remaining_unavailable_reason"] = "incomplete_hourly_model_bundle"
             return None
+        from src.strategy.live_inference.source_clock_vnext import (
+            provider_family_for_source,
+        )
+
+        # These are deterministic provider trajectories, not exchangeable
+        # outcomes. A regional and global product from the same provider share
+        # one physics family; input order is specificity-first, so only its
+        # first current trajectory may contribute a center.
+        provider_representatives: list[object] = []
+        represented_families: set[str] = set()
+        for vector in vectors:
+            provider_family = provider_family_for_source(str(vector.model))
+            if provider_family in represented_families:
+                continue
+            represented_families.add(provider_family)
+            provider_representatives.append(vector)
+        vectors = provider_representatives
+        payload["_edli_day0_provider_representative_models"] = [
+            str(vector.model) for vector in vectors
+        ]
         if current_state is None:
             # Telemetry/test callers without the canonical world connection
             # retain the pure forecast seam. Live callers always pass it.
@@ -39151,7 +39249,9 @@ def _day0_remaining_day_members(
                 else np.minimum(values, float(probability_boundary))
             )
         payload["_edli_day0_remaining_models"] = int(values.size)
-        payload["_edli_day0_remaining_model_names"] = [str(vector.model) for vector in vectors]
+        payload["_edli_day0_remaining_model_names"] = [
+            str(vector.model) for vector in vectors
+        ]
         captured_times: list[str] = []
         for vector in vectors:
             try:

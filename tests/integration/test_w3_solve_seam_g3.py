@@ -5974,6 +5974,7 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
             )
         },
         provenance_json={
+            "bayes_precision_fusion": {"predictive_sigma_c": 1.2},
             "q_bootstrap_samples_basis": "global_simplex_v1",
             "q_bootstrap_samples_by_bin": {
                 key: [probability] * 400
@@ -6394,6 +6395,7 @@ def test_fast_residual_day0_bundle_cannot_replace_remaining_window_q(
             )
         },
         provenance_json={
+            "bayes_precision_fusion": {"predictive_sigma_c": 1.2},
             "q_bootstrap_samples_basis": (
                 "day0_fast_residual_joint_simplex_v1"
             ),
@@ -6757,6 +6759,7 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
         source_cycle_time="2026-07-11T00:00:00+00:00",
         source_available_at="2026-07-11T06:00:00+00:00",
         provenance_json={
+            "bayes_precision_fusion": {"predictive_sigma_c": 1.2},
             "day0_provisional_observation": {
                 "active": True,
                 "support_truncation": False,
@@ -7330,6 +7333,7 @@ def test_post_day_complete_hourly_observation_builds_exact_global_simplex(
         source_cycle_time="2026-07-11T00:00:00+00:00",
         source_available_at="2026-07-11T01:00:00+00:00",
         provenance_json={
+            "bayes_precision_fusion": {"predictive_sigma_c": 1.2},
             "day0_conditioning": {
                 "active": True,
                 "metric": "high",
