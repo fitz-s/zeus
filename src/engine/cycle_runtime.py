@@ -3830,11 +3830,10 @@ def _day0_immature_exit_authority_reason(*sources) -> str | None:
 
 
 def _global_auction_owns_statistical_sell(exit_decision, exit_reason: str) -> bool:
-    trigger = str(getattr(exit_decision, "trigger", "") or exit_reason or "")
-    return not any(
-        trigger.startswith(prefix)
-        for prefix in _DIRECT_REDUCE_ONLY_SELL_TRIGGERS
-    )
+    trigger = str(
+        getattr(exit_decision, "trigger", "") or exit_reason or ""
+    ).strip()
+    return trigger not in _DIRECT_REDUCE_ONLY_SELL_TRIGGERS
 
 
 def _apply_family_monitor_overlay(
