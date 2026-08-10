@@ -66,6 +66,7 @@ _EXECUTION_BINDING_WINNER_FIELDS = (
     "winner_candidate_id",
     "winner_actuation_identity",
 )
+GLOBAL_SELL_EXECUTION_MODES = frozenset({"TAKER_LIMIT", "MAKER_REST"})
 
 
 def _required_text(value: object, field: str) -> str:
@@ -290,6 +291,152 @@ class GlobalAuctionReceiptRef:
                 raise ValueError(
                     f"GLOBAL_AUCTION_RECEIPT_{field.upper()}_MISMATCH"
                 )
+
+
+@dataclass(frozen=True)
+class GlobalSellReceiptClosure:
+    """Typed, immutable binding from a global SELL command to its receipt.
+
+    The receipt reference is deliberately repeated alongside the command
+    identity.  This makes the command boundary self-describing while the
+    duplicated winner fields provide a cheap, strict anti-confusion check.
+    """
+
+    receipt_ref: GlobalAuctionReceiptRef
+    position_id: str
+    condition_id: str
+    token_id: str
+    action: str
+    execution_mode: str
+    winner_event_id: str
+    winner_candidate_id: str
+    winner_actuation_identity: str
+    selection_epoch_identity: str
+
+    def __post_init__(self) -> None:
+        if type(self.receipt_ref) is not GlobalAuctionReceiptRef:
+            raise ValueError("GLOBAL_SELL_RECEIPT_REF_INVALID")
+        for field in ("position_id", "condition_id", "token_id"):
+            value = getattr(self, field)
+            if type(value) is not str or not value.strip():
+                raise ValueError(f"GLOBAL_SELL_RECEIPT_{field.upper()}_INVALID")
+        if type(self.action) is not str or self.action != "SELL":
+            raise ValueError("GLOBAL_SELL_RECEIPT_ACTION_INVALID")
+        if type(self.execution_mode) is not str or self.execution_mode not in GLOBAL_SELL_EXECUTION_MODES:
+            raise ValueError("GLOBAL_SELL_RECEIPT_EXECUTION_MODE_INVALID")
+        for field in (
+            "winner_event_id",
+            "winner_candidate_id",
+            "winner_actuation_identity",
+            "selection_epoch_identity",
+        ):
+            value = getattr(self, field)
+            if type(value) is not str or not value.strip():
+                raise ValueError(f"GLOBAL_SELL_RECEIPT_{field.upper()}_INVALID")
+        if self.winner_event_id != self.receipt_ref.winner_event_id:
+            raise ValueError("GLOBAL_SELL_RECEIPT_WINNER_EVENT_ID_MISMATCH")
+        if self.winner_candidate_id != self.receipt_ref.winner_candidate_id:
+            raise ValueError("GLOBAL_SELL_RECEIPT_WINNER_CANDIDATE_ID_MISMATCH")
+        if self.winner_actuation_identity != self.receipt_ref.winner_actuation_identity:
+            raise ValueError("GLOBAL_SELL_RECEIPT_WINNER_ACTUATION_IDENTITY_MISMATCH")
+        if self.selection_epoch_identity != self.receipt_ref.selection_epoch_identity:
+            raise ValueError("GLOBAL_SELL_RECEIPT_SELECTION_EPOCH_IDENTITY_MISMATCH")
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "receipt_ref": self.receipt_ref.as_payload(),
+            "position_id": self.position_id,
+            "condition_id": self.condition_id,
+            "token_id": self.token_id,
+            "action": self.action,
+            "execution_mode": self.execution_mode,
+            "winner_event_id": self.winner_event_id,
+            "winner_candidate_id": self.winner_candidate_id,
+            "winner_actuation_identity": self.winner_actuation_identity,
+            "selection_epoch_identity": self.selection_epoch_identity,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "GlobalSellReceiptClosure":
+        if not isinstance(payload, Mapping):
+            raise ValueError("GLOBAL_SELL_RECEIPT_CLOSURE_MISSING")
+        expected = {
+            "receipt_ref",
+            "position_id",
+            "condition_id",
+            "token_id",
+            "action",
+            "execution_mode",
+            "winner_event_id",
+            "winner_candidate_id",
+            "winner_actuation_identity",
+            "selection_epoch_identity",
+        }
+        if set(payload) != expected:
+            raise ValueError("GLOBAL_SELL_RECEIPT_CLOSURE_FIELDS_INVALID")
+        return cls(
+            receipt_ref=GlobalAuctionReceiptRef.from_payload(payload["receipt_ref"]),
+            position_id=payload["position_id"],
+            condition_id=payload["condition_id"],
+            token_id=payload["token_id"],
+            action=payload["action"],
+            execution_mode=payload["execution_mode"],
+            winner_event_id=payload["winner_event_id"],
+            winner_candidate_id=payload["winner_candidate_id"],
+            winner_actuation_identity=payload["winner_actuation_identity"],
+            selection_epoch_identity=payload["selection_epoch_identity"],
+        )
+
+    def assert_matches_command(
+        self,
+        *,
+        position_id: object,
+        token_id: object,
+        side: object,
+        envelope: object,
+    ) -> None:
+        """Require exact command/envelope identity and execution mode."""
+
+        if type(position_id) is not str or position_id != self.position_id:
+            raise ValueError("GLOBAL_SELL_RECEIPT_POSITION_ID_MISMATCH")
+        if type(token_id) is not str or token_id != self.token_id:
+            raise ValueError("GLOBAL_SELL_RECEIPT_TOKEN_ID_MISMATCH")
+        if type(side) is not str or side != self.action:
+            raise ValueError("GLOBAL_SELL_RECEIPT_SIDE_MISMATCH")
+        if envelope is None:
+            raise ValueError("GLOBAL_SELL_RECEIPT_ENVELOPE_MISSING")
+        def _field(name: str) -> object:
+            if isinstance(envelope, Mapping):
+                return envelope.get(name)
+            # sqlite3.Row is mapping-like but does not register as Mapping and
+            # exposes values through subscription rather than attributes.
+            keys = getattr(envelope, "keys", None)
+            if callable(keys) and name in keys():
+                return envelope[name]
+            return getattr(envelope, name, None)
+        if str(_field("condition_id") or "") != self.condition_id:
+            raise ValueError("GLOBAL_SELL_RECEIPT_CONDITION_ID_MISMATCH")
+        if str(_field("selected_outcome_token_id") or "") != self.token_id:
+            raise ValueError("GLOBAL_SELL_RECEIPT_ENVELOPE_TOKEN_ID_MISMATCH")
+        if str(_field("side") or "") != self.action:
+            raise ValueError("GLOBAL_SELL_RECEIPT_ENVELOPE_SIDE_MISMATCH")
+        order_type = str(_field("order_type") or "").strip().upper()
+        raw_post_only = _field("post_only")
+        if type(raw_post_only) is bool:
+            post_only = raw_post_only
+        elif type(raw_post_only) is int and raw_post_only in (0, 1):
+            post_only = bool(raw_post_only)
+        else:
+            raise ValueError("GLOBAL_SELL_RECEIPT_POST_ONLY_INVALID")
+        if self.execution_mode == "TAKER_LIMIT":
+            valid = order_type == "FAK" and not post_only
+        else:
+            valid = order_type in {"GTC", "GTD"} and post_only
+        if not valid:
+            raise ValueError("GLOBAL_SELL_RECEIPT_EXECUTION_MODE_MISMATCH")
+
+    # Alias retained for callers that name this operation as a binding check.
+    assert_command_binding = assert_matches_command
 
 
 def global_auction_receipt_ref_from_summary(

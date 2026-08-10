@@ -1,10 +1,12 @@
 # Created: 2026-06-12
-# Last audited: 2026-06-21
+# Last audited: 2026-08-09
 # Authority basis: immutable decision-q certificate authority for settlement skill
 #   attribution (lifecycle-alpha) — the grader resolves q_live/q_lcb_5pct from the
-#   immutable ActionableTradeCertificate (decision_certificates, VERIFIED) reached
-#   via the audit row's expected_edge_source_certificate_hash, NOT from a
-#   time-reconstructed posterior. A position whose decision-q certificate is
+#   immutable ActionableTradeCertificate (decision_certificates, LIVE/VERIFIED)
+#   reached via the exact ENTRY position_decision_attribution row. Global-auction
+#   certificates additionally close through their schema21 receipt; ordinary
+#   exact ENTRY certificates do not require a trades attachment. A position whose
+#   decision-q certificate is
 #   unresolvable grades UNATTRIBUTABLE_Q_MISSING and is never SKILL/LUCK.
 # Prior authority basis:
 #   - Operator skill-vs-luck law 2026-06-12 (verbatim): "wu预测92不是结算在92就算赢了
@@ -69,10 +71,12 @@ THE SIX CATEGORIES
 THE DECISION-Q AUTHORITY (provenance, 2026-06-21)
 -------------------------------------------------
 The skill authority is the IMMUTABLE decision-time q the system committed at
-entry, carried in the ActionableTradeCertificate (decision_certificates,
-verifier_status='VERIFIED') reached via the audit row's
-expected_edge_source_certificate_hash. q_live + q_lcb_5pct live directly in that
-cert's payload_json. The time-reconstructed posterior (the latest
+entry, carried in the exact ENTRY position_decision_attribution link to an
+ActionableTradeCertificate (decision_certificates, LIVE/VERIFIED). q_live +
+q_lcb_5pct live directly in that cert's payload_json. A certificate that
+declares global-auction provenance is additionally closed through the exact
+schema21 global receipt; an ordinary exact ENTRY certificate has no trades
+attachment or decision-log requirement. The time-reconstructed posterior (the latest
 forecast_posteriors cycle at/<= decision_time) is a DEBUG aid ONLY — it is NOT
 the skill authority and never grades a position SKILL/LUCK on its own.
 
@@ -135,17 +139,20 @@ HONESTY DISCIPLINE
 from __future__ import annotations
 
 import json
+import math
 import logging
 import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Mapping, Optional
 
 from src.contracts.global_auction_receipt import (
     GlobalAuctionReceiptRef,
+    GlobalSellReceiptClosure,
     assert_global_auction_receipt_artifact,
 )
+from src.decision_kernel.canonicalization import stable_hash
 
 logger = logging.getLogger(__name__)
 
@@ -670,11 +677,14 @@ def _load_settlements(world_conn: sqlite3.Connection) -> tuple[dict, dict]:
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
-        (table,),
-    ).fetchone()
-    return row is not None
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (table,),
+        ).fetchone()
+        return row is not None
+    except sqlite3.Error:
+        return False
 
 
 def _position_decision_attribution_row(
@@ -707,9 +717,8 @@ def _position_decision_attribution_row(
             """,
             (position_id,),
         ).fetchone()
-    except sqlite3.OperationalError:
-        # Table absent — an older trades DB snapshot that predates the LX-E
-        # migration entirely. Treated identically to "no row" (legacy fallback).
+    except sqlite3.Error:
+        # Any read/schema/attachment failure is unresolvable q provenance.
         return None
 
 
@@ -719,105 +728,22 @@ def _resolve_cert_hash_for_position(
     condition_id: Optional[str],
     direction: Optional[str],
 ) -> Optional[str]:
-    """Resolve a position's decision-certificate hash — position_decision_attribution
-    FIRST, the legacy (condition_id, direction) inference only as a fallback.
+    """Resolve only the exact ENTRY attribution row; never infer a certificate.
 
-    LX-E packet (docs/rebuild/local_ledger_excision_2026-07-12.md Round-2 delta
-    §(c)): the permanent link is now written at command-creation time (or
-    backfilled with an EXACT command-id join — see
-    scripts/backfill_position_decision_attribution.py) into
-    ``trades.position_decision_attribution``. Three cases:
-
-      1. A row exists with resolution='ATTRIBUTED' -> return its hash (the exact
-         link, never a latest-row guess).
-      2. A row exists with resolution='UNATTRIBUTABLE' -> return None WITHOUT
-         falling back to the legacy inference (an explicit "no exact link could be
-         established" verdict must never be second-guessed by the very inference
-         it was created to replace).
-      3. No row at all -> the position predates the table (neither the live hook
-         nor the backfill has covered it yet); fall back to the legacy
-         (condition_id, direction) inference, logging the fallback.
+    Missing table/row, explicit ``UNATTRIBUTABLE``, or an ambiguous row all
+    return ``None``.  The historical ``(condition_id, direction)`` audit bridge
+    is ancillary P&L evidence only and is never a q authority.
     """
     pid = str(position_id or "").strip()
-    if pid:
-        row = _position_decision_attribution_row(world_conn, pid)
-        if row is not None:
-            resolution, cert_hash = row
-            if resolution == "UNATTRIBUTABLE":
-                logger.info(
-                    "cert_hash_resolution: position_id=%s explicitly UNATTRIBUTABLE "
-                    "in position_decision_attribution — skipping grading, no fallback",
-                    pid,
-                )
-                return None
-            h = str(cert_hash or "").strip()
-            return h or None
-        logger.info(
-            "cert_hash_resolution: position_id=%s has no position_decision_attribution "
-            "row (predates the LX-E migration/backfill) — using legacy "
-            "(condition_id, direction) inference",
-            pid,
-        )
-    return _legacy_resolve_cert_hash_for_position(world_conn, condition_id, direction)
-
-
-def _legacy_resolve_cert_hash_for_position(
-    world_conn: sqlite3.Connection,
-    condition_id: Optional[str],
-    direction: Optional[str],
-) -> Optional[str]:
-    """Bridge a position_current row to its decision-q certificate hash.
-
-    LX-E packet (2026-07-13): retained ONLY as the fallback for positions with no
-    ``position_decision_attribution`` row (i.e. predating that table's existence
-    and the one-time backfill). New positions never reach this path — see
-    ``_resolve_cert_hash_for_position``.
-
-    The grader iterates ``trades.position_current`` (the dollar ledger, #416),
-    which carries NO certificate hash. The immutable decision-q lives on the
-    ActionableTradeCertificate reached via ``edli_live_profit_audit``'s
-    ``expected_edge_source_certificate_hash``. The audit ledger records the venue
-    fill(s) for a given market + side, so the bridge key is
-    (condition_id, direction): the same condition + side the position was held on.
-
-    Bridge key derivation (verified read-only against the live world+trades DBs,
-    2026-06-21): of 76 terminal-held positions, (condition_id, direction)
-    resolves the cert for all 53 that have one; token_id is NOT a usable key (the
-    audit fill row records the NO-outcome token, which equals position.no_token_id
-    on 51/53 and position.token_id on only 2/53, so matching on position.token_id
-    would wrongly strand 51 positions). 14 (condition, direction) pairs map to >1
-    distinct cert hash (re-decisions on the same market); 12 of those carry an
-    identical q_live and the other 2 differ only at the 3rd decimal (same side of
-    every threshold), so the SKILL/LUCK grade is invariant to the pick. ``ORDER BY
-    created_at DESC LIMIT 1`` (latest entry decision) is the deterministic, stable
-    choice.
-
-    Returns the most recent non-empty ``expected_edge_source_certificate_hash`` for
-    the (condition_id, direction) match, or None when no audit row carries one —
-    the position is then UNATTRIBUTABLE_Q_MISSING (never time-reconstructed).
-    Reuses the grader's world_conn (INV-37: no new DB connection); the audit table
-    lives in the world MAIN schema alongside decision_certificates.
-    """
-    cid = str(condition_id or "").strip()
-    dirn = str(direction or "").strip()
-    if not cid or not dirn or not _table_exists(world_conn, "edli_live_profit_audit"):
+    if not pid:
         return None
-    row = world_conn.execute(
-        """
-        SELECT expected_edge_source_certificate_hash
-        FROM edli_live_profit_audit
-        WHERE condition_id = ?
-          AND direction = ?
-          AND expected_edge_source_certificate_hash IS NOT NULL
-          AND expected_edge_source_certificate_hash <> ''
-        ORDER BY created_at DESC
-        LIMIT 1
-        """,
-        (cid, dirn),
-    ).fetchone()
+    row = _position_decision_attribution_row(world_conn, pid)
     if row is None:
         return None
-    h = str(row[0] or "").strip()
+    resolution, cert_hash = row
+    if resolution != "ATTRIBUTED":
+        return None
+    h = str(cert_hash or "").strip()
     return h or None
 
 
@@ -840,19 +766,22 @@ def _resolve_audit_fees_for_position(
     dirn = str(direction or "").strip()
     if not cid or not dirn or not _table_exists(world_conn, "edli_live_profit_audit"):
         return None
-    row = world_conn.execute(
-        """
-        SELECT fees
-        FROM edli_live_profit_audit
-        WHERE condition_id = ?
-          AND direction = ?
-          AND filled_size > 0
-          AND avg_fill_price IS NOT NULL
-        ORDER BY created_at DESC
-        LIMIT 1
-        """,
-        (cid, dirn),
-    ).fetchone()
+    try:
+        row = world_conn.execute(
+            """
+            SELECT fees
+            FROM edli_live_profit_audit
+            WHERE condition_id = ?
+              AND direction = ?
+              AND filled_size > 0
+              AND avg_fill_price IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (cid, dirn),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
     if row is None or row[0] is None:
         return None
     try:
@@ -864,15 +793,21 @@ def _resolve_audit_fees_for_position(
 def _resolve_decision_q_from_certificate(
     world_conn: sqlite3.Connection,
     certificate_hash: Optional[str],
+    *,
+    condition_id: Optional[str],
+    direction: Optional[str],
+    held_token_id: Optional[str],
 ) -> Optional[dict]:
     """Resolve the IMMUTABLE decision-time q from the expected-edge certificate.
 
-    Reads the VERIFIED ActionableTradeCertificate from decision_certificates by
-    its certificate_hash (the audit row's expected_edge_source_certificate_hash)
-    and extracts q_live + q_lcb_5pct from its payload_json. This is the SAME cert
-    + key path the writer side stamps onto edli_live_profit_audit
-    (src/events/live_profit_audit.py:_load_verified_certificate_payload), so the
-    grader and writer agree on the decision-q authority.
+    Reads the unique LIVE/VERIFIED ActionableTradeCertificate from
+    ``decision_certificates`` by the exact ENTRY attribution hash and validates
+    its canonical payload hash and exact position identity. Certificates with
+    any global-auction declaration must carry the complete, internally
+    consistent marker plus top-level and nested receipt references, then close
+    through the exact schema21 artifact in ``trades.decision_log``. With all
+    three global fields absent, an ordinary exact ENTRY certificate uses its
+    already-verified q fields directly and never requires a trades attachment.
 
     Returns None when the hash is empty, the cert is absent, the cert is not
     VERIFIED, the payload is unparseable, or it carries no q_live (the position
@@ -882,18 +817,23 @@ def _resolve_decision_q_from_certificate(
     h = str(certificate_hash or "").strip()
     if not h or not _table_exists(world_conn, "decision_certificates"):
         return None
-    row = world_conn.execute(
-        """
-        SELECT payload_json
-        FROM decision_certificates
-        WHERE certificate_hash = ?
-          AND verifier_status = 'VERIFIED'
-        LIMIT 1
-        """,
-        (h,),
-    ).fetchone()
-    if row is None:
+    try:
+        rows = world_conn.execute(
+            """
+            SELECT payload_json, payload_hash
+            FROM decision_certificates
+            WHERE certificate_hash = ?
+              AND certificate_type = 'ActionableTradeCertificate'
+              AND mode = 'LIVE'
+              AND verifier_status = 'VERIFIED'
+            """,
+            (h,),
+        ).fetchall()
+    except sqlite3.Error:
         return None
+    if len(rows) != 1:
+        return None
+    row = rows[0]
     raw = row[0]
     try:
         payload = json.loads(raw) if isinstance(raw, str) else raw
@@ -901,21 +841,54 @@ def _resolve_decision_q_from_certificate(
         return None
     if not isinstance(payload, dict):
         return None
+    expected_identity = {
+        "condition_id": str(condition_id or "").strip(),
+        "direction": str(direction or "").strip(),
+        "token_id": str(held_token_id or "").strip(),
+    }
+    if any(not value for value in expected_identity.values()):
+        return None
+    if any(
+        str(payload.get(field) or "").strip() != expected
+        for field, expected in expected_identity.items()
+    ):
+        return None
+    try:
+        if str(row[1] or "") != stable_hash(payload):
+            return None
+    except (TypeError, ValueError):
+        return None
     economics = payload.get("qkernel_execution_economics")
     global_marker = (
         str(economics.get("global_actuation_identity") or "").strip()
         if isinstance(economics, dict)
         else ""
     )
-    receipt_payload = payload.get("global_auction_receipt")
-    if global_marker:
+    # The production actionable payload keeps the top-level key present with
+    # ``None`` for ordinary entries.  Presence alone is therefore not a global
+    # declaration; any non-empty reference still is, including a malformed
+    # non-empty object that must fail closed below.
+    top_receipt_declared = payload.get("global_auction_receipt") not in (None, "")
+    nested_receipt_declared = (
+        isinstance(economics, dict)
+        and economics.get("global_auction_receipt") not in (None, "")
+    )
+    global_declared = bool(global_marker) or top_receipt_declared or nested_receipt_declared
+    if global_declared:
+        # A partial declaration is never ordinary: deleting one marker/reference
+        # must not downgrade a certificate into an attachment-free path.
+        if (
+            not isinstance(economics, dict)
+            or not global_marker
+            or not top_receipt_declared
+            or not nested_receipt_declared
+        ):
+            return None
+        receipt_payload = payload.get("global_auction_receipt")
+        nested_payload = economics.get("global_auction_receipt")
         try:
-            expected_receipt = GlobalAuctionReceiptRef.from_payload(
-                receipt_payload
-            )
-            nested_receipt = GlobalAuctionReceiptRef.from_payload(
-                economics.get("global_auction_receipt")
-            )
+            expected_receipt = GlobalAuctionReceiptRef.from_payload(receipt_payload)
+            nested_receipt = GlobalAuctionReceiptRef.from_payload(nested_payload)
             expected_receipt.assert_matches_actuation(
                 winner_event_id=economics.get("global_winner_event_id"),
                 winner_candidate_id=economics.get("global_candidate_id"),
@@ -924,16 +897,19 @@ def _resolve_decision_q_from_certificate(
                     "global_selection_epoch_identity"
                 ),
             )
-        except ValueError:
+        except (TypeError, ValueError):
             return None
         if nested_receipt != expected_receipt:
             return None
-        attached = {
-            str(schema)
-            for _, schema, *_ in world_conn.execute(
-                "PRAGMA database_list"
-            ).fetchall()
-        }
+        try:
+            attached = {
+                str(schema)
+                for _, schema, *_ in world_conn.execute(
+                    "PRAGMA database_list"
+                ).fetchall()
+            }
+        except sqlite3.Error:
+            return None
         if "trades" not in attached:
             return None
         try:
@@ -952,10 +928,8 @@ def _resolve_decision_q_from_certificate(
                 decision_log_mode=str(receipt_row[0]),
                 artifact_json=receipt_row[1],
             )
-        except ValueError:
+        except (TypeError, ValueError):
             return None
-    elif receipt_payload not in (None, ""):
-        return None
     q_live = payload.get("q_live")
     if q_live is None:
         return None  # cert carries no decision-q — unattributable, never guessed
@@ -963,11 +937,19 @@ def _resolve_decision_q_from_certificate(
         q_live_f = float(q_live)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(q_live_f) or not 0.0 <= q_live_f <= 1.0:
+        return None
     q_lcb = payload.get("q_lcb_5pct")
     try:
         q_lcb_f = float(q_lcb) if q_lcb is not None else None
     except (TypeError, ValueError):
-        q_lcb_f = None
+        return None
+    if q_lcb_f is not None and (
+        not math.isfinite(q_lcb_f)
+        or not 0.0 <= q_lcb_f <= 1.0
+        or q_lcb_f > q_live_f
+    ):
+        return None
     consumed = payload.get("posterior_id")
     return {
         "q_live": q_live_f,
@@ -1151,7 +1133,7 @@ def _bin_yes_mass_from_q_json(q_json, bin_obj) -> Optional[float]:
 # Load + grade every settled position
 # ---------------------------------------------------------------------------
 
-def _ensure_trades_attached(world_conn: sqlite3.Connection) -> bool:
+def _ensure_trades_attached(world_conn: sqlite3.Connection) -> Optional[bool]:
     """ATTACH zeus_trades.db as 'trades' in READ-ONLY mode on the single conn.
 
     W3 (2026-06-20): the grader reads ``trades.position_current``, which lives in
@@ -1168,11 +1150,16 @@ def _ensure_trades_attached(world_conn: sqlite3.Connection) -> bool:
     """
     from src.state.db import _zeus_trade_db_path
 
-    attached = {row[1] for row in world_conn.execute("PRAGMA database_list").fetchall()}
-    if "trades" not in attached:
-        trades_uri = f"file:{_zeus_trade_db_path()}?mode=ro"
-        world_conn.execute("ATTACH DATABASE ? AS trades", (trades_uri,))
-    return True
+    try:
+        attached = {
+            row[1] for row in world_conn.execute("PRAGMA database_list").fetchall()
+        }
+        if "trades" not in attached:
+            trades_uri = f"file:{_zeus_trade_db_path()}?mode=ro"
+            world_conn.execute("ATTACH DATABASE ? AS trades", (trades_uri,))
+        return True
+    except sqlite3.Error:
+        return None
 
 
 # The position lifecycle's entry/decision events. MIN(occurred_at) over these is the
@@ -1239,7 +1226,8 @@ def load_settled_positions(
     from src.contracts.graded_receipt import grade_receipt
     from src.types.temperature import UnitMismatchError
 
-    _ensure_trades_attached(world_conn)
+    if _ensure_trades_attached(world_conn) is not True:
+        return []
     # Grade ONLY genuinely-held TERMINAL positions: phase IN
     # (settled, economically_closed, admin_closed). position_current.phase is
     # constrained to lifecycle values; without this filter the query also returned
@@ -1260,7 +1248,8 @@ def load_settled_positions(
     )
     position_rows = world_conn.execute(
         f"""
-        SELECT position_id, condition_id, direction, entry_price, shares
+        SELECT position_id, condition_id, direction, token_id, no_token_id,
+               entry_price, shares
         FROM trades.position_current AS position_current
         WHERE entry_price IS NOT NULL
           AND direction IS NOT NULL
@@ -1277,7 +1266,15 @@ def load_settled_positions(
     entry_times = _load_position_entry_times(world_conn)
 
     out: list[SkillGrade] = []
-    for position_id, condition_id, direction, entry_price, shares in position_rows:
+    for (
+        position_id,
+        condition_id,
+        direction,
+        token_id,
+        no_token_id,
+        entry_price,
+        shares,
+    ) in position_rows:
         # position_current's per-share avg fill is ``entry_price``; ``shares`` is the
         # filled size. (There is no avg_fill_price column on this ledger.)
         audit_id = position_id
@@ -1285,15 +1282,11 @@ def load_settled_positions(
         filled_size = shares
         q_live = None       # not stored on position_current — cert is the authority
         q_lcb_5pct = None
-        # Decision-q PROVENANCE bridge (LX-E packet, 2026-07-13): reads the
-        # permanent trades.position_decision_attribution link FIRST (written at
-        # ENTRY command creation, or backfilled via an EXACT command-id join);
-        # falls back to the legacy (condition_id, direction) inference ONLY for
-        # positions with no attribution row at all. When no hash resolves (either
-        # explicitly UNATTRIBUTABLE or genuinely absent from the legacy audit
-        # bridge) the position grades UNATTRIBUTABLE_Q_MISSING below (never
-        # time-reconstructed, never guessed).
-        expected_edge_source_certificate_hash = _resolve_cert_hash_for_position(
+        # Decision-q authority is the permanent ENTRY attribution link (written at
+        # command creation or exact command-id backfill). Missing/ambiguous rows
+        # are terminal for q attribution; the legacy audit bridge is ancillary P&L
+        # only and is never consulted here.
+        decision_certificate_hash = _resolve_cert_hash_for_position(
             world_conn, position_id, condition_id, direction
         )
         # world_grade_pnl_usd input (LX-E packet, 2026-07-13): fees are not stored
@@ -1341,14 +1334,15 @@ def load_settled_positions(
         except ValueError:
             continue
 
-        # --- Decision-q AUTHORITY: the immutable ActionableTradeCertificate ---
-        # Resolve q_live/q_lcb from the cert reached via the audit row's
-        # expected_edge_source_certificate_hash. This is the system's ACTUAL
-        # decision-time q and the SOLE skill authority. The cert is authoritative
-        # over the audit column (which is NULL on pre-writer-fix rows); when the
-        # column IS already stamped by the writer it agrees with the cert.
+        # --- Decision-q AUTHORITY: exact ENTRY attribution -> cert -> receipt ---
+        # The ancillary audit row is never a q authority. Missing/invalid
+        # attribution, certificate, or schema21 receipt leaves q unknown.
         cert_q = _resolve_decision_q_from_certificate(
-            world_conn, expected_edge_source_certificate_hash
+            world_conn,
+            decision_certificate_hash,
+            condition_id=condition_id,
+            direction=direction,
+            held_token_id=(no_token_id if direction == "buy_no" else token_id),
         )
         if cert_q is not None:
             q_live = cert_q["q_live"]
@@ -1594,6 +1588,309 @@ def persist_grade(
 
 
 # ---------------------------------------------------------------------------
+# Global SELL command -> auction receipt settlement audit (derived, read-only)
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class GlobalSellReceiptAudit:
+    """Exact audit verdict for one persisted EXIT/SELL venue command.
+
+    This is deliberately orthogonal to ``SkillGrade``.  Entry-q attribution
+    remains certificate-authoritative; an invalid exit receipt is reported but
+    never relabels the position's settlement outcome or silently supplies q.
+    """
+
+    position_id: str
+    command_id: Optional[str]
+    status: str
+    reason: str
+    receipt_ref: Optional[GlobalAuctionReceiptRef] = None
+
+    def __post_init__(self) -> None:
+        if self.status not in {"VALID", "INVALID", "NOT_GLOBAL_SELL"}:
+            raise ValueError("GLOBAL_SELL_RECEIPT_AUDIT_STATUS_INVALID")
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "position_id": self.position_id,
+            "command_id": self.command_id,
+            "status": self.status,
+            "reason": self.reason,
+            "receipt_ref": (
+                None if self.receipt_ref is None else self.receipt_ref.as_payload()
+            ),
+        }
+
+
+def _global_sell_audit_result(
+    *,
+    position_id: str,
+    command_id: Optional[str],
+    status: str,
+    reason: str,
+    receipt_ref: Optional[GlobalAuctionReceiptRef] = None,
+) -> GlobalSellReceiptAudit:
+    return GlobalSellReceiptAudit(
+        position_id=position_id,
+        command_id=command_id,
+        status=status,
+        reason=reason,
+        receipt_ref=receipt_ref,
+    )
+
+
+def _global_sell_audit_value_error(exc: ValueError) -> str:
+    reason = str(exc).strip()
+    if reason.startswith("GLOBAL_") and " " not in reason:
+        return reason
+    return "GLOBAL_SELL_RECEIPT_AUDIT_INVALID"
+
+
+def _audit_global_sell_command(
+    world_conn: sqlite3.Connection,
+    *,
+    requested_position_id: str,
+    command_row: tuple,
+) -> GlobalSellReceiptAudit:
+    (
+        command_id,
+        command_position_id,
+        token_id,
+        side,
+        intent_kind,
+        envelope_id,
+    ) = command_row
+    command_id_text = str(command_id or "").strip() or None
+    receipt_ref: Optional[GlobalAuctionReceiptRef] = None
+    try:
+        if command_id_text is None:
+            raise ValueError("GLOBAL_SELL_RECEIPT_AUDIT_COMMAND_ID_INVALID")
+        if type(command_position_id) is not str or command_position_id != requested_position_id:
+            raise ValueError("GLOBAL_SELL_RECEIPT_POSITION_ID_MISMATCH")
+        if type(intent_kind) is not str or intent_kind != "EXIT":
+            raise ValueError("GLOBAL_SELL_RECEIPT_INTENT_KIND_MISMATCH")
+        if type(side) is not str or side != "SELL":
+            raise ValueError("GLOBAL_SELL_RECEIPT_SIDE_MISMATCH")
+
+        event_rows = world_conn.execute(
+            """
+            SELECT payload_json
+              FROM trades.venue_command_events
+             WHERE command_id = ?
+               AND sequence_no = 1
+               AND event_type = 'INTENT_CREATED'
+            """,
+            (command_id_text,),
+        ).fetchall()
+        if len(event_rows) != 1:
+            raise ValueError("GLOBAL_SELL_RECEIPT_AUDIT_INTENT_EVENT_MISSING")
+        raw_payload = event_rows[0][0]
+        if raw_payload is None:
+            return _global_sell_audit_result(
+                position_id=requested_position_id,
+                command_id=command_id_text,
+                status="NOT_GLOBAL_SELL",
+                reason="GLOBAL_SELL_RECEIPT_CLOSURE_ABSENT",
+            )
+        try:
+            event_payload = (
+                raw_payload
+                if isinstance(raw_payload, Mapping)
+                else json.loads(raw_payload)
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "GLOBAL_SELL_RECEIPT_AUDIT_EVENT_PAYLOAD_INVALID"
+            ) from exc
+        if not isinstance(event_payload, Mapping):
+            raise ValueError("GLOBAL_SELL_RECEIPT_AUDIT_EVENT_PAYLOAD_INVALID")
+        if "global_sell_receipt_closure" not in event_payload:
+            return _global_sell_audit_result(
+                position_id=requested_position_id,
+                command_id=command_id_text,
+                status="NOT_GLOBAL_SELL",
+                reason="GLOBAL_SELL_RECEIPT_CLOSURE_ABSENT",
+            )
+        if set(event_payload) != {"global_sell_receipt_closure"}:
+            raise ValueError("GLOBAL_SELL_RECEIPT_AUDIT_EVENT_FIELDS_INVALID")
+        closure = GlobalSellReceiptClosure.from_payload(
+            event_payload["global_sell_receipt_closure"]
+        )
+        receipt_ref = closure.receipt_ref
+
+        envelope_rows = world_conn.execute(
+            """
+            SELECT condition_id, selected_outcome_token_id, side,
+                   order_type, post_only
+              FROM trades.venue_submission_envelopes
+             WHERE envelope_id = ?
+            """,
+            (envelope_id,),
+        ).fetchall()
+        if len(envelope_rows) != 1:
+            raise ValueError("GLOBAL_SELL_RECEIPT_ENVELOPE_MISSING")
+        envelope_row = envelope_rows[0]
+        envelope = {
+            "condition_id": envelope_row[0],
+            "selected_outcome_token_id": envelope_row[1],
+            "side": envelope_row[2],
+            "order_type": envelope_row[3],
+            "post_only": envelope_row[4],
+        }
+        closure.assert_matches_command(
+            position_id=command_position_id,
+            token_id=token_id,
+            side=side,
+            envelope=envelope,
+        )
+
+        receipt_rows = world_conn.execute(
+            """
+            SELECT mode, artifact_json
+              FROM trades.decision_log
+             WHERE id = ?
+            """,
+            (receipt_ref.decision_log_id,),
+        ).fetchall()
+        if len(receipt_rows) != 1:
+            raise ValueError("GLOBAL_SELL_RECEIPT_ARTIFACT_MISSING")
+        receipt_row = receipt_rows[0]
+        assert_global_auction_receipt_artifact(
+            expected=receipt_ref,
+            decision_log_id=receipt_ref.decision_log_id,
+            decision_log_mode=receipt_row[0],
+            artifact_json=receipt_row[1],
+        )
+    except sqlite3.Error:
+        return _global_sell_audit_result(
+            position_id=requested_position_id,
+            command_id=command_id_text,
+            status="INVALID",
+            reason="GLOBAL_SELL_RECEIPT_AUDIT_SQLITE_ERROR",
+            receipt_ref=receipt_ref,
+        )
+    except ValueError as exc:
+        return _global_sell_audit_result(
+            position_id=requested_position_id,
+            command_id=command_id_text,
+            status="INVALID",
+            reason=_global_sell_audit_value_error(exc),
+            receipt_ref=receipt_ref,
+        )
+
+    return _global_sell_audit_result(
+        position_id=requested_position_id,
+        command_id=command_id_text,
+        status="VALID",
+        reason="GLOBAL_SELL_RECEIPT_EXACT",
+        receipt_ref=receipt_ref,
+    )
+
+
+def audit_global_sell_receipts(
+    world_conn: sqlite3.Connection,
+    position_id: str,
+) -> tuple[GlobalSellReceiptAudit, ...]:
+    """Audit every EXIT/SELL command for one position through its exact receipt.
+
+    A NULL/missing closure field is an ordinary non-global SELL, never inferred
+    into this authority chain.  Once a closure is present, every malformed,
+    deleted, or mismatched command/envelope/receipt surface is ``INVALID``.
+    """
+
+    pid = str(position_id or "").strip()
+    if not pid:
+        raise ValueError("GLOBAL_SELL_RECEIPT_AUDIT_POSITION_ID_INVALID")
+    try:
+        command_rows = world_conn.execute(
+            """
+            SELECT command_id, position_id, token_id, side, intent_kind, envelope_id
+              FROM trades.venue_commands
+             WHERE position_id = ?
+               AND UPPER(intent_kind) = 'EXIT'
+               AND UPPER(side) = 'SELL'
+             ORDER BY created_at, command_id
+            """,
+            (pid,),
+        ).fetchall()
+    except sqlite3.Error:
+        return (
+            _global_sell_audit_result(
+                position_id=pid,
+                command_id=None,
+                status="INVALID",
+                reason="GLOBAL_SELL_RECEIPT_AUDIT_COMMAND_READ_ERROR",
+            ),
+        )
+    return tuple(
+        _audit_global_sell_command(
+            world_conn,
+            requested_position_id=pid,
+            command_row=tuple(row),
+        )
+        for row in command_rows
+    )
+
+
+def _audit_settled_global_sell_receipts(
+    world_conn: sqlite3.Connection,
+) -> dict[str, object]:
+    """Aggregate the read-only receipt audit over all terminal positions."""
+
+    try:
+        position_rows = world_conn.execute(
+            """
+            SELECT DISTINCT command.position_id
+              FROM trades.venue_commands AS command
+              JOIN trades.position_current AS position_current
+                ON position_current.position_id = command.position_id
+             WHERE UPPER(command.intent_kind) = 'EXIT'
+               AND UPPER(command.side) = 'SELL'
+               AND position_current.phase IN (
+                     'settled', 'economically_closed', 'admin_closed'
+               )
+             ORDER BY command.position_id
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return {
+            "commands": 0,
+            "valid": 0,
+            "invalid": 0,
+            "not_global_sell": 0,
+            "scan_error": "GLOBAL_SELL_RECEIPT_AUDIT_POSITION_SCAN_ERROR",
+            "invalid_details": [],
+        }
+
+    audits = tuple(
+        audit
+        for row in position_rows
+        for audit in audit_global_sell_receipts(world_conn, str(row[0]))
+    )
+    invalid = tuple(audit for audit in audits if audit.status == "INVALID")
+    read_errors = tuple(
+        audit
+        for audit in invalid
+        if audit.reason in {
+            "GLOBAL_SELL_RECEIPT_AUDIT_COMMAND_READ_ERROR",
+            "GLOBAL_SELL_RECEIPT_AUDIT_SQLITE_ERROR",
+        }
+    )
+    return {
+        "commands": len(audits),
+        "valid": sum(audit.status == "VALID" for audit in audits),
+        "invalid": len(invalid),
+        "not_global_sell": sum(
+            audit.status == "NOT_GLOBAL_SELL" for audit in audits
+        ),
+        "scan_error": (
+            "GLOBAL_SELL_RECEIPT_AUDIT_READ_ERROR" if read_errors else None
+        ),
+        "invalid_details": [audit.as_payload() for audit in invalid[:25]],
+    }
+
+
+# ---------------------------------------------------------------------------
 # The skill win-rate read function
 # ---------------------------------------------------------------------------
 
@@ -1819,6 +2116,29 @@ def _run_with_conn(
     rate = compute_skill_win_rate(world_conn)
     discredited_stale = count_discredited_stale_brands(world_conn)
     logger.info(skill_win_rate_log_line(rate, discredited_stale))
+    try:
+        global_sell_receipt_audit = _audit_settled_global_sell_receipts(world_conn)
+    except Exception:  # noqa: BLE001 - derived audit cannot roll back entry grades
+        logger.exception(
+            "global SELL receipt settlement audit failed (entry grades unaffected)"
+        )
+        global_sell_receipt_audit = {
+            "commands": 0,
+            "valid": 0,
+            "invalid": 0,
+            "not_global_sell": 0,
+            "scan_error": "GLOBAL_SELL_RECEIPT_AUDIT_INTERNAL_ERROR",
+            "invalid_details": [],
+        }
+    logger.info(
+        "global_sell_receipt_audit: commands=%s valid=%s invalid=%s "
+        "not_global_sell=%s scan_error=%s",
+        global_sell_receipt_audit["commands"],
+        global_sell_receipt_audit["valid"],
+        global_sell_receipt_audit["invalid"],
+        global_sell_receipt_audit["not_global_sell"],
+        global_sell_receipt_audit["scan_error"],
+    )
 
     return {
         "graded": graded,
@@ -1829,6 +2149,7 @@ def _run_with_conn(
         "naive_win_rate": rate.naive_win_rate,
         "skill_denominator": rate.skill_denominator,
         "discredited_stale_brands": discredited_stale,
+        "global_sell_receipt_audit": global_sell_receipt_audit,
     }
 
 

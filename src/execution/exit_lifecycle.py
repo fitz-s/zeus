@@ -43,6 +43,7 @@ from src.execution.executor import (
     _exit_execution_authority_deadline_error,
     _refresh_exit_collateral_snapshot_for_submit,  # noqa: F401
 )
+from src.contracts.global_auction_receipt import GlobalSellReceiptClosure
 from src.contracts.venue_submission_envelope import (
     LIVE_ORDER_MAX_UNIT_PRICE,
     LIVE_ORDER_MIN_UNIT_PRICE,
@@ -1913,6 +1914,7 @@ class ExitIntent:
     submit_order_type: str | None = None
     close_position: bool = True
     capital_certificate: Mapping[str, object] | None = None
+    global_sell_receipt_closure: GlobalSellReceiptClosure | None = None
     decision_id: str = ""
     probability_receipt: Mapping[str, object] | None = None
     fresh_prob: float | None = None
@@ -2210,7 +2212,9 @@ def place_sell_order(
     marketable_sell_certificate: Mapping[str, object] | None = None,
     marketable_sell_certificate_identity: str = "",
     marketable_sell_execution_authority: object | None = None,
+    global_sell_execution_authority: object | None = None,
     execution_authority_deadline_utc: str = "",
+    global_sell_receipt_closure: GlobalSellReceiptClosure | None = None,
 ) -> OrderResult:
     """Thin compatibility adapter over the executor-level exit-order path."""
 
@@ -2237,7 +2241,9 @@ def place_sell_order(
         marketable_sell_certificate=marketable_sell_certificate,
         marketable_sell_certificate_identity=marketable_sell_certificate_identity,
         marketable_sell_execution_authority=marketable_sell_execution_authority,
+        global_sell_execution_authority=global_sell_execution_authority,
         execution_authority_deadline_utc=execution_authority_deadline_utc,
+        global_sell_receipt_closure=global_sell_receipt_closure,
     )
     deadline_error = _exit_execution_authority_deadline_error(intent)
     if deadline_error is not None:
@@ -3560,6 +3566,58 @@ def _validate_exit_intent(position: Position, exit_context: ExitContext, exit_in
         exit_intent.capital_certificate, Mapping
     ):
         raise ValueError("exit_intent capital_certificate must be a mapping")
+    if exit_intent.global_sell_receipt_closure is not None and type(
+        exit_intent.global_sell_receipt_closure
+    ) is not GlobalSellReceiptClosure:
+        raise ValueError("exit_intent global_sell_receipt_closure must be typed")
+
+
+def _global_sell_receipt_closure_error(
+    position: Position,
+    exit_intent: ExitIntent,
+    authority: GlobalSellExecutionAuthority | None,
+) -> str | None:
+    """Validate the typed global-auction receipt before lifecycle recording."""
+
+    closure = exit_intent.global_sell_receipt_closure
+    if closure is None:
+        return "global_sell_receipt_closure_required"
+    if type(closure) is not GlobalSellReceiptClosure:
+        return "global_sell_receipt_closure_invalid"
+    if not isinstance(authority, GlobalSellExecutionAuthority):
+        return "global_sell_receipt_closure_invalid"
+    try:
+        closure.__post_init__()
+        actuation = authority.actuation
+        candidate = actuation.decision.candidate
+        closure.receipt_ref.assert_matches_actuation(
+            winner_event_id=actuation.winner_event_id,
+            winner_candidate_id=candidate.candidate_id,
+            winner_actuation_identity=actuation.actuation_identity,
+            selection_epoch_identity=actuation.selection_epoch_identity,
+        )
+    except (AttributeError, TypeError, ValueError):
+        return "global_sell_receipt_closure_invalid"
+    expected_token = (
+        getattr(position, "token_id", "")
+        if str(getattr(candidate, "side", "") or "") == "YES"
+        else getattr(position, "no_token_id", "")
+    )
+    if (
+        closure.position_id != str(getattr(position, "trade_id", "") or "")
+        or closure.condition_id != str(getattr(position, "condition_id", "") or "")
+        or closure.token_id != str(expected_token or "")
+        or closure.action != "SELL"
+        or closure.execution_mode != str(getattr(candidate, "execution_mode", "") or "")
+        or closure.winner_event_id != str(getattr(actuation, "winner_event_id", "") or "")
+        or closure.winner_candidate_id != str(getattr(candidate, "candidate_id", "") or "")
+        or closure.winner_actuation_identity
+        != str(getattr(actuation, "actuation_identity", "") or "")
+        or closure.selection_epoch_identity
+        != str(getattr(actuation, "selection_epoch_identity", "") or "")
+    ):
+        return "global_sell_receipt_closure_identity_mismatch"
+    return None
 
 
 def _global_sell_capital_certificate_error(
@@ -3585,6 +3643,14 @@ def _global_sell_capital_certificate_error(
     decision = actuation.decision
     candidate = decision.candidate
     jit = authority.jit_candidate
+    closure_error = _global_sell_receipt_closure_error(
+        position,
+        exit_intent,
+        authority,
+    )
+    if closure_error is not None:
+        return closure_error
+    closure = exit_intent.global_sell_receipt_closure
     raw_direction = getattr(position, "direction", "")
     direction = str(getattr(raw_direction, "value", raw_direction) or "").lower()
     expected_direction = "buy_yes" if candidate.side == "YES" else "buy_no"
@@ -3637,6 +3703,8 @@ def _global_sell_capital_certificate_error(
     certificate = exit_intent.capital_certificate
     if not isinstance(certificate, Mapping):
         return "capital_certificate_required"
+    if certificate.get("global_auction_receipt") != closure.receipt_ref.as_payload():
+        return "global_sell_receipt_closure_capital_certificate_mismatch"
     expected_text = {
         "action": "SELL",
         "position_id": str(getattr(position, "trade_id", "") or ""),
@@ -4786,6 +4854,11 @@ def _exit_intent_audit_payload(exit_intent: ExitIntent) -> dict[str, object]:
             if exit_intent.capital_certificate is not None
             else None
         ),
+        "exit_intent_global_sell_receipt_closure": (
+            exit_intent.global_sell_receipt_closure.as_payload()
+            if exit_intent.global_sell_receipt_closure is not None
+            else None
+        ),
         "exit_intent_decision_id": exit_intent.decision_id,
         "exit_intent_probability_receipt": (
             dict(exit_intent.probability_receipt)
@@ -4918,6 +4991,7 @@ def execute_exit(
     global_sell_authority: GlobalSellExecutionAuthority | None = None,
     hard_fact_authority: object | None = None,
     global_sell_prefetched_orderbook: Mapping[str, object] | None = None,
+    global_sell_required_snapshot_id: str | None = None,
 ) -> str:
     """Execute an exit decision. Returns outcome description.
 
@@ -4986,6 +5060,7 @@ def execute_exit(
         global_sell_authority=global_sell_authority,
         hard_fact_authority=hard_fact_authority,
         global_sell_prefetched_orderbook=global_sell_prefetched_orderbook,
+        global_sell_required_snapshot_id=global_sell_required_snapshot_id,
     )
 
 
@@ -5002,6 +5077,7 @@ def _execute_live_exit(
     global_sell_authority: GlobalSellExecutionAuthority | None,
     hard_fact_authority: object | None,
     global_sell_prefetched_orderbook: Mapping[str, object] | None = None,
+    global_sell_required_snapshot_id: str | None = None,
 ) -> str:
     """Live exit: place sell, check fill, retry on failure."""
     if conn is not None:
@@ -5114,6 +5190,16 @@ def _execute_live_exit(
         )
         if str(exit_intent.submit_order_type or "").upper() != expected_order_type:
             return "exit_blocked: global_sell_order_type_mismatch"
+        closure_error = _global_sell_receipt_closure_error(
+            position,
+            exit_intent,
+            global_sell_authority,
+        )
+        if closure_error is not None:
+            # INV-47 SCOPE: only this global SELL actuation is blocked.
+            # DRAIN: the adapter must rebuild the closure from its exact receipt.
+            # RESET: a subsequent actuation with a matching typed closure clears it.
+            return f"exit_blocked: {closure_error}"
     _record_exit_intent_before_execution_gates(conn, position, exit_intent)
 
     try:
@@ -5133,11 +5219,13 @@ def _execute_live_exit(
                 else None
             ),
             required_raw_orderbook_hash=required_book_hash,
+            required_snapshot_id=global_sell_required_snapshot_id,
             prefetched_orderbook=(
                 global_sell_prefetched_orderbook
                 if global_authorized
                 else None
             ),
+            require_exact_handoff_snapshot=global_authorized,
         )
     except Exception as exc:  # noqa: BLE001
         snapshot_reason = f"{exit_context.exit_reason} [EXECUTABLE_SNAPSHOT_ERROR]"
@@ -5506,6 +5594,14 @@ def _execute_live_exit(
                 == "TAKER_LIMIT"
                 else None
             ),
+            global_sell_execution_authority=(
+                global_sell_authority if global_authorized else None
+            ),
+            global_sell_receipt_closure=(
+                exit_intent.global_sell_receipt_closure
+                if global_authorized
+                else None
+            ),
             **submit_snapshot_context,
         )
         decision_id = exit_intent.decision_id or f"exit:{position.trade_id}"
@@ -5872,6 +5968,92 @@ def _latest_exit_snapshot_context(
     }
 
 
+def _exact_exit_snapshot_context(
+    conn: sqlite3.Connection | None,
+    token_id: str,
+    snapshot_id: str,
+    required_raw_orderbook_hash: str,
+    *,
+    now: datetime | None = None,
+) -> dict[str, object]:
+    """Return the persisted handoff row, without consulting the latest mirror.
+
+    A global SELL handoff is an authority certificate for one immutable snapshot.
+    Looking up the latest row first would let a newer row supersede that
+    certificate (or trigger a second network capture).  Query the canonical
+    append-only table by the required id and validate every submit-time fact
+    needed by the exit executor here.
+    """
+
+    clean_token = str(token_id or "").strip()
+    clean_snapshot_id = str(snapshot_id or "").strip()
+    clean_required_hash = str(required_raw_orderbook_hash or "").strip()
+    if conn is None or not clean_token or not clean_snapshot_id or not clean_required_hash:
+        return {}
+    checked_at = now or _utcnow()
+    saved = conn.row_factory
+    conn.row_factory = sqlite3.Row
+    try:
+        # Deliberately select by snapshot_id only; the token/hash/freshness/bid
+        # checks below preserve the precise failure evidence for a mismatched
+        # handoff rather than silently choosing another row.
+        row = conn.execute(
+            """
+            SELECT snapshot_id, selected_outcome_token_id, freshness_deadline,
+                   orderbook_top_bid, orderbook_top_ask, raw_orderbook_hash
+              FROM executable_market_snapshots
+             WHERE snapshot_id = ?
+             LIMIT 1
+            """,
+            (clean_snapshot_id,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    finally:
+        conn.row_factory = saved
+    if row is None:
+        return {}
+    if str(row["selected_outcome_token_id"] or "").strip() != clean_token:
+        return {}
+    if str(row["raw_orderbook_hash"] or "").strip() != clean_required_hash:
+        return {}
+    freshness_deadline = str(row["freshness_deadline"] or "").strip()
+    deadline = _parse_iso(freshness_deadline)
+    try:
+        deadline_stale = deadline is None or deadline < checked_at
+    except TypeError:
+        deadline_stale = True
+    if deadline_stale:
+        return {}
+    top_bid = str(row["orderbook_top_bid"] or "").strip()
+    if not top_bid or top_bid.upper() == "ABSENT":
+        return {}
+    try:
+        if not Decimal(top_bid).is_finite() or Decimal(top_bid) <= 0:
+            return {}
+    except (InvalidOperation, ValueError):
+        return {}
+
+    from src.state.snapshot_repo import get_snapshot
+
+    snapshot = get_snapshot(conn, clean_snapshot_id)
+    if snapshot is None:
+        return {}
+    # The direct row query above is the authority selection.  Hydration only
+    # supplies the immutable executable identity hash and scalar fields used by
+    # the executor's existing U1 gate.
+    return {
+        "executable_snapshot_id": clean_snapshot_id,
+        "executable_snapshot_hash": snapshot.executable_snapshot_hash,
+        "executable_snapshot_min_tick_size": str(snapshot.min_tick_size),
+        "executable_snapshot_min_order_size": str(snapshot.min_order_size),
+        "executable_snapshot_neg_risk": bool(snapshot.neg_risk),
+        "execution_authority_deadline_utc": freshness_deadline,
+        "executable_snapshot_orderbook_top_bid": top_bid,
+        "executable_snapshot_orderbook_top_ask": str(row["orderbook_top_ask"] or ""),
+    }
+
+
 def _latest_exit_snapshot_identity_seed(
     conn: sqlite3.Connection | None,
     token_id: str,
@@ -6084,7 +6266,9 @@ def _latest_or_capture_exit_snapshot_context(
     *,
     now: datetime | None = None,
     required_raw_orderbook_hash: str | None = None,
+    required_snapshot_id: str | None = None,
     prefetched_orderbook: Mapping[str, object] | None = None,
+    require_exact_handoff_snapshot: bool = False,
 ) -> dict[str, object]:
     """Return fresh snapshot kwargs for exits, capturing one when possible.
 
@@ -6095,14 +6279,26 @@ def _latest_or_capture_exit_snapshot_context(
     executor rejects through the existing executable_snapshot_gate.
     """
 
+    if require_exact_handoff_snapshot:
+        return _exact_exit_snapshot_context(
+            conn,
+            token_id,
+            str(required_snapshot_id or ""),
+            str(required_raw_orderbook_hash or ""),
+            now=now,
+        )
+
     def matches_required_book(context: Mapping[str, object]) -> bool:
         required = str(required_raw_orderbook_hash or "").strip()
+        required_id = str(required_snapshot_id or "").strip()
         if not required:
-            return True
+            return not required_id
         if conn is None:
             return False
         snapshot_id = str(context.get("executable_snapshot_id") or "")
         if not snapshot_id:
+            return False
+        if required_id and snapshot_id != required_id:
             return False
         from src.state.snapshot_repo import get_snapshot
 
@@ -6233,7 +6429,12 @@ def _latest_or_capture_exit_snapshot_context(
             token_id,
             now=captured_at,
         )
-        if refreshed_context and matches_required_book(refreshed_context):
+        if (
+            refreshed_context
+            and str(refreshed_context.get("executable_snapshot_id") or "")
+            == snapshot_id
+            and matches_required_book(refreshed_context)
+        ):
             return refreshed_context
         refreshed_no_bid_context = _latest_exit_snapshot_context(
             conn,
@@ -6241,8 +6442,11 @@ def _latest_or_capture_exit_snapshot_context(
             now=captured_at,
             require_sell_bid=False,
         )
-        if refreshed_no_bid_context and matches_required_book(
+        if (
             refreshed_no_bid_context
+            and str(refreshed_no_bid_context.get("executable_snapshot_id") or "")
+            == snapshot_id
+            and matches_required_book(refreshed_no_bid_context)
         ):
             return refreshed_no_bid_context
         from src.state.snapshot_repo import get_snapshot

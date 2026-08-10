@@ -6149,6 +6149,18 @@ def _latest_global_auction_candidate_counts(
         schema_version = int(summary.get("schema_version") or 0)
         if schema_version < 5:
             return invalid("SCHEMA_VERSION")
+        winner_identity_present = any(
+            str(summary.get(field) or "").strip()
+            for field in (
+                "winner_event_id",
+                "winner_candidate_id",
+                "winner_actuation_identity",
+            )
+        )
+        if winner_identity_present and schema_version != 21:
+            # Schema 17-20 receipts remain readable as no-trade telemetry only;
+            # a winner identity on those rows is not an actionable receipt.
+            return invalid("WINNER_SCHEMA_VERSION")
         if schema_version == 21:
             try:
                 expected_execution_binding_hash = (

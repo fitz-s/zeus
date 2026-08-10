@@ -1,6 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-01
-# Lifecycle: created=2026-07-03; last_reviewed=2026-08-01; last_reused=2026-08-01
+# Last reused/audited: 2026-08-09
+# Lifecycle: created=2026-07-03; last_reviewed=2026-08-09; last_reused=2026-08-09
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
 
@@ -138,7 +138,91 @@ def _global_candidate(
         ledger_snapshot_id="ledger-current",
         executable_cost_curve=curve,
         resolution_identity=resolution_identity,
+        neg_risk=False,
         eligibility_reason=reason,
+    )
+
+
+def _current_maker_witness(candidate, *, proposal, asset_epoch, outcomes):
+    binding = S.maker_fill_candidate_binding_identity(
+        action=getattr(candidate, "action", "BUY"),
+        family_key=candidate.family_key,
+        bin_id=candidate.bin_id,
+        condition_id=candidate.condition_id,
+        side=candidate.side,
+        token_id=candidate.token_id,
+        ledger_snapshot_id=candidate.ledger_snapshot_id,
+        position_id=getattr(candidate, "position_id", None),
+        held_shares=getattr(candidate, "held_shares", None),
+        asset_epoch_identity=asset_epoch,
+        proposal_identity=S.executable_curve_identity(proposal),
+    )
+    training_cutoff = _DECISION_AT - timedelta(hours=2)
+    issued_at = _DECISION_AT - timedelta(minutes=1)
+    valid_until = _DECISION_AT + timedelta(minutes=1)
+    identity = S.current_maker_fill_witness_identity(
+        candidate_binding_identity=binding,
+        asset_epoch_identity=asset_epoch,
+        book_snapshot_id=proposal.snapshot_id,
+        book_hash=proposal.book_hash,
+        limit_price=proposal.levels[0].price,
+        rest_deadline_minutes=20.0,
+        source_identity="current-source",
+        model_identity="current-model",
+        sample_identity="current-sample",
+        training_cutoff_at_utc=training_cutoff,
+        issued_at_utc=issued_at,
+        valid_until_at_utc=valid_until,
+        outcomes=outcomes,
+    )
+    return S.CurrentMakerFillWitness(
+        witness_identity=identity,
+        candidate_binding_identity=binding,
+        asset_epoch_identity=asset_epoch,
+        book_snapshot_id=proposal.snapshot_id,
+        book_hash=proposal.book_hash,
+        limit_price=proposal.levels[0].price,
+        rest_deadline_minutes=20.0,
+        outcomes=tuple(outcomes),
+        source_identity="current-source",
+        model_identity="current-model",
+        sample_identity="current-sample",
+        training_cutoff_at_utc=training_cutoff,
+        issued_at_utc=issued_at,
+        valid_until_at_utc=valid_until,
+    )
+
+
+def _remint_maker_witness(
+    witness,
+    *,
+    outcomes=None,
+    training_cutoff_at_utc=None,
+    issued_at_utc=None,
+    valid_until_at_utc=None,
+):
+    """Alter a witness only after recomputing its canonical authority hash."""
+
+    fields = {
+        "candidate_binding_identity": witness.candidate_binding_identity,
+        "asset_epoch_identity": witness.asset_epoch_identity,
+        "book_snapshot_id": witness.book_snapshot_id,
+        "book_hash": witness.book_hash,
+        "limit_price": witness.limit_price,
+        "rest_deadline_minutes": witness.rest_deadline_minutes,
+        "source_identity": witness.source_identity,
+        "model_identity": witness.model_identity,
+        "sample_identity": witness.sample_identity,
+        "training_cutoff_at_utc": (
+            training_cutoff_at_utc or witness.training_cutoff_at_utc
+        ),
+        "issued_at_utc": issued_at_utc or witness.issued_at_utc,
+        "valid_until_at_utc": valid_until_at_utc or witness.valid_until_at_utc,
+        "outcomes": tuple(outcomes or witness.outcomes),
+    }
+    return S.CurrentMakerFillWitness(
+        witness_identity=S.current_maker_fill_witness_identity(**fields),
+        **fields,
     )
 
 
@@ -401,6 +485,7 @@ def _global_sell_candidate(
         fill_probability=fill_probability,
         fill_probability_source=fill_probability_source,
         rest_deadline_minutes=rest_deadline_minutes,
+        neg_risk=False,
         execution_mode=execution_mode,
         eligibility_reason=(
             "LIVE_UNIT_PRICE_OUT_OF_BOUNDS" if proposal is None else None
@@ -471,7 +556,37 @@ def test_global_sell_scores_the_exact_immediate_bid_prefix():
     assert decision.expected_growth is not None
     assert decision.expected_growth.expected_delta_log_wealth > 0.0
     assert decision.expected_growth.expected_ev_usd > 0.0
-    assert decision.capital_lock_hours == pytest.approx(1.0 / 3600.0)
+    assert decision.capital_lock_hours == pytest.approx(24.0)
+
+
+def test_taker_sell_capital_horizon_is_independent_of_quote_ttl():
+    short = _global_sell_candidate(
+        candidate_id="sell-short-quote",
+        family="sell-short-quote-family",
+        side="YES",
+        held_q=0.30,
+        bids=(("0.60", "10"),),
+        quote_ttl_seconds=1,
+    )
+    long = _global_sell_candidate(
+        candidate_id="sell-long-quote",
+        family="sell-long-quote-family",
+        side="YES",
+        held_q=0.30,
+        bids=(("0.60", "10"),),
+        quote_ttl_seconds=86400,
+    )
+
+    short_decision = _global_select(
+        (short,), resolution_hours_by_family={short.family_key: 18.0}
+    )
+    long_decision = _global_select(
+        (long,), resolution_hours_by_family={long.family_key: 18.0}
+    )
+
+    assert short_decision.candidate is short
+    assert long_decision.candidate is long
+    assert short_decision.capital_lock_hours == long_decision.capital_lock_hours == 18.0
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
@@ -912,6 +1027,7 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
                 ledger_snapshot_id="ledger-current",
                 executable_cost_curve=curve,
                 resolution_identity="resolution-joint",
+                neg_risk=False,
             )
         )
     endowment = S.FamilyPortfolioEndowment(
@@ -1385,7 +1501,14 @@ def _global_select(
                 side=candidate.side,
                 book_snapshot_id=candidate.book_snapshot_id,
                 execution_curve_identity=candidate.execution_curve_identity,
+                neg_risk=candidate.neg_risk,
                 action=getattr(candidate, "action", "BUY"),
+                asset_epoch_identity=getattr(candidate, "asset_epoch_identity", None),
+                maker_witness_identity=(
+                    candidate.maker_fill_witness.witness_identity
+                    if getattr(candidate, "maker_fill_witness", None) is not None
+                    else None
+                ),
             )
             for candidate in candidates
         }
@@ -1524,6 +1647,7 @@ def test_deterministic_day0_payoff_selects_exact_bin_and_rejects_unknown_sibling
         probability_witness=witness,
         ledger_snapshot_id="ledger-current",
         book_captured_at_utc=captured_at,
+        neg_risk=False,
     )
     unknown = S.global_candidate_from_native(
         SimpleNamespace(
@@ -1544,6 +1668,7 @@ def test_deterministic_day0_payoff_selects_exact_bin_and_rejects_unknown_sibling
         probability_witness=witness,
         ledger_snapshot_id="ledger-current",
         book_captured_at_utc=captured_at,
+        neg_risk=False,
     )
 
     decision = _global_select(
@@ -1665,7 +1790,7 @@ def test_global_single_order_sell_can_beat_positive_buy_and_cash():
         > evaluations[buy.candidate_id].expected_growth.expected_log_growth_per_hour
         > 0
     )
-    expected_lock_hours = 1.0 / 3600.0
+    expected_lock_hours = 24.0
     assert decision.capital_lock_hours == pytest.approx(expected_lock_hours)
     assert decision.robust_log_growth_per_hour == pytest.approx(
         decision.robust_delta_log_wealth / expected_lock_hours
@@ -1739,7 +1864,7 @@ def test_global_single_order_sell_uses_incremental_growth_not_loss_majority():
     assert decision.robust_ev_usd > 0
 
 
-def test_global_single_order_ranks_immediate_sell_on_one_capital_growth_rate():
+def test_global_single_order_ranks_taker_sell_on_settlement_horizon():
     sell = _global_sell_candidate(
         candidate_id="sell-runner-up",
         family="sell-runner-family",
@@ -1768,19 +1893,15 @@ def test_global_single_order_ranks_immediate_sell_on_one_capital_growth_rate():
         },
     )
 
-    assert decision.candidate is sell
-    assert decision.capital_action_mode == "IMMEDIATE_TAKER_SELL"
-    assert decision.cash_proceeds_usd == Decimal("3.4000")
-    assert decision.robust_delta_log_wealth > 0
-    assert decision.expected_terminal_wealth is None
-    assert decision.robust_log_growth_per_hour is not None
+    assert decision.candidate is buy
+    assert decision.capital_action_mode == "SETTLEMENT_LOCKED_BUY"
     evaluations = {
         evaluation.candidate_id: evaluation
         for evaluation in decision.candidate_evaluations
     }
     assert evaluations[buy.candidate_id].expected_growth is not None
     assert evaluations[sell.candidate_id].expected_growth is not None
-    expected_sell_lock_hours = 1.0 / 3600.0
+    expected_sell_lock_hours = 24.0
     assert evaluations[sell.candidate_id].capital_lock_hours == pytest.approx(
         expected_sell_lock_hours
     )
@@ -1789,8 +1910,8 @@ def test_global_single_order_ranks_immediate_sell_on_one_capital_growth_rate():
         / expected_sell_lock_hours
     )
     assert (
-        evaluations[sell.candidate_id].expected_growth.expected_log_growth_per_hour
-        > evaluations[buy.candidate_id].expected_growth.expected_log_growth_per_hour
+        evaluations[buy.candidate_id].expected_growth.expected_log_growth_per_hour
+        > evaluations[sell.candidate_id].expected_growth.expected_log_growth_per_hour
         > 0
     )
 
@@ -1878,6 +1999,7 @@ def test_family_entry_block_removes_higher_growth_buy_before_same_family_sell():
         ledger_snapshot_id="ledger-current",
         executable_cost_curve=buy_curve,
         resolution_identity=sell.resolution_identity,
+        neg_risk=False,
     )
     unblocked = _global_select(
         (sell, buy),
@@ -2306,7 +2428,7 @@ def test_unavailable_maker_witness_rejects_only_maker_sibling():
     )
 
 
-def test_global_buy_generation_refuses_untyped_maker_request():
+def test_global_buy_generation_omits_untyped_maker_sibling():
     seed = _global_candidate(
         candidate_id="maker-generation-wall",
         family="maker-generation-wall-family",
@@ -2324,17 +2446,367 @@ def test_global_buy_generation_refuses_untyped_maker_request():
         hypothesis_id="maker-generation-wall-native",
     )
 
-    with pytest.raises(
-        ValueError,
-        match="CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE",
-    ):
-        S.global_candidates_from_native(
-            native,
-            probability_witness=_global_probability_witness(seed),
-            ledger_snapshot_id=seed.ledger_snapshot_id,
-            book_captured_at_utc=seed.book_captured_at_utc,
-            include_maker=True,
+    proposals = S.global_candidates_from_native(
+        native,
+        probability_witness=_global_probability_witness(seed),
+        ledger_snapshot_id=seed.ledger_snapshot_id,
+        book_captured_at_utc=seed.book_captured_at_utc,
+        neg_risk=False,
+        include_maker=True,
+    )
+
+    assert len(proposals) == 1
+    assert proposals[0].execution_mode == "TAKER_LIMIT"
+
+
+def test_current_maker_buy_witness_can_win_on_exact_partial_distribution():
+    taker = _global_candidate(
+        candidate_id="maker-current-taker",
+        family="maker-current-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "100"),),
+    )
+    maker_curve = S.passive_buy_proposal_curve(
+        taker.executable_cost_curve,
+        native_bid_levels=(BookLevel(price=Decimal("0.40"), size=Decimal("100")),),
+    )
+    assert maker_curve is not None
+    asset_epoch = "asset-epoch-current"
+    provisional = replace(
+        taker,
+        candidate_id="maker-current",
+        execution_mode="MAKER_REST",
+        proposal_cost_curve=maker_curve,
+        fill_probability=0.90,
+        fill_probability_source="current-maker-fill-v1",
+        rest_deadline_minutes=20.0,
+        asset_epoch_identity=asset_epoch,
+    )
+    witness = _current_maker_witness(
+        provisional,
+        proposal=maker_curve,
+        asset_epoch=asset_epoch,
+        outcomes=(
+            S.MakerFillOutcome(Decimal("0.70"), Decimal("1"), Decimal("-0.401")),
+            S.MakerFillOutcome(Decimal("0.20"), Decimal("0.50"), Decimal("-0.401")),
+            S.MakerFillOutcome(Decimal("0.10"), Decimal("0"), Decimal("0")),
+        ),
+    )
+    maker = replace(
+        provisional,
+        fill_probability=witness.fill_probability,
+        fill_probability_source=witness.witness_identity,
+        maker_fill_witness=witness,
+    )
+
+    decision = _global_select(
+        (taker, maker), cap="20", resolution_hours_by_family={taker.family_key: 24.0}
+    )
+
+    assert decision.candidate is maker
+    assert decision.candidate.execution_mode == "MAKER_REST"
+    assert decision.capital_action_mode == "CONTINGENT_MAKER_REST_BUY"
+    assert decision.expected_growth is not None
+    terminal = decision.expected_terminal_wealth
+    assert terminal is not None
+    loss_base = terminal.wealth_after_loss_usd - terminal.loss_payoff_usd
+    win_base = terminal.wealth_after_win_usd - terminal.win_payoff_usd
+    expected_du = expected_ev = 0.0
+    for outcome in witness.outcomes:
+        filled = decision.shares * outcome.fill_fraction
+        cost = -(filled * outcome.proceeds_per_share_usd)
+        loss_after = loss_base - cost
+        win_after = win_base - cost + filled
+        outcome_du = terminal.loss_probability_mean * math.log(
+            float(loss_after / loss_base)
+        ) + terminal.win_probability_mean * math.log(float(win_after / win_base))
+        expected_du += float(outcome.probability) * outcome_du
+        expected_ev += float(outcome.probability) * (
+            terminal.win_probability_mean * float(filled) - float(cost)
         )
+    expected_fill_fraction = 0.80
+    expected_horizon = expected_fill_fraction * 24.0 + (
+        1.0 - expected_fill_fraction
+    ) * (20.0 / 60.0)
+    assert decision.expected_growth.expected_delta_log_wealth == pytest.approx(
+        expected_du
+    )
+    assert decision.expected_growth.expected_ev_usd == pytest.approx(expected_ev)
+    assert decision.expected_growth.capital_lock_hours == pytest.approx(
+        expected_horizon
+    )
+
+
+def test_current_maker_witness_asset_epoch_drift_excludes_only_maker_sibling():
+    taker = _global_candidate(
+        candidate_id="maker-epoch-taker", family="maker-epoch-family", side="YES", q=0.80
+    )
+    maker_curve = S.passive_buy_proposal_curve(
+        taker.executable_cost_curve,
+        native_bid_levels=(BookLevel(price=Decimal("0.30"), size=Decimal("100")),),
+    )
+    assert maker_curve is not None
+    provisional = replace(
+        taker,
+        candidate_id="maker-epoch",
+        execution_mode="MAKER_REST",
+        proposal_cost_curve=maker_curve,
+        fill_probability=1.0,
+        fill_probability_source="current-maker-fill-v1",
+        rest_deadline_minutes=20.0,
+        asset_epoch_identity="asset-epoch-a",
+    )
+    witness = _current_maker_witness(
+        provisional,
+        proposal=maker_curve,
+        asset_epoch="asset-epoch-a",
+        outcomes=(S.MakerFillOutcome(Decimal("1"), Decimal("1"), Decimal("-0.301")),),
+    )
+    drifted = replace(
+        provisional,
+        asset_epoch_identity="asset-epoch-b",
+        maker_fill_witness=witness,
+        fill_probability_source=witness.witness_identity,
+    )
+
+    decision = _global_select((taker, drifted))
+
+    assert decision.candidate is taker
+    assert decision.rejection_reasons[drifted.candidate_id] == "CURRENT_MAKER_FILL_WITNESS_MISMATCH"
+
+
+def test_current_maker_witness_rejects_reminted_non_limit_cashflow_only():
+    taker = _global_candidate(
+        candidate_id="maker-cashflow-taker",
+        family="maker-cashflow-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "100"),),
+    )
+    maker_curve = S.passive_buy_proposal_curve(
+        taker.executable_cost_curve,
+        native_bid_levels=(BookLevel(price=Decimal("0.40"), size=Decimal("100")),),
+    )
+    assert maker_curve is not None
+    provisional = replace(
+        taker,
+        candidate_id="maker-cashflow",
+        execution_mode="MAKER_REST",
+        proposal_cost_curve=maker_curve,
+        fill_probability=1.0,
+        fill_probability_source="unbound",
+        rest_deadline_minutes=20.0,
+        asset_epoch_identity="maker-cashflow-epoch",
+    )
+    honest = _current_maker_witness(
+        provisional,
+        proposal=maker_curve,
+        asset_epoch="maker-cashflow-epoch",
+        outcomes=(S.MakerFillOutcome(Decimal("1"), Decimal("1"), Decimal("-0.401")),),
+    )
+    malicious = _remint_maker_witness(
+        honest,
+        outcomes=(S.MakerFillOutcome(Decimal("1"), Decimal("1"), Decimal("-0.01")),),
+    )
+    maker = replace(
+        provisional,
+        maker_fill_witness=malicious,
+        fill_probability_source=malicious.witness_identity,
+    )
+
+    decision = _global_select((taker, maker))
+
+    assert decision.candidate is taker
+    assert decision.rejection_reasons[maker.candidate_id] == (
+        "CURRENT_MAKER_FILL_WITNESS_CASHFLOW_INVALID"
+    )
+    with pytest.raises(ValueError, match="incomplete"):
+        replace(honest, source_identity="tampered-source")
+
+
+def test_current_maker_witness_temporal_order_and_decision_window_fail_closed():
+    taker = _global_candidate(
+        candidate_id="maker-time-taker",
+        family="maker-time-family",
+        side="YES",
+        q=0.80,
+    )
+    proposal = S.passive_buy_proposal_curve(
+        taker.executable_cost_curve,
+        native_bid_levels=(BookLevel(price=Decimal("0.30"), size=Decimal("100")),),
+    )
+    assert proposal is not None
+    provisional = replace(
+        taker,
+        candidate_id="maker-time",
+        execution_mode="MAKER_REST",
+        proposal_cost_curve=proposal,
+        fill_probability=1.0,
+        fill_probability_source="unbound",
+        rest_deadline_minutes=20.0,
+        asset_epoch_identity="maker-time-epoch",
+    )
+    current = _current_maker_witness(
+        provisional,
+        proposal=proposal,
+        asset_epoch="maker-time-epoch",
+        outcomes=(S.MakerFillOutcome(Decimal("1"), Decimal("1"), Decimal("-0.301")),),
+    )
+    expired = _remint_maker_witness(
+        current,
+        valid_until_at_utc=_DECISION_AT - timedelta(seconds=30),
+    )
+    expired_candidate = replace(
+        provisional,
+        maker_fill_witness=expired,
+        fill_probability_source=expired.witness_identity,
+    )
+    expired_decision = _global_select((taker, expired_candidate))
+    assert expired_decision.candidate is taker
+    assert expired_decision.rejection_reasons[expired_candidate.candidate_id] == (
+        "CURRENT_MAKER_FILL_WITNESS_TEMPORAL_INVALID"
+    )
+
+    future = _remint_maker_witness(
+        current,
+        issued_at_utc=_DECISION_AT + timedelta(seconds=30),
+        valid_until_at_utc=_DECISION_AT + timedelta(minutes=1),
+    )
+    future_candidate = replace(
+        provisional,
+        maker_fill_witness=future,
+        fill_probability_source=future.witness_identity,
+    )
+    future_decision = _global_select((taker, future_candidate))
+    assert future_decision.candidate is taker
+    assert future_decision.rejection_reasons[future_candidate.candidate_id] == (
+        "CURRENT_MAKER_FILL_WITNESS_TEMPORAL_INVALID"
+    )
+    with pytest.raises(ValueError, match="incomplete"):
+        _remint_maker_witness(
+            current,
+            training_cutoff_at_utc=current.issued_at_utc + timedelta(seconds=1),
+        )
+
+
+def test_current_maker_sell_witness_binds_actual_holding_and_can_win():
+    taker = _global_sell_candidate(
+        candidate_id="maker-held-taker",
+        family="maker-held-family",
+        side="YES",
+        held_q=0.20,
+        bids=(("0.60", "10"),),
+        shares="10",
+        required_mode="TAKER_LIMIT",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+        exit_authority_status="mature",
+        exit_authority_reason="current-day0-authority",
+    )
+    maker_curve = S.passive_sell_proposal_curve(
+        taker.executable_sell_curve, capacity=Decimal("10")
+    )
+    assert maker_curve is not None
+    asset_epoch = "asset-epoch-held-current"
+    provisional = replace(
+        taker,
+        candidate_id="maker-held",
+        execution_mode="MAKER_REST",
+        proposal_sell_curve=maker_curve,
+        fill_probability=1.0,
+        fill_probability_source="current-maker-fill-v1",
+        rest_deadline_minutes=20.0,
+        asset_epoch_identity=asset_epoch,
+    )
+    witness = _current_maker_witness(
+        provisional,
+        proposal=maker_curve,
+        asset_epoch=asset_epoch,
+        outcomes=(S.MakerFillOutcome(Decimal("1"), Decimal("1"), Decimal("0.601")),),
+    )
+    maker = replace(
+        provisional,
+        fill_probability_source=witness.witness_identity,
+        maker_fill_witness=witness,
+    )
+
+    decision = _global_select((taker, maker))
+
+    assert decision.candidate is maker
+    assert decision.candidate.position_id == taker.position_id
+    assert decision.candidate.held_shares == Decimal("10")
+    assert decision.candidate.execution_mode == "MAKER_REST"
+
+    stale_holding = replace(maker, held_shares=Decimal("9"))
+    stale_decision = _global_select((taker, stale_holding))
+    assert stale_decision.candidate is taker
+    assert stale_decision.rejection_reasons[stale_holding.candidate_id] == (
+        "CURRENT_MAKER_FILL_WITNESS_MISMATCH"
+    )
+
+
+def test_current_maker_sell_aggregates_zero_atom_ruin_lexicographically():
+    taker = _global_sell_candidate(
+        candidate_id="maker-zero-atom-taker",
+        family="maker-zero-atom-family",
+        side="YES",
+        held_q=0.20,
+        bids=(("0.60", "10"),),
+        shares="10",
+        required_mode="TAKER_LIMIT",
+        probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+    )
+    proposal = S.passive_sell_proposal_curve(
+        taker.executable_sell_curve, capacity=Decimal("10")
+    )
+    assert proposal is not None
+    provisional = replace(
+        taker,
+        candidate_id="maker-zero-atom",
+        execution_mode="MAKER_REST",
+        proposal_sell_curve=proposal,
+        fill_probability=0.50,
+        fill_probability_source="unbound",
+        rest_deadline_minutes=20.0,
+        asset_epoch_identity="maker-zero-atom-epoch",
+    )
+    witness = _current_maker_witness(
+        provisional,
+        proposal=proposal,
+        asset_epoch="maker-zero-atom-epoch",
+        outcomes=(
+            S.MakerFillOutcome(Decimal("0.50"), Decimal("1"), Decimal("0.601")),
+            S.MakerFillOutcome(Decimal("0.50"), Decimal("0"), Decimal("0")),
+        ),
+    )
+    maker = replace(
+        provisional,
+        maker_fill_witness=witness,
+        fill_probability_source=witness.witness_identity,
+    )
+    endowment = S.CandidatePortfolioEndowment(
+        loss_wealth_floor_usd=Decimal("0"),
+        win_wealth_floor_usd=Decimal("100"),
+        current_token_shares=Decimal("10"),
+        ledger_snapshot_id="ledger-current",
+    )
+
+    decision = _global_select(
+        (maker,),
+        cap="10",
+        candidate_portfolio_endowment_resolver=lambda _candidate: endowment,
+        resolution_hours_by_family={maker.family_key: 24.0},
+    )
+
+    assert decision.candidate is maker
+    assert decision.expected_growth is not None
+    assert decision.expected_terminal_wealth is not None
+    assert decision.expected_growth.ruin_probability_reduction == pytest.approx(
+        0.50 * (1.0 - decision.expected_terminal_wealth.held_probability_mean)
+    )
+    assert decision.expected_growth.capital_lock_hours == pytest.approx(
+        0.50 * (20.0 / 60.0) + 0.50 * 24.0
+    )
 
 
 def test_global_selector_rejects_untyped_maker_sell_and_keeps_taker_sibling():
@@ -3239,6 +3711,7 @@ def test_global_sell_materializer_floors_chain_fill_dust_to_venue_grid():
         ledger_snapshot_id="ledger-chain-dust",
         executable_sell_curve=sell_curve,
         book_captured_at_utc=_DECISION_AT,
+        neg_risk=False,
     )
 
     assert candidate is not None
@@ -3251,6 +3724,7 @@ def test_global_sell_materializer_floors_chain_fill_dust_to_venue_grid():
         ledger_snapshot_id="ledger-chain-dust",
         executable_sell_curve=sell_curve,
         book_captured_at_utc=_DECISION_AT,
+        neg_risk=False,
         execution_mode="MAKER_REST",
     )
     assert maker is None
@@ -3261,6 +3735,7 @@ def test_global_sell_materializer_floors_chain_fill_dust_to_venue_grid():
         ledger_snapshot_id="ledger-chain-dust",
         executable_sell_curve=sell_curve,
         book_captured_at_utc=_DECISION_AT,
+        neg_risk=False,
         execution_mode="TAKER_LIMIT",
     )
     assert taker is not None
@@ -3304,6 +3779,7 @@ def test_global_sell_materializer_omits_venue_illegal_dust_only_holding():
         ledger_snapshot_id="ledger-dust-only",
         executable_sell_curve=sell_curve,
         book_captured_at_utc=_DECISION_AT,
+        neg_risk=False,
     )
 
     assert candidate is None
@@ -4394,6 +4870,9 @@ def test_global_single_order_excludes_superseded_q_book_and_capital_identity():
     q_old = _global_candidate(candidate_id="q-old", family="q", side="YES", q=0.70)
     book_old = _global_candidate(candidate_id="book-old", family="book", side="YES", q=0.70)
     curve_old = _global_candidate(candidate_id="curve-old", family="curve", side="YES", q=0.70)
+    neg_risk_old = _global_candidate(
+        candidate_id="neg-risk-old", family="neg-risk", side="YES", q=0.70
+    )
     ledger_old = replace(
         _global_candidate(candidate_id="ledger-old", family="ledger", side="YES", q=0.70),
         ledger_snapshot_id="ledger-old",
@@ -4402,6 +4881,7 @@ def test_global_single_order_excludes_superseded_q_book_and_capital_identity():
         q_old,
         book_old,
         curve_old,
+        neg_risk_old,
         ledger_old,
     )
     witnesses = {c.family_key: _global_probability_witness(c) for c in candidates}
@@ -4418,6 +4898,7 @@ def test_global_single_order_excludes_superseded_q_book_and_capital_identity():
             side=c.side,
             book_snapshot_id=c.book_snapshot_id,
             execution_curve_identity=c.execution_curve_identity,
+            neg_risk=c.neg_risk,
         )
         for c in candidates
     }
@@ -4426,6 +4907,9 @@ def test_global_single_order_excludes_superseded_q_book_and_capital_identity():
     )
     current_executions["curve-old"] = replace(
         current_executions["curve-old"], execution_curve_identity="curve-new"
+    )
+    current_executions["neg-risk-old"] = replace(
+        current_executions["neg-risk-old"], neg_risk=True
     )
     decision = _global_select(
         candidates,
@@ -4439,9 +4923,30 @@ def test_global_single_order_excludes_superseded_q_book_and_capital_identity():
         "q-old": "PROBABILITY_AUTHORITY_SUPERSEDED",
         "book-old": "BOOK_IDENTITY_SUPERSEDED",
         "curve-old": "EXECUTION_CURVE_SUPERSEDED",
+        "neg-risk-old": "NEG_RISK_SUPERSEDED",
         "ledger-old": "CAPITAL_IDENTITY_SUPERSEDED",
     }
     assert decision.no_trade_reason == "GLOBAL_EPOCH_SUPERSEDED"
+
+
+def test_current_execution_and_candidate_require_exact_boolean_neg_risk():
+    fields = {
+        "token_id": "token",
+        "side": "YES",
+        "book_snapshot_id": "book",
+        "execution_curve_identity": "curve",
+    }
+    with pytest.raises(TypeError, match="neg_risk"):
+        S.CurrentExecutionAuthority(**fields)
+    with pytest.raises(ValueError, match="incomplete"):
+        S.CurrentExecutionAuthority(**fields, neg_risk=1)
+    with pytest.raises(ValueError, match="incomplete"):
+        S.CurrentExecutionAuthority(**{**fields, "token_id": ""}, neg_risk=False)
+    candidate = _global_candidate(
+        candidate_id="neg-risk-type", family="neg-risk-type", side="YES", q=0.70
+    )
+    with pytest.raises(ValueError, match="execution proposal is invalid"):
+        replace(candidate, neg_risk=1)
 
 
 def test_global_single_order_never_promotes_runner_up_after_book_drift():
@@ -4457,6 +4962,7 @@ def test_global_single_order_never_promotes_runner_up_after_book_drift():
             side=candidate.side,
             book_snapshot_id=candidate.book_snapshot_id,
             execution_curve_identity=candidate.execution_curve_identity,
+            neg_risk=candidate.neg_risk,
         )
         for candidate in (moved, runner_up)
     }

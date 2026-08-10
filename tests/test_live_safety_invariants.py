@@ -2508,14 +2508,22 @@ def test_global_sell_reauction_waits_for_outer_commit_before_network(monkeypatch
         "_latest_snapshot_min_order_dust_error",
         lambda *_args, **_kwargs: None,
     )
+    # The monitor owns only the canonical release predicate; do not pretend this
+    # ordering antibody's lightweight Conn implements production SQL.
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_canonical_global_sell_command_ownership",
+        lambda *_args, **_kwargs: "GLOBAL_NO_COMMAND",
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_exit_command_release_witness",
+        lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setattr(
         exit_lifecycle,
         "needs_global_sell_snapshot_reauction",
-        lambda position, _conn=None: (
-            position.last_exit_error.startswith(
-                "global_sell_exit_executable_snapshot"
-            )
-        ),
+        lambda *_args, **_kwargs: True,
     )
     monkeypatch.setattr(
         cycle_runtime,
@@ -2523,9 +2531,30 @@ def test_global_sell_reauction_waits_for_outer_commit_before_network(monkeypatch
         exit_lifecycle.needs_global_sell_snapshot_reauction,
         raising=False,
     )
+    # The durable-release implementation is covered by its own canonical-DB
+    # tests. Here retain exactly this monitor boundary: publish is impossible
+    # until cycle_runtime has committed the release write.
+    def recover_committed_debt(position, *, conn, requester):
+        if conn.in_transaction or not requester(position, False):
+            return False
+        assert exit_lifecycle.record_global_sell_reauction_reserved(conn, position)
+        conn.commit()
+        return True
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "recover_global_sell_snapshot_reauction_debt",
+        recover_committed_debt,
+    )
     monkeypatch.setattr(
         "src.events.reactor.request_global_auction_completion",
-        lambda **_kwargs: events.append("network_publish") or True,
+        lambda **_kwargs: events.append("network_publish") or (
+            True,
+            SimpleNamespace(
+                request_id="request", material_identity="material",
+                attempt_identity="attempt", scope_identity="scope", generation="1",
+            ),
+        ),
     )
     monkeypatch.setattr(
         exit_lifecycle,
@@ -10223,8 +10252,237 @@ def test_entry_posterior_lookup_is_live_only_and_uses_live_family_index(monkeypa
     assert "TEMP B-TREE" not in plan
 
 
+def _global_jit_clob_market(
+    condition_id: str,
+    yes_token: str,
+    no_token: str,
+    *,
+    neg_risk: bool = False,
+) -> dict[str, object]:
+    return {
+        "condition_id": condition_id,
+        "clobTokenIds": [yes_token, no_token],
+        "accepting_orders": True,
+        "enable_order_book": True,
+        "archived": False,
+        "tick_size": "0.01",
+        "min_order_size": "1",
+        "neg_risk": neg_risk,
+    }
+
+
+def _global_jit_book(token_id: str, *, neg_risk: bool = False) -> dict[str, object]:
+    return {
+        "asset_id": token_id,
+        "bids": [{"price": "0.49", "size": "10"}],
+        "asks": [{"price": "0.50", "size": "10"}],
+        "tick_size": "0.01",
+        "min_order_size": "1",
+        "neg_risk": neg_risk,
+    }
+
+
+def test_global_exit_require_exact_handoff_reuses_only_exact_row(monkeypatch):
+    """A global SELL uses the exact canonical row, never the newer token row."""
+    from src.execution import exit_lifecycle
+    from src.state import snapshot_repo
+    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
+
+    network_calls = []
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_exit_snapshot_context",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("exact handoff must not consult latest token row")
+        ),
+    )
+
+    monkeypatch.setattr(
+        "src.data.market_scanner.get_sibling_outcomes",
+        lambda *_args, **_kwargs: network_calls.append("sibling"),
+    )
+    monkeypatch.setattr(
+        "src.data.market_scanner.capture_executable_market_snapshot",
+        lambda *_args, **_kwargs: network_calls.append("capture"),
+    )
+    conn = sqlite3.connect(":memory:")
+    try:
+        snapshot_repo.init_snapshot_schema(conn)
+        captured = datetime(2026, 8, 9, 10, 0, tzinfo=timezone.utc)
+
+        def add_snapshot(snapshot_id, *, captured_at, deadline, raw_hash, bid="0.49", token="yes-exit"):
+            snapshot_repo.insert_snapshot(
+                conn,
+                ExecutableMarketSnapshot(
+                    snapshot_id=snapshot_id,
+                    gamma_market_id="condition-exit",
+                    event_id="event-exit",
+                    event_slug="exit",
+                    condition_id="condition-exit",
+                    question_id="question-exit",
+                    yes_token_id="yes-exit",
+                    no_token_id="no-exit",
+                    selected_outcome_token_id=token,
+                    outcome_label="YES" if token == "yes-exit" else "NO",
+                    enable_orderbook=True,
+                    active=True,
+                    closed=False,
+                    accepting_orders=True,
+                    market_start_at=None,
+                    market_end_at=None,
+                    market_close_at=None,
+                    sports_start_at=None,
+                    min_tick_size=Decimal("0.01"),
+                    min_order_size=Decimal("1"),
+                    fee_details={"fee_rate": "0.05"},
+                    token_map_raw={"YES": "yes-exit", "NO": "no-exit"},
+                    rfqe=None,
+                    neg_risk=False,
+                    orderbook_top_bid=Decimal(bid) if bid is not None else None,
+                    orderbook_top_ask=Decimal("0.50") if bid is not None else None,
+                    orderbook_depth_jsonb='{"bids": [], "asks": []}',
+                    raw_gamma_payload_hash="a" * 64,
+                    raw_clob_market_info_hash="b" * 64,
+                    raw_orderbook_hash=raw_hash,
+                    authority_tier="CLOB",
+                    captured_at=captured_at,
+                    freshness_deadline=deadline,
+                ),
+            )
+
+        add_snapshot(
+            "snap-exact",
+            captured_at=captured,
+            deadline=captured + timedelta(minutes=5),
+            raw_hash="c" * 64,
+        )
+        add_snapshot(
+            "snap-newer",
+            captured_at=captured + timedelta(seconds=1),
+            deadline=captured + timedelta(minutes=5),
+            raw_hash="d" * 64,
+        )
+        assert exit_lifecycle._latest_or_capture_exit_snapshot_context(
+            conn,
+            object(),
+            SimpleNamespace(
+                trade_id="global-sell-force-current",
+                market_id="condition-exit",
+                token_id="yes-exit",
+                no_token_id="no-exit",
+                direction="sell_yes",
+            ),
+            "yes-exit",
+            now=captured + timedelta(seconds=2),
+            required_snapshot_id="snap-exact",
+            required_raw_orderbook_hash="c" * 64,
+            require_exact_handoff_snapshot=True,
+        )["executable_snapshot_id"] == "snap-exact"
+        assert network_calls == []
+
+        assert exit_lifecycle._latest_or_capture_exit_snapshot_context(
+            conn,
+            object(),
+            SimpleNamespace(market_id="condition-exit", token_id="no-exit", no_token_id="yes-exit"),
+            "no-exit",
+            now=captured + timedelta(seconds=2),
+            required_snapshot_id="snap-exact",
+            required_raw_orderbook_hash="c" * 64,
+            require_exact_handoff_snapshot=True,
+        ) == {}
+
+        assert exit_lifecycle._latest_or_capture_exit_snapshot_context(
+            conn,
+            object(),
+            SimpleNamespace(
+                trade_id="global-sell-force-current-id-mismatch",
+                market_id="condition-exit",
+                token_id="yes-exit",
+                no_token_id="no-exit",
+                direction="sell_yes",
+            ),
+            "yes-exit",
+            now=captured + timedelta(seconds=2),
+            required_snapshot_id="snap-missing",
+            required_raw_orderbook_hash="c" * 64,
+            require_exact_handoff_snapshot=True,
+        ) == {}
+        assert exit_lifecycle._latest_or_capture_exit_snapshot_context(
+            conn,
+            object(),
+            SimpleNamespace(market_id="condition-exit", token_id="yes-exit", no_token_id="no-exit"),
+            "yes-exit",
+            now=captured + timedelta(seconds=2),
+            required_snapshot_id=None,
+            required_raw_orderbook_hash="c" * 64,
+            require_exact_handoff_snapshot=True,
+        ) == {}
+        assert exit_lifecycle._latest_or_capture_exit_snapshot_context(
+            conn,
+            object(),
+            SimpleNamespace(market_id="condition-exit", token_id="yes-exit", no_token_id="no-exit"),
+            "yes-exit",
+            now=captured + timedelta(seconds=2),
+            required_snapshot_id="snap-exact",
+            required_raw_orderbook_hash=None,
+            require_exact_handoff_snapshot=True,
+        ) == {}
+        assert exit_lifecycle._latest_or_capture_exit_snapshot_context(
+            conn,
+            object(),
+            SimpleNamespace(
+                trade_id="global-sell-force-current-hash-mismatch",
+                market_id="condition-exit",
+                token_id="yes-exit",
+                no_token_id="no-exit",
+                direction="sell_yes",
+            ),
+            "yes-exit",
+            now=captured + timedelta(seconds=2),
+            required_snapshot_id="snap-exact",
+            required_raw_orderbook_hash="d" * 64,
+            require_exact_handoff_snapshot=True,
+        ) == {}
+        add_snapshot(
+            "snap-stale",
+            captured_at=captured - timedelta(minutes=10),
+            deadline=captured - timedelta(seconds=1),
+            raw_hash="e" * 64,
+        )
+        assert exit_lifecycle._latest_or_capture_exit_snapshot_context(
+            conn,
+            object(),
+            SimpleNamespace(market_id="condition-exit", token_id="yes-exit", no_token_id="no-exit"),
+            "yes-exit",
+            now=captured,
+            required_snapshot_id="snap-stale",
+            required_raw_orderbook_hash="e" * 64,
+            require_exact_handoff_snapshot=True,
+        ) == {}
+        add_snapshot(
+            "snap-no-bid",
+            captured_at=captured,
+            deadline=captured + timedelta(minutes=5),
+            raw_hash="f" * 64,
+            bid=None,
+        )
+        assert exit_lifecycle._latest_or_capture_exit_snapshot_context(
+            conn,
+            object(),
+            SimpleNamespace(market_id="condition-exit", token_id="yes-exit", no_token_id="no-exit"),
+            "yes-exit",
+            now=captured,
+            required_snapshot_id="snap-no-bid",
+            required_raw_orderbook_hash="f" * 64,
+            require_exact_handoff_snapshot=True,
+        ) == {}
+        assert network_calls == []
+    finally:
+        conn.close()
+
+
 def test_global_sell_jit_fee_uses_current_gamma_v2_schedule(monkeypatch):
-    """A legacy CLOB base-fee cap cannot supersede the current market schedule."""
+    """The current authority retains Gamma, CLOB, and book identity together."""
     from src.contracts import fee_authority
     from src.engine import event_reactor_adapter as adapter
 
@@ -10237,6 +10495,14 @@ def test_global_sell_jit_fee_uses_current_gamma_v2_schedule(monkeypatch):
             json=lambda: [
                 {
                     "conditionId": "condition-weather",
+                    "active": True,
+                    "closed": False,
+                    "acceptingOrders": True,
+                    "enableOrderBook": True,
+                    "clobTokenIds": ["yes-token-weather", "no-token-weather"],
+                    "orderPriceMinTickSize": "0.01",
+                    "orderMinSize": "1",
+                    "negRisk": False,
                     "feeType": "weather_fees",
                     "feeSchedule": {
                         "exponent": 1,
@@ -10255,14 +10521,25 @@ def test_global_sell_jit_fee_uses_current_gamma_v2_schedule(monkeypatch):
         lambda schedule: (schedule, "current_schedule"),
     )
 
-    fee = adapter._current_global_sell_fee_fraction(
+    authority = adapter._current_global_market_authority(
         condition_id="condition-weather",
         token_id="no-token-weather",
+        side="NO",
         gamma_get=gamma_get,
+        clob_market_get=lambda *_args, **_kwargs: _global_jit_clob_market(
+            "condition-weather", "yes-token-weather", "no-token-weather"
+        ),
+        raw_book=_global_jit_book("no-token-weather"),
+        captured_at_utc=datetime.now(timezone.utc),
         timeout=3.0,
     )
 
-    assert fee == Decimal("0.05")
+    assert authority.fee_rate == Decimal("0.05")
+    assert authority.snapshot.condition_id == "condition-weather"
+    assert authority.snapshot.selected_outcome_token_id == "no-token-weather"
+    assert authority.snapshot.tradeability_status.executable_allowed is True
+    assert authority.snapshot.raw_clob_market_info_hash
+    assert authority.snapshot.raw_orderbook_hash
     assert calls == [
         (
             "/markets",
@@ -10272,8 +10549,94 @@ def test_global_sell_jit_fee_uses_current_gamma_v2_schedule(monkeypatch):
     ]
 
 
+def test_global_jit_snapshot_id_changes_for_each_raw_authority_payload():
+    from src.engine import event_reactor_adapter as adapter
+
+    captured_at = datetime(2026, 8, 9, 10, 0, tzinfo=timezone.utc)
+    gamma_market = {
+        "conditionId": "condition-identity",
+        "active": True,
+        "closed": False,
+        "acceptingOrders": True,
+        "enableOrderBook": True,
+        "clobTokenIds": ["yes-identity", "no-identity"],
+        "orderPriceMinTickSize": "0.01",
+        "orderMinSize": "1",
+        "negRisk": False,
+        "feeSchedule": {"exponent": 1, "rate": 0.05, "takerOnly": True},
+    }
+    clob_market = _global_jit_clob_market(
+        "condition-identity", "yes-identity", "no-identity"
+    )
+    raw_book = _global_jit_book("yes-identity")
+
+    def capture(gamma, clob, book):
+        return adapter._current_global_market_authority(
+            condition_id="condition-identity",
+            token_id="yes-identity",
+            side="YES",
+            gamma_get=lambda *_args, **_kwargs: SimpleNamespace(
+                status_code=200, json=lambda: [gamma]
+            ),
+            clob_market_get=lambda *_args, **_kwargs: clob,
+            raw_book=book,
+            captured_at_utc=captured_at,
+            timeout=1.0,
+        ).snapshot.snapshot_id
+
+    baseline = capture(gamma_market, clob_market, raw_book)
+    gamma_changed = dict(gamma_market, description="gamma mutation")
+    clob_changed = dict(clob_market, metadata_revision="clob mutation")
+    book_changed = dict(raw_book, bids=[{"price": "0.48", "size": "10"}])
+    assert len({
+        baseline,
+        capture(gamma_changed, clob_market, raw_book),
+        capture(gamma_market, clob_changed, raw_book),
+        capture(gamma_market, clob_market, book_changed),
+    }) == 4
+
+
+def test_global_jit_internal_tradeability_runtime_error_is_not_market_supersession(
+    monkeypatch,
+):
+    from src.engine import event_reactor_adapter as adapter
+
+    sentinel = RuntimeError("tradeability-internal-sentinel")
+    monkeypatch.setattr(
+        "src.data.market_scanner._build_executable_tradeability_status",
+        lambda **_kwargs: (_ for _ in ()).throw(sentinel),
+    )
+    market = {
+        "conditionId": "condition-runtime",
+        "active": True,
+        "closed": False,
+        "acceptingOrders": True,
+        "enableOrderBook": True,
+        "clobTokenIds": ["yes-runtime", "no-runtime"],
+        "orderPriceMinTickSize": "0.01",
+        "orderMinSize": "1",
+        "negRisk": False,
+        "feeSchedule": {"exponent": 1, "rate": 0.05, "takerOnly": True},
+    }
+    with pytest.raises(RuntimeError, match="tradeability-internal-sentinel"):
+        adapter._current_global_market_authority(
+            condition_id="condition-runtime",
+            token_id="yes-runtime",
+            side="YES",
+            gamma_get=lambda *_args, **_kwargs: SimpleNamespace(
+                status_code=200, json=lambda: [market]
+            ),
+            clob_market_get=lambda *_args, **_kwargs: _global_jit_clob_market(
+                "condition-runtime", "yes-runtime", "no-runtime"
+            ),
+            raw_book=_global_jit_book("yes-runtime"),
+            captured_at_utc=datetime.now(timezone.utc),
+            timeout=1.0,
+        )
+
+
 def test_global_sell_jit_fee_rejects_wrong_gamma_market(monkeypatch):
-    """Submit-time fee truth must bind the selected condition exactly."""
+    """Submit-time authority must bind the selected Gamma/CLOB condition exactly."""
     from src.contracts import fee_authority
     from src.engine import event_reactor_adapter as adapter
 
@@ -10285,11 +10648,12 @@ def test_global_sell_jit_fee_rejects_wrong_gamma_market(monkeypatch):
 
     with pytest.raises(
         ValueError,
-        match="GLOBAL_SELL_JIT_FEE_MARKET_IDENTITY_INVALID",
+        match="GLOBAL_JIT_MARKET_IDENTITY_INVALID",
     ):
-        adapter._current_global_sell_fee_fraction(
+        adapter._current_global_market_authority(
             condition_id="condition-selected",
             token_id="no-token-selected",
+            side="NO",
             gamma_get=lambda *_args, **_kwargs: SimpleNamespace(
                 status_code=200,
                 json=lambda: [
@@ -10299,7 +10663,384 @@ def test_global_sell_jit_fee_rejects_wrong_gamma_market(monkeypatch):
                     }
                 ],
             ),
+            clob_market_get=lambda *_args, **_kwargs: _global_jit_clob_market(
+                "condition-selected", "yes-token-selected", "no-token-selected"
+            ),
+            raw_book=_global_jit_book("no-token-selected"),
+            captured_at_utc=datetime.now(timezone.utc),
             timeout=3.0,
+        )
+
+
+def test_global_jit_active_false_label_preserves_executable_authority():
+    """Active=false is provenance; executable tradeability remains authoritative."""
+    from src.engine import event_reactor_adapter as adapter
+
+    closed_market = {
+        "conditionId": "condition-sell",
+        "active": False,
+        "closed": False,
+        "acceptingOrders": True,
+        "enableOrderBook": True,
+        "clobTokenIds": ["yes-sell", "no-sell"],
+        "orderPriceMinTickSize": "0.01",
+        "orderMinSize": "1",
+        "negRisk": False,
+        "feeSchedule": {"exponent": 1, "rate": 0.05, "takerOnly": True},
+    }
+    authority = adapter._current_global_market_authority(
+            condition_id="condition-sell",
+            token_id="yes-sell",
+            side="YES",
+            gamma_get=lambda *_args, **_kwargs: SimpleNamespace(
+                status_code=200, json=lambda: [closed_market]
+            ),
+            clob_market_get=lambda *_args, **_kwargs: _global_jit_clob_market(
+                "condition-sell", "yes-sell", "no-sell"
+            ),
+            raw_book=_global_jit_book("yes-sell"),
+            captured_at_utc=datetime.now(timezone.utc),
+            timeout=1.0,
+        )
+    assert authority.snapshot.active is False
+    assert authority.snapshot.tradeability_status.executable_allowed is True
+
+
+@pytest.mark.parametrize(
+    ("name", "mutate", "reason"),
+    (
+        ("missing_fee", lambda market: market.pop("feeSchedule"), "METADATA_INVALID"),
+        ("not_accepting", lambda market: market.__setitem__("acceptingOrders", False), "ACCEPTING_ORDERS_INVALID"),
+        ("orderbook_disabled", lambda market: market.__setitem__("enableOrderBook", False), "ENABLE_ORDERBOOK_INVALID"),
+    ),
+)
+def test_global_buy_jit_gamma_metadata_fails_closed(name, mutate, reason):
+    """BUY submit authority rejects incomplete fee and non-tradeable Gamma truth."""
+    from src.engine import event_reactor_adapter as adapter
+
+    market = {
+        "conditionId": "condition-buy",
+        "active": True,
+        "closed": False,
+        "acceptingOrders": True,
+        "enableOrderBook": True,
+        "clobTokenIds": ["yes-buy", "no-buy"],
+        "orderPriceMinTickSize": "0.01",
+        "orderMinSize": "1",
+        "negRisk": False,
+        "feeSchedule": {"exponent": 1, "rate": 0.05, "takerOnly": True},
+    }
+    mutate(market)
+
+    with pytest.raises(ValueError, match=reason):
+        adapter._current_global_market_authority(
+            condition_id="condition-buy",
+            token_id="yes-buy",
+            side="YES",
+            gamma_get=lambda *_args, **_kwargs: SimpleNamespace(
+                status_code=200, json=lambda: [market]
+            ),
+            clob_market_get=lambda *_args, **_kwargs: _global_jit_clob_market(
+                "condition-buy", "yes-buy", "no-buy"
+            ),
+            raw_book=_global_jit_book("yes-buy"),
+            captured_at_utc=datetime.now(timezone.utc),
+            timeout=1.0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("clob_market", "reason"),
+    (
+        (
+            {"archived": True},
+            "METADATA_INVALID",
+        ),
+        (
+            {"clobTokenIds": ["yes-buy", "wrong-token"]},
+            "CLOB_MARKET_TOKEN_OWNERSHIP_INVALID",
+        ),
+        (
+            {"min_order_size": "2"},
+            "METADATA_INVALID",
+        ),
+    ),
+)
+def test_global_jit_authority_rejects_current_clob_market_conflicts(
+    clob_market, reason
+):
+    """Gamma truth alone cannot authorize a JIT submit against CLOB conflict."""
+    from src.engine import event_reactor_adapter as adapter
+
+    gamma_market = {
+        "conditionId": "condition-buy",
+        "active": True,
+        "closed": False,
+        "acceptingOrders": True,
+        "enableOrderBook": True,
+        "clobTokenIds": ["yes-buy", "no-buy"],
+        "orderPriceMinTickSize": "0.01",
+        "orderMinSize": "1",
+        "negRisk": False,
+        "feeSchedule": {"exponent": 1, "rate": 0.05, "takerOnly": True},
+    }
+    current_clob = _global_jit_clob_market("condition-buy", "yes-buy", "no-buy")
+    current_clob.update(clob_market)
+    with pytest.raises(ValueError, match=reason):
+        adapter._current_global_market_authority(
+            condition_id="condition-buy",
+            token_id="yes-buy",
+            side="YES",
+            gamma_get=lambda *_args, **_kwargs: SimpleNamespace(
+                status_code=200, json=lambda: [gamma_market]
+            ),
+            clob_market_get=lambda *_args, **_kwargs: current_clob,
+            raw_book=_global_jit_book("yes-buy"),
+            captured_at_utc=datetime.now(timezone.utc),
+            timeout=1.0,
+        )
+
+
+def test_global_market_authority_supersession_has_no_candidate_overlay():
+    """Metadata/tradeability drift has one outcome: full batch reprepare."""
+    from src.engine import event_reactor_adapter as adapter
+    from src.engine.global_batch_runtime import GlobalWinnerPreflight
+
+    status, replacement, _reason = adapter._global_curve_supersession_from_receipt(
+        SimpleNamespace(
+            reason=(
+                "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:"
+                "curve_economics:jit_detail=fields=neg_risk:"
+                "selected=old:current=new"
+            ),
+            global_jit_candidate=SimpleNamespace(action="BUY"),
+        )
+    )
+    assert status == "MARKET_AUTHORITY_SUPERSEDED"
+    assert replacement is None
+    assert GlobalWinnerPreflight(
+        status=status,
+        reason="current Gamma/CLOB metadata changed",
+    ).replacement_candidate is None
+
+
+def test_global_buy_jit_gamma_fee_drift_is_a_new_curve_not_selected_fee():
+    """Current Gamma fee replaces the selected curve so the outer auction re-ranks."""
+    from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
+    from src.engine import event_reactor_adapter as adapter
+    from src.solve.solver import GlobalSingleOrderCandidate, executable_curve_identity
+
+    def authority(rate: float, *, neg_risk: bool = False):
+        market = {
+            "conditionId": "condition-buy",
+            "active": True,
+            "closed": False,
+            "acceptingOrders": True,
+            "enableOrderBook": True,
+            "clobTokenIds": ["yes-buy", "no-buy"],
+            "orderPriceMinTickSize": "0.01",
+            "orderMinSize": "1",
+            "negRisk": neg_risk,
+            "feeSchedule": {"exponent": 1, "rate": rate, "takerOnly": True},
+        }
+        return adapter._current_global_market_authority(
+            condition_id="condition-buy",
+            token_id="yes-buy",
+            side="YES",
+            gamma_get=lambda *_args, **_kwargs: SimpleNamespace(
+                status_code=200, json=lambda: [market]
+            ),
+            clob_market_get=lambda *_args, **_kwargs: _global_jit_clob_market(
+                "condition-buy", "yes-buy", "no-buy", neg_risk=neg_risk
+            ),
+            raw_book=_global_jit_book("yes-buy", neg_risk=False),
+            captured_at_utc=datetime.now(timezone.utc),
+            timeout=1.0,
+        )
+
+    same = authority(0.05)
+    selected_curve = ExecutableCostCurve(
+        token_id="yes-buy",
+        side="YES",
+        snapshot_id="selected",
+        book_hash=same.snapshot.raw_orderbook_hash,
+        levels=(BookLevel(price=Decimal("0.50"), size=Decimal("10")),),
+        fee_model=FeeModel(fee_rate=Decimal("0.05")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        quote_ttl=timedelta(seconds=30),
+        fee_details=same.fee_details,
+    )
+    candidate = GlobalSingleOrderCandidate(
+        candidate_id="selected-buy",
+        token_id="yes-buy",
+        side="YES",
+        family_key="family",
+        bin_id="bin",
+        condition_id="condition-buy",
+        probability_witness_identity="probability-buy",
+        executable_cost_curve=selected_curve,
+        execution_curve_identity=executable_curve_identity(selected_curve),
+        book_snapshot_id=selected_curve.snapshot_id,
+        book_captured_at_utc=datetime.now(timezone.utc),
+        ledger_snapshot_id="ledger-buy",
+        resolution_identity="resolution-buy",
+        neg_risk=False,
+    )
+    raw_book = {
+        "asset_id": "yes-buy",
+        "asks": [{"price": "0.50", "size": "10"}],
+        "bids": [{"price": "0.49", "size": "10"}],
+        "tick_size": "0.01",
+        "min_order_size": "1",
+        "neg_risk": False,
+    }
+    unchanged = adapter._global_buy_candidate_from_raw_book(
+        candidate, raw_book, captured_at_utc=datetime.now(timezone.utc), market_authority=same
+    )
+    assert adapter._global_selected_order_economics_drift(
+        decision=SimpleNamespace(candidate=candidate), current_candidate=unchanged
+    ) is None
+    neg_risk_drifted = adapter._global_buy_candidate_from_raw_book(
+        candidate,
+        {key: value for key, value in raw_book.items() if key != "neg_risk"},
+        captured_at_utc=datetime.now(timezone.utc),
+        market_authority=authority(0.05, neg_risk=True),
+    )
+    assert adapter._global_selected_order_economics_drift(
+        decision=SimpleNamespace(candidate=candidate), current_candidate=neg_risk_drifted
+    ) == "fields=neg_risk"
+    drifted = adapter._global_buy_candidate_from_raw_book(
+        candidate,
+        raw_book,
+        captured_at_utc=datetime.now(timezone.utc),
+        market_authority=authority(0.06),
+    )
+    assert "fee" in adapter._global_selected_order_economics_drift(
+        decision=SimpleNamespace(candidate=candidate), current_candidate=drifted
+    )
+
+
+def test_global_sell_jit_gamma_neg_risk_drift_reauctions_real_typed_candidate():
+    """The selected typed SELL cannot cross after Gamma changes negRisk."""
+    from src.contracts.executable_cost_curve import BookLevel, FeeModel
+    from src.engine import event_reactor_adapter as adapter
+    from src.solve.solver import (
+        ExecutableSellCurve,
+        GlobalSingleOrderSellCandidate,
+        executable_curve_identity,
+        global_sell_execution_terms,
+    )
+
+    curve = ExecutableSellCurve(
+        token_id="yes-sell",
+        side="YES",
+        snapshot_id="selected-sell",
+        book_hash="selected-book",
+        levels=(BookLevel(price=Decimal("0.50"), size=Decimal("10")),),
+        fee_model=FeeModel(fee_rate=Decimal("0.05")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("1"),
+        quote_ttl=timedelta(seconds=30),
+    )
+    proposal, mode, fill_probability, fill_source, rest_deadline = (
+        global_sell_execution_terms(
+            curve,
+            capacity=Decimal("10"),
+            required_mode="TAKER_LIMIT",
+        )
+    )
+    candidate = GlobalSingleOrderSellCandidate(
+        candidate_id="selected-sell",
+        family_key="family-sell",
+        bin_id="bin-sell",
+        condition_id="condition-sell",
+        side="YES",
+        token_id="yes-sell",
+        position_id="position-sell",
+        held_shares=Decimal("10"),
+        probability_witness_identity="probability-sell",
+        book_snapshot_id=curve.snapshot_id,
+        book_captured_at_utc=datetime.now(timezone.utc),
+        execution_curve_identity=executable_curve_identity(curve),
+        ledger_snapshot_id="ledger-sell",
+        executable_sell_curve=curve,
+        resolution_identity="resolution-sell",
+        proposal_sell_curve=proposal,
+        execution_mode=mode,
+        fill_probability=fill_probability,
+        fill_probability_source=fill_source,
+        rest_deadline_minutes=rest_deadline,
+        neg_risk=False,
+    )
+    market = {
+        "conditionId": "condition-sell",
+        "active": True,
+        "closed": False,
+        "acceptingOrders": True,
+        "enableOrderBook": True,
+        "clobTokenIds": ["yes-sell", "no-sell"],
+        "orderPriceMinTickSize": "0.01",
+        "orderMinSize": "1",
+        "negRisk": True,
+        "feeSchedule": {"exponent": 1, "rate": 0.05, "takerOnly": True},
+    }
+    gamma_authority = adapter._current_global_market_authority(
+        condition_id="condition-sell",
+        token_id="yes-sell",
+        side="YES",
+        gamma_get=lambda *_args, **_kwargs: SimpleNamespace(
+            status_code=200, json=lambda: [market]
+        ),
+        clob_market_get=lambda *_args, **_kwargs: _global_jit_clob_market(
+            "condition-sell", "yes-sell", "no-sell", neg_risk=True
+        ),
+        raw_book=_global_jit_book("yes-sell", neg_risk=True),
+        captured_at_utc=datetime.now(timezone.utc),
+        timeout=1.0,
+    )
+    current = adapter._global_sell_candidate_from_raw_book(
+        candidate,
+        {
+            "asset_id": "yes-sell",
+            "bids": [{"price": "0.50", "size": "10"}],
+            "asks": [{"price": "0.51", "size": "10"}],
+            "tick_size": "0.01",
+            "min_order_size": "1",
+        },
+        captured_at_utc=datetime.now(timezone.utc),
+        market_authority=gamma_authority,
+    )
+    assert adapter._global_sell_execution_economics_drift(
+        decision=SimpleNamespace(candidate=candidate, shares=Decimal("10")),
+        current_candidate=current,
+    ) == "neg_risk"
+
+
+@pytest.mark.parametrize(
+    ("markets", "reason"),
+    (
+        ([{"conditionId": "condition-buy"}, {"conditionId": "condition-buy"}], "IDENTITY_INVALID"),
+        ([{"conditionId": "condition-buy", "clobTokenIds": ["other-token"]}], "TOKEN_OWNERSHIP_INVALID"),
+    ),
+)
+def test_global_buy_jit_gamma_market_identity_is_exact(markets, reason):
+    from src.engine import event_reactor_adapter as adapter
+
+    with pytest.raises(ValueError, match=reason):
+        adapter._current_global_market_authority(
+            condition_id="condition-buy",
+            token_id="yes-buy",
+            side="YES",
+            gamma_get=lambda *_args, **_kwargs: SimpleNamespace(
+                status_code=200, json=lambda: markets
+            ),
+            clob_market_get=lambda *_args, **_kwargs: _global_jit_clob_market(
+                "condition-buy", "yes-buy", "no-buy"
+            ),
+            raw_book=_global_jit_book("yes-buy"),
+            captured_at_utc=datetime.now(timezone.utc),
+            timeout=1.0,
         )
 
 
@@ -15344,6 +16085,91 @@ def _global_sell_exit_context():
         current_market_price_is_fresh=True,
         best_bid=0.45,
     )
+
+
+@pytest.mark.parametrize(
+    ("execution_mode", "submit_order_type"),
+    (("TAKER_LIMIT", "FAK"), ("MAKER_REST", "GTC")),
+)
+def test_place_sell_order_propagates_typed_global_receipt_closure(
+    monkeypatch,
+    execution_mode,
+    submit_order_type,
+):
+    """Both lifecycle order modes preserve the typed receipt into executor intent."""
+
+    from src.contracts.global_auction_receipt import (
+        GlobalAuctionReceiptRef,
+        GlobalSellReceiptClosure,
+    )
+    from src.execution import exit_lifecycle
+
+    receipt_ref = GlobalAuctionReceiptRef(
+        decision_log_id=1,
+        decision_log_mode="global_single_order_auction",
+        receipt_hash="a" * 64,
+        execution_binding_hash="b" * 64,
+        artifact_summary_hash="c" * 64,
+        schema_version=21,
+        winner_event_id="event-1",
+        winner_candidate_id="candidate-1",
+        winner_actuation_identity="actuation-1",
+        selection_epoch_identity="epoch-1",
+    )
+    closure = GlobalSellReceiptClosure(
+        receipt_ref=receipt_ref,
+        position_id="position-1",
+        condition_id="condition-1",
+        token_id="token-1",
+        action="SELL",
+        execution_mode=execution_mode,
+        winner_event_id="event-1",
+        winner_candidate_id="candidate-1",
+        winner_actuation_identity="actuation-1",
+        selection_epoch_identity="epoch-1",
+    )
+    authority = object()
+    captured = {}
+
+    def capture_intent(**kwargs):
+        captured["intent_kwargs"] = kwargs
+        return SimpleNamespace(execution_authority_deadline_utc="future")
+
+    def capture_execute(intent, **_kwargs):
+        captured["intent"] = intent
+        return exit_lifecycle.OrderResult(
+            trade_id="position-1", status="rejected", reason="test"
+        )
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "create_exit_order_intent",
+        capture_intent,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_exit_execution_authority_deadline_error",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "execute_exit_order",
+        capture_execute,
+    )
+    result = exit_lifecycle.place_sell_order(
+        trade_id="position-1",
+        token_id="token-1",
+        shares=1.0,
+        current_price=0.5,
+        best_bid=0.5,
+        submit_order_type=submit_order_type,
+        execution_proof_verified=True,
+        global_sell_execution_authority=authority,
+        global_sell_receipt_closure=closure,
+    )
+    assert result.status == "rejected"
+    assert captured["intent_kwargs"]["global_sell_execution_authority"] is authority
+    assert captured["intent_kwargs"]["global_sell_receipt_closure"] is closure
 
 
 def test_local_exit_without_capital_certificate_cannot_reach_venue(monkeypatch):

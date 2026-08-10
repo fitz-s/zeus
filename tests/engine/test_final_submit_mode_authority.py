@@ -167,6 +167,52 @@ class TestModeRevalidation:
             "validator-bypassing mode-flip hole this P0 closed"
         )
 
+    def test_global_mode_uses_current_jit_fee_not_fixed_five_percent(self, monkeypatch):
+        """A global TAKER decision is re-priced from its JIT Gamma fee witness."""
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+
+        from src.engine import event_reactor_adapter as era
+
+        monkeypatch.setattr(era, "_positive_global_current_objective", lambda _x: True)
+        payload = {
+            "qkernel_execution_economics": {
+                "global_execution_mode": "TAKER_LIMIT",
+                "payoff_q_lcb": 0.505,
+            }
+        }
+        snapshot = SimpleNamespace(payload={"market_end_at": "2026-12-31T00:00:00+00:00"})
+        kwargs = dict(
+            actionable_payload=payload,
+            executable_snapshot=snapshot,
+            fresh_best_bid=0.49,
+            fresh_best_ask=0.50,
+            tick_size=0.01,
+            decision_time=datetime.now(timezone.utc),
+        )
+        assert era._fresh_rest_then_cross_mode(**kwargs, taker_fee_rate=0.0) == "TAKER"
+        assert era._fresh_rest_then_cross_mode(**kwargs, taker_fee_rate=0.05) == "NO_TRADE"
+
+    def test_global_mode_missing_jit_fee_fails_closed(self):
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+
+        from src.engine.event_reactor_adapter import _fresh_rest_then_cross_mode
+
+        assert _fresh_rest_then_cross_mode(
+            actionable_payload={
+                "qkernel_execution_economics": {
+                    "global_execution_mode": "TAKER_LIMIT",
+                    "payoff_q_lcb": 0.99,
+                }
+            },
+            executable_snapshot=SimpleNamespace(payload={}),
+            fresh_best_bid=0.49,
+            fresh_best_ask=0.50,
+            tick_size=0.01,
+            decision_time=datetime.now(timezone.utc),
+        ) == "NO_TRADE"
+
 
 class TestCurrentMakerFillAuthority:
     @pytest.mark.parametrize(
@@ -410,3 +456,172 @@ class TestMakerMarketIdentityContext:
         context = _executable_market_context_from_snapshot(snap)
         assert context is not None
         assert context["event_id"] == "highest-temperature-in-kuala-lumpur-on-june-13-2026"
+
+
+def _strict_authority_conn(*, neg_risk, tradeability, active=1, closed=0):
+    import json
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE executable_market_snapshots ("
+        "snapshot_id TEXT PRIMARY KEY, condition_id TEXT, "
+        "selected_outcome_token_id TEXT, yes_token_id TEXT, no_token_id TEXT, "
+        "captured_at TEXT, freshness_deadline TEXT, enable_orderbook INTEGER, "
+        "active INTEGER, closed INTEGER, accepting_orders INTEGER, "
+        "min_tick_size TEXT, min_order_size TEXT, fee_details_json TEXT, "
+        "neg_risk, orderbook_depth_json TEXT, tradeability_status_json TEXT)"
+    )
+    depth = {
+        "YES": {"asks": [{"price": "0.50", "size": "10"}], "bids": []},
+        "NO": {"asks": [{"price": "0.50", "size": "10"}], "bids": []},
+    }
+    conn.execute(
+        "INSERT INTO executable_market_snapshots VALUES "
+        "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "snap-strict",
+            "condition-strict",
+            "yes-strict",
+            "yes-strict",
+            "no-strict",
+            "2026-08-09T10:00:00+00:00",
+            "2026-08-09T10:01:00+00:00",
+            1,
+            active,
+            closed,
+            1,
+            "0.01",
+            "1",
+            json.dumps({"fee_rate_fraction": 0.0}),
+            neg_risk,
+            json.dumps(depth),
+            json.dumps(tradeability),
+        ),
+    )
+    return conn
+
+
+@pytest.mark.parametrize("raw_neg_risk", [None, 2, -1, "1"])
+def test_current_global_execution_authority_rejects_non_strict_neg_risk(raw_neg_risk):
+    from types import SimpleNamespace
+
+    from src.engine.event_reactor_adapter import current_global_execution_authority
+
+    conn = _strict_authority_conn(
+        neg_risk=raw_neg_risk,
+        tradeability={"executable_allowed": True},
+    )
+    assert (
+        current_global_execution_authority(
+            conn,
+            SimpleNamespace(
+                condition_id="condition-strict", token_id="yes-strict", side="YES"
+            ),
+            decision_time=__import__("datetime").datetime.fromisoformat(
+                "2026-08-09T10:00:30+00:00"
+            ),
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("raw_neg_risk, expected", [(0, False), (1, True)])
+def test_current_global_execution_authority_accepts_only_db_bool_int_neg_risk(
+    raw_neg_risk, expected
+):
+    from types import SimpleNamespace
+
+    from src.engine.event_reactor_adapter import current_global_execution_authority
+
+    conn = _strict_authority_conn(
+        neg_risk=raw_neg_risk,
+        tradeability={"executable_allowed": True},
+    )
+    authority = current_global_execution_authority(
+        conn,
+        SimpleNamespace(
+            condition_id="condition-strict", token_id="yes-strict", side="YES"
+        ),
+        decision_time=__import__("datetime").datetime.fromisoformat(
+            "2026-08-09T10:00:30+00:00"
+        ),
+    )
+    assert authority is not None
+    assert authority.neg_risk is expected
+
+
+@pytest.mark.parametrize("tradeability", [{}, {"executable_allowed": False}])
+def test_current_global_execution_authority_requires_explicit_tradeability(
+    tradeability,
+):
+    from types import SimpleNamespace
+
+    from src.engine.event_reactor_adapter import current_global_execution_authority
+
+    conn = _strict_authority_conn(neg_risk=0, tradeability=tradeability)
+    assert (
+        current_global_execution_authority(
+            conn,
+            SimpleNamespace(
+                condition_id="condition-strict", token_id="yes-strict", side="YES"
+            ),
+            decision_time=__import__("datetime").datetime.fromisoformat(
+                "2026-08-09T10:00:30+00:00"
+            ),
+        )
+        is None
+    )
+
+
+def test_current_global_execution_authority_keeps_lifecycle_labels_as_provenance():
+    from types import SimpleNamespace
+
+    from src.engine.event_reactor_adapter import current_global_execution_authority
+
+    conn = _strict_authority_conn(
+        neg_risk=0,
+        tradeability={"executable_allowed": True},
+        active=0,
+        closed=1,
+    )
+    authority = current_global_execution_authority(
+        conn,
+        SimpleNamespace(
+            condition_id="condition-strict", token_id="yes-strict", side="YES"
+        ),
+        decision_time=__import__("datetime").datetime.fromisoformat(
+            "2026-08-09T10:00:30+00:00"
+        ),
+    )
+    assert authority is not None
+
+
+def test_global_jit_handoff_seals_raw_book_against_source_and_view_mutation():
+    from types import SimpleNamespace
+
+    from src.engine import event_reactor_adapter as adapter
+
+    raw_book = {
+        "asset_id": "token-sealed",
+        "asks": [{"price": "0.50", "size": "10"}],
+        "bids": [],
+    }
+    snapshot = SimpleNamespace(
+        snapshot_id="snap-sealed",
+        raw_orderbook_hash=adapter._hash_jsonish(raw_book),
+    )
+    candidate = SimpleNamespace(
+        book_snapshot_id="snap-sealed",
+        executable_cost_curve=SimpleNamespace(snapshot_id="snap-sealed"),
+    )
+    authority = SimpleNamespace(snapshot=snapshot)
+    handoff = adapter._GlobalJitHandoff(
+        candidate=candidate,
+        authority=authority,
+        raw_book_json=adapter._canonical_global_jit_raw_book(raw_book),
+    )
+    raw_book["asks"][0]["size"] = "1"
+    first_view = handoff.raw_book
+    first_view["asks"][0]["size"] = "2"
+    assert handoff.raw_book["asks"][0]["size"] == "10"

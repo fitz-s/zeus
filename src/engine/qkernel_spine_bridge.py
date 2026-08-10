@@ -83,9 +83,10 @@ from __future__ import annotations
 
 import hashlib
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from types import MappingProxyType
 from typing import Any, Mapping, Optional, Sequence
 from zoneinfo import ZoneInfo
 
@@ -121,6 +122,7 @@ from src.probability.outcome_space import (
     OutcomeSpaceError,
     compute_topology_hash,
 )
+from src.solve.solver import CurrentMakerFillWitness
 # ---------------------------------------------------------------------------
 # Typed no-trade / fault reasons unique to the bridge (the spine owns the rest).
 # ---------------------------------------------------------------------------
@@ -249,6 +251,25 @@ class PreparedGlobalFamily:
     day0_exit_authority_status: str = "not_applicable"
     day0_exit_authority_reason: str = "non_day0_family"
     sell_action_authority_identity: str = "non_day0_default_authority"
+    maker_fill_witnesses: Mapping[
+        tuple[str, str, str, str, str | None], CurrentMakerFillWitness
+    ] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        witnesses = dict(self.maker_fill_witnesses)
+        if any(
+            not isinstance(key, tuple)
+            or len(key) != 5
+            or not all(str(value or "").strip() for value in key[:4])
+            or not isinstance(witness, CurrentMakerFillWitness)
+            for key, witness in witnesses.items()
+        ):
+            raise ValueError("PREPARED_GLOBAL_MAKER_WITNESS_MAPPING_INVALID")
+        object.__setattr__(
+            self,
+            "maker_fill_witnesses",
+            MappingProxyType(witnesses),
+        )
 
 
 def sell_action_authority_identity(

@@ -316,12 +316,237 @@ def passive_sell_proposal_curve(
         snapshot_id=curve.snapshot_id,
         book_hash=curve.book_hash,
         levels=(BookLevel(price=maker_price, size=bounded_capacity),),
-        # Retaining the current fee schedule is conservative when maker fees
-        # are lower than taker fees and exact when the schedule is symmetric.
-        fee_model=curve.fee_model,
+        # Maker-fill authority models the submitted post-only limit itself.  Do
+        # not credit an unproved rebate or accidentally charge a taker fee.
+        fee_model=FeeModel(fee_rate=Decimal("0")),
         min_tick=curve.min_tick,
         min_order_size=curve.min_order_size,
         quote_ttl=curve.quote_ttl,
+    )
+
+
+def passive_buy_proposal_curve(
+    curve: ExecutableCostCurve,
+    *,
+    native_bid_levels: Sequence[BookLevel],
+) -> ExecutableCostCurve | None:
+    """Price one post-only BUY from the same current two-sided book."""
+
+    bids = tuple(native_bid_levels)
+    if not bids:
+        return None
+    best_bid = max(Decimal(level.price) for level in bids)
+    maker_price = best_bid + Decimal(curve.min_tick)
+    best_ask = Decimal(curve.levels[0].price)
+    if (
+        not _live_unit_price_in_band(maker_price)
+        or maker_price <= best_bid
+        or maker_price >= best_ask
+    ):
+        return None
+    return ExecutableCostCurve(
+        token_id=curve.token_id,
+        side=curve.side,
+        snapshot_id=curve.snapshot_id,
+        book_hash=curve.book_hash,
+        levels=(BookLevel(price=maker_price, size=curve.levels[0].size),),
+        # See passive_sell_proposal_curve: current maker authority uses the
+        # exact submitted limit, without an assumed fee or rebate.
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=curve.min_tick,
+        min_order_size=curve.min_order_size,
+        quote_ttl=curve.quote_ttl,
+    )
+
+
+@dataclass(frozen=True)
+class MakerFillOutcome:
+    """One deadline outcome of a resting maker order.
+
+    ``proceeds_per_share_usd`` is signed: negative for a BUY cash outlay and
+    positive for SELL net proceeds.  A zero-fill outcome must have zero proceeds.
+    """
+
+    probability: Decimal
+    fill_fraction: Decimal
+    proceeds_per_share_usd: Decimal
+
+    def __post_init__(self) -> None:
+        probability = Decimal(self.probability)
+        fraction = Decimal(self.fill_fraction)
+        proceeds = Decimal(self.proceeds_per_share_usd)
+        if (
+            not all(value.is_finite() for value in (probability, fraction, proceeds))
+            or probability <= 0
+            or not Decimal("0") <= fraction <= Decimal("1")
+            or (fraction == 0 and proceeds != 0)
+        ):
+            raise ValueError("maker fill outcome is invalid")
+        object.__setattr__(self, "probability", probability)
+        object.__setattr__(self, "fill_fraction", fraction)
+        object.__setattr__(self, "proceeds_per_share_usd", proceeds)
+
+
+def current_maker_fill_witness_identity(
+    *,
+    candidate_binding_identity: str,
+    asset_epoch_identity: str,
+    book_snapshot_id: str,
+    book_hash: str,
+    limit_price: Decimal,
+    rest_deadline_minutes: float,
+    source_identity: str,
+    model_identity: str,
+    sample_identity: str,
+    training_cutoff_at_utc: datetime,
+    issued_at_utc: datetime,
+    valid_until_at_utc: datetime,
+    outcomes: Sequence[MakerFillOutcome],
+) -> str:
+    """Canonical identity for the complete current maker-fill authority."""
+
+    rows = tuple(sorted(
+        (
+            str(row.probability), str(row.fill_fraction),
+            str(row.proceeds_per_share_usd),
+        )
+        for row in outcomes
+    ))
+    return _hash(
+        "CURRENT_MAKER_FILL_V2", str(candidate_binding_identity),
+        str(asset_epoch_identity), str(book_snapshot_id), str(book_hash),
+        str(limit_price), repr(rest_deadline_minutes), str(source_identity),
+        str(model_identity), str(sample_identity),
+        training_cutoff_at_utc.astimezone(timezone.utc).isoformat(),
+        issued_at_utc.astimezone(timezone.utc).isoformat(),
+        valid_until_at_utc.astimezone(timezone.utc).isoformat(),
+        *("\x1e".join(row) for row in rows),
+    )
+
+
+@dataclass(frozen=True)
+class CurrentMakerFillWitness:
+    """Current candidate-bound distribution for one post-only maker sibling.
+
+    The selector accepts a maker proposal only if this witness binds its exact
+    current book epoch, limit, candidate semantic identity, deadline, and every
+    partial-fill cashflow.  It is intentionally not a historical scalar.
+    """
+
+    witness_identity: str
+    candidate_binding_identity: str
+    asset_epoch_identity: str
+    book_snapshot_id: str
+    book_hash: str
+    limit_price: Decimal
+    rest_deadline_minutes: float
+    outcomes: tuple[MakerFillOutcome, ...]
+    source_identity: str
+    model_identity: str
+    sample_identity: str
+    training_cutoff_at_utc: datetime
+    issued_at_utc: datetime
+    valid_until_at_utc: datetime
+
+    def __post_init__(self) -> None:
+        outcomes = tuple(self.outcomes)
+        probability = sum((row.probability for row in outcomes), Decimal("0"))
+        temporal_values = (
+            self.training_cutoff_at_utc,
+            self.issued_at_utc,
+            self.valid_until_at_utc,
+        )
+        expected = current_maker_fill_witness_identity(
+            candidate_binding_identity=self.candidate_binding_identity,
+            asset_epoch_identity=self.asset_epoch_identity,
+            book_snapshot_id=self.book_snapshot_id,
+            book_hash=self.book_hash,
+            limit_price=self.limit_price,
+            rest_deadline_minutes=self.rest_deadline_minutes,
+            source_identity=self.source_identity,
+            model_identity=self.model_identity,
+            sample_identity=self.sample_identity,
+            training_cutoff_at_utc=self.training_cutoff_at_utc,
+            issued_at_utc=self.issued_at_utc,
+            valid_until_at_utc=self.valid_until_at_utc,
+            outcomes=outcomes,
+        )
+        if (
+            not all(
+                str(value or "").strip()
+                for value in (
+                    self.witness_identity,
+                    self.candidate_binding_identity,
+                    self.asset_epoch_identity,
+                    self.book_snapshot_id,
+                    self.book_hash,
+                    self.source_identity,
+                    self.model_identity,
+                    self.sample_identity,
+                )
+            )
+            or not self.limit_price.is_finite()
+            or not _live_unit_price_in_band(self.limit_price)
+            or not math.isfinite(float(self.rest_deadline_minutes))
+            or self.rest_deadline_minutes <= 0.0
+            or not outcomes
+            or any(not isinstance(row, MakerFillOutcome) for row in outcomes)
+            or not any(row.fill_fraction > 0 for row in outcomes)
+            or probability != Decimal("1")
+            or any(value.tzinfo is None for value in temporal_values)
+            or not (
+                self.training_cutoff_at_utc <= self.issued_at_utc
+                <= self.valid_until_at_utc
+            )
+            or self.witness_identity != expected
+        ):
+            raise ValueError("current maker fill witness is incomplete")
+        object.__setattr__(self, "outcomes", outcomes)
+
+    def assert_current_at(self, decision_at_utc: datetime) -> None:
+        if (
+            decision_at_utc.tzinfo is None
+            or self.issued_at_utc > decision_at_utc
+            or decision_at_utc > self.valid_until_at_utc
+        ):
+            raise ValueError("CURRENT_MAKER_FILL_WITNESS_TEMPORAL_INVALID")
+
+    @property
+    def fill_probability(self) -> float:
+        return float(sum(
+            (row.probability for row in self.outcomes if row.fill_fraction > 0),
+            Decimal("0"),
+        ))
+
+    @property
+    def expected_fill_fraction(self) -> float:
+        return float(sum(
+            (row.probability * row.fill_fraction for row in self.outcomes),
+            Decimal("0"),
+        ))
+
+
+def maker_fill_candidate_binding_identity(
+    *,
+    action: str,
+    family_key: str,
+    bin_id: str,
+    condition_id: str,
+    side: str,
+    token_id: str,
+    ledger_snapshot_id: str,
+    position_id: str | None,
+    held_shares: Decimal | None,
+    asset_epoch_identity: str,
+    proposal_identity: str,
+) -> str:
+    """Stable candidate identity excluding the witness itself (no hash cycle)."""
+
+    return _hash(
+        "CURRENT_MAKER_FILL_V1", str(action), str(family_key), str(bin_id),
+        str(condition_id), str(side), str(token_id), str(ledger_snapshot_id),
+        str(position_id or ""), str(held_shares or ""), str(asset_epoch_identity),
+        str(proposal_identity),
     )
 
 
@@ -378,6 +603,7 @@ def global_sell_execution_terms(
     *,
     capacity: Decimal,
     required_mode: Literal["MAKER_REST", "TAKER_LIMIT"] | None = None,
+    maker_fill_witness: CurrentMakerFillWitness | None = None,
 ) -> tuple[
     ExecutableSellCurve | None,
     Literal["MAKER_REST", "TAKER_LIMIT"],
@@ -390,17 +616,16 @@ def global_sell_execution_terms(
     if required_mode not in {None, "MAKER_REST", "TAKER_LIMIT"}:
         raise ValueError("global SELL execution mode is invalid")
     if required_mode == "MAKER_REST":
-        # SCOPE — one maker SELL materialization; taker and HOLD remain live.
-        # DRAIN — each auction rebuild asks again from its current book.
-        # RESET — only a typed candidate-bound current partial-fill witness may
-        # re-enable maker generation in a reviewed revision.
-        return (
-            None,
-            "MAKER_REST",
-            0.0,
-            "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE",
-            None,
-        )
+        maker = passive_sell_proposal_curve(curve, capacity=capacity)
+        if maker is not None and maker_fill_witness is not None:
+            return (
+                maker,
+                "MAKER_REST",
+                maker_fill_witness.fill_probability,
+                maker_fill_witness.witness_identity,
+                maker_fill_witness.rest_deadline_minutes,
+            )
+        return (None, "MAKER_REST", 0.0, "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE", None)
     taker = marketable_sell_proposal_curve(curve, capacity=capacity)
     if taker is not None and required_mode in {None, "TAKER_LIMIT"}:
         return taker, "TAKER_LIMIT", 1.0, "immediate_taker", None
@@ -1181,7 +1406,26 @@ class CurrentExecutionAuthority:
     side: Literal["YES", "NO"]
     book_snapshot_id: str
     execution_curve_identity: str
+    neg_risk: bool
     action: Literal["BUY", "SELL"] = "BUY"
+    asset_epoch_identity: str | None = None
+    maker_witness_identity: str | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            not all(
+                str(value or "").strip()
+                for value in (
+                    self.token_id,
+                    self.book_snapshot_id,
+                    self.execution_curve_identity,
+                )
+            )
+            or self.side not in {"YES", "NO"}
+            or self.action not in {"BUY", "SELL"}
+            or type(self.neg_risk) is not bool
+        ):
+            raise ValueError("current execution authority is incomplete")
 
 
 def global_auction_universe_identity(
@@ -1599,12 +1843,15 @@ class GlobalSingleOrderCandidate:
     ledger_snapshot_id: str
     executable_cost_curve: ExecutableCostCurve
     resolution_identity: str
+    neg_risk: bool
     native_bid_levels: tuple[BookLevel, ...] = ()
     execution_mode: Literal["TAKER_LIMIT", "MAKER_REST"] = "TAKER_LIMIT"
     proposal_cost_curve: ExecutableCostCurve | None = None
     fill_probability: float = 1.0
     fill_probability_source: str = "immediate_taker"
     rest_deadline_minutes: float | None = None
+    maker_fill_witness: CurrentMakerFillWitness | None = None
+    asset_epoch_identity: str | None = None
     eligibility_reason: GlobalEligibilityReason | None = None
 
     @property
@@ -1653,12 +1900,14 @@ class GlobalSingleOrderCandidate:
             or not math.isfinite(float(self.fill_probability))
             or not 0.0 < float(self.fill_probability) <= 1.0
             or not str(self.fill_probability_source or "").strip()
+            or type(self.neg_risk) is not bool
         ):
             raise ValueError("global single-order execution proposal is invalid")
         if self.execution_mode == "TAKER_LIMIT" and (
             self.proposal_cost_curve is not None
             or self.fill_probability != 1.0
             or self.rest_deadline_minutes is not None
+            or self.maker_fill_witness is not None
         ):
             raise ValueError("taker proposal cannot carry passive execution terms")
         if (
@@ -1690,6 +1939,66 @@ class GlobalSingleOrderCandidate:
             raise ValueError("maker proposal must be finite, passive, and deadline-bound")
 
 
+def _maker_witness_rejection(
+    candidate: GlobalSingleOrderAnyCandidate,
+    *,
+    decision_at_utc: datetime,
+) -> str | None:
+    """Return the narrow maker-only exclusion reason for the current epoch."""
+
+    if candidate.execution_mode != "MAKER_REST":
+        return None
+    witness = getattr(candidate, "maker_fill_witness", None)
+    asset_epoch_identity = str(getattr(candidate, "asset_epoch_identity", "") or "")
+    if not isinstance(witness, CurrentMakerFillWitness) or not asset_epoch_identity:
+        return "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
+    proposal = (
+        candidate.economic_sell_curve
+        if isinstance(candidate, GlobalSingleOrderSellCandidate)
+        else candidate.economic_cost_curve
+    )
+    action = str(getattr(candidate, "action", "BUY") or "BUY")
+    binding = maker_fill_candidate_binding_identity(
+        action=action,
+        family_key=candidate.family_key,
+        bin_id=candidate.bin_id,
+        condition_id=candidate.condition_id,
+        side=candidate.side,
+        token_id=candidate.token_id,
+        ledger_snapshot_id=candidate.ledger_snapshot_id,
+        position_id=getattr(candidate, "position_id", None),
+        held_shares=getattr(candidate, "held_shares", None),
+        asset_epoch_identity=asset_epoch_identity,
+        proposal_identity=executable_curve_identity(proposal),
+    )
+    if (
+        witness.candidate_binding_identity != binding
+        or witness.asset_epoch_identity != asset_epoch_identity
+        or witness.book_snapshot_id != proposal.snapshot_id
+        or witness.book_hash != proposal.book_hash
+        or witness.limit_price != proposal.levels[0].price
+        or witness.rest_deadline_minutes != candidate.rest_deadline_minutes
+        or not math.isclose(witness.fill_probability, candidate.fill_probability)
+        or candidate.fill_probability_source != witness.witness_identity
+    ):
+        return "CURRENT_MAKER_FILL_WITNESS_MISMATCH"
+    try:
+        witness.assert_current_at(decision_at_utc)
+    except ValueError:
+        return "CURRENT_MAKER_FILL_WITNESS_TEMPORAL_INVALID"
+    expected_cashflow = (
+        proposal.levels[0].price
+        if action == "SELL"
+        else -proposal.levels[0].price
+    )
+    if any(
+        row.fill_fraction > 0 and row.proceeds_per_share_usd != expected_cashflow
+        for row in witness.outcomes
+    ):
+        return "CURRENT_MAKER_FILL_WITNESS_CASHFLOW_INVALID"
+    return None
+
+
 def _global_native_candidate_id(
     *,
     probability_witness: FamilyPayoffWitness,
@@ -1706,6 +2015,7 @@ def _global_native_candidate_id(
         binding.condition_id,
         str(native.side),
         expected_token,
+        str(bool(getattr(native, "neg_risk", False))),
         execution_mode,
         proposal_identity,
     )
@@ -1717,6 +2027,7 @@ def global_candidate_from_native(
     probability_witness: FamilyPayoffWitness,
     ledger_snapshot_id: str,
     book_captured_at_utc: datetime,
+    neg_risk: bool,
     native_bid_levels: Sequence[BookLevel] = (),
     eligibility_reason: GlobalEligibilityReason | None = None,
 ) -> GlobalSingleOrderCandidate:
@@ -1729,6 +2040,7 @@ def global_candidate_from_native(
         book_captured_at_utc=book_captured_at_utc,
         native_bid_levels=native_bid_levels,
         eligibility_reason=eligibility_reason,
+        neg_risk=neg_risk,
         include_maker=False,
     )[0]
 
@@ -1739,16 +2051,14 @@ def global_candidates_from_native(
     probability_witness: FamilyPayoffWitness,
     ledger_snapshot_id: str,
     book_captured_at_utc: datetime,
+    neg_risk: bool,
     native_bid_levels: Sequence[BookLevel] = (),
     eligibility_reason: GlobalEligibilityReason | None = None,
     include_maker: bool = False,
+    maker_fill_witness: CurrentMakerFillWitness | None = None,
+    asset_epoch_identity: str | None = None,
 ) -> tuple[GlobalSingleOrderCandidate, ...]:
-    """Materialize the current taker proposal for one native claim.
-
-    Maker generation remains fail-closed until a typed current partial-fill
-    probability/payoff witness exists. The historical scalar is not executable
-    decision-time truth.
-    """
+    """Materialize current taker and, when fully witnessed, maker siblings."""
 
     if getattr(native, "no_trade_reason", None) is not None:
         raise ValueError("native no-trade candidate is not globally executable")
@@ -1793,6 +2103,7 @@ def global_candidates_from_native(
         resolution_identity=probability_witness.resolution_identity,
         native_bid_levels=tuple(native_bid_levels),
         eligibility_reason=eligibility_reason,
+        neg_risk=neg_risk,
     )
     taker = GlobalSingleOrderCandidate(
         candidate_id=_global_native_candidate_id(
@@ -1806,11 +2117,30 @@ def global_candidates_from_native(
         **common,
     )
     if include_maker:
-        # SCOPE — one maker BUY materialization; taker remains executable.
-        # DRAIN — each complete auction rebuild reaches this gate independently.
-        # RESET — only a typed candidate-bound current partial-fill witness may
-        # replace this rejection in a reviewed revision.
-        raise ValueError("CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE")
+        maker_curve = passive_buy_proposal_curve(
+            curve, native_bid_levels=native_bid_levels
+        )
+        if maker_curve is None or maker_fill_witness is None or not asset_epoch_identity:
+            return (taker,)
+        maker = GlobalSingleOrderCandidate(
+            candidate_id=_global_native_candidate_id(
+                probability_witness=probability_witness,
+                native=native,
+                binding=binding,
+                expected_token=str(expected_token),
+                execution_mode="MAKER_REST",
+                proposal_identity=executable_curve_identity(maker_curve),
+            ),
+            **common,
+            execution_mode="MAKER_REST",
+            proposal_cost_curve=maker_curve,
+            fill_probability=maker_fill_witness.fill_probability,
+            fill_probability_source=maker_fill_witness.witness_identity,
+            rest_deadline_minutes=maker_fill_witness.rest_deadline_minutes,
+            maker_fill_witness=maker_fill_witness,
+            asset_epoch_identity=asset_epoch_identity,
+        )
+        return (taker, maker)
     return (taker,)
 
 
@@ -1837,6 +2167,7 @@ class GlobalSingleOrderSellCandidate:
     fill_probability: float
     fill_probability_source: str
     rest_deadline_minutes: float | None
+    neg_risk: bool
     native_ask_levels: tuple[BookLevel, ...] = ()
     action: Literal["SELL"] = "SELL"
     execution_mode: Literal["MAKER_REST", "TAKER_LIMIT"] = "MAKER_REST"
@@ -1855,6 +2186,8 @@ class GlobalSingleOrderSellCandidate:
     ] = "not_applicable"
     exit_authority_reason: str = "non_day0_family"
     sell_action_authority_identity: str = "non_day0_default_authority"
+    maker_fill_witness: CurrentMakerFillWitness | None = None
+    asset_epoch_identity: str | None = None
 
     @property
     def economic_sell_curve(self) -> ExecutableSellCurve:
@@ -1910,6 +2243,7 @@ class GlobalSingleOrderSellCandidate:
             not math.isfinite(float(self.fill_probability))
             or not 0.0 < float(self.fill_probability) <= 1.0
             or not str(self.fill_probability_source or "").strip()
+            or type(self.neg_risk) is not bool
             or self.execution_mode not in {"MAKER_REST", "TAKER_LIMIT"}
             or (
                 proposal is not None
@@ -1950,6 +2284,8 @@ class GlobalSingleOrderSellCandidate:
                 is None
             )
         )
+        if self.execution_mode == "TAKER_LIMIT" and self.maker_fill_witness is not None:
+            raise ValueError("taker SELL cannot carry maker fill authority")
         if common_execution_invalid or maker_invalid or taker_invalid:
             raise ValueError("global SELL execution proposal is incoherent")
         functional = self.probability_functional
@@ -1997,6 +2333,7 @@ def global_sell_candidate_from_holding(
     ledger_snapshot_id: str,
     executable_sell_curve: ExecutableSellCurve,
     book_captured_at_utc: datetime,
+    neg_risk: bool,
     probability_functional: Literal[
         "LOWER_CVAR_PARAMETER_DRAWS",
         "POSTERIOR_PREDICTIVE_MEAN",
@@ -2012,6 +2349,8 @@ def global_sell_candidate_from_holding(
     exit_authority_reason: str = "non_day0_family",
     sell_action_authority_identity: str = "non_day0_default_authority",
     execution_mode: Literal["MAKER_REST", "TAKER_LIMIT"] | None = None,
+    maker_fill_witness: CurrentMakerFillWitness | None = None,
+    asset_epoch_identity: str | None = None,
 ) -> GlobalSingleOrderSellCandidate | None:
     """Materialize the venue-legal reducible part of an exact ledger holding."""
 
@@ -2051,6 +2390,7 @@ def global_sell_candidate_from_holding(
         executable_sell_curve,
         capacity=sellable_shares,
         required_mode=execution_mode,
+        maker_fill_witness=maker_fill_witness,
     )
     if execution_mode is not None and proposal is None:
         return None
@@ -2080,6 +2420,7 @@ def global_sell_candidate_from_holding(
             str(fill_probability),
             fill_probability_source,
             str(rest_deadline_minutes),
+            str(neg_risk),
         ),
         family_key=probability_witness.family_key,
         bin_id=binding.bin_id,
@@ -2105,6 +2446,9 @@ def global_sell_candidate_from_holding(
         exit_authority_status=exit_authority_status,
         exit_authority_reason=exit_authority_reason,
         sell_action_authority_identity=sell_action_authority_identity,
+        maker_fill_witness=maker_fill_witness,
+        asset_epoch_identity=asset_epoch_identity,
+        neg_risk=neg_risk,
     )
 
 
@@ -6013,38 +6357,77 @@ def _expected_growth_comparison(
         expected_ev = loss_q * float(terminal.loss_payoff_usd) + favorable_q * float(
             terminal.win_payoff_usd
         )
-    fill_probability = float(getattr(candidate, "fill_probability", 1.0))
     effective_lock_hours = capital_lock_hours
     expected_cost = float(score.cost_usd)
     if getattr(candidate, "execution_mode", "TAKER_LIMIT") == "MAKER_REST":
-        if expected_ruin_reduction > 0.0:
-            raise ValueError(
-                "maker zero-atom objective requires a fill-prefix distribution"
-            )
-        assert candidate.rest_deadline_minutes is not None
+        witness = getattr(candidate, "maker_fill_witness", None)
+        if not isinstance(witness, CurrentMakerFillWitness):
+            raise ValueError("maker expected economics requires current witness")
         rest_hours = float(candidate.rest_deadline_minutes) / 60.0
+        terminal = score.expected_terminal_wealth
+        if terminal is None:
+            raise ValueError("maker expected economics lacks posterior-mean terminal witness")
         if isinstance(candidate, GlobalSingleOrderSellCandidate):
-            # A filled SELL releases the held capital after the rest interval;
-            # an unfilled SELL leaves that capital exposed until resolution.
+            favorable_q = terminal.favorable_sell_probability_mean
+            loss_q = terminal.held_probability_mean
+            loss_base = terminal.wealth_after_loss_usd - terminal.loss_payoff_usd
+            win_base = terminal.wealth_after_win_usd - terminal.win_payoff_usd
+        else:
+            favorable_q = terminal.win_probability_mean
+            loss_q = terminal.loss_probability_mean
+            loss_base = terminal.wealth_after_loss_usd - terminal.loss_payoff_usd
+            win_base = terminal.wealth_after_win_usd - terminal.win_payoff_usd
+        expected_du = expected_ev = expected_cost = expected_ruin_reduction = 0.0
+        expected_fill_fraction = 0.0
+        for outcome in witness.outcomes:
+            fraction = float(outcome.fill_fraction)
+            probability = float(outcome.probability)
+            filled = score.shares * outcome.fill_fraction
+            proceeds = filled * outcome.proceeds_per_share_usd
+            if isinstance(candidate, GlobalSingleOrderSellCandidate):
+                loss_after = loss_base - filled + proceeds
+                win_after = win_base + proceeds
+                ev = float(proceeds) - loss_q * float(filled)
+                cost = float(filled - proceeds)
+            else:
+                cost_usd = -proceeds
+                loss_after = loss_base - cost_usd
+                win_after = win_base - cost_usd + filled
+                ev = favorable_q * float(filled) - float(cost_usd)
+                cost = float(cost_usd)
+            if min(loss_after, win_after) <= 0:
+                if not isinstance(candidate, GlobalSingleOrderSellCandidate):
+                    raise ValueError("maker partial-fill outcome breaches wealth domain")
+            if isinstance(candidate, GlobalSingleOrderSellCandidate):
+                ruin, du = _binary_extended_log_delta(
+                    loss_probability=loss_q,
+                    win_probability=favorable_q,
+                    loss_baseline=loss_base,
+                    win_baseline=win_base,
+                    loss_after=loss_after,
+                    win_after=win_after,
+                )
+                expected_ruin_reduction += probability * ruin
+            else:
+                du = loss_q * math.log(float(loss_after / loss_base)) + favorable_q * math.log(
+                    float(win_after / win_base)
+                )
+            expected_du += probability * du
+            expected_ev += probability * ev
+            expected_cost += probability * cost
+            expected_fill_fraction += probability * fraction
+        if expected_cost <= 0:
+            raise ValueError("maker partial-fill witness has no capital economics")
+        if isinstance(candidate, GlobalSingleOrderSellCandidate):
             effective_lock_hours = (
-                fill_probability * rest_hours
-                + (1.0 - fill_probability) * capital_lock_hours
+                expected_fill_fraction * rest_hours
+                + (1.0 - expected_fill_fraction) * capital_lock_hours
             )
         else:
-            # A filled BUY locks new capital until resolution; an unfilled BUY
-            # only reserves it for the maker-rest interval.
             effective_lock_hours = (
-                fill_probability * capital_lock_hours
-                + (1.0 - fill_probability) * rest_hours
+                expected_fill_fraction * capital_lock_hours
+                + (1.0 - expected_fill_fraction) * rest_hours
             )
-        expected_du *= fill_probability
-        expected_ev *= fill_probability
-        expected_cost *= fill_probability
-    elif isinstance(candidate, GlobalSingleOrderSellCandidate):
-        effective_lock_hours = max(
-            candidate.executable_sell_curve.quote_ttl.total_seconds() / 3600.0,
-            1e-9,
-        )
     return ExpectedGrowthComparison(
         probability_basis="POSTERIOR_PREDICTIVE_MEAN",
         probability_witness_identity=probability_witness.witness_identity,
@@ -6579,12 +6962,10 @@ def select_global_single_order(
         reason: str | None = candidate.eligibility_reason
         q_samples: np.ndarray | None = None
         probability_witness = probability_witnesses.get(candidate.family_key)
-        if reason is None and candidate.execution_mode == "MAKER_REST":
-            # SCOPE — one maker BUY/SELL candidate; taker, HOLD, and CASH remain.
-            # DRAIN — each current selection reconstructs the feasible set.
-            # RESET — only a typed candidate-bound current partial-fill witness
-            # may replace this intrinsic selector wall in a reviewed revision.
-            reason = "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
+        if reason is None:
+            reason = _maker_witness_rejection(
+                candidate, decision_at_utc=decision_at_utc
+            )
         if reason is None and candidate_policy_rejection_resolver is not None:
             try:
                 policy_reason = candidate_policy_rejection_resolver(candidate)
@@ -6669,6 +7050,15 @@ def select_global_single_order(
                 != candidate.execution_curve_identity
             ):
                 reason = "EXECUTION_CURVE_SUPERSEDED"
+            elif current_execution.neg_risk != candidate.neg_risk:
+                reason = "NEG_RISK_SUPERSEDED"
+            elif candidate.execution_mode == "MAKER_REST" and (
+                current_execution.asset_epoch_identity
+                != candidate.asset_epoch_identity
+                or current_execution.maker_witness_identity
+                != candidate.maker_fill_witness.witness_identity
+            ):
+                reason = "CURRENT_MAKER_FILL_WITNESS_SUPERSEDED"
         quote_age = decision_at_utc - candidate.book_captured_at_utc
         candidate_curve = (
             candidate.executable_sell_curve
@@ -6712,6 +7102,7 @@ def select_global_single_order(
         "EXECUTION_AUTHORITY_MISSING",
         "BOOK_IDENTITY_SUPERSEDED",
         "EXECUTION_CURVE_SUPERSEDED",
+        "NEG_RISK_SUPERSEDED",
         "QUOTE_EXPIRED",
         "CAPITAL_IDENTITY_SUPERSEDED",
         "CANDIDATE_POLICY_AUTHORITY_MISSING",

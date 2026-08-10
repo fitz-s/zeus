@@ -55,6 +55,348 @@ from src.sizing.portfolio_reservation import PortfolioReservationLedger
 from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
 
+@pytest.mark.parametrize("post_only,expected_order_type", [(False, "FOK"), (True, "GTC")])
+def test_global_sealed_provider_uses_final_intent_and_skips_book_fetch(
+    monkeypatch, post_only, expected_order_type
+):
+    import json
+
+    from src.data.market_scanner import _sha256_json
+    from src.engine.event_reactor_adapter import SealedBookOverride
+    from src.events import reactor as reactor_module
+
+    gate_calls = []
+    balance_payloads = []
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_heartbeat_authority_summary",
+        lambda order_type: gate_calls.append(("heartbeat", order_type))
+        or {"allow_submit": True, "authority_id": "hb"},
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_user_ws_authority_summary",
+        lambda checked_at: gate_calls.append(("ws", checked_at))
+        or {"allow_submit": True, "authority_id": "ws"},
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_venue_connectivity_authority_summary",
+        lambda checked_at: gate_calls.append(("venue", checked_at))
+        or {"allow_submit": True, "authority_id": "venue"},
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_canonical_buy_collateral_payload",
+        lambda *_args, **_kwargs: {"allow_submit": True},
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_balance_allowance_status",
+        lambda final_intent, *_args, **_kwargs: (
+            balance_payloads.append(dict(final_intent.payload))
+            or ("OK", "balance", datetime.now(timezone.utc).isoformat())
+        ),
+    )
+    book = {
+        "asset_id": "yes-sealed",
+        "asks": [{"price": "0.50", "size": "10"}],
+        "bids": [{"price": "0.49", "size": "10"}],
+    }
+    book_hash = _sha256_json(book)
+    sealed_now = datetime.now(timezone.utc)
+    override = SealedBookOverride(
+        token_id="yes-sealed",
+        side="BUY",
+        snapshot_id="snap-sealed",
+        raw_orderbook_hash=book_hash,
+        orderbook_depth_jsonb=json.dumps(book, sort_keys=True, separators=(",", ":")),
+        best_bid=0.49,
+        best_ask=0.50,
+        tick_size=0.01,
+        min_order_size=1.0,
+        neg_risk=False,
+        captured_at=sealed_now.isoformat(),
+        freshness_deadline=(sealed_now + timedelta(seconds=60)).isoformat(),
+        curve_ttl_seconds=60.0,
+    )
+    provider = reactor_module._edli_pre_submit_authority_provider_from_book_evidence_conn(
+        None,
+        {"pre_submit_max_quote_age_ms": 1000},
+        book_quote_provider=lambda _token: (_ for _ in ()).throw(
+            AssertionError("sealed global provider must not fetch book")
+        ),
+    )
+    intent = SimpleNamespace(
+        payload={
+            "token_id": "yes-sealed",
+            "side": "BUY",
+            "limit_price": 0.51,
+            "size": 2.0,
+            "post_only": post_only,
+            "tick_size": 0.01,
+            "min_order_size": 1.0,
+            "neg_risk": False,
+            "notional_usd": 1.02,
+        }
+    )
+    snapshot = SimpleNamespace(payload={"identity": "snap-sealed"})
+    witness = provider(
+        intent,
+        snapshot,
+        datetime(2026, 8, 9, 10, 0, 30, tzinfo=timezone.utc),
+        sealed_book_override=override,
+    )
+    assert witness.book_hash == book_hash
+    assert witness.current_best_bid == 0.49
+    assert witness.current_best_ask == 0.50
+    assert witness.heartbeat_status == "OK"
+    assert witness.user_ws_status == "OK"
+    assert witness.venue_connectivity_status == "OK"
+    assert witness.balance_allowance_status == "OK"
+    assert gate_calls[0][1] == expected_order_type
+    assert sum(kind == "heartbeat" for kind, _value in gate_calls) == 1
+    assert sum(kind == "ws" for kind, _value in gate_calls) == 1
+    assert sum(kind == "venue" for kind, _value in gate_calls) == 1
+    gate_timestamp = gate_calls[1][1].isoformat()
+    assert witness.heartbeat_checked_at == gate_timestamp
+    assert witness.user_ws_checked_at == gate_timestamp
+    assert witness.venue_connectivity_checked_at == gate_timestamp
+    assert datetime.fromisoformat(witness.checked_at) >= gate_calls[1][1]
+    assert balance_payloads[0]["size"] == 2.0
+    assert balance_payloads[0]["side"] == "BUY"
+    assert balance_payloads[0]["limit_price"] == 0.51
+    assert balance_payloads[0]["notional_usd"] > 0
+    assert balance_payloads[0]["post_only"] is post_only
+    for field, bad_value in (
+        ("snapshot_id", "wrong-snapshot"),
+        ("raw_orderbook_hash", "wrong-hash"),
+        ("curve_ttl_seconds", 0.0),
+        ("best_ask", 0.51),
+        ("tick_size", 0.02),
+        ("min_order_size", 2.0),
+        ("neg_risk", True),
+    ):
+        with pytest.raises(ValueError):
+            provider(
+                intent,
+                snapshot,
+                datetime.now(timezone.utc),
+                sealed_book_override=replace(override, **{field: bad_value}),
+            )
+    monkeypatch.setattr(
+        reactor_module,
+        "_edli_heartbeat_authority_summary",
+        lambda _order_type: {"allow_submit": False, "authority_id": "hb"},
+    )
+    with pytest.raises(ValueError, match="PRE_SUBMIT_HEARTBEAT_ORDER_TYPE_BLOCKED"):
+        provider(
+            intent,
+            snapshot,
+            datetime.now(timezone.utc),
+            sealed_book_override=override,
+        )
+
+
+def test_global_builder_uses_sealed_book_and_one_final_provider_call(monkeypatch):
+    """The production builder must not manufacture a second complete provisional witness."""
+
+    from src.engine import event_reactor_adapter as era
+    from src.engine.event_reactor_adapter import (
+        PreSubmitAuthorityWitness,
+        SealedBookObservation,
+    )
+
+    decision_time = datetime(2026, 8, 9, 10, 0, 30, tzinfo=timezone.utc)
+    captured_at = decision_time
+    depth = json.dumps(
+        {
+            "asset_id": "yes-sealed",
+            "asks": [{"price": "0.50", "size": "10"}],
+            "bids": [{"price": "0.49", "size": "10"}],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    snapshot = SimpleNamespace(
+        snapshot_id="snap-sealed",
+        selected_outcome_token_id="yes-sealed",
+        raw_orderbook_hash=hashlib.sha256(depth.encode()).hexdigest(),
+        orderbook_depth_jsonb=depth,
+        orderbook_top_bid=0.49,
+        orderbook_top_ask=0.50,
+        min_tick_size=0.01,
+        min_order_size=1.0,
+        neg_risk=False,
+        captured_at=captured_at,
+        freshness_deadline=captured_at + timedelta(seconds=60),
+    )
+    curve = SimpleNamespace(quote_ttl=timedelta(seconds=60), fee_model=SimpleNamespace(fee_rate=0.01))
+    candidate = SimpleNamespace(
+        book_snapshot_id="snap-sealed",
+        executable_cost_curve=curve,
+    )
+    global_decision = SimpleNamespace(
+        candidate=candidate,
+        limit_price=0.51,
+        shares=2.0,
+        cost_usd=1.02,
+        expected_fill_price_before_fee=0.50,
+    )
+    receipt = SimpleNamespace(
+        global_actuation=SimpleNamespace(decision=global_decision, winner_event_id="evt-sealed"),
+        strategy_key="Center Bin Buy",
+        direction="buy_yes",
+        metric="high",
+        decision_proof_bundle=None,
+        day0_probability_authority=None,
+        event_id="evt-sealed",
+    )
+    event = SimpleNamespace(event_id="evt-sealed", event_type="FORECAST_DECISION")
+    executable = SimpleNamespace(
+        payload={
+            "identity": "snap-sealed",
+            "selected_snapshot_id": "snap-sealed",
+            "token_id": "yes-sealed",
+            "condition_id": "cond-sealed",
+            "min_tick_size": 0.01,
+            "min_order_size": 1.0,
+            "neg_risk": False,
+        }
+    )
+    quote = SimpleNamespace(payload={"best_bid": 0.49, "best_ask": 0.50})
+    forecast = SimpleNamespace(payload={})
+    cost = SimpleNamespace(payload={})
+    live_cap = SimpleNamespace(payload={"usage_id": "usage-sealed", "reserved_notional_usd": 1.02})
+    actionable_payload = {
+        "event_id": "evt-sealed",
+        "event_type": "FORECAST_DECISION",
+        "condition_id": "cond-sealed",
+        "token_id": "yes-sealed",
+        "direction": "buy_yes",
+        "executable_snapshot_id": "snap-sealed",
+        "q_source": "replacement_0_1",
+        "_edli_q_source": "replacement_0_1",
+        "selection_authority_applied": "qkernel_spine",
+        "qkernel_execution_economics": {"cost": 0.50},
+        "proof_execution_mode_intent": "TAKER",
+        "rest_then_cross_policy": "TAKER",
+        "strategy_key": "Center Bin Buy",
+        "family_id": "family-sealed",
+        "city": "Chicago",
+        "target_date": "2026-08-09",
+        "metric": "high",
+        "live_cap_reserved_notional_usd": 1.02,
+    }
+    final_payload = {
+        **actionable_payload,
+        "final_intent_id": "intent-sealed",
+        "side": "BUY",
+        "limit_price": 0.51,
+        "size": 2.0,
+        "notional_usd": 1.02,
+        "post_only": False,
+        "tick_size": 0.01,
+        "min_order_size": 1.0,
+        "neg_risk": False,
+        "order_mode": "TAKER",
+        "order_type": "FAK_LIMIT",
+        "time_in_force": "FAK",
+    }
+    base_certs = (forecast, executable, quote, cost)
+    compile_result = SimpleNamespace(status="VERIFIED", certificates=base_certs, failures=())
+    monkeypatch.setattr(era.DecisionCompiler, "compile_authority_graph", lambda *_a, **_k: compile_result)
+    monkeypatch.setattr(era, "_payload", lambda _event: {})
+    monkeypatch.setattr(era, "_assert_event_bound_strategy_live_admitted", lambda **_k: None)
+    monkeypatch.setattr(era, "_assert_event_bound_receipt_live_authority", lambda _r: None)
+    monkeypatch.setattr(era, "_assert_event_bound_calibration_live_admitted", lambda _c: None)
+    monkeypatch.setattr(era, "_day0_live_source_parent_certificates", lambda **_k: ())
+    monkeypatch.setattr(era, "_required_cert", lambda _certs, claim: {
+        era.claims.EXECUTABLE_SNAPSHOT: executable,
+        era.claims.QUOTE_FEASIBILITY: quote,
+        era.claims.COST_MODEL: cost,
+        era.claims.FORECAST_AUTHORITY: forecast,
+        era.claims.CALIBRATION: forecast,
+    }[claim])
+    monkeypatch.setattr(era, "_build_live_cap_certificate_from_ledger", lambda **_k: live_cap)
+    monkeypatch.setattr(era, "_actionable_payload_from_receipt", lambda *_a, **_k: dict(actionable_payload))
+    monkeypatch.setattr(era, "_assert_live_entry_submit_authority", lambda _p: None)
+    monkeypatch.setattr(era, "build_actionable_trade_certificate", lambda **_k: SimpleNamespace(payload=dict(actionable_payload)))
+    monkeypatch.setattr(era, "_global_jit_book_hash_for_submit", lambda **_k: None)
+    monkeypatch.setattr(era, "_fresh_rest_then_cross_mode", lambda **_k: "TAKER")
+    monkeypatch.setattr(era, "_current_maker_fill_authority_rejection_reason", lambda **_k: None)
+    monkeypatch.setattr(era, "_validate_final_order_mode_or_abort", lambda **_k: "TAKER")
+    provisional_types = []
+    monkeypatch.setattr(
+        era,
+        "_day0_live_submit_admission_rejection_reason",
+        lambda **kwargs: provisional_types.append(type(kwargs["authority_witness"])) or None,
+    )
+    monkeypatch.setattr(era, "_passive_maker_context_and_book", lambda **_k: (None, 0.49, 0.50))
+    monkeypatch.setattr(era, "_executable_market_context_from_snapshot", lambda _s: {})
+    monkeypatch.setattr(era, "_build_event_bound_taker_quality_proof", lambda **_k: {"passed": True})
+    monkeypatch.setattr(era, "qkernel_global_buy_fak_prefix_rejection_reason", lambda *_a, **_k: None)
+    monkeypatch.setattr(era, "build_final_intent_certificate_from_actionable", lambda **_k: SimpleNamespace(payload=dict(final_payload)))
+    witness = PreSubmitAuthorityWitness(
+        quote_seen_at=captured_at.isoformat(),
+        book_hash=snapshot.raw_orderbook_hash,
+        current_best_bid=0.49,
+        current_best_ask=0.50,
+        tick_size=0.01,
+        min_order_size=1.0,
+        neg_risk=False,
+        heartbeat_status="OK",
+        user_ws_status="OK",
+        venue_connectivity_status="OK",
+        balance_allowance_status="OK",
+        book_authority_id="clob_jit_book",
+        book_captured_at=captured_at.isoformat(),
+        heartbeat_authority_id="hb",
+        heartbeat_checked_at=captured_at.isoformat(),
+        user_ws_authority_id="ws",
+        user_ws_checked_at=captured_at.isoformat(),
+        venue_connectivity_authority_id="venue",
+        venue_connectivity_checked_at=captured_at.isoformat(),
+        balance_allowance_authority_id="balance",
+        balance_allowance_checked_at=captured_at.isoformat(),
+        orderbook_depth_jsonb=depth,
+    )
+    provider_calls = []
+
+    def spy_provider(final_intent, _snapshot, _decision_time, *, sealed_book_override=None):
+        provider_calls.append((dict(final_intent.payload), sealed_book_override))
+        return witness
+
+    monkeypatch.setattr(era, "validate_final_intent_cert_for_existing_executor", lambda _c: "native-hash")
+    monkeypatch.setattr(era, "_release_live_order_build_stale_transaction", lambda *_a, **_k: None)
+    monkeypatch.setattr(era, "_entry_global_submit_suppression_reason", lambda: None)
+    monkeypatch.setattr(era, "_locked_live_opportunity_active_order_reason", lambda *_a, **_k: None)
+    monkeypatch.setattr(era, "_run_live_order_build_savepoint", lambda *_a, **_k: (SimpleNamespace(), SimpleNamespace(), SimpleNamespace()))
+    handoff = SimpleNamespace(authority=SimpleNamespace(snapshot=snapshot), candidate=candidate)
+
+    result = era._build_live_execution_command_certificates(
+        event=event,
+        receipt=receipt,
+        decision_time=decision_time,
+        live_cap_conn=sqlite3.connect(":memory:"),
+        pre_submit_authority_provider=spy_provider,
+        live_order_schema_initialized=True,
+        global_jit_handoff=handoff,
+    )
+
+    assert result
+    assert provisional_types == [SealedBookObservation]
+    assert len(provider_calls) == 1
+    final_intent_payload, sealed_override = provider_calls[0]
+    assert final_intent_payload["size"] == 2.0
+    assert final_intent_payload["side"] == "BUY"
+    assert final_intent_payload["limit_price"] == 0.51
+    assert final_intent_payload["notional_usd"] == 1.02
+    assert final_intent_payload["post_only"] is False
+    assert sealed_override is not None
+    assert sealed_override.snapshot_id == "snap-sealed"
+
+
 def _store() -> tuple[sqlite3.Connection, EventStore]:
     conn = sqlite3.connect(":memory:")
     init_schema(conn)

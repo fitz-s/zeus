@@ -1014,6 +1014,7 @@ class GlobalWinnerPreflight:
         if self.status not in {
             "STABLE",
             "CURVE_SUPERSEDED",
+            "MARKET_AUTHORITY_SUPERSEDED",
             "PROBABILITY_TIGHTENED",
             "PROBABILITY_SUPERSEDED",
             "WEALTH_SUPERSEDED",
@@ -1028,6 +1029,11 @@ class GlobalWinnerPreflight:
             self.replacement_candidate is not None
         ):
             raise ValueError("GLOBAL_WINNER_PREFLIGHT_REPLACEMENT_INVALID")
+        if self.status == "MARKET_AUTHORITY_SUPERSEDED" and (
+            self.replacement_candidate is not None
+            or self.probability_tightening is not None
+        ):
+            raise ValueError("GLOBAL_WINNER_PREFLIGHT_MARKET_AUTHORITY_INVALID")
         if (self.status == "PROBABILITY_TIGHTENED") != (
             self.probability_tightening is not None
         ):
@@ -3926,6 +3932,14 @@ def _book_epoch_with_replacement_candidate(
         != str(getattr(selected_candidate, "ledger_snapshot_id", "") or "")
     ):
         raise ValueError("GLOBAL_REAUCTION_REPLACEMENT_IDENTITY_MISMATCH")
+    selected_neg_risk = getattr(selected_candidate, "neg_risk", None)
+    replacement_neg_risk = getattr(replacement_candidate, "neg_risk", None)
+    if (
+        not isinstance(selected_neg_risk, bool)
+        or not isinstance(replacement_neg_risk, bool)
+        or selected_neg_risk != replacement_neg_risk
+    ):
+        raise ValueError("GLOBAL_REAUCTION_REPLACEMENT_MARKET_AUTHORITY_MISMATCH")
 
     curve_field = (
         "executable_sell_curve"
@@ -4035,6 +4049,7 @@ def _book_epoch_with_replacement_candidate(
             curve=cost_curve,
             captured_at_utc=captured_at,
             bid_levels=bid_levels,
+            neg_risk=replacement_neg_risk,
         )
     if sell_curve is None:
         sell_assets_by_key.pop(selected_key, None)
@@ -4049,6 +4064,7 @@ def _book_epoch_with_replacement_candidate(
             token_id=base.token_id,
             curve=sell_curve,
             captured_at_utc=captured_at,
+            neg_risk=replacement_neg_risk,
         )
 
     states = []
@@ -4482,6 +4498,7 @@ def process_current_global_batch(
     final_actuation_cancelled: Callable[[], bool] | None = None,
     restrict_to_family_keys: frozenset[str] | None = None,
     _probability_supersession_reauction_count: int = 0,
+    _market_authority_supersession_reauction_count: int = 0,
 ) -> GlobalBatchSubmitResult:
     """Select once from every family holding a current q certificate."""
 
@@ -6276,25 +6293,39 @@ def process_current_global_batch(
                         "GLOBAL_PREFLIGHT_BATCH_BLOCKED:"
                         f"{preflight.reason or preflight.status}"
                     )
-                if preflight.status == "PROBABILITY_SUPERSEDED":
-                    if (
-                        _probability_supersession_reauction_count
-                        >= _PROBABILITY_SUPERSESSION_REAUCTION_MAX_ATTEMPTS
-                    ):
-                        return reject(
-                            "GLOBAL_REAUCTION_PROBABILITY_UNSTABLE:"
-                            f"{preflight.reason or preflight.status}"
+                if preflight.status in {
+                    "PROBABILITY_SUPERSEDED",
+                    "MARKET_AUTHORITY_SUPERSEDED",
+                }:
+                    market_authority_superseded = (
+                        preflight.status == "MARKET_AUTHORITY_SUPERSEDED"
+                    )
+                    reauction_count = (
+                        _market_authority_supersession_reauction_count
+                        if market_authority_superseded
+                        else _probability_supersession_reauction_count
+                    )
+                    if reauction_count >= _PROBABILITY_SUPERSESSION_REAUCTION_MAX_ATTEMPTS:
+                        unstable_prefix = (
+                            "GLOBAL_REAUCTION_MARKET_AUTHORITY_UNSTABLE:"
+                            if market_authority_superseded
+                            else "GLOBAL_REAUCTION_PROBABILITY_UNSTABLE:"
                         )
-                    # SCOPE: the old winner's q witness is invalid, and that
-                    # makes the frozen global objective incomparable. DRAIN:
-                    # one bounded recursive cut re-scans every family and
-                    # rebuilds q, book, wealth, BUY, SELL, HOLD, and CASH
-                    # before any venue call. RESET: only its fresh cut may
-                    # actuate; a second drift fails closed for the next wake.
+                        return reject(
+                            f"{unstable_prefix}{preflight.reason or preflight.status}"
+                        )
+                    # SCOPE: either the winner's q proof or its Gamma/CLOB/raw
+                    # book market authority changed. Both invalidate
+                    # comparability of the frozen global objective. DRAIN: one
+                    # bounded cut rebuilds every Gamma+CLOB+raw book, q/wealth,
+                    # BUY/SELL/HOLD/CASH input.
+                    # RESET: only that fresh cut may actuate; repeat drift is
+                    # fail-closed for the next wake.
                     _LOG.warning(
-                        "global batch probability superseded; rebuilding full "
-                        "current-state auction: attempt=%d event=%s reason=%s",
-                        _probability_supersession_reauction_count + 1,
+                        "global batch %s superseded; rebuilding full current-state "
+                        "auction: attempt=%d event=%s reason=%s",
+                        "market authority" if market_authority_superseded else "probability",
+                        reauction_count + 1,
                         winner_id,
                         preflight.reason,
                     )
@@ -6334,7 +6365,12 @@ def process_current_global_batch(
                         final_actuation_cancelled=final_actuation_cancelled,
                         restrict_to_family_keys=restrict_to_family_keys,
                         _probability_supersession_reauction_count=(
-                            _probability_supersession_reauction_count + 1
+                            _probability_supersession_reauction_count
+                            + (0 if market_authority_superseded else 1)
+                        ),
+                        _market_authority_supersession_reauction_count=(
+                            _market_authority_supersession_reauction_count
+                            + (1 if market_authority_superseded else 0)
                         ),
                     )
                 if preflight.status == "CANDIDATE_BLOCKED":

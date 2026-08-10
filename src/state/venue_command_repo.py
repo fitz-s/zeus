@@ -43,6 +43,7 @@ from src.architecture.decorators import capability, protects
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
 from src.contracts.global_auction_receipt import (
     GlobalAuctionReceiptRef,
+    GlobalSellReceiptClosure,
     assert_global_auction_receipt_artifact,
 )
 from src.venue.response_contracts import is_pre_sdk_no_side_effect_rejection
@@ -1253,6 +1254,7 @@ def insert_command(
     venue_order_id: str | None = None,
     reason: str | None = None,
     decision_certificate_hash: str | None = None,
+    global_sell_receipt_closure: GlobalSellReceiptClosure | None = None,
 ) -> None:
     """INSERT a new venue_commands row in INTENT_CREATED state.
 
@@ -1288,6 +1290,14 @@ def insert_command(
         raise ValueError(
             f"side={side!r} must be 'BUY' or 'SELL'"
         )
+    if global_sell_receipt_closure is not None and not (
+        intent_kind == _IntentKind.EXIT.value and side == "SELL"
+    ):
+        raise ValueError(
+            "GLOBAL_SELL_RECEIPT_CLOSURE_FORBIDDEN: closure requires EXIT SELL"
+        )
+    if global_sell_receipt_closure is not None and type(global_sell_receipt_closure) is not GlobalSellReceiptClosure:
+        raise ValueError("GLOBAL_SELL_RECEIPT_CLOSURE_TYPE_INVALID")
     if intent_kind == _IntentKind.CANCEL.value:
         pass
     elif intent_kind in {
@@ -1338,7 +1348,7 @@ def insert_command(
         raise ValueError(
             "ENTRY venue command requires an unpersisted submission envelope"
         )
-    if intent_kind != _IntentKind.ENTRY.value and submission_envelope is not None:
+    if intent_kind != _IntentKind.ENTRY.value and submission_envelope is not None and global_sell_receipt_closure is None:
         raise ValueError(
             "unpersisted submission envelope is reserved for atomic ENTRY admission"
         )
@@ -1355,6 +1365,16 @@ def insert_command(
                 side=side,
                 price=price,
                 size=size,
+            )
+        if global_sell_receipt_closure is not None:
+            _assert_global_sell_receipt_closure(
+                conn,
+                closure=global_sell_receipt_closure,
+                position_id=position_id,
+                token_id=token_id,
+                side=side,
+                envelope=submission_envelope,
+                envelope_id=envelope_id_value,
             )
         resolved_certificate_hash = (
             str(decision_certificate_hash or "").strip() or None
@@ -1400,6 +1420,30 @@ def insert_command(
                 submission_envelope,
                 envelope_id=envelope_id_value,
             )
+        event_payload = (
+            {"global_sell_receipt_closure": global_sell_receipt_closure.as_payload()}
+            if global_sell_receipt_closure is not None
+            else None
+        )
+        provenance_payload = (
+            {
+                "state_after": "INTENT_CREATED",
+                "snapshot_id": snapshot_id_value,
+                "envelope_id": envelope_id_value,
+                "intent_kind": intent_kind,
+                "market_id": market_id,
+                "token_id": token_id,
+                "side": side,
+                "size": size,
+                "price": price,
+                "venue_order_id": venue_order_id,
+                "reason": reason,
+            }
+        )
+        if event_payload is not None:
+            provenance_payload["global_sell_receipt_closure"] = (
+                global_sell_receipt_closure.as_payload()
+            )
         conn.execute(
             """
             INSERT INTO venue_commands (
@@ -1439,13 +1483,18 @@ def insert_command(
                 occurred_at, payload_json, state_after
             ) VALUES (
                 :event_id, :command_id, 1, 'INTENT_CREATED',
-                :occurred_at, NULL, 'INTENT_CREATED'
+                :occurred_at, :payload_json, 'INTENT_CREATED'
             )
             """,
             {
                 "event_id": event_id,
                 "command_id": command_id,
                 "occurred_at": created_at,
+                "payload_json": (
+                    json.dumps(event_payload, sort_keys=True, separators=(",", ":"))
+                    if event_payload is not None
+                    else None
+                ),
             },
         )
         conn.execute(
@@ -1457,19 +1506,7 @@ def insert_command(
             command_id=command_id,
             event_type="INTENT_CREATED",
             occurred_at=created_at,
-            payload={
-                "state_after": "INTENT_CREATED",
-                "snapshot_id": snapshot_id_value,
-                "envelope_id": envelope_id_value,
-                "intent_kind": intent_kind,
-                "market_id": market_id,
-                "token_id": token_id,
-                "side": side,
-                "size": size,
-                "price": price,
-                "venue_order_id": venue_order_id,
-                "reason": reason,
-            },
+            payload=provenance_payload,
         )
         if resolved_certificate_hash:
             record_position_decision_attribution(
@@ -1542,7 +1579,7 @@ def _assert_envelope_gate(
         # DRAIN: the next decision may persist a certified execution envelope.
         # RESET: no latch is stored; a legal maker or SELL FAK passes.
         raise ValueError(
-            "live execution mode is invalid for persisted order: "
+            "persisted taker-capable order is not a legal live execution mode: "
             f"order_type={order_type or 'ABSENT'}:post_only={bool(row['post_only'])}"
         )
     if isinstance(snapshot_id, str) and snapshot_id.strip():
@@ -1578,7 +1615,14 @@ def _assert_in_memory_envelope_gate(
 
     if not isinstance(envelope, VenueSubmissionEnvelope):
         raise TypeError("submission_envelope must be a VenueSubmissionEnvelope")
-    envelope.assert_live_fill_price_bound()
+    try:
+        envelope.assert_live_fill_price_bound()
+    except ValueError as exc:
+        # Preserve the long-standing repo seam wording for callers/tests while
+        # retaining the envelope's detailed mode diagnostic.
+        if "execution mode is not authorized" in str(exc):
+            raise ValueError(f"live fill price is unbounded: {exc}") from None
+        raise
     if envelope.selected_outcome_token_id != str(token_id):
         raise ValueError(
             "venue command token_id does not match in-memory envelope selected token"
@@ -1727,6 +1771,80 @@ def _assert_entry_certificate_closure(
         )
     except ValueError as exc:
         raise ValueError(f"ENTRY global auction receipt closure failed: {exc}") from None
+
+
+def _assert_global_sell_receipt_closure(
+    conn: sqlite3.Connection,
+    *,
+    closure: GlobalSellReceiptClosure,
+    position_id: object,
+    token_id: object,
+    side: object,
+    envelope: object,
+    envelope_id: str | None,
+) -> None:
+    """Re-read and bind one global SELL receipt before any command writes.
+
+    INV-47 SCOPE: this exact EXIT/SELL command and referenced decision row.
+    DRAIN: no queue; the caller must produce a fresh committed receipt and
+    matching envelope.  RESET: a subsequent exact closure passes; no latch is
+    persisted.  This check intentionally runs inside the command SAVEPOINT.
+    """
+    if type(closure) is not GlobalSellReceiptClosure:
+        raise ValueError("GLOBAL_SELL_RECEIPT_CLOSURE_TYPE_INVALID")
+    if envelope is None:
+        if not isinstance(envelope_id, str) or not envelope_id.strip():
+            raise ValueError("GLOBAL_SELL_RECEIPT_ENVELOPE_MISSING")
+        try:
+            with _row_factory_as(conn, sqlite3.Row):
+                envelope = conn.execute(
+                    """
+                    SELECT condition_id, selected_outcome_token_id, side,
+                           order_type, post_only
+                      FROM venue_submission_envelopes
+                     WHERE envelope_id = ?
+                    """,
+                    (envelope_id.strip(),),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise ValueError(
+                "GLOBAL_SELL_RECEIPT_ENVELOPE_UNAVAILABLE"
+            ) from exc
+        if envelope is None:
+            raise ValueError("GLOBAL_SELL_RECEIPT_ENVELOPE_MISSING")
+    try:
+        closure.assert_matches_command(
+            position_id=position_id,
+            token_id=token_id,
+            side=side,
+            envelope=envelope,
+        )
+    except ValueError as exc:
+        message = str(exc)
+        if not message.startswith("GLOBAL_SELL_RECEIPT_"):
+            message = f"GLOBAL_SELL_RECEIPT_COMMAND_BINDING_INVALID: {message}"
+        raise ValueError(message) from None
+    try:
+        with _row_factory_as(conn, sqlite3.Row):
+            receipt_row = conn.execute(
+                "SELECT mode, artifact_json FROM decision_log WHERE id = ?",
+                (closure.receipt_ref.decision_log_id,),
+            ).fetchone()
+    except sqlite3.Error as exc:
+        raise ValueError("GLOBAL_SELL_RECEIPT_DECISION_LOG_UNAVAILABLE") from exc
+    if receipt_row is None:
+        raise ValueError("GLOBAL_SELL_RECEIPT_DECISION_LOG_MISSING")
+    try:
+        assert_global_auction_receipt_artifact(
+            expected=closure.receipt_ref,
+            decision_log_id=closure.receipt_ref.decision_log_id,
+            decision_log_mode=str(receipt_row["mode"]),
+            artifact_json=receipt_row["artifact_json"],
+        )
+    except ValueError as exc:
+        raise ValueError(
+            f"GLOBAL_SELL_RECEIPT_ARTIFACT_INVALID: {exc}"
+        ) from None
 
 
 def _decimal(value: Any) -> Decimal:

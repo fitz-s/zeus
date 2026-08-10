@@ -70,17 +70,30 @@ raw global comparator. No rounded efficiency shortcut may delete a sibling
 before that comparison.
 
 A scalar maker-fill prior is not current decision-time truth and partial fills
-change both terminal atoms and capital-release time. Until a typed,
-candidate-bound current partial-fill distribution exists, every `MAKER_REST`
-BUY/SELL proposal is excluded with
-`CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE`; its taker sibling remains eligible.
-The same wall exists in the local reactor and the final command builder, so the
-legacy fixed prior cannot reach the venue. This is an executable-set decision,
-not a preference for taker orders.
+change both terminal atoms and capital-release time. `CurrentMakerFillWitness`
+therefore binds one candidate, current book epoch, token/side, limit, rest
+deadline, training cutoff, issue/decision/expiry clocks, and a complete
+zero/partial/full fill-fraction distribution. Only a witness whose causal clock
+orders `training_cutoff <= issued <= decision <= expiry` and whose identity is
+present in the current book epoch may make its `MAKER_REST` BUY/SELL proposal
+rankable; a missing or mismatched witness excludes only that maker proposal with
+`CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE`, while its taker sibling remains
+eligible. The present live observation plane does not record enough causal
+queue/deadline/partial-fill facts to produce that distribution, so no production
+maker witness is fabricated: live remains taker-only until a reviewed current
+producer exists. A historical fill scalar is offline evidence, never a silent
+live fallback. This is an executable-set decision, not a preference for taker
+orders.
 
 At submit, the selected mode is preserved and probability, executable book,
-fees, wealth/allocation, position, terminal ruin reduction, utility basis,
-proposal growth, and capital horizon are canonically sealed and revalidated.
+Gamma market state, CLOB market-info, fees, tradeability, `negRisk`, tick/min,
+wealth/allocation, position, terminal ruin reduction, utility basis, proposal
+growth, and capital horizon are canonically sealed and revalidated from one
+current Gamma+CLOB+raw-book snapshot. A metadata or selected SELL drift causes a
+complete global re-auction; a pure BUY depth overlay is allowed only when that
+same metadata authority is unchanged. The persisted executable snapshot commits
+all three raw payload hashes rather than retaining selection-time market
+metadata.
 The current receipt shape is schema 21 / canonical candidate encoding v13. A
 winning receipt now persists the winner event/candidate/actuation and a
 recomputable compact-row execution binding plus a hash of the exact persisted
@@ -90,12 +103,22 @@ the selected actuation and `ActionableTradeCertificate`. If claim-carrier
 rebinding changes the winner event or actuation identity, the runtime appends
 and commits a newly sealed receipt row that references the unchanged base cut;
 it never mutates or reuses the old binding. Entry command persistence re-reads
-that exact row before writing the command or position attribution. Settlement
-skill attribution follows the existing exact `position_id -> certificate_hash`
-relation, revalidates the same receipt row, then consumes the frozen `q_live`,
-`q_lcb_5pct`, and `posterior_id`; missing, deleted, mutated, or mismatched global receipts produce
-`UNATTRIBUTABLE_Q_MISSING` with no inferred fallback. No bridge table or
-settlement schema migration is introduced.
+that exact row before writing the command or position attribution. A selected
+SELL carries a typed receipt closure through `ExitIntent` and `ExitOrderIntent`;
+inside the command SAVEPOINT, persistence re-reads the exact receipt and checks
+its position, condition, token, action, execution mode, winner, and submission
+envelope before any command, event, provenance, or envelope row can exist. The
+canonical closure is then copied into the append-only `INTENT_CREATED` command
+event and provenance payload. Settlement skill attribution follows the existing
+exact `position_id -> certificate_hash` relation, revalidates the same entry
+receipt row, then consumes the frozen `q_live`, `q_lcb_5pct`, and
+`posterior_id`; missing, deleted, mutated, or mismatched global receipts produce
+`UNATTRIBUTABLE_Q_MISSING` with no inferred fallback. An orthogonal settlement
+audit follows `position_id -> EXIT/SELL command -> INTENT_CREATED closure` and
+then the exact `decision_log` row, reporting each global SELL receipt as valid
+or invalid without
+rewriting the entry-q grade. No bridge table or settlement schema migration is
+introduced.
 
 SCOPE is one candidate or one complete q/book/wealth auction cut: malformed or
 stale allocation blocks new BUY authority; unavailable maker-fill evidence

@@ -9972,7 +9972,8 @@ def _edli_fresh_projected_pre_submit_book(
             return None
         captured_at = captured_at.astimezone(timezone.utc)
         freshness_deadline = freshness_deadline.astimezone(timezone.utc)
-        checked_at = datetime.now(timezone.utc)
+        gate_checked_at = datetime.now(timezone.utc)
+        checked_at = gate_checked_at
         age_ms = (checked_at - captured_at).total_seconds() * 1000.0
         if (
             age_ms < 0.0
@@ -10725,8 +10726,12 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
     evidence remains useful for screening but never licenses venue submission.
     """
     from src.main import _row_get
+    from src.data.market_scanner import _sha256_json
 
-    from src.engine.event_reactor_adapter import PreSubmitAuthorityWitness
+    from src.engine.event_reactor_adapter import (
+        PreSubmitAuthorityWitness,
+        SealedBookOverride,
+    )
 
     max_quote_age_ms = int(edli_cfg.get("pre_submit_max_quote_age_ms", 1000) or 1000)
     venue_summary_cache: dict[str, object] | None = None
@@ -10765,9 +10770,16 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
                 )
         return full_collateral_payload_cache
 
-    def _provider(final_intent, _executable_snapshot, decision_time):
+    def _provider(
+        final_intent,
+        _executable_snapshot,
+        decision_time,
+        *,
+        sealed_book_override: SealedBookOverride | None = None,
+    ):
         del decision_time
-        checked_at = datetime.now(timezone.utc)
+        gate_checked_at = datetime.now(timezone.utc)
+        checked_at = gate_checked_at
         intent = final_intent.payload
         token_id = str(intent["token_id"])
 
@@ -10787,19 +10799,16 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
                 "PRE_SUBMIT_HEARTBEAT_ORDER_TYPE_BLOCKED:"
                 f"order_type={heartbeat_order_type}"
             )
-        user_ws_summary = _edli_user_ws_authority_summary(checked_at)
-        venue_summary = _cached_venue_summary(checked_at)
-        (
-            balance_status,
-            balance_authority_id,
-            balance_allowance_checked_at,
-        ) = _edli_balance_allowance_status(
-            final_intent,
-            checked_at,
-            collateral_payload=_cached_collateral_payload(
-                str(intent.get("side") or ""),
-                checked_at,
-            ),
+        user_ws_summary = _edli_user_ws_authority_summary(gate_checked_at)
+        venue_summary = _cached_venue_summary(gate_checked_at)
+        balance_status, balance_authority_id, balance_allowance_checked_at = (
+            _edli_balance_allowance_status(
+                final_intent,
+                gate_checked_at,
+                collateral_payload=_cached_collateral_payload(
+                    str(intent.get("side") or ""), gate_checked_at
+                ),
+            )
         )
         # Price is read last so slow venue/balance checks cannot age the book
         # before the full-depth curve binds to this same observation.
@@ -10814,14 +10823,71 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
             raw_book.update(current)
             return response
 
-        jit = _edli_pre_submit_book_from_jit_fetch(
-            _capture_book,
-            token_id=token_id,
-            side=side,
-            limit_price=float(intent["limit_price"]) if has_limit_price else None,
-            size=float(intent["size"]) if has_size else None,
-            post_only=intent.get("post_only") is True,
-        )
+        if sealed_book_override is not None:
+            override = sealed_book_override
+            if (
+                override.token_id != token_id
+                or override.side != side
+                or str(_executable_snapshot.payload.get("identity") or "")
+                != override.snapshot_id
+            ):
+                raise ValueError("PRE_SUBMIT_SEALED_BOOK_IDENTITY_MISMATCH")
+            captured_at = datetime.fromisoformat(override.captured_at)
+            deadline = datetime.fromisoformat(override.freshness_deadline)
+            now_utc = checked_at.astimezone(timezone.utc)
+            if (
+                captured_at.tzinfo is None
+                or deadline.tzinfo is None
+                or now_utc > deadline.astimezone(timezone.utc)
+                or now_utc
+                > captured_at.astimezone(timezone.utc)
+                + timedelta(seconds=float(override.curve_ttl_seconds))
+                or not override.raw_orderbook_hash
+            ):
+                raise ValueError("PRE_SUBMIT_SEALED_BOOK_FRESHNESS_INVALID")
+            try:
+                sealed_depth = json.loads(override.orderbook_depth_jsonb)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError("PRE_SUBMIT_SEALED_BOOK_DEPTH_INVALID") from exc
+            if not isinstance(sealed_depth, dict):
+                raise ValueError("PRE_SUBMIT_SEALED_BOOK_DEPTH_INVALID")
+            if _sha256_json(sealed_depth) != override.raw_orderbook_hash:
+                raise ValueError("PRE_SUBMIT_SEALED_BOOK_HASH_MISMATCH")
+            raw_book.update(sealed_depth)
+            helper_book = dict(raw_book)
+            helper_book["hash"] = override.raw_orderbook_hash
+            sealed_observed_at = captured_at.astimezone(timezone.utc)
+
+            def _sealed_book(_selected_token_id: str):
+                return helper_book, sealed_observed_at, "clob_jit_book"
+
+            jit = _edli_pre_submit_book_from_jit_fetch(
+                _sealed_book,
+                token_id=token_id,
+                side=side,
+                limit_price=float(intent["limit_price"]) if has_limit_price else None,
+                size=float(intent["size"]) if has_size else None,
+                post_only=intent.get("post_only") is True,
+            )
+            if jit is None or str(jit[2]) != override.raw_orderbook_hash:
+                raise ValueError("PRE_SUBMIT_SEALED_BOOK_HASH_MISMATCH")
+            if (
+                jit[0] != override.best_bid
+                or jit[1] != override.best_ask
+                or float(intent["tick_size"]) != override.tick_size
+                or float(intent["min_order_size"]) != override.min_order_size
+                or bool(intent.get("neg_risk", False)) is not override.neg_risk
+            ):
+                raise ValueError("PRE_SUBMIT_SEALED_BOOK_WITNESS_MISMATCH")
+        else:
+            jit = _edli_pre_submit_book_from_jit_fetch(
+                _capture_book,
+                token_id=token_id,
+                side=side,
+                limit_price=float(intent["limit_price"]) if has_limit_price else None,
+                size=float(intent["size"]) if has_size else None,
+                post_only=intent.get("post_only") is True,
+            )
         if jit is None:
             raise ValueError("PRE_SUBMIT_BOOK_AUTHORITY_JIT_REQUIRED")
         best_bid, best_ask, book_hash, book_observed_at, book_authority_id = jit
@@ -10843,11 +10909,11 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
             book_authority_id=book_authority_id,
             book_captured_at=quote_seen_at,
             heartbeat_authority_id=str(heartbeat_summary["authority_id"]),
-            heartbeat_checked_at=checked_at.isoformat(),
+            heartbeat_checked_at=gate_checked_at.isoformat(),
             user_ws_authority_id=str(user_ws_summary["authority_id"]),
-            user_ws_checked_at=checked_at.isoformat(),
+            user_ws_checked_at=gate_checked_at.isoformat(),
             venue_connectivity_authority_id=str(venue_summary["authority_id"]),
-            venue_connectivity_checked_at=checked_at.isoformat(),
+            venue_connectivity_checked_at=gate_checked_at.isoformat(),
             balance_allowance_authority_id=balance_authority_id,
             balance_allowance_checked_at=balance_allowance_checked_at,
             orderbook_depth_jsonb=json.dumps(

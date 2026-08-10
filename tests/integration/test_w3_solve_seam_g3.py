@@ -3278,6 +3278,40 @@ def test_global_selection_binds_holdings_to_exact_wealth_ledger_generation():
     assert holding_b.holdings == ()
 
 
+def test_maker_authority_mappings_are_canonical_immutable_copies():
+    key = ("bin", "condition", "YES", "token", None)
+    prepared_source = {}
+    prepared = bridge.PreparedGlobalFamily(
+        decision_id="decision",
+        probability_witness=object(),
+        candidate_seeds=(),
+        maker_fill_witnesses=prepared_source,
+    )
+    prepared_source[key] = object()
+    assert dict(prepared.maker_fill_witnesses) == {}
+    with pytest.raises(TypeError):
+        prepared.maker_fill_witnesses[key] = object()
+
+    captured_at = _dt.datetime(2026, 8, 9, tzinfo=_dt.timezone.utc)
+    states = (("family", "bin", "condition", "YES", "token", "NO_ASK"),)
+    epoch_source = {}
+    epoch = CurrentGlobalBookEpoch(
+        assets=(),
+        asset_states=states,
+        captured_at_utc=captured_at,
+        max_age=_dt.timedelta(seconds=1),
+        witness_identity=current_global_book_epoch_identity(
+            asset_states=states,
+            captured_at_utc=captured_at,
+        ),
+        maker_fill_witness_identities=epoch_source,
+    )
+    epoch_source[key] = "late-mutation"
+    assert dict(epoch.maker_fill_witness_identities) == {}
+    with pytest.raises(TypeError):
+        epoch.maker_fill_witness_identities[key] = "mutation"
+
+
 def test_global_actuation_does_not_blanket_block_existing_family_exposure():
     """A first fill must not structurally disable every later global order."""
 
@@ -3902,6 +3936,7 @@ def test_global_actuation_revalidates_content_then_preserves_selected_witness(
         ledger_snapshot_id="selected-ledger",
         executable_sell_curve=sell_curve,
         resolution_identity="selected-resolution",
+        neg_risk=False,
         **_explicit_sell_maker_terms(sell_curve, capacity=Decimal("1")),
     )
     sell_actuation = SimpleNamespace(
@@ -5633,6 +5668,7 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
         ledger_snapshot_id="held-prefix-ledger",
         executable_sell_curve=sell_curve,
         resolution_identity=str(witness.resolution_identity),
+        neg_risk=False,
         **_explicit_sell_maker_terms(sell_curve, capacity=Decimal("1")),
     )
     current, _payload = era._current_global_actuation_prepared_family(
@@ -12951,7 +12987,71 @@ def test_global_preflight_runs_final_entry_authority_before_stable(monkeypatch):
     assert era._global_preflight_block_status(rejected.reason) == "BLOCKED"
 
 
-def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions():
+def _install_global_jit_market_authority_fetches(
+    monkeypatch,
+    *,
+    condition_id: str,
+    token_id: str,
+    side: str,
+    tick: str,
+    min_order_size: str,
+    fee_rate: float = 0.0,
+):
+    """Install typed Gamma/CLOB fetch boundaries for global JIT fixtures."""
+
+    other_token = f"other-{token_id}"
+    gamma_payload = {
+        "conditionId": condition_id,
+        "clobTokenIds": [token_id, other_token],
+        "acceptingOrders": True,
+        "enableOrderBook": True,
+        "closed": False,
+        "active": True,
+        "orderPriceMinTickSize": tick,
+        "orderMinSize": min_order_size,
+        "negRisk": False,
+        "feeType": "weather_fees",
+        "feeSchedule": {"exponent": 1, "rate": fee_rate, "takerOnly": True},
+    }
+    clob_payload = {
+        "condition_id": condition_id,
+        "clobTokenIds": [token_id, other_token],
+        "accepting_orders": True,
+        "enable_order_book": True,
+        "archived": False,
+        "closed": False,
+        "active": True,
+        "tick_size": tick,
+        "min_order_size": min_order_size,
+        "neg_risk": False,
+    }
+    monkeypatch.setattr(
+        era,
+        "_governed_global_gamma_get",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            status_code=200,
+            json=lambda: [gamma_payload],
+        ),
+    )
+
+    class FakeClob:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get_clob_market_info(self, _condition_id, *, timeout=None):
+            return clob_payload
+
+    monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", FakeClob)
+    return gamma_payload, clob_payload
+
+
+def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions(monkeypatch):
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     at = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)
     selected_curve = ExecutableCostCurve(
@@ -12964,6 +13064,16 @@ def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions():
         min_tick=Decimal("0.001"),
         min_order_size=Decimal("5"),
         quote_ttl=_dt.timedelta(seconds=30),
+        fee_details={
+            "feeSchedule_taker_only": True,
+            "fee_rate_bps": 0.0,
+            "fee_rate_fraction": 0.0,
+            "fee_rate_raw_unit": "fraction",
+            "fee_rate_source_field": "fee_rate_fraction",
+            "fee_type": "weather_fees",
+            "source": "global_current_gamma_fee_schedule",
+            "token_id": "token-a",
+        },
     )
     candidate = GlobalSingleOrderCandidate(
         candidate_id="candidate-a",
@@ -12979,6 +13089,7 @@ def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions():
         ledger_snapshot_id="ledger-a",
         executable_cost_curve=selected_curve,
         resolution_identity="resolution-a",
+        neg_risk=False,
     )
     receipt = EventSubmissionReceipt(
         False,
@@ -13006,6 +13117,15 @@ def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions():
             "asks": [{"price": "0.004", "size": "217.68"}],
         }
 
+    _install_global_jit_market_authority_fetches(
+        monkeypatch,
+        condition_id="condition-a",
+        token_id="token-a",
+        side="NO",
+        tick="0.001",
+        min_order_size="5",
+    )
+
     superseded = era._global_preflight_entry_jit_receipt(
         event,
         receipt,
@@ -13017,28 +13137,29 @@ def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions():
     assert superseded.proof_accepted is False
     assert superseded.reason.startswith(
         "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:"
-        "curve_economics:jit_detail=fields=levels:"
+        "curve_economics:jit_detail=fields="
     )
     assert superseded.global_jit_candidate is not None
-    assert superseded.global_jit_candidate.executable_cost_curve.levels == (
+    assert superseded.global_jit_candidate.candidate.executable_cost_curve.levels == (
         BookLevel(price=Decimal("0.004"), size=Decimal("217.68")),
     )
     status, replacement, reason = era._global_curve_supersession_from_receipt(
         superseded
     )
     assert status == "CURVE_SUPERSEDED"
-    assert replacement is superseded.global_jit_candidate
+    assert replacement is superseded.global_jit_candidate.candidate
     assert reason == superseded.reason
 
+    replacement_candidate = superseded.global_jit_candidate.candidate
     replacement_actuation = SimpleNamespace(
         winner_event_id=event.event_id,
         decision=SimpleNamespace(
-            candidate=superseded.global_jit_candidate,
+            candidate=replacement_candidate,
             limit_price=Decimal("0.004"),
             shares=Decimal("190"),
         ),
     )
-    replacement_captured_at = superseded.global_jit_candidate.book_captured_at_utc
+    replacement_captured_at = replacement_candidate.book_captured_at_utc
     reused = era._global_preflight_entry_jit_receipt(
         event,
         receipt,
@@ -13049,7 +13170,9 @@ def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions():
         current_candidate_override=superseded.global_jit_candidate,
         checked_at_utc=replacement_captured_at + _dt.timedelta(seconds=1),
     )
-    assert reused is receipt
+    assert reused is not receipt
+    assert reused.proof_accepted is True
+    assert isinstance(reused.global_jit_candidate, era._GlobalJitHandoff)
 
     stale_calls = []
     stale = era._global_preflight_entry_jit_receipt(
@@ -13068,8 +13191,10 @@ def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions():
         current_candidate_override=superseded.global_jit_candidate,
         checked_at_utc=replacement_captured_at + _dt.timedelta(seconds=31),
     )
-    assert stale_calls == ["token-a"]
-    assert stale is receipt
+    assert stale_calls == []
+    assert stale is not receipt
+    assert stale.proof_accepted is True
+    assert isinstance(stale.global_jit_candidate, era._GlobalJitHandoff)
 
     stable = era._global_preflight_entry_jit_receipt(
         event,
@@ -13082,7 +13207,10 @@ def test_global_preflight_jit_curve_replaces_selected_size_and_reauctions():
             "asks": [{"price": "0.012", "size": "190"}],
         },
     )
-    assert stable is receipt
+    assert stable is not receipt
+    assert stable.proof_accepted is False
+    assert stable.reason.startswith("GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:")
+    assert isinstance(stable.global_jit_candidate, era._GlobalJitHandoff)
 
 
 @pytest.mark.parametrize(("fresh_mode", "valid"), (("TAKER", True), ("", False)))
@@ -13091,16 +13219,32 @@ def test_global_preflight_mode_redecision_preserves_valid_and_falls_through_unpr
 ):
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     at = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)
+    mode_book = {
+        "asset_id": "token-a",
+        "hash": "fresh-book",
+        "bids": [{"price": "0.46", "size": "100"}],
+        "asks": [{"price": "0.52", "size": "100"}],
+    }
     curve = ExecutableCostCurve(
         token_id="token-a",
         side="NO",
         snapshot_id="selected-book",
-        book_hash="selected-hash",
+        book_hash=stable_hash(mode_book),
         levels=(BookLevel(price=Decimal("0.52"), size=Decimal("100")),),
         fee_model=FeeModel(fee_rate=Decimal("0")),
         min_tick=Decimal("0.001"),
         min_order_size=Decimal("5"),
         quote_ttl=_dt.timedelta(seconds=30),
+        fee_details={
+            "feeSchedule_taker_only": True,
+            "fee_rate_bps": 0.0,
+            "fee_rate_fraction": 0.0,
+            "fee_rate_raw_unit": "fraction",
+            "fee_rate_source_field": "fee_rate_fraction",
+            "fee_type": "weather_fees",
+            "source": "global_current_gamma_fee_schedule",
+            "token_id": "token-a",
+        },
     )
     candidate = GlobalSingleOrderCandidate(
         candidate_id="candidate-a",
@@ -13116,6 +13260,7 @@ def test_global_preflight_mode_redecision_preserves_valid_and_falls_through_unpr
         ledger_snapshot_id="ledger-a",
         executable_cost_curve=curve,
         resolution_identity="resolution-a",
+        neg_risk=False,
     )
     receipt = EventSubmissionReceipt(
         False,
@@ -13142,6 +13287,15 @@ def test_global_preflight_mode_redecision_preserves_valid_and_falls_through_unpr
     )
     observed = {}
 
+    _install_global_jit_market_authority_fetches(
+        monkeypatch,
+        condition_id="condition-a",
+        token_id="token-a",
+        side="NO",
+        tick="0.001",
+        min_order_size="5",
+    )
+
     def decide_fresh_mode(**kwargs):
         observed.update(kwargs)
         return fresh_mode
@@ -13151,19 +13305,16 @@ def test_global_preflight_mode_redecision_preserves_valid_and_falls_through_unpr
         event,
         receipt,
         global_actuation=actuation,
-        book_quote_provider=lambda token_id: {
-            "asset_id": token_id,
-            "hash": "fresh-book",
-            "bids": [{"price": "0.46", "size": "100"}],
-            "asks": [{"price": "0.52", "size": "100"}],
-        },
+            book_quote_provider=lambda _token_id: mode_book,
         checked_at_utc=at,
     )
 
     assert observed["fresh_best_bid"] == 0.46
     assert observed["fresh_best_ask"] == 0.52
     if valid:
-        assert revalidated is receipt
+        assert revalidated is not receipt
+        assert revalidated.proof_accepted is True
+        assert isinstance(revalidated.global_jit_candidate, era._GlobalJitHandoff)
         return
     assert revalidated.proof_accepted is False
     assert revalidated.side_effect_status == "NO_SUBMIT"
@@ -13264,7 +13415,7 @@ def test_global_preflight_falls_through_non_actionable_winner_before_mode_redeci
     assert era._global_preflight_block_status(rejected.reason) == "CANDIDATE_BLOCKED"
 
 
-def test_global_preflight_falls_through_sub_band_maker_winner():
+def test_global_preflight_falls_through_sub_band_maker_winner(monkeypatch):
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     at = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)
     curve = ExecutableCostCurve(
@@ -13292,6 +13443,7 @@ def test_global_preflight_falls_through_sub_band_maker_winner():
         ledger_snapshot_id="ledger-a",
         executable_cost_curve=curve,
         resolution_identity="resolution-a",
+        neg_risk=False,
     )
     receipt = EventSubmissionReceipt(
         False,
@@ -13313,6 +13465,14 @@ def test_global_preflight_falls_through_sub_band_maker_winner():
             limit_price=Decimal("0.058"),
             shares=Decimal("340"),
         ),
+    )
+    _install_global_jit_market_authority_fetches(
+        monkeypatch,
+        condition_id="condition-a",
+        token_id="token-a",
+        side="YES",
+        tick="0.001",
+        min_order_size="5",
     )
     rejected = era._global_preflight_entry_jit_receipt(
         event,
@@ -13363,19 +13523,35 @@ def test_fresh_mode_preserves_no_trade_for_sub_band_maker_and_taker():
         assert mode == "NO_TRADE"
 
 
-def test_global_preflight_reuses_provider_observation_without_second_fetch():
+def test_global_preflight_reuses_provider_observation_without_second_fetch(monkeypatch):
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     at = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)
+    reused_book = {
+        "asset_id": "token-a",
+        "hash": "reused-book",
+        "bids": [{"price": "0.003", "size": "100"}],
+        "asks": [{"price": "0.012", "size": "190"}],
+    }
     curve = ExecutableCostCurve(
         token_id="token-a",
         side="NO",
         snapshot_id="selected-book",
-        book_hash="selected-hash",
+        book_hash=stable_hash(reused_book),
         levels=(BookLevel(price=Decimal("0.012"), size=Decimal("190")),),
         fee_model=FeeModel(fee_rate=Decimal("0")),
         min_tick=Decimal("0.001"),
         min_order_size=Decimal("5"),
         quote_ttl=_dt.timedelta(seconds=30),
+        fee_details={
+            "feeSchedule_taker_only": True,
+            "fee_rate_bps": 0.0,
+            "fee_rate_fraction": 0.0,
+            "fee_rate_raw_unit": "fraction",
+            "fee_rate_source_field": "fee_rate_fraction",
+            "fee_type": "weather_fees",
+            "source": "global_current_gamma_fee_schedule",
+            "token_id": "token-a",
+        },
     )
     candidate = GlobalSingleOrderCandidate(
         candidate_id="candidate-a",
@@ -13391,6 +13567,7 @@ def test_global_preflight_reuses_provider_observation_without_second_fetch():
         ledger_snapshot_id="ledger-a",
         executable_cost_curve=curve,
         resolution_identity="resolution-a",
+        neg_risk=False,
     )
     receipt = EventSubmissionReceipt(
         False,
@@ -13413,12 +13590,7 @@ def test_global_preflight_reuses_provider_observation_without_second_fetch():
             self.fetches = 0
             self.consumes = 0
             self.last = (
-                {
-                    "asset_id": "token-a",
-                    "hash": "reused-book",
-                    "bids": [{"price": "0.003", "size": "100"}],
-                    "asks": [{"price": "0.012", "size": "190"}],
-                },
+                reused_book,
                 at,
                 "price_channel_projection",
             )
@@ -13434,6 +13606,15 @@ def test_global_preflight_reuses_provider_observation_without_second_fetch():
 
     provider = Provider()
 
+    _install_global_jit_market_authority_fetches(
+        monkeypatch,
+        condition_id="condition-a",
+        token_id="token-a",
+        side="NO",
+        tick="0.001",
+        min_order_size="5",
+    )
+
     stable = era._global_preflight_entry_jit_receipt(
         event,
         receipt,
@@ -13441,12 +13622,14 @@ def test_global_preflight_reuses_provider_observation_without_second_fetch():
         book_quote_provider=provider,
     )
 
-    assert stable is receipt
+    assert stable is not receipt
+    assert stable.proof_accepted is True
+    assert isinstance(stable.global_jit_candidate, era._GlobalJitHandoff)
     assert provider.consumes == 1
     assert provider.fetches == 0
 
 
-def test_global_winner_persists_jit_curve_as_executor_depth_authority():
+def test_global_winner_persists_jit_curve_as_executor_depth_authority(monkeypatch):
     conn = sqlite3.connect(":memory:")
     init_snapshot_schema(conn)
     captured = _dt.datetime(2026, 7, 14, 20, 5, tzinfo=_dt.timezone.utc)
@@ -13545,11 +13728,35 @@ def test_global_winner_persists_jit_curve_as_executor_depth_authority():
         ledger_snapshot_id="ledger-a",
         executable_cost_curve=selected_curve,
         resolution_identity="resolution-a",
+        neg_risk=False,
+    )
+    gamma_payload, clob_payload = _install_global_jit_market_authority_fetches(
+        monkeypatch,
+        condition_id="condition-a",
+        token_id="token-no-a",
+        side="NO",
+        tick="0.01",
+        min_order_size="1",
+        fee_rate=0.05,
+    )
+    market_authority = era._current_global_market_authority(
+        condition_id="condition-a",
+        token_id="token-no-a",
+        side="NO",
+        gamma_get=lambda *_args, **_kwargs: SimpleNamespace(
+            status_code=200,
+            json=lambda: [gamma_payload],
+        ),
+        clob_market_get=lambda *_args, **_kwargs: clob_payload,
+        raw_book=raw_book,
+        captured_at_utc=captured,
+        timeout=1.0,
     )
     candidate = era._global_buy_candidate_from_raw_book(
         selected,
         raw_book,
         captured_at_utc=captured,
+        market_authority=market_authority,
     )
     curve = candidate.executable_cost_curve
 
@@ -13558,6 +13765,7 @@ def test_global_winner_persists_jit_curve_as_executor_depth_authority():
         proof=SimpleNamespace(executable_snapshot_id=old.snapshot_id),
         candidate=candidate,
         decision_time=captured + _dt.timedelta(seconds=1),
+        market_authority=market_authority,
     )
 
     assert row["snapshot_id"] == curve.snapshot_id
@@ -13579,13 +13787,14 @@ def test_global_winner_persists_jit_curve_as_executor_depth_authority():
     assert snapshot.orderbook_depth_jsonb == json.dumps(
         {
             "asset_id": "token-no-a",
+            "hash": "opaque-venue-hash",
             "asks": [
                 {"price": "0.37", "size": "20"},
                 {"price": "0.38", "size": "30"},
             ],
             "bids": [
-                {"price": "0.36", "size": "40"},
                 {"price": "0.35", "size": "10"},
+                {"price": "0.36", "size": "40"},
             ],
         },
         sort_keys=True,
@@ -13642,6 +13851,7 @@ def test_global_winner_persists_jit_curve_as_executor_depth_authority():
         proof=SimpleNamespace(executable_snapshot_id=newer_substrate.snapshot_id),
         candidate=candidate,
         decision_time=captured + _dt.timedelta(seconds=2),
+        market_authority=market_authority,
     )
     assert reused == snapshot
     assert reused_row["snapshot_id"] == snapshot.snapshot_id
@@ -14616,10 +14826,11 @@ def test_global_family_prepare_binds_full_simplex_to_condition_token_pairs():
         assert candidate.executable_cost_curve.token_id == candidate.token_id
         materialized = global_candidate_from_native(
             candidate,
-            probability_witness=probability,
-            ledger_snapshot_id="ledger-current",
-            book_captured_at_utc=seed.book_captured_at_utc,
-        )
+                probability_witness=probability,
+                ledger_snapshot_id="ledger-current",
+                book_captured_at_utc=seed.book_captured_at_utc,
+                neg_risk=False,
+            )
         assert materialized.token_id == candidate.token_id
         assert materialized.probability_witness_identity == probability.witness_identity
 
@@ -14646,6 +14857,7 @@ def _global_book_metadata_conn(
             active INTEGER NOT NULL,
             closed INTEGER NOT NULL,
             accepting_orders INTEGER NOT NULL,
+            neg_risk INTEGER NOT NULL,
             fee_details_json TEXT NOT NULL,
             min_tick_size TEXT NOT NULL,
             min_order_size TEXT NOT NULL,
@@ -14676,7 +14888,7 @@ def _global_book_metadata_conn(
             snapshot_id = f"metadata-{binding.condition_id}-{side}"
             conn.execute(
                 "INSERT INTO executable_market_snapshots VALUES "
-                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     snapshot_id,
                     f"gamma-market-{binding.condition_id}",
@@ -14689,6 +14901,7 @@ def _global_book_metadata_conn(
                     1,
                     0,
                     1,
+                    0,
                     json.dumps(
                         {
                             "fee_rate_fraction": 0,
@@ -16565,8 +16778,9 @@ def test_current_global_book_epoch_reuses_current_gamma_metadata_for_price_delta
             "enable_orderbook": True,
             "active": True,
             "closed": False,
-            "accepting_orders": True,
-            "gamma_market_id": f"market-{binding.condition_id}",
+                "accepting_orders": True,
+                "neg_risk": False,
+                "gamma_market_id": f"market-{binding.condition_id}",
             "event_id": "event-current",
             "fee_details_json": '{"feesEnabled":false}',
             "min_tick_size": "0.01",
@@ -16588,7 +16802,8 @@ def test_current_global_book_epoch_reuses_current_gamma_metadata_for_price_delta
         max_age=_dt.timedelta(seconds=30),
         metadata_overrides=gamma_metadata,
     )
-    token = probability.bindings[0].yes_token_id
+    selected_binding = probability.bindings[0]
+    token = selected_binding.yes_token_id
     projected_at = at + _dt.timedelta(seconds=2)
     projected_book = {
         **books[token],
@@ -16616,6 +16831,37 @@ def test_current_global_book_epoch_reuses_current_gamma_metadata_for_price_delta
         asset for asset in refreshed.assets if asset.token_id == token
     )
     assert refreshed_asset.curve.levels[0].price == Decimal("0.10")
+    assert refreshed_asset.neg_risk is False
+    assert refreshed_asset.gamma_market_id == (
+        f"market-{selected_binding.condition_id}"
+    )
+    assert refreshed_asset.market_event_id == "event-current"
+    production_candidate = _global_test_buy_candidate(
+        family_key=probability.family_key,
+        probability_witness_identity=probability.witness_identity,
+        book_identity="gamma-clob-current",
+        price="0.10",
+        captured_at=projected_at,
+        bin_id=selected_binding.bin_id,
+        condition_id=selected_binding.condition_id,
+        side="YES",
+        token_id=token,
+        min_order_size="5",
+    )
+    production_candidate = replace(
+        production_candidate,
+        book_snapshot_id=refreshed_asset.curve.snapshot_id,
+        book_captured_at_utc=refreshed_asset.captured_at_utc,
+        execution_curve_identity=executable_curve_identity(refreshed_asset.curve),
+        executable_cost_curve=refreshed_asset.curve,
+        neg_risk=refreshed_asset.neg_risk,
+    )
+    current_execution = refreshed.execution_authority(
+        production_candidate,
+        checked_at_utc=projected_at + _dt.timedelta(milliseconds=10),
+    )
+    assert current_execution is not None
+    assert current_execution.neg_risk is False
 
 
 def test_current_global_book_epoch_rejects_older_projected_token_change():
@@ -17006,9 +17252,10 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
                 "outcomePrices": ["0.5", "0.5"],
                 "acceptingOrders": True,
                 "enableOrderBook": True,
-                "active": True,
-                "closed": False,
-                "feeSchedule": {
+                    "active": True,
+                    "closed": False,
+                    "negRisk": False,
+                    "feeSchedule": {
                     "exponent": 1,
                     "rate": 0.05,
                     "takerOnly": True,
@@ -17525,8 +17772,8 @@ def test_current_gamma_identity_fills_missing_no_without_changing_q():
         INSERT INTO executable_market_snapshots
             SELECT 'conflicting-topology', gamma_market_id, event_id, condition_id,
                    'conflicting-selected', 'conflicting-yes', 'conflicting-no',
-                   enable_orderbook, active,
-               closed, accepting_orders, fee_details_json, min_tick_size,
+                       enable_orderbook, active,
+                   closed, accepting_orders, neg_risk, fee_details_json, min_tick_size,
                min_order_size, captured_at, freshness_deadline,
                tradeability_status_json, orderbook_depth_json
           FROM executable_market_snapshots
@@ -17722,6 +17969,7 @@ def test_global_candidate_endowment_projects_correlated_family_holdings_exactly(
             ledger_snapshot_id="ledger-current",
             executable_sell_curve=sell_curve,
             resolution_identity="resolution-family",
+            neg_risk=False,
             **_explicit_sell_maker_terms(sell_curve, capacity=Decimal("5")),
         ),
         probability_witness=SimpleNamespace(bin_ids=("a", "b", "c")),
@@ -18142,10 +18390,13 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
             token_id=seed.native_candidate.token_id,
             curve=seed.native_candidate.executable_cost_curve,
             captured_at_utc=decision_at,
+            neg_risk=True,
         )
         for prepared in prepared_by_event.values()
         for seed in prepared.candidate_seeds
     )
+    with pytest.raises(ValueError, match="GLOBAL_BOOK_ASSET_INVALID"):
+        replace(assets[0], neg_risk=1)
     asset_states = tuple(
         (
             asset.family_key,
@@ -18204,15 +18455,13 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
         prepared.probability_witness.family_key: prepared.probability_witness
         for prepared in prepared_by_event.values()
     }
-    venue_identity = "current-venue-universe"
-
     auction_kwargs = dict(
         selection_epoch_identity="selection-epoch-current",
         selection_cut_at_utc=decision_at,
         current_scope=current_scope,
         current_scope_identity_resolver=lambda: current_scope.scope_identity,
-        venue_universe_identity=venue_identity,
-        current_venue_universe_identity_resolver=lambda: venue_identity,
+        venue_universe_identity=book_venue_identity,
+        current_venue_universe_identity_resolver=lambda: book_venue_identity,
         universe_max_age=_dt.timedelta(seconds=1),
         current_probability_resolver=lambda key: (
             CurrentFamilyProbabilityAuthority.from_witness(probabilities[key])
@@ -18223,11 +18472,24 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
             book_snapshot_id=candidate.book_snapshot_id,
             execution_curve_identity=candidate.execution_curve_identity,
             action=getattr(candidate, "action", "BUY"),
+            neg_risk=candidate.neg_risk,
         ),
         current_wealth_identity_resolver=lambda: wealth.economic_identity,
         wealth_witness=wealth,
         capital_limit_usd=Decimal("100"),
         decision_at_utc=decision_at,
+        book_epoch=book_epoch,
+        current_capital_limit_resolver=current_capital_limit,
+    )
+    no_book_kwargs = dict(auction_kwargs)
+    no_book_kwargs.pop("book_epoch")
+    missing_neg_risk_authority = select_prepared_global_auction(
+        prepared_by_event,
+        **no_book_kwargs,
+    )
+    assert missing_neg_risk_authority.decision.candidate is None
+    assert missing_neg_risk_authority.decision.no_trade_reason == (
+        "GLOBAL_BOOK_NEG_RISK_AUTHORITY_MISSING"
     )
     selected = select_prepared_global_auction(
         prepared_by_event,
@@ -18345,7 +18607,7 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
     assert fallthrough.winner_event_id != selected.winner_event_id
     assert partial.decision.candidate is None
     assert partial.actuation is None
-    assert partial.decision.no_trade_reason == "GLOBAL_FEASIBLE_SET_INCOMPLETE"
+    assert partial.decision.no_trade_reason == "GLOBAL_BOOK_FAMILY_PROBABILITY_MISSING"
 
     plain_book_selected = select_prepared_global_auction(
         prepared_by_event,
@@ -18358,6 +18620,7 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
         },
     )
     assert plain_book_selected.decision.candidate is not None
+    assert plain_book_selected.decision.candidate.neg_risk is True
 
     held_event_id, held_prepared = next(iter(prepared_by_event.items()))
     held_probability = held_prepared.probability_witness
@@ -18411,6 +18674,7 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
                 token_id=evaluated_holding.token_id,
                 curve=sell_curve,
                 captured_at_utc=decision_at,
+                neg_risk=True,
             ),
         ),
     )
@@ -18514,6 +18778,7 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
                 token_id=weakest_token,
                 curve=actual_sell_curve,
                 captured_at_utc=decision_at,
+                neg_risk=True,
             ),
         ),
         asset_states=actual_sell_states,
@@ -18580,6 +18845,9 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
             "asks": [],
         },
         captured_at_utc=decision_at,
+        market_authority=_jit_market_authority(
+            actual_sell_selected.decision.candidate, tick="0.01", min_order_size="1"
+        ),
     )
     ordinary_taker_authority = GlobalSellExecutionAuthority.from_current(
         actuation=actual_sell_selected.actuation,
@@ -18653,6 +18921,7 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
                 token_id=weakest_token,
                 curve=below_floor_curve,
                 captured_at_utc=decision_at,
+                neg_risk=True,
             ),
         ),
         asset_states=actual_sell_states,
@@ -18852,6 +19121,7 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
             probability_witness=prepared.probability_witness,
             ledger_snapshot_id=wealth.ledger_snapshot_id,
             book_captured_at_utc=seed.book_captured_at_utc,
+            neg_risk=True,
         ).candidate_id
         for prepared in prepared_by_event.values()
         for seed in prepared.candidate_seeds
@@ -22464,15 +22734,18 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
 
     witness_a = _witness(family_a, "a")
     witness_b = _witness(family_b, "b")
-    curve = SimpleNamespace(
+    curve = ExecutableCostCurve(
+        token_id="token-b",
+        side="YES",
+        snapshot_id="book-snapshot-b",
         book_hash="book-b",
-        levels=(SimpleNamespace(price=Decimal("0.40"), size=Decimal("10")),),
-        fee_model=SimpleNamespace(fee_rate=Decimal("0")),
+        levels=(BookLevel(price=Decimal("0.40"), size=Decimal("10")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
         min_tick=Decimal("0.01"),
         min_order_size=Decimal("5"),
         quote_ttl=_dt.timedelta(seconds=30),
     )
-    candidate = SimpleNamespace(
+    candidate = GlobalSingleOrderCandidate(
         candidate_id="candidate-b",
         family_key=family_b,
         bin_id="20C",
@@ -22481,9 +22754,12 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
         token_id="token-b",
         probability_witness_identity=witness_b.witness_identity,
         book_snapshot_id="book-snapshot-b",
-        execution_curve_identity="curve-b",
+        book_captured_at_utc=decision_at,
+        execution_curve_identity=executable_curve_identity(curve),
+        ledger_snapshot_id="ledger-b",
         executable_cost_curve=curve,
         resolution_identity="resolution-b",
+        neg_risk=False,
     )
     decision = SimpleNamespace(
         candidate=candidate,
@@ -23665,6 +23941,7 @@ def _global_test_buy_candidate(
         ledger_snapshot_id="ledger",
         executable_cost_curve=curve,
         resolution_identity="resolution",
+        neg_risk=False,
     )
 
 
@@ -23683,6 +23960,7 @@ def _global_test_candidate_book(
             token_id=candidate.token_id,
             curve=candidate.executable_cost_curve,
             captured_at_utc=candidate.book_captured_at_utc,
+            neg_risk=candidate.neg_risk,
         )
         for candidate in candidates
     )
@@ -23804,6 +24082,7 @@ def test_global_buy_expected_objective_uses_current_point_not_confidence_mean():
             side=selected.side,
             book_snapshot_id=selected.book_snapshot_id,
             execution_curve_identity=selected.execution_curve_identity,
+            neg_risk=selected.neg_risk,
         ),
         current_wealth_identity_resolver=lambda: wealth.economic_identity,
         wealth_witness=wealth,
@@ -26031,6 +26310,7 @@ def test_global_batch_reauctions_complete_cut_on_current_wealth(
         token_id=binding.no_token_id,
         curve=sell_curve,
         captured_at_utc=decision_at,
+        neg_risk=False,
     )
     book_states = (
         (
@@ -27961,13 +28241,14 @@ def _adapter_sell_actuation(
     exit_authority_reason="non_day0_family",
     min_tick="0.01",
     required_execution_mode=None,
+    book_hash="selected-sell-hash",
 ):
     at = _dt.datetime(2026, 7, 13, 12, 0, tzinfo=_dt.timezone.utc)
     curve = ExecutableSellCurve(
         token_id="yes-token",
         side="YES",
         snapshot_id="selected-sell-book",
-        book_hash="selected-sell-hash",
+        book_hash=book_hash,
         levels=tuple(
             BookLevel(price=Decimal(price), size=Decimal(size))
             for price, size in bid_levels
@@ -28004,6 +28285,7 @@ def _adapter_sell_actuation(
         ledger_snapshot_id="ledger-1",
         executable_sell_curve=curve,
         resolution_identity="resolution-1",
+        neg_risk=False,
         proposal_sell_curve=proposal,
         execution_mode=execution_mode,
         fill_probability=fill_probability,
@@ -28137,6 +28419,75 @@ def _adapter_sell_actuation(
         actuation_identity=actuation_identity,
         wealth_economic_identity=wealth_economic_identity,
         economic_identity=economic_identity,
+        auction_receipt_ref=_test_global_auction_receipt_ref(
+            candidate_id=candidate.candidate_id,
+            actuation_identity=actuation_identity,
+            event_id=event.event_id,
+            selection_epoch_identity="selection-epoch-1",
+        ),
+    )
+
+
+def _jit_market_authority(candidate, *, tick, min_order_size):
+    """Typed current-Gamma authority used by raw-book JIT fixtures."""
+
+    curve = getattr(candidate, "executable_sell_curve", None) or getattr(
+        candidate, "executable_cost_curve"
+    )
+    side = candidate.side
+    other_token = f"other-{candidate.token_id}"
+    yes_token, no_token = (
+        (candidate.token_id, other_token)
+        if side == "YES"
+        else (other_token, candidate.token_id)
+    )
+    captured_at = _dt.datetime.now(_dt.timezone.utc)
+    snapshot = ExecutableMarketSnapshot(
+        snapshot_id=hashlib.sha256(
+            f"jit:{candidate.condition_id}:{candidate.token_id}:{tick}:{min_order_size}".encode()
+        ).hexdigest(),
+        gamma_market_id=f"gamma-{candidate.condition_id}",
+        event_id=f"event-{candidate.condition_id}",
+        event_slug=f"event-{candidate.condition_id}",
+        condition_id=candidate.condition_id,
+        question_id=f"question-{candidate.condition_id}",
+        yes_token_id=yes_token,
+        no_token_id=no_token,
+        selected_outcome_token_id=candidate.token_id,
+        outcome_label=side,
+        enable_orderbook=True,
+        active=True,
+        closed=False,
+        accepting_orders=True,
+        market_start_at=None,
+        market_end_at=None,
+        market_close_at=None,
+        sports_start_at=None,
+        min_tick_size=Decimal(str(tick)),
+        min_order_size=Decimal(str(min_order_size)),
+        fee_details=canonicalize_fee_details(
+            {"fee_rate_fraction": str(curve.fee_model.fee_rate)},
+            source="fixture_current_gamma_fee_schedule",
+            token_id=candidate.token_id,
+        ),
+        token_map_raw={"YES": yes_token, "NO": no_token},
+        rfqe=None,
+        neg_risk=candidate.neg_risk,
+        orderbook_top_bid=curve.levels[0].price,
+        orderbook_top_ask=None,
+        orderbook_depth_jsonb=json.dumps(
+            {"bids": [{"price": str(curve.levels[0].price), "size": "10"}]}
+        ),
+        raw_gamma_payload_hash="a" * 64,
+        raw_clob_market_info_hash="b" * 64,
+        raw_orderbook_hash="c" * 64,
+        authority_tier="CLOB",
+        captured_at=captured_at,
+        freshness_deadline=captured_at + _dt.timedelta(seconds=30),
+    )
+    return era._CurrentGlobalMarketAuthority(
+        snapshot=snapshot,
+        fee_rate=candidate.executable_sell_curve.fee_model.fee_rate,
     )
 
 
@@ -28322,6 +28673,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         GLOBAL_WINNER_SUBMIT_FENCED,
     )
     from src.state.db import init_schema
+    from src.state.snapshot_repo import init_snapshot_schema
 
     at = _dt.datetime(2026, 7, 13, 12, 0, tzinfo=_dt.timezone.utc)
     source_event = _global_scope_event(city="Alpha", source_run_id="run-sell")
@@ -28340,12 +28692,32 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     assert claim_store.claim(event.event_id, claimed_at=global_claimed_at)
     global_claim_attempt_count = claim_store.attempt_count(event.event_id)
     global_claim_conn.commit()
+    jit_raw_book = {
+        "asset_id": "yes-token",
+        "hash": "jit-sell-hash",
+        "tick_size": tick,
+        "min_order_size": "5",
+        "bids": [
+            {"price": price, "size": size}
+            for price, size in bid_levels
+        ],
+    }
     actuation = _adapter_sell_actuation(
         event,
         selected_shares="6",
         bid_levels=bid_levels,
         min_tick=tick,
         probability_functional=probability_functional,
+        book_hash=stable_hash(jit_raw_book),
+    )
+    _install_global_jit_market_authority_fetches(
+        monkeypatch,
+        condition_id="condition-1",
+        token_id="yes-token",
+        side="YES",
+        tick=tick,
+        min_order_size="5",
+        fee_rate=float(actuation.decision.candidate.executable_sell_curve.fee_model.fee_rate),
     )
     position = SimpleNamespace(
         trade_id="position-1",
@@ -28420,6 +28792,19 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
                 }
             }
 
+        def get_held_clob_market_info(self, condition_id, *, timeout=None):
+            assert condition_id == "condition-1"
+            return {
+                "condition_id": condition_id,
+                "clobTokenIds": ["yes-token", "other-yes-token"],
+                "accepting_orders": True,
+                "enable_order_book": True,
+                "archived": False,
+                "tick_size": tick,
+                "min_order_size": "5",
+                "neg_risk": False,
+            }
+
         def get_fee_rate_details(self, token_id):
             raise AssertionError(
                 f"legacy CLOB fee authority called for global SELL: {token_id}"
@@ -28442,28 +28827,17 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
             }
 
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", Clob)
-    fee_checked_at = []
-
-    def current_global_sell_fee_fraction(**_kwargs):
-        fee_checked_at.append(_dt.datetime.now(_dt.timezone.utc))
-        return actuation.decision.candidate.executable_sell_curve.fee_model.fee_rate
-
-    monkeypatch.setattr(
-        era,
-        "_current_global_sell_fee_fraction",
-        current_global_sell_fee_fraction,
-    )
     exits = []
 
     def execute_exit(portfolio_arg, position_arg, context, **kwargs):
         exits.append((portfolio_arg, position_arg, context, kwargs))
+        from src.contracts.global_auction_receipt import GlobalSellReceiptClosure
         from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
 
         authority = kwargs["global_sell_authority"]
         assert isinstance(authority, GlobalSellExecutionAuthority)
         assert authority.actuation is actuation
         assert authority.jit_candidate.executable_sell_curve.book_hash
-        assert authority.jit_candidate.book_captured_at_utc <= fee_checked_at[-1]
         assert kwargs["global_sell_prefetched_orderbook"] == {
             "asset_id": "yes-token",
             "hash": "jit-sell-hash",
@@ -28475,6 +28849,11 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
             ],
         }
         intent = kwargs["exit_intent"]
+        assert type(intent.global_sell_receipt_closure) is GlobalSellReceiptClosure
+        assert intent.global_sell_receipt_closure.receipt_ref is actuation.auction_receipt_ref
+        assert intent.capital_certificate["global_auction_receipt"] == (
+            actuation.auction_receipt_ref.as_payload()
+        )
         assert intent.exact_limit_price == pytest.approx(expected_limit)
         assert intent.shares == pytest.approx(6.0)
         assert intent.close_position is False
@@ -28511,9 +28890,11 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     init_schema(conn)
+    init_snapshot_schema(conn)
     assert conn.execute(
         "SELECT COUNT(*) FROM opportunity_event_processing"
     ).fetchone()[0] == 0
+
     preflight = era._submit_current_global_sell(
         event,
         decision_time=at,
@@ -28581,6 +28962,28 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
 
     assert _is_global_reduce_only_exit_receipt(receipt) is True
     assert _receipt_matches_event(event, receipt) is True
+    assert len(exits) == 1
+
+    missing_receipt = replace(actuation, auction_receipt_ref=None)
+    missing = era._submit_current_global_sell(
+        event,
+        decision_time=at,
+        global_actuation=missing_receipt,
+        trade_conn=conn,
+        global_claim_conn=global_claim_conn,
+        forecast_conn=object(),
+        topology_conn=object(),
+        calibration_conn=object(),
+        preflight_only=False,
+        preflight_receipt=preflight,
+        final_authority_deadline=_dt.datetime.now(_dt.timezone.utc)
+        + _dt.timedelta(seconds=30),
+        hard_authority_cancelled=lambda: False,
+        global_claimed_at=global_claimed_at,
+        global_claim_attempt_count=global_claim_attempt_count,
+    )
+    assert missing.reason.startswith("GLOBAL_SELL_RECEIPT_CLOSURE_INVALID:")
+    assert missing.venue_call_started is False
     assert len(exits) == 1
     assert global_claim_conn.in_transaction is False
     assert tuple(
@@ -28777,6 +29180,7 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
         _global_sell_capital_certificate_error,
         _global_sell_execution_authority_shape_error,
     )
+    from src.contracts.global_auction_receipt import GlobalSellReceiptClosure
 
     event = _global_scope_event(city="Alpha", source_run_id="run-sell-authority")
     actuation = _adapter_sell_actuation(
@@ -28798,6 +29202,9 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
             ],
         },
         captured_at_utc=captured_at,
+        market_authority=_jit_market_authority(
+            actuation.decision.candidate, tick=tick, min_order_size="5"
+        ),
     )
     authority = GlobalSellExecutionAuthority.from_current(
         actuation=actuation,
@@ -28848,6 +29255,7 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
         "selected_cash_proceeds_usd": str(decision.cash_proceeds_usd),
         "economic_limit_price": str(decision.limit_price),
         "exact_limit_price": str(authority.limit_price()),
+        "global_auction_receipt": actuation.auction_receipt_ref.as_payload(),
     }
     if candidate.rest_deadline_minutes is not None:
         certificate["rest_deadline_minutes"] = candidate.rest_deadline_minutes
@@ -28862,6 +29270,18 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
         submit_order_type=submit_order_type,
         close_position=False,
         capital_certificate=certificate,
+        global_sell_receipt_closure=GlobalSellReceiptClosure(
+            receipt_ref=actuation.auction_receipt_ref,
+            position_id=candidate.position_id,
+            condition_id=candidate.condition_id,
+            token_id=candidate.token_id,
+            action="SELL",
+            execution_mode=candidate.execution_mode,
+            winner_event_id=actuation.winner_event_id,
+            winner_candidate_id=candidate.candidate_id,
+            winner_actuation_identity=actuation.actuation_identity,
+            selection_epoch_identity=actuation.selection_epoch_identity,
+        ),
     )
     position = SimpleNamespace(
         trade_id=candidate.position_id,
@@ -28901,6 +29321,42 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
         snapshot_context=context,
         now=captured_at + _dt.timedelta(seconds=1),
     ) is None
+    assert _global_sell_capital_certificate_error(
+        position,
+        replace(intent, global_sell_receipt_closure=None),
+        authority,
+        conn=conn,
+        snapshot_context=context,
+        now=captured_at + _dt.timedelta(seconds=1),
+    ) == "global_sell_receipt_closure_required"
+    forged_closure = replace(
+        intent.global_sell_receipt_closure,
+        token_id="forged-token",
+    )
+    assert _global_sell_capital_certificate_error(
+        position,
+        replace(intent, global_sell_receipt_closure=forged_closure),
+        authority,
+        conn=conn,
+        snapshot_context=context,
+        now=captured_at + _dt.timedelta(seconds=1),
+    ) == "global_sell_receipt_closure_identity_mismatch"
+    forged_receipt_payload = dict(
+        actuation.auction_receipt_ref.as_payload(),
+        receipt_hash="f" * 64,
+    )
+    forged_certificate = dict(
+        certificate,
+        global_auction_receipt=forged_receipt_payload,
+    )
+    assert _global_sell_capital_certificate_error(
+        position,
+        replace(intent, capital_certificate=forged_certificate),
+        authority,
+        conn=conn,
+        snapshot_context=context,
+        now=captured_at + _dt.timedelta(seconds=1),
+    ) == "global_sell_receipt_closure_capital_certificate_mismatch"
     position.chain_shares = float(candidate.held_shares - Decimal("0.0001"))
     assert _global_sell_capital_certificate_error(
         position,
@@ -28999,6 +29455,9 @@ def test_global_sell_selected_taker_mode_stays_taker_at_jit(
             "asks": [],
         },
         captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
+        market_authority=_jit_market_authority(
+            actuation.decision.candidate, tick=tick, min_order_size="5"
+        ),
     )
 
     assert rebound.execution_mode == "TAKER_LIMIT"
@@ -29034,6 +29493,9 @@ def test_global_sell_high_bid_binds_legal_fak_floor():
             "asks": [],
         },
         captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
+        market_authority=_jit_market_authority(
+            candidate, tick="0.001", min_order_size="5"
+        ),
     )
     authority = GlobalSellExecutionAuthority.from_current(
         actuation=actuation,
@@ -29072,6 +29534,9 @@ def test_global_sell_worse_jit_bid_requires_complete_reauction():
             "asks": [{"price": "0.51", "size": "10"}],
         },
         captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
+        market_authority=_jit_market_authority(
+            actuation.decision.candidate, tick="0.01", min_order_size="5"
+        ),
     )
     drift = era._global_sell_execution_economics_drift(
         decision=actuation.decision,
@@ -29089,8 +29554,8 @@ def test_global_sell_worse_jit_bid_requires_complete_reauction():
         jit_candidate=worse,
     )
     assert era._global_curve_supersession_from_receipt(receipt) == (
-        "CURVE_SUPERSEDED",
-        worse,
+        "MARKET_AUTHORITY_SUPERSEDED",
+        None,
         receipt.reason,
     )
 
@@ -29111,6 +29576,9 @@ def test_global_sell_jit_overlay_replaces_same_book_buy_and_sell_curves():
         selected,
         raw_book,
         captured_at_utc=captured_at,
+        market_authority=_jit_market_authority(
+            selected, tick="0.01", min_order_size="5"
+        ),
     )
     old_buy_curve = ExecutableCostCurve(
         token_id=selected.token_id,
@@ -29146,6 +29614,7 @@ def test_global_sell_jit_overlay_replaces_same_book_buy_and_sell_curves():
                 token_id=selected.token_id,
                 curve=old_buy_curve,
                 captured_at_utc=selected.book_captured_at_utc,
+                neg_risk=selected.neg_risk,
                 bid_levels=selected.executable_sell_curve.levels,
             ),
         ),
@@ -29167,6 +29636,7 @@ def test_global_sell_jit_overlay_replaces_same_book_buy_and_sell_curves():
                 token_id=selected.token_id,
                 curve=selected.executable_sell_curve,
                 captured_at_utc=selected.book_captured_at_utc,
+                neg_risk=selected.neg_risk,
             ),
         ),
     )
@@ -29191,6 +29661,8 @@ def test_global_sell_jit_overlay_replaces_same_book_buy_and_sell_curves():
         "EXECUTABLE",
         replacement.executable_sell_curve.book_hash,
     )
+    assert len(overlaid.asset_states[0]) == 9
+    assert overlaid.asset_states[0][7:] == state[7:]
     assert overlaid.witness_identity != epoch.witness_identity
 
     no_ask = era._global_sell_candidate_from_raw_book(
@@ -29203,6 +29675,9 @@ def test_global_sell_jit_overlay_replaces_same_book_buy_and_sell_curves():
             "asks": [],
         },
         captured_at_utc=captured_at,
+        market_authority=_jit_market_authority(
+            selected, tick="0.01", min_order_size="5"
+        ),
     )
     no_ask_epoch = global_batch_runtime._book_epoch_with_replacement_candidate(
         epoch,
@@ -29307,7 +29782,7 @@ def test_exact_sell_limit_is_audited_and_off_tick_is_rejected_before_submit(
     assert result.reason.startswith("exact_limit_price_not_tick_aligned:")
 
 
-def test_global_sell_gtc_reaches_exit_envelope_when_allocator_prefers_immediate(
+def test_ordinary_gtc_exit_preserves_allocator_order_type_and_reaches_envelope(
     monkeypatch,
 ):
     from tests import test_executor as executor_fixtures
@@ -29345,11 +29820,11 @@ def test_global_sell_gtc_reaches_exit_envelope_when_allocator_prefers_immediate(
             )
             result = executor_fixtures._final_submit_result(
                 self.bound_envelope,
-                order_id="global-sell-fak-1",
+                order_id="ordinary-exit-gtc-1",
             )
             from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
 
-            signed_order = b"global-sell-fak-signed-order"
+            signed_order = b"ordinary-exit-gtc-signed-order"
             self.persist_signed_identity(
                 VenueSubmissionEnvelope.from_dict(
                     result["_venue_submission_envelope"]
@@ -29402,7 +29877,7 @@ def test_global_sell_gtc_reaches_exit_envelope_when_allocator_prefers_immediate(
     try:
         result = execute_exit_order(
             create_exit_order_intent(
-                trade_id="position-global-fak",
+                trade_id="position-ordinary-gtc",
                 token_id="yes-token",
                 shares=10.0,
                 current_price=0.54,
@@ -29412,7 +29887,7 @@ def test_global_sell_gtc_reaches_exit_envelope_when_allocator_prefers_immediate(
                 **executor_fixtures._snapshot_kwargs("yes-token"),
             ),
             conn=conn,
-            decision_id="global-capital-sell-gtc",
+            decision_id="ordinary-exit-gtc",
         )
     finally:
         executor_fixtures._TEST_CONN = old_test_conn
@@ -29431,7 +29906,7 @@ def test_global_sell_gtc_reaches_exit_envelope_when_allocator_prefers_immediate(
           JOIN venue_submission_envelopes e ON e.envelope_id = c.envelope_id
          WHERE c.decision_id = ?
         """,
-        ("global-capital-sell-gtc",),
+        ("ordinary-exit-gtc",),
     ).fetchone()
     assert dict(envelope) == {"order_type": "GTC"}
     conn.close()

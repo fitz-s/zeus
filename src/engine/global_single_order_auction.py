@@ -25,6 +25,7 @@ from src.solve.solver import (
     CandidatePortfolioEndowment,
     CurrentExecutionAuthority,
     CurrentFamilyProbabilityAuthority,
+    CurrentMakerFillWitness,
     DeterministicBinPayoffWitness,
     FamilyPortfolioEndowment,
     GlobalSingleOrderAnyCandidate,
@@ -33,6 +34,7 @@ from src.solve.solver import (
     PortfolioWealthWitness,
     global_candidates_from_native,
     global_sell_candidate_from_holding,
+    executable_curve_identity,
     select_global_single_order,
 )
 
@@ -324,6 +326,24 @@ def global_single_order_actuation_identity(
         if action == "SELL"
         else candidate.executable_cost_curve
     )
+    economic_curve = (
+        candidate.economic_sell_curve
+        if action == "SELL"
+        else candidate.economic_cost_curve
+    )
+    maker_witness = getattr(candidate, "maker_fill_witness", None)
+    execution_identity = (
+        candidate.execution_mode,
+        candidate.fill_probability,
+        candidate.fill_probability_source,
+        candidate.rest_deadline_minutes,
+        candidate.neg_risk,
+        executable_curve_identity(economic_curve),
+        candidate.asset_epoch_identity,
+        maker_witness.witness_identity if maker_witness is not None else None,
+        maker_witness.candidate_binding_identity if maker_witness is not None else None,
+        maker_witness.asset_epoch_identity if maker_witness is not None else None,
+    )
     sell_identity = (
         (
             action,
@@ -370,6 +390,7 @@ def global_single_order_actuation_identity(
         candidate.condition_id,
         candidate.side,
         candidate.token_id,
+        *execution_identity,
         *sell_identity,
         candidate.probability_witness_identity,
         candidate.book_snapshot_id,
@@ -414,6 +435,24 @@ def global_single_order_economic_identity(
         if action == "SELL"
         else candidate.executable_cost_curve
     )
+    economic_curve = (
+        candidate.economic_sell_curve
+        if action == "SELL"
+        else candidate.economic_cost_curve
+    )
+    maker_witness = getattr(candidate, "maker_fill_witness", None)
+    execution_identity = (
+        candidate.execution_mode,
+        candidate.fill_probability,
+        candidate.fill_probability_source,
+        candidate.rest_deadline_minutes,
+        candidate.neg_risk,
+        executable_curve_identity(economic_curve),
+        candidate.asset_epoch_identity,
+        maker_witness.witness_identity if maker_witness is not None else None,
+        maker_witness.candidate_binding_identity if maker_witness is not None else None,
+        maker_witness.asset_epoch_identity if maker_witness is not None else None,
+    )
     sell_identity = (
         (
             action,
@@ -452,6 +491,7 @@ def global_single_order_economic_identity(
         candidate.condition_id,
         candidate.side,
         candidate.token_id,
+        *execution_identity,
         *sell_identity,
         candidate.resolution_identity,
         probability_witness.family_binding_identity,
@@ -761,6 +801,11 @@ def select_prepared_global_auction(
         or selection_cut_at_utc > decision_at_utc
     ):
         return _no_trade("GLOBAL_SELECTION_EPOCH_IDENTITY_MISSING")
+    if book_epoch is None:
+        # SCOPE: this selection epoch; candidate negRisk is venue-asset authority.
+        # DRAIN: the upstream current-book capture supplies a typed book epoch.
+        # RESET: the next invocation includes that epoch and rematerializes candidates.
+        return _no_trade("GLOBAL_BOOK_NEG_RISK_AUTHORITY_MISSING")
     excluded_by_family = {
         str(family_key or "").strip(): str(reason or "").strip()
         for family_key, reason in (preflight_excluded_by_family or {}).items()
@@ -801,23 +846,6 @@ def select_prepared_global_auction(
             holdings_by_family[family_key] = holdings
         if family_key in excluded:
             continue
-        if book_epoch is None:
-            for seed in getattr(prepared, "candidate_seeds", ()):
-                try:
-                    candidates.extend(
-                        global_candidates_from_native(
-                            seed.native_candidate,
-                            probability_witness=probability,
-                            ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
-                            book_captured_at_utc=seed.book_captured_at_utc,
-                        )
-                    )
-                except Exception as exc:  # noqa: BLE001 - one missing asset invalidates globality
-                    return _no_trade(
-                        "GLOBAL_CANDIDATE_MATERIALIZATION_FAILED:"
-                        f"{type(exc).__name__}:{exc}"
-                    )
-
     if not excluded.issubset(probability_witnesses):
         return _no_trade("GLOBAL_EXCLUDED_FAMILY_UNKNOWN")
     if not buy_disabled.issubset(probability_witnesses):
@@ -903,6 +931,25 @@ def select_prepared_global_auction(
             )
 
         candidates = []
+
+        def maker_witness_for(
+            *,
+            family_key: str,
+            bin_id: str,
+            condition_id: str,
+            side: str,
+            token_id: str,
+            position_id: str | None,
+        ) -> CurrentMakerFillWitness | None:
+            """Read only an upstream typed current witness; never reinterpret priors."""
+
+            witnesses = prepared_by_family[family_key].maker_fill_witnesses
+            if not isinstance(witnesses, Mapping):
+                return None
+            key = (bin_id, condition_id, side, token_id, position_id)
+            witness = witnesses.get(key)
+            return witness if isinstance(witness, CurrentMakerFillWitness) else None
+
         book_state_row_by_key = {
             tuple(state[:5]): tuple(state) for state in book_epoch.asset_states
         }
@@ -920,11 +967,20 @@ def select_prepared_global_auction(
                 condition_id=asset.condition_id,
                 side=asset.side,
                 token_id=asset.token_id,
+                neg_risk=asset.neg_risk,
                 hypothesis_id=(
                     f"GLOBAL_BOOK:{asset.family_key}:{asset.bin_id}:{asset.side}"
                 ),
             )
             try:
+                maker_witness = maker_witness_for(
+                    family_key=asset.family_key,
+                    bin_id=asset.bin_id,
+                    condition_id=asset.condition_id,
+                    side=asset.side,
+                    token_id=asset.token_id,
+                    position_id=None,
+                )
                 candidates.extend(
                     global_candidates_from_native(
                         native,
@@ -932,6 +988,10 @@ def select_prepared_global_auction(
                         ledger_snapshot_id=wealth_witness.ledger_snapshot_id,
                         book_captured_at_utc=asset.captured_at_utc,
                         native_bid_levels=asset.bid_levels,
+                        include_maker=maker_witness is not None,
+                        maker_fill_witness=maker_witness,
+                        asset_epoch_identity=book_epoch.witness_identity,
+                        neg_risk=asset.neg_risk,
                     )
                 )
             except Exception as exc:  # noqa: BLE001 - one malformed asset invalidates globality
@@ -1087,6 +1147,18 @@ def select_prepared_global_auction(
                                     prepared.sell_action_authority_identity
                                 ),
                                 execution_mode=mode,
+                                maker_fill_witness=maker_witness_for(
+                                    family_key=family_key,
+                                    bin_id=str(holding.bin_id),
+                                    condition_id=str(
+                                        holding_binding(holding, probability).condition_id
+                                    ),
+                                    side=str(holding.side),
+                                    token_id=str(holding.token_id),
+                                    position_id=str(holding.position_id),
+                                ),
+                                asset_epoch_identity=book_epoch.witness_identity,
+                                neg_risk=asset.neg_risk,
                             )
                         )
                         is not None
@@ -1244,15 +1316,9 @@ def select_prepared_global_auction(
     def _candidate_policy_rejection(
         candidate: GlobalSingleOrderAnyCandidate,
     ) -> str | None:
-        # Current maker fill probability is a historical scalar, not a
-        # decision-time cohort/provenance witness. Until that typed witness is
-        # present, maker proposals are not in the executable feasible set.
-        # SCOPE — MAKER_REST BUY/SELL only; taker, HOLD, and CASH remain live.
-        # DRAIN — each complete auction rebuilds candidates and policy evidence.
-        # RESET — none in this revision; only a reviewed candidate-bound maker
-        # witness contract may replace this fail-closed policy in new code.
-        if candidate.execution_mode == "MAKER_REST":
-            return "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
+        # Solver-owned typed witness validation is deliberately before this
+        # policy hook.  This hook must not turn a current witnessed maker
+        # sibling back into a blanket historical-prior wall.
         if (
             str(getattr(candidate, "action", "BUY") or "BUY").upper() == "BUY"
             and candidate.family_key in buy_disabled

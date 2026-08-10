@@ -54,8 +54,12 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
   in each branch. Cross-family holdings enter neither branch until a joint law exists; coupling a
   candidate loss to the global floor and its win to the unrelated portfolio ceiling invents a
   correlation and can make an existing winner freeze every new family. Cross-family exposure stays
-  on the correlation-cap rail. Stale, mismatched, maker-contingent, or
-  non-positive candidates are unrankable. Before sizing a new BUY, the current owner strategy's
+  on the correlation-cap rail. Stale, mismatched, non-positive, or unwitnessed/
+  witness-mismatched maker-contingent candidates are unrankable. A maker may be
+  ranked only from a candidate-, current-book-epoch-, limit-, and deadline-bound
+  `CurrentMakerFillWitness` with a causal zero/partial/full fill distribution;
+  a historical scalar or implicit full fill is never current executable truth.
+  Before sizing a new BUY, the current owner strategy's
   native entry-price floor removes unlicensed longshots from the feasible set. Inside that set,
   admission is posterior predictive mean `q > fee-inclusive executable cost` plus positive
   expected delta-log wealth and EV, never a price-independent `q > 0.5` wall; `q_lcb/q_ucb`
