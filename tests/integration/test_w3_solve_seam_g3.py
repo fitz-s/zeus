@@ -19353,6 +19353,7 @@ def test_current_portfolio_wealth_binds_verified_fill_as_non_sellable_endowment(
     held_token,
     side,
 ):
+    """Unknown visibility stays bounded but non-sellable without local-only truth."""
     @dataclass(frozen=True)
     class Prepared:
         probability_witness: object
@@ -19437,6 +19438,121 @@ def test_current_portfolio_wealth_binds_verified_fill_as_non_sellable_endowment(
     assert snapshot.pending_endowments[0].side == side
     assert snapshot.pending_endowments[0].shares == Decimal("14.589284")
     assert endowment.current_token_shares == Decimal("14.589284")
+
+
+@pytest.mark.parametrize(
+    ("direction", "held_token", "chain_state", "chain_shares"),
+    (
+        (Direction.YES, "yes-token", "local_only", 0.0),
+        (Direction.NO, "no-token", "local_only", 0.0),
+        (Direction.YES, "yes-token", "synced", 4.0),
+        (Direction.NO, "no-token", "synced", 4.0),
+        (Direction.YES, "yes-token", "synced", 20.0),
+        (Direction.NO, "no-token", "synced", 20.0),
+    ),
+)
+def test_current_portfolio_wealth_makes_causal_venue_fill_sellable(
+    direction,
+    held_token,
+    chain_state,
+    chain_shares,
+):
+    """Newer CLOB fill truth must not wait for zero or positive stale chain state."""
+
+    decision_at = _dt.datetime(2026, 8, 9, 20, 54, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(captured_at=decision_at)
+    position = SimpleNamespace(
+        trade_id="trade-local-fill",
+        position_id="trade-local-fill",
+        condition_id="condition-local-fill",
+        direction=direction,
+        token_id="yes-token",
+        no_token_id="no-token",
+        chain_state=chain_state,
+        chain_shares=chain_shares,
+        shares=14.589284,
+        effective_shares=14.589284,
+        cost_basis_usd=10.0,
+        effective_cost_basis_usd=10.0,
+        fill_authority="venue_confirmed_full",
+        chain_verified_at="",
+        state="entered",
+    )
+    portfolio = PortfolioState(
+        positions=[position],
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+
+    witness = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        portfolio_state=portfolio,
+    )
+
+    assert witness.native_holdings_micro == ((held_token, 14_589_284),)
+    assert witness.pending_entry_endowments_micro == ()
+    assert witness.native_commitments_micro == ((held_token, 10_000_000),)
+
+
+@pytest.mark.parametrize(
+    ("chain_state", "chain_shares"),
+    (("local_only", 0.0), ("synced", 4.0), ("synced", 20.0)),
+)
+def test_global_sell_jit_accepts_causal_venue_confirmed_shares(
+    monkeypatch,
+    chain_state,
+    chain_shares,
+):
+    """Selection and JIT must use the same causal exposure while chain lags."""
+
+    from src.engine import event_reactor_adapter as era
+    from src.state import portfolio as portfolio_module
+
+    position = SimpleNamespace(
+        trade_id="trade-local-fill",
+        direction="buy_yes",
+        token_id="yes-token",
+        no_token_id="no-token",
+        condition_id="condition-local-fill",
+        chain_state=chain_state,
+        chain_shares=chain_shares,
+        shares=14.589284,
+        effective_shares=14.589284,
+        fill_authority="venue_confirmed_full",
+        state="entered",
+        last_exit_order_id="",
+    )
+    state = SimpleNamespace(
+        positions=(position,),
+        authority="canonical_db",
+        authority_scope="runtime_exposure",
+    )
+    monkeypatch.setattr(
+        portfolio_module,
+        "load_runtime_open_portfolio",
+        lambda _conn: state,
+    )
+    monkeypatch.setattr(
+        era,
+        "_global_sell_command_blocks_reauction",
+        lambda *_args, **_kwargs: False,
+    )
+    candidate = SimpleNamespace(
+        position_id=position.trade_id,
+        side="YES",
+        token_id=position.token_id,
+        condition_id=position.condition_id,
+        held_shares=Decimal("14.58"),
+    )
+
+    current_state, current_position = era._current_global_sell_position(
+        object(), candidate
+    )
+
+    assert current_state is state
+    assert current_position is position
 
 
 def test_current_portfolio_wealth_refuses_unverified_projection_lag():
@@ -28237,8 +28353,10 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         token_id="yes-token",
         no_token_id="no-token",
         condition_id="condition-1",
+        chain_state="synced",
         chain_shares=10.0066,
         effective_shares=10.006602,
+        fill_authority="venue_confirmed_full",
         exit_state="",
         last_exit_order_id="",
         state="holding",

@@ -3098,7 +3098,10 @@ def current_portfolio_wealth_witness(
             raise ValueError("CURRENT_WEALTH_UNKNOWN_CHAIN_INVENTORY")
         from src.contracts.position_truth import has_current_money_risk_chain_state
         from src.state.chain_reconciliation import _CHAIN_SEEN_AT_MAX_AGE_SECONDS
-        from src.state.portfolio import has_verified_trade_fill
+        from src.state.portfolio import (
+            current_tradable_exposure_shares,
+            has_verified_trade_fill,
+        )
 
         position_max_age = timedelta(seconds=_CHAIN_SEEN_AT_MAX_AGE_SECONDS)
         represented_micro: dict[str, int] = {}
@@ -3123,13 +3126,22 @@ def current_portfolio_wealth_witness(
                 shares = Decimal(micro) / Decimal("1000000")
                 evidence = "collateral_snapshot"
             else:
+                causal_shares = Decimal(
+                    str(current_tradable_exposure_shares(position))
+                )
                 shares = Decimal(str(getattr(position, "chain_shares", 0) or 0))
-                if shares <= 0 and has_verified_trade_fill(position):
+                if causal_shares > 0:
+                    shares = causal_shares
+                elif shares <= 0 and has_verified_trade_fill(position):
                     shares = Decimal(str(getattr(position, "shares", 0) or 0))
                 if shares <= 0:
                     raise ValueError("CURRENT_WEALTH_OPEN_POSITION_INVALID")
                 micro = int((shares * Decimal("1000000")).to_integral_value())
-                evidence = "uncertain_local_claim"
+                evidence = (
+                    "causal_venue_exposure"
+                    if causal_shares > 0 and has_verified_trade_fill(position)
+                    else "uncertain_local_claim"
+                )
                 try:
                     chain_verified_at = datetime.fromisoformat(
                         str(getattr(position, "chain_verified_at", "") or "").replace(
@@ -3244,9 +3256,10 @@ def current_portfolio_wealth_witness(
             ):
                 raise ValueError("CURRENT_WEALTH_CHAIN_POSITION_SIZE_MISMATCH")
         held_balances = represented_micro
-        # Only currently represented native inventory may create a SELL action.
-        # Unresolved verified-fill claims still bound wealth and consume capital,
-        # but they are not executable token balances.
+        # Only currently represented venue inventory may create a SELL action.
+        # A typed local-only fill is represented because its CLOB fill fact is
+        # newer than the lagging chain projection. Other unresolved claims still
+        # bound wealth and consume capital without minting a SELL action.
         native_holdings = dict(held_balances)
         bounded_claims = dict(held_balances)
         for token, amount in uncertain_micro.items():

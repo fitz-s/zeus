@@ -1667,6 +1667,21 @@ def test_global_completion_yield_preserves_day0_and_resets_without_work_or_resta
     assert reactor_wake.read_reactor_wake(path=wake_path) == wake
 
 
+def test_executable_v4_exact_debt_does_not_yield_its_book_window(monkeypatch):
+    request = _request(position_id="executable-v4", schema_version=4)
+    wake = _wake(request)
+    exclusion = main._OneTurnWakeExclusion()
+    monkeypatch.setattr(main, "_edli_global_completion_yield", exclusion)
+
+    main._yield_incomplete_global_completion_once(
+        wake,
+        (request,),
+        wake_ids=(wake.wake_id,),
+    )
+
+    assert exclusion.consume() == frozenset()
+
+
 def test_unfinished_day0_monitor_cannot_starve_exact_held_sell_debt(
     monkeypatch, tmp_path: Path
 ) -> None:
