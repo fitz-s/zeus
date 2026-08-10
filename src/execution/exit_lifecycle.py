@@ -5608,9 +5608,19 @@ def _execute_live_exit(
             )
         return "exit_blocked: executable_snapshot_unavailable"
 
+    passive_global_rest = bool(
+        global_authorized
+        and global_sell_authority is not None
+        and global_sell_authority.jit_candidate.execution_mode == "MAKER_REST"
+    )
+    # A taker SELL needs an executable in-band bid.  A globally selected
+    # maker-rest SELL is different: its exact GTC limit is the executable
+    # price, and it may validly rest at 0.05 while the current bid is below
+    # that floor.  The capital certificate, exact snapshot, absolute submit
+    # band, post-only check, and venue boundary remain cumulative gates.
     liquidity_error = (
         _exit_sell_liquidity_error(exit_intent, snapshot_context)
-        if conn is not None
+        if conn is not None and not passive_global_rest
         else ""
     )
     if liquidity_error:

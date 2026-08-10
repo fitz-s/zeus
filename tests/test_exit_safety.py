@@ -11383,6 +11383,135 @@ def test_live_global_sell_partial_residual_does_not_reach_venue(conn, monkeypatc
     )
 
 
+def test_live_global_maker_rest_reaches_submit_when_bid_is_below_floor(
+    conn,
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.execution import exit_lifecycle
+    from src.execution.executor import OrderResult
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+    from src.state.projection import upsert_position_current
+
+    position = Position(
+        trade_id="pos-global-maker-sub-floor-bid",
+        market_id="condition-global-maker-sub-floor-bid",
+        condition_id="condition-global-maker-sub-floor-bid",
+        city="Tel Aviv",
+        cluster="Asia",
+        target_date="2026-08-09",
+        temperature_metric="high",
+        bin_label="33C",
+        direction="buy_no",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        state="holding",
+        chain_state="synced",
+        shares=41.7,
+        chain_shares=41.7,
+        cost_basis_usd=12.51,
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+        entered_at="2026-08-09T00:00:00+00:00",
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    exit_context = ExitContext(
+        exit_reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        current_market_price=0.05,
+        current_market_price_is_fresh=True,
+        best_bid=0.04,
+    )
+    exit_intent = exit_lifecycle.ExitIntent(
+        trade_id=position.trade_id,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        token_id=NO_TOKEN,
+        shares=41.7,
+        current_market_price=0.05,
+        best_bid=0.04,
+        exact_limit_price=0.05,
+        submit_order_type="GTC",
+        capital_certificate={"execution_mode": "MAKER_REST"},
+    )
+    authority = object.__new__(exit_lifecycle.GlobalSellExecutionAuthority)
+    object.__setattr__(authority, "actuation", object())
+    object.__setattr__(
+        authority,
+        "jit_candidate",
+        SimpleNamespace(
+            book_captured_at_utc=datetime.now(timezone.utc),
+            execution_mode="MAKER_REST",
+            executable_sell_curve=SimpleNamespace(
+                book_hash="book-global-maker-sub-floor-bid",
+                quote_ttl=timedelta(seconds=30),
+            ),
+        ),
+    )
+    object.__setattr__(authority, "authority_identity", "test-authority")
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_global_sell_execution_authority_shape_error",
+        lambda _authority: None,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_global_sell_receipt_closure_error",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_global_sell_capital_certificate_error",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *_args, **_kwargs: {
+            "executable_snapshot_id": "snap-global-maker-sub-floor-bid",
+            "executable_snapshot_min_order_size": "5",
+            "executable_snapshot_orderbook_top_bid": "0.04",
+            "executable_snapshot_orderbook_top_ask": "0.05",
+        },
+    )
+    submitted = []
+
+    def place_sell_order(**kwargs):
+        submitted.append(kwargs)
+        return OrderResult(
+            trade_id=position.trade_id,
+            status="pending",
+            order_id="ord-global-maker-sub-floor-bid",
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", place_sell_order)
+
+    result = exit_lifecycle._execute_live_exit(
+        PortfolioState(positions=[position]),
+        position,
+        exit_context,
+        exit_intent,
+        None,
+        conn=conn,
+        execution_evidence=exit_lifecycle.ExitExecutionEvidence(),
+        is_red_force_exit=False,
+        global_sell_authority=authority,
+        hard_fact_authority=None,
+    )
+
+    assert result == "sell_placed: order=ord-global-maker-sub-floor-bid"
+    assert len(submitted) == 1
+    assert submitted[0]["best_bid"] == 0.04
+    assert submitted[0]["exact_limit_price"] == 0.05
+    assert submitted[0]["submit_order_type"] == "GTC"
+    assert position.exit_state == "sell_pending"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ? "
+        "AND event_type = 'EXIT_ORDER_POSTED'",
+        (position.trade_id,),
+    ).fetchone()[0] == 1
+
+
 def test_no_bid_retry_waits_for_fresh_positive_bid_before_release(conn):
     from src.engine.lifecycle_events import build_position_current_projection
     from src.execution.exit_lifecycle import check_pending_retries
