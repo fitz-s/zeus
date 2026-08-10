@@ -16694,6 +16694,45 @@ def test_global_taker_winner_rebinds_local_maker_rejection_without_witness_bypas
         enforce_win_rate_floor=False,
     ) == rebound
 
+    # Production shape: the selected TAKER proof is valid after rebind while
+    # every unselected Day0 sibling remains maker-only and therefore carries
+    # CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE.  JIT admission must validate the
+    # exact global winner, not let those siblings recreate a family-wide veto.
+    sibling = next(
+        row
+        for row in proofs
+        if row.direction == "buy_yes"
+        and str(row.candidate.condition_id) != binding.condition_id
+    )
+    sibling = replace(
+        sibling,
+        execution_mode_intent="MAKER",
+        rest_then_cross_policy="REST_DEFAULT",
+        trade_score=0.0,
+        passed_prefilter=False,
+        missing_reason=era._CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE,
+    )
+    taker_actuation = SimpleNamespace(
+        decision=SimpleNamespace(candidate=selected_candidate("TAKER_LIMIT"))
+    )
+    exact = era._global_actuation_exact_buy_proofs(
+        proofs=(rebound[0], sibling),
+        global_actuation=taker_actuation,
+    )
+    assert exact == rebound
+    assert era._selection_scoped_proofs(
+        proofs=exact,
+        honor_admission_rejections=False,
+        allow_global_current_state_rebind=True,
+        enforce_win_rate_floor=False,
+    ) == rebound
+    assert era._selection_scoped_proofs(
+        proofs=(sibling,),
+        honor_admission_rejections=False,
+        allow_global_current_state_rebind=True,
+        enforce_win_rate_floor=False,
+    ) == ()
+
     maker_without_current_authority = era._global_actuation_current_admission_proofs(
         proofs=(proof,),
         global_actuation=SimpleNamespace(

@@ -15110,6 +15110,44 @@ def _global_actuation_current_admission_proofs(
     )
 
 
+def _global_actuation_exact_buy_proofs(
+    *,
+    proofs: tuple["_CandidateProof", ...],
+    global_actuation: object,
+) -> tuple["_CandidateProof", ...]:
+    """Return only the BUY proof selected by the complete global auction.
+
+    Global selection has already compared every BUY/SELL/HOLD/CASH action.  JIT
+    may revalidate that exact action, but it must not run a second local-family
+    selection whose unselected siblings can veto the winner with their own
+    execution-mode authority failures.
+    """
+
+    decision = getattr(global_actuation, "decision", None)
+    candidate = getattr(decision, "candidate", None)
+    if candidate is None:
+        return ()
+    action = str(getattr(candidate, "action", "") or "").strip().upper()
+    if action != "BUY":
+        return proofs
+    side = str(getattr(candidate, "side", "") or "").strip().upper()
+    direction = {"YES": "buy_yes", "NO": "buy_no"}.get(side)
+    condition_id = str(getattr(candidate, "condition_id", "") or "").strip()
+    bin_id = str(getattr(candidate, "bin_id", "") or "").strip()
+    token_id = str(getattr(candidate, "token_id", "") or "").strip()
+    if direction is None or not all((condition_id, bin_id, token_id)):
+        return ()
+    return tuple(
+        proof
+        for proof in proofs
+        if str(getattr(proof.candidate, "condition_id", "") or "")
+        == condition_id
+        and _candidate_bin_id_from_topology(proof.candidate) == bin_id
+        and str(getattr(proof, "token_id", "") or "") == token_id
+        and str(getattr(proof, "direction", "") or "") == direction
+    )
+
+
 def _global_prepare_failure_reason(spine_result: object) -> str | None:
     if getattr(spine_result, "global_family", None) is not None:
         return None
@@ -15939,7 +15977,47 @@ def _build_event_bound_no_submit_receipt_core(
             selection_exposure_by_outcome=_selection_exposure,
         )
     )
-    if deterministic_global_proofs is not None:
+    _global_selected_candidate = getattr(
+        getattr(global_actuation, "decision", None),
+        "candidate",
+        None,
+    )
+    _global_selected_action = str(
+        getattr(_global_selected_candidate, "action", "") or ""
+    ).strip().upper()
+    if global_actuation is not None and _global_selected_action == "BUY":
+        # The complete global auction already selected one action across every
+        # BUY/SELL/HOLD/CASH alternative.  Re-run current admission only for
+        # that exact proof.  Feeding the whole local family back through this
+        # gate lets unselected maker-only siblings erase a valid TAKER winner
+        # and turns an action-specific proof wall into a batch-wide veto.
+        _global_exact_proofs = _global_actuation_exact_buy_proofs(
+            proofs=proofs,
+            global_actuation=global_actuation,
+        )
+        _selection_scope_telemetry: dict[str, object] = {}
+        _spine_entry_proofs = _selection_scoped_proofs(
+            proofs=_global_exact_proofs,
+            locked_opportunity_conn=locked_opportunity_conn,
+            held_position_conn=trade_conn,
+            strategy_policy_conn=trade_conn,
+            strategy_policy_event_type=event.event_type,
+            decision_time=decision_time,
+            allow_same_family_monitor_owned=_selection_scope_allows_same_family_monitor_owned,
+            honor_admission_rejections=False,
+            allow_global_near_settled_rebind=True,
+            allow_global_current_state_rebind=True,
+            enforce_win_rate_floor=False,
+            telemetry_out=_selection_scope_telemetry,
+            rejection_reason_by_candidate=_selection_scope_rejections,
+        )
+        proof = _spine_entry_proofs[0] if len(_spine_entry_proofs) == 1 else None
+        if proof is None:
+            _global_prepare_reason = str(
+                _selection_scope_telemetry.get("empty_reason")
+                or "SELECTION_SCOPE_EMPTY:exact_global_buy"
+            )
+    elif deterministic_global_proofs is not None:
         _selection_scope_telemetry: dict[str, object] = {}
         _spine_entry_proofs = _selection_scoped_proofs(
             proofs=proofs,
