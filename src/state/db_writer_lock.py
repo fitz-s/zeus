@@ -109,6 +109,7 @@ def connect_with_cutover_lease(
     database: str | Path,
     *,
     canonical_db_path: Path,
+    deadline_monotonic: float | None = None,
     **kwargs: Any,
 ) -> CutoverAwareConnection:
     """Open SQLite only while holding the canonical DB's shared runtime lease."""
@@ -116,13 +117,40 @@ def connect_with_cutover_lease(
     lease_path = cutover_lease_path(canonical_db_path)
     lease_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lease_path), os.O_RDWR | os.O_CREAT, 0o644)
+    lease_acquired = False
     try:
-        fcntl.flock(fd, fcntl.LOCK_SH)
+        if deadline_monotonic is None:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            lease_acquired = True
+        else:
+            while True:
+                remaining = float(deadline_monotonic) - time.monotonic()
+                if remaining <= 0.0:
+                    raise TimeoutError("CUTOVER_LEASE_DEADLINE_EXPIRED")
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    lease_acquired = True
+                    break
+                except BlockingIOError:
+                    remaining = float(deadline_monotonic) - time.monotonic()
+                    if remaining <= 0.0:
+                        raise TimeoutError("CUTOVER_LEASE_DEADLINE_EXPIRED")
+                    time.sleep(min(0.005, remaining))
+            remaining = float(deadline_monotonic) - time.monotonic()
+            if remaining <= 0.0:
+                raise TimeoutError("CUTOVER_LEASE_DEADLINE_EXPIRED")
+            prior_timeout = kwargs.get("timeout")
+            kwargs["timeout"] = (
+                remaining
+                if prior_timeout is None
+                else min(float(prior_timeout), remaining)
+            )
         conn = sqlite3.connect(
             str(database), factory=CutoverAwareConnection, **kwargs
         )
     except BaseException:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        if lease_acquired:
+            fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
         raise
     conn._cutover_fd = fd

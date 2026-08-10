@@ -23,7 +23,7 @@ import sqlite3
 import threading
 import time as _time_module
 from collections.abc import Collection, Mapping
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
@@ -1515,6 +1515,31 @@ def needs_global_sell_snapshot_reauction(
         return False
     obligation = latest_held_sell_reauction_obligation(conn, position)
     if obligation.get("schema_version") == 4:
+        unarmed_residual = (
+            isinstance(obligation.get("residual_proof"), dict)
+            and not str(obligation.get("request_id") or "").strip()
+            and not str(obligation.get("attempt_identity") or "").strip()
+            and not str(obligation.get("completion_deadline_at") or "").strip()
+        )
+        closed_market_hold = (
+            str(row[0]) == "MONITOR_REFRESHED"
+            and payload.get("semantic_event")
+            == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
+            and str(payload.get("hold_reason") or "")
+            in {
+                "MARKET_CLOSED_AWAITING_SETTLEMENT",
+                "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED",
+            }
+            and payload.get("exit_order_submitted") is False
+            and payload.get("exit_failure") is False
+        )
+        if unarmed_residual and closed_market_hold:
+            # SCOPE: only an unarmed residual placeholder copied into an exact
+            # market-closed hold. DRAIN: settlement/reconciliation owns the
+            # residual after executable venue truth no longer exists. RESET: a
+            # later executable monitor event or armed request no longer matches
+            # this gate and resumes ordinary global SELL recovery.
+            return False
         return _held_sell_reauction_recovery_due(
             obligation,
             durable_reserved=(
@@ -10631,6 +10656,7 @@ def _append_exit_retry_release_events_and_update_projection(
     observed_at: datetime,
     release_reason: str,
     release_error: str,
+    deadline_monotonic: float | None = None,
 ) -> dict:
     """Append retry-release evidence before shortening projection cooldowns."""
 
@@ -10660,6 +10686,15 @@ def _append_exit_retry_release_events_and_update_projection(
     changed = 0
     released_ids: list[str] = []
     for row in rows:
+        if (
+            deadline_monotonic is not None
+            and _time_module.monotonic() >= float(deadline_monotonic)
+        ):
+            return {
+                "released": changed,
+                "position_ids": released_ids,
+                "error": "HELD_MONITOR_PREPARATION_DEADLINE_EXPIRED",
+            }
         position_id = str(row[0] or "")
         if not position_id:
             continue
@@ -10739,6 +10774,7 @@ def _release_allocator_config_blocked_exit_retries_after_refresh(
     portfolio,
     *,
     observed_at: datetime,
+    deadline_monotonic: float | None = None,
 ) -> dict:
     """Release exits delayed only because allocator refresh had not run yet."""
 
@@ -10784,6 +10820,7 @@ def _release_allocator_config_blocked_exit_retries_after_refresh(
         observed_at=observed_at,
         release_reason="ALLOCATOR_CONFIGURED_AFTER_REFRESH",
         release_error="allocator_not_configured_released",
+        deadline_monotonic=deadline_monotonic,
     )
     changed = int(released.get("released", 0) or 0)
     position_ids = list(released.get("position_ids", []) or [])
@@ -10955,6 +10992,39 @@ def _full_book_monitor_made_canonical_progress(
     )
 
 
+@contextmanager
+def _held_monitor_preparation_deadline(
+    conn: sqlite3.Connection,
+    deadline_monotonic: float,
+):
+    """Bound pre-monitor SQLite waits and scans to the claim-clock deadline."""
+
+    remaining = float(deadline_monotonic) - _time_module.monotonic()
+    if not math.isfinite(remaining) or remaining <= 0.0:
+        raise TimeoutError("HELD_MONITOR_PREPARATION_DEADLINE_EXPIRED")
+    previous_busy_row = conn.execute("PRAGMA busy_timeout").fetchone()
+    previous_busy_ms = int(previous_busy_row[0] or 0)
+    def expired() -> int:
+        return int(_time_module.monotonic() >= float(deadline_monotonic))
+
+    def ensure_live() -> None:
+        if expired():
+            raise TimeoutError("HELD_MONITOR_PREPARATION_DEADLINE_EXPIRED")
+
+    # Every helper below can issue more than one SQL statement. A timeout based
+    # on the initial remaining budget can therefore be reused after that budget
+    # is gone. Keep lock acquisition effectively non-blocking; the progress
+    # handler bounds scans, and ensure_live fences each preparation step.
+    conn.execute("PRAGMA busy_timeout = 0")
+    conn.set_progress_handler(expired, 1_000)
+    try:
+        yield ensure_live
+        ensure_live()
+    finally:
+        conn.set_progress_handler(None, 0)
+        conn.execute(f"PRAGMA busy_timeout = {previous_busy_ms}")
+
+
 def run_exit_monitor_cycle(
     *,
     held_position_monitor_active: threading.Event,
@@ -11025,7 +11095,7 @@ def run_exit_monitor_cycle(
         mark_held_position_monitor_complete()
         return False
 
-    conn = get_connection()
+    conn = get_connection(deadline_monotonic=monitor_deadline_monotonic)
     if conn is None:
         logger.warning("exit_monitor: DB write-lock degrade — skipping cycle")
         mark_held_position_monitor_complete()
@@ -11035,35 +11105,52 @@ def run_exit_monitor_cycle(
     full_book_open_position_count = 0
     succeeded = False
     monitor_completion_marked = False
-    # FIX 2c (2026-06-20): detect a lapsed MONITOR_REFRESHED cadence (whole-book
-    # silence) on the first cycle after recovery. Detection only; the underlying
-    # daemon supervision is operator infra.
-    if target_families is None:
-        try:
-            _check_monitor_cadence_watchdog(conn, summary)
-        except Exception as _wd_exc:  # noqa: BLE001 — watchdog must never break the cycle
-            logger.warning("exit_monitor: cadence watchdog failed (non-fatal): %s", _wd_exc)
     try:
-        portfolio = load_portfolio(
-            open_positions_only=True,
-            target_families=target_families,
-        )
-        held_monitor_allocator_refresh = _refresh_global_allocator_for_held_position_monitor(
+        with _held_monitor_preparation_deadline(
             conn,
-            portfolio,
-        )
-        summary["held_monitor_allocator_refresh"] = held_monitor_allocator_refresh
-        if (
-            target_families is None
-            and held_monitor_allocator_refresh.get("configured")
-        ):
-            summary["held_monitor_allocator_retry_release"] = (
-                _release_allocator_config_blocked_exit_retries_after_refresh(
+            monitor_deadline_monotonic,
+        ) as ensure_preparation_live:
+            # FIX 2c (2026-06-20): detect a lapsed MONITOR_REFRESHED cadence
+            # on the first cycle after recovery. Detection only.
+            if target_families is None:
+                ensure_preparation_live()
+                try:
+                    _check_monitor_cadence_watchdog(conn, summary)
+                except Exception as _wd_exc:  # noqa: BLE001
+                    logger.warning(
+                        "exit_monitor: cadence watchdog failed (non-fatal): %s",
+                        _wd_exc,
+                    )
+            ensure_preparation_live()
+            portfolio = load_portfolio(
+                open_positions_only=True,
+                target_families=target_families,
+                connection=conn,
+                deadline_monotonic=monitor_deadline_monotonic,
+            )
+            ensure_preparation_live()
+            held_monitor_allocator_refresh = (
+                _refresh_global_allocator_for_held_position_monitor(
                     conn,
                     portfolio,
-                    observed_at=datetime.now(timezone.utc),
                 )
             )
+            summary["held_monitor_allocator_refresh"] = (
+                held_monitor_allocator_refresh
+            )
+            if (
+                target_families is None
+                and held_monitor_allocator_refresh.get("configured")
+            ):
+                ensure_preparation_live()
+                summary["held_monitor_allocator_retry_release"] = (
+                    _release_allocator_config_blocked_exit_retries_after_refresh(
+                        conn,
+                        portfolio,
+                        observed_at=datetime.now(timezone.utc),
+                        deadline_monotonic=monitor_deadline_monotonic,
+                    )
+                )
         monitor_portfolio = _portfolio_for_target_families(portfolio, target_families)
         if target_families is None:
             full_book_open_position_count = len(monitor_portfolio.positions)

@@ -1190,6 +1190,17 @@ def test_monitoring_phase_serves_durable_debt_before_bulk_prefetch(monkeypatch):
             events.append(("singular", token_id))
             return None
 
+        def get_held_orderbook_snapshots_hard_deadline(
+            self,
+            token_ids,
+            *,
+            timeout_seconds,
+        ):
+            events.append(
+                ("bounded", tuple(token_ids), timeout_seconds)
+            )
+            return {}
+
         def get_orderbook_snapshots(self, token_ids):
             events.append(("bulk", tuple(token_ids)))
             clock[0] = 76.0
@@ -1255,9 +1266,10 @@ def test_monitoring_phase_serves_durable_debt_before_bulk_prefetch(monkeypatch):
     assert "fairness-token-0" not in bulk_tokens
     from src.engine.monitor_refresh import prefetched_monitor_orderbook
 
-    assert [event for event in events if event[0] == "singular"] == [
-        ("singular", "fairness-token-0")
+    assert [event[:2] for event in events if event[0] == "bounded"] == [
+        ("bounded", ("fairness-token-0",))
     ]
+    assert [event for event in events if event[0] == "singular"] == []
     assert prefetched_monitor_orderbook(clob, "fairness-token-16") == local_books[
         "fairness-token-16"
     ]
@@ -11984,6 +11996,39 @@ def test_held_monitor_deadline_book_miss_never_falls_back_to_unbounded_quote(
     assert monitor_refresh.monitor_quote_refresh(None, clob, position) is None
 
 
+def test_held_monitor_deadline_requires_bounded_api_for_every_adapter(
+    monkeypatch,
+):
+    from src.engine import monitor_refresh
+
+    position = _make_position(
+        trade_id="deadline-generic-adapter",
+        token_id="deadline-generic-adapter-token",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+    )
+
+    class GenericAdapter:
+        def get_orderbook(self, _token_id):
+            pytest.fail("deadline-bound adapter must not use unbounded book API")
+
+        def get_best_bid_ask(self, _token_id):
+            pytest.fail("deadline-bound adapter must not use unbounded quote API")
+
+    monkeypatch.setattr(monitor_refresh.time, "monotonic", lambda: 3.0)
+    setattr(position, "_zeus_held_monitor_deadline_monotonic", 10.0)
+
+    assert (
+        monitor_refresh.monitor_quote_refresh(
+            None,
+            GenericAdapter(),
+            position,
+        )
+        is None
+    )
+
+
 def test_polymarket_book_http_phases_are_clamped_to_remaining_budget(monkeypatch):
     from src.data.polymarket_client import PolymarketClient
 
@@ -17946,8 +17991,13 @@ def test_exit_monitor_budget_starts_at_claim_and_wrapper_forwards_remaining(
     source = inspect.getsource(run_exit_monitor_cycle)
     claim_offset = source.index("held_position_monitor_active.set()")
     deadline_offset = source.index("monitor_deadline_monotonic =")
-    connection_offset = source.index("conn = get_connection()")
+    connection_offset = source.index(
+        "conn = get_connection(deadline_monotonic=monitor_deadline_monotonic)"
+    )
     assert claim_offset < deadline_offset < connection_offset
+    preparation_offset = source.index("with _held_monitor_preparation_deadline(")
+    portfolio_offset = source.index("portfolio = load_portfolio(")
+    assert connection_offset < preparation_offset < portfolio_offset
 
     captured = {}
 
@@ -18053,6 +18103,327 @@ def test_pending_exit_retry_quote_uses_deadline_aware_bid_only_truth(monkeypatch
     assert refreshed.best_ask is None
     assert refreshed.bid_size == pytest.approx(17.0)
     assert refreshed.bid_ladder == ((0.21, 17.0),)
+
+
+def test_monitor_preparation_sql_deadline_interrupts_and_restores(monkeypatch):
+    from src.execution import exit_lifecycle
+
+    clock = [10.0]
+
+    class Result:
+        def __init__(self, row=None):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class Conn:
+        def __init__(self):
+            self.busy_ms = 30_000
+            self.handler = None
+
+        def execute(self, sql):
+            if sql == "PRAGMA busy_timeout":
+                return Result((self.busy_ms,))
+            if sql.startswith("PRAGMA busy_timeout = "):
+                self.busy_ms = int(sql.rsplit(" ", 1)[-1])
+                return Result()
+            raise AssertionError(sql)
+
+        def set_progress_handler(self, handler, _opcodes):
+            self.handler = handler
+
+    conn = Conn()
+    monkeypatch.setattr(exit_lifecycle._time_module, "monotonic", lambda: clock[0])
+
+    with pytest.raises(
+        TimeoutError,
+        match="HELD_MONITOR_PREPARATION_DEADLINE_EXPIRED",
+    ):
+        with exit_lifecycle._held_monitor_preparation_deadline(conn, 12.0) as ensure_live:
+            assert conn.busy_ms == 0
+            assert conn.handler() == 0
+            clock[0] = 12.1
+            assert conn.handler() == 1
+            ensure_live()
+
+    assert conn.handler is None
+    assert conn.busy_ms == 30_000
+
+
+def test_allocator_retry_release_stops_between_positions_at_monitor_deadline(
+    monkeypatch,
+):
+    from src.execution import exit_lifecycle
+
+    clock = [0.0]
+    savepoint_attempts = []
+
+    class Result:
+        rowcount = 0
+
+        def fetchall(self):
+            return [
+                ("p1", "pending_exit", "center_buy", "", 1, "later"),
+                ("p2", "pending_exit", "center_buy", "", 1, "later"),
+            ]
+
+    class Conn:
+        def execute(self, sql, _params=()):
+            if "SELECT position_id" in sql:
+                return Result()
+            if sql == "SAVEPOINT exit_retry_release":
+                savepoint_attempts.append(clock[0])
+                clock[0] = 0.6
+                raise sqlite3.OperationalError("database is locked")
+            return Result()
+
+    monkeypatch.setattr(exit_lifecycle._time_module, "monotonic", lambda: clock[0])
+
+    result = exit_lifecycle._append_exit_retry_release_events_and_update_projection(
+        Conn(),
+        ["p1", "p2"],
+        observed_at=datetime(2026, 8, 10, tzinfo=timezone.utc),
+        release_reason="ALLOCATOR_CONFIGURED_AFTER_REFRESH",
+        release_error="allocator_not_configured_released",
+        deadline_monotonic=0.5,
+    )
+
+    assert savepoint_attempts == [0.0]
+    assert result["error"] == "HELD_MONITOR_PREPARATION_DEADLINE_EXPIRED"
+
+
+def test_monitor_connection_busy_wait_uses_claim_remaining(monkeypatch):
+    from src.engine import cycle_runner
+
+    observed = {}
+
+    class Result:
+        def fetchall(self):
+            return []
+
+    class Conn:
+        def set_progress_handler(self, _handler, _opcodes):
+            return None
+
+        def execute(self, _sql, _params=()):
+            return Result()
+
+    def connect(_path, *, write_class, busy_timeout_ms, deadline_monotonic):
+        observed.update(
+            write_class=write_class,
+            busy_timeout_ms=busy_timeout_ms,
+            deadline_monotonic=deadline_monotonic,
+        )
+        return Conn()
+
+    monkeypatch.setattr(cycle_runner, "connect_or_degrade", connect)
+    monkeypatch.setattr(cycle_runner.time, "monotonic", lambda: 2.0)
+
+    assert cycle_runner.get_connection(deadline_monotonic=5.0) is not None
+    assert observed == {
+        "write_class": "live",
+        "busy_timeout_ms": 3_000,
+        "deadline_monotonic": 5.0,
+    }
+
+
+def test_monitor_connection_crossing_deadline_never_starts_attach(monkeypatch):
+    from src.engine import cycle_runner
+
+    clock = [0.0]
+    events = []
+
+    class Conn:
+        def __init__(self):
+            self.closed = False
+
+        def execute(self, sql, _params=()):
+            events.append(sql)
+            raise AssertionError("expired connection must not start PRAGMA/ATTACH")
+
+        def close(self):
+            self.closed = True
+
+    conn = Conn()
+
+    def connect(*_args, **_kwargs):
+        clock[0] = 2.0
+        return conn
+
+    monkeypatch.setattr(cycle_runner, "connect_or_degrade", connect)
+    monkeypatch.setattr(cycle_runner.time, "monotonic", lambda: clock[0])
+
+    assert cycle_runner.get_connection(deadline_monotonic=1.0) is None
+    assert events == []
+    assert conn.closed is True
+
+
+def test_monitor_connection_reclamps_attach_after_prior_sql_spends_budget(
+    monkeypatch,
+):
+    from src.engine import cycle_runner
+
+    clock = [0.0]
+    busy_values = []
+
+    class Result:
+        def fetchall(self):
+            clock[0] = 0.9
+            return []
+
+    class Conn:
+        def set_progress_handler(self, _handler, _opcodes):
+            return None
+
+        def execute(self, sql, _params=()):
+            if sql.startswith("PRAGMA busy_timeout = "):
+                busy_values.append(int(sql.rsplit(" ", 1)[-1]))
+                return Result()
+            if sql == "PRAGMA database_list":
+                return Result()
+            return Result()
+
+    monkeypatch.setattr(
+        cycle_runner,
+        "connect_or_degrade",
+        lambda *_args, **_kwargs: Conn(),
+    )
+    monkeypatch.setattr(cycle_runner.time, "monotonic", lambda: clock[0])
+
+    assert cycle_runner.get_connection(deadline_monotonic=1.0) is not None
+    assert busy_values[0] == 1_000
+    assert busy_values[1:] == [100, 100]
+
+
+def test_monitor_portfolio_reuses_deadline_connection_without_closing(
+    monkeypatch,
+    tmp_path,
+):
+    from src.state import db, portfolio
+
+    class Result:
+        def fetchall(self):
+            return []
+
+    class Conn:
+        def execute(self, sql):
+            assert sql == "PRAGMA database_list"
+            return Result()
+
+        def close(self):
+            pytest.fail("caller-owned monitor connection must remain open")
+
+    monkeypatch.setattr(
+        db,
+        "query_portfolio_loader_view",
+        lambda *_args, **_kwargs: {
+            "status": "empty",
+            "positions": [],
+        },
+    )
+
+    loaded = portfolio.load_portfolio(
+        tmp_path / "positions-live.json",
+        open_positions_only=True,
+        connection=Conn(),
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert loaded.authority == "canonical_db"
+    assert loaded.positions == []
+
+
+def test_closed_market_unarmed_residual_is_not_global_sell_debt(monkeypatch):
+    from src.execution import exit_lifecycle
+
+    position = _make_position(
+        trade_id="closed-residual-placeholder",
+        state="day0_window",
+        chain_state="synced",
+    )
+    obligation = {
+        "schema_version": 4,
+        "scope_identity": "closed-scope",
+        "generation": "closed-generation",
+        "position_id": position.trade_id,
+        "held_token_id": position.token_id,
+        "residual_proof": {"command_id": "filled-exit-command"},
+    }
+    payload = {
+        "semantic_event": "MARKET_CLOSED_HOLD_TO_SETTLEMENT",
+        "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
+        "exit_order_submitted": False,
+        "exit_failure": False,
+        "held_sell_reauction_obligation": obligation,
+    }
+
+    class Result:
+        def fetchone(self):
+            return ("MONITOR_REFRESHED", json.dumps(payload))
+
+    class Conn:
+        def execute(self, _sql, _params=()):
+            return Result()
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "latest_held_sell_reauction_obligation",
+        lambda *_args, **_kwargs: obligation,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_held_sell_reauction_recovery_due",
+        lambda *_args, **_kwargs: pytest.fail(
+            "closed unarmed residual must drain through settlement"
+        ),
+    )
+
+    assert exit_lifecycle.needs_global_sell_snapshot_reauction(
+        position,
+        Conn(),
+    ) is False
+
+    payload["hold_reason"] = "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED"
+    assert exit_lifecycle.needs_global_sell_snapshot_reauction(
+        position,
+        Conn(),
+    ) is False
+
+    ordinary_payload = dict(payload)
+    ordinary_payload.pop("semantic_event")
+    ordinary_payload.pop("hold_reason")
+    payload.clear()
+    payload.update(ordinary_payload)
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_held_sell_reauction_recovery_due",
+        lambda *_args, **_kwargs: True,
+    )
+    assert exit_lifecycle.needs_global_sell_snapshot_reauction(
+        position,
+        Conn(),
+    ) is True
+
+    payload.update(
+        semantic_event="MARKET_CLOSED_HOLD_TO_SETTLEMENT",
+        hold_reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+    )
+    armed = {
+        **obligation,
+        "request_id": "armed-request",
+        "attempt_identity": "armed-attempt",
+        "completion_deadline_at": "2026-08-10T18:00:00+00:00",
+    }
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "latest_held_sell_reauction_obligation",
+        lambda *_args, **_kwargs: armed,
+    )
+    assert exit_lifecycle.needs_global_sell_snapshot_reauction(
+        position,
+        Conn(),
+    ) is True
 
 
 def test_expired_monitor_deadline_defers_global_sell_debt_without_refresh(

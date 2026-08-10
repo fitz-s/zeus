@@ -20,6 +20,7 @@ import math
 import os
 import sqlite3
 import tempfile
+import time
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -2099,10 +2100,17 @@ def load_portfolio(
     *,
     open_positions_only: bool = False,
     target_families: Collection[tuple[str, str, str]] | None = None,
+    connection: sqlite3.Connection | None = None,
+    deadline_monotonic: float | None = None,
 ) -> PortfolioState:
     """Load canonical portfolio truth, optionally limited to runtime-open rows."""
     if target_families is not None and not open_positions_only:
         raise ValueError("target_families requires open_positions_only=True")
+    if (
+        deadline_monotonic is not None
+        and time.monotonic() >= float(deadline_monotonic)
+    ):
+        raise TimeoutError("PORTFOLIO_LOAD_DEADLINE_EXPIRED")
     path = path or POSITIONS_PATH
 
     current_mode = get_mode()
@@ -2132,15 +2140,19 @@ def load_portfolio(
     elif path == POSITIONS_PATH:
         mode_override = current_mode
 
+    owns_connection = connection is None
     try:
         # v4 plan §AX3: portfolio loader runs in the live cycle path.
-        trade_db = path.parent / "zeus_trades.db"
-        if trade_db.exists():
-            conn = get_connection(trade_db, write_class="live")
-        elif mode_override is not None:
-            conn = get_trade_connection_with_world(write_class="live")
+        if connection is not None:
+            conn = connection
         else:
-            conn = get_connection(path.parent / "zeus.db", write_class="live")
+            trade_db = path.parent / "zeus_trades.db"
+            if trade_db.exists():
+                conn = get_connection(trade_db, write_class="live")
+            elif mode_override is not None:
+                conn = get_trade_connection_with_world(write_class="live")
+            else:
+                conn = get_connection(path.parent / "zeus.db", write_class="live")
     except Exception:
         logger.error(
             "load_portfolio DB connection failed; returning empty portfolio (entries suppressed this cycle)",
@@ -2196,7 +2208,8 @@ def load_portfolio(
                 )
                 settlement_rows = []
     finally:
-        conn.close()
+        if owns_connection:
+            conn.close()
 
     policy = choose_portfolio_truth_source(snapshot.get("status"))
     if policy.source != "canonical_db":
@@ -2237,6 +2250,11 @@ def load_portfolio(
     # it never hides them: the log line carries the row identity and error.
     positions = []
     for row in snapshot.get("positions", []):
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        ):
+            raise TimeoutError("PORTFOLIO_MATERIALIZATION_DEADLINE_EXPIRED")
         try:
             positions.append(
                 _position_from_projection_row(row, current_mode=current_mode)

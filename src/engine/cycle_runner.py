@@ -8,8 +8,10 @@ surface stable.
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
 import sys
+import time
 from datetime import datetime, timezone
 
 from src.config import STATE_DIR, cities_by_name, get_mode, settings
@@ -63,7 +65,7 @@ from src.state.lifecycle_manager import TERMINAL_STATES, is_terminal_state
 # returns None instead of crashing the daemon. Tests monkeypatch this alias to
 # simulate both the happy path (returns Connection) and the lock-degrade path
 # (returns None).  Any other OperationalError still propagates.
-def get_connection():
+def get_connection(*, deadline_monotonic: float | None = None):
     """T2G: Acquire trade+world DB connection via connect_or_degrade.
 
     Returns a live Connection on success, or None if the DB is transiently
@@ -73,20 +75,71 @@ def get_connection():
     flock topology routes this through the LIVE writer flock once Phase 1
     retrofits land.
     """
-    conn = connect_or_degrade(_zeus_trade_db_path(), write_class="live")
+    busy_timeout_ms = None
+    if deadline_monotonic is not None:
+        remaining_seconds = float(deadline_monotonic) - time.monotonic()
+        if not math.isfinite(remaining_seconds) or remaining_seconds <= 0.0:
+            return None
+        busy_timeout_ms = max(1, math.ceil(remaining_seconds * 1000.0))
+    conn = connect_or_degrade(
+        _zeus_trade_db_path(),
+        write_class="live",
+        busy_timeout_ms=busy_timeout_ms,
+        deadline_monotonic=deadline_monotonic,
+    )
     if conn is None:
         return None
+    deadline_exhausted = False
+
+    def _remaining_deadline_ms() -> int | None:
+        if deadline_monotonic is None:
+            return None
+        remaining = float(deadline_monotonic) - time.monotonic()
+        if not math.isfinite(remaining) or remaining <= 0.0:
+            raise TimeoutError("HELD_MONITOR_CONNECTION_DEADLINE_EXPIRED")
+        return max(1, math.ceil(remaining * 1000.0))
+
+    progress_handler_installed = False
     # ATTACH world schema (mirrors get_trade_connection_with_world logic).
     try:
+        remaining_ms = _remaining_deadline_ms()
+        if remaining_ms is not None:
+            conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
+            conn.set_progress_handler(
+                lambda: int(
+                    time.monotonic() >= float(deadline_monotonic)
+                ),
+                1_000,
+            )
+            progress_handler_installed = True
         attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
         if "world" not in attached:
+            remaining_ms = _remaining_deadline_ms()
+            conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
             conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
         # K1 (2026-05-11): ATTACH forecasts DB so evaluator cross-DB joins work.
         if "forecasts" not in attached:
             from src.state.db import ZEUS_FORECASTS_DB_PATH
+            remaining_ms = _remaining_deadline_ms()
+            conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
             conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+        _remaining_deadline_ms()
+    except TimeoutError:
+        deadline_exhausted = True
     except sqlite3.OperationalError as exc:
-        logger.warning("ATTACH world/forecasts failed (non-fatal): %r", exc)
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        ):
+            deadline_exhausted = True
+        else:
+            logger.warning("ATTACH world/forecasts failed (non-fatal): %r", exc)
+    finally:
+        if progress_handler_installed:
+            conn.set_progress_handler(None, 0)
+    if deadline_exhausted:
+        conn.close()
+        return None
     return conn
 from src.state.chain_reconciliation import ChainPosition, reconcile as reconcile_with_chain
 from src.state.decision_chain import CycleArtifact, MonitorResult, NoTradeCase, store_artifact

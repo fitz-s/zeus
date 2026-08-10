@@ -3000,11 +3000,18 @@ def monitor_quote_refresh(
     try:
         if book is None:
             deadline = getattr(pos, _HELD_MONITOR_DEADLINE_ATTR, None)
-            if deadline is not None and isinstance(clob, PolymarketClient):
+            if deadline is not None:
                 remaining = float(deadline) - time.monotonic()
                 if remaining <= 0.0:
                     return None
-                book = clob.get_held_orderbook_snapshots_hard_deadline(
+                hard_deadline_books = getattr(
+                    clob,
+                    "get_held_orderbook_snapshots_hard_deadline",
+                    None,
+                )
+                if not callable(hard_deadline_books):
+                    return None
+                book = hard_deadline_books(
                     [tid],
                     timeout_seconds=remaining,
                 ).get(tid)

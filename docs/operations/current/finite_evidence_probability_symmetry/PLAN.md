@@ -6,6 +6,21 @@ Status: active
 
 ## 2026-08-10 Held-monitor deadline begins at ownership claim
 
+Post-deploy verification reopened this slice: the first deadline propagation
+still left DB acquisition, canonical portfolio materialization, and allocator
+preparation outside the absolute claim clock, while non-production CLOB
+adapters could bypass the hard-deadline book API.  The same absolute deadline
+now bounds connection busy wait, preparation SQL progress, portfolio row
+materialization, and every adapter's held-book read.  A separate canonical
+audit also proved that an unarmed V4 residual placeholder copied into an exact
+market-closed hold was being misclassified as immediately due reauction debt;
+that state now drains only through settlement/reconciliation unless a later
+executable monitor event or armed request resets it.
+
+The claim clock is one end-to-end budget across cutover-lease acquisition,
+connection PRAGMAs, ATTACH, preparation scans, and per-position retry-release
+iteration. No blocking layer may reinterpret it as a fresh local timeout.
+
 Production evidence showed a held-monitor pass retaining its single-owner claim
 well past the nominal 75-second budget while command recovery performed
 unbounded decision-artifact reads.  Recovery/review now admits decision-log
