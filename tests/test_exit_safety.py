@@ -1651,6 +1651,115 @@ def test_madrid_partial_exit_realized_pnl_is_canonical_and_settlement_adds_resid
     assert settled["realized_pnl_usd"] == pytest.approx(expected_pnl)
 
 
+def test_settlement_accepts_chain_confirmed_partial_residual_over_stale_runtime(conn):
+    """Chain may refine residual precision, not invent missing exit economics."""
+    from src.engine.lifecycle_events import (
+        build_chain_size_corrected_canonical_write,
+        build_position_current_projection,
+    )
+    from src.execution.harvester import _settle_positions
+    from src.state.db import append_many_and_project
+    from src.state.portfolio import PortfolioState, Position
+    from src.state.projection import upsert_position_current
+
+    stale_runtime = Position(
+        trade_id="pos-chain-confirmed-partial-residual",
+        market_id="mkt-chain-confirmed-partial-residual",
+        city="Guangzhou",
+        cluster="asia",
+        target_date="2026-08-10",
+        bin_label="35C",
+        direction="buy_yes",
+        strategy_key="center_buy",
+        size_usd=5.0,
+        entry_price=0.50,
+        shares=10.0,
+        cost_basis_usd=5.0,
+        state="holding",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-chain-confirmed-partial-residual",
+        env="live",
+        last_monitor_at=_NOW.isoformat(),
+    )
+    upsert_position_current(
+        conn, build_position_current_projection(stale_runtime)
+    )
+    conn.execute(
+        """INSERT INTO position_events (
+               event_id, position_id, event_version, sequence_no, event_type,
+               occurred_at, phase_before, phase_after, strategy_key,
+               source_module, payload_json, order_id, caused_by, env
+           ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, 'pending_exit', 'active',
+                     'center_buy', 'tests.test_exit_safety', ?, ?,
+                     'partial_exit_fill', 'live')""",
+        (
+            f"{stale_runtime.trade_id}:partial",
+            stale_runtime.trade_id,
+            _NOW.isoformat(),
+            json.dumps(
+                {
+                    "semantic_event": "CAPITAL_REDUCTION_FILLED",
+                    "economic_fill_identity": "chain-confirmed-partial-fill",
+                    "filled_shares": "9.9955",
+                    "filled_notional_usd": "5.9973",
+                    "allocated_cost_basis_usd": "4.99775",
+                    "realized_pnl_delta_usd": "0.99955",
+                    "remaining_shares": "0.0045",
+                    "remaining_cost_basis_usd": "0.00225",
+                    "fill_price": "0.6",
+                    "order_id": "ord-chain-confirmed-partial",
+                },
+                sort_keys=True,
+            ),
+            "ord-chain-confirmed-partial",
+        ),
+    )
+
+    canonical = replace(
+        stale_runtime,
+        shares=0.004544,
+        chain_shares=0.004544,
+        size_usd=0.002272,
+        cost_basis_usd=0.002272,
+        chain_cost_basis_usd=0.002272,
+        chain_state="synced",
+        state="pending_exit",
+        chain_verified_at=(_NOW + timedelta(seconds=1)).isoformat(),
+    )
+    events, projection = build_chain_size_corrected_canonical_write(
+        canonical,
+        local_shares_before=10.0,
+        sequence_no=2,
+        phase_after="pending_exit",
+        source_module="src.state.chain_reconciliation",
+    )
+    append_many_and_project(conn, events, projection)
+
+    portfolio = PortfolioState(positions=[stale_runtime])
+    assert _settle_positions(
+        conn,
+        portfolio,
+        "Guangzhou",
+        "2026-08-10",
+        "35C",
+        settlement_condition_id="condition-chain-confirmed-partial-residual",
+        settlement_condition_yes_won=False,
+    ) == 1
+
+    settled = conn.execute(
+        """SELECT phase, shares, cost_basis_usd, realized_pnl_usd
+             FROM position_current
+            WHERE position_id = ?""",
+        (stale_runtime.trade_id,),
+    ).fetchone()
+    assert settled["phase"] == "settled"
+    assert settled["shares"] == pytest.approx(0.004544)
+    assert settled["cost_basis_usd"] == pytest.approx(0.002272)
+    assert settled["realized_pnl_usd"] == pytest.approx(0.997278)
+    assert portfolio.positions == []
+
+
 def test_partial_exit_economic_fill_fold_dedups_tx_and_edli_aliases(conn):
     from src.state.fill_dedup import economic_exit_fills_for_position
     from src.state.venue_command_repo import append_trade_fact

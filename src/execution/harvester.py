@@ -369,8 +369,16 @@ def _canonical_partial_exit_realized_pnl(conn, position_id: str) -> Decimal:
 
 def _canonical_partial_exit_residual_basis(
     conn, position_id: str
-) -> tuple[Decimal, Decimal] | None:
-    """Return exact residual shares/cost from the latest canonical fill."""
+) -> tuple[Decimal, Decimal, bool] | None:
+    """Return residual economics and whether Chain refreshed stale runtime.
+
+    A partial-fill event owns realized economics.  A later canonical
+    ``CHAIN_SIZE_CORRECTED`` may only refine that event's residual precision;
+    it may not explain a materially different balance because that would hide
+    an unaccounted fill or transfer.  The correction must also still be the
+    current canonical projection before it can supersede a stale portfolio
+    snapshot used by settlement.
+    """
 
     from src.state.fill_dedup import (
         PartialExitEconomicDebtError,
@@ -382,7 +390,7 @@ def _canonical_partial_exit_residual_basis(
 
     row = conn.execute(
         """
-        SELECT event_id, payload_json
+        SELECT event_id, sequence_no, payload_json
           FROM position_events
          WHERE position_id = ?
            AND caused_by IN ('partial_exit_fill', 'partial_exit_economics_repair')
@@ -395,10 +403,11 @@ def _canonical_partial_exit_residual_basis(
         return None
     try:
         payload = json.loads(str(row["payload_json"] or "{}"))
+        raw_shares = payload["remaining_shares"]
         raw_cost = payload.get("remaining_cost_basis_usd")
         if raw_cost is None:
             return None
-        shares = Decimal(str(payload["remaining_shares"]))
+        shares = Decimal(str(raw_shares))
         cost = Decimal(str(raw_cost))
     except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
         raise PartialExitEconomicDebtError(
@@ -410,7 +419,100 @@ def _canonical_partial_exit_residual_basis(
             "partial EXIT residual basis invalid: "
             f"position_id={position_id} event_id={row['event_id']}"
         )
-    return shares, cost
+    correction_row = conn.execute(
+        """
+        SELECT event_id, payload_json
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'CHAIN_SIZE_CORRECTED'
+           AND sequence_no > ?
+           AND json_extract(payload_json, '$.source') = 'chain_reconciliation'
+           AND json_extract(payload_json, '$.reason') = 'chain_size_corrected'
+         ORDER BY sequence_no DESC, event_id DESC
+         LIMIT 1
+        """,
+        (position_id, int(row["sequence_no"])),
+    ).fetchone()
+    if correction_row is None:
+        return shares, cost, False
+    try:
+        correction = json.loads(str(correction_row["payload_json"] or "{}"))
+        corrected_shares = Decimal(str(correction["shares_after"]))
+        corrected_cost = Decimal(str(correction["cost_basis_usd"]))
+    except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+        raise PartialExitEconomicDebtError(
+            "partial EXIT chain correction malformed: "
+            f"position_id={position_id} event_id={correction_row['event_id']}"
+        ) from exc
+    if correction.get("chain_state") != "synced":
+        raise PartialExitEconomicDebtError(
+            "partial EXIT chain correction is not synced: "
+            f"position_id={position_id} event_id={correction_row['event_id']} "
+            f"chain_state={correction.get('chain_state')}"
+        )
+    if (
+        not corrected_shares.is_finite()
+        or not corrected_cost.is_finite()
+        or corrected_shares < 0
+        or corrected_cost < 0
+    ):
+        raise PartialExitEconomicDebtError(
+            "partial EXIT chain correction invalid: "
+            f"position_id={position_id} event_id={correction_row['event_id']}"
+        )
+
+    if shares == 0:
+        residual_matches = corrected_shares == 0
+    else:
+        share_quantum = Decimal(1).scaleb(shares.as_tuple().exponent)
+        tolerance = min(Decimal("0.0001"), share_quantum / 2)
+        residual_matches = abs(corrected_shares - shares) <= tolerance
+    if not residual_matches:
+        raise PartialExitEconomicDebtError(
+            "partial EXIT chain correction changes economic residual: "
+            f"position_id={position_id} partial={shares} chain={corrected_shares}"
+        )
+
+    if corrected_shares == 0:
+        cost_matches = cost == 0 and corrected_cost == 0
+    else:
+        expected_cost = corrected_shares * (cost / shares)
+        cost_tolerance = max(
+            Decimal("0.00000001"), abs(expected_cost) * Decimal("0.000001")
+        )
+        cost_matches = abs(corrected_cost - expected_cost) <= cost_tolerance
+    if not cost_matches:
+        raise PartialExitEconomicDebtError(
+            "partial EXIT chain correction changes residual unit cost: "
+            f"position_id={position_id} partial_shares={shares} "
+            f"partial_cost={cost} chain_shares={corrected_shares} "
+            f"chain_cost={corrected_cost}"
+        )
+
+    current_row = conn.execute(
+        """
+        SELECT shares, cost_basis_usd
+          FROM position_current
+         WHERE position_id = ?
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    if current_row is None:
+        return shares, cost, False
+    try:
+        current_shares = Decimal(str(current_row["shares"]))
+        current_cost = Decimal(str(current_row["cost_basis_usd"]))
+    except (TypeError, ValueError, ArithmeticError):
+        return shares, cost, False
+    if current_shares != corrected_shares or current_cost != corrected_cost:
+        raise PartialExitEconomicDebtError(
+            "partial EXIT chain correction conflicts with canonical projection: "
+            f"position_id={position_id} chain_shares={corrected_shares} "
+            f"current_shares={current_shares} chain_cost={corrected_cost} "
+            f"current_cost={current_cost}"
+        )
+    return corrected_shares, corrected_cost, True
 
 
 def _repair_legacy_partial_exit_economics(conn, pos) -> None:
@@ -2795,13 +2897,27 @@ def _settle_positions(
                 conn, pos.trade_id
             )
             if residual_basis is not None:
-                exact_residual_shares, exact_residual_cost = residual_basis
-                if exact_residual_shares != Decimal(str(shares)):
+                (
+                    exact_residual_shares,
+                    exact_residual_cost,
+                    chain_refreshed_runtime,
+                ) = residual_basis
+                if (
+                    exact_residual_shares != Decimal(str(shares))
+                    and not chain_refreshed_runtime
+                ):
                     raise PartialExitEconomicDebtError(
                         "partial EXIT residual shares conflict with settlement exposure: "
                         f"position_id={pos.trade_id} canonical={exact_residual_shares} "
                         f"settlement={shares}"
                     )
+                if chain_refreshed_runtime:
+                    shares = float(exact_residual_shares)
+                    pos.shares = shares
+                    pos.chain_shares = shares
+                    pos.cost_basis_usd = float(exact_residual_cost)
+                    pos.chain_cost_basis_usd = float(exact_residual_cost)
+                    pos.size_usd = float(exact_residual_cost)
                 settlement_cost_basis = exact_residual_cost
         except PartialExitEconomicDebtError:
             conn.execute("ROLLBACK TO SAVEPOINT partial_exit_settlement_economics")
