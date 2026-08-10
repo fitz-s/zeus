@@ -427,6 +427,7 @@ def _global_sell_candidate(
     shares="10",
     fee="0",
     min_tick="0.001",
+    min_order="1",
     quote_ttl_seconds=1,
     probability_functional="LOWER_CVAR_PARAMETER_DRAWS",
     exit_authority_status="not_applicable",
@@ -451,7 +452,7 @@ def _global_sell_candidate(
         ),
         fee_model=FeeModel(fee_rate=Decimal(fee)),
         min_tick=Decimal(min_tick),
-        min_order_size=Decimal("1"),
+        min_order_size=Decimal(min_order),
         quote_ttl=timedelta(seconds=quote_ttl_seconds),
     )
     (
@@ -3489,8 +3490,9 @@ def test_global_single_order_taker_sell_is_capped_by_bid_depth():
     decision = _global_select((sell,))
 
     assert decision.candidate is sell
-    assert decision.shares == Decimal("9.99")
-    assert decision.cash_proceeds_usd == Decimal("4.995")
+    assert decision.shares == Decimal("9.00")
+    assert sell.held_shares - decision.shares == Decimal("1.00")
+    assert decision.cash_proceeds_usd == Decimal("4.500")
     assert decision.robust_delta_log_wealth > 0.0
     assert decision.robust_ev_usd > 0.0
 
@@ -3544,6 +3546,36 @@ def test_global_single_order_sell_selects_interior_capital_optimal_reduction():
     assert decision.robust_ev_usd > 0.0
 
 
+def test_global_single_order_sell_never_strands_subminimum_remainder():
+    sell = _global_sell_candidate(
+        candidate_id="sell-no-dust-remainder",
+        family="sell-no-dust-remainder-family",
+        side="YES",
+        held_q=0.49,
+        bids=(("0.58", "15"),),
+        shares="15",
+        min_order="5",
+    )
+
+    decision = _global_select(
+        (sell,),
+        floor="100",
+        ceiling="500",
+        candidate_portfolio_endowment_resolver=lambda _candidate: (
+            S.CandidatePortfolioEndowment(
+                loss_wealth_floor_usd=Decimal("114.40"),
+                win_wealth_floor_usd=Decimal("115"),
+                current_token_shares=Decimal("15"),
+                ledger_snapshot_id=sell.ledger_snapshot_id,
+            )
+        ),
+    )
+
+    assert decision.candidate is sell
+    remainder = sell.held_shares - decision.shares
+    assert remainder == 0 or remainder >= Decimal("5")
+
+
 @pytest.mark.parametrize(
     ("held_q", "bids", "shares", "fee", "floor", "ceiling"),
     (
@@ -3588,6 +3620,10 @@ def test_global_single_order_sell_matches_every_cent_grid_oracle(
     oracle = None
     size = Decimal("1")
     while size <= max_shares:
+        remainder = sell.held_shares - size
+        if remainder != 0 and remainder < curve.min_order_size:
+            size += Decimal("0.01")
+            continue
         proceeds, expected_fill_price, limit_price = curve.proceeds_for_shares(size)
         loss_at_risk = size - proceeds
         loss_after = loss_baseline - size + proceeds

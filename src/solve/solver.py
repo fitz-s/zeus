@@ -3951,6 +3951,11 @@ class GlobalSingleOrderDecision:
                 self.no_trade_reason is not None
                 or self.shares <= 0
                 or self.shares > self.candidate.held_shares
+                or (
+                    self.candidate.held_shares - self.shares != 0
+                    and self.candidate.held_shares - self.shares
+                    < self.candidate.economic_sell_curve.min_order_size
+                )
                 or self.cost_usd <= 0
                 or self.cash_proceeds_usd <= 0
                 or self.cash_proceeds_usd != self.shares - self.cost_usd
@@ -6042,6 +6047,12 @@ def _score_global_single_order_sell(
     # stationary point.  Probe the adjacent venue-cent sizes around each exact
     # point; this is the complete discrete feasible set, not a size heuristic.
     probes = {min_shares, max_shares}
+    # A partial reduction must leave a venue-marketable remainder. Include the
+    # exact boundary; full close is already represented by max_shares whenever
+    # current depth permits it.
+    last_remainder_safe = held_shares - min_shares
+    if min_shares <= last_remainder_safe <= max_shares:
+        probes.add(last_remainder_safe)
     prefix_shares = Decimal("0")
     prefix_proceeds = Decimal("0")
     robust_q_decimal = Decimal(str(robust_q))
@@ -6102,6 +6113,9 @@ def _score_global_single_order_sell(
     ] | None = None
     price_band_rejected = False
     for shares in sorted(venue_probes):
+        remainder = held_shares - shares
+        if remainder != 0 and remainder < min_shares:
+            continue
         proceeds, expected_fill_price, limit_price = curve.proceeds_for_shares(shares)
         submitted_limit = (
             limit_price
