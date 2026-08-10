@@ -3504,32 +3504,15 @@ _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS = frozenset(
     }
 )
 
-# These monitor verdicts are estimates of one leg's terminal value. They do not
-# carry the global auction's current depth curve, fees, portfolio endowment, or
-# robust delta-log-wealth objective, so they may propose a SELL but never actuate
-# one locally. RED and absorbing Day0 hard facts are deliberately absent: their
-# direct reduce-only authority comes from risk/settlement truth, not this
-# statistical comparison.
-_GLOBAL_AUCTION_STATISTICAL_SELL_TRIGGERS = frozenset(
-    {
-        "CI_SEPARATED_REVERSAL",
-        "CI_OVERLAP_SELL_VALUE_DOMINATES",
-        "SETTLEMENT_IMMINENT",
-        "EDGE_REVERSAL",
-        "BUY_NO_EDGE_EXIT",
-        "BUY_NO_NEAR_EXIT",
-        # ORANGE is a risk-state override, not local execution authority.  Its
-        # favorable-exit proposal still needs the global auction's current
-        # depth, fees, wealth and correlated-endowment comparison before SELL.
-        "ORANGE_FAVORABLE_EXIT",
-        # ultimate_alpha 2026-07-24: the unified stopping-law sell proposes and
-        # the global auction actuates — evaluate_exit's L(x) sees only the
-        # top-of-book bid, while the auction values the sell against the real
-        # depth curve, fees, and portfolio endowment (the closest existing
-        # machinery to the PR-2 allocator ΔJ). RED and absorbing Day0 hard
-        # facts remain deliberately absent (direct reduce-only authority).
-        "SELL_REVERSAL",
-    }
+# A monitor probability verdict estimates one leg's terminal value. It may
+# propose a SELL, but only the global auction carries current depth, fees,
+# correlated endowment, and capital ranking. Statistical authority is therefore
+# the default, not an allowlist: a new trigger must not fall through to a local
+# submit that the execution boundary will reject. RED and recomputed absorbing
+# Day0 facts are the only direct reduce-only authorities.
+_DIRECT_REDUCE_ONLY_SELL_TRIGGERS = (
+    "RED_FORCE_EXIT",
+    "DAY0_HARD_FACT_BIN_DEAD",
 )
 
 _FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_USD = 0.05
@@ -3848,9 +3831,9 @@ def _day0_immature_exit_authority_reason(*sources) -> str | None:
 
 def _global_auction_owns_statistical_sell(exit_decision, exit_reason: str) -> bool:
     trigger = str(getattr(exit_decision, "trigger", "") or exit_reason or "")
-    return any(
+    return not any(
         trigger.startswith(prefix)
-        for prefix in _GLOBAL_AUCTION_STATISTICAL_SELL_TRIGGERS
+        for prefix in _DIRECT_REDUCE_ONLY_SELL_TRIGGERS
     )
 
 
