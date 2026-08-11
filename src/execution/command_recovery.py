@@ -5934,9 +5934,11 @@ def _append_filled_entry_projection_repair(
           FROM position_events
          WHERE position_id = ?
            AND event_type = 'ENTRY_ORDER_FILLED'
+           AND command_id = ?
+           AND lower(COALESCE(order_id, '')) = lower(?)
          LIMIT 1
         """,
-        (position_id,),
+        (position_id, str(position.command_id or ""), str(position.order_id or "")),
     ).fetchone()
     if existing_fill is not None:
         upsert_position_current(conn, projection)

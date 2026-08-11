@@ -13911,6 +13911,106 @@ class TestRecoveryResolutionTable:
             else {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
         )
 
+    @pytest.mark.parametrize(
+        ("prior_event_command_id", "prior_event_order_id"),
+        [
+            ("cmd-001", "ord-first"),
+            ("cmd-002", "ord-first"),
+            ("cmd-001", "ord-second"),
+        ],
+    )
+    def test_pending_projection_fill_identity_is_command_scoped(
+        self,
+        conn,
+        mock_client,
+        prior_event_command_id,
+        prior_event_order_id,
+    ):
+        """A prior fill on the position cannot satisfy a later entry command."""
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_execution_fact_repairs,
+            reconcile_filled_entry_projection_repairs,
+        )
+        from src.state.venue_command_repo import append_event
+
+        _seed_pending_entry_projection(conn, order_id="ord-first")
+        conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key,
+                decision_id, snapshot_id, order_id, command_id, caused_by,
+                idempotency_key, venue_status, source_module, env, payload_json
+            ) VALUES (
+                'pos-001:prior-fill', 'pos-001', 1, 3, 'ENTRY_ORDER_FILLED',
+                '2026-04-26T00:06:00Z', 'pending_entry', 'active',
+                'opening_inertia', 'dec-001', 'snap-pos-001', ?, ?, 'test-prior-fill',
+                'pos-001:prior-fill', 'FILLED',
+                'tests.test_command_recovery', 'live', '{}'
+            )
+            """,
+            (prior_event_order_id, prior_event_command_id),
+        )
+
+        # Reproduce the fallback path: an interrupted projection leaves the
+        # position pending while a second command has a confirmed fill.
+        _insert(
+            conn,
+            command_id="cmd-002",
+            position_id="pos-001",
+            decision_id="dec-002",
+            size=3.0,
+            price=0.40,
+            created_at="2026-04-26T00:07:00Z",
+        )
+        _advance_to_acked(conn, command_id="cmd-002", venue_order_id="ord-second")
+        append_event(
+            conn,
+            command_id="cmd-002",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={"venue_order_id": "ord-second", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-002",
+            order_id="ord-second",
+            trade_id="trade-second",
+            state="CONFIRMED",
+            filled_size="3",
+            fill_price="0.40",
+        )
+        _insert_decision_log_trade_case_for_recovery(
+            conn,
+            decision_id="dec-002",
+        )
+
+        assert reconcile_filled_entry_projection_repairs(
+            conn,
+            client=mock_client,
+        ) == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current_fill_count = conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'pos-001'
+               AND event_type = 'ENTRY_ORDER_FILLED'
+               AND command_id = 'cmd-002'
+               AND order_id = 'ord-second'
+            """
+        ).fetchone()[0]
+        assert current_fill_count == 1
+        assert reconcile_filled_entry_projection_repairs(
+            conn,
+            client=mock_client,
+        ) == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+        assert reconcile_filled_entry_execution_fact_repairs(conn) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+
     @pytest.mark.parametrize("repair_owner", ["immediate", "periodic"])
     def test_partial_increment_folds_only_confirmed_cumulative_fill(
         self,
