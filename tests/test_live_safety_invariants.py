@@ -16685,6 +16685,8 @@ def test_executor_reproves_strategy_rejection_taker_authority(monkeypatch):
         submit_order_type="FAK",
         executable_snapshot_id=authority.snapshot_id,
         marketable_sell_execution_authority=authority,
+        global_sell_execution_authority=None,
+        global_sell_receipt_closure=None,
     )
     monkeypatch.setattr(
         "src.state.snapshot_repo.get_snapshot",
@@ -16697,6 +16699,10 @@ def test_executor_reproves_strategy_rejection_taker_authority(monkeypatch):
 
     conn = sqlite3.connect(":memory:")
     try:
+        assert executor._global_sell_receipt_closure_error(
+            intent,
+            order_type="FAK",
+        ) is None
         assert executor._marketable_sell_certificate_error(
             conn,
             intent,
