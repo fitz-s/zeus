@@ -5,6 +5,11 @@
 
 ## 现状(forward)
 
+### 2026-08-11 18:46 CDT tick — exact-winner settlement lock 已部署；forward 盈利仍待真实成交/结算证明
+- **部署事实:** hotfix 已通过官方 `deploy_live.py restart live-trading --allow-unpushed` 入口加载为 `536b41f72`；sidecar identity、restart recovery、monitor cadence 与 EDLI queue progress 均通过。随后 health probe 为 `OK`：daemon/forecast/data/heartbeat 运行，risk `GREEN`，blocking gates `0`，loaded/expected SHA 一致。
+- **当前竞价:** 最新 full-scope receipt 覆盖 116 个 family、2081 个 candidate，9 个 held position 中 8 个 SELL 可评分且全部为负 expected EV，1 个没有合法可执行 SELL book；全局 winner 为 CASH，`NO_CURRENT_EXECUTABLE_POSITIVE_ORDER`。9 个持仓的 monitor probability 与 market price 已重新 fresh。
+- **forward 资本证明:** 自本 SHA 的 deploy guard 时间 `2026-08-11T23:40:47Z` 起，canonical `venue_commands`、`venue_command_events` 与 `settlements` 均无新行，因此该 cohort realized PnL 严格为 `$0.00`。这证明系统没有为制造订单而高买低卖，但尚不证明资本利得；目标保持 active，后续只用新 command/fill/settlement 与资本曲线证明收益。
+
 ### 2026-08-11 18:35 CDT tick — 保留 born-unexitable 防线；仅让 absorbing exact winner 持有到 1
 - **当前真相:** `d55ac5b99` 已恢复 full global auction；新 SHA cohort 尚无 venue command / settlement，realized PnL 仍为 `$0.00`，不得声称资本利得已证明。最新完整 receipt 的可评分 BUY frontier 与全部 held SELL counterfactual 均为负，因此 CASH 是当前已评分集合的正确动作。
 - **precliff 核验:** 911 个被 `CURRENT_PRECLIFF_LIQUIDATION_CAPACITY_MISSING` 拦截的 exact token 重新抓取完整 CLOB depth；910 个仍低于最小订单退出容量，908 个容量为零。唯一短暂反例的 `0.06 x 100` bid 随后消失，market-channel 与 REST 再次一致。普通 statistical BUY 的 precliff gate 属实，不能为增加订单而删除。
