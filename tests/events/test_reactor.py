@@ -1094,6 +1094,13 @@ def test_main_drains_control_commands_before_edli_readiness(monkeypatch):
 
     order: list[str] = []
     captured: dict[str, object] = {}
+    bootstrap_complete = threading.Event()
+    bootstrap_complete.set()
+    monkeypatch.setattr(
+        main,
+        "_held_position_monitor_bootstrap_complete",
+        bootstrap_complete,
+    )
 
     monkeypatch.setattr(
         control_plane,
@@ -1175,6 +1182,13 @@ def test_main_monitor_cadence_debt_blocks_buy_but_keeps_reactor_live(monkeypatch
     import src.main as main
 
     captured: dict[str, object] = {}
+    bootstrap_complete = threading.Event()
+    bootstrap_complete.set()
+    monkeypatch.setattr(
+        main,
+        "_held_position_monitor_bootstrap_complete",
+        bootstrap_complete,
+    )
     monkeypatch.setattr(main, "_start_edli_reactor_wake_listener", lambda: None)
     monkeypatch.setattr(
         main,
@@ -1187,6 +1201,13 @@ def test_main_monitor_cadence_debt_blocks_buy_but_keeps_reactor_live(monkeypatch
         lambda: "held_position_monitor_cadence_overdue",
     )
     monkeypatch.setattr(
+        main,
+        "_held_position_monitor_debt_pending",
+        lambda: pytest.fail(
+            "an already entry-blocked cycle must not be cancelled as stale"
+        ),
+    )
+    monkeypatch.setattr(
         reactor_module,
         "run_edli_event_reactor_cycle",
         lambda **kwargs: captured.update(kwargs) or True,
@@ -1196,6 +1217,52 @@ def test_main_monitor_cadence_debt_blocks_buy_but_keeps_reactor_live(monkeypatch
     assert captured["live_entry_block_reason"] == (
         "held_position_monitor_cadence_overdue"
     )
+    monitor_pending = captured["held_position_monitor_pending"]
+    assert callable(monitor_pending)
+    assert monitor_pending() is False
+
+
+def test_main_monitor_bootstrap_blocks_buy_but_keeps_reactor_live(monkeypatch):
+    import src.events.reactor as reactor_module
+    import src.main as main
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        main,
+        "_held_position_monitor_bootstrap_complete",
+        threading.Event(),
+    )
+    monkeypatch.setattr(main, "_start_edli_reactor_wake_listener", lambda: None)
+    monkeypatch.setattr(
+        main,
+        "_edli_live_entry_readiness_block",
+        lambda _cfg: (None, {}),
+    )
+    monkeypatch.setattr(
+        main,
+        "_held_position_monitor_entry_block_reason",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        main,
+        "_held_position_monitor_debt_pending",
+        lambda: pytest.fail(
+            "a bootstrap entry block must not cancel reduce-only comparison"
+        ),
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "run_edli_event_reactor_cycle",
+        lambda **kwargs: captured.update(kwargs) or True,
+    )
+
+    assert main._edli_event_reactor_cycle() is True
+    assert captured["live_entry_block_reason"] == (
+        "held_position_monitor_bootstrap_incomplete"
+    )
+    monitor_pending = captured["held_position_monitor_pending"]
+    assert callable(monitor_pending)
+    assert monitor_pending() is False
 
 
 @pytest.mark.parametrize(
@@ -4178,6 +4245,92 @@ def test_paused_empty_exposure_selects_forecast_carrier_without_day0_yield(
         assert cycle_kwargs["producer_wake_ids"] == (forecast.wake_id,)
         assert cycle_kwargs["allow_paused_forecast_snapshot_completion"] is True
     finally:
+        main._edli_initialize_reactor_wake_cursor()
+
+
+def test_active_foreign_monitor_yields_day0_for_one_material_wake(monkeypatch):
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    family = ("Paris", "2026-08-12", "high")
+    day0 = reactor_wake.ReactorWake(
+        "day0-held",
+        "2026-08-11T23:00:00+00:00",
+        "day0",
+        "day0_extreme_event_committed",
+        forecast_families=(family,),
+    )
+    forecast = reactor_wake.ReactorWake(
+        "forecast-independent",
+        "2026-08-11T23:00:01+00:00",
+        "forecast",
+        "forecast_posterior_advanced",
+        forecast_families=(family,),
+    )
+    monitor_active = threading.Event()
+    monitor_active.set()
+    selections: list[dict[str, object]] = []
+    cycle_wake_ids: list[tuple[str, ...]] = []
+    acknowledged: list[str] = []
+
+    monkeypatch.setattr(main, "_held_position_monitor_active", monitor_active)
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        main,
+        "_collateral_authority_wake_backoff_ids",
+        lambda: frozenset(),
+    )
+    monkeypatch.setattr(
+        main,
+        "_paused_forecast_carrier_priority_allowed",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        main,
+        "_forecast_wake_held_families",
+        lambda _families: frozenset(),
+    )
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", threading.Lock())
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **kwargs: cycle_wake_ids.append(kwargs["producer_wake_ids"]) or True,
+    )
+    monkeypatch.setattr(
+        main,
+        "_acknowledge_edli_reactor_wake_batch",
+        lambda wake, *_args, **_kwargs: acknowledged.append(wake.wake_id) or True,
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "exact_held_sell_completion_wake_ids",
+        lambda **_kwargs: frozenset(),
+    )
+
+    def read_wake(**kwargs):
+        selections.append(kwargs)
+        excluded = frozenset(kwargs.get("exclude_wake_ids", ()))
+        return forecast if day0.wake_id in excluded else day0
+
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", read_wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "coalescible_reactor_wakes",
+        lambda selected: (selected,),
+    )
+    main._edli_initialize_reactor_wake_cursor()
+    try:
+        assert main._edli_reactor_wake_poll_once() is False
+        assert main._edli_day0_post_monitor_yield.wake_ids == {day0.wake_id}
+        assert acknowledged == []
+
+        assert main._edli_reactor_wake_poll_once() is True
+        assert selections[1]["exclude_wake_ids"] == frozenset({day0.wake_id})
+        assert cycle_wake_ids == [(forecast.wake_id,)]
+        assert acknowledged == [forecast.wake_id]
+    finally:
+        main._day0_urgent_wake_pending.clear()
         main._edli_initialize_reactor_wake_cursor()
 
 

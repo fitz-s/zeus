@@ -5,6 +5,11 @@
 
 ## 现状(forward)
 
+### 2026-08-11 18:20 CDT tick — stale held truth 只封 BUY，不再饿死全局 SELL/HOLD/CASH 竞价
+- **实时反例:** main daemon 与 held monitor 仍活，但 global-auction receipt 在 `2026-08-11T22:56:24Z` 后停止；同期 full-book monitor 因 3 个 `monitor_probability_stale` 持仓反复产生 canonical debt。代码把本应仅阻止新 BUY 的 debt 同时用于 reactor admission/preemption，导致 stale probability 无法自愈时整个 global auction 永久停摆，连可减仓 SELL 和 CASH 比较也不能运行。
+- **最小修复:** canonical/bootstrap monitor debt 继续作为 `entry_submit_block_reason` 冻结 BUY；实际 monitor handoff、periodic fairness debt 和 capital-recovery handoff 仍可抢占 reactor。已经 entry-blocked 的 cycle 不再被同一 canonical debt 二次取消，因此 SELL/HOLD/CASH 保持统一比较。若别的 monitor 已占 single-writer claim，选中的 Day0 wake 保持 durable/unacked 并只让出一个 queue turn，使 exact SELL 或独立 material wake 可并发推进；stale 持仓仍不得提供 BUY authority。
+- **验证边界:** managed worktree 中 event-reactor 全集 `342 passed`、run-mode failure surfaces `224 passed`、entry-block/Day0 slice `15 passed`、SELL receipt persistence/executor/settlement slice `19 passed`；以 worktree code + live canonical state 执行 read-only boot validation 为 `ALL PASS`。尚未落地 live；已实现盈亏仍为 `$0.00`，本修复只恢复前向决策能力，不冒充资本利得证明。
+
 ### 2026-07-27 03:45 CDT tick — Ankara fast observation 从默认排除升级为实测 authority
 - **证据窗:** `2026-07-20T07:42:38Z` 至 `2026-07-27T07:42:38Z`，LTAC 同站 WU/METAR 251 个匹配对；rounded delta 的 p99/max 均为 `0°C`，empirical threshold 为 `1°C`，因此可吸收 margin 为 `0°C`。证据只授权同一 settlement station 的 publication-latency advantage，不改变 settlement source。
 - **money-path 作用:** Ankara Day0 held probability 与 hard-fact exit 可消费更早发布的 LTAC METAR，不再等待较慢 WU 更新；dead-bin/structural-win 对称法则、plausibility guard、oracle anomaly pause 和未测量城市 fail-closed 均保持。

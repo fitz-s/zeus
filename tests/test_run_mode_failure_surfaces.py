@@ -8569,7 +8569,7 @@ def test_quote_only_monitor_recovery_does_not_run_full_book_or_set_debt(
         },
     ),
 )
-def test_reactor_bootstrap_stays_deferred_after_monitor_clear_without_required_post_boot_coverage(
+def test_reactor_bootstrap_keeps_reduce_only_live_without_required_post_boot_coverage(
     monkeypatch,
     evidence,
 ) -> None:
@@ -8599,7 +8599,7 @@ def test_reactor_bootstrap_stays_deferred_after_monitor_clear_without_required_p
         lambda *_args, **_kwargs: evidence,
     )
     try:
-        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
         assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
     finally:
         main_module._held_position_monitor_active.clear()
@@ -8621,7 +8621,7 @@ def test_reactor_bootstrap_stays_deferred_after_monitor_clear_without_required_p
         },
     ),
 )
-def test_reactor_bootstrap_rejects_pre_boot_or_near_future_canonical_evidence(
+def test_reactor_bootstrap_rejects_bad_evidence_without_blocking_reduce_only(
     monkeypatch,
     evidence,
 ) -> None:
@@ -8649,7 +8649,7 @@ def test_reactor_bootstrap_rejects_pre_boot_or_near_future_canonical_evidence(
         lambda *_args, **kwargs: observed_kwargs.update(kwargs) or evidence,
     )
     try:
-        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
         assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
         assert observed_kwargs["min_occurred_at"] == boot_at
         assert observed_kwargs["strict_future"] is True
@@ -8699,7 +8699,7 @@ def test_reactor_bootstrap_completes_vacuously_without_open_held_positions(
         main_module._held_position_monitor_bootstrap_complete.clear()
 
 
-def test_reactor_bootstrap_stays_deferred_without_canonical_monitor_coverage(
+def test_reactor_bootstrap_allows_reduce_only_without_canonical_monitor_coverage(
     monkeypatch,
 ) -> None:
     import src.main as main_module
@@ -8712,7 +8712,7 @@ def test_reactor_bootstrap_stays_deferred_without_canonical_monitor_coverage(
         lambda: False,
     )
     try:
-        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
         assert main_module._held_position_monitor_bootstrap_complete.is_set() is False
     finally:
         main_module._held_position_monitor_active.clear()
@@ -10546,11 +10546,9 @@ def test_monitor_bootstrap_scopes_defer_to_entry_competitors(monkeypatch) -> Non
         lambda **_kwargs: (),
     )
 
-    for job_name in (
-        "edli_event_reactor",
-        "live_health_composite",
-        "market_discovery",
-    ):
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+
+    for job_name in ("live_health_composite", "market_discovery"):
         assert main_module._defer_for_held_position_monitor(job_name) is True
 
     for job_name in (
@@ -10568,7 +10566,7 @@ def test_monitor_bootstrap_scopes_defer_to_entry_competitors(monkeypatch) -> Non
     monkeypatch.setattr(
         wake_module,
         "read_reactor_wake",
-        lambda: pytest.fail("wake queue must not scan before monitor bootstrap"),
+        lambda **_kwargs: None,
     )
     assert main_module._edli_reactor_wake_poll_once() is False
 
@@ -10581,7 +10579,7 @@ def test_monitor_bootstrap_scopes_defer_to_entry_competitors(monkeypatch) -> Non
         assert main_module._defer_for_held_position_monitor(job_name) is False
 
 
-def test_monitor_bootstrap_does_not_waive_current_coverage_for_exact_sell_debt(
+def test_monitor_bootstrap_keeps_exact_sell_reauction_live_but_blocks_discovery(
     monkeypatch,
 ) -> None:
     import src.main as main_module
@@ -10614,7 +10612,7 @@ def test_monitor_bootstrap_does_not_waive_current_coverage_for_exact_sell_debt(
         "_promote_held_position_monitor_bootstrap_from_canonical_progress",
         lambda: promote_calls.append(True) or False,
     )
-    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
     assert promote_calls == [True]
     assert main_module._defer_for_held_position_monitor("market_discovery") is True
     assert promote_calls == [True, True]
@@ -10623,7 +10621,7 @@ def test_monitor_bootstrap_does_not_waive_current_coverage_for_exact_sell_debt(
     assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
 
 
-def test_monitor_bootstrap_retains_exact_sell_debt_while_current_coverage_is_missing(
+def test_monitor_bootstrap_allows_reduce_only_reactor_while_coverage_is_missing(
     monkeypatch,
 ) -> None:
     import src.main as main_module
@@ -10651,11 +10649,11 @@ def test_monitor_bootstrap_retains_exact_sell_debt_while_current_coverage_is_mis
         lambda: False,
     )
 
-    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
     assert bootstrap_complete.is_set() is False
 
 
-def test_canonical_monitor_debt_defers_reactor_after_bootstrap_until_current(
+def test_canonical_monitor_debt_blocks_buy_without_deferring_reactor(
     monkeypatch,
 ) -> None:
     import src.main as main_module
@@ -10680,7 +10678,8 @@ def test_canonical_monitor_debt_defers_reactor_after_bootstrap_until_current(
         lambda: "held_position_monitor_cadence_overdue",
     )
 
-    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+    assert canonical_debt.is_set() is True
 
     monkeypatch.setattr(
         main_module,

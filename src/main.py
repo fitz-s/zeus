@@ -455,19 +455,20 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     ):
         monitor_block_reason = _held_position_monitor_entry_block_reason()
         if monitor_block_reason is not None:
-            # SCOPE: admission of a new global auction while any current held
-            # exposure lacks canonical redecision authority. DRAIN: monitor
-            # recovery owns the writer lane and refreshes the full held book;
-            # queued BUY/SELL facts remain durable. RESET: a canonical clean
-            # read clears this event and the next reactor poll resumes. The
-            # in-flight reactor also sees this debt at its cooperative seam.
+            # SCOPE: BUY authority inside the next global auction while any
+            # current held exposure lacks canonical redecision authority.
+            # SELL/HOLD/CASH comparison must keep running; the cycle wrapper
+            # passes this exact reason as entry_submit_block_reason. DRAIN:
+            # monitor recovery owns the writer lane and refreshes the full
+            # held book. RESET: a canonical clean read clears this event and
+            # the next cycle may admit BUY again.
             logger.warning(
-                "edli_event_reactor deferred: canonical held-position monitor "
-                "debt (%s)",
+                "edli_event_reactor retaining reduce-only auction: canonical "
+                "held-position monitor debt blocks BUY (%s)",
                 monitor_block_reason,
             )
-            return True
-        _held_position_monitor_canonical_debt.clear()
+        else:
+            _held_position_monitor_canonical_debt.clear()
 
     # SCOPE: a timed-out periodic full-book monitor blocks only EDLI reactor
     # admission. DRAIN: the next periodic full-book monitor that successfully
@@ -513,6 +514,17 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
         not _held_position_monitor_bootstrap_complete.is_set()
         and not _promote_held_position_monitor_bootstrap_from_canonical_progress()
     ):
+        if job_name == "edli_event_reactor":
+            # SCOPE: BUY authority only until current-process held coverage is
+            # proven. The wrapper supplies a bootstrap entry block, while an
+            # actual monitor handoff above still preempts reactor admission.
+            # DRAIN: the first canonical post-boot monitor coverage completes
+            # bootstrap. RESET: process restart clears the completion event.
+            logger.info(
+                "edli_event_reactor retaining reduce-only auction while first "
+                "held-position monitor coverage is incomplete"
+            )
+            return False
         logger.info(
             "%s deferred: first held-position monitor coverage tranche has not completed",
             job_name,
@@ -4338,11 +4350,17 @@ def _edli_event_reactor_cycle(
     _global_block_reason, _family_block_reasons = _edli_live_entry_readiness_block(
         _settings_section("edli", {})
     )
-    monitor_entry_block = _held_position_monitor_entry_block_reason()
-    if monitor_entry_block is None:
+    canonical_monitor_entry_block = _held_position_monitor_entry_block_reason()
+    if canonical_monitor_entry_block is None:
         _held_position_monitor_canonical_debt.clear()
     else:
         _held_position_monitor_canonical_debt.set()
+    monitor_entry_block = canonical_monitor_entry_block
+    if (
+        monitor_entry_block is None
+        and not _held_position_monitor_bootstrap_complete.is_set()
+    ):
+        monitor_entry_block = "held_position_monitor_bootstrap_incomplete"
     if _global_block_reason is None and monitor_entry_block is not None:
         _global_block_reason = monitor_entry_block
     if allow_paused_forecast_snapshot_completion:
@@ -4380,7 +4398,10 @@ def _edli_event_reactor_cycle(
         held_position_monitor_pending=(
             lambda: (
                 _periodic_held_position_monitor_handoff_pending.is_set()
-                or _held_position_monitor_debt_pending()
+                or (
+                    monitor_entry_block is None
+                    and _held_position_monitor_debt_pending()
+                )
             )
         ),
         held_position_monitor_debt_pending=(
@@ -6369,6 +6390,13 @@ def _edli_reactor_wake_poll_once() -> bool:
             _held_position_monitor_active.is_set()
             or _held_position_monitor_claim.locked()
         ):
+            # SCOPE: this selected Day0 wake only, for one queue turn while a
+            # different monitor already owns the single-writer claim. DRAIN:
+            # the next poll excludes this durable wake once so an exact SELL
+            # completion or independent material wake can run concurrently
+            # with monitor network I/O. RESET: consume() clears the exclusion;
+            # the Day0 wake is never acknowledged and regains normal priority.
+            _edli_day0_post_monitor_yield.arm(wake.wake_id)
             return False
         day0_requires_exit_monitor = _day0_wake_requires_exit_monitor(
             day0_target_families
