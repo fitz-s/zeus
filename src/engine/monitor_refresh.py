@@ -1063,6 +1063,9 @@ def _perform_single_family_belief_reseed_failsoft(
         from src.data.replacement_cycle_advance_trigger import (
             enqueue_single_family_cycle_advance_reseed,
         )
+        from src.data.replacement_fusion_upgrade_trigger import (
+            enqueue_fusion_upgrade_reseeds,
+        )
 
         cfg = _replacement_forecast_live_materialization_queue_config()
         forecast_db = cfg.get("forecast_db")
@@ -1079,6 +1082,45 @@ def _perform_single_family_belief_reseed_failsoft(
             target_date=target_date,
             metric=metric,
         )
+        # A stale held belief has two independent causal repairs. A strictly
+        # newer carrier cycle belongs to cycle-advance, while newer provider
+        # rows at the SAME carrier cycle belong to fusion/input-revision
+        # upgrade. Sending both cases only to cycle-advance makes the latter an
+        # impossible reset: it correctly returns CYCLE_ADVANCE_NOT_NEEDED while
+        # the exit organ remains blind despite already-persisted newer inputs.
+        fusion_report = enqueue_fusion_upgrade_reseeds(
+            forecast_db=Path(str(forecast_db)),
+            seed_dir=Path(str(seed_dir)),
+            raw_manifest_dir=Path(str(raw_manifest_dir)),
+            limit=1,
+            scopes=((city, target_date, metric),),
+        )
+        if int(fusion_report.get("seeds_enqueued", 0) or 0) > 0:
+            report = dict(fusion_report)
+            report.update(
+                status="BELIEF_INPUT_REVISION_RESEED_ENQUEUED",
+                enqueued=True,
+                repair_lane="input_revision",
+            )
+            logger.info(
+                "monitor belief reseed enqueued city=%s target_date=%s metric=%s "
+                "status=%s enqueued=%s repair_lane=%s",
+                city,
+                target_date,
+                metric,
+                report["status"],
+                report["enqueued"],
+                report["repair_lane"],
+            )
+            return report
+        if int(fusion_report.get("already_enqueued", 0) or 0) > 0:
+            report = dict(fusion_report)
+            report.update(
+                status="BELIEF_INPUT_REVISION_RESEED_PENDING",
+                enqueued=False,
+                repair_lane="input_revision",
+            )
+            return report
         report = enqueue_single_family_cycle_advance_reseed(
             forecast_db=Path(str(forecast_db)),
             seed_dir=Path(str(seed_dir)),
@@ -1089,12 +1131,17 @@ def _perform_single_family_belief_reseed_failsoft(
             held_position=True,
             **day0_payload,
         )
+        if isinstance(report, dict):
+            report = dict(report)
+            report["repair_lane"] = "cycle_advance"
+            report["input_revision_status"] = fusion_report.get("status")
         logger.info(
             "monitor belief reseed enqueued city=%s target_date=%s metric=%s status=%s "
-            "enqueued=%s day0_observed_extreme=%s",
+            "enqueued=%s repair_lane=%s day0_observed_extreme=%s",
             city, target_date, metric,
             report.get("status") if isinstance(report, dict) else None,
             report.get("enqueued") if isinstance(report, dict) else None,
+            report.get("repair_lane") if isinstance(report, dict) else None,
             day0_payload.get("day0_observed_extreme_c") if day0_payload else None,
         )
         return report

@@ -358,6 +358,115 @@ def test_bounded_monitor_defers_sync_readthrough_to_independent_producer(monkeyp
     )
 
 
+def test_reseed_routes_same_cycle_input_revision_before_cycle_advance(
+    monkeypatch,
+    tmp_path,
+):
+    """A same-cycle provider revision must use its own resettable repair lane."""
+    import src.data.replacement_forecast_production as production
+    import src.data.replacement_fusion_upgrade_trigger as fusion
+    import src.data.replacement_cycle_advance_trigger as cycle
+    import src.engine.monitor_refresh as mr
+
+    forecast_db = tmp_path / "forecasts.db"
+    forecast_db.touch()
+    cfg = {
+        "forecast_db": forecast_db,
+        "seed_dir": tmp_path / "seeds",
+        "raw_manifest_dir": tmp_path / "raw",
+    }
+    monkeypatch.setattr(
+        production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    captured = {}
+
+    def enqueue_revision(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "FUSION_UPGRADE_TRIGGER",
+            "seeds_enqueued": 1,
+            "already_enqueued": 0,
+        }
+
+    monkeypatch.setattr(fusion, "enqueue_fusion_upgrade_reseeds", enqueue_revision)
+    monkeypatch.setattr(
+        cycle,
+        "enqueue_single_family_cycle_advance_reseed",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("same-cycle input revision must not fall through")
+        ),
+    )
+    monkeypatch.setattr(mr, "_day0_observed_extreme_reseed_payload", lambda **_kw: {})
+
+    report = mr._perform_single_family_belief_reseed_failsoft(
+        city="Warsaw",
+        target_date="2026-08-12",
+        metric="high",
+    )
+
+    assert report is not None
+    assert report["status"] == "BELIEF_INPUT_REVISION_RESEED_ENQUEUED"
+    assert report["repair_lane"] == "input_revision"
+    assert report["enqueued"] is True
+    assert captured["scopes"] == (("Warsaw", "2026-08-12", "high"),)
+    assert captured["limit"] == 1
+
+
+def test_reseed_falls_through_to_cycle_advance_without_input_revision(
+    monkeypatch,
+    tmp_path,
+):
+    """A stale family with no same-cycle revision still uses newer-cycle repair."""
+    import src.data.replacement_forecast_production as production
+    import src.data.replacement_fusion_upgrade_trigger as fusion
+    import src.data.replacement_cycle_advance_trigger as cycle
+    import src.engine.monitor_refresh as mr
+
+    forecast_db = tmp_path / "forecasts.db"
+    forecast_db.touch()
+    cfg = {
+        "forecast_db": forecast_db,
+        "seed_dir": tmp_path / "seeds",
+        "raw_manifest_dir": tmp_path / "raw",
+    }
+    monkeypatch.setattr(
+        production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        fusion,
+        "enqueue_fusion_upgrade_reseeds",
+        lambda **_kwargs: {
+            "status": "FUSION_UPGRADE_TRIGGER",
+            "seeds_enqueued": 0,
+            "already_enqueued": 0,
+        },
+    )
+    monkeypatch.setattr(
+        cycle,
+        "enqueue_single_family_cycle_advance_reseed",
+        lambda **_kwargs: {
+            "status": "CYCLE_ADVANCE_ENQUEUED",
+            "enqueued": True,
+        },
+    )
+    monkeypatch.setattr(mr, "_day0_observed_extreme_reseed_payload", lambda **_kw: {})
+
+    report = mr._perform_single_family_belief_reseed_failsoft(
+        city="Warsaw",
+        target_date="2026-08-12",
+        metric="high",
+    )
+
+    assert report is not None
+    assert report["status"] == "CYCLE_ADVANCE_ENQUEUED"
+    assert report["repair_lane"] == "cycle_advance"
+    assert report["input_revision_status"] == "FUSION_UPGRADE_TRIGGER"
+
+
 def test_day0_unobserved_prefix_forwards_portfolio_deadline(monkeypatch):
     """The Day0 zero-observation fallback cannot reopen an unbounded DB read."""
     import src.engine.monitor_refresh as mr
