@@ -27,9 +27,10 @@ duplicate fetch of the same already-seen reading a free no-op, never a
 mutation. A genuinely later, different reading for the same nominal
 publish_ts_utc (rare — a source republishing a correction) is a DIFFERENT
 row (the uniqueness key includes value_native), not an overwrite of the old
-one — the ledger keeps both, and the derived-extreme reduction picks the
-correct one via the absorbing-direction law, never trusts a value because it
-arrived last.
+one. The canonical read projection first chooses the latest fetched version
+for each source clock, then derives the local-day MAX/MIN across distinct
+clocks. Thus audit history remains complete without letting a retracted value
+become an irreversible physical boundary.
 """
 
 from __future__ import annotations

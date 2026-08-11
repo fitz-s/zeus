@@ -125,6 +125,45 @@ class TestAppendOnly:
         (count,) = conn.execute("SELECT COUNT(*) FROM observation_prints").fetchone()
         assert count == 2  # both rows present -- an append, never a 1-row overwrite
 
+    @pytest.mark.parametrize(
+        ("metric", "old_value", "corrected_value"),
+        (("high", 37.0, 36.0), ("low", 20.0, 21.0)),
+    )
+    def test_same_clock_latest_revision_replaces_retracted_value(
+        self, metric, old_value, corrected_value
+    ):
+        """Audit keeps both rows; canonical probability sees one current version."""
+
+        conn = _conn()
+        for value, fetched_at in (
+            (old_value, "2026-08-09T08:50:52+00:00"),
+            (corrected_value, "2026-08-09T10:18:22+00:00"),
+        ):
+            append_print(
+                conn,
+                city="Shenzhen",
+                station_id="ZGSZ",
+                source_channel="wu_icao_history",
+                publish_ts_utc="2026-08-09T08:00:00+00:00",
+                value_native=value,
+                unit="C",
+                fetched_at_utc=fetched_at,
+            )
+
+        fact = _latest_authorized_day0_fact(
+            conn,
+            city="Shenzhen",
+            target_date="2026-08-09",
+            temperature_metric=metric,
+            decision_time=datetime(2026, 8, 9, 10, 20, tzinfo=UTC),
+            require_settlement_channel=True,
+        )
+
+        assert fact is not None
+        assert fact["observed_extreme_native"] == corrected_value
+        assert fact["observation_available_at"] == "2026-08-09T10:18:22+00:00"
+        assert conn.execute("SELECT COUNT(*) FROM observation_prints").fetchone()[0] == 2
+
     def test_update_is_structurally_forbidden(self):
         conn = _conn()
         append_print(

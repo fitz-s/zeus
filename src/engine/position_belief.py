@@ -568,16 +568,13 @@ def _observed_running_extreme_native(
     world_db_path: str | None = None,
     deadline_monotonic: float | None = None,
 ) -> float | None:
-    """Cheap O(1) read of the canonical observed running extreme from world.observation_instants.
+    """Read the canonical observed running extreme from the raw publication stream.
 
-    Returns the running high (``metric == "high"``) / running low (``metric == "low"``) in
-    the city's NATIVE settlement unit, or ``None`` when no VERIFIED settlement-grade row is
-    available up to ``now``. This is the SAME canonical surface + source filter the day0
-    hard-fact lane and the absorbing-floor reseed already treat as authoritative
-    (monitor_refresh._day0_observed_extreme_from_canonical_surface), lifted to the single
-    belief authority so the served belief is floored REGARDLESS of whether the upstream
-    day0 live-obs fetch fired. Best-effort: any read failure returns None (the belief is
-    then served unfloored — the floor only ever ADDS the measured fact, never blocks serving).
+    ``observation_prints`` is append-only audit truth; its canonical projection
+    resolves a same-source-clock correction before deriving the local-day
+    MAX/MIN.  ``observation_instants`` remains the compatibility fallback for
+    databases that predate that ledger.  Reading its monotone projection first
+    made a corrected provider print impossible to retract from held belief.
     """
     metric_l = str(metric or "").strip().lower()
     if metric_l not in {"high", "low"}:
@@ -601,6 +598,26 @@ def _observed_running_extreme_native(
     try:
         conn.row_factory = sqlite3.Row
         with _bounded_sqlite_read(conn, deadline_monotonic):
+            try:
+                from src.data.replacement_forecast_current_target_plan import (
+                    _latest_authorized_day0_fact,
+                )
+
+                fact = _latest_authorized_day0_fact(
+                    conn,
+                    city=city,
+                    target_date=target_date,
+                    temperature_metric=metric_l,
+                    decision_time=now,
+                    require_settlement_channel=True,
+                )
+            except (sqlite3.Error, TypeError, ValueError):
+                fact = None
+            if fact is not None:
+                try:
+                    return float(fact["observed_extreme_native"])
+                except (KeyError, TypeError, ValueError):
+                    pass
             for table_ref in ("world.observation_instants", "observation_instants"):
                 if deadline_monotonic is not None:
                     remaining = _remaining_read_timeout(deadline_monotonic)

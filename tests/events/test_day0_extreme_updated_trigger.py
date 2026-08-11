@@ -1556,7 +1556,7 @@ def test_scan_settlement_print_rows_emits_same_clock_value_correction_once():
         suppress_recent_no_value_refutations=True,
         scan_families=(("Paris", target_date, "high"),),
     )
-    semantics = FakeSettlementSemantics(27)
+    semantics = FakeSettlementSemantics(37)
     prior = trigger.emit_from_observation(
         observation=_observation(
             city="Paris",
@@ -1565,9 +1565,9 @@ def test_scan_settlement_print_rows_emits_same_clock_value_correction_once():
             station_id="LFPB",
             observation_time="2026-07-28T04:00:00+00:00",
             observation_available_at="2026-07-28T04:35:00+00:00",
-            raw_value=27.0,
-            high_so_far=27.0,
-            observation_context_id="prior-27",
+            raw_value=37.0,
+            high_so_far=37.0,
+            observation_context_id="prior-37",
         ),
         settlement_semantics=semantics,
         decision_time=datetime(2026, 7, 28, 4, 40, tzinfo=timezone.utc),
@@ -1580,20 +1580,20 @@ def test_scan_settlement_print_rows_emits_same_clock_value_correction_once():
         station_id="LFPB",
         source_channel="wu_icao_history",
         publish_ts_utc="2026-07-28T04:00:00+00:00",
-        value_native=28.0,
+        value_native=36.0,
         unit="C",
         fetched_at_utc="2026-07-28T05:16:00+00:00",
     )
 
     corrected = trigger.scan_settlement_print_rows(
         observation_conn=conn,
-        settlement_semantics=FakeSettlementSemantics(28),
+        settlement_semantics=FakeSettlementSemantics(36),
         decision_time=datetime(2026, 7, 28, 5, 20, tzinfo=timezone.utc),
         received_at="2026-07-28T05:20:00+00:00",
     )
     repeated = trigger.scan_settlement_print_rows(
         observation_conn=conn,
-        settlement_semantics=FakeSettlementSemantics(28),
+        settlement_semantics=FakeSettlementSemantics(36),
         decision_time=datetime(2026, 7, 28, 5, 21, tzinfo=timezone.utc),
         received_at="2026-07-28T05:21:00+00:00",
     )
@@ -1605,7 +1605,7 @@ def test_scan_settlement_print_rows_emits_same_clock_value_correction_once():
             (corrected[0].event_id,),
         ).fetchone()[0]
     )
-    assert payload["high_so_far"] == pytest.approx(28.0)
+    assert payload["high_so_far"] == pytest.approx(36.0)
     assert payload["observation_time"] == "2026-07-28T04:00:00+00:00"
     assert payload["observation_available_at"] == "2026-07-28T05:16:00+00:00"
     assert repeated == []

@@ -45,6 +45,7 @@ from src.engine.position_belief import (
     POSTERIOR_PREDICTIVE_MEAN,
     SELECTED_METHOD_REPLACEMENT_POSTERIOR,
     ReplacementBelief,
+    _observed_running_extreme_native,
     load_replacement_belief,
 )
 from src.data.replacement_forecast_cycle_policy import (
@@ -207,6 +208,45 @@ def _load(db_path, *, direction="buy_no", bin_label=BIN, now=NOW, **kw):
 
 
 class TestLoadReplacementBelief:
+    def test_held_floor_uses_corrected_same_clock_publication(self, tmp_path):
+        from src.state.schema.observation_prints_schema import append_print, ensure_table
+
+        world_db = tmp_path / "zeus-world.db"
+        conn = sqlite3.connect(world_db)
+        ensure_table(conn)
+        append_print(
+            conn,
+            city="Shenzhen",
+            station_id="ZGSZ",
+            source_channel="wu_icao_history",
+            publish_ts_utc="2026-08-09T08:00:00+00:00",
+            value_native=37.0,
+            unit="C",
+            fetched_at_utc="2026-08-09T08:50:52+00:00",
+        )
+        append_print(
+            conn,
+            city="Shenzhen",
+            station_id="ZGSZ",
+            source_channel="wu_icao_history",
+            publish_ts_utc="2026-08-09T08:00:00+00:00",
+            value_native=36.0,
+            unit="C",
+            fetched_at_utc="2026-08-09T10:18:22+00:00",
+        )
+        conn.commit()
+        conn.close()
+
+        observed = _observed_running_extreme_native(
+            city="Shenzhen",
+            target_date="2026-08-09",
+            metric="high",
+            now=datetime(2026, 8, 9, 10, 20, tzinfo=timezone.utc),
+            world_db_path=str(world_db),
+        )
+
+        assert observed == pytest.approx(36.0)
+
     def test_monitor_deadline_bounds_forecast_db_lock_wait(self, forecasts_db):
         """An EXCLUSIVE writer cannot retain the held monitor past its deadline."""
         _insert(

@@ -1199,7 +1199,15 @@ def _latest_authorized_day0_fact(
                 # first causally available rendering.  This keeps the ledger's
                 # append-only audit trail intact while making every consumer
                 # share one conditioning identity with the Day0 event bridge.
-                canonical_prints: dict[
+                # A publication clock identifies one provider fact version.
+                # The ledger is append-only, so a correction is another row
+                # with the SAME clock and a later fetched_at.  Canonical truth
+                # is therefore latest-version-per-clock, followed by MAX/MIN
+                # across distinct clocks.  Including value in this identity
+                # made a retracted WU 37C coexist forever with its corrected
+                # 36C version and falsely turned the derived running high into
+                # an absorbing 37C boundary.
+                print_versions: dict[
                     tuple[str, str, float], tuple[str, str, float, str]
                 ] = {}
                 for print_row in print_rows:
@@ -1274,63 +1282,124 @@ def _latest_authorized_day0_fact(
                             pass
                     canonical_publish_ts = publish_ts
                     canonical_fetched_at = fetched_at
-                    print_identity = (channel, source_clock, float(value))
-                    previous = canonical_prints.get(print_identity)
+                    version_identity = (channel, source_clock, float(value))
+                    previous = print_versions.get(version_identity)
                     if previous is None or (
                         canonical_fetched_at,
                         canonical_publish_ts,
                     ) < (previous[1], previous[0]):
-                        canonical_prints[print_identity] = (
+                        print_versions[version_identity] = (
                             canonical_publish_ts,
                             canonical_fetched_at,
                             float(value),
                             str(print_row["raw_report"] or ""),
                         )
 
-                best_value: float | None = None
-                best_channel = ""
-                latest_clock_by_channel: dict[str, tuple[str, str]] = {}
-                best_raw_report = ""
-                for (channel, _source_clock, _value), (
-                    publish_ts,
-                    fetched_at,
-                    value,
-                    raw_report,
-                ) in canonical_prints.items():
-                    previous_clock = latest_clock_by_channel.get(channel)
-                    if previous_clock is None or (publish_ts, fetched_at) > previous_clock:
-                        latest_clock_by_channel[channel] = (publish_ts, fetched_at)
-                    if best_value is None or (
-                        (metric == "high" and value > best_value)
-                        or (metric == "low" and value < best_value)
-                        or (
-                            value == best_value
-                            and publish_ts
-                            > latest_clock_by_channel.get(best_channel, ("", ""))[0]
-                        )
-                    ):
-                        best_value = value
-                        best_channel = channel
-                        best_raw_report = raw_report
-                if best_value is not None:
-                    best_publish_ts, best_fetched_at = latest_clock_by_channel[
-                        best_channel
+                canonical_prints: dict[
+                    tuple[str, str], tuple[str, str, float, str]
+                ] = {}
+                for (channel, source_clock, _value), version in print_versions.items():
+                    identity = (channel, source_clock)
+                    previous = canonical_prints.get(identity)
+                    if previous is None or (
+                        version[1],
+                        version[0],
+                        version[2],
+                    ) > (previous[1], previous[0], previous[2]):
+                        canonical_prints[identity] = version
+
+                ledger_facts: list[dict[str, object]] = []
+                for channel in sorted({key[0] for key in canonical_prints}):
+                    channel_prints = [
+                        value
+                        for (candidate_channel, _source_clock), value in canonical_prints.items()
+                        if candidate_channel == channel
                     ]
-                    facts.append(
+                    if not channel_prints:
+                        continue
+                    best = (min if metric == "low" else max)(
+                        channel_prints,
+                        key=lambda item: (item[2], item[0], item[1]),
+                    )
+                    frontier = max(
+                        channel_prints,
+                        key=lambda item: (item[0], item[1]),
+                    )
+                    ledger_facts.append(
                         {
-                            "observed_extreme_native": best_value,
-                            "observation_time": best_publish_ts,
-                            "sample_count": len(canonical_prints),
-                            "source": f"observation_prints:{best_channel}",
-                            "observation_source": best_channel,
+                            "observed_extreme_native": float(best[2]),
+                            "observation_time": str(frontier[0]),
+                            "sample_count": len(channel_prints),
+                            "source": f"observation_prints:{channel}",
+                            "observation_source": channel,
                             "station_id": expected_station or "",
                             "unit": expected_unit,
-                            "observation_available_at": best_fetched_at,
+                            "observation_available_at": str(frontier[1]),
                             "raw_payload_sha256": _raw_payload_sha256(
-                                best_raw_report
+                                str(best[3] or "")
                             ),
                         }
                     )
+
+                if ledger_facts:
+                    ledger_channels = {
+                        str(fact["observation_source"]).strip().lower()
+                        for fact in ledger_facts
+                    }
+                    # observation_instants and DAY0 events are projections of
+                    # these exact publication channels.  Once the raw ledger
+                    # is present, letting a stale projection vote alongside it
+                    # makes one retracted print count twice and permanently
+                    # wins the MAX/MIN reduction.  Preserve independent source
+                    # channels, but replace same-channel projections with the
+                    # canonical latest-version ledger projection.
+                    projected_facts = facts
+                    for ledger_fact in ledger_facts:
+                        if str(ledger_fact.get("raw_payload_sha256") or "").strip():
+                            continue
+                        channel = str(
+                            ledger_fact.get("observation_source") or ""
+                        ).strip().lower()
+                        matching_projection = [
+                            fact
+                            for fact in projected_facts
+                            if str(
+                                fact.get("observation_source") or ""
+                            ).strip().lower()
+                            == channel
+                            and float(fact.get("observed_extreme_native"))
+                            == float(ledger_fact["observed_extreme_native"])
+                            and str(fact.get("raw_payload_sha256") or "").strip()
+                        ]
+                        if matching_projection:
+                            ledger_fact["raw_payload_sha256"] = max(
+                                matching_projection,
+                                key=lambda fact: str(
+                                    fact.get("observation_available_at") or ""
+                                ),
+                            )["raw_payload_sha256"]
+                    facts = [
+                        fact
+                        for fact in projected_facts
+                        if str(fact.get("observation_source") or "").strip().lower()
+                        not in ledger_channels
+                    ]
+                    if {
+                        "wu_icao_history",
+                        "aviationweather_metar",
+                    }.issubset(ledger_channels):
+                        facts = [
+                            fact
+                            for fact in facts
+                            if str(
+                                fact.get("observation_source") or ""
+                            ).strip().lower()
+                            not in {
+                                "same_station_fast_tail",
+                                FAST_RESIDUAL_CONDITIONING_SOURCE_ID,
+                            }
+                        ]
+                    facts.extend(ledger_facts)
 
     def fact_time(fact: Mapping[str, object]) -> datetime:
         parsed = datetime.fromisoformat(
