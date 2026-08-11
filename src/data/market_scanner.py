@@ -3655,13 +3655,24 @@ def read_persisted_weather_markets(
     max_age_seconds = max(1.0, float(max_age_seconds))
     cutoff = now - timedelta(seconds=max_age_seconds)
 
-    snapshot_rows = conn.execute(
-        """
-        SELECT *
-          FROM executable_market_snapshots
-         ORDER BY captured_at DESC
-        """
-    ).fetchall()
+    try:
+        # The latest mirror bounds this hot read to one immutable evidence row
+        # per condition/selected side.  Never fall back to the append log here:
+        # it is unbounded history and can hold a WAL reader across the monitor
+        # or auction cycle.
+        snapshot_rows = conn.execute(
+            """
+            SELECT s.*
+              FROM executable_market_snapshot_latest AS latest
+              JOIN executable_market_snapshots AS s
+                ON s.snapshot_id = latest.snapshot_id
+               AND s.condition_id = latest.condition_id
+               AND s.selected_outcome_token_id = latest.selected_outcome_token_id
+            """
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 - live read must fail closed
+        logger.warning("persisted latest executable snapshot read failed: %s", exc)
+        return MarketSnapshot(events=[], authority="NEVER_FETCHED")
     if not snapshot_rows:
         return MarketSnapshot(events=[], authority="NEVER_FETCHED")
 
