@@ -765,45 +765,6 @@ def _global_sell_fak_no_fill_reauction_error(
     return error if str(error).startswith("global_sell_exit_fak_no_fill_reauction:") else ""
 
 
-def _mark_strategy_hold_fak_no_fill_redecision(
-    position: Position,
-    *,
-    reason: str,
-    sell_result: OrderResult,
-    conn: sqlite3.Connection | None,
-) -> bool:
-    """Immediately re-decide a proved no-side-effect strategy-local FAK."""
-
-    proof = _global_sell_fak_no_fill_reauction_error(conn, sell_result)
-    if not proof:
-        return False
-    error = "strategy_hold_exit_fak_no_fill_redecision:venue_fak_no_match_400"
-    _mark_pending_exit(position)
-    position.last_exit_error = error
-    position.exit_state = "retry_pending"
-    position.order_status = "retry_pending"
-    position.next_exit_retry_at = _utcnow().isoformat()
-    _dual_write_canonical_pending_exit_if_available(
-        conn,
-        position,
-        reason=reason,
-        error=error,
-        event_type="EXIT_ORDER_REJECTED",
-        extra_payload={
-            "status": "strategy_hold_fak_no_fill_redecision_pending",
-            "retry_count": int(getattr(position, "exit_retry_count", 0) or 0),
-            "next_retry_at": position.next_exit_retry_at,
-            "fak_no_fill_command_id": str(sell_result.command_id or ""),
-        },
-    )
-    logger.info(
-        "STRATEGY HOLD FAK NO-FILL REDECISION %s: budget not consumed; eligible=%s",
-        position.trade_id,
-        position.next_exit_retry_at,
-    )
-    return True
-
-
 def _post_only_cross_command_id_for_position(
     conn: sqlite3.Connection | None,
     position: Position,
@@ -2535,87 +2496,6 @@ class GlobalSellExecutionAuthority:
         return self.limit_price()
 
 
-@dataclass(frozen=True)
-class StrategyHoldRejectionSellAuthority:
-    """Typed taker authority when the current strategy q may no longer HOLD."""
-
-    position_id: str
-    token_id: str
-    strategy_key: str
-    selected_method: str
-    probability_authority: str
-    current_validations: tuple[str, ...]
-    policy_reason: str
-    snapshot_id: str
-    snapshot_hash: str
-    best_bid: Decimal
-    shares: Decimal
-    expires_at_utc: str
-
-
-def _strategy_hold_rejection_marketable_authority_error(
-    conn: sqlite3.Connection,
-    intent: object,
-    *,
-    limit_price: float,
-    shares: float,
-    now: datetime | None = None,
-) -> str | None:
-    """Re-prove strategy policy, immutable snapshot, and taker economics."""
-
-    authority = getattr(intent, "marketable_sell_execution_authority", None)
-    if not isinstance(authority, StrategyHoldRejectionSellAuthority):
-        return "strategy_hold_rejection_sell_authority_required"
-    if (
-        authority.position_id != str(getattr(intent, "trade_id", "") or "")
-        or authority.token_id != str(getattr(intent, "token_id", "") or "")
-        or Decimal(str(limit_price)) != authority.best_bid
-        or Decimal(str(shares)) != authority.shares
-        or Decimal(str(getattr(intent, "best_bid", "NaN"))) != authority.best_bid
-        or str(getattr(intent, "submit_order_type", "") or "").upper() != "FAK"
-        or str(getattr(intent, "executable_snapshot_id", "") or "")
-        != authority.snapshot_id
-    ):
-        return "strategy_hold_rejection_sell_authority_binding_mismatch"
-    try:
-        deadline = datetime.fromisoformat(
-            authority.expires_at_utc.replace("Z", "+00:00")
-        )
-    except (TypeError, ValueError):
-        return "strategy_hold_rejection_sell_authority_deadline_invalid"
-    if deadline.tzinfo is None:
-        return "strategy_hold_rejection_sell_authority_deadline_invalid"
-    if (now or _utcnow()).astimezone(timezone.utc) > deadline.astimezone(timezone.utc):
-        return "strategy_hold_rejection_sell_authority_expired"
-    try:
-        from src.control.control_plane import (
-            current_strategy_hold_authority_rejection,
-        )
-
-        current_reason = current_strategy_hold_authority_rejection(
-            authority.strategy_key,
-            probability_authority=authority.probability_authority,
-            selected_method=authority.selected_method,
-            current_validations=authority.current_validations,
-        )
-    except Exception:
-        return "strategy_hold_rejection_sell_policy_unavailable"
-    if current_reason != authority.policy_reason:
-        return "strategy_hold_rejection_sell_policy_superseded"
-    from src.state.snapshot_repo import get_snapshot
-
-    snapshot = get_snapshot(conn, authority.snapshot_id)
-    if snapshot is None:
-        return "strategy_hold_rejection_sell_snapshot_missing"
-    if (
-        str(snapshot.selected_outcome_token_id) != authority.token_id
-        or str(snapshot.executable_snapshot_hash) != authority.snapshot_hash
-        or Decimal(str(snapshot.orderbook_top_bid)) != authority.best_bid
-    ):
-        return "strategy_hold_rejection_sell_snapshot_superseded"
-    return None
-
-
 def _global_sell_execution_authority_shape_error(
     authority: object | None,
 ) -> str | None:
@@ -3984,18 +3864,7 @@ def build_exit_intent(position: Position, exit_context: ExitContext) -> ExitInte
         shares=position.effective_shares,
         current_market_price=float(exit_context.current_market_price) if exit_context.current_market_price is not None else 0.0,
         best_bid=exit_context.best_bid,
-        # This action exists because the current strategy q lost empirical
-        # authority. Its invalid HOLD model cannot also price a maker wait;
-        # bind the reduce-only action to immediate partial-fill semantics at
-        # the current executable bid. All submit-time snapshot, price-band,
-        # allocator, collateral, and venue gates remain cumulative.
-        submit_order_type=(
-            "FAK"
-            if str(exit_context.exit_reason or "").startswith(
-                "STRATEGY_HOLD_AUTHORITY_REJECTED "
-            )
-            else None
-        ),
+        submit_order_type=None,
         decision_id=f"exit:{position.trade_id}:{decision_digest}",
         probability_receipt=probability_receipt,
         fresh_prob=float(exit_context.fresh_prob) if exit_context.fresh_prob is not None else None,
@@ -4099,54 +3968,6 @@ def _global_sell_receipt_closure_error(
     ):
         return "global_sell_receipt_closure_identity_mismatch"
     return None
-
-
-def _strategy_hold_rejection_exit_authorized(
-    position: Position,
-    exit_context: ExitContext,
-    exit_intent: ExitIntent,
-) -> bool:
-    """Re-prove the current strategy-local HOLD rejection at submit boundary."""
-
-    reason_text = str(exit_intent.reason or "").strip()
-    if not reason_text.startswith("STRATEGY_HOLD_AUTHORITY_REJECTED ("):
-        return False
-    bid = exit_context.best_bid
-    try:
-        bid_value = float(bid)
-    except (TypeError, ValueError):
-        return False
-    if not (
-        exit_context.current_market_price_is_fresh
-        and math.isfinite(bid_value)
-        and LIVE_ORDER_MIN_UNIT_PRICE <= bid_value <= LIVE_ORDER_MAX_UNIT_PRICE
-    ):
-        return False
-    context_receipt = exit_context.probability_receipt
-    intent_receipt = exit_intent.probability_receipt
-    if (dict(context_receipt or {})) != (dict(intent_receipt or {})):
-        return False
-    probability_authority = (
-        str(context_receipt.get("probability_authority") or "")
-        if isinstance(context_receipt, Mapping)
-        else ""
-    )
-    try:
-        from src.control.control_plane import (
-            current_strategy_hold_authority_rejection,
-        )
-
-        policy_reason = current_strategy_hold_authority_rejection(
-            str(getattr(position, "strategy_key", "") or ""),
-            probability_authority=probability_authority,
-            selected_method=str(getattr(position, "selected_method", "") or ""),
-            current_validations=(
-                getattr(position, "applied_validations", []) or []
-            ),
-        )
-    except Exception:
-        return False
-    return bool(policy_reason and policy_reason in reason_text)
 
 
 def _global_sell_capital_certificate_error(
@@ -5713,14 +5534,6 @@ def _execute_live_exit(
             now=_utcnow(),
         )
     )
-    strategy_hold_rejection_authorized = bool(
-        live_non_red
-        and _strategy_hold_rejection_exit_authorized(
-            position,
-            exit_context,
-            exit_intent,
-        )
-    )
     global_authorized = False
     continuing_existing_exit = bool(
         str(getattr(position, "last_exit_order_id", "") or "")
@@ -5728,7 +5541,6 @@ def _execute_live_exit(
     if (
         live_non_red
         and not hard_fact_authorized
-        and not strategy_hold_rejection_authorized
     ):
         preliminary_error = _global_sell_execution_authority_shape_error(
             global_sell_authority
@@ -5844,11 +5656,7 @@ def _execute_live_exit(
                 snapshot_context=snapshot_context,
                 now=_utcnow(),
             )
-        elif (
-            hard_fact_authorized
-            or strategy_hold_rejection_authorized
-            or continuing_existing_exit
-        ):
+        elif hard_fact_authorized or continuing_existing_exit:
             authority_error = None
         else:
             authority_error = "hard_fact_sell_authority_invalid"
@@ -5981,71 +5789,6 @@ def _execute_live_exit(
             )
             log_exit_retry_event(conn, position, reason=liquidity_reason, error=liquidity_error)
         return f"exit_blocked: {liquidity_error.removeprefix('exit_')}"
-
-    strategy_marketable_authority = None
-    if strategy_hold_rejection_authorized:
-        snapshot_bid = _positive_decimal(
-            snapshot_context.get("executable_snapshot_orderbook_top_bid")
-        )
-        snapshot_id = str(
-            snapshot_context.get("executable_snapshot_id") or ""
-        ).strip()
-        snapshot_hash = str(
-            snapshot_context.get("executable_snapshot_hash") or ""
-        ).strip()
-        deadline = str(
-            snapshot_context.get("execution_authority_deadline_utc") or ""
-        ).strip()
-        receipt = exit_intent.probability_receipt
-        probability_authority = (
-            str(receipt.get("probability_authority") or "")
-            if isinstance(receipt, Mapping)
-            else ""
-        )
-        from src.control.control_plane import (
-            current_strategy_hold_authority_rejection,
-        )
-
-        policy_reason = current_strategy_hold_authority_rejection(
-            str(getattr(position, "strategy_key", "") or ""),
-            probability_authority=probability_authority,
-            selected_method=str(getattr(position, "selected_method", "") or ""),
-            current_validations=(getattr(position, "applied_validations", []) or []),
-        )
-        if (
-            snapshot_bid is None
-            or not LIVE_ORDER_MIN_UNIT_PRICE
-            <= snapshot_bid
-            <= LIVE_ORDER_MAX_UNIT_PRICE
-            or not snapshot_id
-            or not snapshot_hash
-            or not deadline
-            or not policy_reason
-        ):
-            return "exit_blocked: strategy_hold_rejection_sell_authority_unavailable"
-        exit_intent = replace(
-            exit_intent,
-            best_bid=float(snapshot_bid),
-            exact_limit_price=float(snapshot_bid),
-            submit_order_type="FAK",
-        )
-        strategy_marketable_authority = StrategyHoldRejectionSellAuthority(
-            position_id=position.trade_id,
-            token_id=token_id,
-            strategy_key=str(getattr(position, "strategy_key", "") or ""),
-            selected_method=str(getattr(position, "selected_method", "") or ""),
-            probability_authority=probability_authority,
-            current_validations=tuple(
-                str(value)
-                for value in (getattr(position, "applied_validations", []) or [])
-            ),
-            policy_reason=policy_reason,
-            snapshot_id=snapshot_id,
-            snapshot_hash=snapshot_hash,
-            best_bid=snapshot_bid,
-            shares=Decimal(str(exit_intent.shares)),
-            expires_at_utc=deadline,
-        )
 
     # execute_exit_order owns the final targeted CTF refresh, persistence, and
     # reservation immediately before command persistence.  A second lifecycle
@@ -6253,16 +5996,12 @@ def _execute_live_exit(
                 marketable_certificate_hash
             ),
             marketable_sell_execution_authority=(
-                strategy_marketable_authority
-                if strategy_marketable_authority is not None
-                else (
-                    global_sell_authority
-                    if global_authorized
-                    and global_sell_authority is not None
-                    and global_sell_authority.jit_candidate.execution_mode
-                    == "TAKER_LIMIT"
-                    else None
-                )
+                global_sell_authority
+                if global_authorized
+                and global_sell_authority is not None
+                and global_sell_authority.jit_candidate.execution_mode
+                == "TAKER_LIMIT"
+                else None
             ),
             global_sell_execution_authority=(
                 global_sell_authority if global_authorized else None
@@ -6344,17 +6083,6 @@ def _execute_live_exit(
                         conn=conn,
                         reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_LOCKED_SUBMIT]",
                     )
-            if (
-                strategy_hold_rejection_authorized
-                and sell_error == "venue_fak_no_match_400"
-                and _mark_strategy_hold_fak_no_fill_redecision(
-                    position,
-                    reason=f"{exit_context.exit_reason} [FAK_NO_FILL_REDECISION]",
-                    sell_result=sell_result,
-                    conn=conn,
-                )
-            ):
-                return "exit_retry: strategy_hold_fak_no_fill_redecision"
             if _is_below_min_order_sell_error(sell_error):
                 dust_reason = f"{exit_context.exit_reason} [DUST: {sell_error}]"
                 _mark_exit_dust_hold(

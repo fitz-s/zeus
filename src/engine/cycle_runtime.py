@@ -3518,12 +3518,13 @@ _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS = frozenset(
 # global auction cannot compare HOLD using the probability witness RiskGuard
 # just invalidated. Zero support is statistical in provenance but deterministic
 # in action: positive cash strictly dominates a zero-payoff token in every
-# represented branch.
+# represented branch. A strategy entry gate is not SELL authority: historical
+# evidence may stop new exposure, but held exposure remains subject to the
+# current global CASH/HOLD/SELL comparison.
 _DIRECT_REDUCE_ONLY_SELL_TRIGGERS = (
     "RED_FORCE_EXIT",
     "DAY0_HARD_FACT_BIN_DEAD",
     "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
-    "STRATEGY_HOLD_AUTHORITY_REJECTED",
 )
 
 _FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_USD = 0.05
@@ -3654,52 +3655,6 @@ def _entry_qkernel_selection_guard_verdict(conn, pos) -> dict[str, object] | Non
     }
 
 
-def _current_strategy_hold_authority_rejection(pos, exit_context) -> str | None:
-    """Return the exact live policy reason that invalidates this HOLD witness.
-
-    A market-relative alpha rejection says the current q law no longer has
-    authority to claim that HOLD beats executable cash.  It is not a price stop:
-    the same position remains under ordinary redecision when its current belief
-    comes from an independent Day0 observation law.
-
-    SCOPE: open ``forecast_qkernel_entry`` positions whose current held belief is
-    still ``forecast_posteriors`` and whose exact durable RiskGuard gate reason is
-    ``market_relative_alpha_rejected``.  Absorbing Day0 facts are decided before
-    this seam and independent Day0 probability authorities are excluded here.
-    DRAIN: every held-position monitor cycle re-reads the durable strategy policy
-    after refreshing current probability and book evidence; an in-band bid emits
-    a reduce-only decision through the normal canonical exit lifecycle.
-    RESET: RiskGuard expires the durable gate when the bounded current-law cohort
-    clears; ``strategy_gates()`` then returns enabled and this predicate is false.
-    """
-
-    if str(getattr(pos, "strategy_key", "") or "") != "forecast_qkernel_entry":
-        return None
-    receipt = getattr(exit_context, "probability_receipt", None)
-    receipt_authority = (
-        str(receipt.get("probability_authority") or "")
-        if isinstance(receipt, Mapping)
-        else ""
-    )
-    current_validations = tuple(
-        str(value or "")
-        for value in (getattr(pos, "applied_validations", []) or [])
-    )
-    try:
-        from src.control.control_plane import (
-            current_strategy_hold_authority_rejection,
-        )
-
-        return current_strategy_hold_authority_rejection(
-            str(getattr(pos, "strategy_key", "") or ""),
-            probability_authority=receipt_authority,
-            selected_method=str(getattr(pos, "selected_method", "") or ""),
-            current_validations=current_validations,
-        )
-    except Exception:
-        return None
-
-
 def _entry_selection_guard_exit_decision(
     *,
     conn,
@@ -3709,90 +3664,10 @@ def _entry_selection_guard_exit_decision(
     exit_decision=None,
 ) -> object | None:
     verdict = _entry_qkernel_selection_guard_verdict(conn, pos)
-    hold_authority_rejection = _current_strategy_hold_authority_rejection(
-        pos,
-        exit_context,
-    )
-    if verdict is None and hold_authority_rejection is None:
+    if verdict is None:
         return None
-    if hold_authority_rejection is None and not verdict.get("invalid_reason"):
+    if not verdict.get("invalid_reason"):
         return None
-
-    if hold_authority_rejection is not None:
-        if exit_decision is not None and bool(
-            getattr(exit_decision, "should_exit", False)
-        ):
-            summary["strategy_hold_authority_existing_exit_preserved"] = (
-                summary.get("strategy_hold_authority_existing_exit_preserved", 0)
-                + 1
-            )
-            return None
-
-        shares = _position_real_exposure_shares(pos)
-        best_bid = _finite_float_or_none(getattr(exit_context, "best_bid", None))
-        quote_fresh = bool(
-            getattr(exit_context, "current_market_price_is_fresh", False)
-        )
-        from src.state.portfolio import ExitDecision as _ExitDecision
-
-        if (
-            shares <= 0.0
-            or best_bid is None
-            or not quote_fresh
-            or not 0.05 <= best_bid <= 0.95
-        ):
-            summary["strategy_hold_authority_rejected_no_executable_bid"] = (
-                summary.get(
-                    "strategy_hold_authority_rejected_no_executable_bid",
-                    0,
-                )
-                + 1
-            )
-            return _ExitDecision(
-                False,
-                "STRATEGY_HOLD_AUTHORITY_REJECTED_NO_EXECUTABLE_BID "
-                f"({hold_authority_rejection})",
-                urgency="immediate",
-                trigger="STRATEGY_HOLD_AUTHORITY_REJECTED_NO_EXECUTABLE_BID",
-                selected_method=(
-                    getattr(pos, "selected_method", "")
-                    or getattr(pos, "entry_method", "")
-                ),
-                applied_validations=list(
-                    dict.fromkeys(
-                        [
-                            *(getattr(pos, "applied_validations", []) or []),
-                            "strategy_hold_authority_rejected",
-                            "reduce_only_waiting_for_in_band_bid",
-                        ]
-                    )
-                ),
-            )
-
-        summary["strategy_hold_authority_rejected_direct_exits"] = (
-            summary.get("strategy_hold_authority_rejected_direct_exits", 0) + 1
-        )
-        return _ExitDecision(
-            True,
-            "STRATEGY_HOLD_AUTHORITY_REJECTED "
-            f"({hold_authority_rejection}; best_bid={best_bid:.4f})",
-            urgency="immediate",
-            trigger="STRATEGY_HOLD_AUTHORITY_REJECTED",
-            selected_method=(
-                getattr(pos, "selected_method", "")
-                or getattr(pos, "entry_method", "")
-            ),
-            applied_validations=list(
-                dict.fromkeys(
-                    [
-                        *(getattr(pos, "applied_validations", []) or []),
-                        "strategy_hold_authority_rejected",
-                        "riskguard_market_relative_alpha_rejection",
-                        "global_auction_comparison_inapplicable:hold_q_invalid",
-                    ]
-                )
-            ),
-        )
 
     summary["entry_selection_guard_invalid_positions"] = (
         summary.get("entry_selection_guard_invalid_positions", 0) + 1
@@ -8417,62 +8292,19 @@ def execute_monitoring_phase(
                 )
 
                 _invalidate_global_holding_coverage()
-                if exit_trigger == "STRATEGY_HOLD_AUTHORITY_REJECTED":
-                    from src.execution.exit_lifecycle import (
-                        _refresh_global_allocator_for_held_position_monitor,
-                    )
-                    from src.risk_allocator import global_actuation_authority_lease
-
-                    # A collateral wake may revoke process-wide allocator state
-                    # while a multi-position monitor is between decisions. For
-                    # this direct reduce-only action, refresh current authority
-                    # and keep that exact pair coherent through one submit.
-                    with global_actuation_authority_lease():
-                        submit_refresh = (
-                            _refresh_global_allocator_for_held_position_monitor(
-                                conn,
-                                portfolio,
-                            )
-                        )
-                        summary["strategy_hold_exit_submit_allocator_refreshes"] = (
-                            summary.get(
-                                "strategy_hold_exit_submit_allocator_refreshes",
-                                0,
-                            )
-                            + 1
-                        )
-                        if not submit_refresh.get("configured"):
-                            summary[
-                                "strategy_hold_exit_submit_allocator_refresh_failures"
-                            ] = summary.get(
-                                "strategy_hold_exit_submit_allocator_refresh_failures",
-                                0,
-                            ) + 1
-                        outcome = execute_exit(
-                            portfolio=portfolio,
-                            position=pos,
-                            exit_context=replace(
-                                exit_context,
-                                exit_reason=exit_reason,
-                            ),
-                            clob=clob,
-                            conn=conn,
-                            exit_intent=exit_intent,
-                        )
-                else:
-                    outcome = execute_exit(
-                        portfolio=portfolio,
-                        position=pos,
-                        exit_context=replace(exit_context, exit_reason=exit_reason),
-                        clob=clob,
-                        conn=conn,
-                        exit_intent=exit_intent,
-                        hard_fact_authority=(
-                            _hard_fact
-                            if exit_trigger == "DAY0_HARD_FACT_BIN_DEAD"
-                            else None
-                        ),
-                    )
+                outcome = execute_exit(
+                    portfolio=portfolio,
+                    position=pos,
+                    exit_context=replace(exit_context, exit_reason=exit_reason),
+                    clob=clob,
+                    conn=conn,
+                    exit_intent=exit_intent,
+                    hard_fact_authority=(
+                        _hard_fact
+                        if exit_trigger == "DAY0_HARD_FACT_BIN_DEAD"
+                        else None
+                    ),
+                )
                 if outcome.startswith("exit_filled:"):
                     tracker.record_exit(pos)
                     tracker_dirty = True

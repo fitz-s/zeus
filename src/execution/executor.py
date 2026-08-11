@@ -5105,19 +5105,10 @@ def _marketable_sell_certificate_error(
     """
 
     from src.execution.exit_lifecycle import (
-        StrategyHoldRejectionSellAuthority,
         _global_sell_execution_authority_shape_error,
-        _strategy_hold_rejection_marketable_authority_error,
     )
 
     authority = intent.marketable_sell_execution_authority
-    if isinstance(authority, StrategyHoldRejectionSellAuthority):
-        return _strategy_hold_rejection_marketable_authority_error(
-            conn,
-            intent,
-            limit_price=limit_price,
-            shares=shares,
-        )
     authority_error = _global_sell_execution_authority_shape_error(authority)
     if authority_error is not None:
         return authority_error.replace("global_sell_", "marketable_sell_", 1)
@@ -5237,21 +5228,6 @@ def _global_sell_receipt_closure_error(
 
     explicit = intent.global_sell_execution_authority
     compatible = intent.marketable_sell_execution_authority
-    if explicit is None and compatible is not None:
-        from src.execution.exit_lifecycle import (
-            StrategyHoldRejectionSellAuthority,
-        )
-
-        if isinstance(compatible, StrategyHoldRejectionSellAuthority):
-            # This typed authority is strategy-local, not a global-auction
-            # winner. Its policy and exact-book proof are checked by
-            # _marketable_sell_certificate_error; inventing a global receipt
-            # closure for it would misclassify the authority domain.
-            return (
-                "global_sell_execution_authority_required"
-                if intent.global_sell_receipt_closure is not None
-                else None
-            )
     authority = explicit if explicit is not None else compatible
     closure = intent.global_sell_receipt_closure
 

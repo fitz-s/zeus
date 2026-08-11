@@ -9975,8 +9975,8 @@ def _install_market_alpha_rejection(monkeypatch):
     )
 
 
-def test_monitor_rejected_current_q_authority_cannot_authorize_hold(monkeypatch):
-    """A current-law alpha rejection must beat the rejected q's positive edge."""
+def test_monitor_entry_gate_cannot_invent_a_held_position_sell(monkeypatch):
+    """Historical entry evidence cannot bypass current CASH/HOLD/SELL authority."""
     from src.engine import cycle_runtime
 
     _install_market_alpha_rejection(monkeypatch)
@@ -10004,74 +10004,8 @@ def test_monitor_rejected_current_q_authority_cannot_authorize_hold(monkeypatch)
         exit_decision=ExitDecision(False, reason="HOLD", trigger="HOLD"),
     )
 
-    assert decision is not None
-    assert decision.should_exit is True
-    assert decision.trigger == "STRATEGY_HOLD_AUTHORITY_REJECTED"
-    assert cycle_runtime._global_auction_owns_statistical_sell(
-        decision,
-        decision.reason,
-    ) is False
-    assert summary["strategy_hold_authority_rejected_direct_exits"] == 1
-
-
-def test_monitor_rejected_q_uses_current_validation_when_receipt_is_absent(monkeypatch):
-    """Day0 zero-observation fallback cannot hide forecast q behind a null receipt."""
-    from src.engine import cycle_runtime
-
-    _install_market_alpha_rejection(monkeypatch)
-    pos = _make_position(
-        strategy_key="forecast_qkernel_entry",
-        chain_shares=25.0,
-        selected_method="replacement_posterior",
-        applied_validations=[
-            "day0_unobserved_prefix_zero_observation_proven:replacement_posterior_authority",
-            "belief_source=forecast_posteriors;age_h=1.0;fresh",
-        ],
-    )
-
-    decision = cycle_runtime._entry_selection_guard_exit_decision(
-        conn=None,
-        pos=pos,
-        exit_context=SimpleNamespace(
-            best_bid=0.24,
-            current_market_price_is_fresh=True,
-            probability_receipt=None,
-        ),
-        summary={},
-    )
-
-    assert decision is not None
-    assert decision.should_exit is True
-    assert decision.trigger == "STRATEGY_HOLD_AUTHORITY_REJECTED"
-
-
-def test_monitor_rejected_q_waits_for_legal_in_band_bid(monkeypatch):
-    """Authority rejection persists as named debt when the venue cannot fill legally."""
-    from src.engine import cycle_runtime
-
-    _install_market_alpha_rejection(monkeypatch)
-    pos = _make_position(
-        strategy_key="forecast_qkernel_entry",
-        chain_shares=25.0,
-        selected_method="replacement_posterior",
-    )
-    decision = cycle_runtime._entry_selection_guard_exit_decision(
-        conn=None,
-        pos=pos,
-        exit_context=SimpleNamespace(
-            best_bid=0.04,
-            current_market_price_is_fresh=True,
-            probability_receipt={"probability_authority": "forecast_posteriors"},
-        ),
-        summary={},
-    )
-
-    assert decision is not None
-    assert decision.should_exit is False
-    assert decision.trigger == (
-        "STRATEGY_HOLD_AUTHORITY_REJECTED_NO_EXECUTABLE_BID"
-    )
-    assert "reduce_only_waiting_for_in_band_bid" in decision.applied_validations
+    assert decision is None
+    assert summary == {}
 
 
 def test_monitor_rejected_entry_law_does_not_override_independent_day0_q(monkeypatch):
@@ -16574,159 +16508,10 @@ def test_local_exit_without_capital_certificate_cannot_reach_venue(monkeypatch):
     assert pos.exit_state == ""
 
 
-def test_rejected_current_hold_authority_reaches_reduce_only_submit(monkeypatch):
-    """Execution re-proves the same durable rejection instead of demanding invalid q."""
-    from src.execution import exit_lifecycle
-
-    _install_market_alpha_rejection(monkeypatch)
-    policy_reason = (
-        "market_relative_alpha_rejected("
-        "evalue=12.688312,clusters=2,law=predicted_bin_ev_v1)"
-    )
-    pos = _make_position(
-        state="holding",
-        strategy_key="forecast_qkernel_entry",
-        chain_shares=25.0,
-        selected_method="replacement_posterior",
-        applied_validations=["belief_source=forecast_posteriors;age_h=0.5;fresh"],
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_latest_or_capture_exit_snapshot_context",
-        lambda *_args, **_kwargs: {
-            "executable_snapshot_id": "strategy-rejection-snapshot",
-            "executable_snapshot_hash": "strategy-rejection-book",
-            "executable_snapshot_min_tick_size": "0.01",
-            "executable_snapshot_min_order_size": "1",
-            "executable_snapshot_neg_risk": False,
-            "execution_authority_deadline_utc": "2099-01-01T00:00:00+00:00",
-            "executable_snapshot_orderbook_top_bid": "0.45",
-            "executable_snapshot_orderbook_top_ask": "0.46",
-        },
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "check_sell_collateral",
-        lambda *_args, **_kwargs: (True, ""),
-    )
-    submitted = []
-
-    def place(**kwargs):
-        submitted.append(kwargs)
-        return exit_lifecycle.OrderResult(
-            trade_id=pos.trade_id,
-            status="pending",
-            order_id="strategy-rejection-sell",
-            external_order_id="strategy-rejection-sell",
-        )
-
-    monkeypatch.setattr(exit_lifecycle, "place_sell_order", place)
-
-    class Clob:
-        @staticmethod
-        def get_order_status(_order_id):
-            return {"status": "OPEN"}
-
-    context = ExitContext(
-        exit_reason=(
-            "STRATEGY_HOLD_AUTHORITY_REJECTED "
-            f"({policy_reason}; best_bid=0.4500)"
-        ),
-        fresh_prob=0.71,
-        fresh_prob_is_fresh=True,
-        current_market_price=0.45,
-        current_market_price_is_fresh=True,
-        best_bid=0.45,
-        probability_receipt={"probability_authority": "forecast_posteriors"},
-        position_state="holding",
-    )
-
-    outcome = execute_exit(_make_portfolio(pos), pos, context, clob=Clob())
-
-    assert outcome == "sell_pending: order=strategy-rejection-sell, status=OPEN"
-    assert len(submitted) == 1
-    assert submitted[0]["shares"] == pos.effective_shares
-    assert submitted[0]["submit_order_type"] == "FAK"
-    assert submitted[0]["exact_limit_price"] == 0.45
-    assert isinstance(
-        submitted[0]["marketable_sell_execution_authority"],
-        exit_lifecycle.StrategyHoldRejectionSellAuthority,
-    )
-
-
-def test_executor_reproves_strategy_rejection_taker_authority(monkeypatch):
-    """The final SDK boundary accepts only current policy plus the exact book."""
-    from src.control import control_plane
-    from src.execution import executor, exit_lifecycle
-
-    _install_market_alpha_rejection(monkeypatch)
-    policy_reason = (
-        "market_relative_alpha_rejected("
-        "evalue=12.688312,clusters=2,law=predicted_bin_ev_v1)"
-    )
-    authority = exit_lifecycle.StrategyHoldRejectionSellAuthority(
-        position_id="strategy-exit-position",
-        token_id="strategy-exit-token",
-        strategy_key="forecast_qkernel_entry",
-        selected_method="replacement_posterior",
-        probability_authority="forecast_posteriors",
-        current_validations=("belief_source=forecast_posteriors;fresh",),
-        policy_reason=policy_reason,
-        snapshot_id="strategy-exit-snapshot",
-        snapshot_hash="strategy-exit-book",
-        best_bid=Decimal("0.32"),
-        shares=Decimal("25"),
-        expires_at_utc="2099-01-01T00:00:00+00:00",
-    )
-    intent = SimpleNamespace(
-        trade_id=authority.position_id,
-        token_id=authority.token_id,
-        best_bid=0.32,
-        submit_order_type="FAK",
-        executable_snapshot_id=authority.snapshot_id,
-        marketable_sell_execution_authority=authority,
-        global_sell_execution_authority=None,
-        global_sell_receipt_closure=None,
-    )
-    monkeypatch.setattr(
-        "src.state.snapshot_repo.get_snapshot",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            selected_outcome_token_id=authority.token_id,
-            executable_snapshot_hash=authority.snapshot_hash,
-            orderbook_top_bid=Decimal("0.32"),
-        ),
-    )
-
-    conn = sqlite3.connect(":memory:")
-    try:
-        assert executor._global_sell_receipt_closure_error(
-            intent,
-            order_type="FAK",
-        ) is None
-        assert executor._marketable_sell_certificate_error(
-            conn,
-            intent,
-            limit_price=0.32,
-            shares=25.0,
-        ) is None
-
-        monkeypatch.setattr(control_plane, "strategy_gates", lambda: {})
-        assert executor._marketable_sell_certificate_error(
-            conn,
-            intent,
-            limit_price=0.32,
-            shares=25.0,
-        ) == "strategy_hold_rejection_sell_policy_superseded"
-    finally:
-        conn.close()
-
-
 def test_spoofed_hold_authority_rejection_cannot_reach_venue(monkeypatch):
-    """A reason string without the matching durable control policy remains blocked."""
-    from src.control import control_plane
+    """A historical gate reason cannot bypass global capital authority."""
     from src.execution import exit_lifecycle
 
-    monkeypatch.setattr(control_plane, "strategy_gates", lambda: {})
     pos = _make_position(
         state="holding",
         strategy_key="forecast_qkernel_entry",

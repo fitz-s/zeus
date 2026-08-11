@@ -988,49 +988,6 @@ def is_strategy_enabled(strategy: str) -> bool:
     return decision.enabled
 
 
-def current_strategy_hold_authority_rejection(
-    strategy: str,
-    *,
-    probability_authority: str,
-    selected_method: str,
-    current_validations: Iterable[str] = (),
-) -> str | None:
-    """Return an exact durable policy rejection for the current HOLD q.
-
-    This is the single control-plane interpretation shared by monitor decision
-    and the final SELL boundary. Entry disablement alone is not an exit witness;
-    only the empirical market-relative rejection of the same currently consumed
-    forecast authority qualifies.
-    """
-
-    if str(strategy or "") != "forecast_qkernel_entry":
-        return None
-    validations = tuple(str(value or "") for value in current_validations)
-    validation_authority = (
-        str(selected_method or "") == "replacement_posterior"
-        and any(
-            value.startswith("belief_source=forecast_posteriors;")
-            or value.endswith(":replacement_posterior_authority")
-            for value in validations
-        )
-    )
-    if (
-        str(probability_authority or "") != "forecast_posteriors"
-        and not validation_authority
-    ):
-        return None
-    gate = strategy_gates().get("forecast_qkernel_entry")
-    if gate is None or gate.enabled:
-        return None
-    snapshot = gate.reason_snapshot
-    if not isinstance(snapshot, Mapping):
-        return None
-    reason = str(snapshot.get("reason") or "").strip()
-    if not reason.startswith("market_relative_alpha_rejected("):
-        return None
-    return reason
-
-
 def _refresh_live_allowed_strategy_cache(conn=None) -> None:
     """Refresh the evidence-tier live-allowed cache without touching gates."""
     own_conn = conn is None
