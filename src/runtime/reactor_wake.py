@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import math
+import multiprocessing
 import os
 import socket
 import stat
@@ -88,6 +89,62 @@ _WAKE_QUEUE_CACHE: dict[Path, dict[Path, ReactorWake | None]] = {}
 _WAKE_QUEUE_REVISIONS: dict[Path, tuple[int, ...]] = {}
 _HELD_SELL_REAUCTION_RECEIPT_LINEAGE_LOCK = threading.Lock()
 HELD_SELL_REAUCTION_LINEAGE_LOCK_TIMEOUT_SECONDS = 0.25
+_HELD_SELL_REAUCTION_RECOVERY_CHILD_LOCK = threading.Lock()
+_HELD_SELL_REAUCTION_RECOVERY_CHILD = None
+
+
+def _held_sell_reauction_recovery_read_worker(
+    send_conn,
+    scope_identity: str,
+    path_text: str,
+) -> None:
+    """Read one V4 lineage/receipt snapshot in a killable child."""
+
+    try:
+        path = Path(path_text) if path_text else None
+        request = latest_v4_held_sell_reauction_request(
+            scope_identity,
+            path=path,
+        )
+        current = (
+            None
+            if request is None
+            else (
+                request.request_id,
+                request.material_identity,
+                request.generation,
+                request.attempt_identity,
+            )
+        )
+        completed = bool(
+            request is not None
+            and held_sell_reauction_requests_completed((request,), path=path)
+        )
+        send_conn.send(
+            json.dumps(
+                {
+                    "status": "ok",
+                    "current": current,
+                    "completed": completed,
+                },
+                separators=(",", ":"),
+            )
+        )
+    except BaseException as exc:  # noqa: BLE001 - process boundary reports failure.
+        try:
+            send_conn.send(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    },
+                    separators=(",", ":"),
+                )
+            )
+        except BaseException:
+            pass
+    finally:
+        send_conn.close()
 
 
 @dataclass(frozen=True)
@@ -2197,6 +2254,120 @@ def held_sell_reauction_requests_completed(
         ):
             return False
     return True
+
+
+def held_sell_reauction_recovery_snapshot_hard_deadline(
+    scope_identity: str,
+    *,
+    timeout_seconds: float,
+    path: Path | None = None,
+) -> tuple[tuple[str, str, str, str] | None, bool]:
+    """Read one V4 lineage/receipt snapshot without retaining the caller.
+
+    This is a read-only recovery classifier. Killing its child can lose no
+    command, receipt, or lifecycle write; timeout means the caller must defer
+    classification and retry from durable truth on the next bounded pass.
+    The budget bounds the parent poll after child start; OS process creation
+    and final reap are cleanup tails. A retained unreaped child blocks another
+    spawn, so those tails cannot accumulate into a process storm.
+    """
+
+    global _HELD_SELL_REAUCTION_RECOVERY_CHILD
+
+    scope = str(scope_identity or "").strip()
+    timeout = float(timeout_seconds)
+    if not scope:
+        raise ValueError("HELD_SELL_REAUCTION_SCOPE_IDENTITY_INVALID")
+    if not math.isfinite(timeout) or timeout < 0.01:
+        raise TimeoutError("held SELL recovery read has insufficient deadline")
+    deadline = time.monotonic() + timeout
+
+    def remaining() -> float:
+        return max(0.0, deadline - time.monotonic())
+
+    def stop_and_reap(process) -> None:
+        if not process.is_alive():
+            return
+        process.terminate()
+        process.join(timeout=min(0.25, max(0.01, remaining())))
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=0.25)
+
+    lock_budget = min(0.05, timeout / 4.0)
+    if not _HELD_SELL_REAUCTION_RECOVERY_CHILD_LOCK.acquire(
+        timeout=lock_budget
+    ):
+        raise TimeoutError("held SELL recovery child is already active")
+    receive_conn = None
+    send_conn = None
+    process = None
+    started = False
+    try:
+        context = multiprocessing.get_context("spawn")
+        receive_conn, send_conn = context.Pipe(duplex=False)
+        process = context.Process(
+            target=_held_sell_reauction_recovery_read_worker,
+            args=(send_conn, scope, str(path or "")),
+            name="zeus-held-sell-recovery-read",
+            daemon=True,
+        )
+        prior = _HELD_SELL_REAUCTION_RECOVERY_CHILD
+        if prior is not None:
+            stop_and_reap(prior)
+            if prior.is_alive():
+                raise TimeoutError("prior held SELL recovery child is unreaped")
+            prior.close()
+            _HELD_SELL_REAUCTION_RECOVERY_CHILD = None
+        process.start()
+        started = True
+        _HELD_SELL_REAUCTION_RECOVERY_CHILD = process
+        send_conn.close()
+        cleanup_reserve = min(0.25, timeout / 4.0)
+        poll_budget = max(0.0, remaining() - cleanup_reserve)
+        if poll_budget <= 0.0 or not receive_conn.poll(poll_budget):
+            stop_and_reap(process)
+            raise TimeoutError(
+                f"held SELL recovery read exceeded {timeout:.2f}s child budget"
+            )
+        try:
+            payload = json.loads(receive_conn.recv())
+        except (EOFError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError("HELD_SELL_REAUCTION_RECOVERY_READ_INVALID") from exc
+        process.join(timeout=min(0.25, remaining()))
+        stop_and_reap(process)
+        if not isinstance(payload, dict) or payload.get("status") != "ok":
+            raise RuntimeError(
+                str(
+                    payload.get("error")
+                    if isinstance(payload, dict)
+                    else "HELD_SELL_REAUCTION_RECOVERY_READ_INVALID"
+                )
+            )
+        raw_current = payload.get("current")
+        current = (
+            None
+            if raw_current is None
+            else tuple(str(value or "") for value in raw_current)
+        )
+        if current is not None and len(current) != 4:
+            raise RuntimeError("HELD_SELL_REAUCTION_RECOVERY_READ_INVALID")
+        return current, bool(payload.get("completed"))
+    finally:
+        if send_conn is not None:
+            try:
+                send_conn.close()
+            except OSError:
+                pass
+        if receive_conn is not None:
+            receive_conn.close()
+        if started and process is not None:
+            stop_and_reap(process)
+            if not process.is_alive():
+                process.close()
+                if _HELD_SELL_REAUCTION_RECOVERY_CHILD is process:
+                    _HELD_SELL_REAUCTION_RECOVERY_CHILD = None
+        _HELD_SELL_REAUCTION_RECOVERY_CHILD_LOCK.release()
 
 
 def acknowledge_reactor_wake(

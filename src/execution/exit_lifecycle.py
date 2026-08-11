@@ -69,6 +69,7 @@ _HELD_MONITOR_CLOB_CLIENT = None
 _HELD_MONITOR_CLOB_CLIENT_FACTORY = None
 _HELD_MONITOR_CLOB_CLIENT_LOCK = threading.Lock()
 GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS = 30.0
+HELD_SELL_REAUCTION_CLASSIFICATION_IO_MAX_SECONDS = 0.75
 
 
 class GlobalSellSnapshotReauctionDebtStatus(str, Enum):
@@ -1006,6 +1007,7 @@ def _held_sell_reauction_recovery_due(
     obligation: Mapping[str, object],
     *,
     durable_reserved: bool = False,
+    deadline_monotonic: float | None = None,
 ) -> bool:
     """Whether an exact V4 SELL debt lacks timely terminal proof.
 
@@ -1038,30 +1040,54 @@ def _held_sell_reauction_recovery_due(
     try:
         from src.runtime.reactor_wake import (
             held_sell_reauction_requests_completed,
+            held_sell_reauction_recovery_snapshot_hard_deadline,
             latest_v4_held_sell_reauction_request,
         )
 
-        request = latest_v4_held_sell_reauction_request(scope_identity)
-        if request is None:
-            return True
         expected = (
             str(obligation.get("request_id") or ""),
             str(obligation.get("material_identity") or ""),
             str(obligation.get("generation") or ""),
             str(obligation.get("attempt_identity") or ""),
         )
-        current = (
-            request.request_id,
-            request.material_identity,
-            request.generation,
-            request.attempt_identity,
-        )
-        if held_sell_reauction_requests_completed((request,)):
+        if deadline_monotonic is None:
+            request = latest_v4_held_sell_reauction_request(scope_identity)
+            if request is None:
+                return True
+            current = (
+                request.request_id,
+                request.material_identity,
+                request.generation,
+                request.attempt_identity,
+            )
+            completed = held_sell_reauction_requests_completed((request,))
+        else:
+            remaining = float(deadline_monotonic) - _time_module.monotonic()
+            if remaining < 0.01:
+                raise TimeoutError("held SELL recovery classification deadline expired")
+            current, completed = (
+                held_sell_reauction_recovery_snapshot_hard_deadline(
+                    scope_identity,
+                    timeout_seconds=min(
+                        remaining,
+                        HELD_SELL_REAUCTION_CLASSIFICATION_IO_MAX_SECONDS,
+                    ),
+                )
+            )
+            if current is None:
+                return True
+        if completed:
             return False
         if current != expected:
             return True
         return now > deadline_utc
-    except (OSError, ValueError):
+    except TimeoutError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        if deadline_monotonic is not None:
+            raise TimeoutError(
+                "held SELL recovery classification unavailable"
+            ) from exc
         # An unreadable queue cannot prove that the deadline was satisfied.
         return True
 
@@ -1594,6 +1620,7 @@ def classify_global_sell_snapshot_reauction_debt(
                         payload.get("global_sell_reauction_status")
                         == "durable_wake_reserved"
                     ),
+                    deadline_monotonic=auxiliary_deadline,
                 )
                 else GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
             )

@@ -131,6 +131,7 @@ _LIVE_DISCOVERY_EVAL_BUDGET_ENV = "ZEUS_LIVE_DISCOVERY_EVAL_BUDGET_SECONDS"
 _LIVE_DISCOVERY_EVAL_BUDGET_DEFAULT_SECONDS = 360.0
 _HELD_POSITION_MONITOR_BUDGET_ENV = "ZEUS_HELD_POSITION_MONITOR_BUDGET_SECONDS"
 _HELD_POSITION_MONITOR_BUDGET_DEFAULT_SECONDS = 75.0
+_HELD_MONITOR_GLOBAL_DEBT_SCAN_MAX_SECONDS = 1.0
 _HELD_POSITION_MONITOR_RESERVATION_MIN = 2
 _HELD_POSITION_MONITOR_DEGRADED_COVERAGE_CYCLES = 3
 _MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS = 250
@@ -5804,6 +5805,7 @@ def execute_monitoring_phase(
         _HELD_MONITOR_DEADLINE_ATTR,
         _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
         install_monitor_day0_family_cache,
+        monitor_quote_refresh,
         refresh_position,
     )
     from src.execution.exit_lifecycle import (
@@ -5901,7 +5903,7 @@ def execute_monitoring_phase(
         """Reserve a durable global cut for a canonical reauction debt."""
 
         try:
-            if time.monotonic() >= auxiliary_deadline:
+            if time.monotonic() >= global_sell_debt_deadline:
                 defer_optional_maintenance("GLOBAL_SELL_DEBT_REQUEST_DEADLINE")
                 raise TimeoutError(
                     "GLOBAL_SELL_REAUCTION_AUXILIARY_DEADLINE_EXPIRED"
@@ -5911,7 +5913,7 @@ def execute_monitoring_phase(
             obligation = getattr(position, "_held_sell_reauction_obligation", {})
             obligation = obligation if isinstance(obligation, dict) else {}
             if force_new_generation:
-                if time.monotonic() >= auxiliary_deadline:
+                if time.monotonic() >= global_sell_debt_deadline:
                     raise TimeoutError(
                         "GLOBAL_SELL_REAUCTION_AUXILIARY_DEADLINE_EXPIRED"
                     )
@@ -5923,7 +5925,7 @@ def execute_monitoring_phase(
                 setattr(
                     position,
                     _HELD_MONITOR_DEADLINE_ATTR,
-                    auxiliary_deadline,
+                    global_sell_debt_deadline,
                 )
                 try:
                     refresh_position(conn, clob, position)
@@ -5939,7 +5941,7 @@ def execute_monitoring_phase(
                             _HELD_MONITOR_DEADLINE_ATTR,
                             previous_deadline,
                         )
-                if time.monotonic() >= auxiliary_deadline:
+                if time.monotonic() >= global_sell_debt_deadline:
                     raise TimeoutError(
                         "GLOBAL_SELL_REAUCTION_AUXILIARY_DEADLINE_EXPIRED"
                     )
@@ -6185,7 +6187,7 @@ def execute_monitoring_phase(
     ) -> None:
         nonlocal portfolio_dirty
         for index, position in enumerate(debt_positions):
-            if time.monotonic() >= auxiliary_deadline:
+            if time.monotonic() >= global_sell_debt_deadline:
                 deferred = len(debt_positions) - index
                 defer_optional_maintenance(
                     "GLOBAL_SELL_DEBT_DRAIN_DEADLINE",
@@ -6355,6 +6357,7 @@ def execute_monitoring_phase(
         float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS),
     )
     auxiliary_deadline = monitor_deadline - primary_reserve_seconds
+    global_sell_debt_deadline = auxiliary_deadline
     summary["held_monitor_budget_seconds"] = monitor_budget_seconds
     summary["held_monitor_primary_belief_reserve_seconds"] = (
         primary_reserve_seconds
@@ -6451,9 +6454,21 @@ def execute_monitoring_phase(
         summary["exit_preflight_skipped_for_monitor_refresh"] = True
 
     portfolio_positions = tuple(getattr(portfolio, "positions", ()) or ())
+    # Debt reconstruction is auxiliary to current economic redecision. Bound
+    # the whole scan, not each row independently, so a larger held book cannot
+    # spend the 70s auxiliary window on serial lineage reads and leave only the
+    # 5s primary reserve for every q/book refresh.
+    debt_scan_deadline = min(
+        auxiliary_deadline,
+        time.monotonic() + _HELD_MONITOR_GLOBAL_DEBT_SCAN_MAX_SECONDS,
+    )
+    global_sell_debt_deadline = debt_scan_deadline
+    summary["global_sell_snapshot_reauction_scan_budget_seconds"] = (
+        _HELD_MONITOR_GLOBAL_DEBT_SCAN_MAX_SECONDS
+    )
     committed_debt_candidates: list[object] = []
     for index, position in enumerate(portfolio_positions):
-        if time.monotonic() >= auxiliary_deadline:
+        if time.monotonic() >= debt_scan_deadline:
             defer_optional_maintenance("GLOBAL_SELL_DEBT_SCAN_DEADLINE")
             summary["global_sell_snapshot_reauction_scan_deadline_deferred"] = (
                 len(portfolio_positions) - index
@@ -6462,7 +6477,7 @@ def execute_monitoring_phase(
         debt_status = classify_global_sell_snapshot_reauction_debt(
             position,
             conn,
-            auxiliary_deadline=auxiliary_deadline,
+            auxiliary_deadline=debt_scan_deadline,
         )
         if debt_status is GlobalSellSnapshotReauctionDebtStatus.DEFERRED:
             # SCOPE: unclassified positions in this held-monitor pass. DRAIN:
@@ -6487,7 +6502,7 @@ def execute_monitoring_phase(
             committed_debt_candidates.append(position)
     committed_debt_positions = tuple(committed_debt_candidates)
     if committed_debt_positions:
-        if time.monotonic() >= auxiliary_deadline:
+        if time.monotonic() >= global_sell_debt_deadline:
             defer_optional_maintenance(
                 "GLOBAL_SELL_DEBT_DRAIN_DEADLINE",
                 len(committed_debt_positions),
@@ -6790,6 +6805,9 @@ def execute_monitoring_phase(
     network_prefetch_started = False
     network_prefetch_unavailable = False
     network_prefetch_batch_transport_failed = False
+    network_prefetch_batch_failed = False
+    network_prefetch_singular_fallback_attempted = False
+    network_prefetch_singular_fallback_position_id = None
     durable_debt_network_attempted = False
     summary["held_monitor_budget_reservation_count"] = monitor_reservation_count
     summary["held_monitor_durable_debt_position"] = (
@@ -7137,6 +7155,7 @@ def execute_monitoring_phase(
                 )
                 if error := network_prefetch.get("held_monitor_orderbook_prefetch_error"):
                     summary["held_monitor_orderbook_prefetch_error"] = error
+                    network_prefetch_batch_failed = True
                     network_prefetch_batch_transport_failed = bool(
                         network_prefetch.get(
                             "held_monitor_orderbook_prefetch_transport_failed",
@@ -7177,15 +7196,78 @@ def execute_monitoring_phase(
                     summary["held_monitor_orderbook_prefetch_bypassed"] = True
                     network_prefetch_unavailable = False
                     network_book_tokens = frozenset()
-                if network_prefetch_unavailable:
-                    summary["held_monitor_positions_deferred_for_orderbook_gap"] = (
-                        summary.get(
-                            "held_monitor_positions_deferred_for_orderbook_gap",
-                            0,
+                    if time.monotonic() >= monitor_deadline:
+                        deferred_count = len(monitor_positions) - position_index
+                        summary["held_monitor_positions_deferred"] = deferred_count
+                        summary["held_monitor_defer_reason"] = (
+                            "cycle_budget_exhausted"
                         )
-                        + 1
-                    )
-                    continue
+                        summary["held_monitor_deadline_deferred_positions"] = (
+                            deferred_count
+                        )
+                        summary["held_monitor_deadline_defer_reason"] = (
+                            "MONITOR_DEADLINE_EXPIRED_DURING_BATCH_PREFETCH"
+                        )
+                        break
+                if network_prefetch_unavailable:
+                    if (
+                        network_prefetch_batch_failed
+                        and not network_prefetch_singular_fallback_attempted
+                        and held_token_id
+                        and time.monotonic() < monitor_deadline
+                    ):
+                        # A failed shared batch is not evidence that this held token
+                        # lacks a current book.  Spend at most one already-bounded
+                        # singular read so one transport failure cannot blind the
+                        # whole held book, while retaining anti-storm deferral for
+                        # every other gap until the next fair monitor pass.
+                        previous_deadline = getattr(
+                            pos,
+                            _HELD_MONITOR_DEADLINE_ATTR,
+                            None,
+                        )
+                        network_prefetch_singular_fallback_attempted = True
+                        setattr(pos, _HELD_MONITOR_DEADLINE_ATTR, monitor_deadline)
+                        try:
+                            fallback_quote = monitor_quote_refresh(
+                                conn,
+                                clob,
+                                pos,
+                                retry_after_prefetch=True,
+                            )
+                        finally:
+                            if previous_deadline is None:
+                                try:
+                                    delattr(pos, _HELD_MONITOR_DEADLINE_ATTR)
+                                except AttributeError:
+                                    pass
+                            else:
+                                setattr(
+                                    pos,
+                                    _HELD_MONITOR_DEADLINE_ATTR,
+                                    previous_deadline,
+                                )
+                        if fallback_quote is not None:
+                            network_prefetch_singular_fallback_position_id = id(pos)
+                            summary[
+                                "held_monitor_batch_failure_singular_recovered_position"
+                            ] = str(getattr(pos, "trade_id", "") or "")
+                            summary[
+                                "held_monitor_batch_failure_singular_recovered"
+                            ] = 1
+                        else:
+                            summary[
+                                "held_monitor_batch_failure_singular_unavailable"
+                            ] = 1
+                    if network_prefetch_singular_fallback_position_id != id(pos):
+                        summary["held_monitor_positions_deferred_for_orderbook_gap"] = (
+                            summary.get(
+                                "held_monitor_positions_deferred_for_orderbook_gap",
+                                0,
+                            )
+                            + 1
+                        )
+                        continue
                 if urgent_preemption_requested():
                     # This position is already counted as scanned above; only
                     # the unvisited tail is deferred.

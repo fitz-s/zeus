@@ -18,6 +18,7 @@ import inspect
 import json
 import math
 import multiprocessing
+import os
 import sqlite3
 import threading
 import time
@@ -12429,10 +12430,10 @@ def test_held_book_hard_deadline_accepts_only_requested_book_objects(monkeypatch
     }
 
 
-def test_monitoring_batch_transport_failure_defers_without_singular_fanout(
+def test_monitoring_batch_transport_failure_recovers_one_without_singular_fanout(
     monkeypatch,
 ):
-    """A failed batch defers all gaps; a healthy next cycle retries from scratch."""
+    """A failed batch recovers one bounded position; the next cycle retries all."""
     from src.engine import cycle_runtime, monitor_refresh
 
     positions = [
@@ -12464,9 +12465,23 @@ def test_monitoring_batch_transport_failure_defers_without_singular_fanout(
                 for position in positions
             }
 
-        def get_orderbook(self, token_id):
-            singular_calls.append(token_id)
-            raise AssertionError("batch failure must not fan out singular reads")
+        def get_held_orderbook_snapshots_hard_deadline(
+            self,
+            token_ids,
+            *,
+            timeout_seconds,
+        ):
+            assert timeout_seconds > 0.0
+            assert len(token_ids) == 1
+            singular_calls.extend(token_ids)
+            token_id = token_ids[0]
+            return {
+                token_id: {
+                    "asset_id": token_id,
+                    "bids": [{"price": "0.40", "size": "20"}],
+                    "asks": [{"price": "0.42", "size": "20"}],
+                }
+            }
 
     monkeypatch.setattr(
         cycle_runtime,
@@ -12510,12 +12525,16 @@ def test_monitoring_batch_transport_failure_defers_without_singular_fanout(
         held_position_monitor_budget_seconds=10.0,
     )
 
-    assert singular_calls == []
-    assert refreshes == []
-    assert canonical_refreshes == []
+    assert singular_calls == [positions[0].token_id]
+    assert refreshes == [positions[0].trade_id]
+    assert canonical_refreshes == refreshes
     assert summary["held_monitor_orderbook_prefetch_transport_failed"] is True
-    assert summary["held_monitor_positions_deferred_for_orderbook_gap"] == 2
-    assert summary["monitors"] == 0
+    assert summary["held_monitor_positions_deferred_for_orderbook_gap"] == 1
+    assert summary["held_monitor_batch_failure_singular_recovered"] == 1
+    assert summary["held_monitor_batch_failure_singular_recovered_position"] == (
+        positions[0].trade_id
+    )
+    assert summary["monitors"] == 1
 
     clob.fail_batch = False
     recovered_summary = {"monitors": 0, "exits": 0}
@@ -12531,13 +12550,75 @@ def test_monitoring_batch_transport_failure_defers_without_singular_fanout(
         held_position_monitor_budget_seconds=10.0,
     )
 
-    assert singular_calls == []
-    assert refreshes == [position.trade_id for position in positions]
+    assert singular_calls == [positions[0].token_id]
+    assert refreshes == [
+        positions[0].trade_id,
+        *(position.trade_id for position in positions),
+    ]
     assert canonical_refreshes == refreshes
     assert recovered_summary["monitors"] == 2
     assert not recovered_summary.get(
         "held_monitor_orderbook_prefetch_transport_failed", False
     )
+
+
+def test_monitoring_failed_singular_recovery_does_not_fan_out(monkeypatch):
+    """One failed singular recovery cannot multiply a shared batch outage."""
+    from src.engine import cycle_runtime, monitor_refresh
+
+    positions = [
+        _make_position(
+            trade_id=f"batch-singular-failure-{index}",
+            token_id=f"batch-singular-failure-token-{index}",
+            direction="buy_yes",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(2)
+    ]
+    singular_calls = []
+
+    class FailedBatchClob:
+        def get_orderbook_snapshots(self, _token_ids):
+            raise RuntimeError("/books transport unavailable")
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {},
+    )
+
+    def failed_singular(_conn, _clob, position, *, retry_after_prefetch=False):
+        assert retry_after_prefetch is True
+        singular_calls.append(position.token_id)
+        return None
+
+    monkeypatch.setattr(monitor_refresh, "monitor_quote_refresh", failed_singular)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "refresh_position",
+        lambda *_args, **_kwargs: pytest.fail(
+            "a position without a recovered quote must remain deferred"
+        ),
+    )
+
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        FailedBatchClob(),
+        _make_portfolio(*positions),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_monitor_failed_singular_recovery"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=10.0,
+    )
+
+    assert singular_calls == [positions[0].token_id]
+    assert summary["held_monitor_positions_deferred_for_orderbook_gap"] == 2
+    assert summary["held_monitor_batch_failure_singular_unavailable"] == 1
+    assert summary["monitors"] == 0
 
 
 def test_monitoring_batch_transport_does_not_retry_after_deadline(
@@ -18891,15 +18972,22 @@ def test_global_sell_debt_drain_stops_after_first_attempt_exhausts_deadline(
         ),
     )
 
-    def recover(position, **_kwargs):
+    def recover(position, *, requester, **_kwargs):
         attempted.append(position.trade_id)
         clock[0] = 2.0
+        assert requester(position, True) is False
         return False
 
     monkeypatch.setattr(
         exit_lifecycle,
         "recover_global_sell_snapshot_reauction_debt",
         recover,
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *_args, **_kwargs: pytest.fail(
+            "expired debt-drain budget must not start a primary refresh"
+        ),
     )
     monkeypatch.setattr(
         cycle_runtime,
@@ -19024,6 +19112,323 @@ def test_decision_log_406131_debt_classification_defers_when_sql_spends_deadline
     assert conn.history_queries == 1
     assert conn.handler is None
     assert conn.busy_ms == 30_000
+
+
+def test_global_sell_debt_lineage_timeout_is_typed_deferred(monkeypatch):
+    """A stuck durable read is auxiliary debt, never primary-monitor time."""
+    from src.execution import exit_lifecycle
+    from src.runtime import reactor_wake
+
+    position = _make_position(
+        trade_id="global-debt-lineage-timeout",
+        state="holding",
+        chain_state="synced",
+    )
+    obligation = {
+        "schema_version": 4,
+        "scope_identity": "global-debt-lineage-timeout-scope",
+        "request_id": "global-debt-lineage-timeout-request",
+        "material_identity": "global-debt-lineage-timeout-material",
+        "generation": "global-debt-lineage-timeout-generation",
+        "attempt_identity": "global-debt-lineage-timeout-attempt",
+        "position_id": position.trade_id,
+        "held_token_id": position.token_id,
+        "completion_deadline_at": "2026-08-11T20:00:00+00:00",
+    }
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE position_events (
+            position_id TEXT,
+            event_type TEXT,
+            sequence_no INTEGER,
+            occurred_at TEXT,
+            payload_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO position_events VALUES (?, 'MONITOR_REFRESHED', 1, ?, ?)",
+        (
+            position.trade_id,
+            "2026-08-11T20:00:00+00:00",
+            json.dumps({"held_sell_reauction_obligation": obligation}),
+        ),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "latest_held_sell_reauction_obligation",
+        lambda *_args, **_kwargs: obligation,
+    )
+    child_budgets = []
+
+    def timeout_read(_scope, *, timeout_seconds, path=None):
+        assert path is None
+        child_budgets.append(timeout_seconds)
+        raise TimeoutError("simulated blocked lineage read")
+
+    monkeypatch.setattr(
+        reactor_wake,
+        "held_sell_reauction_recovery_snapshot_hard_deadline",
+        timeout_read,
+    )
+
+    status = exit_lifecycle.classify_global_sell_snapshot_reauction_debt(
+        position,
+        conn,
+        auxiliary_deadline=time.monotonic() + 5.0,
+    )
+
+    assert status is exit_lifecycle.GlobalSellSnapshotReauctionDebtStatus.DEFERRED
+    assert child_budgets == pytest.approx(
+        [exit_lifecycle.HELD_SELL_REAUCTION_CLASSIFICATION_IO_MAX_SECONDS]
+    )
+    conn.close()
+
+
+def test_global_sell_debt_deferral_preserves_primary_monitor_refresh(monkeypatch):
+    """Auxiliary debt deferral cannot blind an otherwise refreshable holding."""
+    from src.engine import cycle_runtime, monitor_refresh
+    from src.execution import exit_lifecycle
+
+    position = _make_position(
+        trade_id="global-debt-deferral-primary-refresh",
+        token_id="global-debt-deferral-primary-token",
+        state="holding",
+        chain_state="synced",
+    )
+    refreshes = []
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "classify_global_sell_snapshot_reauction_debt",
+        lambda *_args, **_kwargs: (
+            exit_lifecycle.GlobalSellSnapshotReauctionDebtStatus.DEFERRED
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: [position],
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {
+            position.token_id: {
+                "asset_id": position.token_id,
+                "bids": [{"price": "0.40", "size": "20"}],
+                "asks": [{"price": "0.42", "size": "20"}],
+            }
+        },
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_day0_hard_fact_position_eligible",
+        lambda *_args, **_kwargs: False,
+    )
+
+    def refresh(_conn, _clob, refreshed):
+        refreshes.append(refreshed.trade_id)
+        return _monitor_test_edge_context(refreshed)
+
+    monkeypatch.setattr(monitor_refresh, "refresh_position", refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_global_debt_deferral_primary_refresh"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=10.0,
+    )
+
+    assert refreshes == [position.trade_id]
+    assert summary["global_sell_snapshot_reauction_classification_deferred"] == 1
+    assert summary["held_monitor_primary_belief_read_completed"] == 1
+    assert summary["monitors"] == 1
+
+
+def test_held_sell_recovery_read_hard_deadline_kills_blocked_lineage(tmp_path):
+    """A blocked local lineage read cannot retain the monitor process."""
+    from src.runtime import reactor_wake
+
+    scope = "blocked-lineage-hard-deadline"
+    lineage_path = reactor_wake._held_sell_reauction_lineage_path(
+        scope,
+        path=tmp_path,
+    )
+    lineage_path.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(lineage_path)
+    started = time.monotonic()
+
+    with pytest.raises(TimeoutError, match="child budget"):
+        reactor_wake.held_sell_reauction_recovery_snapshot_hard_deadline(
+            scope,
+            timeout_seconds=0.20,
+            path=tmp_path,
+        )
+
+    assert time.monotonic() - started < 1.0
+    assert reactor_wake.held_sell_reauction_recovery_snapshot_hard_deadline(
+        "missing-lineage-hard-deadline",
+        timeout_seconds=1.0,
+        path=tmp_path,
+    ) == (None, False)
+    assert reactor_wake._HELD_SELL_REAUCTION_RECOVERY_CHILD is None
+    assert reactor_wake._HELD_SELL_REAUCTION_RECOVERY_CHILD_LOCK.acquire(
+        blocking=False
+    )
+    reactor_wake._HELD_SELL_REAUCTION_RECOVERY_CHILD_LOCK.release()
+
+
+def test_blocked_global_debt_lineage_preserves_eight_primary_refreshes(
+    tmp_path,
+    monkeypatch,
+):
+    """Observed pre-primary stall shape cannot blind the whole held book."""
+    from src.engine import cycle_runtime, monitor_refresh
+    from src.execution import exit_lifecycle
+    from src.runtime import reactor_wake
+    from src.state.db import get_connection, init_schema
+
+    positions = [
+        _make_position(
+            trade_id=f"blocked-debt-eight-{index}",
+            token_id=f"blocked-debt-eight-token-{index}",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(8)
+    ]
+    scope = "blocked-debt-eight-scope"
+    obligation = {
+        "schema_version": 4,
+        "scope_identity": scope,
+        "request_id": "blocked-debt-eight-request",
+        "material_identity": "blocked-debt-eight-material",
+        "generation": "blocked-debt-eight-generation",
+        "attempt_identity": "blocked-debt-eight-attempt",
+        "position_id": positions[0].trade_id,
+        "held_token_id": positions[0].token_id,
+        "completion_deadline_at": "2026-08-11T20:00:00+00:00",
+    }
+    conn = get_connection(tmp_path / "blocked-debt-eight.db")
+    init_schema(conn)
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, source_module, env, payload_json
+        ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, ?, 'live', ?)
+        """,
+        (
+            "blocked-debt-eight:monitor:1",
+            positions[0].trade_id,
+            "2026-08-11T20:00:00+00:00",
+            "tests/test_live_safety_invariants",
+            json.dumps({"held_sell_reauction_obligation": obligation}),
+        ),
+    )
+    conn.commit()
+    lineage_path = reactor_wake._held_sell_reauction_lineage_path(
+        scope,
+        path=tmp_path,
+    )
+    lineage_path.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(lineage_path)
+
+    def blocked_recovery_due(current, **_kwargs):
+        assert current["scope_identity"] == scope
+        reactor_wake.held_sell_reauction_recovery_snapshot_hard_deadline(
+            scope,
+            timeout_seconds=0.20,
+            path=tmp_path,
+        )
+        pytest.fail("blocked lineage unexpectedly completed")
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_held_sell_reauction_recovery_due",
+        blocked_recovery_due,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: positions,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_day0_hard_fact_position_eligible",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {
+            position.token_id: {
+                "asset_id": position.token_id,
+                "bids": [{"price": "0.40", "size": "20"}],
+                "asks": [{"price": "0.42", "size": "20"}],
+            }
+            for position in positions
+        },
+    )
+    refreshes = []
+    canonical_refreshes = []
+
+    def refresh(_conn, _clob, position):
+        refreshes.append(position.trade_id)
+        position.last_monitor_prob = 0.60
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_best_bid = 0.40
+        position.last_monitor_market_price = 0.40
+        position.last_monitor_market_price_is_fresh = True
+        return _monitor_test_edge_context(position)
+
+    monkeypatch.setattr(monitor_refresh, "refresh_position", refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda _conn, position, **_kwargs: (
+            canonical_refreshes.append(position.trade_id) or True
+        ),
+    )
+
+    summary = {"monitors": 0, "exits": 0}
+    started = time.monotonic()
+    cycle_runtime.execute_monitoring_phase(
+        conn,
+        object(),
+        _make_portfolio(*positions),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_blocked_debt_eight_primary_refreshes"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=75.0,
+    )
+
+    assert time.monotonic() - started < 5.0
+    assert refreshes == [position.trade_id for position in positions]
+    assert canonical_refreshes == refreshes
+    assert summary["global_sell_snapshot_reauction_classification_deferred"] == 8
+    assert summary["held_monitor_primary_belief_read_completed"] == 8
+    assert summary["monitors"] == 8
+    conn.close()
 
 
 def test_monitor_refresh_deadline_defers_before_canonical_emit(monkeypatch):
