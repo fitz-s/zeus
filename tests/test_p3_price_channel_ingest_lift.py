@@ -34,6 +34,7 @@ import fcntl
 import inspect
 import json
 import sqlite3
+import threading
 import time
 import types
 from datetime import datetime, timedelta, timezone
@@ -534,9 +535,11 @@ def test_no_regression_order_runtime_keeps_boot_fill_bridge_recovery():
         "the order runtime must keep _edli_boot_fill_bridge_recovery — it reads the durable "
         "fill bridge at boot so no fill is dropped across the P3 cutover."
     )
-    # And it must still be invoked during boot (called inside main()).
-    assert "_edli_boot_fill_bridge_recovery" in _called_func_names(_MAIN_PY), (
-        "_edli_boot_fill_bridge_recovery must still be CALLED at boot in src.main."
+    # And its asynchronous starter must still be invoked during boot. The
+    # canonical recovery itself remains shared and unchanged; only scheduler
+    # startup is decoupled from its historical scan.
+    assert "_start_edli_boot_fill_bridge_recovery" in _called_func_names(_MAIN_PY), (
+        "_start_edli_boot_fill_bridge_recovery must be CALLED at boot in src.main."
     )
 
 
@@ -597,6 +600,64 @@ def test_boot_fill_bridge_probe_uncertainty_preserves_canonical_recovery(monkeyp
 
     assert conn.committed is True
     assert conn.closed is True
+
+
+def test_boot_fill_bridge_recovery_does_not_block_scheduler_startup(monkeypatch):
+    """Historical recovery runs off the boot thread and releases BUY only after success."""
+    import src.main as main_mod
+
+    entered = threading.Event()
+    release = threading.Event()
+    complete = threading.Event()
+    monkeypatch.setattr(main_mod, "_edli_boot_fill_bridge_recovery_complete", complete)
+    monkeypatch.setattr(main_mod, "_edli_boot_fill_bridge_recovery_thread", None)
+
+    def _slow_success():
+        entered.set()
+        assert release.wait(timeout=2.0)
+        return True
+
+    monkeypatch.setattr(main_mod, "_edli_boot_fill_bridge_recovery", _slow_success)
+
+    thread = main_mod._start_edli_boot_fill_bridge_recovery()
+
+    assert thread is not None
+    assert entered.wait(timeout=1.0)
+    assert thread.is_alive()
+    assert complete.is_set() is False
+    assert main_mod._edli_live_entry_readiness_block({}) == (
+        "entry_readiness:EDLI_BOOT_FILL_BRIDGE_RECOVERY_PENDING",
+        {},
+    )
+
+    release.set()
+    thread.join(timeout=2.0)
+    assert thread.is_alive() is False
+    assert complete.is_set() is True
+
+
+def test_boot_fill_bridge_recovery_retries_before_buy_release(monkeypatch):
+    """A failed pass cannot open BUY admission; the same owner retries to success."""
+    import src.main as main_mod
+
+    complete = threading.Event()
+    attempts = []
+    monkeypatch.setattr(main_mod, "_edli_boot_fill_bridge_recovery_complete", complete)
+    monkeypatch.setattr(main_mod, "_edli_boot_fill_bridge_recovery_thread", None)
+    monkeypatch.setattr(main_mod, "_EDLI_BOOT_FILL_BRIDGE_RETRY_SECONDS", 0.001)
+
+    def _fail_then_succeed():
+        attempts.append(len(attempts) + 1)
+        return len(attempts) >= 2
+
+    monkeypatch.setattr(main_mod, "_edli_boot_fill_bridge_recovery", _fail_then_succeed)
+
+    thread = main_mod._start_edli_boot_fill_bridge_recovery()
+    assert thread is not None
+    thread.join(timeout=2.0)
+
+    assert attempts == [1, 2]
+    assert complete.is_set() is True
 
 
 def test_no_regression_order_runtime_reads_current_feasibility_projection():

@@ -100,6 +100,9 @@ _held_position_monitor_canonical_last_check = 0.0
 _HELD_POSITION_MONITOR_CANONICAL_RECHECK_SECONDS = 1.0
 _held_position_monitor_bootstrap_complete = threading.Event()
 _capital_recovery_handoff_pending = threading.Event()
+_edli_boot_fill_bridge_recovery_complete = threading.Event()
+_edli_boot_fill_bridge_recovery_thread: threading.Thread | None = None
+_EDLI_BOOT_FILL_BRIDGE_RETRY_SECONDS = 30.0
 _held_position_monitor_bootstrap_check_lock = threading.Lock()
 _held_position_monitor_bootstrap_last_check = 0.0
 _day0_urgent_wake_pending = threading.Event()
@@ -1196,6 +1199,15 @@ def _edli_live_entry_readiness_block(
     # return values fresh from current DB rows on every call, so once DRAIN
     # clears the underlying row the gate reads false on its very next
     # invocation -- no separate reset action exists or is needed.
+    # SCOPE: BUY admission only. Scheduler startup, held monitoring, SELL,
+    # command recovery, and settlement remain live while the historical bridge
+    # debt is checked. DRAIN: the single boot recovery thread proves there is no
+    # orphan or materializes every bounded candidate, retrying after transient
+    # failures. RESET: that thread sets the process-local completion event only
+    # after a successful canonical recovery pass; restart initializes it clear.
+    if not _edli_boot_fill_bridge_recovery_complete.is_set():
+        return "entry_readiness:EDLI_BOOT_FILL_BRIDGE_RECOVERY_PENDING", {}
+
     try:
         _require_stage_file_paths(edli_cfg)
         state_section = _settings_section("state", {})
@@ -8690,7 +8702,7 @@ def _resolve_edli_user_channel_aggregate_id(conn, message: dict) -> str:
 
 
 
-def _edli_boot_fill_bridge_recovery() -> None:
+def _edli_boot_fill_bridge_recovery() -> bool:
     """MF-1: heal orphaned EDLI confirmed fills AT BOOT, before any new trading.
 
     The durable scan also runs every reconcile cycle, but running it once at boot
@@ -8732,7 +8744,7 @@ def _edli_boot_fill_bridge_recovery() -> None:
                 logger.info(
                     "EDLI boot fill-bridge recovery: no orphaned confirmed fills"
                 )
-                return
+                return True
 
             bridge_conn = get_trade_connection_with_world_required(write_class="live")
             bridged = _edli_durable_fill_bridge_scan(bridge_conn, now=now)
@@ -8751,6 +8763,7 @@ def _edli_boot_fill_bridge_recovery() -> None:
             )
         else:
             logger.info("EDLI boot fill-bridge recovery: no orphaned confirmed fills")
+        return True
     except Exception as exc:  # noqa: BLE001
         # Boot recovery is best-effort: the per-cycle durable scan is the safety
         # net, so a boot-time hiccup must never block the daemon from starting.
@@ -8760,6 +8773,44 @@ def _edli_boot_fill_bridge_recovery() -> None:
             exc,
             exc_info=True,
         )
+        return False
+
+
+def _start_edli_boot_fill_bridge_recovery() -> threading.Thread | None:
+    """Drain historical fill-bridge debt without delaying monitor startup."""
+
+    global _edli_boot_fill_bridge_recovery_thread
+    if _edli_boot_fill_bridge_recovery_complete.is_set():
+        return None
+    if (
+        _edli_boot_fill_bridge_recovery_thread is not None
+        and _edli_boot_fill_bridge_recovery_thread.is_alive()
+    ):
+        return _edli_boot_fill_bridge_recovery_thread
+
+    def _run() -> None:
+        while not _edli_boot_fill_bridge_recovery_complete.is_set():
+            if _edli_boot_fill_bridge_recovery():
+                _edli_boot_fill_bridge_recovery_complete.set()
+                logger.info(
+                    "EDLI boot fill-bridge recovery complete; BUY admission may resume"
+                )
+                return
+            logger.warning(
+                "EDLI boot fill-bridge recovery incomplete; retrying in %.1fs",
+                _EDLI_BOOT_FILL_BRIDGE_RETRY_SECONDS,
+            )
+            _edli_boot_fill_bridge_recovery_complete.wait(
+                _EDLI_BOOT_FILL_BRIDGE_RETRY_SECONDS
+            )
+
+    _edli_boot_fill_bridge_recovery_thread = threading.Thread(
+        target=_run,
+        name="edli-boot-fill-bridge-recovery",
+        daemon=True,
+    )
+    _edli_boot_fill_bridge_recovery_thread.start()
+    return _edli_boot_fill_bridge_recovery_thread
 
 
 def _edli_boot_settlement_redeem_recovery() -> None:
@@ -9378,13 +9429,15 @@ def main():
     # current() acquisition.
     _startup_wallet_check(bankroll_record=_warm_rec)
 
-    # MF-1: durable self-healing capital spine — AT BOOT, before any new trading,
+    # MF-1: durable self-healing capital spine — start the recovery at boot,
     # bridge any EDLI confirmed fill that was orphaned (no position_current) by a
     # prior daemon death / swallowed bridge exception. Closes the restart-specific
     # orphan window immediately so stuck capital is visible to chain-reconcile /
-    # exit / harvester / redeem before the first entry wave. Fail-open (never
-    # blocks boot); the per-cycle durable scan is the continuous safety net.
-    _edli_boot_fill_bridge_recovery()
+    # exit / harvester / redeem before the first entry wave. The recovery drains
+    # asynchronously so scheduler/monitor/SELL startup is never coupled to an
+    # unbounded historical scan; BUY remains fail-closed in the cycle-local
+    # entry-readiness gate until the recovery pass succeeds.
+    _start_edli_boot_fill_bridge_recovery()
 
     # 守護 (2026-06-03): queue a non-blocking recovery pass for VERIFIED settlement
     # truth already on disk for FILLED positions still sitting phase=active.

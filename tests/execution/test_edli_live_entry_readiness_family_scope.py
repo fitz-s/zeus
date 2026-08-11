@@ -23,6 +23,7 @@ from __future__ import annotations
 import inspect
 import json
 import sqlite3
+import threading
 from datetime import datetime, timezone
 
 import pytest
@@ -32,6 +33,15 @@ from src.state.schema.edli_live_cap_usage_schema import ensure_table as _ensure_
 from src.state.schema.edli_live_order_events_schema import ensure_tables as _ensure_live_order_tables
 
 FIXED_NOW = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _completed_boot_fill_bridge(monkeypatch):
+    """Exercise this gate's family-scoping layer after boot recovery drained."""
+
+    complete = threading.Event()
+    complete.set()
+    monkeypatch.setattr(main_mod, "_edli_boot_fill_bridge_recovery_complete", complete)
 
 
 def _make_world_db(tmp_path) -> str:
