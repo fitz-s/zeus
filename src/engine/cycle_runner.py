@@ -578,6 +578,15 @@ def _execute_monitoring_phase(
     should_preempt_for_urgent_day0=None,
     defer_partial_orderbook_gaps: bool = False,
 ):
+    if isinstance(conn, sqlite3.Connection):
+        # SCOPE: only this short-lived held-monitor connection. DRAIN:
+        # src.main's dedicated 90-second PASSIVE canonical-WAL checkpoints copy
+        # reclaimable frames after the monitor releases its transaction.
+        # RESET: the connection closes at cycle teardown; a later cycle opens
+        # and configures a new connection. Keep checkpoint I/O out of a monitor
+        # commit so SQLite cannot overrun the held-position decision deadline.
+        conn.execute("PRAGMA wal_autocheckpoint = 0")
+        summary["held_monitor_wal_autocheckpoint"] = "disabled"
     return _runtime.execute_monitoring_phase(
         conn,
         clob,

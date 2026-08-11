@@ -12477,6 +12477,39 @@ def test_monitoring_phase_uses_tracker_record_exit_for_deferred_sell_fills(monke
     assert artifact.exit_cases[0].trade_id == "filled-1"
 
 
+def test_held_monitor_commit_cannot_inherit_sqlite_autocheckpoint(monkeypatch):
+    """The live monitor connection leaves WAL draining to the scheduled backstop."""
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA wal_autocheckpoint = 1")
+    observed = {}
+
+    def _execute(*args, **kwargs):
+        observed["wal_autocheckpoint"] = args[0].execute(
+            "PRAGMA wal_autocheckpoint"
+        ).fetchone()[0]
+        return False, False
+
+    monkeypatch.setattr(cycle_runner._runtime, "execute_monitoring_phase", _execute)
+    summary = {"monitors": 0, "exits": 0}
+
+    try:
+        result = cycle_runner._execute_monitoring_phase(
+            conn,
+            object(),
+            PortfolioState(),
+            object(),
+            StrategyTracker(),
+            summary,
+        )
+    finally:
+        conn.close()
+
+    assert result == (False, False)
+    assert observed["wal_autocheckpoint"] == 0
+    assert summary["held_monitor_wal_autocheckpoint"] == "disabled"
+
+
 def _monitor_chain_deps(now: datetime):
     return types.SimpleNamespace(
         MonitorResult=cycle_runner.MonitorResult,
