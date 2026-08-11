@@ -3501,29 +3501,110 @@ def test_current_gamma_market_fetch_batches_concurrently_and_fails_closed():
         )
 
 
-def test_current_gamma_market_fetch_returns_at_total_deadline():
-    worker_finished = threading.Event()
+def test_current_gamma_market_fetch_retains_workers_at_total_deadline(monkeypatch):
+    import concurrent.futures
+
+    real_executor = concurrent.futures.ThreadPoolExecutor
+    shutdown_started = threading.Event()
+    first_worker_entered = threading.Event()
+    second_worker_waiting = threading.Event()
+    allow_second_worker = threading.Event()
+    workers_started = threading.Event()
+    completion_wait_entered = threading.Event()
+    deadline_triggered = threading.Event()
+    worker_release = threading.Event()
+    workers_finished = threading.Event()
+    call_finished = threading.Event()
+    outcome = []
+    started_chunks = []
+    finished_chunks = []
+    arrived_chunks = []
+    calls_lock = threading.Lock()
+    clock = [0.0]
+
+    class TrackingExecutor(real_executor):
+        def shutdown(self, *args, **kwargs):
+            shutdown_started.set()
+            return super().shutdown(*args, **kwargs)
+
+    monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", TrackingExecutor)
+    monkeypatch.setattr(
+        universe,
+        "_time",
+        SimpleNamespace(monotonic=lambda: clock[0]),
+    )
+
+    def controlled_as_completed(_futures, *, timeout):
+        assert timeout == pytest.approx(1.0)
+        completion_wait_entered.set()
+        assert deadline_triggered.wait(2.0)
+        raise concurrent.futures.TimeoutError
+
+    monkeypatch.setattr(concurrent.futures, "as_completed", controlled_as_completed)
 
     def slow_gamma_get(_path, *, params, timeout):
-        assert timeout <= 0.05
-        time.sleep(0.15)
-        worker_finished.set()
-        return SimpleNamespace(status_code=200, json=lambda: [])
+        assert timeout == pytest.approx(1.0)
+        chunk = tuple(params["condition_ids"])
+        with calls_lock:
+            arrived_chunks.append(chunk)
+            arrival_index = len(arrived_chunks)
+        if arrival_index == 2:
+            second_worker_waiting.set()
+            assert allow_second_worker.wait(2.0)
+        with calls_lock:
+            started_chunks.append(chunk)
+            if arrival_index == 1:
+                first_worker_entered.set()
+            if len(started_chunks) == 2:
+                workers_started.set()
+        try:
+            assert worker_release.wait(2.0)
+            return SimpleNamespace(status_code=200, json=lambda: [])
+        finally:
+            with calls_lock:
+                finished_chunks.append(chunk)
+                if len(finished_chunks) == 2:
+                    workers_finished.set()
 
-    started = time.monotonic()
-    with pytest.raises(
-        ValueError,
-        match="GLOBAL_CURRENT_GAMMA_MARKETS_DEADLINE_EXCEEDED",
-    ):
-        universe.fetch_current_gamma_markets(
-            tuple(f"condition-{index}" for index in range(101)),
-            gamma_get=slow_gamma_get,
-            timeout=4.0,
-            total_timeout=0.05,
-            max_workers=2,
-        )
-    assert time.monotonic() - started < 0.12
-    assert worker_finished.wait(timeout=1.0)
+    def invoke():
+        try:
+            universe.fetch_current_gamma_markets(
+                tuple(f"condition-{index}" for index in range(101)),
+                gamma_get=slow_gamma_get,
+                timeout=4.0,
+                total_timeout=1.0,
+                max_workers=2,
+            )
+        except BaseException as exc:  # noqa: BLE001 - thread result assertion below
+            outcome.append(exc)
+        finally:
+            call_finished.set()
+
+    caller = threading.Thread(target=invoke, daemon=True)
+    caller.start()
+    try:
+        assert first_worker_entered.wait(2.0)
+        assert second_worker_waiting.wait(2.0)
+        assert not call_finished.is_set()
+        allow_second_worker.set()
+        assert workers_started.wait(2.0)
+        assert completion_wait_entered.wait(2.0)
+        clock[0] = 1.0
+        deadline_triggered.set()
+        assert shutdown_started.wait(2.0)
+        assert not call_finished.is_set()
+    finally:
+        allow_second_worker.set()
+        deadline_triggered.set()
+        worker_release.set()
+    assert workers_finished.wait(2.0)
+    assert call_finished.wait(2.0)
+    caller.join(2.0)
+    assert sorted(finished_chunks) == sorted(started_chunks)
+    assert len(started_chunks) == 2
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], ValueError)
+    assert "GLOBAL_CURRENT_GAMMA_MARKETS_DEADLINE_EXCEEDED" in str(outcome[0])
 
 
 def test_current_gamma_client_survives_late_batch_workers(monkeypatch):
@@ -3634,6 +3715,311 @@ def test_speculative_book_metadata_reads_latest_projection_without_history():
     assert metadata[('condition-open', 'yes-open')]["enable_orderbook"] is True
     assert metadata[('condition-closed', 'yes-closed')]["closed"] == 1
     trade.close()
+
+
+def test_global_book_invalidation_reader_never_loads_append_depth_history():
+    trade = sqlite3.connect(":memory:")
+    trade.executescript(
+        """
+        CREATE TABLE executable_market_snapshot_latest (
+            snapshot_id TEXT NOT NULL,
+            condition_id TEXT NOT NULL,
+            selected_outcome_token_id TEXT NOT NULL,
+            yes_token_id TEXT NOT NULL,
+            no_token_id TEXT NOT NULL,
+            captured_at TEXT NOT NULL
+        );
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            orderbook_depth_json TEXT NOT NULL
+        );
+        CREATE TABLE executable_market_snapshot_invalidations (
+            condition_id TEXT,
+            token_id TEXT,
+            invalidated_at TEXT NOT NULL
+        );
+        INSERT INTO executable_market_snapshot_latest VALUES (
+            'snapshot-1', 'condition-1', 'yes-1', 'yes-1', 'no-1',
+            '2026-08-11T09:00:00+00:00'
+        );
+        INSERT INTO executable_market_snapshots VALUES (
+            'snapshot-1', 'forbidden-depth-blob'
+        );
+        INSERT INTO executable_market_snapshot_invalidations VALUES (
+            'condition-1', NULL, '2026-08-11T09:01:00+00:00'
+        );
+        """
+    )
+    history_reads = []
+
+    def deny_history_read(action, table, column, _database, _trigger):
+        if action == sqlite3.SQLITE_READ and table == "executable_market_snapshots":
+            history_reads.append(column)
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    trade.set_authorizer(deny_history_read)
+    rows = universe._global_book_latest_invalidation_rows(
+        trade,
+        condition_ids=("condition-1",),
+        checked_at_utc=_dt.datetime(
+            2026,
+            8,
+            11,
+            9,
+            2,
+            tzinfo=_dt.timezone.utc,
+        ),
+    )
+
+    assert history_reads == []
+    assert rows == [
+        {
+            "snapshot_id": "snapshot-1",
+            "condition_id": "condition-1",
+            "selected_outcome_token_id": "yes-1",
+            "yes_token_id": "yes-1",
+            "no_token_id": "no-1",
+            "captured_at": "2026-08-11T09:00:00+00:00",
+            "snapshot_invalidated": True,
+        }
+    ]
+    trade.close()
+
+
+def test_pre_network_sqlite_reader_yields_typed_to_held_monitor(tmp_path):
+    trade = sqlite3.connect(tmp_path / "preempted-reader.db")
+    monitor_probes = 0
+
+    def monitor_pending():
+        nonlocal monitor_probes
+        monitor_probes += 1
+        return monitor_probes >= 4
+
+    work_context = universe.WorkContext(
+        deadline_monotonic=100.0,
+        cancel_requested=monitor_pending,
+        monotonic=lambda: 0.0,
+    )
+
+    with pytest.raises(universe.WorkDeferred) as caught:
+        with universe.bounded_work_sqlite(
+            trade,
+            work_context,
+            stage="metadata_invalidation",
+        ) as read_conn:
+            read_conn.execute(
+                """
+                WITH RECURSIVE slow(value) AS (
+                    VALUES(0) UNION ALL SELECT value + 1 FROM slow
+                    WHERE value < 1000000
+                )
+                SELECT SUM(value) FROM slow
+                """
+            ).fetchone()
+
+    assert caught.value.code is universe.WorkDeferredCode.PREEMPTED
+    assert monitor_probes >= 4
+    trade.close()
+
+
+def test_pre_network_sqlite_reader_returns_typed_at_absolute_deadline(tmp_path):
+    trade = sqlite3.connect(tmp_path / "deadline-reader.db")
+    clock = [0.0]
+
+    def monotonic():
+        clock[0] += 0.0005
+        return clock[0]
+
+    work_context = universe.WorkContext(
+        deadline_monotonic=0.010,
+        monotonic=monotonic,
+    )
+
+    with pytest.raises(universe.WorkDeferred) as caught:
+        with universe.bounded_work_sqlite(
+            trade,
+            work_context,
+            stage="metadata_invalidation",
+        ) as read_conn:
+            read_conn.execute(
+                """
+                WITH RECURSIVE slow(value) AS (
+                    VALUES(0) UNION ALL SELECT value + 1 FROM slow
+                    WHERE value < 1000000
+                )
+                SELECT SUM(value) FROM slow
+                """
+            ).fetchone()
+
+    assert caught.value.code is universe.WorkDeferredCode.DEADLINE
+    assert clock[0] < 0.020
+    trade.close()
+
+
+def test_bounded_sqlite_preserves_shared_handler_and_has_no_late_interrupt(
+    tmp_path,
+    monkeypatch,
+):
+    db_path = tmp_path / "owned-reader.db"
+    real_connect = sqlite3.connect
+    interrupt_calls = []
+
+    class RecordingConnection(sqlite3.Connection):
+        def interrupt(self):
+            interrupt_calls.append(time.monotonic())
+            return super().interrupt()
+
+    trade = real_connect(
+        db_path,
+        check_same_thread=False,
+        factory=RecordingConnection,
+    )
+    trade.execute("CREATE TABLE values_for_scan(value INTEGER NOT NULL)")
+    trade.executemany(
+        "INSERT INTO values_for_scan VALUES (?)",
+        ((value,) for value in range(500)),
+    )
+    trade.commit()
+    shared_handler_calls = []
+
+    def shared_handler():
+        shared_handler_calls.append(True)
+        return 0
+
+    trade.set_progress_handler(shared_handler, 100)
+
+    def recording_connect(*args, **kwargs):
+        return real_connect(*args, factory=RecordingConnection, **kwargs)
+
+    monkeypatch.setattr(universe.sqlite3, "connect", recording_connect)
+    cancel_requested = [False]
+    work_context = universe.WorkContext(
+        deadline_monotonic=time.monotonic() + 5.0,
+        cancel_requested=lambda: cancel_requested[0],
+    )
+    reader_started = threading.Event()
+    reader_finished = threading.Event()
+
+    def bounded_reader():
+        with universe.bounded_work_sqlite(
+            trade,
+            work_context,
+            stage="concurrent_reader",
+        ) as read_conn:
+            reader_started.set()
+            read_conn.execute(
+                "SELECT SUM(left_row.value * right_row.value) "
+                "FROM values_for_scan AS left_row "
+                "CROSS JOIN values_for_scan AS right_row"
+            ).fetchone()
+        reader_finished.set()
+
+    reader = threading.Thread(target=bounded_reader)
+    reader.start()
+    assert reader_started.wait(1.0)
+    trade.execute(
+        "WITH RECURSIVE scan(value) AS (VALUES(0) UNION ALL "
+        "SELECT value + 1 FROM scan WHERE value < 10000) "
+        "SELECT SUM(value) FROM scan"
+    ).fetchone()
+    reader.join(2.0)
+    assert reader_finished.is_set()
+    assert shared_handler_calls
+    with universe.bounded_work_sqlite(
+        trade,
+        work_context,
+        stage="replacement_hwm",
+        shared_connection=True,
+    ) as shared_conn:
+        assert shared_conn is trade
+        shared_conn.execute("SELECT SUM(value) FROM values_for_scan").fetchone()
+    interrupts_at_exit = tuple(interrupt_calls)
+    cancel_requested[0] = True
+    time.sleep(0.02)
+    assert tuple(interrupt_calls) == interrupts_at_exit
+    calls_before_probe = len(shared_handler_calls)
+    trade.execute("SELECT SUM(value) FROM values_for_scan").fetchone()
+    assert len(shared_handler_calls) > calls_before_probe
+    trade.set_progress_handler(None, 0)
+    trade.close()
+
+
+def test_bounded_sqlite_shared_fence_orders_and_cancels_before_connection_use():
+    first_conn = sqlite3.connect(":memory:", check_same_thread=False)
+    second_conn = sqlite3.connect(":memory:", check_same_thread=False)
+    second_sql = []
+    second_conn.set_trace_callback(second_sql.append)
+    first_entered = threading.Event()
+    first_release = threading.Event()
+    second_attempted = threading.Event()
+    second_finished = threading.Event()
+    cancel_second = [False]
+    order = []
+    outcome = []
+    context = universe.WorkContext(deadline_monotonic=None)
+    cancelled_context = universe.WorkContext(
+        deadline_monotonic=None,
+        cancel_requested=lambda: cancel_second[0],
+    )
+
+    def hold_first():
+        try:
+            with universe.bounded_work_sqlite(
+                first_conn,
+                context,
+                stage="first_shared",
+                shared_connection=True,
+            ):
+                order.append("first")
+                first_entered.set()
+                assert first_release.wait(2.0)
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            outcome.append(exc)
+
+    def cancel_while_waiting():
+        second_attempted.set()
+        try:
+            with universe.bounded_work_sqlite(
+                second_conn,
+                cancelled_context,
+                stage="second_shared",
+                shared_connection=True,
+            ):
+                order.append("second")
+        except BaseException as exc:  # noqa: BLE001 - asserted below
+            outcome.append(exc)
+        finally:
+            second_finished.set()
+
+    first = threading.Thread(target=hold_first, daemon=True)
+    second = threading.Thread(target=cancel_while_waiting, daemon=True)
+    first.start()
+    try:
+        assert first_entered.wait(2.0)
+        second.start()
+        assert second_attempted.wait(2.0)
+        cancel_second[0] = True
+        assert second_finished.wait(2.0)
+        assert order == ["first"]
+        assert second_sql == []
+    finally:
+        first_release.set()
+    first.join(2.0)
+    second.join(2.0)
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], universe.WorkDeferred)
+    assert outcome[0].code is universe.WorkDeferredCode.PREEMPTED
+    with universe.bounded_work_sqlite(
+        second_conn,
+        context,
+        stage="third_shared",
+        shared_connection=True,
+    ):
+        order.append("third")
+    assert order == ["first", "third"]
+    first_conn.close()
+    second_conn.close()
 
 
 _SPINE_DECISION_AT = _dt.datetime(2026, 6, 13, 12, 0, tzinfo=_dt.timezone.utc)
@@ -9500,18 +9886,31 @@ def test_live_adapter_overlaps_gamma_bind_with_missing_clob_book_prefetch(
 
 
 def test_live_adapter_urgent_day0_preempts_parallel_book_prefetch(monkeypatch):
+    import concurrent.futures
+
     from src.runtime import reactor_wake
 
-    trade = sqlite3.connect(":memory:")
-    forecast = sqlite3.connect(":memory:")
-    topology = sqlite3.connect(":memory:")
-    world = sqlite3.connect(":memory:")
+    trade = sqlite3.connect(":memory:", check_same_thread=False)
+    forecast = sqlite3.connect(":memory:", check_same_thread=False)
+    topology = sqlite3.connect(":memory:", check_same_thread=False)
+    world = sqlite3.connect(":memory:", check_same_thread=False)
     captured = {}
     revision = {"value": (1, 1, 1)}
     reason = {"value": "market_price_advanced"}
     book_started = threading.Event()
     book_release = threading.Event()
     book_finished = threading.Event()
+    shutdown_started = threading.Event()
+    call_finished = threading.Event()
+    outcome = []
+    real_executor = concurrent.futures.ThreadPoolExecutor
+
+    class TrackingExecutor(real_executor):
+        def shutdown(self, *args, **kwargs):
+            shutdown_started.set()
+            return super().shutdown(*args, **kwargs)
+
+    monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", TrackingExecutor)
 
     monkeypatch.setattr(
         reactor_wake,
@@ -9605,8 +10004,8 @@ def test_live_adapter_urgent_day0_preempts_parallel_book_prefetch(monkeypatch):
 
         def get_orderbook_snapshots(self, tokens, **_kwargs):
             book_started.set()
-            assert book_release.wait(2.0)
             try:
+                assert book_release.wait(2.0)
                 return {
                     token: {"asset_id": token, "hash": f"hash-{token}"}
                     for token in tokens
@@ -9653,20 +10052,31 @@ def test_live_adapter_urgent_day0_preempts_parallel_book_prefetch(monkeypatch):
         )
     }
 
-    started = time.monotonic()
+    def invoke():
+        try:
+            captured["current_book_epoch_provider"](
+                probability,
+                _dt.datetime.now(_dt.timezone.utc),
+            )
+        except BaseException as exc:  # noqa: BLE001 - thread result assertion below
+            outcome.append(exc)
+        finally:
+            call_finished.set()
+
+    caller = threading.Thread(target=invoke, daemon=True)
+    caller.start()
     try:
-        bound, epoch = captured["current_book_epoch_provider"](
-            probability,
-            _dt.datetime.now(_dt.timezone.utc),
-        )
-        elapsed = time.monotonic() - started
+        assert book_started.wait(2.0)
+        assert shutdown_started.wait(2.0)
+        assert not call_finished.is_set()
     finally:
         book_release.set()
-
-    assert bound == probability
-    assert epoch is None
-    assert elapsed < 0.5
-    assert book_finished.wait(1.0)
+    assert book_finished.wait(2.0)
+    assert call_finished.wait(2.0)
+    caller.join(2.0)
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], universe.WorkDeferred)
+    assert outcome[0].code is universe.WorkDeferredCode.PREEMPTED
     trade.close()
     forecast.close()
     topology.close()
@@ -15688,6 +16098,14 @@ def test_global_book_metadata_refresh_tracks_unresolved_invalidation():
     probability = _current_global_book_probability()
     conn = _global_book_metadata_conn(probability)
     conn.execute(
+        "ALTER TABLE executable_market_snapshot_latest "
+        "ADD COLUMN captured_at TEXT"
+    )
+    conn.execute(
+        "UPDATE executable_market_snapshot_latest "
+        "SET captured_at = '2026-06-13T07:59:00+00:00'"
+    )
+    conn.execute(
         """
         CREATE TABLE executable_market_snapshot_invalidations (
             invalidation_id TEXT PRIMARY KEY,
@@ -15744,7 +16162,7 @@ def test_global_book_metadata_refresh_tracks_unresolved_invalidation():
     later_invalidation = checked_at + _dt.timedelta(seconds=1)
     conn.execute(
         """
-        UPDATE executable_market_snapshots
+        UPDATE executable_market_snapshot_latest
            SET captured_at = '2026-06-13T07:59:45+00:00'
         """
     )
@@ -17771,6 +18189,231 @@ def test_current_global_book_epoch_overlaps_chunks_and_preserves_window():
     )
     assert epoch.asset_states == sequential.asset_states
     assert epoch.witness_identity == sequential.witness_identity
+
+
+def test_global_book_fake_future_stops_dispatch_at_201_584_deadline(monkeypatch):
+    import concurrent.futures
+
+    probability = _current_global_book_probability()
+    clock = [0.0]
+    submitted = []
+    cancelled = []
+    network_calls = []
+
+    class FakeFuture:
+        def cancel(self):
+            cancelled.append(True)
+            return True
+
+    class FakeExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        def submit(self, _function, chunk):
+            submitted.append(tuple(chunk))
+            clock[0] = 201.584
+            return FakeFuture()
+
+        def shutdown(self, **_kwargs):
+            pass
+
+    monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", FakeExecutor)
+    work_context = universe.WorkContext(
+        deadline_monotonic=201.584,
+        monotonic=lambda: clock[0],
+    )
+    at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
+
+    with pytest.raises(universe.WorkDeferred) as caught:
+        capture_current_global_book_epoch(
+            _global_book_metadata_conn(probability),
+            probability_witnesses={probability.family_key: probability},
+            get_books=lambda chunk, *, timeout: network_calls.append(
+                (tuple(chunk), timeout)
+            ),
+            clock=lambda: at,
+            max_age=_dt.timedelta(seconds=30),
+            batch_size=1,
+            book_fetch_workers=4,
+            work_context=work_context,
+            request_timeout=8.0,
+        )
+
+    assert caught.value.code is universe.WorkDeferredCode.DEADLINE
+    assert clock[0] == pytest.approx(201.584)
+    assert len(submitted) == 1
+    assert cancelled == [True]
+    assert network_calls == []
+
+
+def test_global_work_cut_preserves_healthy_23_second_path_then_deadlines():
+    clock = [0.0]
+    assert era._GLOBAL_AUCTION_WORK_CUT_SECONDS == 30.0
+    work_context = universe.WorkContext(
+        deadline_monotonic=era._GLOBAL_AUCTION_WORK_CUT_SECONDS,
+        monotonic=lambda: clock[0],
+    )
+
+    assert work_context.clipped_timeout(
+        8.0,
+        stage="normal_book_request",
+    ) == pytest.approx(8.0)
+    clock[0] = 23.0
+    assert work_context.checkpoint("normal_publish") == pytest.approx(7.0)
+    assert work_context.clipped_timeout(
+        8.0,
+        stage="late_book_request",
+    ) == pytest.approx(7.0)
+    clock[0] = 30.0
+    with pytest.raises(universe.WorkDeferred) as caught:
+        work_context.checkpoint("deadline")
+    assert caught.value.code is universe.WorkDeferredCode.DEADLINE
+
+
+def test_global_book_fake_future_yields_control_to_held_monitor(monkeypatch):
+    import concurrent.futures
+
+    probability = _current_global_book_probability()
+    monitor_pending = [False]
+    monitor_probes = []
+    submitted = []
+    cancelled = []
+
+    def cancel_requested():
+        monitor_probes.append(monitor_pending[0])
+        return monitor_pending[0]
+
+    class FakeFuture:
+        def cancel(self):
+            cancelled.append(True)
+            return True
+
+    class FakeExecutor:
+        def __init__(self, **_kwargs):
+            pass
+
+        def submit(self, _function, chunk):
+            submitted.append(tuple(chunk))
+            monitor_pending[0] = True
+            return FakeFuture()
+
+        def shutdown(self, **_kwargs):
+            pass
+
+    monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", FakeExecutor)
+    work_context = universe.WorkContext(
+        deadline_monotonic=300.0,
+        cancel_requested=cancel_requested,
+        monotonic=lambda: 0.0,
+    )
+    at = _dt.datetime(2026, 6, 13, 8, 0, tzinfo=_dt.timezone.utc)
+
+    with pytest.raises(universe.WorkDeferred) as caught:
+        capture_current_global_book_epoch(
+            _global_book_metadata_conn(probability),
+            probability_witnesses={probability.family_key: probability},
+            get_books=lambda _chunk: pytest.fail("network must not start"),
+            clock=lambda: at,
+            max_age=_dt.timedelta(seconds=30),
+            batch_size=1,
+            book_fetch_workers=4,
+            work_context=work_context,
+        )
+
+    assert caught.value.code is universe.WorkDeferredCode.PREEMPTED
+    assert len(submitted) == 1
+    assert cancelled == [True]
+    assert monitor_probes[-1] is True
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_code"),
+    (
+        ("cancel", universe.WorkDeferredCode.PREEMPTED),
+        ("deadline", universe.WorkDeferredCode.DEADLINE),
+    ),
+)
+def test_global_book_defer_joins_started_workers_before_return(
+    mode,
+    expected_code,
+    monkeypatch,
+):
+    import concurrent.futures
+
+    started_chunks = []
+    finished_chunks = []
+    request_timeouts = []
+    cancel_requested = [False]
+    clock = [0.0]
+    calls_lock = threading.Lock()
+    workers_started = threading.Event()
+    workers_release = threading.Event()
+    shutdown_started = threading.Event()
+    call_finished = threading.Event()
+    outcome = []
+    real_executor = concurrent.futures.ThreadPoolExecutor
+
+    class TrackingExecutor(real_executor):
+        def shutdown(self, *args, **kwargs):
+            shutdown_started.set()
+            return super().shutdown(*args, **kwargs)
+
+    monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", TrackingExecutor)
+
+    def get_books(chunk, *, timeout):
+        with calls_lock:
+            started_chunks.append(tuple(chunk))
+            request_timeouts.append(timeout)
+            if mode == "cancel" and len(started_chunks) == 2:
+                cancel_requested[0] = True
+            if len(started_chunks) == 2:
+                workers_started.set()
+        try:
+            assert workers_release.wait(2.0)
+            return {token: {"asset_id": token} for token in chunk}
+        finally:
+            with calls_lock:
+                finished_chunks.append(tuple(chunk))
+
+    work_context = universe.WorkContext(
+        deadline_monotonic=1.0,
+        cancel_requested=lambda: cancel_requested[0],
+        monotonic=lambda: clock[0],
+    )
+
+    def invoke():
+        try:
+            universe.fetch_current_global_books(
+                ("token-a", "token-b", "token-c", "token-d"),
+                get_books=get_books,
+                batch_size=1,
+                book_fetch_workers=2,
+                work_context=work_context,
+                request_timeout=0.1,
+            )
+        except BaseException as exc:  # noqa: BLE001 - thread result assertion below
+            outcome.append(exc)
+        finally:
+            call_finished.set()
+
+    caller = threading.Thread(target=invoke, daemon=True)
+    caller.start()
+    try:
+        assert workers_started.wait(2.0)
+        if mode == "deadline":
+            clock[0] = 1.0
+        assert shutdown_started.wait(2.0)
+        assert not call_finished.is_set()
+    finally:
+        workers_release.set()
+    assert call_finished.wait(2.0)
+    caller.join(2.0)
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], universe.WorkDeferred)
+    assert outcome[0].code is expected_code
+    assert sorted(finished_chunks) == sorted(started_chunks)
+    assert len(started_chunks) == 2
+    assert all(timeout == pytest.approx(0.1) for timeout in request_timeouts)
 
 
 def test_current_global_book_epoch_rejects_excessive_parallelism():
@@ -25410,11 +26053,14 @@ def test_global_batch_rebuilds_full_cut_after_stale_sell_probability(
 
     original_begin_snapshot = global_batch_runtime._begin_selection_read_snapshot
 
-    def begin_snapshot(connections):
+    def begin_snapshot(connections, *, work_context=None):
         assert tuple(connections) == snapshot_connections
         assert not any(conn.in_transaction for conn in snapshot_connections)
         generation = len(calls["snapshot_release"]) + 1
-        release = original_begin_snapshot(connections)
+        release = original_begin_snapshot(
+            connections,
+            work_context=work_context,
+        )
         calls["snapshot_release"].append(0)
 
         def release_once():
@@ -27897,7 +28543,7 @@ def test_global_batch_unstable_curve_falls_through_to_executable_sell(monkeypatc
     assert result.receipts[event.event_id].submitted is True
 
 
-def test_global_batch_stable_preflight_cannot_cross_epoch_deadline(monkeypatch):
+def test_global_batch_work_deadline_blocks_final_actuation(monkeypatch):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     scope = current_global_auction_scope_from_events(
@@ -27919,15 +28565,11 @@ def test_global_batch_stable_preflight_cannot_cross_epoch_deadline(monkeypatch):
         ),
     )
     calls = {"preflight": 0, "venue": 0}
-    current_times = iter(
-        (
-            decision_at,
-            decision_at,
-            decision_at,
-            decision_at,
-            decision_at + _dt.timedelta(seconds=29.9),
-            decision_at + _dt.timedelta(seconds=30.1),
-        )
+    work_clock = [0.0]
+    final_probes = [0]
+    work_context = universe.WorkContext(
+        deadline_monotonic=30.0,
+        monotonic=lambda: work_clock[0],
     )
     monkeypatch.setattr(
         global_batch_runtime, "scan_current_global_auction_scope", lambda **_: scope
@@ -27957,6 +28599,12 @@ def test_global_batch_stable_preflight_cannot_cross_epoch_deadline(monkeypatch):
             binding_token="binding-a",
         )
 
+    def final_actuation_cancelled():
+        final_probes[0] += 1
+        if final_probes[0] == 4:
+            work_clock[0] = 30.0
+        return False
+
     result = global_batch_runtime.process_current_global_batch(
         (event,),
         decision_time=decision_at,
@@ -27978,19 +28626,20 @@ def test_global_batch_stable_preflight_cannot_cross_epoch_deadline(monkeypatch):
         stamp_receipt=lambda receipt: receipt,
         venue_submit_count=lambda: calls["venue"],
         current_execution=lambda *_: object(),
-        current_time_provider=lambda: next(current_times),
-        current_book_epoch_provider=lambda probabilities, _at: (
+        current_time_provider=lambda: decision_at,
+        current_book_epoch_provider=lambda probabilities, _at, _context: (
             probabilities,
             _global_test_book("book", price="0.40"),
         ),
+        work_context=work_context,
+        final_actuation_cancelled=final_actuation_cancelled,
     )
 
     assert calls == {"preflight": 1, "venue": 0}
+    assert final_probes == [4]
     assert result.venue_submit_count == 0
     assert result.winner_event_id is None
-    assert result.receipts[event.event_id].reason == (
-        "GLOBAL_REAUCTION_EPOCH_EXPIRED"
-    )
+    assert result.receipts[event.event_id].reason == "DEFERRED_DEADLINE"
 
 
 @pytest.mark.parametrize("interrupt_reason", ("deadline", "cancelled"))
@@ -28968,6 +29617,64 @@ def test_global_selection_read_snapshot_holds_one_readiness_cut(tmp_path):
     selection.rollback()
     selection.close()
     writer.close()
+
+
+def test_global_work_deadline_bounds_selection_schema_lock_before_network(tmp_path):
+    path = tmp_path / "selection-schema-lock.db"
+    seed = sqlite3.connect(path)
+    seed.execute("CREATE TABLE readiness_state (value TEXT NOT NULL)")
+    seed.commit()
+    seed.close()
+    locker = sqlite3.connect(path)
+    selection = sqlite3.connect(path)
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    network_calls = []
+    work_context = universe.WorkContext(
+        deadline_monotonic=time.monotonic() + 0.05,
+    )
+    locker.execute("BEGIN EXCLUSIVE")
+    locker.execute("CREATE TABLE held_schema_lock (value TEXT)")
+    started_at = time.monotonic()
+    try:
+        result = global_batch_runtime.process_current_global_batch(
+            (event,),
+            decision_time=_dt.datetime(
+                2026,
+                7,
+                10,
+                8,
+                0,
+                tzinfo=_dt.timezone.utc,
+            ),
+            world_conn=object(),
+            forecast_conn=object(),
+            trade_conn=object(),
+            payload_reader=lambda current: json.loads(current.payload_json),
+            prepare_event=lambda *_: pytest.fail(
+                "schema-locked snapshot must defer before preparation"
+            ),
+            actuate_winner=lambda *_: pytest.fail(
+                "schema-locked snapshot must not actuate"
+            ),
+            stamp_receipt=lambda receipt: receipt,
+            venue_submit_count=lambda: 0,
+            current_execution=lambda *_: object(),
+            current_time_provider=lambda: pytest.fail(
+                "schema-locked snapshot must defer before decision time read"
+            ),
+            current_book_epoch_provider=lambda *_: network_calls.append(True),
+            work_context=work_context,
+            selection_snapshot_connections=(selection,),
+        )
+    finally:
+        locker.rollback()
+    assert time.monotonic() - started_at < 2.0
+    assert result.receipts[event.event_id].reason == "DEFERRED_DEADLINE"
+    assert result.venue_submit_count == 0
+    assert network_calls == []
+    assert selection.in_transaction is False
+    selection.close()
+    locker.close()
 
 
 def test_global_selection_schema_reads_are_cached_only_inside_owned_snapshot():

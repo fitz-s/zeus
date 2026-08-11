@@ -341,6 +341,8 @@ from src.calibration.emos import (
     bin_probability_settlement as _bin_probability_settlement,
 )
 
+_GLOBAL_AUCTION_WORK_CUT_SECONDS = 30.0
+
 
 UTC = timezone.utc
 
@@ -1659,7 +1661,7 @@ def _global_book_metadata_refresh_family_keys(
     if checked_at.tzinfo is None:
         raise ValueError("GLOBAL_BOOK_INVALIDATION_CHECK_TIME_NAIVE")
     from src.engine.global_auction_universe import (
-        _global_book_snapshot_rows,
+        _global_book_latest_invalidation_rows,
         _table_exists,
     )
 
@@ -1729,7 +1731,7 @@ def _global_book_metadata_refresh_family_keys(
     }
     invalidated: set[str] = set()
     seen_conditions: set[str] = set()
-    for row in _global_book_snapshot_rows(
+    for row in _global_book_latest_invalidation_rows(
         trade_conn,
         condition_ids=tuple(candidate_conditions),
         checked_at_utc=checked_at,
@@ -7784,8 +7786,13 @@ def event_bound_live_adapter_from_trade_conn(
             GlobalWinnerPreflight,
             process_current_global_batch,
         )
+        from src.engine.global_auction_universe import (
+            WorkContext,
+            bounded_work_sqlite,
+        )
 
         events = tuple(events)
+        global_batch_started = _time.monotonic()
         probability_refresh_family_keys = (
             _global_probability_refresh_family_keys(events)
         )
@@ -7962,6 +7969,29 @@ def event_bound_live_adapter_from_trade_conn(
                         "global selection cancellation probe failed"
                     )
             return False
+
+        global_work_context = WorkContext(
+            # The periodic held-monitor handoff cadence is 30s and canonical
+            # monitor evidence is stale at 150s. A distinct work-cut contract
+            # preserves observed healthy 23s auctions without borrowing the
+            # per-request book timeout as whole-batch authority.
+            deadline_monotonic=(
+                global_batch_started + _GLOBAL_AUCTION_WORK_CUT_SECONDS
+            ),
+            cancel_requested=_day0_selection_cancelled,
+            monotonic=_time.monotonic,
+        )
+        # INV-47 SCOPE: this current global cut only. DRAIN: a typed DEFERRED
+        # receipt leaves durable work retryable. RESET: the next cycle creates
+        # a new WorkContext from its own outer-cut start and monitor handoff.
+
+        def _work_sql(stage, operation):
+            with bounded_work_sqlite(
+                trade_conn,
+                global_work_context,
+                stage=stage,
+            ) as read_conn:
+                return operation(read_conn)
 
         if forecast_conn is None or topology_conn is None or calibration_conn is None:
             from src.events.reactor import GlobalBatchSubmitResult
@@ -8479,67 +8509,15 @@ def event_bound_live_adapter_from_trade_conn(
 
         book_metadata_by_key: dict[
             tuple[str, str], Mapping[str, object]
-        ] = _cached_global_book_metadata(
-            trade_conn,
-            checked_at=datetime.now(UTC),
-        )
-        speculative_book_metadata_by_key = (
-            dict(book_metadata_by_key)
-            or _cached_global_book_speculative_metadata(trade_conn)
-        )
+        ] = {}
+        speculative_book_metadata_by_key: dict[
+            tuple[str, str], Mapping[str, object]
+        ] = {}
         reduce_only_book_tokens: frozenset[str] | None = None
-        if (
-            entry_submit_suppression_reason is not None
-            or selection_completion_reserved
-        ):
-            try:
-                held_token_rows = trade_conn.execute(
-                    """
-                    SELECT city, target_date, temperature_metric,
-                           direction, token_id, no_token_id
-                      FROM position_current
-                     WHERE phase IN ('active', 'day0_window', 'pending_exit')
-                       AND COALESCE(chain_shares, shares, 0) > 0
-                    """
-                ).fetchall()
-            except sqlite3.OperationalError as exc:
-                if "no such table: position_current" not in str(exc).lower():
-                    raise
-                held_token_rows = ()
-            held_tokens_by_family: dict[str, set[str]] = {}
-            for (
-                city,
-                target_date,
-                metric,
-                direction,
-                token_id,
-                no_token_id,
-            ) in held_token_rows:
-                held_token = str(
-                    no_token_id
-                    if str(direction or "").strip().lower() == "buy_no"
-                    else token_id
-                ).strip()
-                if not held_token:
-                    continue
-                family_key = weather_family_id(
-                    city=str(city or ""),
-                    target_date=str(target_date or ""),
-                    metric=str(metric or "").lower(),
-                )
-                held_tokens_by_family.setdefault(family_key, set()).add(
-                    held_token
-                )
-            held_tokens = frozenset(
-                token
-                for family_tokens in held_tokens_by_family.values()
-                for token in family_tokens
-            )
-            reduce_only_book_tokens = held_tokens or None
-        else:
-            held_tokens_by_family = {}
+        held_tokens_by_family: dict[str, set[str]] = {}
 
-        def _current_book_epoch(probabilities, _at):
+        def _current_book_epoch_with_context(probabilities, _at, work_context):
+            nonlocal reduce_only_book_tokens
             from src.contracts.executable_market_snapshot import (
                 FRESHNESS_WINDOW_DEFAULT,
             )
@@ -8556,10 +8534,86 @@ def event_bound_live_adapter_from_trade_conn(
                 fetch_current_global_books,
                 fetch_current_gamma_markets,
             )
+            book_metadata_by_key.clear()
+            book_metadata_by_key.update(
+                _work_sql(
+                    "book_initial_metadata",
+                    lambda read_conn: _cached_global_book_metadata(
+                        read_conn,
+                        checked_at=datetime.now(UTC),
+                    ),
+                )
+            )
+            speculative_book_metadata_by_key.clear()
+            speculative_book_metadata_by_key.update(
+                dict(book_metadata_by_key)
+                or _work_sql(
+                    "book_initial_speculative_metadata",
+                    lambda read_conn: _cached_global_book_speculative_metadata(
+                        read_conn
+                    ),
+                )
+            )
+            held_tokens_by_family.clear()
+            reduce_only_book_tokens = None
+            if (
+                entry_submit_suppression_reason is not None
+                or selection_completion_reserved
+            ):
+                try:
+                    held_token_rows = _work_sql(
+                        "book_held_token_projection",
+                        lambda read_conn: read_conn.execute(
+                            """
+                            SELECT city, target_date, temperature_metric,
+                                   direction, token_id, no_token_id
+                              FROM position_current
+                             WHERE phase IN ('active', 'day0_window', 'pending_exit')
+                               AND COALESCE(chain_shares, shares, 0) > 0
+                            """
+                        ).fetchall(),
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "no such table: position_current" not in str(exc).lower():
+                        raise
+                    held_token_rows = ()
+                for (
+                    city,
+                    target_date,
+                    metric,
+                    direction,
+                    token_id,
+                    no_token_id,
+                ) in held_token_rows:
+                    held_token = str(
+                        no_token_id
+                        if str(direction or "").strip().lower() == "buy_no"
+                        else token_id
+                    ).strip()
+                    if not held_token:
+                        continue
+                    family_key = weather_family_id(
+                        city=str(city or ""),
+                        target_date=str(target_date or ""),
+                        metric=str(metric or "").lower(),
+                    )
+                    held_tokens_by_family.setdefault(family_key, set()).add(
+                        held_token
+                    )
+                reduce_only_book_tokens = frozenset(
+                    token
+                    for family_tokens in held_tokens_by_family.values()
+                    for token in family_tokens
+                ) or None
             _book_started = _time.monotonic()
             timeout = max(
                 1.0,
-                float(os.environ.get("ZEUS_GLOBAL_AUCTION_BOOK_TIMEOUT_SECONDS", "8.0")),
+                float(
+                    os.environ.get(
+                        "ZEUS_GLOBAL_AUCTION_BOOK_TIMEOUT_SECONDS",
+                        "8.0",
+                    )
+                ),
             )
             batch_size = max(
                 1,
@@ -8574,15 +8628,21 @@ def event_bound_live_adapter_from_trade_conn(
             )
 
             def _urgent_book_preemption(stage: str) -> bool:
-                if not _day0_selection_cancelled():
-                    return False
-                logging.getLogger(__name__).info(
-                    "global book epoch preempted by urgent input: stage=%s "
-                    "elapsed_s=%.3f",
+                remaining = work_context.checkpoint(f"book_epoch:{stage}")
+                logging.getLogger(__name__).debug(
+                    "global book epoch checkpoint: stage=%s elapsed_s=%.3f "
+                    "remaining_s=%.3f cancel=%s deadline=%s",
                     stage,
                     _time.monotonic() - _book_started,
+                    remaining,
+                    False,
+                    work_context.deadline_monotonic,
                 )
-                return True
+                return False
+
+            def _publish_book_epoch(probability_slice, epoch, *, stage):
+                work_context.checkpoint(f"book_epoch:{stage}:before_publish")
+                return probability_slice, epoch
 
             if _urgent_book_preemption("start"):
                 return probabilities, None
@@ -8688,8 +8748,6 @@ def event_bound_live_adapter_from_trade_conn(
                 gamma_event_requests = 0
                 refresh_started_at = datetime.now(UTC)
                 started = _time.monotonic()
-                gamma_deadline: float | None = None
-                clob_deadline: float | None = None
                 gamma = _global_current_gamma_client(
                     timeout_seconds=gamma_timeout,
                 )
@@ -8708,15 +8766,10 @@ def event_bound_live_adapter_from_trade_conn(
                 with contextlib.nullcontext(gamma), clob_metadata as clob:
 
                     def _remaining_gamma_timeout() -> float:
-                        nonlocal gamma_deadline
-                        if gamma_deadline is None:
-                            gamma_deadline = _time.monotonic() + gamma_timeout
-                        remaining = gamma_deadline - _time.monotonic()
-                        if remaining <= 0.0:
-                            raise ValueError(
-                                "GLOBAL_CURRENT_GAMMA_DEADLINE_EXCEEDED"
-                            )
-                        return min(gamma_timeout, remaining)
+                        return work_context.clipped_timeout(
+                            gamma_timeout,
+                            stage="book_metadata:gamma_timeout",
+                        )
 
                     def _gamma_get_once(path, *, params=None, timeout):
                         return _governed_global_gamma_get(
@@ -8730,23 +8783,15 @@ def event_bound_live_adapter_from_trade_conn(
                     def _clob_market(condition_id):
                         import httpx
 
-                        nonlocal clob_deadline
                         if clob is None:
-                            return None
-                        if clob_deadline is None:
-                            clob_deadline = _time.monotonic() + gamma_timeout
-                        remaining = clob_deadline - _time.monotonic()
-                        if remaining <= 0.0:
-                            logging.getLogger(__name__).warning(
-                                "held-risk market metadata deadline exhausted: "
-                                "condition_id=%s",
-                                condition_id,
-                            )
                             return None
                         try:
                             return clob.get_held_clob_market_info(
                                 condition_id,
-                                timeout=min(gamma_timeout, remaining),
+                                timeout=work_context.clipped_timeout(
+                                    gamma_timeout,
+                                    stage="book_metadata:clob_timeout",
+                                ),
                             )
                         except (
                             httpx.HTTPError,
@@ -8762,12 +8807,23 @@ def event_bound_live_adapter_from_trade_conn(
 
                     def _gamma_markets(condition_ids):
                         nonlocal gamma_batch_requests
-                        markets, batch_requests = fetch_current_gamma_markets(
-                            condition_ids,
-                            gamma_get=_gamma_get_once,
-                            timeout=gamma_timeout,
-                            total_timeout=_remaining_gamma_timeout(),
-                        )
+                        try:
+                            markets, batch_requests = fetch_current_gamma_markets(
+                                condition_ids,
+                                gamma_get=_gamma_get_once,
+                                timeout=gamma_timeout,
+                                total_timeout=_remaining_gamma_timeout(),
+                            )
+                        except ValueError as exc:
+                            if (
+                                str(exc)
+                                == "GLOBAL_CURRENT_GAMMA_MARKETS_DEADLINE_EXCEEDED"
+                            ):
+                                work_context.checkpoint(
+                                    "book_metadata:gamma_completion"
+                                )
+                            raise
+                        work_context.checkpoint("book_metadata:gamma_completion")
                         gamma_batch_requests += batch_requests
                         return markets
 
@@ -8847,10 +8903,13 @@ def event_bound_live_adapter_from_trade_conn(
                             for row in rows
                         ):
                             refreshed_family_keys.append(str(family_key))
-                    _record_global_book_metadata_refresh_hwm(
-                        trade_conn,
-                        refreshed_family_keys,
-                        refreshed_at=refresh_started_at,
+                    _work_sql(
+                        "book_metadata_refresh_hwm_write",
+                        lambda read_conn: _record_global_book_metadata_refresh_hwm(
+                            read_conn,
+                            refreshed_family_keys,
+                            refreshed_at=refresh_started_at,
+                        ),
                     )
                 return bound_probabilities
 
@@ -8934,11 +8993,14 @@ def event_bound_live_adapter_from_trade_conn(
                     projected_loader=(
                         None
                         if projection_checked
-                        else lambda: _projected_global_book_hint(
-                            trade_conn,
-                            tokens,
-                            checked_at=captured_at,
-                            max_age=FRESHNESS_WINDOW_DEFAULT,
+                        else lambda: _work_sql(
+                            "book_token_projection",
+                            lambda read_conn: _projected_global_book_hint(
+                                read_conn,
+                                tokens,
+                                checked_at=captured_at,
+                                max_age=FRESHNESS_WINDOW_DEFAULT,
+                            ),
                         )
                     )
                 )
@@ -8989,7 +9051,7 @@ def event_bound_live_adapter_from_trade_conn(
                 ) as clob, polymarket_request_governor.fc03_span("global_book_prefetch"):
                     fetched_books = fetch_current_global_books(
                         missing_tokens,
-                        get_books=lambda chunk: (
+                        get_books=lambda chunk, *, timeout: (
                             clob.get_orderbook_snapshots(
                                 chunk,
                                 timeout=timeout,
@@ -8997,6 +9059,8 @@ def event_bound_live_adapter_from_trade_conn(
                         ),
                         batch_size=batch_size,
                         book_fetch_workers=4,
+                        work_context=work_context,
+                        request_timeout=timeout,
                     )
                     fetch_finished_at = datetime.now(UTC)
                     epoch_at = _global_book_prefetch_epoch_at(
@@ -9009,7 +9073,7 @@ def event_bound_live_adapter_from_trade_conn(
                     if epoch_at is None:
                         refreshed_projection = fetch_current_global_books(
                             tuple(projected_books),
-                            get_books=lambda chunk: (
+                            get_books=lambda chunk, *, timeout: (
                                 clob.get_orderbook_snapshots(
                                     chunk,
                                     timeout=timeout,
@@ -9017,6 +9081,8 @@ def event_bound_live_adapter_from_trade_conn(
                             ),
                             batch_size=batch_size,
                             book_fetch_workers=4,
+                            work_context=work_context,
+                            request_timeout=timeout,
                         )
                         projected_books = dict(refreshed_projection)
                         projection_refetched = len(projected_books)
@@ -9109,7 +9175,7 @@ def event_bound_live_adapter_from_trade_conn(
                         epoch = capture_current_global_book_epoch(
                             trade_conn,
                             probability_witnesses=bound_probabilities,
-                            get_books=lambda tokens: (
+                            get_books=lambda tokens, *, timeout: (
                                 clob.get_orderbook_snapshots(
                                     tokens,
                                     timeout=timeout,
@@ -9121,6 +9187,8 @@ def event_bound_live_adapter_from_trade_conn(
                             book_fetch_workers=4,
                             metadata_overrides=book_metadata_by_key,
                             required_token_ids=capture_required_tokens,
+                            work_context=work_context,
+                            request_timeout=timeout,
                         )
                 else:
                     _, books, captured_at = matching_prefetch
@@ -9136,6 +9204,7 @@ def event_bound_live_adapter_from_trade_conn(
                         prefetched_books=books,
                         prefetched_at_utc=captured_at,
                         required_token_ids=capture_required_tokens,
+                        work_context=work_context,
                     )
                 logging.getLogger(__name__).info(
                     "global book epoch stage completed: mode=%s "
@@ -9227,10 +9296,13 @@ def event_bound_live_adapter_from_trade_conn(
                 (
                     cached_bound_probabilities,
                     cached_binding_reason,
-                ) = _reuse_global_book_superset_token_bindings(
-                    trade_conn,
-                    probabilities,
-                    checked_at=cache_checked_at,
+                ) = _work_sql(
+                    "book_held_superset_reuse",
+                    lambda read_conn: _reuse_global_book_superset_token_bindings(
+                        read_conn,
+                        probabilities,
+                        checked_at=cache_checked_at,
+                    ),
                 )
                 if cached_bound_probabilities is not None:
                     probabilities = cached_bound_probabilities
@@ -9252,15 +9324,18 @@ def event_bound_live_adapter_from_trade_conn(
                         "global held-token cached topology reuse rejected: reason=%s",
                         cached_binding_reason,
                     )
-            metadata_refresh_family_keys = (
-                _global_book_metadata_refresh_family_keys(
-                    trade_conn,
+            refreshed_at_by_family = _work_sql(
+                "book_metadata_refresh_hwm_read",
+                lambda read_conn: _global_book_metadata_refresh_hwm(read_conn),
+            )
+            metadata_refresh_family_keys = _work_sql(
+                "book_metadata_invalidation",
+                lambda read_conn: _global_book_metadata_refresh_family_keys(
+                    read_conn,
                     probabilities,
                     checked_at=cache_checked_at,
-                    refreshed_at_by_family=_global_book_metadata_refresh_hwm(
-                        trade_conn
-                    ),
-                )
+                    refreshed_at_by_family=refreshed_at_by_family,
+                ),
             )
             metadata_refresh_family_keys = metadata_refresh_family_keys.union(
                 held_binding_refresh_family_keys
@@ -9280,26 +9355,33 @@ def event_bound_live_adapter_from_trade_conn(
                     "global held-token witness rebind required: families=%d",
                     len(held_binding_refresh_family_keys),
                 )
-            speculative_topology = _global_book_speculative_topology(
-                trade_conn,
-                probabilities,
+            speculative_topology = _work_sql(
+                "book_speculative_topology",
+                lambda read_conn: _global_book_speculative_topology(
+                    read_conn,
+                    probabilities,
+                ),
             )
-            effective_speculative_book_metadata = (
-                _global_book_speculative_snapshot_metadata(
-                    trade_conn,
+            effective_speculative_book_metadata = _work_sql(
+                "book_speculative_snapshot_metadata",
+                lambda read_conn: _global_book_speculative_snapshot_metadata(
+                    read_conn,
                     speculative_topology,
-                )
+                ),
             )
             effective_speculative_book_metadata.update(
                 speculative_book_metadata_by_key
             )
-            cached_before_bind, cache_before_reason = _probe_global_book_epoch_cache(
-                trade_conn,
-                probabilities,
-                checked_at=cache_checked_at,
-                allowed=True,
-                topology_hint=speculative_topology,
-                mutable_family_keys=effective_book_refresh_family_keys,
+            cached_before_bind, cache_before_reason = _work_sql(
+                "book_cache_probe_before_bind",
+                lambda read_conn: _probe_global_book_epoch_cache(
+                    read_conn,
+                    probabilities,
+                    checked_at=cache_checked_at,
+                    allowed=True,
+                    topology_hint=speculative_topology,
+                    mutable_family_keys=effective_book_refresh_family_keys,
+                ),
             )
             if cached_before_bind is None:
                 logging.getLogger(__name__).info(
@@ -9311,10 +9393,13 @@ def event_bound_live_adapter_from_trade_conn(
                 (
                     superset_bound_probabilities,
                     superset_reuse_reason,
-                ) = _reuse_global_book_superset_token_bindings(
-                    trade_conn,
-                    probabilities,
-                    checked_at=cache_checked_at,
+                ) = _work_sql(
+                    "book_superset_reuse",
+                    lambda read_conn: _reuse_global_book_superset_token_bindings(
+                        read_conn,
+                        probabilities,
+                        checked_at=cache_checked_at,
+                    ),
                 )
                 if superset_bound_probabilities is not None:
                     logging.getLogger(__name__).info(
@@ -9335,12 +9420,15 @@ def event_bound_live_adapter_from_trade_conn(
             reusable_topology_entry = None
             if cached_before_bind is None and cache_before_reason == "expired":
                 reusable_topology_entry, topology_cache_reason = (
-                    _probe_global_book_cache_entry(
-                        trade_conn,
-                        probabilities,
-                        allowed=True,
-                        topology_hint=speculative_topology,
-                        mutable_family_keys=effective_book_refresh_family_keys,
+                    _work_sql(
+                        "book_expired_topology_cache_probe",
+                        lambda read_conn: _probe_global_book_cache_entry(
+                            read_conn,
+                            probabilities,
+                            allowed=True,
+                            topology_hint=speculative_topology,
+                            mutable_family_keys=effective_book_refresh_family_keys,
+                        ),
                     )
                 )
                 if reusable_topology_entry is None:
@@ -9403,9 +9491,13 @@ def event_bound_live_adapter_from_trade_conn(
                             len(rebound_probabilities),
                             len(getattr(epoch, "assets", ())),
                         )
-                        return rebound_probabilities, _scope_global_book_epoch(
-                            epoch,
+                        return _publish_book_epoch(
                             rebound_probabilities,
+                            _scope_global_book_epoch(
+                                epoch,
+                                rebound_probabilities,
+                            ),
+                            stage="cache_hit",
                         )
             if cached_before_bind is not None and eligible_refresh_family_keys:
                 cached_probabilities = _cached_global_book_probabilities(
@@ -9443,11 +9535,14 @@ def event_bound_live_adapter_from_trade_conn(
                         for family_key in eligible_refresh_family_keys
                         for token in state_tokens_by_family.get(family_key, ())
                     )
-                    projected_rows = _projected_global_book_rows_hint(
-                        trade_conn,
-                        projection_tokens,
-                        checked_at=cache_checked_at,
-                        max_age=FRESHNESS_WINDOW_DEFAULT,
+                    projected_rows = _work_sql(
+                        "book_exact_token_projection",
+                        lambda read_conn: _projected_global_book_rows_hint(
+                            read_conn,
+                            projection_tokens,
+                            checked_at=cache_checked_at,
+                            max_age=FRESHNESS_WINDOW_DEFAULT,
+                        ),
                     )
                     try:
                         if projected_rows is None:
@@ -9459,13 +9554,16 @@ def event_bound_live_adapter_from_trade_conn(
                         )
 
                         refreshed_epoch, changed_tokens = (
-                            refresh_current_global_book_epoch_tokens(
-                                trade_conn,
-                                epoch=cached_before_bind,
-                                projected_books=projected_rows,
-                                required_tokens=tuple(exact_refresh_tokens),
-                                checked_at_utc=cache_checked_at,
-                                metadata_overrides=book_metadata_by_key,
+                            _work_sql(
+                                "book_exact_token_refresh",
+                                lambda read_conn: refresh_current_global_book_epoch_tokens(
+                                    read_conn,
+                                    epoch=cached_before_bind,
+                                    projected_books=projected_rows,
+                                    required_tokens=tuple(exact_refresh_tokens),
+                                    checked_at_utc=cache_checked_at,
+                                    metadata_overrides=book_metadata_by_key,
+                                ),
                             )
                         )
                         cached_probability_slice = {
@@ -9485,12 +9583,15 @@ def event_bound_live_adapter_from_trade_conn(
                     else:
                         cache_probabilities = dict(cached_probabilities)
                         cache_probabilities.update(rebound_probabilities)
-                        _store_global_book_epoch(
-                            trade_conn,
-                            cache_probabilities,
-                            refreshed_epoch,
-                            checked_at=cache_checked_at,
-                            metadata_by_key=book_metadata_by_key,
+                        _work_sql(
+                            "book_token_projection_cache_store",
+                            lambda read_conn: _store_global_book_epoch(
+                                read_conn,
+                                cache_probabilities,
+                                refreshed_epoch,
+                                checked_at=cache_checked_at,
+                                metadata_by_key=book_metadata_by_key,
+                            ),
                         )
                         logging.getLogger(__name__).info(
                             "global book token projection refresh completed: "
@@ -9501,9 +9602,13 @@ def event_bound_live_adapter_from_trade_conn(
                             len(exact_refresh_tokens),
                             changed_tokens,
                         )
-                        return rebound_probabilities, _scope_global_book_epoch(
-                            refreshed_epoch,
+                        return _publish_book_epoch(
                             rebound_probabilities,
+                            _scope_global_book_epoch(
+                                refreshed_epoch,
+                                rebound_probabilities,
+                            ),
+                            stage="token_projection_refresh",
                         )
             prefetch_slice = None
             prefetch_mode = ""
@@ -9526,9 +9631,12 @@ def event_bound_live_adapter_from_trade_conn(
                     for family_key in eligible_refresh_family_keys
                 }
                 prefetch_mode = "family_delta_books"
-                delta_topology = _global_book_speculative_topology(
-                    trade_conn,
-                    prefetch_slice,
+                delta_topology = _work_sql(
+                    "book_delta_speculative_topology",
+                    lambda read_conn: _global_book_speculative_topology(
+                        read_conn,
+                        prefetch_slice,
+                    ),
                 )
                 if delta_topology is not None:
                     prefetch_token_hint = tuple(
@@ -9710,11 +9818,14 @@ def event_bound_live_adapter_from_trade_conn(
                 if projection_tokens is None:
                     projection_tokens = prefetch_token_hint
                 projected = (
-                    _projected_global_book_hint(
-                        trade_conn,
-                        projection_tokens,
-                        checked_at=projection_at,
-                        max_age=FRESHNESS_WINDOW_DEFAULT,
+                    _work_sql(
+                        "book_parallel_token_projection",
+                        lambda read_conn: _projected_global_book_hint(
+                            read_conn,
+                            projection_tokens,
+                            checked_at=projection_at,
+                            max_age=FRESHNESS_WINDOW_DEFAULT,
+                        ),
                     )
                     if projection_tokens is not None
                     else None
@@ -9751,10 +9862,10 @@ def event_bound_live_adapter_from_trade_conn(
                             if future.done():
                                 raise
                 finally:
-                    # A running public-book request owns no canonical state. Let
-                    # its bounded HTTP timeout finish outside the reactor instead
-                    # of making executor teardown retain the global decision lane.
-                    pool.shutdown(wait=False, cancel_futures=True)
+                    # The worker owns a client whose request timeout is clipped
+                    # to this cut. Cancel queued work and keep that client alive
+                    # until every started request has terminated.
+                    pool.shutdown(wait=True, cancel_futures=True)
             if _urgent_book_preemption("after_initial_book_io"):
                 return probabilities, None
             bound_probabilities = dict(retained_bound_probabilities)
@@ -9785,12 +9896,15 @@ def event_bound_live_adapter_from_trade_conn(
                 )
                 return {}, None
             cache_checked_at = datetime.now(UTC)
-            cached, cache_after_reason = _probe_global_book_epoch_cache(
-                trade_conn,
-                bound_probabilities,
-                checked_at=cache_checked_at,
-                allowed=True,
-                mutable_family_keys=effective_book_refresh_family_keys,
+            cached, cache_after_reason = _work_sql(
+                "book_cache_probe_after_bind",
+                lambda read_conn: _probe_global_book_epoch_cache(
+                    read_conn,
+                    bound_probabilities,
+                    checked_at=cache_checked_at,
+                    allowed=True,
+                    mutable_family_keys=effective_book_refresh_family_keys,
+                ),
             )
             if cached is None:
                 logging.getLogger(__name__).info(
@@ -9807,9 +9921,13 @@ def event_bound_live_adapter_from_trade_conn(
                     len(bound_probabilities),
                     len(getattr(cached, "assets", ())),
                 )
-                return bound_probabilities, _scope_global_book_epoch(
-                    cached,
+                return _publish_book_epoch(
                     bound_probabilities,
+                    _scope_global_book_epoch(
+                        cached,
+                        bound_probabilities,
+                    ),
+                    stage="cache_after_bind",
                 )
 
             if (
@@ -9858,12 +9976,15 @@ def event_bound_live_adapter_from_trade_conn(
                             ),
                         )
                     )
-                    cache_store_status = _store_global_book_epoch(
-                        trade_conn,
-                        merged_probabilities,
-                        merged_epoch,
-                        checked_at=datetime.now(UTC),
-                        metadata_by_key=book_metadata_by_key,
+                    cache_store_status = _work_sql(
+                        "book_delta_cache_store",
+                        lambda read_conn: _store_global_book_epoch(
+                            read_conn,
+                            merged_probabilities,
+                            merged_epoch,
+                            checked_at=datetime.now(UTC),
+                            metadata_by_key=book_metadata_by_key,
+                        ),
                     )
                     if cache_store_status != "stored":
                         logging.getLogger(__name__).warning(
@@ -9879,9 +10000,13 @@ def event_bound_live_adapter_from_trade_conn(
                         len(merged_probabilities),
                         len(merged_epoch.assets),
                     )
-                    return bound_probabilities, _scope_global_book_epoch(
-                        merged_epoch,
+                    return _publish_book_epoch(
                         bound_probabilities,
+                        _scope_global_book_epoch(
+                            merged_epoch,
+                            bound_probabilities,
+                        ),
+                        stage="delta_merge",
                     )
                 except (TypeError, ValueError) as exc:
                     logging.getLogger(__name__).warning(
@@ -9922,22 +10047,28 @@ def event_bound_live_adapter_from_trade_conn(
                 cache_epoch,
                 cache_metadata,
                 cache_extend_status,
-            ) = _extend_global_book_epoch_cache(
-                trade_conn,
-                bound_probabilities,
-                epoch,
-                checked_at=datetime.now(UTC),
-                metadata_by_key=book_metadata_by_key,
+            ) = _work_sql(
+                "book_full_cache_extend",
+                lambda read_conn: _extend_global_book_epoch_cache(
+                    read_conn,
+                    bound_probabilities,
+                    epoch,
+                    checked_at=datetime.now(UTC),
+                    metadata_by_key=book_metadata_by_key,
+                ),
             )
             cache_store_status = (
                 "stored"
                 if cache_extend_status == "extended"
-                else _store_global_book_epoch(
-                    trade_conn,
-                    cache_probabilities,
-                    cache_epoch,
-                    checked_at=datetime.now(UTC),
-                    metadata_by_key=cache_metadata,
+                else _work_sql(
+                    "book_full_cache_store",
+                    lambda read_conn: _store_global_book_epoch(
+                        read_conn,
+                        cache_probabilities,
+                        cache_epoch,
+                        checked_at=datetime.now(UTC),
+                        metadata_by_key=cache_metadata,
+                    ),
                 )
             )
             if cache_store_status != "stored":
@@ -9959,7 +10090,18 @@ def event_bound_live_adapter_from_trade_conn(
                     len(bound_probabilities),
                     len(getattr(epoch, "assets", ())),
                 )
-            return bound_probabilities, epoch
+            return _publish_book_epoch(
+                bound_probabilities,
+                epoch,
+                stage="full_capture",
+            )
+
+        def _current_book_epoch(probabilities, _at, work_context=None):
+            return _current_book_epoch_with_context(
+                probabilities,
+                _at,
+                work_context or global_work_context,
+            )
 
         def _current_entry_capital_limit(
             candidate,
@@ -10076,6 +10218,7 @@ def event_bound_live_adapter_from_trade_conn(
                 # positions from this same canonical trade connection at selection.
                 portfolio_state_provider=None,
                 current_book_epoch_provider=_current_book_epoch,
+                work_context=global_work_context,
                 current_capital_limit_resolver=_current_entry_capital_limit,
                 # Apply the same configured submit authority before expensive
                 # preflight. SELL remains eligible in reduce-only operation.

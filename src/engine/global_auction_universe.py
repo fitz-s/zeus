@@ -13,10 +13,13 @@ import json
 import sqlite3
 import threading
 import time as _time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
+from enum import Enum
 from functools import cached_property
+from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo
@@ -37,6 +40,7 @@ from src.events.triggers.forecast_snapshot_ready import (
     ForecastSnapshotReadyTrigger,
     executable_forecast_live_eligible_reader,
 )
+from src.state.db import _connect_read_only
 from src.solve.solver import (
     actionable_family_payoff_bindings,
     CurrentExecutionAuthority,
@@ -57,6 +61,231 @@ GLOBAL_BOOK_CONFIRMED_ABSENT_FIELD = "_global_confirmed_absent"
 
 class GlobalAuctionScopeCancelled(RuntimeError):
     """Raised when held-position monitoring preempts a read-only scope scan."""
+
+
+class WorkDeferredCode(str, Enum):
+    """Retryable reasons for yielding a global money-path work cut."""
+
+    PREEMPTED = "DEFERRED_PREEMPTED"
+    DEADLINE = "DEFERRED_DEADLINE"
+
+
+class WorkDeferred(RuntimeError):
+    """Typed control-flow signal; no complete epoch may cross this boundary."""
+
+    def __init__(
+        self,
+        code: WorkDeferredCode,
+        *,
+        stage: str,
+        remaining_s: float,
+    ) -> None:
+        self.code = code
+        self.stage = str(stage)
+        self.remaining_s = max(0.0, float(remaining_s))
+        super().__init__(f"{code.value}:{self.stage}")
+
+
+@dataclass(frozen=True)
+class WorkContext:
+    """One absolute deadline and cancellation authority for a global work cut."""
+
+    deadline_monotonic: float | None
+    cancel_requested: Callable[[], bool] | None = None
+    monotonic: Callable[[], float] = _time.monotonic
+
+    def remaining(self) -> float:
+        if self.deadline_monotonic is None:
+            return float("inf")
+        return max(0.0, float(self.deadline_monotonic) - self.monotonic())
+
+    def checkpoint(self, stage: str) -> float:
+        if self.cancel_requested is not None and self.cancel_requested():
+            raise WorkDeferred(
+                WorkDeferredCode.PREEMPTED,
+                stage=stage,
+                remaining_s=self.remaining(),
+            )
+        remaining = self.remaining()
+        if remaining <= 0.0:
+            raise WorkDeferred(
+                WorkDeferredCode.DEADLINE,
+                stage=stage,
+                remaining_s=remaining,
+            )
+        return remaining
+
+    def clipped_timeout(self, timeout: float, *, stage: str) -> float:
+        requested = float(timeout)
+        if requested <= 0.0:
+            raise ValueError("WORK_CONTEXT_TIMEOUT_INVALID")
+        return min(requested, self.checkpoint(stage))
+
+
+_IN_MEMORY_WORK_SQLITE_FENCE = threading.RLock()
+_SHARED_WORK_SQLITE_FENCE = threading.RLock()
+
+
+def _work_sqlite_main_path(conn: sqlite3.Connection) -> str | None:
+    for _sequence, name, path in conn.execute("PRAGMA database_list"):
+        if str(name) == "main":
+            clean = str(path or "").strip()
+            return clean or None
+    return None
+
+
+@contextmanager
+def _shared_work_sqlite_serialization(
+    work_context: WorkContext,
+    *,
+    stage: str,
+):
+    acquired = False
+    try:
+        while not acquired:
+            remaining = work_context.checkpoint(f"{stage}:fence_wait")
+            wait_seconds = (
+                0.005
+                if remaining == float("inf")
+                else min(0.005, remaining)
+            )
+            acquired = _SHARED_WORK_SQLITE_FENCE.acquire(
+                timeout=max(0.0, wait_seconds)
+            )
+        yield
+    finally:
+        if acquired:
+            _SHARED_WORK_SQLITE_FENCE.release()
+
+
+@contextmanager
+def bounded_work_sqlite(
+    conn: sqlite3.Connection,
+    work_context: WorkContext,
+    *,
+    stage: str,
+    shared_connection: bool = False,
+):
+    """Run one bounded read without taking ownership of a shared connection."""
+
+    if shared_connection:
+        # Some snapshot-scoped readers key frozen state by connection identity.
+        # Serialize those explicit owners, retain any pre-existing progress
+        # handler, and use interrupt plus a clipped busy timeout only.
+        with _shared_work_sqlite_serialization(work_context, stage=stage):
+            work_context.checkpoint(f"{stage}:before_sql")
+            prior_busy_timeout = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+            remaining = work_context.remaining()
+            remaining_ms = (
+                prior_busy_timeout
+                if remaining == float("inf")
+                else max(1, min(prior_busy_timeout, int(remaining * 1000.0)))
+            )
+            deferred: list[WorkDeferred] = []
+            stopped = threading.Event()
+
+            def _watch_shared() -> None:
+                while not stopped.wait(0.005):
+                    try:
+                        work_context.checkpoint(f"{stage}:sql_interrupt")
+                    except WorkDeferred as exc:
+                        if not deferred:
+                            deferred.append(exc)
+                        if not stopped.is_set():
+                            conn.interrupt()
+                        return
+
+            watcher = threading.Thread(
+                target=_watch_shared,
+                name="global-work-shared-sqlite-deadline",
+                daemon=True,
+            )
+            conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
+            watcher.start()
+            try:
+                try:
+                    yield conn
+                except sqlite3.OperationalError:
+                    if deferred:
+                        raise deferred[0]
+                    work_context.checkpoint(f"{stage}:sql_error")
+                    raise
+                if deferred:
+                    raise deferred[0]
+                work_context.checkpoint(f"{stage}:after_sql")
+            finally:
+                stopped.set()
+                watcher.join()
+                conn.execute(f"PRAGMA busy_timeout = {prior_busy_timeout}")
+        return
+    work_context.checkpoint(f"{stage}:before_sql_path")
+    main_path = _work_sqlite_main_path(conn)
+    work_context.checkpoint(f"{stage}:before_sql")
+    if main_path is None:
+        # In-memory fixtures cannot be reopened. Serialize their use and retain
+        # any caller-owned progress handler; production file-backed reads use
+        # the independently interruptible connection below.
+        with _IN_MEMORY_WORK_SQLITE_FENCE:
+            yield conn
+            work_context.checkpoint(f"{stage}:after_sql")
+        return
+
+    remaining = work_context.remaining()
+    remaining_ms = (
+        5_000
+        if remaining == float("inf")
+        else max(1, min(5_000, int(remaining * 1000.0)))
+    )
+    read_conn = _connect_read_only(Path(main_path))
+    read_conn.row_factory = conn.row_factory
+    read_conn.text_factory = conn.text_factory
+    deferred: list[WorkDeferred] = []
+    stopped = threading.Event()
+
+    def _remember_deferred(checkpoint_stage: str) -> bool:
+        try:
+            work_context.checkpoint(checkpoint_stage)
+        except WorkDeferred as exc:
+            if not deferred:
+                deferred.append(exc)
+            return True
+        return False
+
+    def _progress() -> int:
+        return int(_remember_deferred(f"{stage}:sql_progress"))
+
+    def _watch() -> None:
+        while not stopped.wait(0.005):
+            if _remember_deferred(f"{stage}:sql_interrupt"):
+                if not stopped.is_set():
+                    read_conn.interrupt()
+                return
+
+    watcher = threading.Thread(
+        target=_watch,
+        name="global-work-sqlite-deadline",
+        daemon=True,
+    )
+    read_conn.execute("PRAGMA query_only = ON")
+    read_conn.execute(f"PRAGMA busy_timeout = {remaining_ms}")
+    read_conn.set_progress_handler(_progress, 1_000)
+    watcher.start()
+    try:
+        try:
+            yield read_conn
+        except sqlite3.OperationalError:
+            if deferred:
+                raise deferred[0]
+            work_context.checkpoint(f"{stage}:sql_error")
+            raise
+        if deferred:
+            raise deferred[0]
+        work_context.checkpoint(f"{stage}:after_sql")
+    finally:
+        stopped.set()
+        watcher.join()
+        read_conn.set_progress_handler(None, 0)
+        read_conn.close()
 
 
 @dataclass(frozen=True, init=False)
@@ -421,6 +650,108 @@ def _global_book_snapshot_rows(
             item = _row_dict(cur, row)
             item["snapshot_invalidated"] = snapshot_invalidated(item)
             rows.append(item)
+    return rows
+
+
+def _global_book_latest_invalidation_rows(
+    trade_conn: sqlite3.Connection,
+    *,
+    condition_ids: Sequence[str],
+    checked_at_utc: datetime,
+) -> list[dict[str, object]]:
+    """Read invalidation identity without loading append-table book payloads."""
+
+    if checked_at_utc.tzinfo is None:
+        raise ValueError("GLOBAL_BOOK_INVALIDATION_CHECK_TIME_NAIVE")
+    clean = tuple(
+        value
+        for value in dict.fromkeys(
+            str(raw or "").strip() for raw in condition_ids
+        )
+        if value
+    )
+    if not clean:
+        return []
+    condition_invalidated_at: dict[str, datetime] = {}
+    token_invalidated_at: dict[str, datetime] = {}
+    if _table_exists(trade_conn, "executable_market_snapshot_invalidations"):
+        for raw_condition, raw_token, raw_invalidated_at in trade_conn.execute(
+            """
+            SELECT condition_id, token_id, MAX(invalidated_at)
+              FROM executable_market_snapshot_invalidations
+             WHERE invalidated_at <= ?
+             GROUP BY condition_id, token_id
+            """,
+            (checked_at_utc.astimezone(timezone.utc).isoformat(),),
+        ):
+            try:
+                invalidated_at = datetime.fromisoformat(
+                    str(raw_invalidated_at).replace("Z", "+00:00")
+                ).astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                continue
+            condition_id = str(raw_condition or "").strip()
+            token_id = str(raw_token or "").strip()
+            if condition_id:
+                condition_invalidated_at[condition_id] = max(
+                    invalidated_at,
+                    condition_invalidated_at.get(
+                        condition_id,
+                        datetime.min.replace(tzinfo=timezone.utc),
+                    ),
+                )
+            if token_id:
+                token_invalidated_at[token_id] = max(
+                    invalidated_at,
+                    token_invalidated_at.get(
+                        token_id,
+                        datetime.min.replace(tzinfo=timezone.utc),
+                    ),
+                )
+
+    rows: list[dict[str, object]] = []
+    for offset in range(0, len(clean), 400):
+        chunk = clean[offset : offset + 400]
+        placeholders = ",".join("?" for _ in chunk)
+        cur = trade_conn.execute(
+            f"""
+            SELECT snapshot_id,
+                   condition_id,
+                   selected_outcome_token_id,
+                   yes_token_id,
+                   no_token_id,
+                   captured_at
+              FROM executable_market_snapshot_latest
+             WHERE condition_id IN ({placeholders})
+             ORDER BY captured_at DESC, snapshot_id DESC
+            """,
+            chunk,
+        )
+        for raw in cur.fetchall():
+            row = _row_dict(cur, raw)
+            try:
+                captured_at = datetime.fromisoformat(
+                    str(row.get("captured_at") or "").replace("Z", "+00:00")
+                ).astimezone(timezone.utc)
+            except (TypeError, ValueError):
+                row["snapshot_invalidated"] = False
+            else:
+                identities = (
+                    condition_invalidated_at.get(
+                        str(row.get("condition_id") or "")
+                    ),
+                    token_invalidated_at.get(
+                        str(row.get("selected_outcome_token_id") or "")
+                    ),
+                    token_invalidated_at.get(str(row.get("yes_token_id") or "")),
+                    token_invalidated_at.get(str(row.get("no_token_id") or "")),
+                )
+                row["snapshot_invalidated"] = any(
+                    invalidated_at is not None
+                    and invalidated_at >= captured_at
+                    for invalidated_at in identities
+                )
+            rows.append(row)
     return rows
 
 
@@ -831,7 +1162,7 @@ def capture_current_global_book_epoch(
     trade_conn: sqlite3.Connection,
     *,
     probability_witnesses: Mapping[str, FamilyPayoffWitness],
-    get_books: Callable[[list[str]], Mapping[str, Mapping[str, object]]],
+    get_books: Callable[..., Mapping[str, Mapping[str, object]]],
     clock: Callable[[], datetime],
     max_age: timedelta,
     batch_size: int = 500,
@@ -840,9 +1171,13 @@ def capture_current_global_book_epoch(
     prefetched_books: Mapping[str, Mapping[str, object]] | None = None,
     prefetched_at_utc: datetime | None = None,
     required_token_ids: frozenset[str] | None = None,
+    work_context: WorkContext | None = None,
+    request_timeout: float | None = None,
 ) -> CurrentGlobalBookEpoch:
     """Fetch current books for the economically feasible token set."""
 
+    if work_context is not None:
+        work_context.checkpoint("book_capture:start")
     required_tokens = (
         frozenset(str(token or "").strip() for token in required_token_ids)
         if required_token_ids is not None
@@ -899,11 +1234,23 @@ def capture_current_global_book_epoch(
     if started_at is None or started_at.tzinfo is None:
         raise ValueError("GLOBAL_BOOK_CLOCK_INVALID")
     started_at = started_at.astimezone(timezone.utc)
-    metadata_rows = _global_book_snapshot_rows(
-        trade_conn,
-        condition_ids=[row[2] for row in bindings],
-        checked_at_utc=started_at,
-    )
+    if work_context is None:
+        metadata_rows = _global_book_snapshot_rows(
+            trade_conn,
+            condition_ids=[row[2] for row in bindings],
+            checked_at_utc=started_at,
+        )
+    else:
+        with bounded_work_sqlite(
+            trade_conn,
+            work_context,
+            stage="book_capture:metadata",
+        ) as read_conn:
+            metadata_rows = _global_book_snapshot_rows(
+                read_conn,
+                condition_ids=[row[2] for row in bindings],
+                checked_at_utc=started_at,
+            )
     metadata_by_key: dict[tuple[str, str], dict[str, object]] = {}
     for row in metadata_rows:
         condition_id = str(row.get("condition_id") or "")
@@ -943,10 +1290,14 @@ def capture_current_global_book_epoch(
             get_books=get_books,
             batch_size=batch_size,
             book_fetch_workers=book_fetch_workers,
+            work_context=work_context,
+            request_timeout=request_timeout,
         )
         if prefetched_books is None
         else _validated_global_book_batch(prefetched_books)
     )
+    if work_context is not None:
+        work_context.checkpoint("book_capture:after_fetch")
     finished_at = clock()
     if finished_at.tzinfo is None:
         raise ValueError("GLOBAL_BOOK_CLOCK_INVALID")
@@ -985,6 +1336,8 @@ def capture_current_global_book_epoch(
         asset_states=states,
         captured_at_utc=started_at,
     )
+    if work_context is not None:
+        work_context.checkpoint("book_capture:before_publish")
     return CurrentGlobalBookEpoch(
         assets=tuple(assets),
         asset_states=tuple(states),
@@ -1171,9 +1524,11 @@ def _validated_global_book_batch(
 def fetch_current_global_books(
     tokens: Sequence[str],
     *,
-    get_books: Callable[[list[str]], Mapping[str, Mapping[str, object]]],
+    get_books: Callable[..., Mapping[str, Mapping[str, object]]],
     batch_size: int = 500,
     book_fetch_workers: int = 1,
+    work_context: WorkContext | None = None,
+    request_timeout: float | None = None,
 ) -> dict[str, Mapping[str, object]]:
     """Fetch one bounded CLOB book universe without interpreting market metadata."""
 
@@ -1196,20 +1551,76 @@ def fetch_current_global_books(
     def merge(batch: Mapping[str, Mapping[str, object]]) -> None:
         books.update(_validated_global_book_batch(batch))
 
+    def fetch(chunk: list[str]) -> Mapping[str, Mapping[str, object]]:
+        if work_context is None:
+            return get_books(chunk)
+        work_context.checkpoint("book_fetch:request_start")
+        if request_timeout is None:
+            return get_books(chunk)
+        timeout = work_context.clipped_timeout(
+            request_timeout,
+            stage="book_fetch:request_timeout",
+        )
+        return get_books(chunk, timeout=timeout)
+
     if len(chunks) == 1 or book_fetch_workers == 1:
         for chunk in chunks:
-            merge(get_books(chunk))
+            if work_context is not None:
+                work_context.checkpoint("book_fetch:before_dispatch")
+            batch = fetch(chunk)
+            if work_context is not None:
+                work_context.checkpoint("book_fetch:before_completion")
+            merge(batch)
         return books
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
-    with ThreadPoolExecutor(
+    pool = ThreadPoolExecutor(
         max_workers=min(book_fetch_workers, len(chunks)),
         thread_name_prefix="global-clob-books",
-    ) as executor:
-        futures = tuple(executor.submit(get_books, chunk) for chunk in chunks)
-        for future in as_completed(futures):
-            merge(future.result())
+    )
+    pending: set[object] = set()
+    chunk_iter = iter(chunks)
+    try:
+        while len(pending) < min(book_fetch_workers, len(chunks)):
+            if work_context is not None:
+                work_context.checkpoint("book_fetch:before_dispatch")
+            try:
+                chunk = next(chunk_iter)
+            except StopIteration:
+                break
+            pending.add(pool.submit(fetch, chunk))
+        while pending:
+            wait_timeout = None
+            if work_context is not None:
+                wait_timeout = min(
+                    0.025,
+                    work_context.checkpoint("book_fetch:before_wait"),
+                )
+            done, pending = wait(
+                pending,
+                timeout=wait_timeout,
+                return_when=FIRST_COMPLETED,
+            )
+            if not done:
+                continue
+            for future in done:
+                if work_context is not None:
+                    work_context.checkpoint("book_fetch:before_completion")
+                merge(future.result())
+                if work_context is not None:
+                    work_context.checkpoint("book_fetch:before_dispatch")
+                try:
+                    chunk = next(chunk_iter)
+                except StopIteration:
+                    continue
+                pending.add(pool.submit(fetch, chunk))
+    finally:
+        for future in pending:
+            future.cancel()
+        # Running jobs already own a timeout clipped to this work context. Keep
+        # their client alive until they terminate; queued jobs are cancelled.
+        pool.shutdown(wait=True, cancel_futures=True)
     return books
 
 
@@ -1337,7 +1748,7 @@ def fetch_current_gamma_markets(
     finally:
         for future in futures:
             future.cancel()
-        pool.shutdown(wait=False, cancel_futures=True)
+        pool.shutdown(wait=True, cancel_futures=True)
     return tuple(markets), len(chunks)
 
 

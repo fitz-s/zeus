@@ -4772,6 +4772,10 @@ TRANSIENT_MONEY_PATH_REASONS: frozenset[str] = frozenset({
     "GLOBAL_AUCTION_NO_TRADE",
     "GLOBAL_AUCTION_FAILED",
     "GLOBAL_AUCTION_SUPERSEDED_BY_NEW_FACT",
+    # Absolute work-cut yields preserve every carrier for the next cycle. They
+    # are control-flow outcomes, never book-unavailable or economic no-trades.
+    "DEFERRED_PREEMPTED",
+    "DEFERRED_DEADLINE",
     # No family has a current admissible probability yet. Retain the events and
     # release the trading lane long enough for the posterior substrate to advance.
     "GLOBAL_AUCTION_NO_CURRENT_PROBABILITY_FAMILY",

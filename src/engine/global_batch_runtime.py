@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_FLOOR
@@ -33,6 +33,10 @@ from src.engine.global_auction_universe import (
     CurrentGlobalBookEpoch,
     CurrentGlobalSellAsset,
     GlobalAuctionScopeCancelled,
+    WorkContext,
+    WorkDeferred,
+    WorkDeferredCode,
+    bounded_work_sqlite,
     current_global_book_epoch_identity,
     current_global_auction_scope_from_events,
     current_portfolio_wealth_witness,
@@ -4124,6 +4128,8 @@ def _book_epoch_with_replacement_candidate(
 
 def _begin_selection_read_snapshot(
     connections: Sequence[sqlite3.Connection],
+    *,
+    work_context: WorkContext | None = None,
 ) -> Callable[[], None]:
     """Own one frozen read view for selection; reject caller-owned transactions."""
 
@@ -4137,13 +4143,27 @@ def _begin_selection_read_snapshot(
             seen.add(identity)
             if not isinstance(conn, sqlite3.Connection):
                 raise TypeError("GLOBAL_SELECTION_SNAPSHOT_CONNECTION_INVALID")
-            if conn.in_transaction:
-                raise RuntimeError("GLOBAL_SELECTION_SNAPSHOT_CALLER_TXN_OPEN")
-            conn.execute("BEGIN")
-            owned.append(conn)
-            # A deferred transaction does not acquire its read view until the first
-            # statement. Establish every authority view before the cut is named.
-            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+
+            def establish_snapshot() -> None:
+                if conn.in_transaction:
+                    raise RuntimeError("GLOBAL_SELECTION_SNAPSHOT_CALLER_TXN_OPEN")
+                conn.execute("BEGIN")
+                owned.append(conn)
+                # A deferred transaction does not acquire its read view until
+                # the first statement. Establish every authority view before
+                # the cut is named.
+                conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+
+            if work_context is None:
+                establish_snapshot()
+            else:
+                with bounded_work_sqlite(
+                    conn,
+                    work_context,
+                    stage="selection_snapshot",
+                    shared_connection=True,
+                ):
+                    establish_snapshot()
     except Exception:
         for conn in reversed(owned):
             conn.rollback()
@@ -4503,10 +4523,11 @@ def process_current_global_batch(
     actuate_preflighted_winner: GlobalOneShotActuator | None = None,
     portfolio_state_provider: Callable[[], object] | None = None,
     current_book_epoch_provider: Callable[
-        [Mapping[str, object], datetime],
+        [Mapping[str, object], datetime, WorkContext],
         tuple[Mapping[str, object], CurrentGlobalBookEpoch],
     ]
     | None = None,
+    work_context: WorkContext | None = None,
     selection_snapshot_connections: Sequence[sqlite3.Connection] = (),
     preflight_sqlite_connections: Sequence[sqlite3.Connection] = (),
     current_capital_limit_resolver: Callable[[object, str, str], object]
@@ -4566,12 +4587,19 @@ def process_current_global_batch(
         )
         stage_log(
             "global batch stage completed: %s elapsed_s=%.3f total_s=%.3f "
-            "events=%d families=%s",
+            "events=%d families=%s remaining_s=%s cancel=%s deadline=%s",
             stage,
             elapsed,
             total,
             len(event_tuple),
             families if families is not None else "unknown",
+            (
+                f"{work_context.remaining():.3f}"
+                if work_context is not None
+                else "unbounded"
+            ),
+            False,
+            work_context.deadline_monotonic if work_context else None,
         )
         stage_started = now
 
@@ -4694,6 +4722,9 @@ def process_current_global_batch(
         return changed
 
     def cancelled(stage: str) -> bool:
+        if work_context is not None:
+            work_context.checkpoint(stage)
+            return False
         if selection_cancelled is None:
             return False
         try:
@@ -4736,6 +4767,19 @@ def process_current_global_batch(
                 len(event_tuple),
             )
         return changed
+
+    @contextmanager
+    def bounded_read(conn: object, stage: str, *, shared_connection: bool = False):
+        if work_context is None or not isinstance(conn, sqlite3.Connection):
+            yield conn
+            return
+        with bounded_work_sqlite(
+            conn,
+            work_context,
+            stage=stage,
+            shared_connection=shared_connection,
+        ) as read_conn:
+            yield read_conn
 
     def bind_selected_winner(selected):
         """Bind one selected scope event to a committed claim in this epoch."""
@@ -5014,7 +5058,8 @@ def process_current_global_batch(
         if isinstance(world_conn, sqlite3.Connection):
             selection_connections = (*selection_connections, world_conn)
         selection_snapshot_release = _begin_selection_read_snapshot(
-            selection_connections
+            selection_connections,
+            work_context=work_context,
         )
         release_schema = prime_frozen_schema_reads(selection_connections)
         release_snapshot_only = selection_snapshot_release
@@ -5036,10 +5081,15 @@ def process_current_global_batch(
         log_stage("selection_snapshot")
         if cancelled("selection_snapshot"):
             return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
-        if probe_inflight_buy_ambiguity(trade_conn):
-            raise ValueError("CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS")
+        with bounded_read(
+            trade_conn,
+            "scope:trade_obligations",
+            shared_connection=True,
+        ) as scope_trade_conn:
+            if probe_inflight_buy_ambiguity(scope_trade_conn):
+                raise ValueError("CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS")
+            held_families = _current_held_weather_families(scope_trade_conn)
         scope_at = current_time()
-        held_families = _current_held_weather_families(trade_conn)
         if not buy_candidates_enabled and not held_families:
             return reject("GLOBAL_AUCTION_NO_REDUCE_ONLY_FAMILY")
         restricted_families = None
@@ -5093,20 +5143,35 @@ def process_current_global_batch(
         )
         missing_held_families: list[tuple[str, str, str]] = []
         try:
-            full_scope = scan_current_global_auction_scope(
-                world_conn=world_conn,
-                forecasts_conn=forecast_conn,
-                decision_at_utc=scope_at,
-                held_families=held_families,
-                missing_held_families=missing_held_families,
-                restrict_to_families=(
-                    held_families
-                    if not buy_candidates_enabled
-                    else (restricted_families or None)
-                ),
-                day0_only=day0_only_scope,
-                cancelled=selection_cancelled,
-            )
+            with ExitStack() as scope_reads:
+                scope_world_conn = scope_reads.enter_context(
+                    bounded_read(
+                        world_conn,
+                        "scope:world",
+                        shared_connection=True,
+                    )
+                )
+                scope_forecast_conn = scope_reads.enter_context(
+                    bounded_read(
+                        forecast_conn,
+                        "scope:forecast",
+                        shared_connection=True,
+                    )
+                )
+                full_scope = scan_current_global_auction_scope(
+                    world_conn=scope_world_conn,
+                    forecasts_conn=scope_forecast_conn,
+                    decision_at_utc=scope_at,
+                    held_families=held_families,
+                    missing_held_families=missing_held_families,
+                    restrict_to_families=(
+                        held_families
+                        if not buy_candidates_enabled
+                        else (restricted_families or None)
+                    ),
+                    day0_only=day0_only_scope,
+                    cancelled=selection_cancelled,
+                )
         except GlobalAuctionScopeCancelled:
             _LOG.info(
                 "global batch preempted during scope scan for held-position monitor: "
@@ -5213,19 +5278,36 @@ def process_current_global_batch(
             prime_frozen_replacement_artifact_hwm,
         )
 
-        release_hwm = prime_frozen_replacement_artifact_hwm(
-            forecast_conn,
-            requests=(
-                (
-                    str(payload.get("city") or ""),
-                    str(payload.get("target_date") or ""),
-                    str(payload.get("metric") or ""),
-                )
-                for _, event in decision_scope.events_by_family
-                for payload in (payload_reader(event),)
-            ),
-            decision_time=scope_at,
+        hwm_requests = tuple(
+            (
+                str(payload.get("city") or ""),
+                str(payload.get("target_date") or ""),
+                str(payload.get("metric") or ""),
+            )
+            for _, event in decision_scope.events_by_family
+            for payload in (payload_reader(event),)
         )
+        release_hwm = None
+        try:
+            # Frozen replacement state is keyed by this transaction's exact
+            # connection identity, so this is the explicit serialized shared-
+            # connection exception; it never replaces a caller progress handler.
+            with bounded_read(
+                forecast_conn,
+                "replacement_hwm",
+                shared_connection=True,
+            ) as hwm_conn:
+                release_hwm = prime_frozen_replacement_artifact_hwm(
+                    hwm_conn,
+                    requests=hwm_requests,
+                    decision_time=scope_at,
+                )
+        except Exception:
+            if release_hwm is not None:
+                release_hwm()
+            raise
+        if release_hwm is None:
+            raise RuntimeError("GLOBAL_REPLACEMENT_HWM_RELEASE_MISSING")
         release_read_snapshot = selection_snapshot_release
         if release_read_snapshot is None:
             raise RuntimeError("GLOBAL_SELECTION_SNAPSHOT_RELEASE_MISSING")
@@ -5245,18 +5327,25 @@ def process_current_global_batch(
         wealth_age = timedelta(seconds=float(COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS))
 
         def capture_selection_wealth():
-            state = portfolio_state_provider() if portfolio_state_provider else None
-            if state is None and hasattr(trade_conn, "execute"):
-                from src.state.portfolio import load_runtime_open_portfolio
-
-                state = load_runtime_open_portfolio(trade_conn)
-            witness = current_portfolio_wealth_witness(
+            with bounded_read(
                 trade_conn,
-                decision_at_utc=current_time(),
-                max_age=wealth_age,
-                portfolio_state=state,
-            )
-            return state, witness
+                "wealth_capture",
+                shared_connection=True,
+            ) as wealth_conn:
+                state = (
+                    portfolio_state_provider() if portfolio_state_provider else None
+                )
+                if state is None and hasattr(wealth_conn, "execute"):
+                    from src.state.portfolio import load_runtime_open_portfolio
+
+                    state = load_runtime_open_portfolio(wealth_conn)
+                witness = current_portfolio_wealth_witness(
+                    wealth_conn,
+                    decision_at_utc=current_time(),
+                    max_age=wealth_age,
+                    portfolio_state=state,
+                )
+                return state, witness
 
         selection_state = None
         selection_wealth = None
@@ -5406,10 +5495,17 @@ def process_current_global_batch(
             if cancelled("book_epoch_start"):
                 return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
             requested_probability_family_keys = frozenset(probabilities)
-            probabilities, book_epoch = current_book_epoch_provider(
-                probabilities,
-                current_time(),
-            )
+            if work_context is None:
+                probabilities, book_epoch = current_book_epoch_provider(  # type: ignore[call-arg]
+                    probabilities,
+                    current_time(),
+                )
+            else:
+                probabilities, book_epoch = current_book_epoch_provider(
+                    probabilities,
+                    current_time(),
+                    work_context,
+                )
             unexpected_probability_family_keys = frozenset(probabilities).difference(
                 requested_probability_family_keys
             )
@@ -6122,6 +6218,20 @@ def process_current_global_batch(
                     0.0,
                     (auction_deadline - preflight_at).total_seconds(),
                 )
+                work_deadline_owns_preflight = bool(
+                    work_context is not None
+                    and work_context.deadline_monotonic is not None
+                    and work_context.deadline_monotonic
+                    <= preflight_deadline_monotonic
+                )
+                if work_deadline_owns_preflight:
+                    preflight_deadline_monotonic = work_context.deadline_monotonic
+                preflight_cancelled = (
+                    work_context.cancel_requested
+                    if work_context is not None
+                    and work_context.cancel_requested is not None
+                    else selection_cancelled
+                )
                 preflight_fence = None
                 try:
                     with _global_preflight_sqlite_fence(
@@ -6132,7 +6242,7 @@ def process_current_global_batch(
                             *preflight_sqlite_connections,
                         ),
                         deadline_monotonic=preflight_deadline_monotonic,
-                        cancelled=selection_cancelled,
+                        cancelled=preflight_cancelled,
                     ) as preflight_fence:
                         preflight = preflight_winner(
                             winner,
@@ -6150,6 +6260,12 @@ def process_current_global_batch(
                     preflight_fence is not None
                     and preflight_fence.interrupt_reason == "deadline"
                 ):
+                    if work_deadline_owns_preflight:
+                        raise WorkDeferred(
+                            WorkDeferredCode.DEADLINE,
+                            stage="winner_preflight:work_deadline",
+                            remaining_s=0.0,
+                        )
                     _LOG.warning(
                         "global winner preflight SQLite work exceeded epoch deadline: "
                         "elapsed_s=%.3f event=%s",
@@ -6161,6 +6277,12 @@ def process_current_global_batch(
                     preflight_fence is not None
                     and preflight_fence.interrupt_reason == "cancelled"
                 ):
+                    if work_context is not None:
+                        raise WorkDeferred(
+                            WorkDeferredCode.PREEMPTED,
+                            stage="winner_preflight:cancelled",
+                            remaining_s=work_context.remaining(),
+                        )
                     return reject(
                         "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
                     )
@@ -6389,6 +6511,7 @@ def process_current_global_batch(
                         epoch_superseded=epoch_superseded,
                         selection_cancelled=selection_cancelled,
                         final_actuation_cancelled=final_actuation_cancelled,
+                        work_context=work_context,
                         restrict_to_family_keys=restrict_to_family_keys,
                         _probability_supersession_reauction_count=(
                             _probability_supersession_reauction_count
@@ -6747,13 +6870,33 @@ def process_current_global_batch(
             if event.event_id != winner_id
         }
         before_calls = venue_submit_count()
-        final_actuation_at = current_time()
         if final_cancelled("final_actuation"):
             return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
-        if preflight_winner is not None and final_actuation_at > auction_deadline:
-            return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")
         release_selection_snapshot()
         _invalidate_global_holding_coverage()
+        if final_cancelled("final_actuation_before_submit"):
+            return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
+
+        def checkpoint_final_actuation() -> tuple[datetime, bool]:
+            checked_at = current_time()
+            if preflight_winner is not None and checked_at > auction_deadline:
+                if work_context is not None:
+                    raise WorkDeferred(
+                        WorkDeferredCode.DEADLINE,
+                        stage="final_actuation:auction_deadline",
+                        remaining_s=0.0,
+                    )
+                return checked_at, True
+            # This checkpoint is deliberately the last callable boundary before
+            # the one-shot actuator: the effective deadline is the earlier of
+            # the auction wall-clock authority above and this shared work cut.
+            if work_context is not None:
+                work_context.checkpoint("final_actuation:before_submit")
+            return checked_at, False
+
+        final_actuation_at, auction_expired = checkpoint_final_actuation()
+        if auction_expired:
+            return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")
         actuation_started = True
         winner_receipt = (
             actuate_preflighted_winner.consume(
@@ -6810,6 +6953,17 @@ def process_current_global_batch(
             ),
             continuation_event=continuation_event,
         )
+    except WorkDeferred as exc:
+        _LOG.info(
+            "global auction deferred: code=%s stage=%s remaining_s=%.3f "
+            "cancel=%s deadline=%s",
+            exc.code.value,
+            exc.stage,
+            exc.remaining_s,
+            exc.code.value == "DEFERRED_PREEMPTED",
+            work_context.deadline_monotonic if work_context else None,
+        )
+        return reject(exc.code.value)
     except Exception as exc:  # noqa: BLE001 - one authority fault invalidates epoch
         _LOG.exception("global auction epoch failed closed")
         if actuation_started:
