@@ -1,5 +1,5 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-05-17
+# Last reused/audited: 2026-08-11
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z4.yaml
 #                  + 2026-05-13 collateral_ledger singleton lifecycle remediation
 #                  + 2026-05-17 / 2026-06-17 live collateral DB lock remediation
@@ -33,6 +33,7 @@ from src.contracts.fx_classification import (
 )
 
 AuthorityTier = Literal["CHAIN", "VENUE", "DEGRADED"]
+SnapshotWitness = Literal["portfolio", "pusd"]
 
 _MICRO = 1_000_000
 _CTF_SCALE = 1_000_000
@@ -445,8 +446,12 @@ class CollateralLedger:
         self._persist_snapshot(snapshot)
         self._snapshot = snapshot
 
-    def snapshot(self) -> CollateralSnapshot:
-        loaded = self._load_latest_snapshot()
+    def snapshot(
+        self,
+        *,
+        witness: SnapshotWitness = "portfolio",
+    ) -> CollateralSnapshot:
+        loaded = self._load_latest_snapshot(witness=witness)
         if loaded is not None:
             self._snapshot = loaded
         if self._snapshot is None:
@@ -903,13 +908,20 @@ class CollateralLedger:
             ).fetchall()
         return {str(row["token_id"]): int(row["amount"] or 0) for row in rows}
 
-    def _load_latest_snapshot(self) -> CollateralSnapshot | None:
+    def _load_latest_snapshot(
+        self,
+        *,
+        witness: SnapshotWitness = "portfolio",
+    ) -> CollateralSnapshot | None:
         if self._conn is None and self._db_path is None:
             return None
         with self._connection_scope() as conn:
             if conn is None:
                 return None
-            snapshot = load_latest_collateral_snapshot_read_only(conn)
+            snapshot = load_latest_collateral_snapshot_read_only(
+                conn,
+                witness=witness,
+            )
         if snapshot is None:
             return None
         return replace(
@@ -1042,19 +1054,32 @@ def _snapshot_is_fresh_enough_for_cache(snapshot: CollateralSnapshot) -> bool:
 
 def load_latest_collateral_snapshot_read_only(
     conn: sqlite3.Connection,
+    *,
+    witness: SnapshotWitness = "portfolio",
 ) -> CollateralSnapshot | None:
-    """Read a fallback snapshot without schema initialization or writes."""
+    """Read the newest snapshot valid for one explicitly named consumer.
+
+    ``pusd`` consumes the causally newest pUSD witness verbatim, including a
+    newest DEGRADED row, so bankroll authority cannot silently roll back to an
+    older successful read. ``portfolio`` preserves the CTF-aware fallback used
+    by generic inventory consumers while local token exposure remains open.
+    """
+
+    if witness not in {"portfolio", "pusd"}:
+        raise ValueError(f"unsupported collateral snapshot witness: {witness}")
 
     try:
         rows = conn.execute(
             """
             SELECT *
               FROM collateral_ledger_snapshots
-             ORDER BY id DESC
+             ORDER BY julianday(captured_at) DESC, id DESC
              LIMIT 32
             """
         ).fetchall()
-        has_active_ctf_exposure = _has_active_ctf_exposure(conn)
+        has_active_ctf_exposure = (
+            witness == "portfolio" and _has_active_ctf_exposure(conn)
+        )
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc).lower():
             return None
@@ -1071,6 +1096,8 @@ def load_latest_collateral_snapshot_read_only(
         for row in rows
     ]
     latest = snapshots[0]
+    if witness == "pusd":
+        return latest
     for snapshot in snapshots:
         if snapshot.authority_tier == "DEGRADED":
             continue

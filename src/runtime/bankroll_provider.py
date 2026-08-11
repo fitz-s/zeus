@@ -774,7 +774,11 @@ def warm_from_collateral_snapshot(
     if ledger is None:
         logger.error("bankroll ledger warm -> None: collateral_ledger_unconfigured")
         return None
-    snapshot = ledger.snapshot()
+    # Bankroll authority consumes pUSD truth only. Generic portfolio snapshot
+    # selection deliberately prefers a recent non-empty CTF witness while any
+    # token exposure remains open; using it here can roll a newer pUSD-only
+    # sidecar wake back to an older submit-time target-token row.
+    snapshot = ledger.snapshot(witness="pusd")
     if snapshot.authority_tier == "DEGRADED":
         logger.error("bankroll ledger warm -> None: collateral snapshot degraded")
         return None

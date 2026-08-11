@@ -1,5 +1,5 @@
 # Created: 2026-05-31
-# Last reused/audited: 2026-08-10
+# Last reused/audited: 2026-08-11
 # Authority basis: src/runtime/bankroll_provider.py (cached() RESILIENT bound, KILLER 1
 #   2026-05-31: default 1800s, supersedes the prior 300s fail-closed window that blanked
 #   last-good across transient wallet-RPC blip clusters) + src/main.py:_edli_event_reactor_cycle
@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -531,6 +532,104 @@ def test_collateral_snapshot_warm_rejects_real_degraded_authority():
             authority_tier="DEGRADED",
         )
 
+        assert bankroll_provider.warm_from_collateral_snapshot() is None
+    finally:
+        configure_global_ledger(None)
+        bankroll_provider.reset_cache_for_tests()
+
+
+def _install_mixed_collateral_snapshot_history(
+    tmp_path,
+    *,
+    newest_pusd_authority: str = "CHAIN",
+):
+    trade_db = tmp_path / "mixed-collateral.db"
+    ledger = CollateralLedger(db_path=trade_db)
+    newer_at = datetime.now(timezone.utc) - timedelta(seconds=1)
+    older_at = newer_at - timedelta(seconds=1)
+
+    # Persist the newer pUSD-only fact first, then simulate an already-captured
+    # target-token read committing later. Row id therefore disagrees with fact
+    # time, exactly as two concurrent live producers can interleave.
+    ledger.set_snapshot(
+        CollateralSnapshot(
+            pusd_balance_micro=20_000_000,
+            pusd_allowance_micro=20_000_000,
+            usdc_e_legacy_balance_micro=0,
+            ctf_token_balances={},
+            ctf_token_allowances={},
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+            captured_at=newer_at,
+            authority_tier=newest_pusd_authority,
+        )
+    )
+    ledger.set_snapshot(
+        CollateralSnapshot(
+            pusd_balance_micro=10_000_000,
+            pusd_allowance_micro=10_000_000,
+            usdc_e_legacy_balance_micro=0,
+            ctf_token_balances={"held-token": 5_000_000},
+            ctf_token_allowances={"held-token": 5_000_000},
+            reserved_pusd_for_buys_micro=0,
+            reserved_tokens_for_sells={},
+            captured_at=older_at,
+            authority_tier="CHAIN",
+        )
+    )
+    with sqlite3.connect(trade_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE position_current (
+                phase TEXT,
+                shares REAL,
+                chain_shares REAL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO position_current VALUES ('active', 5.0, 5.0)"
+        )
+    return ledger, newer_at
+
+
+def test_bankroll_warm_uses_newest_pusd_witness_not_older_target_ctf_row(
+    monkeypatch,
+    tmp_path,
+):
+    ledger, newer_at = _install_mixed_collateral_snapshot_history(tmp_path)
+    configure_global_ledger(ledger)
+    try:
+        # Portfolio consumers still retain the target-token witness.
+        assert ledger.snapshot().ctf_token_balances == {"held-token": 5_000_000}
+
+        record = bankroll_provider.warm_from_collateral_snapshot()
+
+        assert record is not None
+        assert record.value_usd == 20.0
+        assert record.fetched_at == newer_at.isoformat()
+        monkeypatch.setattr(
+            main_module,
+            "_refresh_global_execution_authority",
+            lambda *, bankroll_record: {
+                "configured": bankroll_record.fetched_at == newer_at.isoformat()
+            },
+        )
+        assert main_module._refresh_global_execution_authority_after_collateral_publish(
+            captured_at=newer_at.isoformat(),
+        ) == {"configured": True}
+    finally:
+        configure_global_ledger(None)
+        bankroll_provider.reset_cache_for_tests()
+
+
+def test_bankroll_warm_does_not_hide_newest_degraded_pusd_behind_old_ctf(tmp_path):
+    ledger, _ = _install_mixed_collateral_snapshot_history(
+        tmp_path,
+        newest_pusd_authority="DEGRADED",
+    )
+    configure_global_ledger(ledger)
+    try:
         assert bankroll_provider.warm_from_collateral_snapshot() is None
     finally:
         configure_global_ledger(None)
