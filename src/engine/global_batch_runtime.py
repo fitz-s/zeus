@@ -4209,9 +4209,10 @@ def _family_key(event: OpportunityEvent, payload: Mapping[str, object]) -> str:
 _DAY0_ALPHA_SHADOW_REASON = (
     "MARKET_RELATIVE_ALPHA_SHADOW:day0_nowcast_entry"
 )
+_DAY0_ALPHA_SHADOW_DECISION_LAW = "executable_min_order_capital_gain_v2"
 _DAY0_ALPHA_SHADOW_SELECTION_RULE = (
-    "earliest_complete_global_cut_max_abs_q_minus_"
-    "executable_min_order_vwap_v1"
+    "earliest_complete_global_cut_max_positive_q_minus_"
+    "fee_adjusted_min_order_cost_per_target_date_v2"
 )
 
 
@@ -4256,10 +4257,11 @@ def _day0_market_relative_alpha_shadow_events(
 ) -> tuple[object, ...]:
     """Freeze no-money Day0 evidence that can eventually drain its entry gate.
 
-    One immutable candidate is chosen per target-date/metric cluster at the
+    One immutable positive-edge candidate is chosen per target date at the
     first complete cut that reaches this writer.  The choice rule uses only
-    decision-time q and executable minimum-order VWAP, so settlement cannot
-    influence which member of a correlated cluster is graded later.
+    decision-time q and fee-adjusted executable minimum-order cost, so neither
+    settlement nor a non-tradable probability disagreement can authorize the
+    capital evidence graded later.
     """
 
     if book_epoch is None:
@@ -4284,7 +4286,7 @@ def _day0_market_relative_alpha_shadow_events(
         ): asset
         for asset in tuple(getattr(book_epoch, "assets", ()) or ())
     }
-    selected_by_cluster: dict[tuple[str, str], dict[str, object]] = {}
+    selected_by_cluster: dict[str, dict[str, object]] = {}
     for evaluation in evaluations:
         reason = str(getattr(evaluation, "rejection_reason", "") or "")
         source_prefix = (
@@ -4335,10 +4337,13 @@ def _day0_market_relative_alpha_shadow_events(
         ):
             continue
         raw_vwap, fee_adjusted = market_prices
+        expected_edge = float(q) - fee_adjusted
+        if not math.isfinite(expected_edge) or expected_edge <= 0.0:
+            continue
         envelope = {
-            "schema_version": 1,
+            "schema_version": 2,
             "strategy_key": "day0_nowcast_entry",
-            "decision_law_id": "predicted_bin_ev_v1",
+            "decision_law_id": _DAY0_ALPHA_SHADOW_DECISION_LAW,
             "probability_semantics_revision": revision,
             "selection_rule": _DAY0_ALPHA_SHADOW_SELECTION_RULE,
             "selection_epoch_identity": selection_epoch_identity,
@@ -4384,14 +4389,15 @@ def _day0_market_relative_alpha_shadow_events(
             "min_order_size": str(asset.curve.min_order_size),
             "raw_min_order_vwap": raw_vwap,
             "fee_adjusted_min_order_cost": fee_adjusted,
+            "expected_net_edge_per_share": expected_edge,
         }
         candidate = {
-            "claimed_edge": abs(float(q) - raw_vwap),
+            "claimed_edge": expected_edge,
             "tie_break": (family_key, bin_id, side, token_id),
             "event": NoTradeRegretEvent(
                 event_id=(
-                    "market-relative-alpha-shadow-v1:"
-                    f"day0_nowcast_entry:{revision}:{target_date}:{metric}"
+                    "market-relative-alpha-shadow-v2:"
+                    f"day0_nowcast_entry:{revision}:{target_date}"
                 ),
                 rejection_stage="RISK_GUARD",
                 rejection_reason=_DAY0_ALPHA_SHADOW_REASON,
@@ -4426,7 +4432,7 @@ def _day0_market_relative_alpha_shadow_events(
                 ),
             ),
         }
-        cluster = (target_date, metric)
+        cluster = target_date
         incumbent = selected_by_cluster.get(cluster)
         if incumbent is None or (
             candidate["claimed_edge"], candidate["tie_break"]

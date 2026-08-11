@@ -31857,7 +31857,7 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
             family_b: {
                 "city": "Beta",
                 "target_date": "2026-08-11",
-                "metric": "high",
+                "metric": "low",
             },
         },
         selection_epoch_identity="selection-epoch",
@@ -31870,8 +31870,41 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
     assert events[0].q_live == pytest.approx(0.90)
     assert events[0].hypothetical_fill_price == pytest.approx(0.20)
     envelope = json.loads(events[0].envelope_json)
-    assert envelope["selection_rule"].endswith("min_order_vwap_v1")
+    assert envelope["schema_version"] == 2
+    assert envelope["decision_law_id"] == "executable_min_order_capital_gain_v2"
+    assert envelope["selection_rule"].endswith("per_target_date_v2")
     assert envelope["q"] == pytest.approx(0.90)
+    assert envelope["expected_net_edge_per_share"] > 0.0
+
+    no_capital_edge = global_batch_runtime._day0_market_relative_alpha_shadow_events(
+        selected=SimpleNamespace(
+            decision=SimpleNamespace(candidate_evaluations=evaluations)
+        ),
+        probability_witnesses={
+            family_a: witness(family_a, 0.10),
+            family_b: witness(family_b, 0.20),
+        },
+        book_epoch=SimpleNamespace(
+            assets=assets,
+            witness_identity="book-epoch",
+        ),
+        family_context_by_key={
+            family_a: {
+                "city": "Alpha",
+                "target_date": "2026-08-11",
+                "metric": "high",
+            },
+            family_b: {
+                "city": "Beta",
+                "target_date": "2026-08-11",
+                "metric": "low",
+            },
+        },
+        selection_epoch_identity="selection-epoch",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+    )
+    assert no_capital_edge == ()
 
     conn = sqlite3.connect(":memory:")
     ensure_table(conn)

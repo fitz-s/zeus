@@ -2483,14 +2483,16 @@ def _settled_day0_market_relative_alpha_shadow_rows(
             "condition_id": row["condition_id"],
             "token_id": row["token_id"],
         }
+        if envelope.get("decision_law_id") != "executable_min_order_capital_gain_v2":
+            block("superseded_decision_law")
+            continue
         if (
-            envelope.get("schema_version") != 1
+            envelope.get("schema_version") != 2
             or envelope.get("strategy_key") != "day0_nowcast_entry"
-            or envelope.get("decision_law_id") != "predicted_bin_ev_v1"
             or envelope.get("selection_rule")
             != (
-                "earliest_complete_global_cut_max_abs_q_minus_"
-                "executable_min_order_vwap_v1"
+                "earliest_complete_global_cut_max_positive_q_minus_"
+                "fee_adjusted_min_order_cost_per_target_date_v2"
             )
             or revision != DAY0_PROBABILITY_SEMANTICS_REVISION
             or day0_probability_semantics_revision(q_version) != revision
@@ -2517,6 +2519,10 @@ def _settled_day0_market_relative_alpha_shadow_rows(
             market = float(row["hypothetical_fill_price"])
             envelope_q = float(envelope["q"])
             envelope_market = float(envelope["raw_min_order_vwap"])
+            fee_adjusted_cost = float(envelope["fee_adjusted_min_order_cost"])
+            row_fee_adjusted_cost = float(row["c_fee_adjusted"])
+            min_order_size = float(envelope["min_order_size"])
+            expected_net_edge = float(envelope["expected_net_edge_per_share"])
             decision_time = datetime.fromisoformat(
                 str(row["decision_time"] or "").replace("Z", "+00:00")
             )
@@ -2531,9 +2537,33 @@ def _settled_day0_market_relative_alpha_shadow_rows(
         if created_at.tzinfo is None:
             created_at = created_at.replace(tzinfo=timezone.utc)
         if (
-            not all(math.isfinite(value) for value in (q, market))
+            not all(
+                math.isfinite(value)
+                for value in (
+                    q,
+                    market,
+                    fee_adjusted_cost,
+                    min_order_size,
+                    expected_net_edge,
+                )
+            )
             or not 0.0 <= q <= 1.0
             or not 0.0 < market < 1.0
+            or not 0.0 < fee_adjusted_cost < 1.0
+            or min_order_size <= 0.0
+            or expected_net_edge <= 0.0
+            or not math.isclose(
+                q - fee_adjusted_cost,
+                expected_net_edge,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            or not math.isclose(
+                row_fee_adjusted_cost,
+                fee_adjusted_cost,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
             or not math.isclose(q, envelope_q, rel_tol=0.0, abs_tol=1e-12)
             or not math.isclose(
                 market, envelope_market, rel_tol=0.0, abs_tol=1e-12
@@ -2551,6 +2581,9 @@ def _settled_day0_market_relative_alpha_shadow_rows(
                 "envelope": envelope,
                 "q": q,
                 "market": market,
+                "fee_adjusted_cost": fee_adjusted_cost,
+                "min_order_size": min_order_size,
+                "expected_net_edge": expected_net_edge,
                 "side": side,
                 "decision_time_parsed": decision_time,
                 "created_at_parsed": created_at,
@@ -2641,7 +2674,7 @@ def _settled_day0_market_relative_alpha_shadow_rows(
                 "probability_semantics_revisions": (
                     DAY0_PROBABILITY_SEMANTICS_REVISION,
                 ),
-                "decision_law_id": "predicted_bin_ev_v1",
+                "decision_law_id": "executable_min_order_capital_gain_v2",
                 "settled_at": settled_at.isoformat(),
                 "entry_market_benchmark_ready": True,
                 "entry_market_benchmark": row["market"],
@@ -2652,7 +2685,23 @@ def _settled_day0_market_relative_alpha_shadow_rows(
                 ),
                 "p_posterior": row["q"],
                 "outcome": int(str(venue_outcome).upper() == row["side"]),
-                "evidence_source": "no_trade_regret_events_day0_shadow_v1",
+                "capital_gain_proof_ready": True,
+                "hypothetical_min_order_size": row["min_order_size"],
+                "hypothetical_capital_committed_usd": (
+                    row["fee_adjusted_cost"] * row["min_order_size"]
+                ),
+                "hypothetical_settlement_payout_usd": (
+                    int(str(venue_outcome).upper() == row["side"])
+                    * row["min_order_size"]
+                ),
+                "hypothetical_realized_pnl_usd": (
+                    (
+                        int(str(venue_outcome).upper() == row["side"])
+                        - row["fee_adjusted_cost"]
+                    )
+                    * row["min_order_size"]
+                ),
+                "evidence_source": "no_trade_regret_events_day0_shadow_v2",
             }
         )
     status.update(
@@ -2698,6 +2747,12 @@ def _market_relative_alpha_evidence(
     for row in rows:
         if str(row.get("strategy") or "").strip() != strategy_key:
             continue
+        decision_law_id = str(row.get("decision_law_id") or "").strip()
+        if (
+            strategy_key == "day0_nowcast_entry"
+            and decision_law_id != "executable_min_order_capital_gain_v2"
+        ):
+            continue
         if row.get("probability_semantics_ready") is not True:
             continue
         try:
@@ -2737,18 +2792,35 @@ def _market_relative_alpha_evidence(
                 if str(revision).strip()
             )
         )
-        cohort_key = (str(row.get("decision_law_id") or "").strip(), revisions)
+        cohort_key = (decision_law_id, revisions)
         # HIGH and LOW from the same target date share weather, observation,
         # and market-information shocks.  Treat the date as the independent
         # unit; choosing between metrics remains an ex-ante claimed-edge choice,
         # never a second likelihood-ratio observation.
         evidence_cluster = (str(family[1]).strip(),)
+        try:
+            capital_committed = float(
+                row.get("hypothetical_capital_committed_usd")
+            )
+            capital_pnl = float(row.get("hypothetical_realized_pnl_usd"))
+        except (TypeError, ValueError):
+            capital_committed = 0.0
+            capital_pnl = 0.0
+        capital_gain_proof_ready = bool(
+            row.get("capital_gain_proof_ready") is True
+            and math.isfinite(capital_committed)
+            and capital_committed > 0.0
+            and math.isfinite(capital_pnl)
+        )
         candidate = {
             "trade_id": str(row.get("trade_id") or ""),
             "q": q,
             "market": market,
             "outcome": outcome,
             "claimed_edge": abs(q - market),
+            "capital_gain_proof_ready": capital_gain_proof_ready,
+            "hypothetical_capital_committed_usd": capital_committed,
+            "hypothetical_realized_pnl_usd": capital_pnl,
         }
         cluster_rows = cohorts.setdefault(cohort_key, {})
         incumbent = cluster_rows.get(evidence_cluster)
@@ -2769,6 +2841,33 @@ def _market_relative_alpha_evidence(
             log_model_over_market += math.log(model_probability / market_probability)
         market_over_model_evalue = math.exp(min(700.0, -log_model_over_market))
         model_over_market_evalue = math.exp(min(700.0, log_model_over_market))
+        capital_rows = [
+            row
+            for row in cluster_rows.values()
+            if row["capital_gain_proof_ready"]
+        ]
+        capital_committed = sum(
+            float(row["hypothetical_capital_committed_usd"])
+            for row in capital_rows
+        )
+        capital_pnl = sum(
+            float(row["hypothetical_realized_pnl_usd"])
+            for row in capital_rows
+        )
+        capital_proof_ready = bool(capital_rows) and len(capital_rows) == len(
+            cluster_rows
+        )
+        capital_gain_validated = (
+            capital_proof_ready
+            and math.isfinite(capital_committed)
+            and math.isfinite(capital_pnl)
+            and capital_committed > 0.0
+            and capital_pnl > 0.0
+        )
+        statistical_validation = model_over_market_evalue >= rejection_evalue
+        validated = statistical_validation and (
+            strategy_key != "day0_nowcast_entry" or capital_gain_validated
+        )
         cohort_evidence.append(
             {
                 "decision_law_id": decision_law_id,
@@ -2787,8 +2886,17 @@ def _market_relative_alpha_evidence(
                 "log_model_over_market": round(log_model_over_market, 6),
                 "market_over_model_evalue": round(market_over_model_evalue, 6),
                 "model_over_market_evalue": round(model_over_market_evalue, 6),
+                "capital_gain_proof_ready": capital_proof_ready,
+                "hypothetical_capital_committed_usd": round(capital_committed, 6),
+                "hypothetical_realized_pnl_usd": round(capital_pnl, 6),
+                "hypothetical_return_on_capital": (
+                    round(capital_pnl / capital_committed, 6)
+                    if capital_committed > 0.0
+                    else None
+                ),
+                "capital_gain_validated": capital_gain_validated,
                 "rejected": market_over_model_evalue >= rejection_evalue,
-                "validated": model_over_market_evalue >= rejection_evalue,
+                "validated": validated,
             }
         )
 
@@ -2862,25 +2970,27 @@ def _day0_market_relative_alpha_gate_reason(
 
     INV-47 SCOPE: only new ``day0_nowcast_entry`` exposure; held monitoring,
     current global SELL/HOLD comparison, settlement, and learning continue.
-    DRAIN: the global auction freezes one no-money current-revision q and exact
-    executable minimum-order price per independent target-date/metric cluster;
+    DRAIN: the global auction freezes one no-money current-revision positive-edge
+    executable minimum-order action per independent target date;
     every RiskGuard tick joins those immutable certificates to later VERIFIED
     settlement outcomes. RESET: the durable gate expires only when current-law
-    model/market sequential evidence reaches the configured e-value boundary
-    without a simultaneous market/model rejection. This is evidence admission,
-    never a historical-loss exit trigger.
+    model/market sequential evidence reaches the configured e-value boundary,
+    its exact hypothetical after-fee capital curve is positive, and there is no
+    simultaneous market/model rejection. This is evidence admission, never a
+    historical-loss exit trigger.
     """
 
-    if (
-        semantics_binding.get("status") != "ok"
-        or evidence.get("validated") is True
-    ):
+    if semantics_binding.get("status") != "ok":
         return None
     cohorts = [
         cohort
         for cohort in (evidence.get("cohorts") or [])
         if isinstance(cohort, Mapping)
+        and cohort.get("decision_law_id")
+        == "executable_min_order_capital_gain_v2"
     ]
+    if any(cohort.get("validated") is True for cohort in cohorts):
+        return None
     strongest = (
         max(
             cohorts,
@@ -2899,13 +3009,18 @@ def _day0_market_relative_alpha_gate_reason(
         if strongest is not None
         else 0
     )
+    current_status = (
+        "rejected"
+        if any(cohort.get("rejected") is True for cohort in cohorts)
+        else ("inconclusive" if cohorts else "no_evidence")
+    )
     return (
         "market_relative_alpha_unproven("
-        f"status={evidence.get('status')},"
+        f"status={current_status},"
         f"model_evalue={model_evalue},"
         f"required={required_evalue},"
         f"clusters={clusters},"
-        "law=predicted_bin_ev_v1,"
+        "law=executable_min_order_capital_gain_v2,"
         f"revision={semantics_binding.get('current_revision')}"
         ")"
     )

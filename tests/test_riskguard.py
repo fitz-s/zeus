@@ -4154,9 +4154,13 @@ class TestQkernelMarketRelativeAlphaEvidence:
                     outcome=1,
                 ),
                 "strategy": "day0_nowcast_entry",
+                "decision_law_id": "executable_min_order_capital_gain_v2",
                 "probability_semantics_revisions": (
                     DAY0_PROBABILITY_SEMANTICS_REVISION,
                 ),
+                "capital_gain_proof_ready": True,
+                "hypothetical_capital_committed_usd": 1.0,
+                "hypothetical_realized_pnl_usd": 4.0,
             }
             for index in range(2)
         ]
@@ -4189,6 +4193,8 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert evidence["rejected"] is False
         assert evidence["cohorts"][0]["independent_cluster_count"] == 2
         assert evidence["cohorts"][0]["model_over_market_evalue"] > 20.0
+        assert evidence["cohorts"][0]["hypothetical_realized_pnl_usd"] == 8.0
+        assert evidence["cohorts"][0]["capital_gain_validated"] is True
         binding = {
             "status": "ok",
             "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
@@ -4212,9 +4218,13 @@ class TestQkernelMarketRelativeAlphaEvidence:
             row = {
                 **self._row(trade_id, city="NYC", q=q, outcome=1),
                 "strategy": "day0_nowcast_entry",
+                "decision_law_id": "executable_min_order_capital_gain_v2",
                 "probability_semantics_revisions": (
                     DAY0_PROBABILITY_SEMANTICS_REVISION,
                 ),
+                "capital_gain_proof_ready": True,
+                "hypothetical_capital_committed_usd": 1.0,
+                "hypothetical_realized_pnl_usd": 4.0,
             }
             rows.append(row)
             conn.execute(
@@ -4240,6 +4250,72 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert evidence["validated"] is False
         conn.close()
 
+    def test_high_evalue_cannot_unlock_negative_hypothetical_capital_curve(self):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        rows = [
+            {
+                **self._row("small-win", city="Alpha", q=0.90, outcome=1),
+                "strategy": "day0_nowcast_entry",
+                "decision_law_id": "executable_min_order_capital_gain_v2",
+                "probability_semantics_revisions": (
+                    DAY0_PROBABILITY_SEMANTICS_REVISION,
+                ),
+                "capital_gain_proof_ready": True,
+                "hypothetical_capital_committed_usd": 0.30,
+                "hypothetical_realized_pnl_usd": 4.70,
+            },
+            {
+                **self._row("large-loss", city="Beta", q=0.20, outcome=0),
+                "strategy": "day0_nowcast_entry",
+                "decision_law_id": "executable_min_order_capital_gain_v2",
+                "probability_semantics_revisions": (
+                    DAY0_PROBABILITY_SEMANTICS_REVISION,
+                ),
+                "capital_gain_proof_ready": True,
+                "hypothetical_capital_committed_usd": 6.00,
+                "hypothetical_realized_pnl_usd": -6.00,
+            },
+        ]
+        conn = self._conn()
+        for index, row in enumerate(rows):
+            conn.execute(
+                "INSERT INTO position_current VALUES (?,?,?,?,?)",
+                (
+                    row["trade_id"],
+                    0.05,
+                    row["city"],
+                    f"2026-08-{9 + index:02d}",
+                    "high",
+                ),
+            )
+            conn.execute(
+                "INSERT INTO execution_fact VALUES (?,'entry','2026-08-10','filled',?,1)",
+                (row["trade_id"], 0.05),
+            )
+
+        evidence = riskguard_module._market_relative_alpha_evidence(
+            riskguard_module._bind_entry_market_benchmarks(conn, rows),
+            strategy_key="day0_nowcast_entry",
+            rejection_evalue=10.0,
+            as_of=datetime(2026, 8, 11, tzinfo=timezone.utc),
+        )
+
+        cohort = evidence["cohorts"][0]
+        assert cohort["model_over_market_evalue"] > 10.0
+        assert cohort["hypothetical_realized_pnl_usd"] == pytest.approx(-1.30)
+        assert cohort["capital_gain_validated"] is False
+        assert evidence["validated"] is False
+        assert riskguard_module._day0_market_relative_alpha_gate_reason(
+            {
+                "status": "ok",
+                "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+            },
+            evidence,
+            required_evalue=10.0,
+        ) is not None
+        conn.close()
+
     def test_current_day0_without_capital_evidence_is_entry_gated(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
@@ -4261,7 +4337,39 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert reason == (
             "market_relative_alpha_unproven("
             "status=no_evidence,model_evalue=0.0,required=10.0,clusters=0,"
-            "law=predicted_bin_ev_v1,"
+            "law=executable_min_order_capital_gain_v2,"
+            f"revision={DAY0_PROBABILITY_SEMANTICS_REVISION})"
+        )
+
+    def test_superseded_accuracy_cohort_cannot_unlock_capital_gain_law(self):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        reason = riskguard_module._day0_market_relative_alpha_gate_reason(
+            {
+                "status": "ok",
+                "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+            },
+            {
+                "status": "validated",
+                "validated": True,
+                "rejected": False,
+                "cohorts": [
+                    {
+                        "decision_law_id": "predicted_bin_ev_v1",
+                        "model_over_market_evalue": 100.0,
+                        "independent_cluster_count": 20,
+                        "validated": True,
+                        "rejected": False,
+                    }
+                ],
+            },
+            required_evalue=10.0,
+        )
+
+        assert reason == (
+            "market_relative_alpha_unproven("
+            "status=no_evidence,model_evalue=0.0,required=10.0,clusters=0,"
+            "law=executable_min_order_capital_gain_v2,"
             f"revision={DAY0_PROBABILITY_SEMANTICS_REVISION})"
         )
 
@@ -4279,15 +4387,15 @@ class TestQkernelMarketRelativeAlphaEvidence:
         decision_at = datetime(2026, 8, 10, 16, tzinfo=timezone.utc)
         q_version = bind_day0_probability_semantics("q-shadow")
         envelope = {
-            "schema_version": 1,
+            "schema_version": 2,
             "strategy_key": "day0_nowcast_entry",
-            "decision_law_id": "predicted_bin_ev_v1",
+            "decision_law_id": "executable_min_order_capital_gain_v2",
             "probability_semantics_revision": (
                 DAY0_PROBABILITY_SEMANTICS_REVISION
             ),
             "selection_rule": (
-                "earliest_complete_global_cut_max_abs_q_minus_"
-                "executable_min_order_vwap_v1"
+                "earliest_complete_global_cut_max_positive_q_minus_"
+                "fee_adjusted_min_order_cost_per_target_date_v2"
             ),
             "selection_epoch_identity": "selection",
             "selection_cut_at_utc": decision_at.isoformat(),
@@ -4318,16 +4426,17 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "min_order_size": "5",
             "raw_min_order_vwap": 0.20,
             "fee_adjusted_min_order_cost": 0.21,
+            "expected_net_edge_per_share": 0.69,
         }
         conn = sqlite3.connect(":memory:")
         ensure_table(conn)
         NoTradeRegretLedger(conn).insert_idempotent(
             NoTradeRegretEvent(
                 event_id=(
-                    "market-relative-alpha-shadow-v1:"
+                    "market-relative-alpha-shadow-v2:"
                     "day0_nowcast_entry:"
                     f"{DAY0_PROBABILITY_SEMANTICS_REVISION}:"
-                    "2026-08-10:high"
+                    "2026-08-10"
                 ),
                 rejection_stage="RISK_GUARD",
                 rejection_reason=(
@@ -4430,7 +4539,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 "probability_semantics_revisions": (
                     DAY0_PROBABILITY_SEMANTICS_REVISION,
                 ),
-                "decision_law_id": "predicted_bin_ev_v1",
+                "decision_law_id": "executable_min_order_capital_gain_v2",
                 "settled_at": "2026-08-11T10:00:00+00:00",
                 "entry_market_benchmark_ready": True,
                 "entry_market_benchmark": 0.20,
@@ -4441,8 +4550,13 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 ),
                 "p_posterior": 0.90,
                 "outcome": 1,
+                "capital_gain_proof_ready": True,
+                "hypothetical_min_order_size": 5.0,
+                "hypothetical_capital_committed_usd": 1.05,
+                "hypothetical_settlement_payout_usd": 5.0,
+                "hypothetical_realized_pnl_usd": 3.95,
                 "evidence_source": (
-                    "no_trade_regret_events_day0_shadow_v1"
+                    "no_trade_regret_events_day0_shadow_v2"
                 ),
             }
         ]
