@@ -421,6 +421,84 @@ def test_operator_can_override_system_auto_pause_row():
     conn2.close()
 
 
+def test_lower_precedence_resume_cannot_clear_stronger_pause():
+    """A later routine resume must not pierce a stronger live-money pause."""
+
+    conn = get_world_connection()
+    upsert_control_override(
+        conn,
+        override_id=AUTO_PAUSE_OVERRIDE_ID,
+        target_type="global",
+        target_key="entries",
+        action_type="gate",
+        value="true",
+        issued_by="control_plane",
+        issued_at=datetime.now(timezone.utc).isoformat(),
+        reason="forward_capital_proof_required",
+        effective_until=None,
+        precedence=1000,
+    )
+    conn.commit()
+    conn.close()
+
+    ok, reason = cp._apply_command("resume", {"precedence": 100})
+
+    assert ok is True
+    assert reason.startswith("ignored_lower_precedence:")
+    conn = get_world_connection()
+    assert query_control_override_state(conn)["entries_paused"] is True
+    latest = conn.execute(
+        "SELECT operation, precedence FROM control_overrides_history "
+        "WHERE override_id=? ORDER BY history_id DESC LIMIT 1",
+        (AUTO_PAUSE_OVERRIDE_ID,),
+    ).fetchone()
+    assert latest["operation"] == "upsert"
+    assert latest["precedence"] == 1000
+    conn.close()
+
+
+def test_lower_precedence_strategy_enable_cannot_clear_stronger_gate():
+    """A routine enable must not replace a stronger disabled-strategy gate."""
+
+    strategy = "forecast_qkernel_entry"
+    override_id = f"control_plane:strategy:{strategy}:gate"
+    conn = get_world_connection()
+    upsert_control_override(
+        conn,
+        override_id=override_id,
+        target_type="strategy",
+        target_key=strategy,
+        action_type="gate",
+        value="true",
+        issued_by="operator",
+        issued_at=datetime.now(timezone.utc).isoformat(),
+        reason="forward_capital_proof_required",
+        effective_until=None,
+        precedence=1000,
+    )
+    conn.commit()
+    conn.close()
+
+    ok, reason = cp._apply_command(
+        "set_strategy_gate",
+        {"strategy": strategy, "enabled": True, "precedence": 100},
+    )
+
+    assert ok is True
+    assert reason.startswith("ignored_lower_precedence:")
+    conn = get_world_connection()
+    state = query_control_override_state(conn)
+    assert state["strategy_gates"][strategy]["enabled"] is False
+    latest = conn.execute(
+        "SELECT value, precedence FROM control_overrides_history "
+        "WHERE override_id=? ORDER BY history_id DESC LIMIT 1",
+        (override_id,),
+    ).fetchone()
+    assert latest["value"] == "true"
+    assert latest["precedence"] == 1000
+    conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Test 6 (new, Option C): precedence skip emits warning log
 # ---------------------------------------------------------------------------

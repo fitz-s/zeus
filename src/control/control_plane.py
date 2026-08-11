@@ -1089,6 +1089,41 @@ def _acknowledge_command(name: str, cmd: dict, *, status: str, reason: str = "")
     return ack
 
 
+def _lower_precedence_override_reason(
+    conn,
+    *,
+    override_id: str,
+    requested_precedence: int,
+    now_iso: str,
+) -> str:
+    """Return an audit reason when a live override outranks this command."""
+
+    if conn is None:
+        return ""
+    row = conn.execute(
+        """
+        SELECT precedence
+          FROM control_overrides
+         WHERE override_id = ?
+           AND issued_at <= ?
+           AND (effective_until IS NULL OR effective_until > ?)
+        """,
+        (override_id, now_iso, now_iso),
+    ).fetchone()
+    if row is None:
+        return ""
+    current_precedence = int(row["precedence"] or 0)
+    if requested_precedence >= current_precedence:
+        return ""
+    reason = (
+        "ignored_lower_precedence:"
+        f"override_id={override_id}:requested={requested_precedence}:"
+        f"current={current_precedence}"
+    )
+    logger.warning("CONTROL_PRECEDENCE_PRESERVED %s", reason)
+    return reason
+
+
 
 def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
     conn = None
@@ -1103,6 +1138,14 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
         conn = None
     try:
         if name == "pause_entries":
+            precedence_reason = _lower_precedence_override_reason(
+                conn,
+                override_id="control_plane:global:entries_paused",
+                requested_precedence=precedence,
+                now_iso=issued_at,
+            )
+            if precedence_reason:
+                return True, precedence_reason
             result = upsert_control_override(
                 conn,
                 override_id="control_plane:global:entries_paused",
@@ -1119,6 +1162,14 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
             status = str(result.get("status") or "unknown")
             return status == "written", "" if status == "written" else status
         if name == "resume":
+            precedence_reason = _lower_precedence_override_reason(
+                conn,
+                override_id="control_plane:global:entries_paused",
+                requested_precedence=precedence,
+                now_iso=issued_at,
+            )
+            if precedence_reason:
+                return True, precedence_reason
             pause_result = expire_control_override(
                 conn,
                 override_id="control_plane:global:entries_paused",
@@ -1173,6 +1224,15 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
                 return False, "missing_strategy"
             if not isinstance(enabled, bool):
                 return False, "missing_enabled_bool"
+            override_id = f"control_plane:strategy:{strategy}:gate"
+            precedence_reason = _lower_precedence_override_reason(
+                conn,
+                override_id=override_id,
+                requested_precedence=precedence,
+                now_iso=issued_at,
+            )
+            if precedence_reason:
+                return True, precedence_reason
             decision = GateDecision(
                 enabled=enabled,
                 reason_code=ReasonCode(cmd.get("reason_code", "unspecified")),
@@ -1185,7 +1245,7 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
             _control_state["strategy_gates"] = gates
             result = upsert_control_override(
                 conn,
-                override_id=f"control_plane:strategy:{strategy}:gate",
+                override_id=override_id,
                 target_type="strategy",
                 target_key=strategy,
                 action_type="gate",
