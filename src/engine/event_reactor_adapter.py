@@ -12971,6 +12971,18 @@ def _global_preflight_block_status(reason: str) -> str:
     if (
         reason.startswith(
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
+            "SELECTION_SCOPE_EMPTY:admission:input=1:classes="
+        )
+        and " exceeds executable depth on token " in reason
+        and "fail closed rather than fabricate a fill price=1" in reason
+    ):
+        # The exact selected BUY cannot satisfy the venue minimum on this
+        # current book. Exclude it and compare sibling SELL/HOLD/CASH now;
+        # a later book event rebuilds the candidate from new depth.
+        return "CANDIDATE_BLOCKED"
+    if (
+        reason.startswith(
+            "GLOBAL_ACTUATION_PREPARE_FAILED:"
             "SELECTION_SCOPE_EMPTY:locked:"
         )
         and "classes=EDLI_LIVE_ORDER_ACTIVE_DUPLICATE_SUPPRESSED=" in reason

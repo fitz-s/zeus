@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-10
+# Last reused/audited: 2026-08-11
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -12977,6 +12977,14 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         ),
         (
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
+            "SELECTION_SCOPE_EMPTY:admission:input=1:"
+            "classes=requested 5 shares exceeds executable depth on token "
+            "'thin-token' (total ask depth 1 shares); fail closed rather than "
+            "fabricate a fill price=1",
+            "CANDIDATE_BLOCKED",
+        ),
+        (
+            "GLOBAL_ACTUATION_PREPARE_FAILED:"
             "SELECTION_SCOPE_EMPTY:execution_price:input=2:"
             "classes=EXECUTION_PRICE_MISSING=1",
             "BATCH_BLOCKED",
@@ -25643,6 +25651,15 @@ def test_global_batch_falls_through_family_local_preflight_block(
             "GLOBAL_ACTUATION_PREPARE_FAILED:"
             "SELECTION_SCOPE_EMPTY:execution_price:input=1:"
             "classes=EXECUTION_PRICE_MISSING=1",
+            "BUY",
+            "SELL",
+        ),
+        (
+            "GLOBAL_ACTUATION_PREPARE_FAILED:"
+            "SELECTION_SCOPE_EMPTY:admission:input=1:"
+            "classes=requested 5 shares exceeds executable depth on token "
+            "'thin-token' (total ask depth 1 shares); fail closed rather than "
+            "fabricate a fill price=1",
             "BUY",
             "SELL",
         ),
