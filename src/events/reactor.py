@@ -10938,7 +10938,7 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
             def _sealed_book(_selected_token_id: str):
                 return helper_book, sealed_observed_at, "clob_jit_book"
 
-            jit = _edli_pre_submit_book_from_jit_fetch(
+            sealed_jit = _edli_pre_submit_book_from_jit_fetch(
                 _sealed_book,
                 token_id=token_id,
                 side=side,
@@ -10946,16 +10946,32 @@ def _edli_pre_submit_authority_provider_from_book_evidence_conn(
                 size=float(intent["size"]) if has_size else None,
                 post_only=intent.get("post_only") is True,
             )
-            if jit is None or str(jit[2]) != override.raw_orderbook_hash:
+            if sealed_jit is None or str(sealed_jit[2]) != override.raw_orderbook_hash:
                 raise ValueError("PRE_SUBMIT_SEALED_BOOK_HASH_MISMATCH")
             if (
-                jit[0] != override.best_bid
-                or jit[1] != override.best_ask
+                sealed_jit[0] != override.best_bid
+                or sealed_jit[1] != override.best_ask
                 or float(intent["tick_size"]) != override.tick_size
                 or float(intent["min_order_size"]) != override.min_order_size
                 or bool(intent.get("neg_risk", False)) is not override.neg_risk
             ):
                 raise ValueError("PRE_SUBMIT_SEALED_BOOK_WITNESS_MISMATCH")
+            # The sealed cut proves which globally ranked action reached this seam;
+            # it is not submit-time price authority.  Probability, wealth, and
+            # collateral checks can consume most of the 1s quote-age budget, so
+            # re-observe the selected token only after those checks complete.  The
+            # final intent's limit/size plus downstream maker-cross and executor
+            # recapture guards decide whether harmless book motion remains
+            # executable; raw-hash equality with the earlier cut is intentionally
+            # not required.
+            jit = _edli_pre_submit_book_from_jit_fetch(
+                _capture_book,
+                token_id=token_id,
+                side=side,
+                limit_price=float(intent["limit_price"]) if has_limit_price else None,
+                size=float(intent["size"]) if has_size else None,
+                post_only=intent.get("post_only") is True,
+            )
         else:
             jit = _edli_pre_submit_book_from_jit_fetch(
                 _capture_book,

@@ -60,7 +60,7 @@ from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
 
 
 @pytest.mark.parametrize("post_only,expected_order_type", [(False, "FOK"), (True, "GTC")])
-def test_global_sealed_provider_uses_final_intent_and_skips_book_fetch(
+def test_global_sealed_provider_recaptures_selected_book_after_slow_gates(
     monkeypatch, post_only, expected_order_type
 ):
     import json
@@ -108,7 +108,7 @@ def test_global_sealed_provider_uses_final_intent_and_skips_book_fetch(
         "bids": [{"price": "0.49", "size": "10"}],
     }
     book_hash = _sha256_json(book)
-    sealed_now = datetime.now(timezone.utc)
+    sealed_now = datetime.now(timezone.utc) - timedelta(seconds=3)
     override = SealedBookOverride(
         token_id="yes-sealed",
         side="BUY",
@@ -124,11 +124,19 @@ def test_global_sealed_provider_uses_final_intent_and_skips_book_fetch(
         freshness_deadline=(sealed_now + timedelta(seconds=60)).isoformat(),
         curve_ttl_seconds=60.0,
     )
+    live_seen_at = datetime.now(timezone.utc)
+    live_book = {
+        **book,
+        "hash": "live-selected-book-hash",
+    }
+    book_fetches = []
     provider = reactor_module._edli_pre_submit_authority_provider_from_book_evidence_conn(
         None,
         {"pre_submit_max_quote_age_ms": 1000},
-        book_quote_provider=lambda _token: (_ for _ in ()).throw(
-            AssertionError("sealed global provider must not fetch book")
+        book_quote_provider=lambda token: (
+            book_fetches.append(token) or live_book,
+            live_seen_at,
+            "clob_jit_book",
         ),
     )
     intent = SimpleNamespace(
@@ -151,9 +159,12 @@ def test_global_sealed_provider_uses_final_intent_and_skips_book_fetch(
         datetime(2026, 8, 9, 10, 0, 30, tzinfo=timezone.utc),
         sealed_book_override=override,
     )
-    assert witness.book_hash == book_hash
+    assert witness.book_hash == "live-selected-book-hash"
     assert witness.current_best_bid == 0.49
     assert witness.current_best_ask == 0.50
+    assert datetime.fromisoformat(witness.book_captured_at) == live_seen_at
+    assert datetime.fromisoformat(witness.book_captured_at) > sealed_now
+    assert book_fetches == ["yes-sealed"]
     assert witness.heartbeat_status == "OK"
     assert witness.user_ws_status == "OK"
     assert witness.venue_connectivity_status == "OK"
@@ -172,6 +183,18 @@ def test_global_sealed_provider_uses_final_intent_and_skips_book_fetch(
     assert balance_payloads[0]["limit_price"] == 0.51
     assert balance_payloads[0]["notional_usd"] > 0
     assert balance_payloads[0]["post_only"] is post_only
+    if not post_only:
+        live_book["asks"] = [{"price": "0.52", "size": "10"}]
+        live_book["hash"] = "adverse-live-book-hash"
+        with pytest.raises(ValueError, match="PRE_SUBMIT_BOOK_AUTHORITY_JIT_DEPTH_INSUFFICIENT"):
+            provider(
+                intent,
+                snapshot,
+                datetime.now(timezone.utc),
+                sealed_book_override=override,
+            )
+        live_book["asks"] = [{"price": "0.50", "size": "10"}]
+        live_book["hash"] = "live-selected-book-hash"
     for field, bad_value in (
         ("snapshot_id", "wrong-snapshot"),
         ("raw_orderbook_hash", "wrong-hash"),
