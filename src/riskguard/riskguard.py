@@ -2712,6 +2712,410 @@ def _settled_day0_market_relative_alpha_shadow_rows(
     return output, status
 
 
+def _submission_schedule_fee_usd(
+    *,
+    post_only: object,
+    fee_details_json: object,
+    fill_price: object,
+    shares: object,
+) -> float | None:
+    """Apply an immutable submit-time fee schedule to an actual fill.
+
+    Venue trade facts do not consistently carry ``fee_paid_micro``. A missing
+    observation is not permission to call the fee zero, so the forward capital
+    curve uses the schedule frozen in the submission envelope and the actual
+    fill price/size. Maker fills conservatively receive no rebate.
+    """
+
+    try:
+        price = float(fill_price)
+        quantity = float(shares)
+        maker = int(post_only) == 1
+    except (TypeError, ValueError):
+        return None
+    if (
+        not math.isfinite(price)
+        or not math.isfinite(quantity)
+        or not 0.0 < price < 1.0
+        or quantity <= 0.0
+    ):
+        return None
+    if maker:
+        return 0.0
+    try:
+        details = json.loads(str(fee_details_json or ""))
+        rate = float(details["fee_rate_fraction"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not math.isfinite(rate) or not 0.0 <= rate <= 1.0:
+        return None
+    return rate * price * (1.0 - price) * quantity
+
+
+def _day0_live_realized_capital_curve(
+    conn: sqlite3.Connection,
+    *,
+    window_days: float,
+    as_of: datetime | None = None,
+) -> dict[str, object]:
+    """Grade current-semantics Day0 fills on realized net capital only.
+
+    A profitable early exit is capital truth but not a binary-outcome grade;
+    probability accuracy is not capital gain. Only exact entry fills plus an
+    EXIT_ORDER_FILLED/SETTLED event enter this curve. Gross canonical P&L is
+    reduced by the frozen fee schedule because venue facts may omit fees.
+    """
+
+    from src.events.day0_authority import (
+        DAY0_PROBABILITY_SEMANTICS_REVISION,
+        day0_probability_semantics_revision,
+    )
+
+    evaluated_at = as_of or datetime.now(timezone.utc)
+    if evaluated_at.tzinfo is None:
+        evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+    cutoff = evaluated_at - timedelta(days=window_days)
+    status: dict[str, object] = {
+        "status": "awaiting_current_law_fills",
+        "decision_law_id": "predicted_bin_ev_v1",
+        "probability_semantics_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+        "window_days": window_days,
+        "evaluated_at": evaluated_at.isoformat(),
+        "filled_position_count": 0,
+        "open_position_count": 0,
+        "realized_position_count": 0,
+        "excluded_superseded_position_count": 0,
+        "blocked_position_count": 0,
+        "capital_committed_usd": 0.0,
+        "realized_capital_committed_usd": 0.0,
+        "gross_realized_pnl_usd": 0.0,
+        "fee_bound_usd": 0.0,
+        "net_realized_pnl_usd": 0.0,
+        "return_on_realized_capital": None,
+        "curve": [],
+        "blocked_reasons": {},
+        "source": (
+            "venue_commands+venue_submission_envelopes+execution_fact+"
+            "position_events+position_current"
+        ),
+        "fee_basis": "submission_schedule_at_actual_fill_no_maker_rebate",
+    }
+    required_columns = {
+        "position_current": {
+            "position_id", "phase", "city", "target_date",
+            "temperature_metric", "strategy_key", "decision_law_id",
+            "cost_basis_usd", "realized_pnl_usd",
+        },
+        "venue_commands": {
+            "command_id", "position_id", "intent_kind", "q_version",
+            "envelope_id",
+        },
+        "venue_submission_envelopes": {
+            "envelope_id", "post_only", "fee_details_json",
+        },
+        "execution_fact": {
+            "command_id", "position_id", "order_role", "filled_at",
+            "terminal_exec_status", "fill_price", "shares",
+        },
+        "position_events": {
+            "position_id", "sequence_no", "event_type", "occurred_at",
+            "payload_json",
+        },
+    }
+    try:
+        for table, required in required_columns.items():
+            if not _table_exists(conn, table):
+                status.update(status="capital_truth_unavailable", missing_table=table)
+                return status
+            columns = {
+                str(row[1])
+                for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            missing = sorted(required.difference(columns))
+            if missing:
+                status.update(
+                    status="capital_truth_unavailable",
+                    missing_columns={table: missing},
+                )
+                return status
+    except sqlite3.Error as exc:
+        status.update(status="capital_truth_unavailable", error=type(exc).__name__)
+        return status
+
+    entry_rows = conn.execute(
+        "SELECT pc.position_id,pc.phase,pc.city,pc.target_date,"
+        "pc.temperature_metric,pc.cost_basis_usd,pc.realized_pnl_usd,"
+        "vc.command_id,vc.q_version,ef.fill_price,ef.shares,ef.filled_at,"
+        "vse.post_only,vse.fee_details_json "
+        "FROM position_current AS pc "
+        "JOIN venue_commands AS vc ON vc.position_id=pc.position_id "
+        "JOIN execution_fact AS ef ON ef.command_id=vc.command_id "
+        "JOIN venue_submission_envelopes AS vse ON vse.envelope_id=vc.envelope_id "
+        "WHERE pc.strategy_key='day0_nowcast_entry' "
+        "AND pc.decision_law_id='predicted_bin_ev_v1' "
+        "AND vc.intent_kind='ENTRY' AND ef.order_role='entry' "
+        "AND ef.filled_at IS NOT NULL "
+        "AND lower(COALESCE(ef.terminal_exec_status,''))='filled' "
+        "AND pc.position_id IN ("
+        "SELECT position_id FROM execution_fact "
+        "WHERE order_role='entry' AND filled_at>=? "
+        "AND lower(COALESCE(terminal_exec_status,''))='filled') "
+        "ORDER BY pc.position_id,ef.filled_at,vc.command_id",
+        (cutoff.isoformat(),),
+    ).fetchall()
+    if not entry_rows:
+        return status
+
+    positions: dict[str, dict[str, object]] = {}
+    for raw in entry_rows:
+        position_id = str(raw[0] or "").strip()
+        position = positions.setdefault(
+            position_id,
+            {
+                "position_id": position_id,
+                "phase": str(raw[1] or ""),
+                "city": str(raw[2] or ""),
+                "target_date": str(raw[3] or ""),
+                "metric": str(raw[4] or ""),
+                "projection_cost_basis_usd": raw[5],
+                "projection_realized_pnl_usd": raw[6],
+                "entries": [],
+            },
+        )
+        position["entries"].append(
+            {
+                "q_version": str(raw[8] or ""),
+                "fill_price": raw[9],
+                "shares": raw[10],
+                "filled_at": str(raw[11] or ""),
+                "post_only": raw[12],
+                "fee_details_json": raw[13],
+            }
+        )
+
+    blocked_reasons: dict[str, int] = status["blocked_reasons"]  # type: ignore[assignment]
+
+    def block(reason: str) -> None:
+        blocked_reasons[reason] = blocked_reasons.get(reason, 0) + 1
+
+    current_positions: dict[str, dict[str, object]] = {}
+    for position_id, position in positions.items():
+        entries: list[dict[str, object]] = position["entries"]  # type: ignore[assignment]
+        revisions = {
+            day0_probability_semantics_revision(str(entry["q_version"]))
+            for entry in entries
+        }
+        if revisions != {DAY0_PROBABILITY_SEMANTICS_REVISION}:
+            status["excluded_superseded_position_count"] = (
+                int(status["excluded_superseded_position_count"]) + 1
+            )
+            continue
+        entry_notional = 0.0
+        entry_fee = 0.0
+        entry_times: list[datetime] = []
+        valid = True
+        for entry in entries:
+            try:
+                fill_price = float(entry["fill_price"])
+                shares = float(entry["shares"])
+                filled_at = datetime.fromisoformat(
+                    str(entry["filled_at"]).replace("Z", "+00:00")
+                )
+            except (TypeError, ValueError):
+                valid = False
+                break
+            if filled_at.tzinfo is None:
+                filled_at = filled_at.replace(tzinfo=timezone.utc)
+            fee = _submission_schedule_fee_usd(
+                post_only=entry["post_only"],
+                fee_details_json=entry["fee_details_json"],
+                fill_price=fill_price,
+                shares=shares,
+            )
+            if fee is None:
+                valid = False
+                break
+            entry_notional += fill_price * shares
+            entry_fee += fee
+            entry_times.append(filled_at)
+        try:
+            projected_cost = float(position["projection_cost_basis_usd"])
+        except (TypeError, ValueError):
+            projected_cost = math.nan
+        if (
+            not valid
+            or not entry_times
+            or not math.isfinite(projected_cost)
+            or projected_cost <= 0.0
+            or not math.isclose(
+                projected_cost, entry_notional, rel_tol=0.0, abs_tol=0.011
+            )
+        ):
+            block("entry_capital_identity_incomplete")
+            continue
+        position.update(
+            entry_notional_usd=entry_notional,
+            entry_fee_bound_usd=entry_fee,
+            capital_committed_usd=entry_notional + entry_fee,
+            entered_at=min(entry_times),
+        )
+        current_positions[position_id] = position
+
+    status["filled_position_count"] = len(current_positions)
+    status["blocked_position_count"] = sum(blocked_reasons.values())
+    status["capital_committed_usd"] = round(
+        sum(
+            float(position["capital_committed_usd"])
+            for position in current_positions.values()
+        ),
+        6,
+    )
+    if not current_positions:
+        if blocked_reasons:
+            status["status"] = "capital_truth_degraded"
+        return status
+
+    position_ids = sorted(current_positions)
+    placeholders = ",".join("?" for _ in position_ids)
+    exit_rows = conn.execute(
+        "SELECT vc.position_id,ef.fill_price,ef.shares,vse.post_only,"
+        "vse.fee_details_json "
+        "FROM venue_commands AS vc "
+        "JOIN execution_fact AS ef ON ef.command_id=vc.command_id "
+        "JOIN venue_submission_envelopes AS vse ON vse.envelope_id=vc.envelope_id "
+        "WHERE vc.intent_kind='EXIT' AND ef.order_role='exit' "
+        "AND ef.filled_at IS NOT NULL "
+        "AND lower(COALESCE(ef.terminal_exec_status,''))='filled' "
+        f"AND vc.position_id IN ({placeholders})",
+        tuple(position_ids),
+    ).fetchall()
+    exit_fees: dict[str, float | None] = {
+        position_id: 0.0 for position_id in position_ids
+    }
+    for raw in exit_rows:
+        position_id = str(raw[0] or "")
+        fee = _submission_schedule_fee_usd(
+            post_only=raw[3],
+            fee_details_json=raw[4],
+            fill_price=raw[1],
+            shares=raw[2],
+        )
+        if fee is None:
+            exit_fees[position_id] = None
+        elif exit_fees[position_id] is not None:
+            exit_fees[position_id] = float(exit_fees[position_id]) + fee
+
+    event_rows = conn.execute(
+        "SELECT position_id,event_type,occurred_at,payload_json "
+        "FROM position_events "
+        "WHERE event_type IN ('EXIT_ORDER_FILLED','SETTLED') "
+        f"AND position_id IN ({placeholders}) "
+        "ORDER BY position_id,sequence_no DESC",
+        tuple(position_ids),
+    ).fetchall()
+    latest_event: dict[str, tuple[object, ...]] = {}
+    for raw in event_rows:
+        latest_event.setdefault(str(raw[0] or ""), tuple(raw))
+
+    realized: list[dict[str, object]] = []
+    open_count = 0
+    for position_id, position in current_positions.items():
+        phase = str(position["phase"])
+        if phase not in {"economically_closed", "settled"}:
+            open_count += 1
+            continue
+        event = latest_event.get(position_id)
+        expected_event = "SETTLED" if phase == "settled" else "EXIT_ORDER_FILLED"
+        if event is None or str(event[1]) != expected_event:
+            block("terminal_event_missing_or_mismatched")
+            continue
+        try:
+            payload = json.loads(str(event[3] or ""))
+            event_pnl = float(payload["pnl"])
+            projected_pnl = float(position["projection_realized_pnl_usd"])
+            realized_at = datetime.fromisoformat(
+                str(event[2] or "").replace("Z", "+00:00")
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            block("terminal_economics_invalid")
+            continue
+        if realized_at.tzinfo is None:
+            realized_at = realized_at.replace(tzinfo=timezone.utc)
+        if (
+            not math.isfinite(event_pnl)
+            or not math.isfinite(projected_pnl)
+            or not math.isclose(event_pnl, projected_pnl, rel_tol=0.0, abs_tol=0.011)
+            or realized_at < position["entered_at"]
+            or realized_at > evaluated_at
+        ):
+            block("terminal_economics_identity_mismatch")
+            continue
+        exit_fee = exit_fees.get(position_id)
+        if exit_fee is None:
+            block("exit_fee_identity_incomplete")
+            continue
+        fee_bound = float(position["entry_fee_bound_usd"]) + float(exit_fee)
+        realized.append(
+            {
+                "position_id": position_id,
+                "city": position["city"],
+                "target_date": position["target_date"],
+                "metric": position["metric"],
+                "close_type": expected_event,
+                "realized_at": realized_at,
+                "capital_committed_usd": float(position["capital_committed_usd"]),
+                "gross_realized_pnl_usd": event_pnl,
+                "fee_bound_usd": fee_bound,
+                "net_realized_pnl_usd": event_pnl - fee_bound,
+            }
+        )
+
+    realized.sort(key=lambda row: (row["realized_at"], row["position_id"]))
+    cumulative = 0.0
+    curve: list[dict[str, object]] = []
+    for row in realized:
+        cumulative += float(row["net_realized_pnl_usd"])
+        curve.append(
+            {
+                **row,
+                "realized_at": row["realized_at"].isoformat(),
+                "capital_committed_usd": round(float(row["capital_committed_usd"]), 6),
+                "gross_realized_pnl_usd": round(float(row["gross_realized_pnl_usd"]), 6),
+                "fee_bound_usd": round(float(row["fee_bound_usd"]), 6),
+                "net_realized_pnl_usd": round(float(row["net_realized_pnl_usd"]), 6),
+                "cumulative_net_realized_pnl_usd": round(cumulative, 6),
+            }
+        )
+    realized_capital = sum(float(row["capital_committed_usd"]) for row in realized)
+    gross_pnl = sum(float(row["gross_realized_pnl_usd"]) for row in realized)
+    fee_bound = sum(float(row["fee_bound_usd"]) for row in realized)
+    net_pnl = gross_pnl - fee_bound
+    status.update(
+        open_position_count=open_count,
+        realized_position_count=len(realized),
+        blocked_position_count=sum(blocked_reasons.values()),
+        realized_capital_committed_usd=round(realized_capital, 6),
+        gross_realized_pnl_usd=round(gross_pnl, 6),
+        fee_bound_usd=round(fee_bound, 6),
+        net_realized_pnl_usd=round(net_pnl, 6),
+        return_on_realized_capital=(
+            round(net_pnl / realized_capital, 6)
+            if realized_capital > 0.0
+            else None
+        ),
+        curve=curve,
+    )
+    if status["blocked_position_count"]:
+        status["status"] = "capital_truth_degraded"
+    elif not realized:
+        status["status"] = "probation_in_flight"
+    elif net_pnl > 0.0:
+        status["status"] = "positive"
+    else:
+        status["status"] = "nonpositive"
+    return status
+
+
 def _market_relative_alpha_evidence(
     rows: list[dict],
     *,
@@ -2965,6 +3369,7 @@ def _day0_market_relative_alpha_gate_reason(
     evidence: Mapping[str, object],
     *,
     required_evalue: float,
+    live_capital_curve: Mapping[str, object] | None = None,
 ) -> str | None:
     """Require positive current-law capital evidence before Day0 admission.
 
@@ -2973,11 +3378,13 @@ def _day0_market_relative_alpha_gate_reason(
     DRAIN: the global auction freezes one no-money current-revision positive-edge
     executable minimum-order action per independent target date;
     every RiskGuard tick joins those immutable certificates to later VERIFIED
-    settlement outcomes. RESET: the durable gate expires only when current-law
-    model/market sequential evidence reaches the configured e-value boundary,
-    its exact hypothetical after-fee capital curve is positive, and there is no
-    simultaneous market/model rejection. This is evidence admission, never a
-    historical-loss exit trigger.
+    settlement outcomes. RESET: shadow evidence may admit only the first
+    current-law live trial. Once a current-revision fill exists, admission stays
+    closed while that trial is unresolved or while the current-window
+    conservative net realized curve is non-positive. Existing positions, or
+    natural seven-day expiry, drain the evidence. A positive realized curve plus
+    continuing shadow validation reopens admission. Pre-revision losses never
+    enter this current-law curve.
     """
 
     if semantics_binding.get("status") != "ok":
@@ -2989,7 +3396,37 @@ def _day0_market_relative_alpha_gate_reason(
         and cohort.get("decision_law_id")
         == "executable_min_order_capital_gain_v2"
     ]
-    if any(cohort.get("validated") is True for cohort in cohorts):
+    shadow_validated = any(cohort.get("validated") is True for cohort in cohorts)
+    if live_capital_curve is not None:
+        live_status = str(live_capital_curve.get("status") or "unavailable")
+        filled = int(live_capital_curve.get("filled_position_count") or 0)
+        realized = int(live_capital_curve.get("realized_position_count") or 0)
+        try:
+            net_pnl = float(live_capital_curve.get("net_realized_pnl_usd") or 0.0)
+        except (TypeError, ValueError):
+            net_pnl = math.nan
+        if shadow_validated and live_status in {
+            "capital_truth_unavailable",
+            "capital_truth_degraded",
+        }:
+            return (
+                "live_capital_truth_unavailable("
+                f"status={live_status},filled={filled},realized={realized},"
+                "law=executable_min_order_capital_gain_v2)"
+            )
+        if shadow_validated and filled > 0 and realized == 0:
+            return (
+                "live_capital_probation_in_flight("
+                f"filled={filled},open={live_capital_curve.get('open_position_count')},"
+                "law=executable_min_order_capital_gain_v2)"
+            )
+        if realized > 0 and (not math.isfinite(net_pnl) or net_pnl <= 0.0):
+            return (
+                "live_capital_nonpositive("
+                f"filled={filled},realized={realized},net_pnl={round(net_pnl, 6)},"
+                "law=executable_min_order_capital_gain_v2)"
+            )
+    if shadow_validated:
         return None
     strongest = (
         max(
@@ -3936,6 +4373,11 @@ def _tick_once() -> RiskLevel:
             window_days=market_relative_alpha_window_days,
             as_of=market_relative_alpha_as_of,
         )
+        day0_live_realized_capital_curve = _day0_live_realized_capital_curve(
+            zeus_conn,
+            window_days=market_relative_alpha_window_days,
+            as_of=market_relative_alpha_as_of,
+        )
         day0_market_relative_alpha_evidence = _market_relative_alpha_evidence(
             brier_actuating_rows + day0_market_relative_alpha_shadow_rows,
             strategy_key="day0_nowcast_entry",
@@ -3948,6 +4390,7 @@ def _tick_once() -> RiskLevel:
                 day0_probability_semantics_binding,
                 day0_market_relative_alpha_evidence,
                 required_evalue=market_relative_alpha_evalue,
+                live_capital_curve=day0_live_realized_capital_curve,
             )
         )
         day0_market_relative_alpha_gate_required = (
@@ -4546,6 +4989,9 @@ def _tick_once() -> RiskLevel:
                 ),
                 "day0_market_relative_alpha_shadow": (
                     day0_market_relative_alpha_shadow_status
+                ),
+                "day0_live_realized_capital_curve": (
+                    day0_live_realized_capital_curve
                 ),
                 "day0_market_relative_alpha_gate_required": (
                     day0_market_relative_alpha_gate_required

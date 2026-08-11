@@ -4206,6 +4206,254 @@ class TestQkernelMarketRelativeAlphaEvidence:
         ) is None
         conn.close()
 
+    @staticmethod
+    def _live_capital_conn(
+        *,
+        phase: str,
+        gross_pnl: float | None,
+        exit_price: float | None,
+    ) -> sqlite3.Connection:
+        from src.events.day0_authority import bind_day0_probability_semantics
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT,
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                strategy_key TEXT,
+                decision_law_id TEXT,
+                cost_basis_usd REAL,
+                realized_pnl_usd REAL
+            );
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                position_id TEXT,
+                intent_kind TEXT,
+                q_version TEXT,
+                envelope_id TEXT
+            );
+            CREATE TABLE venue_submission_envelopes (
+                envelope_id TEXT PRIMARY KEY,
+                post_only INTEGER,
+                fee_details_json TEXT
+            );
+            CREATE TABLE execution_fact (
+                command_id TEXT,
+                position_id TEXT,
+                order_role TEXT,
+                filled_at TEXT,
+                terminal_exec_status TEXT,
+                fill_price REAL,
+                shares REAL
+            );
+            CREATE TABLE position_events (
+                position_id TEXT,
+                sequence_no INTEGER,
+                event_type TEXT,
+                occurred_at TEXT,
+                payload_json TEXT
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO position_current VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                "current-trial",
+                phase,
+                "Buenos Aires",
+                "2026-08-11",
+                "high",
+                "day0_nowcast_entry",
+                "predicted_bin_ev_v1",
+                1.56,
+                gross_pnl,
+            ),
+        )
+        fee_json = json.dumps({"fee_rate_fraction": 0.05})
+        conn.execute(
+            "INSERT INTO venue_submission_envelopes VALUES (?,?,?)",
+            ("entry-envelope", 0, fee_json),
+        )
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?,?,?,?,?)",
+            (
+                "entry-command",
+                "current-trial",
+                "ENTRY",
+                bind_day0_probability_semantics("current-trial-q"),
+                "entry-envelope",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO execution_fact VALUES (?,?,?,?,?,?,?)",
+            (
+                "entry-command",
+                "current-trial",
+                "entry",
+                "2026-08-11T15:07:43+00:00",
+                "filled",
+                0.25,
+                6.24,
+            ),
+        )
+        if exit_price is not None:
+            conn.execute(
+                "INSERT INTO venue_submission_envelopes VALUES (?,?,?)",
+                ("exit-envelope", 0, fee_json),
+            )
+            conn.execute(
+                "INSERT INTO venue_commands VALUES (?,?,?,?,?)",
+                (
+                    "exit-command",
+                    "current-trial",
+                    "EXIT",
+                    "",
+                    "exit-envelope",
+                ),
+            )
+            conn.execute(
+                "INSERT INTO execution_fact VALUES (?,?,?,?,?,?,?)",
+                (
+                    "exit-command",
+                    "current-trial",
+                    "exit",
+                    "2026-08-11T16:48:04+00:00",
+                    "filled",
+                    exit_price,
+                    6.24,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO position_events VALUES (?,?,?,?,?)",
+                (
+                    "current-trial",
+                    2,
+                    "EXIT_ORDER_FILLED",
+                    "2026-08-11T16:52:07+00:00",
+                    json.dumps({"pnl": gross_pnl}),
+                ),
+            )
+        conn.commit()
+        return conn
+
+    @staticmethod
+    def _validated_day0_shadow_evidence() -> dict:
+        return {
+            "status": "validated",
+            "validated": True,
+            "rejected": False,
+            "cohorts": [
+                {
+                    "decision_law_id": "executable_min_order_capital_gain_v2",
+                    "model_over_market_evalue": 12.0,
+                    "independent_cluster_count": 2,
+                    "validated": True,
+                    "rejected": False,
+                }
+            ],
+        }
+
+    def test_current_live_loss_recloses_day0_entry_after_fee_bound(self):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        conn = self._live_capital_conn(
+            phase="economically_closed",
+            gross_pnl=-0.06,
+            exit_price=0.24,
+        )
+        curve = riskguard_module._day0_live_realized_capital_curve(
+            conn,
+            window_days=7.0,
+            as_of=datetime(2026, 8, 11, 17, tzinfo=timezone.utc),
+        )
+
+        assert curve["status"] == "nonpositive"
+        assert curve["filled_position_count"] == 1
+        assert curve["realized_position_count"] == 1
+        assert curve["gross_realized_pnl_usd"] == pytest.approx(-0.06)
+        assert curve["fee_bound_usd"] == pytest.approx(0.115409)
+        assert curve["net_realized_pnl_usd"] == pytest.approx(-0.175409)
+        reason = riskguard_module._day0_market_relative_alpha_gate_reason(
+            {
+                "status": "ok",
+                "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+            },
+            self._validated_day0_shadow_evidence(),
+            required_evalue=10.0,
+            live_capital_curve=curve,
+        )
+        assert reason == (
+            "live_capital_nonpositive("
+            "filled=1,realized=1,net_pnl=-0.175409,"
+            "law=executable_min_order_capital_gain_v2)"
+        )
+        conn.close()
+
+    def test_first_current_live_trial_blocks_more_entries_until_realized(self):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        conn = self._live_capital_conn(
+            phase="day0_window",
+            gross_pnl=None,
+            exit_price=None,
+        )
+        curve = riskguard_module._day0_live_realized_capital_curve(
+            conn,
+            window_days=7.0,
+            as_of=datetime(2026, 8, 11, 17, tzinfo=timezone.utc),
+        )
+
+        assert curve["status"] == "probation_in_flight"
+        assert curve["filled_position_count"] == 1
+        assert curve["open_position_count"] == 1
+        assert curve["realized_position_count"] == 0
+        reason = riskguard_module._day0_market_relative_alpha_gate_reason(
+            {
+                "status": "ok",
+                "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+            },
+            self._validated_day0_shadow_evidence(),
+            required_evalue=10.0,
+            live_capital_curve=curve,
+        )
+        assert reason == (
+            "live_capital_probation_in_flight("
+            "filled=1,open=1,law=executable_min_order_capital_gain_v2)"
+        )
+        conn.close()
+
+    def test_positive_current_live_curve_reopens_after_shadow_validation(self):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        conn = self._live_capital_conn(
+            phase="economically_closed",
+            gross_pnl=3.43,
+            exit_price=0.80,
+        )
+        curve = riskguard_module._day0_live_realized_capital_curve(
+            conn,
+            window_days=7.0,
+            as_of=datetime(2026, 8, 11, 17, tzinfo=timezone.utc),
+        )
+
+        assert curve["status"] == "positive"
+        assert curve["net_realized_pnl_usd"] > 0.0
+        assert riskguard_module._day0_market_relative_alpha_gate_reason(
+            {
+                "status": "ok",
+                "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+            },
+            self._validated_day0_shadow_evidence(),
+            required_evalue=10.0,
+            live_capital_curve=curve,
+        ) is None
+        conn.close()
+
     def test_same_target_date_high_and_low_count_as_one_evidence_cluster(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
