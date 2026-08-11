@@ -31906,6 +31906,63 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
     )
     assert no_capital_edge == ()
 
+    qkernel_evaluations = tuple(
+        SimpleNamespace(
+            **{
+                **vars(evaluation),
+                "rejection_reason": (
+                    "STRATEGY_POLICY_GATED:forecast_qkernel_entry:"
+                    "sources=risk_action:gate"
+                ),
+            }
+        )
+        for evaluation in evaluations
+    )
+    qkernel_witnesses = {
+        family_key: SimpleNamespace(
+            **{
+                **vars(witness(family_key, q)),
+                "q_version": f"qkernel-current-{family_key}",
+            }
+        )
+        for family_key, q in ((family_a, 0.90), (family_b, 0.80))
+    }
+    qkernel_events = global_batch_runtime._market_relative_alpha_shadow_events(
+        selected=SimpleNamespace(
+            decision=SimpleNamespace(candidate_evaluations=qkernel_evaluations)
+        ),
+        probability_witnesses=qkernel_witnesses,
+        book_epoch=SimpleNamespace(
+            assets=assets,
+            witness_identity="book-epoch",
+        ),
+        family_context_by_key={
+            family_a: {
+                "city": "Alpha",
+                "target_date": "2026-08-11",
+                "metric": "high",
+            },
+            family_b: {
+                "city": "Beta",
+                "target_date": "2026-08-11",
+                "metric": "low",
+            },
+        },
+        selection_epoch_identity="selection-epoch",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+        strategy_keys=("forecast_qkernel_entry",),
+    )
+    assert len(qkernel_events) == 1
+    qkernel_envelope = json.loads(qkernel_events[0].envelope_json)
+    assert qkernel_envelope["strategy_key"] == "forecast_qkernel_entry"
+    assert qkernel_envelope["probability_semantics_revision"] == (
+        global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION
+    )
+    assert qkernel_events[0].rejection_reason == (
+        "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
+    )
+
     conn = sqlite3.connect(":memory:")
     ensure_table(conn)
     first = global_batch_runtime._record_day0_market_relative_alpha_shadows(
@@ -31918,4 +31975,10 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
     assert conn.execute(
         "SELECT COUNT(*) FROM no_trade_regret_events"
     ).fetchone()[0] == 1
+    global_batch_runtime._record_market_relative_alpha_shadows(
+        conn, qkernel_events
+    )
+    assert conn.execute(
+        "SELECT COUNT(*) FROM no_trade_regret_events"
+    ).fetchone()[0] == 2
     conn.close()

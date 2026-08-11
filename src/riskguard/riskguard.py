@@ -2375,19 +2375,30 @@ def _bind_entry_market_benchmarks(
     return output
 
 
-def _settled_day0_market_relative_alpha_shadow_rows(
+def _settled_market_relative_alpha_shadow_rows(
     conn: sqlite3.Connection,
     *,
+    strategy_key: str,
     window_days: float,
     as_of: datetime | None = None,
     forecasts_connection_factory=get_forecasts_connection_read_only,
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
-    """Bind frozen no-money Day0 decisions to later verified venue outcomes."""
+    """Bind frozen no-money decisions to later verified venue outcomes."""
 
     from src.events.day0_authority import (
         DAY0_PROBABILITY_SEMANTICS_REVISION,
         day0_probability_semantics_revision,
     )
+
+    if strategy_key == "day0_nowcast_entry":
+        expected_revision = DAY0_PROBABILITY_SEMANTICS_REVISION
+        expected_source_status = "current_day0_probability_authority"
+    elif strategy_key == "forecast_qkernel_entry":
+        expected_revision = CURRENT_EVIDENCE_SEMANTICS_REVISION
+        expected_source_status = "current_qkernel_probability_authority"
+    else:
+        raise ValueError("market-relative alpha shadow strategy is not canonical")
+    expected_reason = f"MARKET_RELATIVE_ALPHA_SHADOW:{strategy_key}"
 
     evaluated_at = as_of or datetime.now(timezone.utc)
     if evaluated_at.tzinfo is None:
@@ -2402,6 +2413,7 @@ def _settled_day0_market_relative_alpha_shadow_rows(
     ).fetchone()
     status: dict[str, object] = {
         "status": "no_shadow_evidence",
+        "strategy_key": strategy_key,
         "source_schema": schema,
         "shadow_candidate_count": 0,
         "certificate_ready_count": 0,
@@ -2448,7 +2460,7 @@ def _settled_day0_market_relative_alpha_shadow_rows(
         "AND rejection_reason=? AND created_at>=? "
         "ORDER BY created_at,regret_event_id",
         (
-            "MARKET_RELATIVE_ALPHA_SHADOW:day0_nowcast_entry",
+            expected_reason,
             cutoff.isoformat(),
         ),
     ).fetchall()
@@ -2486,16 +2498,21 @@ def _settled_day0_market_relative_alpha_shadow_rows(
         if envelope.get("decision_law_id") != "executable_min_order_capital_gain_v2":
             block("superseded_decision_law")
             continue
+        revision_identity_ready = (
+            day0_probability_semantics_revision(q_version) == revision
+            if strategy_key == "day0_nowcast_entry"
+            else bool(q_version)
+        )
         if (
             envelope.get("schema_version") != 2
-            or envelope.get("strategy_key") != "day0_nowcast_entry"
+            or envelope.get("strategy_key") != strategy_key
             or envelope.get("selection_rule")
             != (
                 "earliest_complete_global_cut_max_positive_q_minus_"
                 "fee_adjusted_min_order_cost_per_target_date_v2"
             )
-            or revision != DAY0_PROBABILITY_SEMANTICS_REVISION
-            or day0_probability_semantics_revision(q_version) != revision
+            or revision != expected_revision
+            or not revision_identity_ready
             or side not in {"YES", "NO"}
             or any(
                 str(envelope.get(key) or "") != str(value or "")
@@ -2508,7 +2525,7 @@ def _settled_day0_market_relative_alpha_shadow_rows(
             != str(envelope.get("book_snapshot_id") or "")
             or int(row["native_quote_available"] or 0) != 1
             or int(row["family_complete"] or 0) != 1
-            or row["source_status"] != "current_day0_probability_authority"
+            or row["source_status"] != expected_source_status
             or row["hypothetical_order_type"] != "MARKETABLE_LIMIT"
             or row["hypothetical_fill_status"] != "EXECUTABLE_AT_DECISION"
         ):
@@ -2589,6 +2606,44 @@ def _settled_day0_market_relative_alpha_shadow_rows(
                 "created_at_parsed": created_at,
             }
         )
+    if not certificates:
+        status["certificate_ready_count"] = 0
+        status["blocked_reasons"] = blocked
+        return [], status
+    if strategy_key == "forecast_qkernel_entry":
+        probes = [
+            {
+                "trade_id": str(row["regret_event_id"]),
+                "strategy": strategy_key,
+                "entry_q_versions": (str(row["envelope"]["q_version"]),),
+            }
+            for row in certificates
+        ]
+        classified, semantics_binding = _bind_qkernel_probability_semantics(
+            probes,
+            forecasts_connection_factory=forecasts_connection_factory,
+        )
+        status["probability_semantics_binding"] = semantics_binding
+        current_revisions = {
+            str(row["trade_id"]): tuple(
+                str(revision)
+                for revision in (row.get("probability_semantics_revisions") or ())
+            )
+            for row in classified
+            if row.get("probability_semantics_ready") is True
+        }
+        current_certificates = []
+        for row in certificates:
+            revisions = current_revisions.get(str(row["regret_event_id"]))
+            if revisions != (expected_revision,):
+                block("probability_semantics_not_current")
+                continue
+            row["probability_semantics_revisions"] = revisions
+            current_certificates.append(row)
+        certificates = current_certificates
+    else:
+        for row in certificates:
+            row["probability_semantics_revisions"] = (expected_revision,)
     status["certificate_ready_count"] = len(certificates)
     if not certificates:
         status["blocked_reasons"] = blocked
@@ -2669,11 +2724,11 @@ def _settled_day0_market_relative_alpha_shadow_rows(
         output.append(
             {
                 "trade_id": str(row["regret_event_id"]),
-                "strategy": "day0_nowcast_entry",
+                "strategy": strategy_key,
                 "probability_semantics_ready": True,
-                "probability_semantics_revisions": (
-                    DAY0_PROBABILITY_SEMANTICS_REVISION,
-                ),
+                "probability_semantics_revisions": row[
+                    "probability_semantics_revisions"
+                ],
                 "decision_law_id": "executable_min_order_capital_gain_v2",
                 "settled_at": settled_at.isoformat(),
                 "entry_market_benchmark_ready": True,
@@ -2701,7 +2756,11 @@ def _settled_day0_market_relative_alpha_shadow_rows(
                     )
                     * row["min_order_size"]
                 ),
-                "evidence_source": "no_trade_regret_events_day0_shadow_v2",
+                "evidence_source": (
+                    "no_trade_regret_events_day0_shadow_v2"
+                    if strategy_key == "day0_nowcast_entry"
+                    else "no_trade_regret_events_qkernel_shadow_v2"
+                ),
             }
         )
     status.update(
@@ -2710,6 +2769,38 @@ def _settled_day0_market_relative_alpha_shadow_rows(
         blocked_reasons=blocked,
     )
     return output, status
+
+
+def _settled_day0_market_relative_alpha_shadow_rows(
+    conn: sqlite3.Connection,
+    *,
+    window_days: float,
+    as_of: datetime | None = None,
+    forecasts_connection_factory=get_forecasts_connection_read_only,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    return _settled_market_relative_alpha_shadow_rows(
+        conn,
+        strategy_key="day0_nowcast_entry",
+        window_days=window_days,
+        as_of=as_of,
+        forecasts_connection_factory=forecasts_connection_factory,
+    )
+
+
+def _settled_qkernel_market_relative_alpha_shadow_rows(
+    conn: sqlite3.Connection,
+    *,
+    window_days: float,
+    as_of: datetime | None = None,
+    forecasts_connection_factory=get_forecasts_connection_read_only,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    return _settled_market_relative_alpha_shadow_rows(
+        conn,
+        strategy_key="forecast_qkernel_entry",
+        window_days=window_days,
+        as_of=as_of,
+        forecasts_connection_factory=forecasts_connection_factory,
+    )
 
 
 def _submission_schedule_fee_usd(
@@ -4438,8 +4529,16 @@ def _tick_once() -> RiskLevel:
             thresholds.get("market_relative_alpha_window_days", 7.0)
         )
         market_relative_alpha_as_of = datetime.now(timezone.utc)
+        (
+            qkernel_market_relative_alpha_shadow_rows,
+            qkernel_market_relative_alpha_shadow_status,
+        ) = _settled_qkernel_market_relative_alpha_shadow_rows(
+            zeus_conn,
+            window_days=market_relative_alpha_window_days,
+            as_of=market_relative_alpha_as_of,
+        )
         market_relative_alpha_evidence = _qkernel_market_relative_alpha_evidence(
-            brier_actuating_rows,
+            brier_actuating_rows + qkernel_market_relative_alpha_shadow_rows,
             rejection_evalue=market_relative_alpha_evalue,
             window_days=market_relative_alpha_window_days,
             as_of=market_relative_alpha_as_of,
@@ -5066,6 +5165,9 @@ def _tick_once() -> RiskLevel:
                     day0_probability_semantics_binding
                 ),
                 "market_relative_alpha_evidence": market_relative_alpha_evidence,
+                "qkernel_market_relative_alpha_shadow": (
+                    qkernel_market_relative_alpha_shadow_status
+                ),
                 "market_relative_alpha_gate_confirmation": (
                     market_relative_alpha_gate_confirmation
                 ),

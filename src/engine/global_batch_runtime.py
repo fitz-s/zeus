@@ -27,6 +27,9 @@ from src.contracts.global_auction_receipt import (
     global_auction_receipt_ref_from_artifact,
 )
 from src.data.market_topology_rows import prime_frozen_schema_reads
+from src.data.replacement_forecast_cycle_policy import (
+    CURRENT_EVIDENCE_SEMANTICS_REVISION,
+)
 from src.engine.global_auction_universe import (
     CurrentGlobalAuctionScope,
     CurrentGlobalBookAsset,
@@ -4214,6 +4217,11 @@ _DAY0_ALPHA_SHADOW_SELECTION_RULE = (
     "earliest_complete_global_cut_max_positive_q_minus_"
     "fee_adjusted_min_order_cost_per_target_date_v2"
 )
+_QKERNEL_ALPHA_SHADOW_REASON = (
+    "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
+)
+_QKERNEL_ALPHA_SHADOW_DECISION_LAW = "executable_min_order_capital_gain_v2"
+_QKERNEL_ALPHA_SHADOW_SELECTION_RULE = _DAY0_ALPHA_SHADOW_SELECTION_RULE
 
 
 def _native_buy_min_order_vwap(
@@ -4245,7 +4253,7 @@ def _native_buy_min_order_vwap(
     return float(raw_vwap), float(fee_adjusted)
 
 
-def _day0_market_relative_alpha_shadow_events(
+def _market_relative_alpha_shadow_events(
     *,
     selected: object,
     probability_witnesses: Mapping[str, object],
@@ -4254,13 +4262,17 @@ def _day0_market_relative_alpha_shadow_events(
     selection_epoch_identity: str,
     selection_cut_at_utc: datetime,
     decision_at_utc: datetime,
+    strategy_keys: Sequence[str] = (
+        "day0_nowcast_entry",
+        "forecast_qkernel_entry",
+    ),
 ) -> tuple[object, ...]:
-    """Freeze no-money Day0 evidence that can eventually drain its entry gate.
+    """Freeze no-money current-law evidence for gated entry strategies.
 
-    One immutable positive-edge candidate is chosen per target date at the
-    first complete cut that reaches this writer.  The choice rule uses only
-    decision-time q and fee-adjusted executable minimum-order cost, so neither
-    settlement nor a non-tradable probability disagreement can authorize the
+    One immutable positive-edge candidate per strategy and target date is
+    chosen at the first complete cut that reaches this writer. The choice uses
+    only decision-time q and fee-adjusted executable minimum-order cost, so
+    neither settlement nor a non-tradable disagreement can authorize the
     capital evidence graded later.
     """
 
@@ -4271,6 +4283,12 @@ def _day0_market_relative_alpha_shadow_events(
         day0_probability_semantics_revision,
     )
     from src.strategy.live_inference.no_trade_regret import NoTradeRegretEvent
+
+    allowed_strategies = frozenset(str(strategy).strip() for strategy in strategy_keys)
+    if not allowed_strategies or not allowed_strategies.issubset(
+        {"day0_nowcast_entry", "forecast_qkernel_entry"}
+    ):
+        raise ValueError("market-relative alpha shadow strategy is not canonical")
 
     decision = getattr(selected, "decision", None)
     evaluations = tuple(
@@ -4289,14 +4307,26 @@ def _day0_market_relative_alpha_shadow_events(
     selected_by_cluster: dict[str, dict[str, object]] = {}
     for evaluation in evaluations:
         reason = str(getattr(evaluation, "rejection_reason", "") or "")
+        strategy_key = next(
+            (
+                strategy
+                for strategy in sorted(allowed_strategies)
+                if reason.startswith(
+                    f"STRATEGY_POLICY_GATED:{strategy}:sources="
+                )
+            ),
+            None,
+        )
         source_prefix = (
-            "STRATEGY_POLICY_GATED:day0_nowcast_entry:sources="
+            f"STRATEGY_POLICY_GATED:{strategy_key}:sources="
+            if strategy_key is not None
+            else ""
         )
         if (
-            str(getattr(evaluation, "action", "") or "").upper() != "BUY"
+            strategy_key is None
+            or str(getattr(evaluation, "action", "") or "").upper() != "BUY"
             or str(getattr(evaluation, "status", "") or "").upper()
             != "REJECTED"
-            or not reason.startswith(source_prefix)
             or "risk_action:gate" not in reason[len(source_prefix) :].split(",")
         ):
             continue
@@ -4318,13 +4348,26 @@ def _day0_market_relative_alpha_shadow_events(
         target_date = str(context.get("target_date") or "").strip()
         metric = str(context.get("metric") or "").strip().lower()
         q_version = str(getattr(witness, "q_version", "") or "")
-        revision = day0_probability_semantics_revision(q_version)
+        if strategy_key == "day0_nowcast_entry":
+            revision = day0_probability_semantics_revision(q_version)
+            probability_ready = revision == DAY0_PROBABILITY_SEMANTICS_REVISION
+            source_status = "current_day0_probability_authority"
+            shadow_reason = _DAY0_ALPHA_SHADOW_REASON
+            decision_law = _DAY0_ALPHA_SHADOW_DECISION_LAW
+            selection_rule = _DAY0_ALPHA_SHADOW_SELECTION_RULE
+        else:
+            revision = CURRENT_EVIDENCE_SEMANTICS_REVISION
+            probability_ready = bool(q_version)
+            source_status = "current_qkernel_probability_authority"
+            shadow_reason = _QKERNEL_ALPHA_SHADOW_REASON
+            decision_law = _QKERNEL_ALPHA_SHADOW_DECISION_LAW
+            selection_rule = _QKERNEL_ALPHA_SHADOW_SELECTION_RULE
         if (
             not city
             or not target_date
             or metric not in {"high", "low"}
             or side not in {"YES", "NO"}
-            or revision != DAY0_PROBABILITY_SEMANTICS_REVISION
+            or not probability_ready
         ):
             continue
         q = family_payoff_point_q(witness, bin_id=bin_id, side=side)
@@ -4342,10 +4385,10 @@ def _day0_market_relative_alpha_shadow_events(
             continue
         envelope = {
             "schema_version": 2,
-            "strategy_key": "day0_nowcast_entry",
-            "decision_law_id": _DAY0_ALPHA_SHADOW_DECISION_LAW,
+            "strategy_key": strategy_key,
+            "decision_law_id": decision_law,
             "probability_semantics_revision": revision,
-            "selection_rule": _DAY0_ALPHA_SHADOW_SELECTION_RULE,
+            "selection_rule": selection_rule,
             "selection_epoch_identity": selection_epoch_identity,
             "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
             "decision_at_utc": decision_at_utc.isoformat(),
@@ -4397,10 +4440,10 @@ def _day0_market_relative_alpha_shadow_events(
             "event": NoTradeRegretEvent(
                 event_id=(
                     "market-relative-alpha-shadow-v2:"
-                    f"day0_nowcast_entry:{revision}:{target_date}"
+                    f"{strategy_key}:{revision}:{target_date}"
                 ),
                 rejection_stage="RISK_GUARD",
-                rejection_reason=_DAY0_ALPHA_SHADOW_REASON,
+                rejection_reason=shadow_reason,
                 regret_bucket="RISK_CAP",
                 condition_id=condition_id,
                 token_id=token_id,
@@ -4416,7 +4459,7 @@ def _day0_market_relative_alpha_shadow_events(
                 c_fee_adjusted=fee_adjusted,
                 p_fill_lcb=1.0,
                 native_quote_available=True,
-                source_status="current_day0_probability_authority",
+                source_status=source_status,
                 family_complete=True,
                 hypothetical_order_type="MARKETABLE_LIMIT",
                 hypothetical_fill_status="EXECUTABLE_AT_DECISION",
@@ -4432,7 +4475,7 @@ def _day0_market_relative_alpha_shadow_events(
                 ),
             ),
         }
-        cluster = target_date
+        cluster = f"{strategy_key}:{target_date}"
         incumbent = selected_by_cluster.get(cluster)
         if incumbent is None or (
             candidate["claimed_edge"], candidate["tie_break"]
@@ -4444,7 +4487,18 @@ def _day0_market_relative_alpha_shadow_events(
     )
 
 
-def _record_day0_market_relative_alpha_shadows(
+def _day0_market_relative_alpha_shadow_events(
+    **kwargs,
+) -> tuple[object, ...]:
+    """Compatibility wrapper for the Day0-only shadow writer contract."""
+
+    return _market_relative_alpha_shadow_events(
+        **kwargs,
+        strategy_keys=("day0_nowcast_entry",),
+    )
+
+
+def _record_market_relative_alpha_shadows(
     conn: object,
     events: Sequence[object],
 ) -> tuple[str, ...]:
@@ -4458,13 +4512,22 @@ def _record_day0_market_relative_alpha_shadows(
         ledger = NoTradeRegretLedger(conn)
         return tuple(ledger.insert_idempotent(event) for event in events)
     except Exception as exc:  # noqa: BLE001 - evidence cannot mask venue outcome
-        # This evidence only drains a new-entry gate.  A write failure therefore
-        # keeps Day0 blocked, but must not suppress held SELL/HOLD/CASH handling.
+        # This evidence only drains new-entry gates. A write failure keeps the
+        # affected strategy blocked, but must not suppress SELL/HOLD/CASH.
         _LOG.error(
-            "Day0 market-relative alpha shadow persistence unavailable: %s",
+            "Market-relative alpha shadow persistence unavailable: %s",
             type(exc).__name__,
         )
         return ()
+
+
+def _record_day0_market_relative_alpha_shadows(
+    conn: object,
+    events: Sequence[object],
+) -> tuple[str, ...]:
+    """Compatibility wrapper for existing Day0-focused tests."""
+
+    return _record_market_relative_alpha_shadows(conn, events)
 
 
 def _forecast_carrier_matches(
@@ -6114,7 +6177,7 @@ def process_current_global_batch(
                 for family_key, scope_event in full_scope_event_by_family.items()
                 for payload in (payload_reader(scope_event),)
             }
-            alpha_shadow_events = _day0_market_relative_alpha_shadow_events(
+            alpha_shadow_events = _market_relative_alpha_shadow_events(
                 selected=selected,
                 probability_witnesses=attempt_probabilities,
                 book_epoch=attempt_book_epoch,
@@ -7289,13 +7352,13 @@ def process_current_global_batch(
     finally:
         release_selection_snapshot()
         alpha_shadow_events = tuple(pending_alpha_shadow_events.values())
-        recorded_alpha_shadow_ids = _record_day0_market_relative_alpha_shadows(
+        recorded_alpha_shadow_ids = _record_market_relative_alpha_shadows(
             world_conn,
             alpha_shadow_events,
         )
         if alpha_shadow_events:
             _LOG.info(
-                "Day0 market-relative alpha shadow cut: candidates=%d recorded=%d",
+                "Market-relative alpha shadow cut: candidates=%d recorded=%d",
                 len(alpha_shadow_events),
                 len(recorded_alpha_shadow_ids),
             )
