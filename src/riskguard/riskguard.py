@@ -2759,12 +2759,14 @@ def _live_realized_capital_curve(
     window_days: float,
     as_of: datetime | None = None,
 ) -> dict[str, object]:
-    """Grade current-semantics live fills on realized net capital only.
+    """Build walk-forward realized-capital attribution for observability only.
 
     A profitable early exit is capital truth but not a binary-outcome grade;
     probability accuracy is not capital gain. Only exact entry fills plus an
     EXIT_ORDER_FILLED/SETTLED event enter this curve. Gross canonical P&L is
     reduced by the frozen fee schedule because venue facts may omit fees.
+    This retrospective curve never supplies entry admission for either strategy;
+    current causal alpha and the normal executable economics/risk stack do.
     """
 
     if strategy_key not in {"day0_nowcast_entry", "forecast_qkernel_entry"}:
@@ -3224,44 +3226,6 @@ def _qkernel_live_realized_capital_curve(
     )
 
 
-def _live_realized_capital_gate_reason(
-    curve: Mapping[str, object],
-    *,
-    strategy_key: str,
-) -> str | None:
-    """Keep each strategy in one-trial probation until real net gain exists."""
-
-    status = str(curve.get("status") or "unavailable")
-    filled = int(curve.get("filled_position_count") or 0)
-    realized = int(curve.get("realized_position_count") or 0)
-    try:
-        net_pnl = float(curve.get("net_realized_pnl_usd") or 0.0)
-    except (TypeError, ValueError):
-        net_pnl = math.nan
-    law = "executable_min_order_capital_gain_v2"
-    if status == "capital_truth_degraded" or (
-        status == "capital_truth_unavailable" and (filled > 0 or realized > 0)
-    ):
-        return (
-            "live_capital_truth_unavailable("
-            f"strategy={strategy_key},status={status},filled={filled},"
-            f"realized={realized},law={law})"
-        )
-    if filled > 0 and realized == 0:
-        return (
-            "live_capital_probation_in_flight("
-            f"strategy={strategy_key},filled={filled},"
-            f"open={curve.get('open_position_count')},law={law})"
-        )
-    if realized > 0 and (not math.isfinite(net_pnl) or net_pnl <= 0.0):
-        return (
-            "live_capital_nonpositive("
-            f"strategy={strategy_key},filled={filled},realized={realized},"
-            f"net_pnl={round(net_pnl, 6)},law={law})"
-        )
-    return None
-
-
 def _market_relative_alpha_evidence(
     rows: list[dict],
     *,
@@ -3512,58 +3476,35 @@ def _qkernel_market_relative_alpha_evidence(
 
 def _day0_market_relative_alpha_gate_reason(
     semantics_binding: Mapping[str, object],
-    evidence: Mapping[str, object],
+    causal_alpha_evidence: Mapping[str, object],
     *,
     required_evalue: float,
-    live_capital_curve: Mapping[str, object] | None = None,
 ) -> str | None:
-    """Require positive current-law capital evidence before Day0 admission.
+    """Require validated current-law causal alpha evidence for Day0 admission.
 
     INV-47 SCOPE: only new ``day0_nowcast_entry`` exposure; held monitoring,
     current global SELL/HOLD comparison, settlement, and learning continue.
     DRAIN: the global auction freezes one no-money current-revision positive-edge
     executable minimum-order action per independent target date;
     every RiskGuard tick joins those immutable certificates to later VERIFIED
-    settlement outcomes. RESET: shadow evidence may admit only the first
-    current-law live trial. Once a current-revision fill exists, admission stays
-    closed while that trial is unresolved or while the current-window
-    conservative net realized curve is non-positive. Existing positions, or
-    natural seven-day expiry, drain the evidence. A positive realized curve plus
-    continuing shadow validation reopens admission. Pre-revision losses never
-    enter this current-law curve.
+    settlement outcomes. RESET: a matching validated model-over-market cohort
+    opens admission; absent, inconclusive, superseded-law, or rejected evidence
+    remains fail-closed under the existing e-value contract. The separate live
+    realized-capital curve remains walk-forward attribution/observability only:
+    sunk P&L, unresolved trials, or degraded retrospective capital telemetry do
+    not veto unrelated current causal alpha.
     """
 
     if semantics_binding.get("status") != "ok":
         return None
     cohorts = [
         cohort
-        for cohort in (evidence.get("cohorts") or [])
+        for cohort in (causal_alpha_evidence.get("cohorts") or [])
         if isinstance(cohort, Mapping)
         and cohort.get("decision_law_id")
         == "executable_min_order_capital_gain_v2"
     ]
     shadow_validated = any(cohort.get("validated") is True for cohort in cohorts)
-    if live_capital_curve is not None:
-        if (
-            shadow_validated
-            and str(live_capital_curve.get("status"))
-            == "capital_truth_unavailable"
-        ):
-            return (
-                "live_capital_truth_unavailable("
-                "strategy=day0_nowcast_entry,status=capital_truth_unavailable,"
-                "filled=0,realized=0,"
-                "law=executable_min_order_capital_gain_v2)"
-            )
-        live_reason = _live_realized_capital_gate_reason(
-            live_capital_curve,
-            strategy_key="day0_nowcast_entry",
-        )
-        if live_reason is not None and (
-            shadow_validated
-            or str(live_capital_curve.get("status")) == "nonpositive"
-        ):
-            return live_reason
     if shadow_validated:
         return None
     strongest = (
@@ -4510,12 +4451,6 @@ def _tick_once() -> RiskLevel:
                 as_of=market_relative_alpha_as_of,
             )
         )
-        qkernel_live_realized_capital_gate_reason = (
-            _live_realized_capital_gate_reason(
-                qkernel_live_realized_capital_curve,
-                strategy_key="forecast_qkernel_entry",
-            )
-        )
         (
             day0_market_relative_alpha_shadow_rows,
             day0_market_relative_alpha_shadow_status,
@@ -4541,7 +4476,6 @@ def _tick_once() -> RiskLevel:
                 day0_probability_semantics_binding,
                 day0_market_relative_alpha_evidence,
                 required_evalue=market_relative_alpha_evalue,
-                live_capital_curve=day0_live_realized_capital_curve,
             )
         )
         day0_market_relative_alpha_gate_required = (
@@ -4688,12 +4622,6 @@ def _tick_once() -> RiskLevel:
                     f"law={strongest['decision_law_id']}"
                     ")"
                 ),
-            )
-        if qkernel_live_realized_capital_gate_reason is not None:
-            _append_reason(
-                recommended_strategy_gate_reasons,
-                "forecast_qkernel_entry",
-                qkernel_live_realized_capital_gate_reason,
             )
         probability_semantics_level = RiskLevel.GREEN
         if probability_semantics_binding.get("status") == "unavailable":

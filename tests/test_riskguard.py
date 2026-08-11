@@ -4358,7 +4358,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
             ],
         }
 
-    def test_current_live_loss_recloses_day0_entry_after_fee_bound(self):
+    def test_validated_shadow_ignores_unrelated_current_revision_realized_loss(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
         conn = self._live_capital_conn(
@@ -4385,17 +4385,11 @@ class TestQkernelMarketRelativeAlphaEvidence:
             },
             self._validated_day0_shadow_evidence(),
             required_evalue=10.0,
-            live_capital_curve=curve,
         )
-        assert reason == (
-            "live_capital_nonpositive("
-            "strategy=day0_nowcast_entry,filled=1,realized=1,"
-            "net_pnl=-0.175409,"
-            "law=executable_min_order_capital_gain_v2)"
-        )
+        assert reason is None
         conn.close()
 
-    def test_first_current_live_trial_blocks_more_entries_until_realized(self):
+    def test_validated_shadow_ignores_unresolved_live_fill(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
         conn = self._live_capital_conn(
@@ -4420,31 +4414,39 @@ class TestQkernelMarketRelativeAlphaEvidence:
             },
             self._validated_day0_shadow_evidence(),
             required_evalue=10.0,
-            live_capital_curve=curve,
         )
-        assert reason == (
-            "live_capital_probation_in_flight("
-            "strategy=day0_nowcast_entry,filled=1,open=1,"
-            "law=executable_min_order_capital_gain_v2)"
-        )
+        assert reason is None
         conn.close()
 
-    def test_positive_current_live_curve_reopens_after_shadow_validation(self):
+    @pytest.mark.parametrize(
+        "capital_status",
+        ("capital_truth_unavailable", "capital_truth_degraded"),
+    )
+    def test_validated_shadow_ignores_degraded_capital_curve(
+        self,
+        capital_status,
+    ):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
-        conn = self._live_capital_conn(
-            phase="economically_closed",
-            gross_pnl=3.43,
-            exit_price=0.80,
-        )
+        if capital_status == "capital_truth_unavailable":
+            conn = sqlite3.connect(":memory:")
+        else:
+            conn = self._live_capital_conn(
+                phase="day0_window",
+                gross_pnl=None,
+                exit_price=None,
+            )
+            conn.execute(
+                "UPDATE venue_submission_envelopes SET fee_details_json='{}'"
+            )
+            conn.commit()
         curve = riskguard_module._day0_live_realized_capital_curve(
             conn,
             window_days=7.0,
             as_of=datetime(2026, 8, 11, 17, tzinfo=timezone.utc),
         )
 
-        assert curve["status"] == "positive"
-        assert curve["net_realized_pnl_usd"] > 0.0
+        assert curve["status"] == capital_status
         assert riskguard_module._day0_market_relative_alpha_gate_reason(
             {
                 "status": "ok",
@@ -4452,11 +4454,10 @@ class TestQkernelMarketRelativeAlphaEvidence:
             },
             self._validated_day0_shadow_evidence(),
             required_evalue=10.0,
-            live_capital_curve=curve,
         ) is None
         conn.close()
 
-    def test_qkernel_realized_loss_is_an_independent_entry_gate(
+    def test_qkernel_realized_loss_remains_observability_only(
         self,
         monkeypatch,
     ):
@@ -4517,16 +4518,29 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert curve["filled_position_count"] == 1
         assert curve["blocked_position_count"] == 0
         assert curve["realized_position_count"] == 1
-        reason = riskguard_module._live_realized_capital_gate_reason(
-            curve,
-            strategy_key="forecast_qkernel_entry",
-        )
-        assert reason == (
-            "live_capital_nonpositive("
-            "strategy=forecast_qkernel_entry,filled=1,realized=1,"
-            "net_pnl=-0.602523,law=executable_min_order_capital_gain_v2)"
-        )
+        assert curve["net_realized_pnl_usd"] == pytest.approx(-0.602523)
         conn.close()
+
+    def test_realized_capital_curves_have_no_entry_gate_wiring(self):
+        import inspect
+
+        tick_source = inspect.getsource(riskguard_module._tick_once)
+
+        assert "_qkernel_live_realized_capital_curve(" in tick_source
+        assert "_day0_live_realized_capital_curve(" in tick_source
+        assert '"qkernel_live_realized_capital_curve":' in tick_source
+        assert '"day0_live_realized_capital_curve":' in tick_source
+        assert "live_realized_capital_gate_reason" not in tick_source
+        assert "live_capital_curve" not in inspect.signature(
+            riskguard_module._qkernel_market_relative_alpha_evidence
+        ).parameters
+        assert "live_capital_curve" not in inspect.signature(
+            riskguard_module._day0_market_relative_alpha_gate_reason
+        ).parameters
+        assert not hasattr(
+            riskguard_module,
+            "_live_realized_capital_gate_reason",
+        )
 
     def test_same_target_date_high_and_low_count_as_one_evidence_cluster(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
@@ -4572,7 +4586,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert evidence["validated"] is False
         conn.close()
 
-    def test_high_evalue_cannot_unlock_negative_hypothetical_capital_curve(self):
+    def test_unvalidated_shadow_remains_gated_under_evalue_contract(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
         rows = [
@@ -4638,7 +4652,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         ) is not None
         conn.close()
 
-    def test_current_day0_without_capital_evidence_is_entry_gated(self):
+    def test_current_day0_without_validated_causal_evidence_is_entry_gated(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
         reason = riskguard_module._day0_market_relative_alpha_gate_reason(
