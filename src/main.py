@@ -8386,9 +8386,10 @@ def _edli_day0_hourly_refresh_cycle() -> None:
     See that function's docstring for the vector-refresh lane it runs.
 
     The reactor and redecision locks are dispatcher-owned scheduling primitives.
-    The first full held-position pass reads the already-persisted current evidence
-    without competing with this background scan. After bootstrap, fresh vectors
-    resume and their durable wake triggers targeted re-monitoring.
+    This background producer observes those lanes to reduce its work, but never
+    owns their locks: an escaped provider timeout must not pin held-position
+    redecision. Fresh vectors persist independently and their durable wake
+    triggers targeted re-monitoring.
     """
     _consume_live_control_commands()
     if _defer_for_held_position_monitor("edli_day0_hourly_refresh"):
@@ -8396,18 +8397,15 @@ def _edli_day0_hourly_refresh_cycle() -> None:
 
     from src.events.reactor import run_edli_day0_hourly_refresh_cycle
 
-    trading_lane_active = _edli_redecision_screen_lock.locked()
-    if trading_lane_active or not _edli_reactor_active_lock.acquire(blocking=False):
-        run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
-        return
-    try:
-        # Recheck after admission so a redecision claim cannot race the first
-        # check while this background job acquires the shared lane.
-        run_edli_day0_hourly_refresh_cycle(
-            trading_lane_active=_edli_redecision_screen_lock.locked(),
-        )
-    finally:
-        _edli_reactor_active_lock.release()
+    trading_lane_active = (
+        _edli_redecision_screen_lock.locked()
+        or _edli_reactor_active_lock.locked()
+        or _held_position_monitor_active.is_set()
+        or _held_position_monitor_canonical_debt.is_set()
+    )
+    run_edli_day0_hourly_refresh_cycle(
+        trading_lane_active=trading_lane_active,
+    )
 
 
 

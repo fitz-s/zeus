@@ -5750,8 +5750,10 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
     waits, and held-position probability authority retains critical-quota
     precedence.
 
-    ``trading_lane_active`` is injected from src.main after atomic admission
-    against the reactor, redecision, and held-monitor scheduling primitives.
+    ``trading_lane_active`` is a dispatcher snapshot of the reactor,
+    redecision, and held-monitor scheduling primitives. The producer never
+    acquires those locks; an over-budget provider call therefore cannot block
+    current-capital redecision.
     """
     global _DAY0_HOURLY_REFRESH_CURSOR
 

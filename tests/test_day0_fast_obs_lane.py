@@ -3490,21 +3490,23 @@ class TestMutexNoHttpSplit:
             trading_lane_active=True,
         )
 
-    def test_hourly_refresh_admission_excludes_redecision_and_reactor(self):
+    def test_hourly_refresh_observes_trading_lanes_without_owning_them(self):
         source = open("src/main.py", encoding="utf-8").read()
         hook_start = source.index('@_scheduler_job("edli_day0_hourly_refresh")')
         hook_end = source.index("def _edli_is_sqlite_lock_error", hook_start)
         hook = source[hook_start:hook_end]
-        assert "_held_position_monitor_active.is_set()" not in hook
+        assert "_held_position_monitor_active.is_set()" in hook
+        assert "_held_position_monitor_canonical_debt.is_set()" in hook
         assert "_edli_redecision_screen_lock.locked()" in hook
-        assert "_edli_reactor_active_lock.acquire(blocking=False)" in hook
-        assert "_edli_reactor_active_lock.release()" in hook
+        assert "_edli_reactor_active_lock.locked()" in hook
+        assert "_edli_reactor_active_lock.acquire" not in hook
+        assert "_edli_reactor_active_lock.release" not in hook
 
         schedule_at = source.index('id="edli_day0_hourly_refresh"')
         schedule = source[schedule_at - 500 : schedule_at + 500]
         assert "OPENING_HUNT_FIRST_DELAY_SECONDS + 36.0" in schedule
 
-    def test_hourly_refresh_runs_while_held_monitor_is_active(self, monkeypatch):
+    def test_hourly_refresh_reduces_work_while_held_monitor_is_active(self, monkeypatch):
         import threading
 
         import src.main as main
@@ -3524,8 +3526,45 @@ class TestMutexNoHttpSplit:
 
         main._edli_day0_hourly_refresh_cycle()
 
-        assert calls == [{"trading_lane_active": False}]
+        assert calls == [{"trading_lane_active": True}]
         assert main._edli_reactor_active_lock.locked() is False
+
+    def test_blocked_hourly_refresh_never_pins_reactor_lock(self, monkeypatch):
+        import threading
+
+        import src.main as main
+        from src.events import reactor as reactor_module
+
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_refresh(**_kwargs):
+            started.set()
+            assert release.wait(timeout=5.0)
+
+        monkeypatch.setattr(main, "_consume_live_control_commands", lambda: None)
+        monkeypatch.setattr(main, "_edli_redecision_screen_lock", threading.Lock())
+        monkeypatch.setattr(main, "_edli_reactor_active_lock", threading.Lock())
+        monkeypatch.setattr(main, "_held_position_monitor_active", threading.Event())
+        monkeypatch.setattr(
+            main, "_held_position_monitor_canonical_debt", threading.Event()
+        )
+        monkeypatch.setattr(
+            reactor_module,
+            "run_edli_day0_hourly_refresh_cycle",
+            blocked_refresh,
+        )
+
+        producer = threading.Thread(target=main._edli_day0_hourly_refresh_cycle)
+        producer.start()
+        assert started.wait(timeout=5.0)
+
+        assert main._edli_reactor_active_lock.acquire(blocking=False)
+        main._edli_reactor_active_lock.release()
+
+        release.set()
+        producer.join(timeout=5.0)
+        assert not producer.is_alive()
 
     def test_live_family_admission_scopes_market_seek_to_runtime_cities(self, monkeypatch):
         from src.events import reactor as reactor_module
