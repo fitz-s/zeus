@@ -4200,6 +4200,46 @@ class TestQkernelMarketRelativeAlphaEvidence:
         ) is None
         conn.close()
 
+    def test_same_target_date_high_and_low_count_as_one_evidence_cluster(self):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        rows = []
+        conn = self._conn()
+        for trade_id, metric, q in (
+            ("same-date-high", "high", 0.90),
+            ("same-date-low", "low", 0.95),
+        ):
+            row = {
+                **self._row(trade_id, city="NYC", q=q, outcome=1),
+                "strategy": "day0_nowcast_entry",
+                "probability_semantics_revisions": (
+                    DAY0_PROBABILITY_SEMANTICS_REVISION,
+                ),
+            }
+            rows.append(row)
+            conn.execute(
+                "INSERT INTO position_current VALUES (?,?,?,?,?)",
+                (trade_id, 0.20, "NYC", "2026-08-10", metric),
+            )
+            conn.execute(
+                "INSERT INTO execution_fact VALUES (?,'entry','2026-08-10','filled',?,1)",
+                (trade_id, 0.20),
+            )
+
+        evidence = riskguard_module._market_relative_alpha_evidence(
+            riskguard_module._bind_entry_market_benchmarks(conn, rows),
+            strategy_key="day0_nowcast_entry",
+            rejection_evalue=10.0,
+            as_of=datetime(2026, 8, 11, tzinfo=timezone.utc),
+        )
+
+        cohort = evidence["cohorts"][0]
+        assert cohort["candidate_count"] == 2
+        assert cohort["independent_cluster_count"] == 1
+        assert cohort["model_over_market_evalue"] == pytest.approx(4.75)
+        assert evidence["validated"] is False
+        conn.close()
+
     def test_current_day0_without_capital_evidence_is_entry_gated(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 

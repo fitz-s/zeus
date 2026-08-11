@@ -2738,10 +2738,11 @@ def _market_relative_alpha_evidence(
             )
         )
         cohort_key = (str(row.get("decision_law_id") or "").strip(), revisions)
-        evidence_cluster = (
-            str(family[1]).strip(),
-            str(family[2]).strip(),
-        )
+        # HIGH and LOW from the same target date share weather, observation,
+        # and market-information shocks.  Treat the date as the independent
+        # unit; choosing between metrics remains an ex-ante claimed-edge choice,
+        # never a second likelihood-ratio observation.
+        evidence_cluster = (str(family[1]).strip(),)
         candidate = {
             "trade_id": str(row.get("trade_id") or ""),
             "q": q,
