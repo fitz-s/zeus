@@ -8231,7 +8231,12 @@ def execute_monitoring_phase(
                 boundary="position_monitor",
             )
 
-    _emit_portfolio_rotation_evaluation_status(conn, summary, deps=deps)
+    _emit_portfolio_rotation_evaluation_status(
+        conn,
+        summary,
+        deps=deps,
+        deadline_monotonic=monitor_deadline,
+    )
     _release_monitor_write_lock_boundary(
         conn,
         summary,
@@ -8559,7 +8564,13 @@ def _rotation_candidates(conn, *, decision_time: datetime) -> tuple[list, list[s
     return candidates, skipped
 
 
-def _emit_portfolio_rotation_evaluation_status(conn, summary: dict, *, deps) -> None:
+def _emit_portfolio_rotation_evaluation_status(
+    conn,
+    summary: dict,
+    *,
+    deps,
+    deadline_monotonic: float | None = None,
+) -> None:
     """Evaluate portfolio rotation value without implying executable live action.
 
     Actual same-family fill-up/shift actions are driven by EDLI_REDECISION_PENDING
@@ -8570,6 +8581,18 @@ def _emit_portfolio_rotation_evaluation_status(conn, summary: dict, *, deps) -> 
     if conn is None:
         summary["portfolio_rotation_evaluation_status"] = "unavailable:no_connection"
         return
+    if (
+        deadline_monotonic is not None
+        and time.monotonic() >= float(deadline_monotonic)
+    ):
+        # This is read-side telemetry; it has no live rotation authority.  It
+        # must never retain the single held-monitor writer after the economic
+        # redecision budget is gone.  The event reactor owns executable
+        # rotation and a later monitor pass may refresh this summary.
+        summary["portfolio_rotation_evaluation_status"] = (
+            "deferred:held_monitor_deadline_expired"
+        )
+        return
     now_fn = getattr(deps, "_utcnow", None)
     try:
         decision_time = now_fn() if callable(now_fn) else datetime.now(timezone.utc)
@@ -8579,8 +8602,51 @@ def _emit_portfolio_rotation_evaluation_status(conn, summary: dict, *, deps) -> 
         decision_time = decision_time.replace(tzinfo=timezone.utc)
     decision_time = decision_time.astimezone(timezone.utc)
 
-    holds, hold_missing = _rotation_held_positions(conn)
-    candidates, candidate_missing = _rotation_candidates(conn, decision_time=decision_time)
+    previous_busy_ms: int | None = None
+    if deadline_monotonic is not None:
+        remaining_ms = max(
+            0,
+            int((float(deadline_monotonic) - time.monotonic()) * 1_000.0),
+        )
+        if remaining_ms <= 0:
+            summary["portfolio_rotation_evaluation_status"] = (
+                "deferred:held_monitor_deadline_expired"
+            )
+            return
+        previous_busy_row = conn.execute("PRAGMA busy_timeout").fetchone()
+        previous_busy_ms = int(previous_busy_row[0] or 0)
+        conn.execute(f"PRAGMA busy_timeout = {min(previous_busy_ms, remaining_ms)}")
+        conn.set_progress_handler(
+            lambda: int(time.monotonic() >= float(deadline_monotonic)),
+            1_000,
+        )
+    try:
+        holds, hold_missing = _rotation_held_positions(conn)
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        ):
+            summary["portfolio_rotation_evaluation_status"] = (
+                "deferred:held_monitor_deadline_expired"
+            )
+            return
+        candidates, candidate_missing = _rotation_candidates(
+            conn,
+            decision_time=decision_time,
+        )
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        ):
+            summary["portfolio_rotation_evaluation_status"] = (
+                "deferred:held_monitor_deadline_expired"
+            )
+            return
+    finally:
+        if deadline_monotonic is not None:
+            conn.set_progress_handler(None, 0)
+            if previous_busy_ms is not None:
+                conn.execute(f"PRAGMA busy_timeout = {previous_busy_ms}")
     summary["portfolio_rotation_held_positions_evaluated"] = len(holds)
     summary["portfolio_rotation_candidates_evaluated"] = len(candidates)
     if hold_missing:
