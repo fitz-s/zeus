@@ -1095,14 +1095,21 @@ def _lower_precedence_override_reason(
     override_id: str,
     requested_precedence: int,
     now_iso: str,
+    protect_equal: bool = False,
+    expected_override_issued_at: str = "",
 ) -> str:
-    """Return an audit reason when a live override outranks this command."""
+    """Return an audit reason when a live override outranks this command.
+
+    Equal-precedence commands that weaken a gate use an issued-at compare-and-set.
+    This prevents a delayed command from undoing a newer live-money containment
+    row while preserving an explicit, current operator release path.
+    """
 
     if conn is None:
         return ""
     row = conn.execute(
         """
-        SELECT precedence
+        SELECT precedence, issued_at
           FROM control_overrides
          WHERE override_id = ?
            AND issued_at <= ?
@@ -1113,13 +1120,23 @@ def _lower_precedence_override_reason(
     if row is None:
         return ""
     current_precedence = int(row["precedence"] or 0)
-    if requested_precedence >= current_precedence:
+    current_issued_at = str(row["issued_at"] or "")
+    if requested_precedence > current_precedence:
         return ""
-    reason = (
-        "ignored_lower_precedence:"
-        f"override_id={override_id}:requested={requested_precedence}:"
-        f"current={current_precedence}"
-    )
+    if requested_precedence == current_precedence:
+        if not protect_equal or expected_override_issued_at == current_issued_at:
+            return ""
+        reason = (
+            "ignored_equal_precedence_without_cas:"
+            f"override_id={override_id}:precedence={current_precedence}:"
+            f"current_issued_at={current_issued_at}"
+        )
+    else:
+        reason = (
+            "ignored_lower_precedence:"
+            f"override_id={override_id}:requested={requested_precedence}:"
+            f"current={current_precedence}"
+        )
     logger.warning("CONTROL_PRECEDENCE_PRESERVED %s", reason)
     return reason
 
@@ -1167,6 +1184,8 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
                 override_id="control_plane:global:entries_paused",
                 requested_precedence=precedence,
                 now_iso=issued_at,
+                protect_equal=True,
+                expected_override_issued_at=str(cmd.get("expected_override_issued_at") or ""),
             )
             if precedence_reason:
                 return True, precedence_reason
@@ -1230,6 +1249,8 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
                 override_id=override_id,
                 requested_precedence=precedence,
                 now_iso=issued_at,
+                protect_equal=enabled,
+                expected_override_issued_at=str(cmd.get("expected_override_issued_at") or ""),
             )
             if precedence_reason:
                 return True, precedence_reason

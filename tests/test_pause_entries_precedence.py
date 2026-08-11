@@ -499,6 +499,100 @@ def test_lower_precedence_strategy_enable_cannot_clear_stronger_gate():
     conn.close()
 
 
+def test_equal_precedence_resume_requires_current_override_cas():
+    """A delayed same-authority resume cannot clear a newer max-priority pause."""
+
+    issued_at = datetime.now(timezone.utc).isoformat()
+    conn = get_world_connection()
+    upsert_control_override(
+        conn,
+        override_id=AUTO_PAUSE_OVERRIDE_ID,
+        target_type="global",
+        target_key="entries",
+        action_type="gate",
+        value="true",
+        issued_by="control_plane",
+        issued_at=issued_at,
+        reason="forward_capital_proof_required",
+        effective_until=None,
+        precedence=1000,
+    )
+    conn.commit()
+    conn.close()
+
+    ok, reason = cp._apply_command("resume", {"precedence": 1000})
+    assert ok is True
+    assert reason.startswith("ignored_equal_precedence_without_cas:")
+
+    conn = get_world_connection()
+    assert query_control_override_state(conn)["entries_paused"] is True
+    conn.close()
+
+    ok, reason = cp._apply_command(
+        "resume",
+        {
+            "precedence": 1000,
+            "expected_override_issued_at": issued_at,
+        },
+    )
+    assert ok is True
+    assert reason == ""
+
+    conn = get_world_connection()
+    assert query_control_override_state(conn)["entries_paused"] is False
+    conn.close()
+
+
+def test_equal_precedence_strategy_enable_requires_current_override_cas():
+    """A same-priority enable must name the exact disabled gate it supersedes."""
+
+    strategy = "forecast_qkernel_entry"
+    override_id = f"control_plane:strategy:{strategy}:gate"
+    issued_at = datetime.now(timezone.utc).isoformat()
+    conn = get_world_connection()
+    upsert_control_override(
+        conn,
+        override_id=override_id,
+        target_type="strategy",
+        target_key=strategy,
+        action_type="gate",
+        value="true",
+        issued_by="operator",
+        issued_at=issued_at,
+        reason="forward_capital_proof_required",
+        effective_until=None,
+        precedence=1000,
+    )
+    conn.commit()
+    conn.close()
+
+    ok, reason = cp._apply_command(
+        "set_strategy_gate",
+        {"strategy": strategy, "enabled": True, "precedence": 1000},
+    )
+    assert ok is True
+    assert reason.startswith("ignored_equal_precedence_without_cas:")
+
+    conn = get_world_connection()
+    assert query_control_override_state(conn)["strategy_gates"][strategy]["enabled"] is False
+    conn.close()
+
+    ok, reason = cp._apply_command(
+        "set_strategy_gate",
+        {
+            "strategy": strategy,
+            "enabled": True,
+            "precedence": 1000,
+            "expected_override_issued_at": issued_at,
+        },
+    )
+    assert ok is True
+    assert reason == ""
+
+    conn = get_world_connection()
+    assert query_control_override_state(conn)["strategy_gates"][strategy]["enabled"] is True
+    conn.close()
+
 # ---------------------------------------------------------------------------
 # Test 6 (new, Option C): precedence skip emits warning log
 # ---------------------------------------------------------------------------
