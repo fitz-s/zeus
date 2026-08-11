@@ -8354,6 +8354,17 @@ def run_edli_event_reactor_cycle(
             selection_completion_reserved=(
                 _monitor_completion_mode.reduce_only
             ),
+            selection_completion_sell_keys=(
+                frozenset(
+                    (
+                        str(getattr(request, "position_id", "") or "").strip(),
+                        str(getattr(request, "held_token_id", "") or "").strip(),
+                    )
+                    for request in held_sell_completion_cut_requests
+                )
+                if _monitor_completion_mode.reduce_only
+                else frozenset()
+            ),
             held_family_provider=held_family_provider,
         )
 

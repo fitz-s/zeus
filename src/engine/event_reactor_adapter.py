@@ -6880,6 +6880,7 @@ def event_bound_live_adapter_from_trade_conn(
     selection_cancelled: Callable[[], bool] | None = None,
     selection_completion_fairness_reserved: bool = False,
     selection_completion_reserved: bool = False,
+    selection_completion_sell_keys: frozenset[tuple[str, str]] = frozenset(),
     held_family_provider: Callable[[], object] | None = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
@@ -6914,6 +6915,17 @@ def event_bound_live_adapter_from_trade_conn(
     ] = {}
     _global_claim_generations: Mapping[str, str] = {}
     _global_claim_attempt_counts: Mapping[str, int] = {}
+    exact_completion_sell_keys = frozenset(
+        (str(position_id or "").strip(), str(token_id or "").strip())
+        for position_id, token_id in selection_completion_sell_keys
+    )
+    if any(
+        not position_id or not token_id
+        for position_id, token_id in exact_completion_sell_keys
+    ):
+        raise ValueError("GLOBAL_EXACT_HELD_COMPLETION_SCOPE_INVALID")
+    if exact_completion_sell_keys and not selection_completion_reserved:
+        raise ValueError("GLOBAL_EXACT_HELD_COMPLETION_SCOPE_UNRESERVED")
     from src.runtime.reactor_wake import (
         reactor_urgent_wake_identity,
         reactor_urgent_wake_reason,
@@ -9983,6 +9995,15 @@ def event_bound_live_adapter_from_trade_conn(
                 getattr(candidate, "action", "BUY") or "BUY"
             ).strip().upper()
             if action == "SELL":
+                # SCOPE: only unrelated held positions in this exact completion
+                # cut. DRAIN: the requested position's SELL/HOLD/CASH comparison
+                # reaches one terminal receipt or actuation. RESET: the next
+                # adapter is rebuilt from the remaining durable request keys.
+                if exact_completion_sell_keys and (
+                    str(getattr(candidate, "position_id", "") or "").strip(),
+                    str(getattr(candidate, "token_id", "") or "").strip(),
+                ) not in exact_completion_sell_keys:
+                    return "GLOBAL_EXACT_HELD_COMPLETION_OTHER_POSITION"
                 return None
             if entry_submit_suppression_reason is not None:
                 return entry_submit_suppression_reason

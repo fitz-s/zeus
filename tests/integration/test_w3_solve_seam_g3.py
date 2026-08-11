@@ -7692,7 +7692,12 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     )
     monkeypatch.setattr(era, "_entry_pause_blocks_live_submit", lambda _conn: None)
 
-    def make_adapter(*, completion_reserved=False, fairness_reserved=False):
+    def make_adapter(
+        *,
+        completion_reserved=False,
+        fairness_reserved=False,
+        completion_sell_keys=frozenset(),
+    ):
         return era.event_bound_live_adapter_from_trade_conn(
             trade,
             get_current_level=lambda: era.RiskLevel.GREEN,
@@ -7705,6 +7710,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
             auction_capital_authority=CapacityAuthority(),
             selection_completion_fairness_reserved=fairness_reserved,
             selection_completion_reserved=completion_reserved,
+            selection_completion_sell_keys=completion_sell_keys,
         )
 
     adapter = make_adapter()
@@ -7752,12 +7758,39 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         _dt.datetime(2026, 7, 10, 8, 11, tzinfo=_dt.timezone.utc),
     )
     assert captured["buy_candidates_enabled"] is True
-    reserved_adapter = make_adapter(completion_reserved=True)
+    reserved_adapter = make_adapter(
+        completion_reserved=True,
+        completion_sell_keys=frozenset({("position-nyc", "token-nyc")}),
+    )
     reserved_adapter.process_global_batch(
         (event,),
         _dt.datetime(2026, 7, 10, 8, 12, tzinfo=_dt.timezone.utc),
     )
     assert captured["buy_candidates_enabled"] is False
+    exact_completion_policy = captured["candidate_policy_rejection_resolver"]
+    assert exact_completion_policy(
+        SimpleNamespace(
+            action="SELL",
+            position_id="position-nyc",
+            token_id="token-nyc",
+        )
+    ) is None
+    assert exact_completion_policy(
+        SimpleNamespace(
+            action="SELL",
+            position_id="position-unrelated",
+            token_id="token-unrelated",
+        )
+    ) == "GLOBAL_EXACT_HELD_COMPLETION_OTHER_POSITION"
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_EXACT_HELD_COMPLETION_SCOPE_UNRESERVED",
+    ):
+        make_adapter(
+            completion_sell_keys=frozenset(
+                {("position-unreserved", "token-unreserved")}
+            )
+        )
     fairness_adapter = make_adapter(fairness_reserved=True)
     fairness_adapter.process_global_batch(
         (event,),
