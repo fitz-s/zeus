@@ -1,7 +1,7 @@
 # Created: 2026-05-06
-# Last reused or audited: 2026-07-14
+# Last reused or audited: 2026-08-10
 # Authority basis: live side effects are blocked by kill/freeze/risk authority;
-#                  deployment worktree drift remains observability only.
+#                  new exposure requires current executable-code authority.
 
 """Tests for Gate 5: runtime kill-switch and settlement-window-freeze enforcement.
 
@@ -135,7 +135,7 @@ class TestGateRuntimeAllClear:
         decisions = {r["decision"] for r in records}
         assert "allow" in decisions, f"Expected at least one 'allow' decision; got {decisions}"
 
-    def test_deployment_freshness_mismatch_is_not_submit_authority(
+    def test_deployment_freshness_mismatch_blocks_new_exposure(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
@@ -159,9 +159,10 @@ class TestGateRuntimeAllClear:
             _fake_git,
         )
 
-        gate_runtime.check("live_venue_submit")
+        with pytest.raises(RuntimeError, match="deployment_freshness_mismatch"):
+            gate_runtime.check("live_venue_submit")
 
-    def test_runtime_diff_does_not_block_entry_or_reduce_only_exit(
+    def test_runtime_diff_blocks_entry_but_preserves_reduce_only_exit(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
@@ -187,7 +188,8 @@ class TestGateRuntimeAllClear:
             lambda *_args, **_kwargs: (),
         )
 
-        gate_runtime.check("live_venue_submit")
+        with pytest.raises(RuntimeError, match="deployment_freshness_mismatch"):
+            gate_runtime.check("live_venue_submit")
         gate_runtime.check("reduce_only_exit_submit")
 
     def test_reduce_only_exit_allows_exit_runtime_diff(
@@ -267,7 +269,7 @@ class TestGateRuntimeAllClear:
 
         gate_runtime.check("live_venue_submit")
 
-    def test_dirty_runtime_worktree_is_not_submit_authority(
+    def test_dirty_runtime_worktree_blocks_new_exposure(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
     ) -> None:
         monkeypatch.delenv("ZEUS_KILL_SWITCH", raising=False)
@@ -292,7 +294,8 @@ class TestGateRuntimeAllClear:
             lambda *_args, **_kwargs: ("src/control/live_health.py",),
         )
 
-        gate_runtime.check("live_venue_submit")
+        with pytest.raises(RuntimeError, match="deployment_freshness_mismatch"):
+            gate_runtime.check("live_venue_submit")
 
     def test_deployment_freshness_dirty_readonly_audit_scripts_allow_live_submit(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
