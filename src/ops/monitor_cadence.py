@@ -12,7 +12,7 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Mapping
 
 from src.contracts.position_truth import (
     CURRENT_MONEY_RISK_CHAIN_STATES,
@@ -255,12 +255,30 @@ def collect_monitor_cadence_evidence(
         else:
             fresh_count += 1
     open_count = len(monitored_rows)
+    quote_only_stale = [
+        item
+        for item in stale_or_missing
+        if item.get("issue") == "monitor_clob_stale"
+    ]
+    blocking_stale = [
+        item
+        for item in stale_or_missing
+        if item.get("issue") != "monitor_clob_stale"
+    ]
     return {
         "open_position_count": open_count,
         "monitored_position_count": open_count,
         "fresh_position_count": fresh_count,
         "stale_or_missing_position_count": len(stale_or_missing),
         "stale_or_missing_positions": stale_or_missing[:sample_limit],
+        # Keep strict stale evidence intact, but split the complete list so a
+        # missing held-side quote cannot become global cadence debt. Counts are
+        # deliberately computed before sampling; each sample is independently
+        # bounded by sample_limit.
+        "quote_only_stale_position_count": len(quote_only_stale),
+        "quote_only_stale_positions": quote_only_stale[:sample_limit],
+        "blocking_stale_position_count": len(blocking_stale),
+        "blocking_stale_positions": blocking_stale[:sample_limit],
         "settlement_recoverable_position_count": len(settlement_recoverable),
         "settlement_recoverable_positions": settlement_recoverable[:sample_limit],
         "review_managed_position_count": len(review_managed),
@@ -270,6 +288,43 @@ def collect_monitor_cadence_evidence(
         "non_monitor_chain_risk_position_count": len(non_monitor_chain_risk_rows),
         "non_monitor_chain_risk_positions": non_monitor_chain_risk_rows[:sample_limit],
         "non_monitor_chain_risk_role": "chain_reconciliation_not_monitor_cadence",
+    }
+
+
+def monitor_cadence_blocking_evidence(
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Read blocking/quote-only stale groups with legacy evidence fallback.
+
+    Older callers and test doubles expose only the strict stale count/list.
+    Treat that shape as wholly blocking so the new quote-only classification
+    cannot accidentally make an unknown evidence shape fail open.
+    """
+
+    stale_count = int(evidence.get("stale_or_missing_position_count") or 0)
+    stale_positions = list(evidence.get("stale_or_missing_positions") or [])
+    group_fields = {
+        "blocking_stale_position_count",
+        "blocking_stale_positions",
+        "quote_only_stale_position_count",
+        "quote_only_stale_positions",
+    }
+    if not group_fields.issubset(evidence):
+        return {
+            "blocking_stale_position_count": stale_count,
+            "blocking_stale_positions": stale_positions,
+            "quote_only_stale_position_count": 0,
+            "quote_only_stale_positions": [],
+        }
+    return {
+        "blocking_stale_position_count": int(
+            evidence.get("blocking_stale_position_count") or 0
+        ),
+        "blocking_stale_positions": list(evidence["blocking_stale_positions"]),
+        "quote_only_stale_position_count": int(
+            evidence.get("quote_only_stale_position_count") or 0
+        ),
+        "quote_only_stale_positions": list(evidence["quote_only_stale_positions"]),
     }
 
 

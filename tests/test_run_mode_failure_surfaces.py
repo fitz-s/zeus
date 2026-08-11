@@ -8427,6 +8427,126 @@ def test_reactor_bootstrap_releases_after_canonical_monitor_coverage(
         main_module._held_position_monitor_bootstrap_complete.clear()
 
 
+def test_reactor_bootstrap_counts_quote_only_monitor_as_covered(
+    monkeypatch,
+) -> None:
+    from datetime import datetime, timezone
+
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    class ReadOnlyConnection:
+        def close(self) -> None:
+            pass
+
+    main_module._held_position_monitor_active.clear()
+    main_module._held_position_monitor_bootstrap_complete.clear()
+    main_module._held_position_monitor_bootstrap_last_check = 0.0
+    monkeypatch.setitem(
+        main_module._BOOT_STATE,
+        "ts",
+        datetime(2026, 7, 26, 9, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(db_module, "get_trade_connection_read_only", ReadOnlyConnection)
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: {
+            "open_position_count": 1,
+            "fresh_position_count": 0,
+            "settlement_recoverable_position_count": 0,
+            "stale_or_missing_position_count": 1,
+            "stale_or_missing_positions": [{"position_id": "quote-only"}],
+            "quote_only_stale_position_count": 1,
+            "quote_only_stale_positions": [{"position_id": "quote-only"}],
+            "blocking_stale_position_count": 0,
+            "blocking_stale_positions": [],
+            "future_monitor_event_count": 0,
+        },
+    )
+    try:
+        assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+        assert main_module._held_position_monitor_bootstrap_complete.is_set()
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_bootstrap_complete.clear()
+
+
+def test_quote_only_monitor_does_not_block_entry_admission(monkeypatch) -> None:
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    class ReadOnlyConnection:
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(db_module, "get_trade_connection_read_only", ReadOnlyConnection)
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: {
+            "stale_or_missing_position_count": 1,
+            "stale_or_missing_positions": [{
+                "position_id": "quote-only",
+                "issue": "monitor_clob_stale",
+            }],
+            "quote_only_stale_position_count": 1,
+            "quote_only_stale_positions": [{
+                "position_id": "quote-only",
+                "issue": "monitor_clob_stale",
+            }],
+            "blocking_stale_position_count": 0,
+            "blocking_stale_positions": [],
+            "future_monitor_event_count": 0,
+        },
+    )
+
+    assert main_module._held_position_monitor_entry_block_reason() is None
+
+
+def test_quote_only_monitor_recovery_does_not_run_full_book_or_set_debt(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.ops.monitor_cadence as cadence_module
+    import src.state.db as db_module
+
+    class ReadOnlyConnection:
+        def close(self) -> None:
+            pass
+
+    evidence = {
+        "stale_or_missing_position_count": 1,
+        "stale_or_missing_positions": [{"position_id": "quote-only"}],
+        "quote_only_stale_position_count": 1,
+        "quote_only_stale_positions": [{"position_id": "quote-only"}],
+        "blocking_stale_position_count": 0,
+        "blocking_stale_positions": [],
+        "future_monitor_event_count": 0,
+    }
+    main_module._held_position_monitor_canonical_debt.clear()
+    monkeypatch.setattr(db_module, "get_trade_connection_read_only", ReadOnlyConnection)
+    monkeypatch.setattr(
+        cadence_module,
+        "collect_monitor_cadence_evidence",
+        lambda *_args, **_kwargs: evidence,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_exit_monitor_cycle",
+        lambda **_kwargs: pytest.fail("quote-only evidence must not run full-book recovery"),
+    )
+
+    try:
+        assert main_module._durable_held_position_monitor_recovery_cycle.__wrapped__() is True
+        assert not main_module._held_position_monitor_canonical_debt.is_set()
+    finally:
+        main_module._held_position_monitor_canonical_debt.clear()
+
+
 @pytest.mark.parametrize(
     "evidence",
     (

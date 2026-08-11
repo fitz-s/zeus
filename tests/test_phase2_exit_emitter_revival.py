@@ -1084,13 +1084,57 @@ class TestMonitorCadenceWatchdog:
             quote_fresh=False,
         )
 
-        record = _check_monitor_cadence_watchdog(conn, {})
+        summary: dict = {}
+        record = _check_monitor_cadence_watchdog(conn, summary)
 
-        assert record is not None
-        assert record["fresh_position_count"] == 0
-        assert record["stale_or_missing_position_count"] == 1
-        assert record["stale_or_missing_positions"][0]["issue"] == (
-            "monitor_clob_stale"
+        assert record is None
+        assert summary["monitor_cadence_stale_or_missing_position_count"] == 1
+        assert summary["monitor_cadence_blocking_stale_position_count"] == 0
+        assert summary["monitor_cadence_quote_only_stale_position_count"] == 1
+        assert summary["monitor_cadence_quote_only_stale_positions"][0][
+            "issue"
+        ] == "monitor_clob_stale"
+        assert "monitor_cadence_gap_flagged" not in summary
+
+    def test_quote_only_split_counts_are_exact_when_samples_are_limited(self):
+        from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+
+        conn = _db()
+        now = datetime.now(timezone.utc)
+        for index in range(3):
+            self._insert_monitor_refreshed(
+                conn,
+                now.isoformat(),
+                position_id=f"quote-only-{index}",
+                quote_fresh=False,
+            )
+        self._insert_monitor_refreshed(
+            conn,
+            now.isoformat(),
+            position_id="probability-invalid",
+            payload={
+                "last_monitor_prob_is_fresh": True,
+                "last_monitor_market_price": 0.5,
+                "last_monitor_market_price_is_fresh": True,
+            },
+        )
+
+        evidence = collect_monitor_cadence_evidence(
+            conn,
+            now=now,
+            max_age_seconds=240.0,
+            monitor_refreshed_only=True,
+            require_fresh_inputs=True,
+            sample_limit=1,
+        )
+
+        assert evidence["stale_or_missing_position_count"] == 4
+        assert evidence["quote_only_stale_position_count"] == 3
+        assert evidence["blocking_stale_position_count"] == 1
+        assert len(evidence["quote_only_stale_positions"]) == 1
+        assert len(evidence["blocking_stale_positions"]) == 1
+        assert evidence["blocking_stale_positions"][0]["issue"] == (
+            "monitor_probability_value_invalid"
         )
 
     def test_watchdog_rejects_fresh_inputs_when_exit_completion_publish_failed(self):

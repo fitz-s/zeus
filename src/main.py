@@ -296,6 +296,7 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
         # RESET: completion releases the bootstrap defer for this process;
         # process restart initializes the completion Event clear and re-proves it.
         from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+        from src.ops.monitor_cadence import monitor_cadence_blocking_evidence
         from src.state.db import get_trade_connection_read_only
 
         conn = get_trade_connection_read_only()
@@ -319,17 +320,25 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
             evidence.get("settlement_recoverable_position_count") or 0
         )
         stale = int(evidence.get("stale_or_missing_position_count") or 0)
+        cadence_groups = monitor_cadence_blocking_evidence(evidence)
+        blocking_stale = int(cadence_groups["blocking_stale_position_count"])
+        quote_only_stale = int(
+            cadence_groups["quote_only_stale_position_count"]
+        )
         required = open_count
-        covered = fresh + settlement_recoverable
-        if stale > 0 or covered < required:
+        covered = fresh + settlement_recoverable + quote_only_stale
+        if blocking_stale > 0 or covered < required:
             return False
         _held_position_monitor_bootstrap_complete.set()
         logger.info(
             "held-position monitor bootstrap coverage verified: "
-            "progress_positions=%d required_progress=%d open_positions=%d",
+            "progress_positions=%d required_progress=%d open_positions=%d "
+            "strict_stale=%d blocking_stale=%d",
             covered,
             required,
             open_count,
+            stale,
+            blocking_stale,
         )
         return True
     except Exception as exc:  # noqa: BLE001 - bootstrap remains fail-closed.
@@ -350,7 +359,10 @@ def _held_position_monitor_entry_block_reason() -> str | None:
     # recovery re-evaluates every current positive exposure and appends fresh
     # canonical MONITOR_REFRESHED evidence. RESET: zero overdue/future current
     # exposures automatically removes this reason on the next reactor cycle.
-    from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+    from src.ops.monitor_cadence import (
+        collect_monitor_cadence_evidence,
+        monitor_cadence_blocking_evidence,
+    )
     from src.state.db import get_trade_connection_read_only
 
     conn = None
@@ -377,7 +389,8 @@ def _held_position_monitor_entry_block_reason() -> str | None:
 
     if int(evidence.get("future_monitor_event_count") or 0) > 0:
         return "held_position_monitor_future_evidence"
-    if int(evidence.get("stale_or_missing_position_count") or 0) > 0:
+    cadence_groups = monitor_cadence_blocking_evidence(evidence)
+    if int(cadence_groups["blocking_stale_position_count"]) > 0:
         return "held_position_monitor_cadence_overdue"
     return None
 
@@ -8996,7 +9009,10 @@ def _durable_held_position_monitor_recovery_cycle() -> bool:
     independent executor retries the existing single-writer monitor lane.
     """
 
-    from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+    from src.ops.monitor_cadence import (
+        collect_monitor_cadence_evidence,
+        monitor_cadence_blocking_evidence,
+    )
     from src.state.db import get_trade_connection_read_only
 
     def _evidence() -> dict[str, Any]:
@@ -9014,7 +9030,8 @@ def _durable_held_position_monitor_recovery_cycle() -> bool:
             conn.close()
 
     overdue = _evidence()
-    overdue_count = int(overdue.get("stale_or_missing_position_count") or 0)
+    overdue_groups = monitor_cadence_blocking_evidence(overdue)
+    overdue_count = int(overdue_groups["blocking_stale_position_count"])
     future_count = int(overdue.get("future_monitor_event_count") or 0)
     if overdue_count <= 0 and future_count <= 0:
         _held_position_monitor_canonical_debt.clear()
@@ -9033,16 +9050,15 @@ def _durable_held_position_monitor_recovery_cycle() -> bool:
         "held-position monitor recovery debt: overdue=%d future=%d sample=%s",
         overdue_count,
         future_count,
-        overdue.get("stale_or_missing_positions")
+        overdue_groups["blocking_stale_positions"]
         or overdue.get("future_monitor_events")
         or [],
     )
     _exit_monitor_cycle(recovery_full_book=True)
 
     remaining = _evidence()
-    remaining_overdue = int(
-        remaining.get("stale_or_missing_position_count") or 0
-    )
+    remaining_groups = monitor_cadence_blocking_evidence(remaining)
+    remaining_overdue = int(remaining_groups["blocking_stale_position_count"])
     remaining_future = int(remaining.get("future_monitor_event_count") or 0)
     if remaining_overdue > 0 or remaining_future > 0:
         raise RuntimeError(

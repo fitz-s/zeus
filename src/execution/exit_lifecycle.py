@@ -11236,7 +11236,10 @@ def _check_monitor_cadence_watchdog(conn, summary: dict) -> dict | None:
     threshold_seconds = _EXIT_MONITOR_INTERVAL_SECONDS * _MONITOR_CADENCE_GAP_FACTOR
     now = datetime.now(timezone.utc)
     try:
-        from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+        from src.ops.monitor_cadence import (
+            collect_monitor_cadence_evidence,
+            monitor_cadence_blocking_evidence,
+        )
 
         evidence = collect_monitor_cadence_evidence(
             conn,
@@ -11251,7 +11254,9 @@ def _check_monitor_cadence_watchdog(conn, summary: dict) -> dict | None:
         logger.warning("MONITOR_CADENCE_WATCHDOG_READ_FAILED: %s", exc)
         return None
 
-    stale = list(evidence.get("stale_or_missing_positions") or [])
+    cadence_groups = monitor_cadence_blocking_evidence(evidence)
+    stale = list(cadence_groups["blocking_stale_positions"])
+    quote_only_stale = list(cadence_groups["quote_only_stale_positions"])
     future = list(evidence.get("future_monitor_events") or [])
     summary["monitor_cadence_open_position_count"] = int(
         evidence.get("open_position_count") or 0
@@ -11259,6 +11264,19 @@ def _check_monitor_cadence_watchdog(conn, summary: dict) -> dict | None:
     summary["monitor_cadence_fresh_position_count"] = int(
         evidence.get("fresh_position_count") or 0
     )
+    summary["monitor_cadence_stale_or_missing_position_count"] = int(
+        evidence.get("stale_or_missing_position_count") or 0
+    )
+    summary["monitor_cadence_stale_or_missing_positions"] = list(
+        evidence.get("stale_or_missing_positions") or []
+    )
+    summary["monitor_cadence_blocking_stale_position_count"] = int(
+        cadence_groups["blocking_stale_position_count"]
+    )
+    summary["monitor_cadence_quote_only_stale_position_count"] = int(
+        cadence_groups["quote_only_stale_position_count"]
+    )
+    summary["monitor_cadence_quote_only_stale_positions"] = quote_only_stale
     if not stale and not future:
         return None
 
@@ -11275,9 +11293,19 @@ def _check_monitor_cadence_watchdog(conn, summary: dict) -> dict | None:
         "open_position_count": int(evidence.get("open_position_count") or 0),
         "fresh_position_count": int(evidence.get("fresh_position_count") or 0),
         "stale_or_missing_position_count": int(
-            evidence.get("stale_or_missing_position_count") or 0
+            cadence_groups["blocking_stale_position_count"]
         ),
         "stale_or_missing_positions": stale,
+        "strict_stale_or_missing_position_count": int(
+            evidence.get("stale_or_missing_position_count") or 0
+        ),
+        "strict_stale_or_missing_positions": list(
+            evidence.get("stale_or_missing_positions") or []
+        ),
+        "quote_only_stale_position_count": int(
+            cadence_groups["quote_only_stale_position_count"]
+        ),
+        "quote_only_stale_positions": quote_only_stale,
         "future_monitor_event_count": int(
             evidence.get("future_monitor_event_count") or 0
         ),
