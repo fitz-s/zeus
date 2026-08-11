@@ -4142,6 +4142,89 @@ class TestQkernelMarketRelativeAlphaEvidence:
         }
         conn.close()
 
+    def test_current_day0_law_requires_sequential_market_advantage(self):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        rows = [
+            {
+                **self._row(
+                    f"day0-{index}",
+                    city=f"City {index}",
+                    q=0.90,
+                    outcome=1,
+                ),
+                "strategy": "day0_nowcast_entry",
+                "probability_semantics_revisions": (
+                    DAY0_PROBABILITY_SEMANTICS_REVISION,
+                ),
+            }
+            for index in range(2)
+        ]
+        conn = self._conn()
+        for index, row in enumerate(rows):
+            conn.execute(
+                "INSERT INTO position_current VALUES (?,?,?,?,?)",
+                (
+                    row["trade_id"],
+                    0.20,
+                    row["city"],
+                    f"2026-08-{9 + index:02d}",
+                    "high",
+                ),
+            )
+            conn.execute(
+                "INSERT INTO execution_fact VALUES (?,'entry','2026-08-10','filled',?,1)",
+                (row["trade_id"], 0.20),
+            )
+
+        evidence = riskguard_module._market_relative_alpha_evidence(
+            riskguard_module._bind_entry_market_benchmarks(conn, rows),
+            strategy_key="day0_nowcast_entry",
+            rejection_evalue=10.0,
+            as_of=datetime(2026, 8, 11, tzinfo=timezone.utc),
+        )
+
+        assert evidence["status"] == "validated"
+        assert evidence["validated"] is True
+        assert evidence["rejected"] is False
+        assert evidence["cohorts"][0]["independent_cluster_count"] == 2
+        assert evidence["cohorts"][0]["model_over_market_evalue"] > 20.0
+        binding = {
+            "status": "ok",
+            "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+        }
+        assert riskguard_module._day0_market_relative_alpha_gate_reason(
+            binding,
+            evidence,
+            required_evalue=10.0,
+        ) is None
+        conn.close()
+
+    def test_current_day0_without_capital_evidence_is_entry_gated(self):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        reason = riskguard_module._day0_market_relative_alpha_gate_reason(
+            {
+                "status": "ok",
+                "current_count": 0,
+                "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+            },
+            {
+                "status": "no_evidence",
+                "validated": False,
+                "rejected": False,
+                "cohorts": [],
+            },
+            required_evalue=10.0,
+        )
+
+        assert reason == (
+            "market_relative_alpha_unproven("
+            "status=no_evidence,model_evalue=0.0,required=10.0,clusters=0,"
+            "law=predicted_bin_ev_v1,"
+            f"revision={DAY0_PROBABILITY_SEMANTICS_REVISION})"
+        )
+
     def test_tick_persists_qkernel_gate_and_keeps_held_lanes_green(
         self,
         monkeypatch,

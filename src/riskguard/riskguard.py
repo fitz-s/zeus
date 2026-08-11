@@ -31,6 +31,7 @@ import shutil
 import sqlite3
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -2374,30 +2375,27 @@ def _bind_entry_market_benchmarks(
     return output
 
 
-def _qkernel_market_relative_alpha_evidence(
+def _market_relative_alpha_evidence(
     rows: list[dict],
     *,
+    strategy_key: str,
     rejection_evalue: float,
     window_days: float = 7.0,
     as_of: datetime | None = None,
 ) -> dict[str, object]:
-    """Test current qkernel claims against their executable market benchmark.
+    """Test one current probability law against its executable entry market.
 
     For one binary claim, ``market/model`` likelihood is a valid sequential
     e-value because both probabilities were fixed before the outcome. Sibling
     bins and same-day weather errors are correlated, so each target-date/metric
     cluster contributes only its largest ex-ante claimed edge. This is a
-    capital-alpha test, not a stop-loss: it asks whether the model that
-    authorized entry is beating the price paid.
-
-    SCOPE: only new ``forecast_qkernel_entry`` exposure via its durable strategy
-    gate; held monitoring, reduce-only SELL, reconciliation, and settlement run.
-    DRAIN: every RiskGuard tick rebinds immutable fills and settled outcomes.
-    RESET: replacement probability semantics supersede the rejected cohort, or
-    its bounded seven-day capital evidence ages out; a passing current cohort
-    expires the durable strategy action on the next tick.
+    capital-alpha test, not a stop-loss: model/market evidence proves admission;
+    market/model evidence rejects it. Both probabilities are immutable decision-
+    time witnesses, never reconstructed after settlement.
     """
 
+    if strategy_key not in {"forecast_qkernel_entry", "day0_nowcast_entry"}:
+        raise ValueError("market-relative alpha strategy is not canonical")
     if not math.isfinite(rejection_evalue) or rejection_evalue <= 1.0:
         raise ValueError("market-relative alpha rejection_evalue must exceed 1")
     if not math.isfinite(window_days) or window_days <= 0.0 or window_days > 7.0:
@@ -2410,7 +2408,7 @@ def _qkernel_market_relative_alpha_evidence(
     cohorts: dict[tuple[str, tuple[str, ...]], dict[tuple[str, str], dict]] = {}
     missing_benchmark_count = 0
     for row in rows:
-        if str(row.get("strategy") or "").strip() != "forecast_qkernel_entry":
+        if str(row.get("strategy") or "").strip() != strategy_key:
             continue
         if row.get("probability_semantics_ready") is not True:
             continue
@@ -2481,6 +2479,7 @@ def _qkernel_market_relative_alpha_evidence(
             market_probability = market if outcome else 1.0 - market
             log_model_over_market += math.log(model_probability / market_probability)
         market_over_model_evalue = math.exp(min(700.0, -log_model_over_market))
+        model_over_market_evalue = math.exp(min(700.0, log_model_over_market))
         cohort_evidence.append(
             {
                 "decision_law_id": decision_law_id,
@@ -2489,8 +2488,7 @@ def _qkernel_market_relative_alpha_evidence(
                 "candidate_count": sum(
                     1
                     for row in rows
-                    if str(row.get("strategy") or "").strip()
-                    == "forecast_qkernel_entry"
+                    if str(row.get("strategy") or "").strip() == strategy_key
                     and str(row.get("decision_law_id") or "").strip()
                     == decision_law_id
                     and tuple(sorted(row.get("probability_semantics_revisions") or ()))
@@ -2499,20 +2497,128 @@ def _qkernel_market_relative_alpha_evidence(
                 ),
                 "log_model_over_market": round(log_model_over_market, 6),
                 "market_over_model_evalue": round(market_over_model_evalue, 6),
+                "model_over_market_evalue": round(model_over_market_evalue, 6),
                 "rejected": market_over_model_evalue >= rejection_evalue,
+                "validated": model_over_market_evalue >= rejection_evalue,
             }
         )
 
     rejected = [cohort for cohort in cohort_evidence if cohort["rejected"]]
+    validated = [cohort for cohort in cohort_evidence if cohort["validated"]]
     return {
-        "status": "rejected" if rejected else ("ok" if cohort_evidence else "no_evidence"),
+        "strategy_key": strategy_key,
+        "status": (
+            "rejected"
+            if rejected
+            else (
+                "validated"
+                if validated
+                else ("inconclusive" if cohort_evidence else "no_evidence")
+            )
+        ),
         "rejection_evalue": rejection_evalue,
         "window_days": window_days,
         "evaluated_at": evaluated_at.isoformat(),
         "rejected": bool(rejected),
+        "validated": bool(validated) and not bool(rejected),
         "missing_benchmark_count": missing_benchmark_count,
         "cohorts": cohort_evidence,
     }
+
+
+def _qkernel_market_relative_alpha_evidence(
+    rows: list[dict],
+    *,
+    rejection_evalue: float,
+    window_days: float = 7.0,
+    as_of: datetime | None = None,
+) -> dict[str, object]:
+    """Compatibility projection for the rejection-only forecast entry gate."""
+
+    evidence = _market_relative_alpha_evidence(
+        rows,
+        strategy_key="forecast_qkernel_entry",
+        rejection_evalue=rejection_evalue,
+        window_days=window_days,
+        as_of=as_of,
+    )
+    cohorts = []
+    for cohort in evidence["cohorts"]:
+        projected = dict(cohort)
+        projected.pop("model_over_market_evalue", None)
+        projected.pop("validated", None)
+        cohorts.append(projected)
+    return {
+        "status": (
+            "rejected"
+            if evidence["rejected"]
+            else ("ok" if cohorts else "no_evidence")
+        ),
+        "rejection_evalue": evidence["rejection_evalue"],
+        "window_days": evidence["window_days"],
+        "evaluated_at": evidence["evaluated_at"],
+        "rejected": evidence["rejected"],
+        "missing_benchmark_count": evidence["missing_benchmark_count"],
+        "cohorts": cohorts,
+    }
+
+
+def _day0_market_relative_alpha_gate_reason(
+    semantics_binding: Mapping[str, object],
+    evidence: Mapping[str, object],
+    *,
+    required_evalue: float,
+) -> str | None:
+    """Require positive current-law capital evidence before Day0 admission.
+
+    INV-47 SCOPE: only new ``day0_nowcast_entry`` exposure; held monitoring,
+    current global SELL/HOLD comparison, settlement, and learning continue.
+    DRAIN: every RiskGuard tick binds immutable current-revision entry q,
+    executable entry price, and verified settlement by independent target-date/
+    metric cluster. RESET: the durable gate expires only when current-law
+    model/market sequential evidence reaches the configured e-value boundary
+    without a simultaneous market/model rejection. This is evidence admission,
+    never a historical-loss exit trigger.
+    """
+
+    if (
+        semantics_binding.get("status") != "ok"
+        or evidence.get("validated") is True
+    ):
+        return None
+    cohorts = [
+        cohort
+        for cohort in (evidence.get("cohorts") or [])
+        if isinstance(cohort, Mapping)
+    ]
+    strongest = (
+        max(
+            cohorts,
+            key=lambda cohort: float(cohort["model_over_market_evalue"]),
+        )
+        if cohorts
+        else None
+    )
+    model_evalue = (
+        float(strongest["model_over_market_evalue"])
+        if strongest is not None
+        else 0.0
+    )
+    clusters = (
+        int(strongest["independent_cluster_count"])
+        if strongest is not None
+        else 0
+    )
+    return (
+        "market_relative_alpha_unproven("
+        f"status={evidence.get('status')},"
+        f"model_evalue={model_evalue},"
+        f"required={required_evalue},"
+        f"clusters={clusters},"
+        "law=predicted_bin_ev_v1,"
+        f"revision={semantics_binding.get('current_revision')}"
+        ")"
+    )
 
 
 # Below this many settled observations a per-strategy Brier score is noise,
@@ -3404,14 +3510,32 @@ def _tick_once() -> RiskLevel:
 
         brier_metric_rows = _riskguard_brier_metric_rows(brier_candidate_rows)
         brier_actuating_rows = _riskguard_brier_actuating_rows(brier_metric_rows)
+        market_relative_alpha_evalue = float(
+            thresholds.get("market_relative_alpha_rejection_evalue", 10.0)
+        )
+        market_relative_alpha_window_days = float(
+            thresholds.get("market_relative_alpha_window_days", 7.0)
+        )
         market_relative_alpha_evidence = _qkernel_market_relative_alpha_evidence(
             brier_actuating_rows,
-            rejection_evalue=float(
-                thresholds.get("market_relative_alpha_rejection_evalue", 10.0)
-            ),
-            window_days=float(
-                thresholds.get("market_relative_alpha_window_days", 7.0)
-            ),
+            rejection_evalue=market_relative_alpha_evalue,
+            window_days=market_relative_alpha_window_days,
+        )
+        day0_market_relative_alpha_evidence = _market_relative_alpha_evidence(
+            brier_actuating_rows,
+            strategy_key="day0_nowcast_entry",
+            rejection_evalue=market_relative_alpha_evalue,
+            window_days=market_relative_alpha_window_days,
+        )
+        day0_market_relative_alpha_gate_reason = (
+            _day0_market_relative_alpha_gate_reason(
+                day0_probability_semantics_binding,
+                day0_market_relative_alpha_evidence,
+                required_evalue=market_relative_alpha_evalue,
+            )
+        )
+        day0_market_relative_alpha_gate_required = (
+            day0_market_relative_alpha_gate_reason is not None
         )
         probability_identity_ready_count = sum(
             bool(row.get("probability_identity_ready", False))
@@ -3528,6 +3652,12 @@ def _tick_once() -> RiskLevel:
         execution_observed = int(execution_overall.get("terminal_observed", 0) or 0)
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
+        if day0_market_relative_alpha_gate_reason is not None:
+            _append_reason(
+                recommended_strategy_gate_reasons,
+                "day0_nowcast_entry",
+                day0_market_relative_alpha_gate_reason,
+            )
         if market_relative_alpha_evidence["rejected"]:
             rejected_cohorts = [
                 cohort
@@ -3708,6 +3838,19 @@ def _tick_once() -> RiskLevel:
             )
             if not market_relative_alpha_gate_confirmation.get(
                 "forecast_qkernel_entry",
+                False,
+            ):
+                strategy_signal_level = RiskLevel.YELLOW
+        day0_market_relative_alpha_gate_confirmation: dict[str, bool] = {}
+        if day0_market_relative_alpha_gate_required:
+            day0_market_relative_alpha_gate_confirmation = (
+                _confirm_active_durable_strategy_gates(
+                    zeus_conn,
+                    ["day0_nowcast_entry"],
+                )
+            )
+            if not day0_market_relative_alpha_gate_confirmation.get(
+                "day0_nowcast_entry",
                 False,
             ):
                 strategy_signal_level = RiskLevel.YELLOW
@@ -3981,6 +4124,15 @@ def _tick_once() -> RiskLevel:
                 "market_relative_alpha_evidence": market_relative_alpha_evidence,
                 "market_relative_alpha_gate_confirmation": (
                     market_relative_alpha_gate_confirmation
+                ),
+                "day0_market_relative_alpha_evidence": (
+                    day0_market_relative_alpha_evidence
+                ),
+                "day0_market_relative_alpha_gate_required": (
+                    day0_market_relative_alpha_gate_required
+                ),
+                "day0_market_relative_alpha_gate_confirmation": (
+                    day0_market_relative_alpha_gate_confirmation
                 ),
                 "settlement_quality_level": settlement_quality_level.value,
                 "execution_quality_level": execution_quality_level.value,
