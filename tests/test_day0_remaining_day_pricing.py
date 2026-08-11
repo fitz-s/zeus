@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-10
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Last reused or audited: 2026-08-11
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-11; last_reused=2026-08-11
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -1752,6 +1752,186 @@ class TestRemainingDayMembers:
         assert point.sum() == pytest.approx(1.0)
         assert payload["_edli_day0_peak_set_mixture_basis"] == (
             "peak_set_atom_plus_truncated_remaining_path_v1"
+        )
+
+    def test_fast_residual_frontier_moves_peak_atom_before_slow_wu_catches_up(self):
+        """Munich antibody: a 99% fast 31C scenario cannot leave q at 30C."""
+        import hashlib
+
+        import src.engine.event_reactor_adapter as era
+        from src.config import runtime_cities_by_name
+        from src.contracts.settlement_semantics import SettlementSemantics
+
+        observed_at = "2026-08-11T13:53:33.843000+00:00"
+        residual_weights = ((0.0, 0.9898621721893085),)
+        identity = {
+            "semantics_revision": "same_station_causal_residual_v1",
+            "station_id": "EDDM",
+            "settlement_channel": "wu_icao_history",
+            "fast_channel": "aviationweather_metar",
+            "unit": "C",
+            "as_of": observed_at,
+            "window_start": "2026-08-04T13:53:33.843000+00:00",
+            "matched_pairs": 294,
+            "residual_weights_c": residual_weights,
+            "unknown_weight": 0.010137827810691391,
+            "settlement_extreme_c": 30.0,
+        }
+        identity_hash = hashlib.sha256(
+            json.dumps(
+                identity,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        conditioning = {
+            "active": True,
+            "metric": "high",
+            "observed_extreme_c": 31.0,
+            "source": "wu_api+same_station_fast_tail",
+            "observation_time": observed_at,
+            "sample_count": 32,
+            "unit": "C",
+            "support_truncation": False,
+            "fast_residual_likelihood": {
+                **identity,
+                "identity_hash": identity_hash,
+                "residual_weights_c": [
+                    {"residual_c": 0.0, "weight": 0.9898621721893085}
+                ],
+                "scenario_weights": [
+                    {
+                        "observed_bound_c": 30.0,
+                        "weight": 0.010137827810691391,
+                    },
+                    {
+                        "observed_bound_c": 31.0,
+                        "weight": 0.9898621721893085,
+                    },
+                ],
+                "support_truncation": False,
+            },
+        }
+        payload = {
+            "metric": "high",
+            "rounded_value": 30,
+            "high_so_far": 30.0,
+            "settlement_source": "wu_icao_history",
+            "_edli_day0_probability_boundary_native": 31.0,
+            "_edli_day0_peak_set_probability": 0.95,
+            "_edli_day0_peak_set_sample_count": 70,
+            "_edli_day0_peak_set_probability_basis": (
+                "monthly_empirical_jeffreys_v1"
+            ),
+            "_edli_global_day0_binding": {
+                "statistical_probability_conditioning": conditioning,
+            },
+        }
+        city = runtime_cities_by_name()["Munich"]
+        point = era._day0_remaining_p_raw_vector(
+            np.array([30.0, 30.0, 30.0], dtype=float),
+            city=city,
+            settlement_semantics=SettlementSemantics.for_city(city),
+            bins=[
+                Bin(None, 30, "C", "30C or below"),
+                Bin(31, 31, "C", "31C"),
+                Bin(32, None, "C", "32C or above"),
+            ],
+            payload=payload,
+            extra_member_sigma=0.0,
+        )
+
+        assert point.sum() == pytest.approx(1.0)
+        assert point[0] < 0.02
+        assert point[1] > 0.90
+        assert payload["_edli_day0_fast_residual_boundary_scenarios_native"] == [
+            {
+                "observed_bound_native": 30.0,
+                "weight": pytest.approx(0.010137827810691391),
+            },
+            {
+                "observed_bound_native": 31.0,
+                "weight": pytest.approx(0.9898621721893085),
+            },
+        ]
+
+    def test_fast_residual_bootstrap_selects_one_coherent_boundary_per_row(self):
+        import src.engine.event_reactor_adapter as era
+
+        bins = [
+            Bin(None, 30, "C", "30C or below"),
+            Bin(31, 31, "C", "31C"),
+            Bin(32, None, "C", "32C or above"),
+        ]
+        analysis = SimpleNamespace(
+            _rng=np.random.default_rng(20260811),
+            _settle=lambda values: np.rint(values),
+            bins=bins,
+            p_cal=np.array([0.01, 0.94, 0.05]),
+        )
+        sampler = era._Day0BootstrapSampler(
+            members=np.array([30.0, 30.0, 30.0]),
+            rounded=31.0,
+            boundary_survival_probability=1.0,
+            metric="high",
+            sigma=0.15,
+            mask=np.ones(3),
+            peak_set_probability=0.95,
+            peak_set_atom=31.0,
+            boundary_scenarios=((30.0, 0.01), (31.0, 0.99)),
+        )
+
+        samples = sampler.sample_matrix(
+            analysis,
+            n_samples=2_000,
+            n_members=50,
+        )
+        slow_rows = samples[:, 0] > 0.5
+
+        assert slow_rows.mean() == pytest.approx(0.01, abs=0.01)
+        assert np.median(samples[~slow_rows, 1]) > 0.90
+        assert np.allclose(samples.sum(axis=1), 1.0)
+
+    def test_fast_residual_low_frontier_uses_the_same_boundary_mixture(
+        self,
+        monkeypatch,
+    ):
+        import src.engine.event_reactor_adapter as era
+
+        conditioning = {
+            "fast_residual_likelihood": {
+                "scenario_weights": [
+                    {"observed_bound_c": 10.0, "weight": 0.1},
+                    {"observed_bound_c": 9.0, "weight": 0.9},
+                ]
+            }
+        }
+        monkeypatch.setattr(
+            era,
+            "_validated_fast_residual_day0_conditioning",
+            lambda candidate: conditioning if candidate is conditioning else None,
+        )
+        payload = {
+            "metric": "low",
+            "rounded_value": 10.0,
+            "low_so_far": 10.0,
+            "_edli_day0_probability_boundary_native": 9.0,
+            "_edli_global_day0_binding": {
+                "statistical_probability_conditioning": conditioning,
+            },
+        }
+
+        scenarios = era._day0_probability_boundary_scenarios_native(
+            payload,
+            metric="low",
+            unit="C",
+        )
+
+        assert np.asarray(scenarios) == pytest.approx(
+            np.asarray(((9.0, 0.9), (10.0, 0.1)))
+        )
+        assert payload["_edli_day0_fast_residual_probability_update"] == (
+            "joint_point_and_bootstrap_boundary_mixture_v1"
         )
 
     def test_peak_set_mixture_requires_finite_empirical_evidence(self):

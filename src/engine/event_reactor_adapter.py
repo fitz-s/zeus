@@ -32797,7 +32797,7 @@ _GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS = (
     "day0_deterministic_bin_payoff_v1"
 )
 _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
-    "current_coherent_day0_peak_state_remaining_model_bootstrap_v4"
+    "current_coherent_day0_fast_residual_peak_state_remaining_model_bootstrap_v5"
 )
 _GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_BAND_BASIS = (
     "current_coherent_day0_conditioned_replacement_simplex_v1"
@@ -36963,6 +36963,7 @@ class _Day0BootstrapSampler:
     mask: np.ndarray
     peak_set_probability: float | None = None
     peak_set_atom: float | None = None
+    boundary_scenarios: tuple[tuple[float, float], ...] = ()
 
     def _sample_member_draws(
         self,
@@ -36976,10 +36977,22 @@ class _Day0BootstrapSampler:
             members_per_row,
         )
         means = self.members[idx]
+        boundary = self.rounded
+        if self.boundary_scenarios:
+            scenario = int(
+                analysis._rng.choice(
+                    len(self.boundary_scenarios),
+                    p=[weight for _bound, weight in self.boundary_scenarios],
+                )
+            )
+            boundary = self.boundary_scenarios[scenario][0]
         if self.peak_set_probability is not None:
+            peak_set_atom = (
+                boundary if self.boundary_scenarios else self.peak_set_atom
+            )
             if (
-                self.rounded is None
-                or self.peak_set_atom is None
+                boundary is None
+                or peak_set_atom is None
                 or self.boundary_survival_probability < 1.0
             ):
                 raise ValueError("DAY0_PEAK_STATE_BOUNDARY_INVALID")
@@ -36987,8 +37000,8 @@ class _Day0BootstrapSampler:
                 rng=analysis._rng,
                 member_means=means,
                 sigma=self.sigma,
-                movement_boundary=self.rounded,
-                peak_set_atom=self.peak_set_atom,
+                movement_boundary=boundary,
+                peak_set_atom=peak_set_atom,
                 metric=self.metric,
                 peak_set_probability=self.peak_set_probability,
             )
@@ -36997,15 +37010,21 @@ class _Day0BootstrapSampler:
             self.sigma,
             members_per_row,
         )
-        return self._apply_probability_boundary(analysis, draws)
+        return self._apply_probability_boundary(analysis, draws, boundary=boundary)
 
-    def _apply_probability_boundary(self, analysis, draws: np.ndarray) -> np.ndarray:
-        if self.rounded is None:
+    def _apply_probability_boundary(
+        self,
+        analysis,
+        draws: np.ndarray,
+        *,
+        boundary: float | None,
+    ) -> np.ndarray:
+        if boundary is None:
             return draws
         bounded = (
-            np.maximum(draws, self.rounded)
+            np.maximum(draws, boundary)
             if self.metric == "high"
-            else np.minimum(draws, self.rounded)
+            else np.minimum(draws, boundary)
         )
         if self.boundary_survival_probability >= 1.0:
             return bounded
@@ -37126,6 +37145,11 @@ def _make_day0_bootstrap_sampler(
         if metric not in {"high", "low"}:
             raise ValueError(f"unsupported day0 metric for bootstrap: {metric!r}")
         finality = day0_evidence_finality(payload)
+        boundary_scenarios = _day0_probability_boundary_scenarios_native(
+            payload,
+            metric=metric,
+            unit=unit,
+        )
         if finality in DAY0_ABSORBING_FINALITIES:
             probability_boundary = _day0_probability_boundary_native(
                 payload,
@@ -37170,7 +37194,7 @@ def _make_day0_bootstrap_sampler(
     )
     peak_set_atom = None
     if peak_set_probability is not None:
-        peak_set_atom = _optional_float(payload.get("rounded_value"))
+        peak_set_atom = probability_boundary
         if peak_set_atom is None:
             raise ValueError("DAY0_PEAK_STATE_SETTLEMENT_ATOM_MISSING")
     return _Day0BootstrapSampler(
@@ -37182,6 +37206,7 @@ def _make_day0_bootstrap_sampler(
         mask=np.asarray(mask, dtype=float),
         peak_set_probability=peak_set_probability,
         peak_set_atom=peak_set_atom,
+        boundary_scenarios=boundary_scenarios,
     )
 
 
@@ -38283,6 +38308,14 @@ def _day0_remaining_p_raw_vector(
     metric = str(
         payload.get("metric") or payload.get("temperature_metric") or ""
     ).strip().lower()
+    boundary_scenarios = _day0_probability_boundary_scenarios_native(
+        payload,
+        metric=metric,
+        unit=str(getattr(city, "settlement_unit", "") or ""),
+    )
+    fast_residual_mixture = (
+        "_edli_day0_fast_residual_probability_update" in payload
+    )
     probability_boundary = _day0_probability_boundary_native(payload, metric)
     from src.events.day0_authority import day0_evidence_finality
 
@@ -38325,6 +38358,7 @@ def _day0_remaining_p_raw_vector(
         "city": str(getattr(city, "name", "") or ""),
         "metric": metric,
         "probability_boundary": probability_boundary,
+        "probability_boundary_scenarios": boundary_scenarios,
         "future_extremes": sorted(float(v) for v in members.tolist()),
         "sigma": sigma,
         "n_mc": n_mc,
@@ -38335,55 +38369,67 @@ def _day0_remaining_p_raw_vector(
             boundary_survival_probability
         )
     seed = int(stable_hash(seed_payload)[:16], 16)
-    rng = np.random.default_rng(seed)
     peak_set_probability = _day0_peak_set_probability_for_distribution(
         payload=payload,
         metric=metric,
     )
+    probability_rows: list[np.ndarray] = []
+    for scenario_boundary, scenario_weight in boundary_scenarios:
+        scenario_rng = np.random.default_rng(seed)
+        if peak_set_probability is not None:
+            if boundary_survival_probability < 1.0:
+                raise ValueError("DAY0_PEAK_STATE_PROVISIONAL_BOUNDARY_INVALID")
+            final = _sample_day0_extreme_with_peak_state(
+                rng=scenario_rng,
+                member_means=np.broadcast_to(members, (n_mc, members.size)),
+                sigma=sigma,
+                movement_boundary=scenario_boundary,
+                peak_set_atom=scenario_boundary,
+                metric=metric,
+                peak_set_probability=peak_set_probability,
+            )
+        else:
+            future = members + scenario_rng.normal(
+                0.0,
+                sigma,
+                (n_mc, members.size),
+            )
+            bounded = (
+                np.maximum(future, scenario_boundary)
+                if metric == "high"
+                else np.minimum(future, scenario_boundary)
+            )
+            if boundary_survival_probability < 1.0:
+                survives = (
+                    scenario_rng.random((n_mc, members.size))
+                    < boundary_survival_probability
+                )
+                final = np.where(survives, bounded, future)
+            else:
+                final = bounded
+        measured = settlement_semantics.round_values(final)
+        row = bin_counts_from_array(measured.reshape(-1), bins).astype(float)
+        row /= float(n_mc * members.size)
+        probability_rows.append(float(scenario_weight) * row)
+    probabilities = np.sum(probability_rows, axis=0)
     if peak_set_probability is not None:
-        if boundary_survival_probability < 1.0:
-            raise ValueError("DAY0_PEAK_STATE_PROVISIONAL_BOUNDARY_INVALID")
-        peak_set_atom = _optional_float(payload.get("rounded_value"))
-        if peak_set_atom is None:
-            raise ValueError("DAY0_PEAK_STATE_SETTLEMENT_ATOM_MISSING")
-        final = _sample_day0_extreme_with_peak_state(
-            rng=rng,
-            member_means=np.broadcast_to(members, (n_mc, members.size)),
-            sigma=sigma,
-            movement_boundary=probability_boundary,
-            peak_set_atom=peak_set_atom,
-            metric=metric,
-            peak_set_probability=peak_set_probability,
-        )
         payload["_edli_day0_peak_set_mixture_basis"] = (
             _DAY0_PEAK_SET_MIXTURE_BASIS
         )
-    else:
-        future = members + rng.normal(0.0, sigma, (n_mc, members.size))
-        bounded = (
-            np.maximum(future, probability_boundary)
-            if metric == "high"
-            else np.minimum(future, probability_boundary)
-        )
-        if boundary_survival_probability < 1.0:
-            survives = (
-                rng.random((n_mc, members.size))
-                < boundary_survival_probability
-            )
-            final = np.where(survives, bounded, future)
-        else:
-            final = bounded
-    measured = settlement_semantics.round_values(final)
-    probabilities = bin_counts_from_array(measured.reshape(-1), bins).astype(float)
-    probabilities /= float(n_mc * members.size)
     total = float(probabilities.sum())
     if total > 0.0:
         probabilities /= total
     payload["_edli_day0_probability_operator"] = (
-        "peak_set_atom_plus_truncated_remaining_path_v1"
+        (
+            "fast_residual_boundary_mixture_peak_set_plus_remaining_path_v1"
+            if fast_residual_mixture
+            else "peak_set_atom_plus_truncated_remaining_path_v1"
+        )
         if peak_set_probability is not None
         else (
-            "revision_mixture_extreme_observed_then_noisy_future_v2"
+            "fast_residual_boundary_mixture_extreme_then_noisy_future_v1"
+            if fast_residual_mixture
+            else "revision_mixture_extreme_observed_then_noisy_future_v2"
             if boundary_survival_probability < 1.0
             else "extreme_observed_then_noisy_future_v1"
         )
@@ -38679,6 +38725,104 @@ def _day0_probability_boundary_native(
     if metric == "low" and physical_boundary <= settlement_observed + 1e-9:
         return physical_boundary
     return settlement_boundary
+
+
+def _day0_probability_boundary_scenarios_native(
+    payload: Mapping[str, object],
+    *,
+    metric: str,
+    unit: str,
+) -> tuple[tuple[float, float], ...]:
+    """Return the current fast-residual boundary mixture in settlement units.
+
+    A same-station fast observation is probability evidence, not a second
+    settlement oracle.  Its residual scenarios therefore condition the Day0
+    point distribution and each coherent bootstrap row.  Treating the faster
+    physical frontier as a deterministic boundary while leaving the peak-set
+    atom on the slower WU value creates the impossible state that lost Munich:
+    the receipt knew 31C, but 95% of q remained an atom at 30C.
+    """
+
+    normalized_metric = str(metric or "").strip().lower()
+    normalized_unit = str(unit or "").strip().upper()
+    if normalized_metric not in {"high", "low"} or normalized_unit not in {
+        "C",
+        "F",
+    }:
+        raise ValueError("DAY0_FAST_RESIDUAL_BOUNDARY_IDENTITY_INVALID")
+    default_boundary = _day0_probability_boundary_native(
+        payload,
+        normalized_metric,
+    )
+    if default_boundary is None:
+        raise ValueError("DAY0_FAST_RESIDUAL_BOUNDARY_MISSING")
+    binding = payload.get("_edli_global_day0_binding")
+    conditioning = (
+        binding.get("statistical_probability_conditioning")
+        if isinstance(binding, Mapping)
+        else None
+    )
+    validated = _validated_fast_residual_day0_conditioning(conditioning)
+    if validated is None:
+        return ((float(default_boundary), 1.0),)
+    likelihood = validated["fast_residual_likelihood"]
+    if not isinstance(likelihood, Mapping):
+        raise ValueError("DAY0_FAST_RESIDUAL_BOUNDARY_IDENTITY_INVALID")
+    scenario_rows = likelihood.get("scenario_weights")
+    if not isinstance(scenario_rows, (list, tuple)) or not scenario_rows:
+        raise ValueError("DAY0_FAST_RESIDUAL_BOUNDARY_IDENTITY_INVALID")
+    settlement_boundary = _observed_day0_extreme_native(
+        payload,
+        normalized_metric,
+    )
+    if settlement_boundary is None:
+        settlement_boundary = _optional_float(payload.get("rounded_value"))
+    if settlement_boundary is None:
+        raise ValueError("DAY0_FAST_RESIDUAL_SETTLEMENT_BOUNDARY_MISSING")
+
+    weights_by_boundary: dict[float, float] = {}
+    for row in scenario_rows:
+        if not isinstance(row, Mapping):
+            raise ValueError("DAY0_FAST_RESIDUAL_BOUNDARY_IDENTITY_INVALID")
+        raw_c = row.get("observed_bound_c")
+        boundary = (
+            float(settlement_boundary)
+            if raw_c is None
+            else (
+                float(raw_c)
+                if normalized_unit == "C"
+                else float(raw_c) * 9.0 / 5.0 + 32.0
+            )
+        )
+        boundary = (
+            max(float(settlement_boundary), boundary)
+            if normalized_metric == "high"
+            else min(float(settlement_boundary), boundary)
+        )
+        weight = float(row["weight"])
+        weights_by_boundary[boundary] = (
+            weights_by_boundary.get(boundary, 0.0) + weight
+        )
+    total = sum(weights_by_boundary.values())
+    if not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError("DAY0_FAST_RESIDUAL_BOUNDARY_WEIGHTS_INVALID")
+    scenarios = tuple(sorted(weights_by_boundary.items()))
+    if not scenarios or any(
+        not math.isfinite(boundary)
+        or not math.isfinite(weight)
+        or weight < 0.0
+        for boundary, weight in scenarios
+    ):
+        raise ValueError("DAY0_FAST_RESIDUAL_BOUNDARY_IDENTITY_INVALID")
+    if isinstance(payload, dict):
+        payload["_edli_day0_fast_residual_boundary_scenarios_native"] = [
+            {"observed_bound_native": boundary, "weight": weight}
+            for boundary, weight in scenarios
+        ]
+        payload["_edli_day0_fast_residual_probability_update"] = (
+            "joint_point_and_bootstrap_boundary_mixture_v1"
+        )
+    return scenarios
 
 
 def _settled_day0_extreme(
