@@ -2524,6 +2524,112 @@ def test_global_taker_buy_size_does_not_exceed_current_precliff_liquidation_dept
     assert Decimal("20") <= decision.shares <= Decimal("25")
 
 
+def test_statistical_candidate_cannot_forge_exact_payoff_settlement_lock():
+    candidate = _global_candidate(
+        candidate_id="forged-exact-lock",
+        family="forged-exact-lock-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "100"),),
+        min_order="5",
+    )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.05"), size=Decimal("100")),
+        ),
+        settlement_locked_exact_payoff=True,
+    )
+
+    decision = _global_select((candidate,), cap="5")
+
+    assert decision.candidate is None
+    assert decision.rejection_reasons[candidate.candidate_id] == "DEPTH_INFEASIBLE"
+
+
+@pytest.mark.parametrize(
+    ("exact_yes_payoff", "side"),
+    ((1, "YES"), (0, "NO")),
+)
+def test_exact_payoff_taker_can_lock_to_settlement_without_exit_depth(
+    exact_yes_payoff,
+    side,
+):
+    captured_at = _DECISION_AT - timedelta(milliseconds=100)
+    family = "exact-settlement-lock-family"
+    binding = S.OutcomeTokenBinding(
+        bin_id="winner-bin",
+        condition_id="winner-condition",
+        yes_token_id="winner-yes",
+        no_token_id="winner-no",
+    )
+    other = S.OutcomeTokenBinding(
+        bin_id="unknown-bin",
+        condition_id="unknown-condition",
+        yes_token_id="unknown-yes",
+        no_token_id="unknown-no",
+    )
+    fields = {
+        "family_key": family,
+        "bindings": (binding, other),
+        "exact_yes_payoffs": ((binding.bin_id, exact_yes_payoff),),
+        "q_version": "day0-exact-q-v1",
+        "resolution_identity": "day0-resolution",
+        "topology_identity": "day0-topology",
+        "posterior_identity_hash": "day0-payoff-state",
+        "source_truth_identity": "day0-observation-fact",
+        "authority_certificate_hash": "day0-certificate",
+        "band_alpha": ALPHA,
+        "band_basis": "day0_deterministic_bin_payoff_v1",
+        "captured_at_utc": captured_at,
+    }
+    witness = S.DeterministicBinPayoffWitness(
+        **fields,
+        max_age=timedelta(seconds=30),
+        witness_identity=S.deterministic_bin_payoff_witness_identity(**fields),
+    )
+    native = SimpleNamespace(
+        no_trade_reason=None,
+        executable_cost_curve=_global_curve(
+            side=side,
+            token=(
+                binding.yes_token_id if side == "YES" else binding.no_token_id
+            ),
+            levels=(("0.80", "100"),),
+            min_order="5",
+        ),
+        family_key=family,
+        bin_id=binding.bin_id,
+        condition_id=binding.condition_id,
+        side=side,
+        token_id=(binding.yes_token_id if side == "YES" else binding.no_token_id),
+        hypothesis_id="buy-exact-winner",
+    )
+
+    candidate = S.global_candidate_from_native(
+        native,
+        probability_witness=witness,
+        ledger_snapshot_id="ledger-current",
+        book_captured_at_utc=captured_at,
+        neg_risk=False,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.05"), size=Decimal("100")),
+        ),
+    )
+    decision = _global_select(
+        (candidate,),
+        probability_witnesses={family: witness},
+        cap="5",
+    )
+
+    assert candidate.settlement_locked_exact_payoff is True
+    assert candidate.eligibility_reason is None
+    assert decision.candidate is candidate
+    assert decision.shares >= Decimal("5")
+    assert decision.expected_terminal_wealth is not None
+    assert decision.expected_terminal_wealth.win_probability_mean == 1.0
+
+
 def test_current_precliff_capacity_counts_all_positive_depth_above_floor():
     levels = (
         BookLevel(price=Decimal("0.05"), size=Decimal("100")),

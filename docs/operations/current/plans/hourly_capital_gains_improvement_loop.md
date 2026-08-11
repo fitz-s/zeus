@@ -5,6 +5,13 @@
 
 ## 现状(forward)
 
+### 2026-08-11 18:35 CDT tick — 保留 born-unexitable 防线；仅让 absorbing exact winner 持有到 1
+- **当前真相:** `d55ac5b99` 已恢复 full global auction；新 SHA cohort 尚无 venue command / settlement，realized PnL 仍为 `$0.00`，不得声称资本利得已证明。最新完整 receipt 的可评分 BUY frontier 与全部 held SELL counterfactual 均为负，因此 CASH 是当前已评分集合的正确动作。
+- **precliff 核验:** 911 个被 `CURRENT_PRECLIFF_LIQUIDATION_CAPACITY_MISSING` 拦截的 exact token 重新抓取完整 CLOB depth；910 个仍低于最小订单退出容量，908 个容量为零。唯一短暂反例的 `0.06 x 100` bid 随后消失，market-channel 与 REST 再次一致。普通 statistical BUY 的 precliff gate 属实，不能为增加订单而删除。
+- **窄缺口:** 原 gate 同时拒绝 typed `DeterministicBinPayoffWitness` 已证明当前所买 side terminal payoff 恰为 `1` 的立即成交。这不是 statistical longshot：其正确动作是 settlement-locked hold，而不是低价 SELL；要求当前退出盘反而违反 absorbing hard-fact 与“持有到 1”语义。
+- **最小修复:** 仅 `TAKER_LIMIT + DeterministicBinPayoffWitness + exact selected-side payoff=1` 可绕过 precliff sizing/JIT gate。solver 从实际 witness 类型重新证明，JIT 再要求 candidate/current marker 一致、`SETTLEMENT_LOCKED_BUY`、`win_probability_mean=1`、`loss_probability_mean=0`。maker、普通 statistical、unknown deterministic sibling、非 exact decision 全部保留原 gate；伪造 marker 的 statistical candidate 仍 `DEPTH_INFEASIBLE`。
+- **验证:** solver 全集 `209 passed`；新/原 precliff + JIT 抗体 `16 passed`；multiwinner `8 passed`；worktree code + live canonical state 的 read-only boot validation `ALL PASS`。完整 integration 的 5 个失败与 live 基线逐项相同，均为此前 precliff/price-band 后未更新的旧 fixtures，不归因于本 diff；不把部分覆盖称为全绿。尚未落地 live。
+
 ### 2026-08-11 18:20 CDT tick — stale held truth 只封 BUY，不再饿死全局 SELL/HOLD/CASH 竞价
 - **实时反例:** main daemon 与 held monitor 仍活，但 global-auction receipt 在 `2026-08-11T22:56:24Z` 后停止；同期 full-book monitor 因 3 个 `monitor_probability_stale` 持仓反复产生 canonical debt。代码把本应仅阻止新 BUY 的 debt 同时用于 reactor admission/preemption，导致 stale probability 无法自愈时整个 global auction 永久停摆，连可减仓 SELL 和 CASH 比较也不能运行。
 - **最小修复:** canonical/bootstrap monitor debt 继续作为 `entry_submit_block_reason` 冻结 BUY；实际 monitor handoff、periodic fairness debt 和 capital-recovery handoff 仍可抢占 reactor。已经 entry-blocked 的 cycle 不再被同一 canonical debt 二次取消，因此 SELL/HOLD/CASH 保持统一比较。若别的 monitor 已占 single-writer claim，选中的 Day0 wake 保持 durable/unacked 并只让出一个 queue turn，使 exact SELL 或独立 material wake 可并发推进；stale 持仓仍不得提供 BUY authority。

@@ -1876,6 +1876,7 @@ class GlobalSingleOrderCandidate:
     resolution_identity: str
     neg_risk: bool
     native_bid_levels: tuple[BookLevel, ...] = ()
+    settlement_locked_exact_payoff: bool = False
     execution_mode: Literal["TAKER_LIMIT", "MAKER_REST"] = "TAKER_LIMIT"
     proposal_cost_curve: ExecutableCostCurve | None = None
     fill_probability: float = 1.0
@@ -1894,6 +1895,10 @@ class GlobalSingleOrderCandidate:
     def __post_init__(self) -> None:
         if self.side not in {"YES", "NO"}:
             raise ValueError(f"unsupported native side: {self.side!r}")
+        if type(self.settlement_locked_exact_payoff) is not bool:
+            raise ValueError("candidate exact-payoff settlement lock must be bool")
+        if self.settlement_locked_exact_payoff and self.execution_mode != "TAKER_LIMIT":
+            raise ValueError("exact-payoff settlement lock requires immediate taker mode")
         if not all(
             str(value).strip()
             for value in (
@@ -2120,9 +2125,18 @@ def global_candidates_from_native(
     ):
         eligibility_reason = "DETERMINISTIC_PAYOFF_NOT_PROVED"
     bids = tuple(native_bid_levels)
+    exact_yes_payoff = (
+        probability_witness.exact_yes_payoff(binding.bin_id)
+        if isinstance(probability_witness, DeterministicBinPayoffWitness)
+        else None
+    )
+    settlement_locked_exact_payoff = exact_yes_payoff is not None and (
+        exact_yes_payoff if native.side == "YES" else 1 - exact_yes_payoff
+    ) == 1
     taker_eligibility_reason = eligibility_reason
     if (
         taker_eligibility_reason is None
+        and not settlement_locked_exact_payoff
         and current_precliff_liquidation_capacity(bids)
         < Decimal(curve.min_order_size)
     ):
@@ -2153,6 +2167,7 @@ def global_candidates_from_native(
             proposal_identity=executable_curve_identity(curve),
         ),
         eligibility_reason=taker_eligibility_reason,
+        settlement_locked_exact_payoff=settlement_locked_exact_payoff,
         **common,
     )
     if include_maker:
@@ -5261,6 +5276,7 @@ def _score_global_single_order(
     fractional_kelly_multiplier: Decimal = Decimal("1"),
     payoff_q_lcb: float | None = None,
     current_token_shares: Decimal = Decimal("0"),
+    settlement_locked_exact_payoff: bool = False,
 ) -> GlobalSingleOrderDecision:
     """Find the executable fractional-Kelly optimum for one candidate.
 
@@ -5279,6 +5295,8 @@ def _score_global_single_order(
         raise ValueError("fractional Kelly multiplier must be finite and in (0, 1]")
     if not held_shares.is_finite() or held_shares < 0:
         raise ValueError("current token shares must be finite and non-negative")
+    if type(settlement_locked_exact_payoff) is not bool:
+        raise ValueError("exact-payoff settlement-lock authority must be bool")
     affordability_limit = min(
         Decimal(spendable_cash_usd),
         Decimal(wealth_floor_usd) * (Decimal("1") - Decimal(str(_WEALTH_MARGIN))),
@@ -5295,7 +5313,10 @@ def _score_global_single_order(
         candidate.economic_cost_curve,
         spend_limit_usd=optimization_limit,
     )
-    if candidate.execution_mode == "TAKER_LIMIT":
+    if (
+        candidate.execution_mode == "TAKER_LIMIT"
+        and not settlement_locked_exact_payoff
+    ):
         liquidation_capacity = current_precliff_liquidation_capacity(
             candidate.native_bid_levels
         )
@@ -5715,6 +5736,7 @@ def _score_global_single_order_buy_expected(
     capital_limit_usd: Decimal,
     fractional_kelly_multiplier: Decimal,
     current_token_shares: Decimal,
+    settlement_locked_exact_payoff: bool = False,
 ) -> GlobalSingleOrderDecision:
     """Size one BUY on posterior-mean expected log wealth.
 
@@ -5743,6 +5765,7 @@ def _score_global_single_order_buy_expected(
         fractional_kelly_multiplier=fractional_kelly_multiplier,
         payoff_q_lcb=mean_q,
         current_token_shares=current_token_shares,
+        settlement_locked_exact_payoff=settlement_locked_exact_payoff,
     )
     reason_map = {
         "NON_POSITIVE_ROBUST_OBJECTIVE": "NON_POSITIVE_EXPECTED_OBJECTIVE",
@@ -7424,6 +7447,14 @@ def select_global_single_order(
             capital_limit_usd=candidate_capital_limit,
             fractional_kelly_multiplier=multiplier,
             current_token_shares=candidate_endowment.current_token_shares,
+            settlement_locked_exact_payoff=(
+                candidate.settlement_locked_exact_payoff
+                and isinstance(
+                    probability_witness,
+                    DeterministicBinPayoffWitness,
+                )
+                and payoff_probability_mean == 1.0
+            ),
         )
         if score.candidate is None:
             rejections.update(score.rejection_reasons)
@@ -7612,6 +7643,7 @@ def select_global_single_order(
                     capital_limit_usd=target_cost,
                     fractional_kelly_multiplier=Decimal("1"),
                     current_token_shares=Decimal("0"),
+                    settlement_locked_exact_payoff=False,
                 )
                 if fixed.candidate is None:
                     rejections[candidate_id] = (

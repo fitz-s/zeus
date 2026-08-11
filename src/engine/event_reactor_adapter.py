@@ -13650,18 +13650,48 @@ def _global_preflight_entry_jit_receipt(
             raise ValueError("GLOBAL_BUY_JIT_SELECTED_SIZE_INVALID")
         from src.solve.solver import current_precliff_liquidation_capacity
 
+        execution_mode = str(
+            getattr(candidate, "execution_mode", "") or ""
+        ).upper()
+        settlement_locked_exact_payoff = (
+            getattr(candidate, "settlement_locked_exact_payoff", False) is True
+            and getattr(
+                current_candidate,
+                "settlement_locked_exact_payoff",
+                False,
+            )
+            is True
+        )
+        expected_terminal = getattr(decision, "expected_terminal_wealth", None)
+        exact_payoff_decision = (
+            str(getattr(decision, "capital_action_mode", "") or "")
+            == "SETTLEMENT_LOCKED_BUY"
+            and float(
+                getattr(expected_terminal, "win_probability_mean", float("nan"))
+            )
+            == 1.0
+            and float(
+                getattr(expected_terminal, "loss_probability_mean", float("nan"))
+            )
+            == 0.0
+        )
         liquidation_capacity = current_precliff_liquidation_capacity(
             current_candidate.native_bid_levels
         )
-        if liquidation_capacity + Decimal("1e-9") < shares:
+        if (
+            not (
+                execution_mode == "TAKER_LIMIT"
+                and settlement_locked_exact_payoff
+                and exact_payoff_decision
+            )
+            and liquidation_capacity + Decimal("1e-9") < shares
+        ):
             raise ValueError(
                 "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
                 f"token_id={candidate.token_id}:required_shares={shares}:"
                 f"precliff_bid_shares={liquidation_capacity}"
             )
-        if str(getattr(candidate, "execution_mode", "") or "").upper() == (
-            "TAKER_LIMIT"
-        ):
+        if execution_mode == "TAKER_LIMIT":
             executable_shares = sum(
                 (
                     level.size

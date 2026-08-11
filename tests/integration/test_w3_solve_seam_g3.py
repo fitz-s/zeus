@@ -14007,6 +14007,97 @@ def test_global_preflight_jit_rejects_buy_that_lost_precliff_liquidation_depth(
     )
 
 
+@pytest.mark.parametrize("win_q", (1.0, 0.9))
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_preflight_jit_requires_exact_payoff_to_bypass_exit_depth(
+    monkeypatch,
+    side,
+    win_q,
+):
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    at = _dt.datetime(2026, 8, 10, 20, 5, tzinfo=_dt.timezone.utc)
+    selected_curve = ExecutableCostCurve(
+        token_id="token-a",
+        side=side,
+        snapshot_id="selected-book",
+        book_hash="selected-hash",
+        levels=(BookLevel(price=Decimal("0.80"), size=Decimal("100")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("5"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    candidate = GlobalSingleOrderCandidate(
+        candidate_id="candidate-a",
+        family_key="family-a",
+        bin_id="bin-a",
+        condition_id="condition-a",
+        side=side,
+        token_id="token-a",
+        probability_witness_identity="probability-a",
+        book_snapshot_id=selected_curve.snapshot_id,
+        book_captured_at_utc=at,
+        execution_curve_identity=executable_curve_identity(selected_curve),
+        ledger_snapshot_id="ledger-a",
+        executable_cost_curve=selected_curve,
+        resolution_identity="resolution-a",
+        neg_risk=False,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.05"), size=Decimal("100")),
+        ),
+        settlement_locked_exact_payoff=True,
+    )
+    receipt = EventSubmissionReceipt(
+        False,
+        event.event_id,
+        event.causal_snapshot_id,
+        proof_accepted=True,
+        decision_proof_bundle=(object(),),
+    )
+    actuation = SimpleNamespace(
+        winner_event_id=event.event_id,
+        decision=SimpleNamespace(
+            candidate=candidate,
+            limit_price=Decimal("0.80"),
+            shares=Decimal("20"),
+            capital_action_mode="SETTLEMENT_LOCKED_BUY",
+            expected_terminal_wealth=SimpleNamespace(
+                win_probability_mean=win_q,
+                loss_probability_mean=1.0 - win_q,
+            ),
+        ),
+    )
+    _install_global_jit_market_authority_fetches(
+        monkeypatch,
+        condition_id="condition-a",
+        token_id="token-a",
+        side=side,
+        tick="0.01",
+        min_order_size="5",
+    )
+
+    accepted = era._global_preflight_entry_jit_receipt(
+        event,
+        receipt,
+        global_actuation=actuation,
+        book_quote_provider=lambda token_id: {
+            "asset_id": token_id,
+            "hash": "jit-book-a",
+            "bids": [{"price": "0.05", "size": "100"}],
+            "asks": [{"price": "0.80", "size": "100"}],
+        },
+    )
+
+    assert accepted.proof_accepted is (win_q == 1.0)
+    if win_q == 1.0:
+        assert isinstance(accepted.global_jit_candidate, era._GlobalJitHandoff)
+    else:
+        assert accepted.reason.startswith(
+            "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+            "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
+        )
+
+
 @pytest.mark.parametrize("side", ("YES", "NO"))
 def test_global_preflight_jit_rejects_off_tick_native_bid(monkeypatch, side):
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
