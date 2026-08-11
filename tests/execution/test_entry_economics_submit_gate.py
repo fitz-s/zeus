@@ -1264,7 +1264,7 @@ def test_entry_economics_current_state_tail_still_requires_positive_robust_utili
     assert verdict["reason"] == "expected_profit_below_floor"
 
 
-def test_current_state_mean_buy_rejects_negative_confidence_edge_at_submit():
+def test_current_state_mean_buy_accepts_positive_expected_edge_with_negative_lcb_edge():
     economics = _current_state_mean_buy_econ(global_max_spend_usd="2.05")
 
     assert (
@@ -1303,8 +1303,7 @@ def test_current_state_mean_buy_rejects_negative_confidence_edge_at_submit():
         actionable_payload={"qkernel_execution_economics": economics},
     )
 
-    assert verdict["allowed"] is False
-    assert verdict["reason"] == "qkernel_confidence_edge_non_positive"
+    assert verdict["allowed"] is True
     assert conservative_submit_expected_edge(
         {
             "direction": "buy_yes",

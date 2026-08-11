@@ -5092,7 +5092,7 @@ def test_global_single_order_resizes_on_candidate_executable_q_bound():
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_buy_rejects_posterior_mean_when_lcb_is_below_market(side):
+def test_global_buy_uses_posterior_mean_when_lcb_is_below_market(side):
     candidate = _global_candidate(
         candidate_id=f"mean-positive-lcb-negative-{side}",
         family=f"mean-positive-lcb-negative-{side}",
@@ -5107,13 +5107,21 @@ def test_global_buy_rejects_posterior_mean_when_lcb_is_below_market(side):
         candidate_payoff_q_lcb_resolver=lambda _candidate: 0.49,
     )
 
-    assert decision.candidate is None
-    assert decision.rejection_reasons[candidate.candidate_id] == (
-        "NON_POSITIVE_CONFIDENCE_EDGE"
+    assert decision.candidate is candidate
+    assert decision.expected_terminal_wealth is not None
+    assert decision.expected_terminal_wealth.probability_basis == (
+        "POSTERIOR_PREDICTIVE_MEAN"
     )
+    assert decision.expected_terminal_wealth.win_probability_mean == pytest.approx(
+        0.72
+    )
+    assert decision.expected_terminal_wealth.expected_ev_usd > 0
+    assert decision.expected_terminal_wealth.expected_delta_log_wealth > 0
+    assert decision.robust_delta_log_wealth == 0
+    assert decision.robust_ev_usd == 0
 
 
-def test_global_buy_rejects_live_shape_with_negative_lcb_edge():
+def test_global_buy_uses_mean_for_live_shape_with_negative_lcb_edge():
     candidate = _global_candidate(
         candidate_id="live-negative-lcb-regression",
         family="live-negative-lcb-regression",
@@ -5128,37 +5136,17 @@ def test_global_buy_rejects_live_shape_with_negative_lcb_edge():
         candidate_payoff_q_lcb_resolver=lambda _candidate: 0.0647173,
     )
 
-    assert decision.candidate is None
-    assert decision.rejection_reasons[candidate.candidate_id] == (
-        "NON_POSITIVE_CONFIDENCE_EDGE"
-    )
-
-
-def test_global_buy_keeps_mean_objective_after_positive_confidence_admission():
-    candidate = _global_candidate(
-        candidate_id="mean-positive-confidence-positive",
-        family="mean-positive-confidence-positive",
-        side="YES",
-        q=0.72,
-        levels=(("0.55", "100"),),
-    )
-
-    decision = _global_select(
-        (candidate,),
-        cap="5",
-        candidate_payoff_q_lcb_resolver=lambda _candidate: 0.61,
-    )
-
     assert decision.candidate is candidate
     assert decision.expected_terminal_wealth is not None
     assert decision.expected_terminal_wealth.probability_basis == (
         "POSTERIOR_PREDICTIVE_MEAN"
     )
     assert decision.expected_terminal_wealth.win_probability_mean == pytest.approx(
-        0.72
+        0.575273
     )
     assert decision.expected_terminal_wealth.expected_ev_usd > 0
     assert decision.expected_terminal_wealth.expected_delta_log_wealth > 0
+    assert decision.robust_delta_log_wealth == 0
 
 
 def test_global_single_order_excludes_superseded_q_book_and_capital_identity():
