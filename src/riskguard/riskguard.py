@@ -3694,17 +3694,18 @@ def _tick_once() -> RiskLevel:
         )
         market_relative_alpha_gate_confirmation: dict[str, bool] = {}
         if market_relative_alpha_evidence["rejected"]:
-            if durable_action_status.get("status") == "emitted":
-                market_relative_alpha_gate_confirmation = (
-                    _confirm_active_durable_strategy_gates(
-                        zeus_conn,
-                        ["forecast_qkernel_entry"],
-                    )
+            # The auxiliary write may lose a transient writer race after this
+            # exact strategy gate was already committed by an earlier tick.
+            # Re-read durable scope unconditionally: write status describes
+            # this attempt, not whether qkernel is currently gated.  Treating
+            # ``skipped_dependency_lock`` as gate absence widened one strategy's
+            # persistence retry into a portfolio-wide YELLOW entry freeze.
+            market_relative_alpha_gate_confirmation = (
+                _confirm_active_durable_strategy_gates(
+                    zeus_conn,
+                    ["forecast_qkernel_entry"],
                 )
-            else:
-                market_relative_alpha_gate_confirmation = {
-                    "forecast_qkernel_entry": False,
-                }
+            )
             if not market_relative_alpha_gate_confirmation.get(
                 "forecast_qkernel_entry",
                 False,

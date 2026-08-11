@@ -4290,9 +4290,29 @@ class TestQkernelMarketRelativeAlphaEvidence:
         ).fetchone()
         degraded_details = json.loads(degraded_row["details_json"])
 
-        assert degraded_level == RiskLevel.YELLOW
-        assert degraded_details["strategy_signal_level"] == RiskLevel.YELLOW.value
+        assert degraded_level == RiskLevel.GREEN
+        assert degraded_details["strategy_signal_level"] == RiskLevel.GREEN.value
         assert degraded_details["market_relative_alpha_gate_confirmation"] == {
+            "forecast_qkernel_entry": True,
+        }
+
+        gate_conn = get_connection(zeus_db)
+        gate_conn.execute(
+            "DELETE FROM risk_actions "
+            "WHERE action_id='riskguard:gate:forecast_qkernel_entry'"
+        )
+        gate_conn.commit()
+        gate_conn.close()
+
+        missing_gate_level = riskguard_module.tick()
+        missing_gate_row = get_connection(risk_db).execute(
+            "SELECT level,details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        missing_gate_details = json.loads(missing_gate_row["details_json"])
+
+        assert missing_gate_level == RiskLevel.YELLOW
+        assert missing_gate_details["strategy_signal_level"] == RiskLevel.YELLOW.value
+        assert missing_gate_details["market_relative_alpha_gate_confirmation"] == {
             "forecast_qkernel_entry": False,
         }
 
