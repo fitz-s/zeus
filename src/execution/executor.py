@@ -1609,6 +1609,10 @@ def _entry_economics_component(
         or abs((payoff_q_lcb - econ_cost) - econ_edge_lcb) > 1e-6
     ):
         reason = "qkernel_payoff_edge_inconsistent"
+    # SCOPE: this final BUY submission only. DRAIN/RESET: a newly selected
+    # current certificate with positive q_lcb-minus-cost passes without a latch.
+    elif mean_action and econ_edge_lcb <= 0.0:
+        reason = "qkernel_confidence_edge_non_positive"
     elif mean_action and (
         econ_edge_expected is None
         or abs((bound_q_live - econ_cost) - econ_edge_expected) > 1e-6

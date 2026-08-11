@@ -6883,6 +6883,7 @@ def select_global_single_order(
     ] = {}
     buy_capital_limits: dict[str, Decimal] = {}
     buy_endowments: dict[str, CandidatePortfolioEndowment] = {}
+    buy_payoff_q_lcb_by_id: dict[str, float] = {}
     joint_buy_candidates_by_family: dict[
         str, list[GlobalSingleOrderCandidate]
     ] = {}
@@ -7389,6 +7390,10 @@ def select_global_single_order(
             ):
                 rejections[candidate.candidate_id] = "PAYOFF_Q_LCB_INVALID"
                 continue
+            if candidate_payoff_q_lcb is not None:
+                buy_payoff_q_lcb_by_id[candidate.candidate_id] = (
+                    candidate_payoff_q_lcb
+                )
         if (
             family_portfolio_endowment_resolver is not None
             and isinstance(
@@ -7462,6 +7467,18 @@ def select_global_single_order(
                             )
                 rejected_buy_economics_by_id[candidate.candidate_id] = rejected_buy
         else:
+            # SCOPE: only this new-risk BUY; SELL/HOLD proposals are untouched.
+            # DRAIN: every auction recomputes the current q bound and executable cost.
+            # RESET: no latch; fresh evidence with positive confidence EV passes.
+            if (
+                candidate_payoff_q_lcb is not None
+                and Decimal(str(candidate_payoff_q_lcb)) * score.shares
+                <= score.cost_usd
+            ):
+                rejections[candidate.candidate_id] = (
+                    "NON_POSITIVE_CONFIDENCE_EDGE"
+                )
+                continue
             score, horizon_reason = bind_capital_horizon(
                 score,
                 family_key=candidate.family_key,
@@ -7623,6 +7640,16 @@ def select_global_single_order(
                         rejected_buy_economics_by_id[candidate_id] = (
                             fixed.buy_rejection_economics
                         )
+                    continue
+                # Recheck the exact joint-repaired size: deeper fills can consume
+                # confidence edge that was positive for the standalone proposal.
+                payoff_q_lcb = buy_payoff_q_lcb_by_id.get(candidate_id)
+                if (
+                    payoff_q_lcb is not None
+                    and Decimal(str(payoff_q_lcb)) * fixed.shares
+                    <= fixed.cost_usd
+                ):
+                    rejections[candidate_id] = "NON_POSITIVE_CONFIDENCE_EDGE"
                     continue
                 fixed, horizon_reason = bind_capital_horizon(
                     fixed,
