@@ -1361,33 +1361,62 @@ def _ensure_restart_world_schemas(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
-def _ensure_restart_trade_schemas(conn: sqlite3.Connection) -> None:
-    """Install trade bootstrap plus guarded schema expansions while all daemons are stopped."""
+def _assert_restart_trade_schema_ready(conn: sqlite3.Connection) -> None:
+    """Fail closed on restart unless trade schema metadata is already complete."""
 
-    from src.state.db import init_schema_trade_only
-    from src.state.ledger import ensure_token_suppression_reason_schema
+    if conn.in_transaction:
+        raise RuntimeError("restart trade schema assertion requires no open transaction")
+    from src.execution.settlement_commands import assert_settlement_schema_ready
+    from src.state.table_registry import DBIdentity, assert_db_matches_registry
 
-    # B071 may already expose token_suppression as a VIEW. Upgrade its history
-    # CHECK before the general initializer sees that alias shape.
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        ensure_token_suppression_reason_schema(conn)
-    except Exception:
-        conn.rollback()
-        raise
-    conn.commit()
+    assert_db_matches_registry(conn, DBIdentity.TRADE)
+    assert_settlement_schema_ready(conn)
 
-    init_schema_trade_only(conn)
+    def _object(name: str, kind: str) -> str:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = ? AND name = ?",
+            (kind, name),
+        ).fetchone()
+        return str(row[0] or "") if row else ""
 
-    # Fresh DBs create the new shape during bootstrap; legacy DBs arrive here
-    # already upgraded. Keep the postcondition explicit and fail before start.
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        ensure_token_suppression_reason_schema(conn)
-    except Exception:
-        conn.rollback()
-        raise
-    conn.commit()
+    history_sql = _object("token_suppression_history", "table")
+    if "chain_only_auto_resolved_match" not in history_sql:
+        raise RuntimeError("restart trade schema missing token suppression history reason")
+    history_columns = {
+        row[1]
+        for row in conn.execute("PRAGMA table_info(token_suppression_history)")
+    }
+    required_history_columns = {
+        "history_id", "token_id", "suppression_reason", "operation", "recorded_at"
+    }
+    if not required_history_columns.issubset(history_columns):
+        raise RuntimeError("restart trade schema token suppression history shape is incomplete")
+
+    token_table_sql = _object("token_suppression", "table")
+    token_view_sql = _object("token_suppression", "view")
+    current_view_sql = _object("token_suppression_current", "view")
+    if token_table_sql:
+        token_sql = token_table_sql
+    elif token_view_sql and current_view_sql:
+        if (
+            "token_suppression_current" not in token_view_sql
+            or "token_suppression_history" not in current_view_sql
+        ):
+            raise RuntimeError("restart trade schema token suppression view lineage is invalid")
+        token_sql = token_view_sql + current_view_sql
+    else:
+        raise RuntimeError("restart trade schema token suppression table/view shape is invalid")
+    if token_table_sql and "chain_only_auto_resolved_match" not in token_sql:
+        raise RuntimeError("restart trade schema missing token suppression reason")
+
+    migration = conn.execute(
+        "SELECT 1 FROM _migrations_applied WHERE name = ?",
+        ("202607_cas_reservation_ledger",),
+    ).fetchone()
+    if migration is None:
+        raise RuntimeError("restart trade schema migration ledger is incomplete")
+    if conn.in_transaction:
+        raise RuntimeError("restart trade schema assertion opened a transaction")
 
 
 def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
@@ -1404,7 +1433,7 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         import json
         from scripts.migrations import apply_migrations
         from scripts.deploy_live import (
-            _ensure_restart_trade_schemas,
+            _assert_restart_trade_schema_ready,
             _ensure_restart_world_schemas,
         )
         from src.state.db import (
@@ -1477,14 +1506,12 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
 
         trade_conn = get_trade_connection(write_class='live')
         try:
-            _ensure_restart_trade_schemas(trade_conn)
             applied['trade'] = apply_migrations(
                 trade_conn,
                 target='202607_cas_reservation_ledger',
                 db_identity='trade',
             )
-            _ensure_restart_trade_schemas(trade_conn)
-            trade_conn.commit()
+            _assert_restart_trade_schema_ready(trade_conn)
         finally:
             trade_conn.close()
 
