@@ -31937,6 +31937,58 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
         )
         for family_key, q in ((family_a, 0.90), (family_b, 0.80))
     }
+    semantics_conn = sqlite3.connect(":memory:")
+    semantics_conn.execute(
+        "CREATE TABLE forecast_posteriors ("
+        "posterior_identity_hash TEXT PRIMARY KEY, provenance_json TEXT)"
+    )
+    for family_key, revision, lag, reused in (
+        (
+            family_a,
+            global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION,
+            0.0,
+            False,
+        ),
+        (
+            family_b,
+            "stale_ensemble_absolute_disagreement_v2",
+            6.0,
+            True,
+        ),
+    ):
+        semantics_conn.execute(
+            "INSERT INTO forecast_posteriors VALUES (?,?)",
+            (
+                f"posterior-{family_key}",
+                json.dumps(
+                    {
+                        "bayes_precision_fusion": {
+                            "current_evidence_shape": {
+                                "semantics_revision": revision,
+                                "translation_applied": False,
+                                "shape_lag_hours": lag,
+                                "stale_shape_reused": reused,
+                                "between_cohort_status": (
+                                    "SIMULTANEOUS_PROVEN"
+                                ),
+                            }
+                        }
+                    }
+                ),
+            ),
+        )
+    semantics_by_posterior = (
+        global_batch_runtime._qkernel_shadow_current_semantics_by_posterior(
+            semantics_conn,
+            qkernel_witnesses,
+        )
+    )
+    semantics_conn.close()
+    assert semantics_by_posterior == {
+        f"posterior-{family_a}": (
+            global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        )
+    }
     qkernel_events = global_batch_runtime._market_relative_alpha_shadow_events(
         selected=SimpleNamespace(
             decision=SimpleNamespace(candidate_evaluations=qkernel_evaluations)
@@ -31961,6 +32013,7 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
         selection_epoch_identity="selection-epoch",
         selection_cut_at_utc=at,
         decision_at_utc=at,
+        qkernel_semantics_by_posterior=semantics_by_posterior,
         strategy_keys=("forecast_qkernel_entry",),
     )
     assert len(qkernel_events) == 1
@@ -31973,7 +32026,42 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
         "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
     )
     assert qkernel_events[0].event_id.startswith(
-        "market-relative-alpha-shadow-v2-posterior-lineage:"
+        "market-relative-alpha-shadow-v3-current-semantics:"
+    )
+    assert (
+        global_batch_runtime._market_relative_alpha_shadow_events(
+            selected=SimpleNamespace(
+                decision=SimpleNamespace(
+                    candidate_evaluations=qkernel_evaluations
+                )
+            ),
+            probability_witnesses=qkernel_witnesses,
+            book_epoch=SimpleNamespace(
+                assets=assets,
+                witness_identity="book-epoch",
+            ),
+            family_context_by_key={
+                family_a: {
+                    "city": "Alpha",
+                    "target_date": "2026-08-11",
+                    "metric": "high",
+                },
+                family_b: {
+                    "city": "Beta",
+                    "target_date": "2026-08-11",
+                    "metric": "low",
+                },
+            },
+            selection_epoch_identity="selection-epoch",
+            selection_cut_at_utc=at,
+            decision_at_utc=at,
+            qkernel_semantics_by_posterior={
+                f"posterior-{family_key}": "stale_ensemble_absolute_disagreement_v2"
+                for family_key in (family_a, family_b)
+            },
+            strategy_keys=("forecast_qkernel_entry",),
+        )
+        == ()
     )
     missing_posterior_witnesses = {
         family_key: SimpleNamespace(

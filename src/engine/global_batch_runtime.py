@@ -28,7 +28,10 @@ from src.contracts.global_auction_receipt import (
 )
 from src.data.market_topology_rows import prime_frozen_schema_reads
 from src.data.replacement_forecast_cycle_policy import (
+    BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN,
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    _current_evidence_shape,
+    current_evidence_shape_semantics_mismatch,
 )
 from src.engine.global_auction_universe import (
     CurrentGlobalAuctionScope,
@@ -4221,7 +4224,7 @@ _QKERNEL_ALPHA_SHADOW_REASON = (
     "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
 )
 _QKERNEL_ALPHA_SHADOW_EVENT_VERSION = (
-    "market-relative-alpha-shadow-v2-posterior-lineage"
+    "market-relative-alpha-shadow-v3-current-semantics"
 )
 _QKERNEL_ALPHA_SHADOW_DECISION_LAW = "executable_min_order_capital_gain_v2"
 _QKERNEL_ALPHA_SHADOW_SELECTION_RULE = _DAY0_ALPHA_SHADOW_SELECTION_RULE
@@ -4256,6 +4259,68 @@ def _native_buy_min_order_vwap(
     return float(raw_vwap), float(fee_adjusted)
 
 
+def _qkernel_shadow_current_semantics_by_posterior(
+    conn: object,
+    probability_witnesses: Mapping[str, object],
+) -> dict[str, str]:
+    """Bind shadow eligibility to exact decision-snapshot posterior semantics."""
+
+    if not isinstance(conn, sqlite3.Connection):
+        return {}
+    posterior_hashes = sorted(
+        {
+            str(getattr(witness, "posterior_identity_hash", "") or "").strip()
+            for witness in probability_witnesses.values()
+            if str(
+                getattr(witness, "posterior_identity_hash", "") or ""
+            ).strip()
+        }
+    )
+    if not posterior_hashes:
+        return {}
+    # FAIL-CLOSED GATE CONTRACT
+    # SCOPE: qkernel no-money shadow evidence only; auction actions are unchanged.
+    # DRAIN: the next same-cycle v4 posterior on this decision snapshot is eligible.
+    # RESET: a fresh posterior hash maps to v4 and may claim its target-date key.
+    output: dict[str, str] = {}
+    try:
+        for start in range(0, len(posterior_hashes), 500):
+            chunk = posterior_hashes[start : start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = conn.execute(
+                "SELECT posterior_identity_hash,provenance_json "
+                "FROM forecast_posteriors "
+                f"WHERE posterior_identity_hash IN ({placeholders})",
+                tuple(chunk),
+            ).fetchall()
+            for posterior_identity_hash, provenance in rows:
+                shape = _current_evidence_shape(provenance)
+                if shape is None:
+                    continue
+                try:
+                    shape_lag_hours = float(shape.get("shape_lag_hours") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    str(shape.get("semantics_revision") or "")
+                    == CURRENT_EVIDENCE_SEMANTICS_REVISION
+                    and shape.get("translation_applied") is False
+                    and shape_lag_hours == 0.0
+                    and shape.get("stale_shape_reused") is not True
+                    and shape.get("between_cohort_status")
+                    == BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN
+                    and not current_evidence_shape_semantics_mismatch(provenance)
+                ):
+                    output[str(posterior_identity_hash)] = (
+                        CURRENT_EVIDENCE_SEMANTICS_REVISION
+                    )
+    except (sqlite3.Error, TypeError, ValueError):
+        # Evidence collection may drain an entry gate but must never disturb the
+        # auction's SELL/HOLD/CASH result. Missing authority simply emits no row.
+        return {}
+    return output
+
+
 def _market_relative_alpha_shadow_events(
     *,
     selected: object,
@@ -4265,6 +4330,7 @@ def _market_relative_alpha_shadow_events(
     selection_epoch_identity: str,
     selection_cut_at_utc: datetime,
     decision_at_utc: datetime,
+    qkernel_semantics_by_posterior: Mapping[str, str] | None = None,
     strategy_keys: Sequence[str] = (
         "day0_nowcast_entry",
         "forecast_qkernel_entry",
@@ -4363,8 +4429,17 @@ def _market_relative_alpha_shadow_events(
             selection_rule = _DAY0_ALPHA_SHADOW_SELECTION_RULE
             event_version = "market-relative-alpha-shadow-v2"
         else:
-            revision = CURRENT_EVIDENCE_SEMANTICS_REVISION
-            probability_ready = bool(q_version and posterior_identity_hash)
+            revision = str(
+                (qkernel_semantics_by_posterior or {}).get(
+                    posterior_identity_hash
+                )
+                or ""
+            )
+            probability_ready = bool(
+                q_version
+                and posterior_identity_hash
+                and revision == CURRENT_EVIDENCE_SEMANTICS_REVISION
+            )
             source_status = "current_qkernel_probability_authority"
             shadow_reason = _QKERNEL_ALPHA_SHADOW_REASON
             decision_law = _QKERNEL_ALPHA_SHADOW_DECISION_LAW
@@ -6190,6 +6265,12 @@ def process_current_global_batch(
                 selection_epoch_identity=attempt_selection_epoch_identity,
                 selection_cut_at_utc=scope_at,
                 decision_at_utc=selection_at,
+                qkernel_semantics_by_posterior=(
+                    _qkernel_shadow_current_semantics_by_posterior(
+                        forecast_conn,
+                        attempt_probabilities,
+                    )
+                ),
             )
             for shadow_event in alpha_shadow_events:
                 pending_alpha_shadow_events.setdefault(

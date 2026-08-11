@@ -3476,7 +3476,7 @@ def _market_relative_alpha_evidence(
         )
         statistical_validation = model_over_market_evalue >= rejection_evalue
         # A probability system can beat the market on log score while still
-        # lose money at the executable prices and minimum sizes that were
+        # losing money at the executable prices and minimum sizes that were
         # available at decision time.  Both entry strategies therefore require
         # the same positive forward-capital proof; likelihood evidence alone is
         # diagnostic, never validation for re-opening capital.
