@@ -4199,7 +4199,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "status": "ok",
             "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
         }
-        assert riskguard_module._day0_market_relative_alpha_observation(
+        assert riskguard_module._day0_market_relative_alpha_gate_reason(
             binding,
             evidence,
             required_evalue=10.0,
@@ -4378,7 +4378,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert curve["gross_realized_pnl_usd"] == pytest.approx(-0.06)
         assert curve["fee_bound_usd"] == pytest.approx(0.115409)
         assert curve["net_realized_pnl_usd"] == pytest.approx(-0.175409)
-        reason = riskguard_module._day0_market_relative_alpha_observation(
+        reason = riskguard_module._day0_market_relative_alpha_gate_reason(
             {
                 "status": "ok",
                 "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
@@ -4407,7 +4407,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert curve["filled_position_count"] == 1
         assert curve["open_position_count"] == 1
         assert curve["realized_position_count"] == 0
-        reason = riskguard_module._day0_market_relative_alpha_observation(
+        reason = riskguard_module._day0_market_relative_alpha_gate_reason(
             {
                 "status": "ok",
                 "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
@@ -4447,7 +4447,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         )
 
         assert curve["status"] == capital_status
-        assert riskguard_module._day0_market_relative_alpha_observation(
+        assert riskguard_module._day0_market_relative_alpha_gate_reason(
             {
                 "status": "ok",
                 "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
@@ -4535,7 +4535,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
             riskguard_module._qkernel_market_relative_alpha_evidence
         ).parameters
         assert "live_capital_curve" not in inspect.signature(
-            riskguard_module._day0_market_relative_alpha_observation
+            riskguard_module._day0_market_relative_alpha_gate_reason
         ).parameters
         assert not hasattr(
             riskguard_module,
@@ -4586,7 +4586,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert evidence["validated"] is False
         conn.close()
 
-    def test_unvalidated_shadow_remains_visible_under_evalue_contract(self):
+    def test_unvalidated_shadow_remains_gated_under_evalue_contract(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
         rows = [
@@ -4642,7 +4642,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert cohort["hypothetical_realized_pnl_usd"] == pytest.approx(-1.30)
         assert cohort["capital_gain_validated"] is False
         assert evidence["validated"] is False
-        assert riskguard_module._day0_market_relative_alpha_observation(
+        assert riskguard_module._day0_market_relative_alpha_gate_reason(
             {
                 "status": "ok",
                 "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
@@ -4652,10 +4652,10 @@ class TestQkernelMarketRelativeAlphaEvidence:
         ) is not None
         conn.close()
 
-    def test_current_day0_without_validated_causal_evidence_is_observed(self):
+    def test_current_day0_without_validated_causal_evidence_is_entry_gated(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
-        reason = riskguard_module._day0_market_relative_alpha_observation(
+        reason = riskguard_module._day0_market_relative_alpha_gate_reason(
             {
                 "status": "ok",
                 "current_count": 0,
@@ -4680,7 +4680,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
     def test_superseded_accuracy_cohort_cannot_unlock_capital_gain_law(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
-        reason = riskguard_module._day0_market_relative_alpha_observation(
+        reason = riskguard_module._day0_market_relative_alpha_gate_reason(
             {
                 "status": "ok",
                 "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
@@ -5106,7 +5106,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         }
         conn.close()
 
-    def test_tick_records_qkernel_evidence_and_expires_legacy_alpha_gate(
+    def test_tick_persists_qkernel_gate_and_keeps_held_lanes_green(
         self,
         monkeypatch,
         tmp_path,
@@ -5175,27 +5175,6 @@ class TestQkernelMarketRelativeAlphaEvidence:
                     "filled",
                 ),
             )
-        for strategy_key, reason in (
-            ("forecast_qkernel_entry", "legacy_alpha_gate"),
-            ("day0_nowcast_entry", "legacy_day0_alpha_gate"),
-        ):
-            conn.execute(
-                "INSERT INTO risk_actions ("
-                "action_id,strategy_key,action_type,value,issued_at,effective_until,"
-                "reason,source,precedence,status) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (
-                    f"riskguard:gate:{strategy_key}",
-                    strategy_key,
-                    "gate",
-                    "true",
-                    "2026-08-11T00:00:00+00:00",
-                    None,
-                    reason,
-                    "riskguard",
-                    50,
-                    "active",
-                ),
-            )
         conn.commit()
         conn.close()
 
@@ -5228,29 +5207,77 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "SELECT level,details_json FROM risk_state ORDER BY id DESC LIMIT 1"
         ).fetchone()
         details = json.loads(risk_row["details_json"])
-        gate_rows = get_connection(zeus_db).execute(
+        gate = get_connection(zeus_db).execute(
             "SELECT strategy_key,status,reason FROM risk_actions "
-            "WHERE action_id IN (?,?) ORDER BY strategy_key",
-            (
-                "riskguard:gate:forecast_qkernel_entry",
-                "riskguard:gate:day0_nowcast_entry",
-            ),
-        ).fetchall()
+            "WHERE action_id='riskguard:gate:forecast_qkernel_entry'"
+        ).fetchone()
 
         assert level == RiskLevel.GREEN
         assert risk_row["level"] == RiskLevel.GREEN.value
         assert details["market_relative_alpha_evidence"]["rejected"] is True
-        assert details["market_relative_alpha_admission_role"] == "observational"
-        assert details["market_relative_alpha_gate_confirmation"] == {}
-        assert details["day0_market_relative_alpha_admission_role"] == "observational"
-        assert details["day0_market_relative_alpha_gate_required"] is False
-        assert details["day0_market_relative_alpha_gate_confirmation"] == {}
-        assert {
-            row["strategy_key"]: (row["status"], row["reason"])
-            for row in gate_rows
-        } == {
-            "day0_nowcast_entry": ("expired", "legacy_day0_alpha_gate"),
-            "forecast_qkernel_entry": ("expired", "legacy_alpha_gate"),
+        assert details["market_relative_alpha_gate_confirmation"] == {
+            "forecast_qkernel_entry": True,
+        }
+        assert dict(gate) == {
+            "strategy_key": "forecast_qkernel_entry",
+            "status": "active",
+            "reason": (
+                "market_relative_alpha_rejected("
+                "evalue=12.688312,clusters=2,law=predicted_bin_ev_v1)"
+            ),
+        }
+
+        monkeypatch.setattr(
+            riskguard_module,
+            "_refresh_riskguard_auxiliary_bookkeeping",
+            lambda *_, **__: (
+                {
+                    "status": "skipped_dependency_lock",
+                    "emitted_count": 0,
+                    "expired_count": 0,
+                },
+                {
+                    "status": "skipped_dependency_lock",
+                    "rows_written": 0,
+                    "missing_required_tables": [],
+                    "missing_optional_tables": [],
+                    "settlement_authority_missing_tables": [],
+                    "omitted_fields": [],
+                },
+                {"status": "empty", "by_strategy": {}, "stale_strategy_keys": []},
+            ),
+        )
+
+        degraded_level = riskguard_module.tick()
+        degraded_row = get_connection(risk_db).execute(
+            "SELECT level,details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        degraded_details = json.loads(degraded_row["details_json"])
+
+        assert degraded_level == RiskLevel.GREEN
+        assert degraded_details["strategy_signal_level"] == RiskLevel.GREEN.value
+        assert degraded_details["market_relative_alpha_gate_confirmation"] == {
+            "forecast_qkernel_entry": True,
+        }
+
+        gate_conn = get_connection(zeus_db)
+        gate_conn.execute(
+            "DELETE FROM risk_actions "
+            "WHERE action_id='riskguard:gate:forecast_qkernel_entry'"
+        )
+        gate_conn.commit()
+        gate_conn.close()
+
+        missing_gate_level = riskguard_module.tick()
+        missing_gate_row = get_connection(risk_db).execute(
+            "SELECT level,details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        missing_gate_details = json.loads(missing_gate_row["details_json"])
+
+        assert missing_gate_level == RiskLevel.YELLOW
+        assert missing_gate_details["strategy_signal_level"] == RiskLevel.YELLOW.value
+        assert missing_gate_details["market_relative_alpha_gate_confirmation"] == {
+            "forecast_qkernel_entry": False,
         }
 
 
