@@ -25,13 +25,6 @@ OVERRIDE_PRECEDENCE = {
     "risk_action": 1,   # automated risk_actions rows
 }
 
-FORWARD_CAPITAL_CREDENTIAL_ACTION = "gate"
-FORWARD_CAPITAL_CREDENTIAL_ACTION_ID_PREFIX = "riskguard:forward-capital:"
-FORWARD_CAPITAL_REQUIRED_STRATEGIES = frozenset({
-    "day0_nowcast_entry",
-    "forecast_qkernel_entry",
-})
-
 
 @dataclass(frozen=True)
 class StrategyPolicy:
@@ -71,44 +64,7 @@ def resolve_strategy_policy(
         sources.append(f"hard_safety:tighten_risk:{control_threshold_multiplier:g}")
 
     manual_overrides = _select_rows(_load_manual_overrides(conn, strategy_key, current_time))
-    raw_risk_actions = _load_risk_actions(conn, strategy_key, current_time)
-    credential_action_id = (
-        f"{FORWARD_CAPITAL_CREDENTIAL_ACTION_ID_PREFIX}{strategy_key}"
-    )
-    risk_actions = _select_rows(
-        [
-            row
-            for row in raw_risk_actions
-            if str(row["action_id"]) != credential_action_id
-        ]
-    )
-
-    if strategy_key in FORWARD_CAPITAL_REQUIRED_STRATEGIES:
-        credential = next(
-            (
-                row
-                for row in raw_risk_actions
-                if str(row["action_id"]) == credential_action_id
-                if str(row["action_type"]) == FORWARD_CAPITAL_CREDENTIAL_ACTION
-                and str(row["source"]) == "riskguard"
-                and not _parse_boolish(row["value"])
-                and str(row["reason"] or "").startswith(
-                    "forward_capital_gain_validated("
-                )
-            ),
-            None,
-        )
-        if credential is None:
-            # SCOPE: only new ENTRY commands for the exact proof-required strategy.
-            # DRAIN: the RiskGuard tick re-grades current-law settled forward
-            # capital evidence and refreshes a short-lived credential every cycle.
-            # RESET: an active, unexpired RiskGuard credential unlocks re-decision;
-            # expiry or evidence loss immediately restores this fail-closed gate.
-            gated = True
-            locked_fields.add("gated")
-            sources.append("hard_safety:forward_capital_gain_unproven")
-        else:
-            sources.append("hard_safety:forward_capital_gain_validated")
+    risk_actions = _select_rows(_load_risk_actions(conn, strategy_key, current_time))
 
     for row in manual_overrides:
         try:
@@ -316,8 +272,7 @@ def _load_risk_actions(
     rows = _query_rows(
         conn,
         """
-        SELECT action_id, action_type, value, issued_at, effective_until,
-               reason, source, precedence, status
+        SELECT action_id, action_type, value, issued_at, effective_until, precedence, status
         FROM risk_actions
         WHERE strategy_key = ?
         ORDER BY precedence DESC, issued_at DESC, action_id DESC

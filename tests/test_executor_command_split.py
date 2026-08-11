@@ -1311,45 +1311,6 @@ class TestLiveOrderCommandSplit:
         assert component["reason"] == "authority_schema_missing"
         assert component["details"]["risk_actions_ready"] is False
 
-    def test_submit_time_manual_ungate_cannot_bypass_forward_capital_proof(
-        self,
-        mem_conn,
-    ):
-        from src.execution.executor import (
-            _entry_strategy_policy_submit_component,
-        )
-
-        now = datetime.now(timezone.utc)
-        mem_conn.execute(
-            """
-            INSERT INTO world.control_overrides_history (
-                override_id, target_type, target_key, action_type, value,
-                issued_by, issued_at, effective_until, reason, precedence,
-                operation, recorded_at
-            ) VALUES (?, 'strategy', ?, 'gate', 'false', 'test', ?, NULL,
-                      'attempted submit-time ungate', 100, 'upsert', ?)
-            """,
-            (
-                "manual-qkernel-submit-ungate",
-                "forecast_qkernel_entry",
-                (now - timedelta(seconds=1)).isoformat(),
-                (now - timedelta(seconds=1)).isoformat(),
-            ),
-        )
-
-        component = _entry_strategy_policy_submit_component(
-            mem_conn,
-            _make_entry_intent(mem_conn),
-            {"strategy_key": "forecast_qkernel_entry"},
-            checked_at=now,
-        )
-
-        assert component["allowed"] is False
-        assert component["reason"] == "gated"
-        assert component["details"]["sources"] == (
-            "hard_safety:forward_capital_gain_unproven"
-        )
-
     def test_entry_submit_requested_persists_execution_capability_proof(self, mem_conn, monkeypatch):
         """Entry SUBMIT_REQUESTED carries one pre-submit capability proof."""
         import json
