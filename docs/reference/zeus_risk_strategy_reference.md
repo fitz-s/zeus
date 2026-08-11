@@ -117,24 +117,6 @@ Gate reasons are accumulated from two sources:
 When a strategy no longer has active gate reasons, its action is set to
 `status="expired"` with `effective_until=now`. This is the un-gate path.
 
-Day0 and qkernel ENTRY have one additional fail-closed prerequisite. RiskGuard
-leases `riskguard:forward-capital:{strategy_key}` as an existing-schema
-`gate=false` row for at most the normal five-minute RiskGuard freshness budget.
-That row is a credential, not a manual ungate: it is recognized only by its
-fixed action id, `source="riskguard"`, validation reason, active status, and
-unexpired lease. It is excluded from ordinary risk-gate reduction, so a valid
-credential cannot suppress another active `gate=true` action.
-
-RiskGuard emits the credential only when one settlement-graded shadow cohort
-has the exact `executable_min_order_capital_gain_v2` decision law, the current
-strategy probability-semantics revision, the governed model-over-market
-e-value, complete executable minimum-order capital accounting, and strictly
-positive realized P&L. Missing or non-positive proof expires the credential;
-policy checks its absence before manual overrides. The existing submit-time
-strategy-policy re-read therefore blocks command persistence and venue contact
-even if an operator row attempts `gate=false`. Held SELL/HOLD/CASH lanes are out
-of scope.
-
 ### 2.2 Portfolio truth loading for RiskGuard
 
 RiskGuard uses a dual-source portfolio truth model:
