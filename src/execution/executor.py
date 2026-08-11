@@ -3541,16 +3541,20 @@ def _entry_q_version_from_authority(
     context_q_version = _nonempty_q_identity(
         getattr(context, "posterior_identity_hash", None)
     )
-    if context_q_version:
-        return context_q_version
     if (
         context is not None
         and hasattr(context, "is_day0_observation_context")
         and context.is_day0_observation_context()
     ):
-        day0_q_version = str(getattr(context, "raw_payload_hash", "") or "").strip()
+        from src.events.day0_authority import bind_day0_probability_semantics
+
+        day0_q_version = context_q_version or str(
+            getattr(context, "raw_payload_hash", "") or ""
+        ).strip()
         if day0_q_version:
-            return day0_q_version
+            return bind_day0_probability_semantics(day0_q_version)
+    if context_q_version:
+        return context_q_version
     forecast_context_q_version = _forecast_entry_raw_hash_q_version_from_context(
         context
     )

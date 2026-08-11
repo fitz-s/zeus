@@ -1958,6 +1958,78 @@ def _bind_qkernel_probability_semantics(
     return output, status
 
 
+def _bind_day0_probability_semantics(
+    rows: list[dict],
+) -> tuple[list[dict], dict[str, object]]:
+    """Classify Day0 settlements by the mechanism stamped at ENTRY fill.
+
+    Old hashes remain valid historical evidence, but they cannot convict the
+    current mechanism.  Mixed-version fills are non-actuating because no one
+    probability mechanism owns their share-weighted q.
+
+    SCOPE: current-law ``day0_nowcast_entry`` settlement learning only.
+    DRAIN: each RiskGuard tick rebinds immutable filled ENTRY q_versions.
+    RESET: a settled fill stamped with the current revision enters the cohort;
+    superseded rows remain telemetry and age naturally with the bounded scan.
+    """
+
+    from src.events.day0_authority import (
+        DAY0_PROBABILITY_SEMANTICS_REVISION,
+        day0_probability_semantics_revision,
+    )
+
+    output = [dict(row) for row in rows]
+    candidates = [
+        row
+        for row in output
+        if str(row.get("strategy") or "").strip() == "day0_nowcast_entry"
+    ]
+    counts = {"current": 0, "superseded": 0, "missing": 0, "mixed": 0}
+    for row in candidates:
+        versions = tuple(
+            str(version).strip()
+            for version in (row.get("entry_q_versions") or ())
+            if str(version).strip()
+        )
+        parsed_revisions = tuple(
+            day0_probability_semantics_revision(version) for version in versions
+        )
+        revisions = tuple(
+            sorted({revision for revision in parsed_revisions if revision})
+        )
+        row["probability_semantics_revisions"] = revisions
+        if not versions:
+            classification = "missing"
+            reason = "entry_q_version_lineage_missing"
+        elif not revisions:
+            classification = "superseded"
+            reason = "superseded_probability_semantics"
+        elif all(
+            revision == DAY0_PROBABILITY_SEMANTICS_REVISION
+            for revision in parsed_revisions
+        ):
+            classification = "current"
+            reason = ""
+        elif DAY0_PROBABILITY_SEMANTICS_REVISION in parsed_revisions:
+            classification = "mixed"
+            reason = "mixed_probability_semantics"
+        else:
+            classification = "superseded"
+            reason = "superseded_probability_semantics"
+        counts[classification] += 1
+        row["probability_semantics_ready"] = classification == "current"
+        row["probability_semantics_blocked_reason"] = reason
+    return output, {
+        "status": "ok" if candidates else "not_applicable",
+        "strategy_candidate_count": len(candidates),
+        "current_count": counts["current"],
+        "superseded_count": counts["superseded"],
+        "missing_count": counts["missing"],
+        "mixed_count": counts["mixed"],
+        "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+    }
+
+
 def _filled_entry_probability_composites(
     conn: sqlite3.Connection,
     position_ids: set[str],
@@ -2187,10 +2259,10 @@ def _riskguard_brier_actuating_rows(
             continue
         if str(row.get("decision_law_id") or "").strip() not in DECISION_LAW_IDS:
             continue
-        if (
-            str(row.get("strategy") or "").strip() == "forecast_qkernel_entry"
-            and row.get("probability_semantics_ready") is not True
-        ):
+        if str(row.get("strategy") or "").strip() in {
+            "forecast_qkernel_entry",
+            "day0_nowcast_entry",
+        } and row.get("probability_semantics_ready") is not True:
             continue
         actuating.append(row)
         if len(actuating) >= limit:
@@ -3275,6 +3347,10 @@ def _tick_once() -> RiskLevel:
             settlement_scan_rows,
             probability_semantics_binding,
         ) = _bind_qkernel_probability_semantics(settlement_scan_rows)
+        (
+            settlement_scan_rows,
+            day0_probability_semantics_binding,
+        ) = _bind_day0_probability_semantics(settlement_scan_rows)
         settlement_scan_rows = _bind_entry_market_benchmarks(
             zeus_conn,
             settlement_scan_rows,
@@ -3898,6 +3974,9 @@ def _tick_once() -> RiskLevel:
                 "brier_strategy_localization": brier_strategy_localization,
                 "probability_semantics_level": probability_semantics_level.value,
                 "probability_semantics_binding": probability_semantics_binding,
+                "day0_probability_semantics_binding": (
+                    day0_probability_semantics_binding
+                ),
                 "market_relative_alpha_evidence": market_relative_alpha_evidence,
                 "market_relative_alpha_gate_confirmation": (
                     market_relative_alpha_gate_confirmation

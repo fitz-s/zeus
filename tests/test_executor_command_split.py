@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-11; last_reused=2026-08-11
 # Purpose: Lock executor command split phase ordering and ACK invariants.
 # Reuse: Run when venue command persistence, live order submission, or ACK handling changes.
 # Created: 2026-04-26
-# Last reused/audited: 2026-08-10
+# Last reused/audited: 2026-08-11
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S3
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-4 side-effect boundary.
@@ -19,6 +19,7 @@ import sqlite3
 from src.state.collateral_ledger import init_collateral_schema
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, call
 import json
 
@@ -813,6 +814,32 @@ def _decision_source_context(**overrides):
     }
     fields.update(overrides)
     return DecisionSourceContext(**fields)
+
+
+def test_day0_entry_q_version_stamps_probability_semantics_revision():
+    from src.events.day0_authority import (
+        DAY0_PROBABILITY_SEMANTICS_REVISION,
+        bind_day0_probability_semantics,
+    )
+    from src.execution.executor import _entry_q_version_from_authority
+
+    raw_hash = "d" * 64
+    context = _decision_source_context(
+        posterior_identity_hash=raw_hash,
+        forecast_source_role="day0_observed_probability",
+        authority_tier="DAY0_OBSERVATION",
+    )
+
+    q_version = _entry_q_version_from_authority(
+        SimpleNamespace(decision_source_context=context),
+        None,
+    )
+
+    assert q_version == (
+        f"day0-semrev:{DAY0_PROBABILITY_SEMANTICS_REVISION}:{raw_hash}"
+    )
+    old = "day0-semrev:retired-day0-v0:q-old"
+    assert bind_day0_probability_semantics(old) == old
 
 
 def _make_entry_intent(
@@ -3473,6 +3500,7 @@ class TestLiveOrderCommandSplit:
             intent,
             certificate_hash=certificate_hash,
         )
+        decision_at = datetime.now(timezone.utc).isoformat()
         mem_conn.execute(
             """
             INSERT INTO decision_log (
@@ -3481,8 +3509,8 @@ class TestLiveOrderCommandSplit:
             """,
             (
                 "live",
-                _NOW.isoformat(),
-                _NOW.isoformat(),
+                decision_at,
+                decision_at,
                 json.dumps(
                     {
                         "trade_cases": [
@@ -3504,7 +3532,7 @@ class TestLiveOrderCommandSplit:
                     },
                     sort_keys=True,
                 ),
-                _NOW.isoformat(),
+                decision_at,
                 "live",
             ),
         )

@@ -1,8 +1,8 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-08-10
+# Last reused/audited: 2026-08-11
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Lifecycle: created=2026-03-30; last_reviewed=2026-08-11; last_reused=2026-08-11
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
@@ -1064,7 +1064,7 @@ class TestMetrics:
         assert [
             row["trade_id"]
             for row in riskguard_module._riskguard_brier_actuating_rows(bound)
-        ] == ["current", "stale", "day0"]
+        ] == ["current", "stale"]
 
     def test_qkernel_semantics_lookup_unavailable_fails_closed(self, tmp_path):
         row = {
@@ -1090,6 +1090,49 @@ class TestMetrics:
             "probability_semantics_authority_unavailable"
         )
         assert riskguard_module._riskguard_brier_actuating_rows(bound) == []
+
+    def test_day0_brier_actuation_excludes_superseded_and_mixed_semantics(self):
+        from src.events.day0_authority import bind_day0_probability_semantics
+
+        common = {
+            "strategy": "day0_nowcast_entry",
+            "probability_identity_ready": True,
+            "decision_law_identity_ready": True,
+            "decision_law_id": "predicted_bin_ev_v1",
+        }
+        current = bind_day0_probability_semantics("q-current")
+        rows = [
+            {**common, "trade_id": "current", "entry_q_versions": (current,)},
+            {**common, "trade_id": "legacy", "entry_q_versions": ("q-old",)},
+            {
+                **common,
+                "trade_id": "mixed",
+                "entry_q_versions": (current, "q-old"),
+            },
+            {**common, "trade_id": "missing", "entry_q_versions": ()},
+        ]
+
+        bound, status = riskguard_module._bind_day0_probability_semantics(rows)
+        by_id = {row["trade_id"]: row for row in bound}
+
+        assert by_id["current"]["probability_semantics_ready"] is True
+        assert by_id["legacy"]["probability_semantics_blocked_reason"] == (
+            "superseded_probability_semantics"
+        )
+        assert by_id["mixed"]["probability_semantics_blocked_reason"] == (
+            "mixed_probability_semantics"
+        )
+        assert by_id["missing"]["probability_semantics_blocked_reason"] == (
+            "entry_q_version_lineage_missing"
+        )
+        assert status["current_count"] == 1
+        assert status["superseded_count"] == 1
+        assert status["mixed_count"] == 1
+        assert status["missing_count"] == 1
+        assert [
+            row["trade_id"]
+            for row in riskguard_module._riskguard_brier_actuating_rows(bound)
+        ] == ["current"]
 
     def test_probability_identity_binding_rejects_filled_command_without_fact(self):
         conn = sqlite3.connect(":memory:")

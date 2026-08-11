@@ -34704,7 +34704,14 @@ def _prepare_current_global_probability_family(
                 day0_payload_out[key] = payload[key]
     sample_identity = probability_sample_matrix_identity(samples)
     if current_day0_payload is not None:
+        from src.events.day0_authority import (
+            DAY0_PROBABILITY_SEMANTICS_REVISION,
+        )
+
         source_truth = {
+            "probability_semantics_revision": (
+                DAY0_PROBABILITY_SEMANTICS_REVISION
+            ),
             "probability_base_identity": day0_base_identity,
             "source_cycle_time": source_cycle.astimezone(UTC).isoformat(),
             "source_available_at": source_available_at,

@@ -30,6 +30,13 @@ DAY0_LIVE_AUTHORITY_MATCHES = {
 DAY0_REMAINING_DAY_Q_SOURCE = "day0_remaining_day"
 DAY0_REMAINING_DAY_Q_MODE = "remaining_day"
 DAY0_REMAINING_DAY_GLOBAL_AUTHORITY = "day0_remaining_day_global_probability_v1"
+# Settlement learning must grade the probability mechanism that actually
+# authorized a fill.  Increment this when the Day0 probability construction
+# changes; the value is stamped into every live ENTRY q_version.
+DAY0_PROBABILITY_SEMANTICS_REVISION = (
+    "day0_current_state_predictive_error_extreme_state_v1"
+)
+_DAY0_SEMANTIC_Q_VERSION_PREFIX = "day0-semrev:"
 DAY0_DETERMINISTIC_BIN_PAYOFF_Q_SOURCE = "day0_deterministic_bin_payoff"
 DAY0_DETERMINISTIC_BIN_PAYOFF_Q_MODE = "deterministic_bin_payoff"
 DAY0_DETERMINISTIC_BIN_PAYOFF_GLOBAL_AUTHORITY = (
@@ -69,6 +76,37 @@ DAY0_WU_FAST_RESIDUAL_SOURCE = "wu_api+same_station_fast_tail"
 DAY0_ABSORBING_FINALITIES = frozenset(
     {DAY0_MONOTONE_SETTLEMENT_BOUND, DAY0_FINAL_DAILY_SETTLEMENT}
 )
+
+
+def bind_day0_probability_semantics(q_version: object) -> str:
+    """Bind one Day0 q identity to the mechanism that produced it."""
+
+    identity = str(q_version or "").strip()
+    if not identity:
+        raise ValueError("DAY0_Q_VERSION_MISSING")
+    if identity.startswith(_DAY0_SEMANTIC_Q_VERSION_PREFIX):
+        if day0_probability_semantics_revision(identity) is None:
+            raise ValueError("DAY0_Q_VERSION_SEMANTICS_INVALID")
+        return identity
+    prefix = (
+        f"{_DAY0_SEMANTIC_Q_VERSION_PREFIX}"
+        f"{DAY0_PROBABILITY_SEMANTICS_REVISION}:"
+    )
+    return f"{prefix}{identity}"
+
+
+def day0_probability_semantics_revision(q_version: object) -> str | None:
+    """Read a stamped Day0 semantics revision; legacy hashes return None."""
+
+    identity = str(q_version or "").strip()
+    if not identity.startswith(_DAY0_SEMANTIC_Q_VERSION_PREFIX):
+        return None
+    revision, separator, base_identity = identity[
+        len(_DAY0_SEMANTIC_Q_VERSION_PREFIX) :
+    ].partition(":")
+    if not separator or not revision or not base_identity:
+        return None
+    return revision
 
 
 def day0_evidence_finality(payload: Mapping[str, object]) -> str:
