@@ -3024,6 +3024,7 @@ def _replacement_bayes_precision_fusion_override(
         # previous_runs substitution is recorded, never silent); persisted_current is its
         # (value, rid) view for the fetch seam below.
         from src.data.replacement_current_value_serving import (  # noqa: PLC0415
+            read_freshest_coherent_instrument_values,
             read_current_instrument_values,
         )
 
@@ -3381,16 +3382,27 @@ def _replacement_bayes_precision_fusion_override(
                     values_c_by_source=_source_values,
                 )
             )
+            _scheme_coherent_current = (
+                {}
+                if _scheme is None or conn is None
+                else read_freshest_coherent_instrument_values(
+                    conn,
+                    city=request.city,
+                    metric=metric,
+                    target_date=target_date,
+                    decision_time_iso=computed_at.isoformat(),
+                    models=tuple(str(model) for model in _scheme.weights),
+                    cohort_window_hours=BETWEEN_COHORT_WINDOW_HOURS,
+                )
+            )
             _scheme_current_provider_cohort_count = (
                 0
                 if _scheme is None
-                else _current_provider_cohort_family_count(
+                else _current_provider_family_count(
                     configured_weights=_scheme.weights,
-                    values_c_by_source=_source_values,
-                    cycles_by_source={
-                        str(_m): str(served_current[_m].served_cycle)  # type: ignore[union-attr]
-                        for _m in _scheme.weights
-                        if _m in served_current
+                    values_c_by_source={
+                        str(model): float(value.value_c)
+                        for model, value in _scheme_coherent_current.items()
                     },
                 )
             )
@@ -3508,29 +3520,37 @@ def _replacement_bayes_precision_fusion_override(
                         "sample_n": int(_scheme.sample_n),
                         "center_sigma_c": _source_clock_center_sigma_c,
                         "predictive_sigma_c": _source_clock_predictive_sigma_c,
+                        "between_cohort_value_serving": {
+                            str(model): value.as_provenance()
+                            for model, value in _scheme_coherent_current.items()
+                            if model in _source_clock_used_models
+                        },
                     }
+                    for _model, _served in _scheme_coherent_current.items():
+                        if _model in _source_clock_used_models:
+                            _source_clock_dep_ids.add(
+                                int(_served.raw_model_forecast_id)
+                            )
                     _source_clock_current_shape = _read_current_evidence_shape(
                         conn,
                         request,
                         metric=metric,
                         provider_values_c={
-                            model: float(_source_values[model])
+                            model: float(_scheme_coherent_current[model].value_c)
                             for model in _source_clock_used_models
-                            if model in _source_values
+                            if model in _scheme_coherent_current
                         },
                         provider_weights={
                             str(model): float(weight)
                             for model, weight in _weights.items()
                             if model in _source_clock_used_models
+                            and model in _scheme_coherent_current
                         },
                         center_c=float(_mu_diagonal),
-                        # Freshest-coherent-cohort between (consult v2 (b)): served
-                        # cycle stamps for the cohort filter. Every normalized provider
-                        # must carry one; missing provenance fails closed.
                         provider_cycles={
-                            str(_m): str(served_current[_m].served_cycle)  # type: ignore[union-attr]
+                            str(_m): str(_scheme_coherent_current[_m].served_cycle)
                             for _m in _source_clock_used_models
-                            if _m in served_current
+                            if _m in _scheme_coherent_current
                         },
                     )
                     # The live source-clock route has one shape authority: current
@@ -3621,26 +3641,41 @@ def _replacement_bayes_precision_fusion_override(
                     except Exception:
                         pass
                 _source_clock_used_models = tuple(str(model) for model in _weights)
+                _fallback_coherent_current = (
+                    {}
+                    if conn is None
+                    else read_freshest_coherent_instrument_values(
+                        conn,
+                        city=request.city,
+                        metric=metric,
+                        target_date=target_date,
+                        decision_time_iso=computed_at.isoformat(),
+                        models=_source_clock_used_models,
+                        cohort_window_hours=BETWEEN_COHORT_WINDOW_HOURS,
+                        include_station_sources=True,
+                    )
+                )
+                for _served in _fallback_coherent_current.values():
+                    _source_clock_dep_ids.add(int(_served.raw_model_forecast_id))
                 _source_clock_current_shape = _read_current_evidence_shape(
                     conn,
                     request,
                     metric=metric,
                     provider_values_c={
-                        str(model): float(_z_by_model[model])
+                        str(model): float(_fallback_coherent_current[model].value_c)
                         for model in _weights
-                        if model in _z_by_model
+                        if model in _fallback_coherent_current
                     },
                     provider_weights={
                         str(model): float(weight)
                         for model, weight in _weights.items()
+                        if model in _fallback_coherent_current
                     },
                     center_c=float(_mu_diagonal),
-                    # Freshest-coherent-cohort between (consult v2 (b)); the same
-                    # complete cycle provenance is required as above.
                     provider_cycles={
-                        str(_m): str(served_current[_m].served_cycle)  # type: ignore[union-attr]
+                        str(_m): str(_fallback_coherent_current[_m].served_cycle)
                         for _m in _source_clock_used_models
-                        if _m in served_current
+                        if _m in _fallback_coherent_current
                     },
                 )
                 if _source_clock_current_shape is not None:
@@ -3653,6 +3688,10 @@ def _replacement_bayes_precision_fusion_override(
                 if _source_clock_payload is not None:
                     _source_clock_payload.update(
                         {
+                            "between_cohort_value_serving": {
+                                str(model): value.as_provenance()
+                                for model, value in _fallback_coherent_current.items()
+                            },
                             "center_sigma_c": _source_clock_center_sigma_c,
                             "predictive_sigma_c": _source_clock_predictive_sigma_c,
                             "probability_shape_basis": (

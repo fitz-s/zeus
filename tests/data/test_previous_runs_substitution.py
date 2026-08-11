@@ -1,5 +1,5 @@
 # Created: 2026-06-11
-# Last reused or audited: 2026-08-08
+# Last reused or audited: 2026-08-10
 # Authority basis: Task #32 follow-up (operator 2026-06-11) — 没有新的就用老的 applied to fusion
 #   membership. The gem_global-only previous_runs exception (edc598b440) is generalized into the
 #   SINGLE serving authority (src/data/replacement_current_value_serving.py): a provider absent
@@ -44,6 +44,7 @@ from src.data.replacement_forecast_cycle_policy import (
 )
 from src.data.replacement_current_value_serving import (
     PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS,
+    read_freshest_coherent_instrument_values,
     read_current_instrument_values,
 )
 
@@ -113,6 +114,63 @@ def test_provider_absent_from_both_endpoints_stays_dropped() -> None:
     out = _read(conn)
     assert "jma_seamless" not in out
     assert set(out) == {"gfs_global"}
+
+
+def test_newer_async_run_cannot_erase_latest_coherent_provider_cohort() -> None:
+    conn = _conn()
+    icon_cycle = "2026-06-11T00:00:00+00:00"
+    nbm_coherent_cycle = "2026-06-11T03:00:00+00:00"
+    nbm_latest_cycle = "2026-06-11T04:00:00+00:00"
+    _insert(
+        conn,
+        10,
+        "icon_global",
+        33.0,
+        "single_runs",
+        cycle=icon_cycle,
+        captured="2026-06-11T02:00:00+00:00",
+    )
+    _insert(
+        conn,
+        11,
+        "ncep_nbm_conus",
+        33.2,
+        "single_runs",
+        cycle=nbm_coherent_cycle,
+        captured="2026-06-11T03:30:00+00:00",
+    )
+    _insert(
+        conn,
+        12,
+        "ncep_nbm_conus",
+        33.4,
+        "single_runs",
+        cycle=nbm_latest_cycle,
+        captured="2026-06-11T04:30:00+00:00",
+    )
+
+    newest = read_current_instrument_values(
+        conn,
+        city="Beijing",
+        metric="high",
+        target_date="2026-06-12",
+        source_cycle_time_iso=CYCLE,
+        decision_time_iso="2026-06-11T05:00:00+00:00",
+    )
+    coherent = read_freshest_coherent_instrument_values(
+        conn,
+        city="Beijing",
+        metric="high",
+        target_date="2026-06-12",
+        decision_time_iso="2026-06-11T05:00:00+00:00",
+        models=("icon_global", "ncep_nbm_conus"),
+        cohort_window_hours=3.0,
+    )
+    conn.close()
+
+    assert newest["ncep_nbm_conus"].raw_model_forecast_id == 12
+    assert coherent["icon_global"].raw_model_forecast_id == 10
+    assert coherent["ncep_nbm_conus"].raw_model_forecast_id == 11
 
 
 # -------------------------------------------------------------------------------------

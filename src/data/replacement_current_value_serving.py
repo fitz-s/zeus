@@ -686,3 +686,107 @@ def read_current_instrument_values(
                 age_hours=0.0 if _age is None else _age, lead_days=lead,
             )
     return out
+
+
+def read_freshest_coherent_instrument_values(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    metric: str,
+    target_date: str,
+    decision_time_iso: str,
+    models: tuple[str, ...],
+    cohort_window_hours: float,
+    max_substitution_age_hours: float = PREVIOUS_RUNS_SUBSTITUTION_MAX_AGE_HOURS,
+    include_station_sources: bool = False,
+) -> dict[str, ServedInstrumentValue]:
+    """Return the newest causal multi-family provider cohort.
+
+    This selector is intentionally distinct from ``read_current_instrument_values``:
+    the latter serves each provider's newest possessed value for the center, while
+    this function may select an immediately prior run for one provider so the
+    between-provider spread remains simultaneous. A newer asynchronous run therefore
+    cannot erase an already possessed coherent cohort.
+    """
+
+    try:
+        decision_time = datetime.fromisoformat(
+            str(decision_time_iso).replace("Z", "+00:00")
+        )
+        if decision_time.tzinfo is None:
+            raise ValueError("decision_time_iso must be timezone-aware")
+        window_hours = float(cohort_window_hours)
+        if not math.isfinite(window_hours) or window_hours < 0.0:
+            raise ValueError("cohort_window_hours must be finite and non-negative")
+    except (TypeError, ValueError, OverflowError):
+        return {}
+
+    from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
+        replacement_source_cycle_max_age_hours,
+    )
+    from src.strategy.live_inference.source_clock_vnext import (  # noqa: PLC0415
+        provider_family_for_source,
+    )
+
+    schema = current_value_serving_schema(conn)
+    if not schema.has_captured_at and not schema.has_source_available_at:
+        return {}
+
+    requested = set(models)
+    by_model_cycle: dict[tuple[str, datetime], ServedInstrumentValue] = {}
+    max_cycle_age = replacement_source_cycle_max_age_hours()
+    for row in _read_source_clock_rows(
+        conn,
+        city=city,
+        metric=metric,
+        target_date=target_date,
+        decision_iso=decision_time.isoformat(),
+        schema=schema,
+        max_substitution_age_hours=max_substitution_age_hours,
+    ):
+        served = _served_source_clock_row(
+            row,
+            schema=schema,
+            max_substitution_age_hours=max_substitution_age_hours,
+        )
+        if served is None:
+            continue
+        model, value = served
+        if model not in requested:
+            continue
+        if model.startswith(("cwa_", "hko_")) and not include_station_sources:
+            continue
+        try:
+            cycle = datetime.fromisoformat(
+                value.served_cycle.replace("Z", "+00:00")
+            )
+            if cycle.tzinfo is None:
+                continue
+            age_hours = (decision_time - cycle).total_seconds() / 3600.0
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if age_hours < 0.0 or age_hours > max_cycle_age:
+            continue
+        # The source-clock query orders endpoint quality and correction receipt so
+        # first-valid wins for one model/cycle, exactly like the center selector.
+        by_model_cycle.setdefault((model, cycle), value)
+
+    if not by_model_cycle:
+        return {}
+    cycles = tuple(sorted({cycle for _, cycle in by_model_cycle}, reverse=True))
+    for cohort_cycle in cycles:
+        cohort: dict[str, ServedInstrumentValue] = {}
+        for model in requested:
+            eligible = [
+                (cycle, value)
+                for (candidate_model, cycle), value in by_model_cycle.items()
+                if candidate_model == model
+                and 0.0
+                <= (cohort_cycle - cycle).total_seconds() / 3600.0
+                <= window_hours
+            ]
+            if eligible:
+                cohort[model] = max(eligible, key=lambda item: item[0])[1]
+        if len({provider_family_for_source(model) for model in cohort}) >= 2:
+            return cohort
+    return {}
