@@ -11232,6 +11232,14 @@ def _global_buy_candidate_from_raw_book(
         raise ValueError("GLOBAL_BUY_JIT_BID_LEVEL_INVALID") from exc
     if len(bid_levels) != len(raw_bids or ()):
         raise ValueError("GLOBAL_BUY_JIT_BID_LEVEL_INVALID")
+    for level in bid_levels:
+        ratio = level.price / market_authority.min_tick
+        if abs(ratio - ratio.to_integral_value()) > Decimal("1e-9"):
+            raise ValueError(
+                "GLOBAL_BUY_JIT_BID_LEVEL_INVALID:off_tick:"
+                f"token_id={token_id}:price={level.price}:"
+                f"min_tick={market_authority.min_tick}"
+            )
     for raw_names, current in (
         (("tick_size", "min_tick_size", "minTickSize"), market_authority.min_tick),
         (
@@ -13497,20 +13505,20 @@ def _global_preflight_entry_jit_receipt(
         limit = Decimal(str(getattr(decision, "limit_price", "0") or "0"))
         if shares <= 0:
             raise ValueError("GLOBAL_BUY_JIT_SELECTED_SIZE_INVALID")
+        from src.solve.solver import current_precliff_liquidation_capacity
+
+        liquidation_capacity = current_precliff_liquidation_capacity(
+            current_candidate.native_bid_levels
+        )
+        if liquidation_capacity + Decimal("1e-9") < shares:
+            raise ValueError(
+                "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
+                f"token_id={candidate.token_id}:required_shares={shares}:"
+                f"precliff_bid_shares={liquidation_capacity}"
+            )
         if str(getattr(candidate, "execution_mode", "") or "").upper() == (
             "TAKER_LIMIT"
         ):
-            from src.solve.solver import current_precliff_liquidation_capacity
-
-            liquidation_capacity = current_precliff_liquidation_capacity(
-                current_candidate.native_bid_levels
-            )
-            if liquidation_capacity + Decimal("1e-9") < shares:
-                raise ValueError(
-                    "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
-                    f"token_id={candidate.token_id}:required_shares={shares}:"
-                    f"precliff_bid_shares={liquidation_capacity}"
-                )
             executable_shares = sum(
                 (
                     level.size

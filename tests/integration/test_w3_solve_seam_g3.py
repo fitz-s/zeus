@@ -13368,7 +13368,7 @@ def test_global_preflight_jit_worse_curve_replaces_and_reauctions(monkeypatch):
         return {
             "asset_id": token_id,
             "hash": "book-a",
-            "bids": [{"price": "0.05", "size": "200"}],
+            "bids": [{"price": "0.06", "size": "200"}],
             "asks": [{"price": "0.14", "size": "217.68"}],
         }
 
@@ -13439,7 +13439,7 @@ def test_global_preflight_jit_worse_curve_replaces_and_reauctions(monkeypatch):
             or {
                 "asset_id": token_id,
                 "hash": "fresh-after-expiry",
-                "bids": [{"price": "0.05", "size": "200"}],
+                "bids": [{"price": "0.06", "size": "200"}],
                 "asks": [{"price": "0.14", "size": "217.68"}],
             }
         ),
@@ -13458,7 +13458,7 @@ def test_global_preflight_jit_worse_curve_replaces_and_reauctions(monkeypatch):
         book_quote_provider=lambda token_id: {
             "asset_id": token_id,
             "hash": "evidence-only-hash-change",
-            "bids": [{"price": "0.05", "size": "200"}],
+            "bids": [{"price": "0.06", "size": "200"}],
             "asks": [{"price": "0.12", "size": "190"}],
         },
     )
@@ -13467,14 +13467,29 @@ def test_global_preflight_jit_worse_curve_replaces_and_reauctions(monkeypatch):
     assert isinstance(stable.global_jit_candidate, era._GlobalJitHandoff)
 
 
+@pytest.mark.parametrize("execution_mode", ("TAKER_LIMIT", "MAKER_REST"))
+@pytest.mark.parametrize("side", ("YES", "NO"))
 def test_global_preflight_jit_rejects_buy_that_lost_precliff_liquidation_depth(
     monkeypatch,
+    execution_mode,
+    side,
 ):
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     at = _dt.datetime(2026, 8, 10, 20, 5, tzinfo=_dt.timezone.utc)
     selected_curve = ExecutableCostCurve(
         token_id="token-a",
-        side="YES",
+        side=side,
+        snapshot_id="selected-book",
+        book_hash="selected-hash",
+        levels=(BookLevel(price=Decimal("0.07"), size=Decimal("100")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("5"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    proposal_curve = ExecutableCostCurve(
+        token_id="token-a",
+        side=side,
         snapshot_id="selected-book",
         book_hash="selected-hash",
         levels=(BookLevel(price=Decimal("0.06"), size=Decimal("100")),),
@@ -13483,12 +13498,23 @@ def test_global_preflight_jit_rejects_buy_that_lost_precliff_liquidation_depth(
         min_order_size=Decimal("5"),
         quote_ttl=_dt.timedelta(seconds=30),
     )
+    maker_terms = (
+        {
+            "execution_mode": "MAKER_REST",
+            "proposal_cost_curve": proposal_curve,
+            "fill_probability": 0.5,
+            "fill_probability_source": "current-maker-witness",
+            "rest_deadline_minutes": 20.0,
+        }
+        if execution_mode == "MAKER_REST"
+        else {}
+    )
     candidate = GlobalSingleOrderCandidate(
         candidate_id="candidate-a",
         family_key="family-a",
         bin_id="bin-a",
         condition_id="condition-a",
-        side="YES",
+        side=side,
         token_id="token-a",
         probability_witness_identity="probability-a",
         book_snapshot_id=selected_curve.snapshot_id,
@@ -13500,6 +13526,88 @@ def test_global_preflight_jit_rejects_buy_that_lost_precliff_liquidation_depth(
         neg_risk=False,
         native_bid_levels=(
             BookLevel(price=Decimal("0.05"), size=Decimal("100")),
+        ),
+        **maker_terms,
+    )
+    receipt = EventSubmissionReceipt(
+        False,
+        event.event_id,
+        event.causal_snapshot_id,
+        proof_accepted=True,
+        decision_proof_bundle=(object(),),
+    )
+    actuation = SimpleNamespace(
+        winner_event_id=event.event_id,
+        decision=SimpleNamespace(
+            candidate=candidate,
+            limit_price=(
+                Decimal("0.06")
+                if execution_mode == "MAKER_REST"
+                else Decimal("0.07")
+            ),
+            shares=Decimal("20"),
+        ),
+    )
+    _install_global_jit_market_authority_fetches(
+        monkeypatch,
+        condition_id="condition-a",
+        token_id="token-a",
+        side=side,
+        tick="0.01",
+        min_order_size="5",
+    )
+
+    rejected = era._global_preflight_entry_jit_receipt(
+        event,
+        receipt,
+        global_actuation=actuation,
+        book_quote_provider=lambda token_id: {
+            "asset_id": token_id,
+            "hash": "jit-book-a",
+            "bids": [{"price": "0.05", "size": "100"}],
+            "asks": [{"price": "0.07", "size": "100"}],
+        },
+    )
+
+    assert rejected.proof_accepted is False
+    assert rejected.reason.startswith(
+        "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+        "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
+    )
+
+
+@pytest.mark.parametrize("side", ("YES", "NO"))
+def test_global_preflight_jit_rejects_off_tick_native_bid(monkeypatch, side):
+    event = _global_scope_event(city="Alpha", source_run_id="run-a")
+    at = _dt.datetime(2026, 8, 10, 20, 5, tzinfo=_dt.timezone.utc)
+    selected_curve = ExecutableCostCurve(
+        token_id="token-a",
+        side=side,
+        snapshot_id="selected-book",
+        book_hash="selected-hash",
+        levels=(BookLevel(price=Decimal("0.07"), size=Decimal("100")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("5"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    candidate = GlobalSingleOrderCandidate(
+        candidate_id="candidate-a",
+        family_key="family-a",
+        bin_id="bin-a",
+        condition_id="condition-a",
+        side=side,
+        token_id="token-a",
+        probability_witness_identity="probability-a",
+        book_snapshot_id=selected_curve.snapshot_id,
+        book_captured_at_utc=at,
+        execution_curve_identity=executable_curve_identity(selected_curve),
+        ledger_snapshot_id="ledger-a",
+        executable_cost_curve=selected_curve,
+        resolution_identity="resolution-a",
+        neg_risk=False,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.06"), size=Decimal("100")),
         ),
     )
     receipt = EventSubmissionReceipt(
@@ -13513,7 +13621,7 @@ def test_global_preflight_jit_rejects_buy_that_lost_precliff_liquidation_depth(
         winner_event_id=event.event_id,
         decision=SimpleNamespace(
             candidate=candidate,
-            limit_price=Decimal("0.06"),
+            limit_price=Decimal("0.07"),
             shares=Decimal("20"),
         ),
     )
@@ -13521,7 +13629,7 @@ def test_global_preflight_jit_rejects_buy_that_lost_precliff_liquidation_depth(
         monkeypatch,
         condition_id="condition-a",
         token_id="token-a",
-        side="YES",
+        side=side,
         tick="0.01",
         min_order_size="5",
     )
@@ -13533,15 +13641,16 @@ def test_global_preflight_jit_rejects_buy_that_lost_precliff_liquidation_depth(
         book_quote_provider=lambda token_id: {
             "asset_id": token_id,
             "hash": "jit-book-a",
-            "bids": [{"price": "0.05", "size": "100"}],
-            "asks": [{"price": "0.06", "size": "100"}],
+            "bids": [{"price": "0.061", "size": "100"}],
+            "asks": [{"price": "0.07", "size": "100"}],
         },
     )
 
     assert rejected.proof_accepted is False
     assert rejected.reason.startswith(
         "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
-        "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
+        "GLOBAL_BUY_JIT_BID_LEVEL_INVALID:off_tick:"
+        "token_id=token-a:price=0.061:min_tick=0.01"
     )
 
 

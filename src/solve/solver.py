@@ -371,16 +371,20 @@ def passive_buy_proposal_curve(
 def current_precliff_liquidation_capacity(
     native_bid_levels: Sequence[BookLevel],
 ) -> Decimal:
-    """Return same-token depth sellable with one downward-tick slack above floor."""
+    """Return finite positive same-token bid shares strictly above the live floor.
+
+    A legal SELL limit may price-improve against bids above the submit ceiling, so
+    those shares remain current liquidation capacity.
+    """
 
     return sum(
         (
             Decimal(level.size)
             for level in native_bid_levels
             if Decimal(level.price).is_finite()
-            and LIVE_ORDER_MIN_UNIT_PRICE
-            < Decimal(level.price)
-            <= LIVE_ORDER_MAX_UNIT_PRICE
+            and Decimal(level.price) > LIVE_ORDER_MIN_UNIT_PRICE
+            and Decimal(level.size).is_finite()
+            and Decimal(level.size) > 0
         ),
         Decimal("0"),
     )

@@ -1,6 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-09
-# Lifecycle: created=2026-07-03; last_reviewed=2026-08-09; last_reused=2026-08-09
+# Last reused/audited: 2026-08-11
+# Lifecycle: created=2026-07-03; last_reviewed=2026-08-11; last_reused=2026-08-11
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
 
@@ -2522,6 +2522,21 @@ def test_global_taker_buy_size_does_not_exceed_current_precliff_liquidation_dept
 
     assert decision.candidate is candidate
     assert Decimal("20") <= decision.shares <= Decimal("25")
+
+
+def test_current_precliff_capacity_counts_all_positive_depth_above_floor():
+    levels = (
+        BookLevel(price=Decimal("0.05"), size=Decimal("100")),
+        BookLevel(price=Decimal("0.0501"), size=Decimal("2")),
+        BookLevel(price=Decimal("0.95"), size=Decimal("3")),
+        BookLevel(price=Decimal("0.96"), size=Decimal("7")),
+        SimpleNamespace(price=Decimal("0.50"), size=Decimal("-11")),
+        SimpleNamespace(price=Decimal("0.50"), size=Decimal("NaN")),
+        SimpleNamespace(price=Decimal("0.50"), size=Decimal("Infinity")),
+        SimpleNamespace(price=Decimal("NaN"), size=Decimal("100")),
+    )
+
+    assert S.current_precliff_liquidation_capacity(levels) == Decimal("12")
 
 
 def test_current_maker_buy_witness_can_win_on_exact_partial_distribution():
