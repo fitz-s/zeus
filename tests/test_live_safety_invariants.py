@@ -18369,14 +18369,192 @@ def test_monitor_absolute_deadline_includes_pending_exit_preflight(monkeypatch):
         summary,
         deps=_monitor_test_deps("test_monitor_preflight_deadline"),
         run_exit_preflight=True,
-        held_position_monitor_budget_seconds=0.5,
+        held_position_monitor_budget_seconds=6.0,
     )
 
     assert len(observed) == 1
     deadline, preflight_called_at = observed[0]
-    assert started < deadline
-    assert 0.0 < deadline - preflight_called_at <= 0.5
-    assert summary["held_monitor_budget_seconds"] == pytest.approx(0.5)
+    assert deadline < started + 6.0
+    assert 0.0 < deadline - preflight_called_at <= 5.0
+    assert summary["held_monitor_budget_seconds"] == pytest.approx(6.0)
+
+
+def _assert_primary_monitor_progress(monkeypatch, *, clock, position):
+    from src.engine import cycle_runtime
+
+    evaluations: list[str] = []
+
+    def refresh(*_args):
+        return _monitor_test_edge_context(position)
+
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: [position],
+    )
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: evaluations.append(self.trade_id)
+        or ExitDecision(False, "PRIMARY_RESERVE_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+    return evaluations
+
+
+def test_pending_exit_preflight_auxiliary_deadline_preserves_primary_refresh(
+    monkeypatch,
+):
+    from src.engine import cycle_runtime
+    from src.execution import exit_lifecycle
+
+    position = _make_position(trade_id="primary-after-pending-preflight")
+    clock = [0.0]
+    evaluations = _assert_primary_monitor_progress(
+        monkeypatch,
+        clock=clock,
+        position=position,
+    )
+    observed_deadlines: list[float] = []
+
+    def pending_preflight(
+        _portfolio,
+        _clob,
+        *,
+        conn,
+        deadline_monotonic,
+        global_sell_reauction_requester,
+    ):
+        del conn, global_sell_reauction_requester
+        observed_deadlines.append(deadline_monotonic)
+        clock[0] = deadline_monotonic
+        return {"filled": 0, "retried": 0, "unchanged": 0, "filled_positions": []}
+
+    monkeypatch.setattr(exit_lifecycle, "check_pending_exits", pending_preflight)
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_primary_after_pending_preflight"),
+        run_exit_preflight=True,
+        held_position_monitor_budget_seconds=6.0,
+    )
+
+    assert observed_deadlines == [pytest.approx(1.0)]
+    assert evaluations == [position.trade_id]
+    assert summary["held_monitor_primary_belief_read_started"] == 1
+    assert summary["held_monitor_primary_belief_read_completed"] == 1
+
+
+def test_global_sell_debt_drain_auxiliary_deadline_preserves_primary_refresh(
+    monkeypatch,
+):
+    from src.engine import cycle_runtime
+    from src.execution import exit_lifecycle
+
+    active = _make_position(trade_id="primary-after-global-debt")
+    debt = _make_position(
+        trade_id="pending-global-debt",
+        state="pending_exit",
+        exit_state="retry_pending",
+    )
+    clock = [0.0]
+    evaluations = _assert_primary_monitor_progress(
+        monkeypatch,
+        clock=clock,
+        position=active,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "needs_global_sell_snapshot_reauction",
+        lambda position, _conn: position is debt,
+    )
+    recovered: list[str] = []
+
+    def recover(position, **_kwargs):
+        recovered.append(position.trade_id)
+        clock[0] = 1.0
+        return False
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "recover_global_sell_snapshot_reauction_debt",
+        recover,
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(debt, active),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_primary_after_global_debt"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=6.0,
+    )
+
+    assert recovered == [debt.trade_id]
+    assert evaluations == [active.trade_id]
+    assert summary["global_sell_snapshot_reauction_debts_pending"] == 1
+    assert summary["held_monitor_optional_maintenance_deferred"] >= 1
+    assert summary["held_monitor_primary_belief_read_completed"] == 1
+
+
+def test_local_orderbook_prefetch_auxiliary_deadline_bypasses_to_primary_refresh(
+    monkeypatch,
+):
+    from src.engine import cycle_runtime
+
+    position = _make_position(trade_id="primary-after-local-prefetch")
+    clock = [0.0]
+    evaluations = _assert_primary_monitor_progress(
+        monkeypatch,
+        clock=clock,
+        position=position,
+    )
+
+    def local_prefetch(*_args, deadline_monotonic, **_kwargs):
+        assert deadline_monotonic == pytest.approx(1.0)
+        clock[0] = deadline_monotonic
+        return {}
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        local_prefetch,
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_primary_after_local_prefetch"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=6.0,
+    )
+
+    assert evaluations == [position.trade_id]
+    assert summary["held_monitor_orderbook_prefetch_bypassed"] is True
+    assert summary["held_monitor_optional_maintenance_deferred"] >= 1
+    assert summary["held_monitor_primary_belief_read_started"] == 1
+    assert summary["held_monitor_primary_belief_read_completed"] == 1
 
 
 def test_exit_monitor_budget_starts_at_claim_and_wrapper_forwards_remaining(
@@ -18946,7 +19124,7 @@ def test_global_sell_debt_drain_stops_after_first_attempt_exhausts_deadline(
         summary,
         deps=_monitor_test_deps("test_bounded_global_sell_debt_drain"),
         run_exit_preflight=False,
-        held_position_monitor_budget_seconds=1.0,
+        held_position_monitor_budget_seconds=6.0,
     )
 
     assert attempted == ["bounded-global-sell-debt-0"]

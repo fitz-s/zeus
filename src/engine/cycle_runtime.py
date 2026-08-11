@@ -4848,6 +4848,7 @@ def _fresh_local_held_monitor_orderbooks(
     now_utc: datetime,
     summary: dict,
     deps,
+    deadline_monotonic: float | None = None,
 ) -> dict[str, dict]:
     if conn is None:
         return {}
@@ -4864,6 +4865,20 @@ def _fresh_local_held_monitor_orderbooks(
     values_sql = ",".join("(?, ?)" for _ in scope)
     params = [part for pair in scope for part in pair]
     params.append(now_utc.astimezone(timezone.utc).isoformat())
+    progress_handler_installed = False
+    if deadline_monotonic is not None:
+        if time.monotonic() >= float(deadline_monotonic):
+            summary["held_monitor_orderbook_prefetch_defer_reason"] = (
+                "AUXILIARY_DEADLINE_EXPIRED"
+            )
+            return {}
+        set_progress_handler = getattr(conn, "set_progress_handler", None)
+        if callable(set_progress_handler):
+            set_progress_handler(
+                lambda: int(time.monotonic() >= float(deadline_monotonic)),
+                1_000,
+            )
+            progress_handler_installed = True
     try:
         rows = conn.execute(
             f"""
@@ -4886,10 +4901,29 @@ def _fresh_local_held_monitor_orderbooks(
             params,
         ).fetchall()
     except Exception as exc:  # noqa: BLE001 - network remains the fallback.
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        ):
+            summary["held_monitor_orderbook_prefetch_defer_reason"] = (
+                "AUXILIARY_DEADLINE_EXPIRED"
+            )
         summary["held_monitor_local_orderbook_error"] = str(exc)[:500]
         deps.logger.warning(
             "held monitor local orderbook prefetch failed; using network fallback: %s",
             exc,
+        )
+        return {}
+    finally:
+        if progress_handler_installed:
+            conn.set_progress_handler(None, 0)
+
+    if (
+        deadline_monotonic is not None
+        and time.monotonic() >= float(deadline_monotonic)
+    ):
+        summary["held_monitor_orderbook_prefetch_defer_reason"] = (
+            "AUXILIARY_DEADLINE_EXPIRED"
         )
         return {}
 
@@ -4957,12 +4991,24 @@ def _prefetch_held_monitor_orderbooks(
         publish_current_monitor_orderbook_batch({}, captured_at_utc=None)
     summary["held_monitor_orderbooks_requested"] = len(token_ids)
     summary["held_monitor_orderbooks_published_for_global_sell"] = 0
+    if (
+        local_only
+        and deadline_monotonic is not None
+        and time.monotonic() >= float(deadline_monotonic)
+    ):
+        summary["held_monitor_orderbook_prefetch_defer_reason"] = (
+            "AUXILIARY_DEADLINE_EXPIRED"
+        )
+        summary["held_monitor_orderbook_prefetch_bypassed"] = True
+        install_monitor_orderbook_prefetch(clob, {})
+        return frozenset()
     local_books = _fresh_local_held_monitor_orderbooks(
         conn,
         positions,
         now_utc=now_utc,
         summary=summary,
         deps=deps,
+        deadline_monotonic=deadline_monotonic,
     )
     local_books = {**existing_books, **local_books}
     summary["held_monitor_orderbooks_local"] = len(local_books)
@@ -5979,14 +6025,19 @@ def execute_monitoring_phase(
         """Reserve a durable global cut for a canonical reauction debt."""
 
         try:
+            if time.monotonic() >= auxiliary_deadline:
+                defer_optional_maintenance("GLOBAL_SELL_DEBT_REQUEST_DEADLINE")
+                raise TimeoutError(
+                    "GLOBAL_SELL_REAUCTION_AUXILIARY_DEADLINE_EXPIRED"
+                )
             from src.events.reactor import request_global_auction_completion
 
             obligation = getattr(position, "_held_sell_reauction_obligation", {})
             obligation = obligation if isinstance(obligation, dict) else {}
             if force_new_generation:
-                if time.monotonic() >= monitor_deadline:
+                if time.monotonic() >= auxiliary_deadline:
                     raise TimeoutError(
-                        "GLOBAL_SELL_REAUCTION_MONITOR_DEADLINE_EXPIRED"
+                        "GLOBAL_SELL_REAUCTION_AUXILIARY_DEADLINE_EXPIRED"
                     )
                 previous_deadline = getattr(
                     position,
@@ -5996,7 +6047,7 @@ def execute_monitoring_phase(
                 setattr(
                     position,
                     _HELD_MONITOR_DEADLINE_ATTR,
-                    monitor_deadline,
+                    auxiliary_deadline,
                 )
                 try:
                     refresh_position(conn, clob, position)
@@ -6012,9 +6063,9 @@ def execute_monitoring_phase(
                             _HELD_MONITOR_DEADLINE_ATTR,
                             previous_deadline,
                         )
-                if time.monotonic() >= monitor_deadline:
+                if time.monotonic() >= auxiliary_deadline:
                     raise TimeoutError(
-                        "GLOBAL_SELL_REAUCTION_MONITOR_DEADLINE_EXPIRED"
+                        "GLOBAL_SELL_REAUCTION_AUXILIARY_DEADLINE_EXPIRED"
                     )
                 if not (
                     bool(getattr(position, "last_monitor_prob_is_fresh", False))
@@ -6258,8 +6309,12 @@ def execute_monitoring_phase(
     ) -> None:
         nonlocal portfolio_dirty
         for index, position in enumerate(debt_positions):
-            if time.monotonic() >= monitor_deadline:
+            if time.monotonic() >= auxiliary_deadline:
                 deferred = len(debt_positions) - index
+                defer_optional_maintenance(
+                    "GLOBAL_SELL_DEBT_DRAIN_DEADLINE",
+                    deferred,
+                )
                 summary["global_sell_snapshot_reauction_deadline_deferred"] = (
                     summary.get(
                         "global_sell_snapshot_reauction_deadline_deferred",
@@ -6389,6 +6444,15 @@ def execute_monitoring_phase(
             )
         return released
 
+    def defer_optional_maintenance(reason: str, count: int = 1) -> None:
+        summary["held_monitor_optional_maintenance_deferred"] = (
+            summary.get("held_monitor_optional_maintenance_deferred", 0)
+            + max(1, int(count))
+        )
+        summary.setdefault("held_monitor_optional_maintenance_defer_reasons", [])
+        if reason not in summary["held_monitor_optional_maintenance_defer_reasons"]:
+            summary["held_monitor_optional_maintenance_defer_reasons"].append(reason)
+
     def urgent_preemption_requested() -> bool:
         if should_preempt_for_urgent_day0 is None:
             return False
@@ -6414,7 +6478,19 @@ def execute_monitoring_phase(
         held_position_monitor_budget_seconds
     )
     monitor_deadline = time.monotonic() + monitor_budget_seconds
+    primary_reserve_seconds = max(
+        0.0,
+        float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS),
+    )
+    auxiliary_deadline = monitor_deadline - primary_reserve_seconds
     summary["held_monitor_budget_seconds"] = monitor_budget_seconds
+    summary["held_monitor_primary_belief_reserve_seconds"] = (
+        primary_reserve_seconds
+    )
+    summary["held_monitor_primary_belief_read_started"] = 0
+    summary["held_monitor_primary_belief_read_completed"] = 0
+    summary["held_monitor_primary_belief_read_deferred"] = 0
+    summary["held_monitor_optional_maintenance_deferred"] = 0
 
     # Preflight may release a due retry back to its economic holding phase
     # before the normal monitor pass. Preserve the preflight identity fact so
@@ -6435,7 +6511,7 @@ def execute_monitoring_phase(
                 portfolio,
                 clob,
                 conn=conn,
-                deadline_monotonic=monitor_deadline,
+                deadline_monotonic=auxiliary_deadline,
                 global_sell_reauction_requester=(
                     request_global_sell_snapshot_reauction
                 ),
@@ -6505,7 +6581,8 @@ def execute_monitoring_phase(
     portfolio_positions = tuple(getattr(portfolio, "positions", ()) or ())
     committed_debt_candidates: list[object] = []
     for index, position in enumerate(portfolio_positions):
-        if time.monotonic() >= monitor_deadline:
+        if time.monotonic() >= auxiliary_deadline:
+            defer_optional_maintenance("GLOBAL_SELL_DEBT_SCAN_DEADLINE")
             summary["global_sell_snapshot_reauction_scan_deadline_deferred"] = (
                 len(portfolio_positions) - index
             )
@@ -6514,7 +6591,11 @@ def execute_monitoring_phase(
             committed_debt_candidates.append(position)
     committed_debt_positions = tuple(committed_debt_candidates)
     if committed_debt_positions:
-        if time.monotonic() >= monitor_deadline:
+        if time.monotonic() >= auxiliary_deadline:
+            defer_optional_maintenance(
+                "GLOBAL_SELL_DEBT_DRAIN_DEADLINE",
+                len(committed_debt_positions),
+            )
             summary["global_sell_snapshot_reauction_deadline_deferred"] = len(
                 committed_debt_positions
             )
@@ -6635,8 +6716,15 @@ def execute_monitoring_phase(
         deps=deps,
         local_only=True,
         mark_unfetched_attempted=False,
+        deadline_monotonic=auxiliary_deadline,
     )
     summary.update(local_prefetch)
+    if time.monotonic() >= auxiliary_deadline:
+        defer_optional_maintenance("HELD_ORDERBOOK_PREFETCH_DEADLINE")
+        summary["held_monitor_orderbook_prefetch_bypassed"] = True
+        # No batch miss may consume the primary reserve.  Let the admitted
+        # position use refresh_position's own current, bounded quote path.
+        network_book_tokens = frozenset()
     local_book_tokens = frozenset(
         _position_held_token_id(pos) for pos in quote_positions
     ) - network_book_tokens
@@ -6835,6 +6923,10 @@ def execute_monitoring_phase(
         if monitor_deadline_expired and not deadline_rescue:
             deferred_count = len(monitor_positions) - position_index
             if deferred_count > 0:
+                summary["held_monitor_primary_belief_read_deferred"] = (
+                    summary.get("held_monitor_primary_belief_read_deferred", 0)
+                    + deferred_count
+                )
                 summary["held_monitor_positions_deferred"] = deferred_count
                 summary["held_monitor_defer_reason"] = "cycle_budget_exhausted"
                 summary["held_monitor_deadline_deferred_positions"] = deferred_count
@@ -6866,6 +6958,10 @@ def execute_monitoring_phase(
             < HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
         ):
             deferred_count = len(monitor_positions) - position_index
+            summary["held_monitor_primary_belief_read_deferred"] = (
+                summary.get("held_monitor_primary_belief_read_deferred", 0)
+                + deferred_count
+            )
             summary["held_monitor_positions_deferred"] = deferred_count
             summary["held_monitor_defer_reason"] = (
                 "primary_belief_budget_reserve"
@@ -7064,6 +7160,16 @@ def execute_monitoring_phase(
 
         held_token_id = _position_held_token_id(pos)
         is_durable_debt_network_attempt = False
+        if (
+            held_token_id in network_book_tokens
+            and time.monotonic() >= auxiliary_deadline
+        ):
+            defer_optional_maintenance("HELD_ORDERBOOK_BATCH_DEADLINE")
+            summary["held_monitor_orderbook_prefetch_bypassed"] = True
+            # Batch orderbook warming is optional.  Do not let a missing batch
+            # turn into an unbounded gap: refresh_position retains its own
+            # current/fresh single-token deadline path.
+            network_book_tokens = frozenset()
         if held_token_id in network_book_tokens and not local_dead_bin_deadline_rescue:
             if network_prefetch_unavailable:
                 summary["held_monitor_positions_deferred_for_orderbook_gap"] = (
@@ -7118,7 +7224,10 @@ def execute_monitoring_phase(
                     now_utc=monitor_now_utc,
                     deps=deps,
                     preserve_existing=True,
-                    deadline_monotonic=monitor_deadline,
+                    deadline_monotonic=auxiliary_deadline,
+                )
+                network_prefetch_deadline_exhausted = (
+                    time.monotonic() >= auxiliary_deadline
                 )
                 summary["held_monitor_orderbooks_prefetched"] = (
                     int(summary.get("held_monitor_orderbooks_prefetched", 0) or 0)
@@ -7167,6 +7276,11 @@ def execute_monitoring_phase(
                     summary["held_monitor_orderbook_prefetch_unavailable"] = (
                         "ORDERBOOK_PREFETCH_INSTALL_FAILED"
                     )
+                if network_prefetch_deadline_exhausted:
+                    defer_optional_maintenance("HELD_ORDERBOOK_BATCH_DEADLINE")
+                    summary["held_monitor_orderbook_prefetch_bypassed"] = True
+                    network_prefetch_unavailable = False
+                    network_book_tokens = frozenset()
                 if network_prefetch_unavailable:
                     summary["held_monitor_positions_deferred_for_orderbook_gap"] = (
                         summary.get(
@@ -7563,6 +7677,10 @@ def execute_monitoring_phase(
                     _HELD_MONITOR_DEADLINE_ATTR,
                     monitor_deadline,
                 )
+                summary["held_monitor_primary_belief_read_started"] = (
+                    summary.get("held_monitor_primary_belief_read_started", 0)
+                    + 1
+                )
                 try:
                     edge_ctx = refresh_position(conn, clob, pos)
                 finally:
@@ -7699,6 +7817,10 @@ def execute_monitoring_phase(
                 # structurally-won position would defeat the purpose of holding.
             else:
                 exit_decision = pos.evaluate_exit(exit_context)
+                summary["held_monitor_primary_belief_read_completed"] = (
+                    summary.get("held_monitor_primary_belief_read_completed", 0)
+                    + 1
+                )
             entry_selection_guard_forced_exit = False
             if not (
                 _hard_fact is not None
