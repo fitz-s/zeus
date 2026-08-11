@@ -1549,3 +1549,38 @@ transport uses the same shared priority quota lease; injected `urlopen` remains
 only a deterministic test seam. HTTP unavailable, terminal, rate-limit, and
 transport outcomes remain fail-closed as `anchor_available=False`, and the
 next poll re-evaluates fresh provider truth under the request ledger.
+
+### 2026-08-11 Follow-up -- Admit global-auction TRADE receipts through the writer turnstile
+
+Live evidence after `094f7c3f9` shows a completed global selection failing at
+`decision_log` persistence with raw `sqlite3.OperationalError: database is
+locked`. The four global-auction receipt INSERT sites use the long-lived TRADE
+connection directly, while canonical monitor writes already register MONITOR
+intent through `WriteCoordinator`; the uncoordinated auction writer can
+therefore collide with or delay the continuous held-capital decision lane.
+
+Every production global-auction receipt write becomes one short STANDARD
+TRADE write unit: construct the receipt outside the lease, acquire the canonical
+TRADE coordinator inside the current `WorkContext` deadline, execute only
+`store_artifact` plus its commit/rollback guard, then release before JIT,
+network, or venue work. A visible MONITOR waiter outranks the auction unit.
+Lease timeout/cancellation raises typed `WorkDeferred`, so scheduler retry is
+distinguishable from economic no-trade and raw SQLite failure.
+
+SCOPE is one selection, carrier-rebound, or winner-preflight receipt. DRAIN is
+its bounded STANDARD lease attempt followed by the existing fresh global work
+cut. RESET is lease release on commit, rollback, or exception; no decision
+state survives as a fake economic rejection. Preflight expiry/revocation still
+rolls back before venue submission.
+
+Authorized files are `src/engine/global_batch_runtime.py`,
+`tests/integration/test_w3_solve_seam_g3.py`, their existing rationale/registry
+rows, and this plan. Forbidden: changing q, Kelly, candidate feasibility,
+entry posture, monitor priority, auction cadence, lifecycle, schema, submitted
+price bounds, or holding a DB lease across selection/network/venue work.
+Acceptance: a held STANDARD auction unit cannot overtake a registered MONITOR;
+lease contention yields `WorkDeferred` rather than raw `OperationalError` or
+economic no-trade; release permits the next current cut to persist; every
+receipt site commits within the lease; preflight revocation remains
+side-effect-free; focused global-auction, coordinator-priority, compilation,
+planning-lock, and diff checks pass before exact-SHA hot-fix deployment.

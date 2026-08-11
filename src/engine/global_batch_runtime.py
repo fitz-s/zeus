@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import math
+from pathlib import Path
 import sqlite3
 import threading
 import time
@@ -71,6 +72,131 @@ from src.solve.solver import (
     family_payoff_q_samples,
 )
 from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
+
+
+_GLOBAL_AUCTION_WRITE_FALLBACK_DEADLINE_MS = 1_000
+_GLOBAL_AUCTION_WRITE_MAX_HOLD_MS = 500
+
+
+class _GlobalArtifactCommitRevoked(RuntimeError):
+    """A receipt lost current authority before its durable commit."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = str(reason)
+        super().__init__(self.reason)
+
+
+@contextmanager
+def _global_auction_trade_write_lease(
+    conn: sqlite3.Connection,
+    *,
+    work_context: WorkContext | None,
+    owner: str,
+):
+    """Admit one canonical auction write behind MONITOR without leasing fixtures."""
+
+    from src.state.db import _zeus_trade_db_path
+
+    main_rows = [
+        row
+        for row in conn.execute("PRAGMA database_list").fetchall()
+        if str(row[1]) == "main"
+    ]
+    if len(main_rows) != 1:
+        raise RuntimeError("GLOBAL_AUCTION_TRADE_DB_IDENTITY_AMBIGUOUS")
+    raw_main_path = str(main_rows[0][2] or "").strip()
+    if not raw_main_path or Path(raw_main_path).resolve(
+        strict=False
+    ) != _zeus_trade_db_path().resolve(strict=False):
+        yield None
+        return
+    if conn.in_transaction:
+        raise RuntimeError("GLOBAL_AUCTION_TRADE_WRITE_CALLER_TXN_OPEN")
+
+    if work_context is None:
+        deadline_ms = _GLOBAL_AUCTION_WRITE_FALLBACK_DEADLINE_MS
+    else:
+        remaining = work_context.checkpoint(f"{owner}:before_write_lease")
+        deadline_ms = (
+            _GLOBAL_AUCTION_WRITE_FALLBACK_DEADLINE_MS
+            if not math.isfinite(remaining)
+            else max(1, math.ceil(remaining * 1_000.0))
+        )
+
+    from src.state.db_writer_lock import WriteClass
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WriteLeaseTimeout,
+        WritePriority,
+        default_runtime_write_coordinator,
+    )
+
+    try:
+        with default_runtime_write_coordinator().lease(
+            (DBIdentity.TRADE,),
+            owner=owner,
+            write_class=WriteClass.LIVE,
+            priority=WritePriority.STANDARD,
+            deadline_ms=deadline_ms,
+            max_hold_ms=_GLOBAL_AUCTION_WRITE_MAX_HOLD_MS,
+        ) as lease:
+            yield lease
+    except WriteLeaseTimeout as exc:
+        remaining = work_context.remaining() if work_context is not None else 0.0
+        raise WorkDeferred(
+            (
+                WorkDeferredCode.DEADLINE
+                if remaining <= 0.0
+                else WorkDeferredCode.PREEMPTED
+            ),
+            stage=f"{owner}:write_lease",
+            remaining_s=remaining,
+        ) from exc
+
+
+def _global_auction_artifact_persister(
+    conn: sqlite3.Connection,
+    *,
+    work_context: WorkContext | None,
+    owner: str,
+    before_commit: Callable[[], str | None] | None = None,
+) -> Callable[[object], int | None]:
+    """Build the only durable auction unit: INSERT plus guarded commit."""
+
+    from src.state.decision_chain import store_artifact
+
+    def persist(artifact: object) -> int | None:
+        with _global_auction_trade_write_lease(
+            conn,
+            work_context=work_context,
+            owner=owner,
+        ) as lease:
+            before_changes = conn.total_changes
+            try:
+                if work_context is not None:
+                    work_context.checkpoint(f"{owner}:before_store")
+                row_id = store_artifact(conn, artifact)
+                if work_context is not None:
+                    work_context.checkpoint(f"{owner}:after_store")
+                revoked_reason = before_commit() if before_commit is not None else None
+                if revoked_reason is not None:
+                    raise _GlobalArtifactCommitRevoked(revoked_reason)
+                if work_context is not None:
+                    work_context.checkpoint(f"{owner}:before_commit")
+                commit_started = time.monotonic()
+                conn.commit()
+                if lease is not None:
+                    lease.record_commit(
+                        commit_ms=(time.monotonic() - commit_started) * 1_000.0,
+                        rows_changed=max(0, conn.total_changes - before_changes),
+                    )
+                return row_id
+            except BaseException:
+                if conn.in_transaction:
+                    conn.rollback()
+                raise
+
+    return persist
 
 
 @dataclass
@@ -2579,12 +2705,15 @@ def _store_global_auction_receipt(
     expected_holding_obligations: Sequence[_CurrentHeldObligation] = (),
     holding_probability_witnesses: Mapping[str, object] | None = None,
     wealth_reauction_audit: _WealthReauctionAudit | None = None,
+    persist_artifact: Callable[[object], int | None] | None = None,
 ) -> int | None:
     """Persist one complete auction comparison before any venue side effect."""
 
     if not isinstance(conn, sqlite3.Connection):
         return None
     from src.state.decision_chain import CycleArtifact, store_artifact
+
+    persist = persist_artifact or (lambda artifact: store_artifact(conn, artifact))
 
     scope_keys = tuple(str(key) for key in full_scope_family_keys)
     probability_keys = tuple(str(key) for key, _ in probability_manifest)
@@ -3466,8 +3595,7 @@ def _store_global_auction_receipt(
                 compact_receipt["artifact_summary_hash"] = (
                     global_auction_artifact_summary_hash(compact_receipt)
                 )
-                row_id = store_artifact(
-                    conn,
+                row_id = persist(
                     CycleArtifact(
                         mode=mode,
                         started_at=selection_cut_at_utc.isoformat(),
@@ -3571,8 +3699,7 @@ def _store_global_auction_receipt(
         receipt["artifact_summary_hash"] = (
             global_auction_artifact_summary_hash(receipt)
         )
-        row_id = store_artifact(
-            conn,
+        row_id = persist(
             CycleArtifact(
                 mode="global_single_order_auction",
                 started_at=selection_cut_at_utc.isoformat(),
@@ -3681,10 +3808,13 @@ def _store_global_claim_carrier_rebound_receipt(
     *,
     selected: object,
     base_decision_log_id: int,
+    persist_artifact: Callable[[object], int | None] | None = None,
 ) -> tuple[object, int]:
     """Append and bind the final carrier identity without mutating its base cut."""
 
     from src.state.decision_chain import CycleArtifact, store_artifact
+
+    persist = persist_artifact or (lambda artifact: store_artifact(conn, artifact))
 
     actuation = getattr(selected, "actuation", None)
     candidate = getattr(getattr(selected, "decision", None), "candidate", None)
@@ -3749,8 +3879,7 @@ def _store_global_claim_carrier_rebound_receipt(
     summary["artifact_summary_hash"] = global_auction_artifact_summary_hash(
         summary
     )
-    row_id = store_artifact(
-        conn,
+    row_id = persist(
         CycleArtifact(
             mode=mode,
             started_at=str(summary["selection_cut_at_utc"]),
@@ -3781,6 +3910,7 @@ def _store_global_preflight_receipt(
     winner_event_id: str,
     venue_submit_count_before: int,
     venue_submit_count_after: int,
+    persist_artifact: Callable[[object], int | None] | None = None,
 ) -> int | None:
     """Persist the immutable outcome of one side-effect-free winner preflight."""
 
@@ -3871,8 +4001,9 @@ def _store_global_preflight_receipt(
 
     from src.state.decision_chain import CycleArtifact, store_artifact
 
-    row_id = store_artifact(
-        conn,
+    persist = persist_artifact or (lambda artifact: store_artifact(conn, artifact))
+
+    row_id = persist(
         CycleArtifact(
             mode="global_single_order_auction_preflight",
             started_at=checked_at_utc.isoformat(),
@@ -6014,9 +6145,18 @@ def process_current_global_batch(
                     trade_conn,
                     selected=selected,
                     base_decision_log_id=last_selection_receipt_row_id,
+                    persist_artifact=_global_auction_artifact_persister(
+                        trade_conn,
+                        work_context=work_context,
+                        owner="global_auction_carrier_rebound_receipt",
+                    ),
                 )
             )
-            trade_conn.commit()
+            if trade_conn.in_transaction:
+                # Injected/test persistence seams may retain the historical
+                # caller-owned commit contract. The production persister has
+                # already committed while holding the coordinated lease.
+                trade_conn.commit()
             last_selection_receipt_row_id = rebound_row_id
             if holding_obligations:
                 _publish_global_holding_coverage(
@@ -6349,22 +6489,22 @@ def process_current_global_batch(
                 expected_holding_obligations=holding_obligations,
                 holding_probability_witnesses=attempt_probabilities,
                 wealth_reauction_audit=wealth_reauction_audit,
+                persist_artifact=_global_auction_artifact_persister(
+                    trade_conn,
+                    work_context=work_context,
+                    owner="global_auction_selection_receipt",
+                ),
             )
             last_selection_receipt_row_id = receipt_row_id
             _LOG.info(
                 "global auction receipt store completed: elapsed_s=%.3f",
                 time.monotonic() - receipt_store_started,
             )
-            if isinstance(trade_conn, sqlite3.Connection):
-                # The selection receipt is the durable boundary before JIT
-                # preflight. End its implicit write transaction before any
-                # network work so quote ingestion can use the TRADE WAL writer.
-                receipt_commit_started = time.monotonic()
+            if (
+                isinstance(trade_conn, sqlite3.Connection)
+                and trade_conn.in_transaction
+            ):
                 trade_conn.commit()
-                _LOG.info(
-                    "global auction receipt commit completed: elapsed_s=%.3f",
-                    time.monotonic() - receipt_commit_started,
-                )
             if getattr(selected, "actuation", None) is not None:
                 # Read-only coordinators may supply a non-SQLite stand-in; they
                 # can inspect selection but cannot create an actionable
@@ -6741,35 +6881,52 @@ def process_current_global_batch(
                 after_preflight = venue_submit_count()
                 if after_preflight != before_preflight:
                     return reject("GLOBAL_PREFLIGHT_VENUE_SIDE_EFFECT")
-                preflight_receipt_row_id = _store_global_preflight_receipt(
-                    trade_conn,
-                    selected=selected,
-                    preflight=preflight,
-                    authority=preflight_authority,
-                    checked_at_utc=preflight_at,
-                    winner_event_id=winner_id,
-                    venue_submit_count_before=before_preflight,
-                    venue_submit_count_after=after_preflight,
-                )
-                receipt_expired = current_time() > auction_deadline
-                receipt_revoked = final_cancelled(
-                    "preflight_receipt_before_commit"
-                )
-                if receipt_expired or receipt_revoked:
-                    if isinstance(trade_conn, sqlite3.Connection):
-                        trade_conn.rollback()
-                    return reject(
-                        "GLOBAL_REAUCTION_EPOCH_EXPIRED"
-                        if receipt_expired
-                        else (
+                preflight_guard_checked = False
+
+                def preflight_commit_guard() -> str | None:
+                    nonlocal preflight_guard_checked
+                    preflight_guard_checked = True
+                    if current_time() > auction_deadline:
+                        return "GLOBAL_REAUCTION_EPOCH_EXPIRED"
+                    if final_cancelled("preflight_receipt_before_commit"):
+                        return (
                             "GLOBAL_AUCTION_NO_TRADE:"
                             "GLOBAL_SELECTION_CANCELLED"
                         )
+                    return None
+
+                try:
+                    preflight_receipt_row_id = _store_global_preflight_receipt(
+                        trade_conn,
+                        selected=selected,
+                        preflight=preflight,
+                        authority=preflight_authority,
+                        checked_at_utc=preflight_at,
+                        winner_event_id=winner_id,
+                        venue_submit_count_before=before_preflight,
+                        venue_submit_count_after=after_preflight,
+                        persist_artifact=_global_auction_artifact_persister(
+                            trade_conn,
+                            work_context=work_context,
+                            owner="global_auction_preflight_receipt",
+                            before_commit=preflight_commit_guard,
+                        ),
                     )
-                if isinstance(trade_conn, sqlite3.Connection):
-                    # A stable preflight is immediately followed by venue I/O;
-                    # fallthrough may run another preflight. Neither may carry
-                    # this completed receipt's WAL writer lock.
+                except _GlobalArtifactCommitRevoked as exc:
+                    return reject(exc.reason)
+                if not preflight_guard_checked:
+                    revoked_reason = preflight_commit_guard()
+                    if revoked_reason is not None:
+                        if (
+                            isinstance(trade_conn, sqlite3.Connection)
+                            and trade_conn.in_transaction
+                        ):
+                            trade_conn.rollback()
+                        return reject(revoked_reason)
+                if (
+                    isinstance(trade_conn, sqlite3.Connection)
+                    and trade_conn.in_transaction
+                ):
                     trade_conn.commit()
                 if preflight.status == "STABLE":
                     break

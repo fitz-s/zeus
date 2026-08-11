@@ -32123,3 +32123,242 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
         "SELECT COUNT(*) FROM no_trade_regret_events"
     ).fetchone()[0] == 2
     conn.close()
+
+
+def test_global_auction_trade_receipt_yields_to_registered_monitor(
+    tmp_path, monkeypatch
+):
+    from src.engine.global_auction_universe import WorkContext
+    from src.state.db_writer_lock import WriteClass
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WritePriority
+    import src.state.db as state_db
+    import src.state.decision_chain as decision_chain
+    import src.state.write_coordinator as write_coordinator
+
+    trade_path = tmp_path / "zeus_trades.db"
+    setup = sqlite3.connect(trade_path)
+    setup.execute("CREATE TABLE receipt_probe (value TEXT NOT NULL)")
+    setup.commit()
+    setup.close()
+    coordinator = WriteCoordinator({DBIdentity.TRADE: trade_path})
+    monkeypatch.setattr(state_db, "_zeus_trade_db_path", lambda: trade_path)
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: coordinator,
+    )
+    acquisition_order: list[str] = []
+
+    def store_probe(conn, _artifact):
+        acquisition_order.append("auction")
+        return conn.execute(
+            "INSERT INTO receipt_probe VALUES ('persisted')"
+        ).lastrowid
+
+    monkeypatch.setattr(decision_chain, "store_artifact", store_probe)
+    monitor_done = threading.Event()
+    auction_done = threading.Event()
+    errors: list[BaseException] = []
+
+    def monitor_writer():
+        try:
+            with coordinator.lease(
+                (DBIdentity.TRADE,),
+                owner="test_monitor",
+                write_class=WriteClass.LIVE,
+                priority=WritePriority.MONITOR,
+                deadline_ms=2_000,
+            ):
+                acquisition_order.append("monitor")
+                time.sleep(0.05)
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            monitor_done.set()
+
+    def auction_writer():
+        conn = sqlite3.connect(trade_path)
+        try:
+            persist = global_batch_runtime._global_auction_artifact_persister(
+                conn,
+                work_context=WorkContext(time.monotonic() + 2.0),
+                owner="test_global_auction_receipt",
+            )
+            persist(object())
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            conn.close()
+            auction_done.set()
+
+    with coordinator.lease(
+        (DBIdentity.TRADE,),
+        owner="test_blocker",
+        write_class=WriteClass.LIVE,
+        priority=WritePriority.STANDARD,
+        deadline_ms=500,
+    ):
+        monitor = threading.Thread(target=monitor_writer)
+        monitor.start()
+        deadline = time.monotonic() + 1.0
+        while not coordinator.has_pending_monitor_waiter((DBIdentity.TRADE,)):
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+        auction = threading.Thread(target=auction_writer)
+        auction.start()
+        time.sleep(0.05)
+
+    monitor.join(timeout=2.0)
+    auction.join(timeout=2.0)
+    assert monitor_done.is_set()
+    assert auction_done.is_set()
+    assert errors == []
+    assert acquisition_order == ["monitor", "auction"]
+    verify = sqlite3.connect(trade_path)
+    assert verify.execute("SELECT COUNT(*) FROM receipt_probe").fetchone()[0] == 1
+    verify.close()
+
+
+def test_global_auction_trade_receipt_contention_is_typed_deferred(
+    tmp_path, monkeypatch
+):
+    from src.engine.global_auction_universe import WorkContext, WorkDeferred
+    from src.state.db_writer_lock import WriteClass
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WritePriority
+    import src.state.db as state_db
+    import src.state.decision_chain as decision_chain
+    import src.state.write_coordinator as write_coordinator
+
+    trade_path = tmp_path / "zeus_trades.db"
+    setup = sqlite3.connect(trade_path)
+    setup.execute("CREATE TABLE receipt_probe (value TEXT NOT NULL)")
+    setup.commit()
+    setup.close()
+    coordinator = WriteCoordinator({DBIdentity.TRADE: trade_path})
+    monkeypatch.setattr(state_db, "_zeus_trade_db_path", lambda: trade_path)
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: coordinator,
+    )
+    monkeypatch.setattr(
+        decision_chain,
+        "store_artifact",
+        lambda conn, _artifact: conn.execute(
+            "INSERT INTO receipt_probe VALUES ('unexpected')"
+        ).lastrowid,
+    )
+    conn = sqlite3.connect(trade_path)
+    persist = global_batch_runtime._global_auction_artifact_persister(
+        conn,
+        work_context=WorkContext(time.monotonic() + 0.05),
+        owner="test_global_auction_contention",
+    )
+
+    with coordinator.lease(
+        (DBIdentity.TRADE,),
+        owner="test_blocker",
+        write_class=WriteClass.LIVE,
+        priority=WritePriority.STANDARD,
+        deadline_ms=500,
+    ):
+        with pytest.raises(WorkDeferred) as raised:
+            persist(object())
+
+    assert raised.value.stage == "test_global_auction_contention:write_lease"
+    assert conn.execute("SELECT COUNT(*) FROM receipt_probe").fetchone()[0] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize("expiry_mode", ("deadline", "cancel"))
+def test_global_auction_trade_receipt_rolls_back_if_work_expires_during_store(
+    tmp_path, monkeypatch, expiry_mode
+):
+    from src.engine.global_auction_universe import WorkContext, WorkDeferred
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator
+    import src.state.db as state_db
+    import src.state.decision_chain as decision_chain
+    import src.state.write_coordinator as write_coordinator
+
+    trade_path = tmp_path / "zeus_trades.db"
+    setup = sqlite3.connect(trade_path)
+    setup.execute("CREATE TABLE receipt_probe (value TEXT NOT NULL)")
+    setup.commit()
+    setup.close()
+    coordinator = WriteCoordinator({DBIdentity.TRADE: trade_path})
+    monkeypatch.setattr(state_db, "_zeus_trade_db_path", lambda: trade_path)
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: coordinator,
+    )
+    cancelled = [False]
+
+    def store_then_expire(conn, _artifact):
+        row_id = conn.execute(
+            "INSERT INTO receipt_probe VALUES ('must-rollback')"
+        ).lastrowid
+        if expiry_mode == "deadline":
+            time.sleep(0.03)
+        else:
+            cancelled[0] = True
+        return row_id
+
+    monkeypatch.setattr(decision_chain, "store_artifact", store_then_expire)
+    work_context = WorkContext(
+        time.monotonic() + (0.01 if expiry_mode == "deadline" else 1.0),
+        cancel_requested=lambda: cancelled[0],
+    )
+    conn = sqlite3.connect(trade_path)
+    persist = global_batch_runtime._global_auction_artifact_persister(
+        conn,
+        work_context=work_context,
+        owner="test_global_auction_expiry",
+    )
+
+    with pytest.raises(WorkDeferred) as raised:
+        persist(object())
+
+    assert raised.value.stage == "test_global_auction_expiry:after_store"
+    assert conn.execute("SELECT COUNT(*) FROM receipt_probe").fetchone()[0] == 0
+    conn.close()
+
+
+def test_global_auction_trade_receipt_accepts_unbounded_work_context(
+    tmp_path, monkeypatch
+):
+    from src.engine.global_auction_universe import WorkContext
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator
+    import src.state.db as state_db
+    import src.state.decision_chain as decision_chain
+    import src.state.write_coordinator as write_coordinator
+
+    trade_path = tmp_path / "zeus_trades.db"
+    setup = sqlite3.connect(trade_path)
+    setup.execute("CREATE TABLE receipt_probe (value TEXT NOT NULL)")
+    setup.commit()
+    setup.close()
+    coordinator = WriteCoordinator({DBIdentity.TRADE: trade_path})
+    monkeypatch.setattr(state_db, "_zeus_trade_db_path", lambda: trade_path)
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: coordinator,
+    )
+    monkeypatch.setattr(
+        decision_chain,
+        "store_artifact",
+        lambda conn, _artifact: conn.execute(
+            "INSERT INTO receipt_probe VALUES ('persisted')"
+        ).lastrowid,
+    )
+    conn = sqlite3.connect(trade_path)
+    persist = global_batch_runtime._global_auction_artifact_persister(
+        conn,
+        work_context=WorkContext(None),
+        owner="test_global_auction_unbounded",
+    )
+
+    assert persist(object()) == 1
+    assert conn.execute("SELECT COUNT(*) FROM receipt_probe").fetchone()[0] == 1
+    conn.close()
