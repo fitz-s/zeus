@@ -24,6 +24,10 @@ from src.contracts.replacement_pipeline_files import (
     validate_materialization_seed,
 )
 from src.data.replacement_forecast_cycle_policy import tradeable_grade_coverage_sql
+from src.data.replacement_current_value_serving import (
+    current_value_serving_schema,
+    read_current_instrument_frontier_identity,
+)
 from src.data.replacement_input_hwm import replacement_live_input_lag_reason
 from src.data.replacement_forecast_materialization_request_builder import (
     build_replacement_forecast_materialization_request,
@@ -1302,16 +1306,14 @@ def _blocked_attempt_fingerprint(
     db_path = Path(forecast_db)
     if not all(scope) or not db_path.exists():
         return None
-    # Scope the raw watermark to THIS request's own carrier cycle (2026-07-13/14 incident
-    # gap B): during active ingest a new raw row lands every few minutes for the target's
-    # OTHER cycles/leads, so a target-wide watermark churns every tick and NEVER settles
-    # (verified: 0/277 blocked attempts suppressed). Only inputs at the request's own
-    # source_cycle_time can heal THIS exact request; a fresher cycle produces a NEW request
-    # file with a new semantic key anyway (cycle-advance path), so narrowing here is safe.
-    request_cycle = _parse_utc_iso(payload.get("source_cycle_time"))
-    if request_cycle is None:
+    # A source-clock materialization keeps the ENS carrier cycle fixed while each
+    # deterministic provider may advance independently.  Fingerprint the exact
+    # production selector frontier at this request's immutable decision instant;
+    # carrier-cycle aggregation misses those healing inputs, while target-wide MAX
+    # watermarks churn on rows the request could not yet have consumed.
+    computed_at = _parse_utc_iso(payload.get("computed_at"))
+    if computed_at is None:
         return None
-    request_cycle_iso = request_cycle.isoformat()
     try:
         from src.state.db import _connect  # noqa: PLC0415
 
@@ -1319,25 +1321,24 @@ def _blocked_attempt_fingerprint(
         try:
             conn.execute("PRAGMA query_only=ON")
             missing_sources = _source_clock_missing_configured_sources(conn, payload)
-            row = conn.execute(
-                """
-                SELECT COUNT(*),
-                       COALESCE(MAX(raw_model_forecast_id), 0),
-                       COALESCE(MAX(captured_at), ''),
-                       COALESCE(MAX(source_available_at), '')
-                FROM raw_model_forecasts
-                WHERE city = ?
-                  AND target_date = ?
-                  AND metric = ?
-                  AND source_cycle_time = ?
-                """,
-                scope + (request_cycle_iso,),
-            ).fetchone()
+            from src.strategy.live_inference.source_clock_city_weights import (  # noqa: PLC0415
+                scheme_for_city,
+            )
+
+            scheme = scheme_for_city(scope[0], metric=scope[2])
+            configured_models = None if scheme is None else tuple(scheme.final_sources)
+            source_clock_frontier = read_current_instrument_frontier_identity(
+                conn,
+                city=scope[0],
+                metric=scope[2],
+                target_date=scope[1],
+                decision_time_iso=computed_at.isoformat(),
+                models=configured_models,
+                schema=current_value_serving_schema(conn),
+            )
         finally:
             conn.close()
     except Exception:  # noqa: BLE001 - unknown watermark must retry, never suppress work
-        return None
-    if row is None:
         return None
     file_revisions: dict[str, tuple[int, int] | None] = {}
     if not missing_sources:
@@ -1373,11 +1374,10 @@ def _blocked_attempt_fingerprint(
                 if key not in _ATTEMPT_CLOCK_FIELDS
             },
             "files": file_revisions,
-            "raw": (
-                {"missing_configured_sources": missing_sources}
-                if missing_sources
-                else tuple(row)
-            ),
+            "raw": {
+                "missing_configured_sources": missing_sources,
+                "source_clock_frontier": source_clock_frontier,
+            },
             "logic": logic_revisions,
         },
         sort_keys=True,
