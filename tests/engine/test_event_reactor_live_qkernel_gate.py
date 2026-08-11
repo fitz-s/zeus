@@ -5803,6 +5803,54 @@ def test_posterior_cycle_members_do_not_depend_on_forecast_carrier(monkeypatch):
     assert present is True
     assert fallback_certificate == certificate
 
+    cohort_fallback = json.loads(json.dumps(horizon_fallback))
+    cohort_fusion = cohort_fallback["bayes_precision_fusion"]
+    cohort_fusion["used_models"] = ["a", "b", "c"]
+    cohort_fusion["current_value_serving"]["c"] = {
+        "raw_model_forecast_id": 3,
+        "served_via": "single_runs",
+        "served_cycle": "2026-07-13T12:00:00+00:00",
+    }
+    cohort_scheme = cohort_fusion["source_clock_one_scheme"]
+    cohort_scheme.update(
+        {
+            "used_weights": {"a": 0.3, "b": 0.3, "c": 0.4},
+            "missing_sources": [],
+            "fallback_reason": "configured_current_provider_cohort_unavailable",
+            "configured_current_provider_family_count": 2,
+            "configured_current_provider_cohort_family_count": 1,
+            "current_evidence_shape": {"provider_count": 3},
+        }
+    )
+    present, cohort_certificate = era._source_clock_model_count_certificate(
+        cohort_fallback
+    )
+    assert present is True
+    assert cohort_certificate == {
+        **certificate,
+        "posterior_configured_sources": ("a", "b", "c"),
+        "posterior_served_sources": ("a", "b", "c"),
+        "posterior_configured_model_count": 3,
+        "posterior_served_model_count": 3,
+    }
+
+    inconsistent_cohort = json.loads(json.dumps(cohort_fallback))
+    inconsistent_cohort["bayes_precision_fusion"]["source_clock_one_scheme"][
+        "configured_current_provider_cohort_family_count"
+    ] = 2
+    assert era._source_clock_model_count_certificate(inconsistent_cohort) == (
+        True,
+        None,
+    )
+    missing_cohort_count = json.loads(json.dumps(cohort_fallback))
+    missing_cohort_count["bayes_precision_fusion"]["source_clock_one_scheme"].pop(
+        "configured_current_provider_cohort_family_count"
+    )
+    assert era._source_clock_model_count_certificate(missing_cohort_count) == (
+        True,
+        None,
+    )
+
     monkeypatch.setattr(
         source_clock_vnext,
         "provider_family_for_source",

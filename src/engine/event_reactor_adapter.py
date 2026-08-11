@@ -24310,9 +24310,13 @@ def _source_clock_model_count_certificate(
         observed = int(observed)
     except (TypeError, ValueError):
         return True, None
+    fallback_reason = scheme.get("fallback_reason")
     horizon_fallback = (
-        scheme.get("fallback_reason")
-        == "configured_current_provider_pair_unavailable"
+        fallback_reason
+        in {
+            "configured_current_provider_pair_unavailable",
+            "configured_current_provider_cohort_unavailable",
+        }
         and scheme.get("fallback_to") == "current_precision_fusion"
     )
     if horizon_fallback:
@@ -24320,6 +24324,12 @@ def _source_clock_model_count_certificate(
         try:
             configured_family_count = int(
                 scheme.get("configured_current_provider_family_count")
+            )
+            configured_cohort_family_count = (
+                int(scheme.get("configured_current_provider_cohort_family_count"))
+                if fallback_reason
+                == "configured_current_provider_cohort_unavailable"
+                else 0
             )
             shape_provider_count = int(
                 current_shape.get("provider_count")
@@ -24340,7 +24350,17 @@ def _source_clock_model_count_certificate(
             len(configured) < 2
             or any(not value for value in configured)
             or len(set(configured)) != len(configured)
-            or configured_family_count >= 2
+            or (
+                fallback_reason == "configured_current_provider_pair_unavailable"
+                and configured_family_count >= 2
+            )
+            or (
+                fallback_reason == "configured_current_provider_cohort_unavailable"
+                and (
+                    configured_family_count < 2
+                    or configured_cohort_family_count >= 2
+                )
+            )
             or len(used) < 2
             or any(not value for value in used)
             or len(set(used)) != len(used)
