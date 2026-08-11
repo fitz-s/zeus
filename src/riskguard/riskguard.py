@@ -2375,6 +2375,294 @@ def _bind_entry_market_benchmarks(
     return output
 
 
+def _settled_day0_market_relative_alpha_shadow_rows(
+    conn: sqlite3.Connection,
+    *,
+    window_days: float,
+    as_of: datetime | None = None,
+    forecasts_connection_factory=get_forecasts_connection_read_only,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    """Bind frozen no-money Day0 decisions to later verified venue outcomes."""
+
+    from src.events.day0_authority import (
+        DAY0_PROBABILITY_SEMANTICS_REVISION,
+        day0_probability_semantics_revision,
+    )
+
+    evaluated_at = as_of or datetime.now(timezone.utc)
+    if evaluated_at.tzinfo is None:
+        evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+    database_names = {
+        str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()
+    }
+    schema = "world" if "world" in database_names else "main"
+    table_ready = conn.execute(
+        f"SELECT 1 FROM {schema}.sqlite_master "
+        "WHERE type='table' AND name='no_trade_regret_events' LIMIT 1"
+    ).fetchone()
+    status: dict[str, object] = {
+        "status": "no_shadow_evidence",
+        "source_schema": schema,
+        "shadow_candidate_count": 0,
+        "certificate_ready_count": 0,
+        "settlement_ready_count": 0,
+        "blocked_reasons": {},
+    }
+    if table_ready is None:
+        status["status"] = "shadow_table_unavailable"
+        return [], status
+
+    cutoff = evaluated_at - timedelta(days=window_days + 2.0)
+    column_names = (
+        "regret_event_id",
+        "event_id",
+        "rejection_stage",
+        "rejection_reason",
+        "condition_id",
+        "token_id",
+        "decision_time",
+        "city",
+        "target_date",
+        "metric",
+        "family_id",
+        "bin_label",
+        "direction",
+        "q_live",
+        "c_fee_adjusted",
+        "native_quote_available",
+        "source_status",
+        "family_complete",
+        "hypothetical_order_type",
+        "hypothetical_fill_status",
+        "hypothetical_fill_price",
+        "causal_snapshot_id",
+        "executable_snapshot_id",
+        "envelope_json",
+        "created_at",
+    )
+    raw_rows = conn.execute(
+        f"SELECT {','.join(column_names)} "
+        f"FROM {schema}.no_trade_regret_events "
+        "INDEXED BY idx_no_trade_regret_stage "
+        "WHERE rejection_stage='RISK_GUARD' "
+        "AND rejection_reason=? AND created_at>=? "
+        "ORDER BY created_at,regret_event_id",
+        (
+            "MARKET_RELATIVE_ALPHA_SHADOW:day0_nowcast_entry",
+            cutoff.isoformat(),
+        ),
+    ).fetchall()
+    status["shadow_candidate_count"] = len(raw_rows)
+    blocked: dict[str, int] = {}
+
+    def block(reason: str) -> None:
+        blocked[reason] = blocked.get(reason, 0) + 1
+
+    certificates: list[dict[str, object]] = []
+    for raw in raw_rows:
+        row = dict(zip(column_names, raw))
+        try:
+            envelope = json.loads(str(row["envelope_json"] or ""))
+        except (TypeError, ValueError):
+            block("envelope_invalid")
+            continue
+        if not isinstance(envelope, Mapping):
+            block("envelope_invalid")
+            continue
+        revision = str(
+            envelope.get("probability_semantics_revision") or ""
+        )
+        q_version = str(envelope.get("q_version") or "")
+        side = str(envelope.get("side") or "").upper()
+        expected_fields = {
+            "family_key": row["family_id"],
+            "city": row["city"],
+            "target_date": row["target_date"],
+            "metric": row["metric"],
+            "bin_id": row["bin_label"],
+            "condition_id": row["condition_id"],
+            "token_id": row["token_id"],
+        }
+        if (
+            envelope.get("schema_version") != 1
+            or envelope.get("strategy_key") != "day0_nowcast_entry"
+            or envelope.get("decision_law_id") != "predicted_bin_ev_v1"
+            or envelope.get("selection_rule")
+            != (
+                "earliest_complete_global_cut_max_abs_q_minus_"
+                "executable_min_order_vwap_v1"
+            )
+            or revision != DAY0_PROBABILITY_SEMANTICS_REVISION
+            or day0_probability_semantics_revision(q_version) != revision
+            or side not in {"YES", "NO"}
+            or any(
+                str(envelope.get(key) or "") != str(value or "")
+                for key, value in expected_fields.items()
+            )
+            or str(row["direction"] or "") != f"buy_{side.lower()}"
+            or str(row["causal_snapshot_id"] or "")
+            != str(envelope.get("probability_witness_identity") or "")
+            or str(row["executable_snapshot_id"] or "")
+            != str(envelope.get("book_snapshot_id") or "")
+            or int(row["native_quote_available"] or 0) != 1
+            or int(row["family_complete"] or 0) != 1
+            or row["source_status"] != "current_day0_probability_authority"
+            or row["hypothetical_order_type"] != "MARKETABLE_LIMIT"
+            or row["hypothetical_fill_status"] != "EXECUTABLE_AT_DECISION"
+        ):
+            block("certificate_identity_mismatch")
+            continue
+        try:
+            q = float(row["q_live"])
+            market = float(row["hypothetical_fill_price"])
+            envelope_q = float(envelope["q"])
+            envelope_market = float(envelope["raw_min_order_vwap"])
+            decision_time = datetime.fromisoformat(
+                str(row["decision_time"] or "").replace("Z", "+00:00")
+            )
+            created_at = datetime.fromisoformat(
+                str(row["created_at"] or "").replace("Z", "+00:00")
+            )
+        except (KeyError, TypeError, ValueError):
+            block("certificate_value_invalid")
+            continue
+        if decision_time.tzinfo is None:
+            decision_time = decision_time.replace(tzinfo=timezone.utc)
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        if (
+            not all(math.isfinite(value) for value in (q, market))
+            or not 0.0 <= q <= 1.0
+            or not 0.0 < market < 1.0
+            or not math.isclose(q, envelope_q, rel_tol=0.0, abs_tol=1e-12)
+            or not math.isclose(
+                market, envelope_market, rel_tol=0.0, abs_tol=1e-12
+            )
+            or str(envelope.get("decision_at_utc") or "")
+            != str(row["decision_time"] or "")
+            or decision_time > evaluated_at
+            or created_at > evaluated_at
+        ):
+            block("certificate_value_mismatch")
+            continue
+        certificates.append(
+            {
+                **row,
+                "envelope": envelope,
+                "q": q,
+                "market": market,
+                "side": side,
+                "decision_time_parsed": decision_time,
+                "created_at_parsed": created_at,
+            }
+        )
+    status["certificate_ready_count"] = len(certificates)
+    if not certificates:
+        status["blocked_reasons"] = blocked
+        return [], status
+
+    condition_ids = sorted(
+        {str(row["condition_id"]) for row in certificates}
+    )
+    settlement_by_condition: dict[str, list[tuple[object, ...]]] = {}
+    forecasts_conn: sqlite3.Connection | None = None
+    try:
+        forecasts_conn = forecasts_connection_factory()
+        forecasts_conn.execute("PRAGMA query_only=ON")
+        forecasts_conn.execute("PRAGMA busy_timeout=250")
+        for start in range(0, len(condition_ids), 500):
+            chunk = condition_ids[start : start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = forecasts_conn.execute(
+                "SELECT me.condition_id,me.city,me.target_date,"
+                "me.temperature_metric,me.outcome,so.settled_at "
+                "FROM market_events me JOIN settlement_outcomes so "
+                "ON so.city=me.city AND so.target_date=me.target_date "
+                "AND so.temperature_metric=me.temperature_metric "
+                f"WHERE me.condition_id IN ({placeholders}) "
+                "AND me.outcome IN ('YES','NO') "
+                "AND so.authority='VERIFIED'",
+                tuple(chunk),
+            ).fetchall()
+            for outcome_row in rows:
+                settlement_by_condition.setdefault(
+                    str(outcome_row[0]), []
+                ).append(tuple(outcome_row))
+    except (OSError, sqlite3.Error) as exc:
+        status.update(
+            status="settlement_authority_unavailable",
+            blocked_reasons={
+                **blocked,
+                f"settlement_authority_{type(exc).__name__}": len(certificates),
+            },
+        )
+        return [], status
+    finally:
+        if forecasts_conn is not None:
+            forecasts_conn.close()
+
+    output: list[dict[str, object]] = []
+    for row in certificates:
+        matches = settlement_by_condition.get(str(row["condition_id"]), [])
+        exact = [
+            match
+            for match in matches
+            if (
+                str(match[1]) == str(row["city"])
+                and str(match[2]) == str(row["target_date"])
+                and str(match[3]).lower() == str(row["metric"]).lower()
+            )
+        ]
+        if len(exact) != 1:
+            block("settlement_missing_or_ambiguous")
+            continue
+        _condition_id, _city, _date, _metric, venue_outcome, settled_at_raw = exact[0]
+        try:
+            settled_at = datetime.fromisoformat(
+                str(settled_at_raw or "").replace("Z", "+00:00")
+            )
+        except ValueError:
+            block("settlement_time_invalid")
+            continue
+        if settled_at.tzinfo is None:
+            settled_at = settled_at.replace(tzinfo=timezone.utc)
+        if (
+            settled_at <= row["decision_time_parsed"]
+            or settled_at <= row["created_at_parsed"]
+            or settled_at > evaluated_at
+        ):
+            block("settlement_not_strictly_later")
+            continue
+        output.append(
+            {
+                "trade_id": str(row["regret_event_id"]),
+                "strategy": "day0_nowcast_entry",
+                "probability_semantics_ready": True,
+                "probability_semantics_revisions": (
+                    DAY0_PROBABILITY_SEMANTICS_REVISION,
+                ),
+                "decision_law_id": "predicted_bin_ev_v1",
+                "settled_at": settled_at.isoformat(),
+                "entry_market_benchmark_ready": True,
+                "entry_market_benchmark": row["market"],
+                "entry_market_benchmark_family": (
+                    str(row["city"]),
+                    str(row["target_date"]),
+                    str(row["metric"]),
+                ),
+                "p_posterior": row["q"],
+                "outcome": int(str(venue_outcome).upper() == row["side"]),
+                "evidence_source": "no_trade_regret_events_day0_shadow_v1",
+            }
+        )
+    status.update(
+        status="ok" if output else "awaiting_verified_settlement",
+        settlement_ready_count=len(output),
+        blocked_reasons=blocked,
+    )
+    return output, status
+
+
 def _market_relative_alpha_evidence(
     rows: list[dict],
     *,
@@ -2573,9 +2861,10 @@ def _day0_market_relative_alpha_gate_reason(
 
     INV-47 SCOPE: only new ``day0_nowcast_entry`` exposure; held monitoring,
     current global SELL/HOLD comparison, settlement, and learning continue.
-    DRAIN: every RiskGuard tick binds immutable current-revision entry q,
-    executable entry price, and verified settlement by independent target-date/
-    metric cluster. RESET: the durable gate expires only when current-law
+    DRAIN: the global auction freezes one no-money current-revision q and exact
+    executable minimum-order price per independent target-date/metric cluster;
+    every RiskGuard tick joins those immutable certificates to later VERIFIED
+    settlement outcomes. RESET: the durable gate expires only when current-law
     model/market sequential evidence reaches the configured e-value boundary
     without a simultaneous market/model rejection. This is evidence admission,
     never a historical-loss exit trigger.
@@ -3516,16 +3805,27 @@ def _tick_once() -> RiskLevel:
         market_relative_alpha_window_days = float(
             thresholds.get("market_relative_alpha_window_days", 7.0)
         )
+        market_relative_alpha_as_of = datetime.now(timezone.utc)
         market_relative_alpha_evidence = _qkernel_market_relative_alpha_evidence(
             brier_actuating_rows,
             rejection_evalue=market_relative_alpha_evalue,
             window_days=market_relative_alpha_window_days,
+            as_of=market_relative_alpha_as_of,
+        )
+        (
+            day0_market_relative_alpha_shadow_rows,
+            day0_market_relative_alpha_shadow_status,
+        ) = _settled_day0_market_relative_alpha_shadow_rows(
+            zeus_conn,
+            window_days=market_relative_alpha_window_days,
+            as_of=market_relative_alpha_as_of,
         )
         day0_market_relative_alpha_evidence = _market_relative_alpha_evidence(
-            brier_actuating_rows,
+            brier_actuating_rows + day0_market_relative_alpha_shadow_rows,
             strategy_key="day0_nowcast_entry",
             rejection_evalue=market_relative_alpha_evalue,
             window_days=market_relative_alpha_window_days,
+            as_of=market_relative_alpha_as_of,
         )
         day0_market_relative_alpha_gate_reason = (
             _day0_market_relative_alpha_gate_reason(
@@ -4127,6 +4427,9 @@ def _tick_once() -> RiskLevel:
                 ),
                 "day0_market_relative_alpha_evidence": (
                     day0_market_relative_alpha_evidence
+                ),
+                "day0_market_relative_alpha_shadow": (
+                    day0_market_relative_alpha_shadow_status
                 ),
                 "day0_market_relative_alpha_gate_required": (
                     day0_market_relative_alpha_gate_required

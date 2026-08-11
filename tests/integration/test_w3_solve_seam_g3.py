@@ -132,6 +132,8 @@ from src.strategy.live_inference.mode_consistent_ev import (
     MAKER_FILL_PROBABILITY_DEADLINE_SOURCE,
     MAKER_REST_ESCALATION_DEADLINE_MINUTES,
 )
+
+
 from src.state.collateral_ledger import (
     CollateralLedger,
     CollateralSnapshot,
@@ -31753,3 +31755,125 @@ def test_global_auction_receipt_delta_component_uses_byte_minimal_exact_encoding
         delta="d" * 101,
         inline="f" * 100,
     )
+
+
+def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
+    from src.events.day0_authority import bind_day0_probability_semantics
+    from src.state.schema.no_trade_regret_events_schema import ensure_table
+
+    at = _dt.datetime(2026, 8, 11, 16, 0, tzinfo=_dt.timezone.utc)
+
+    def curve(token_id: str, price: str) -> ExecutableCostCurve:
+        return ExecutableCostCurve(
+            token_id=token_id,
+            side="YES",
+            snapshot_id=f"snapshot-{token_id}",
+            book_hash=f"book-{token_id}",
+            levels=(BookLevel(price=Decimal(price), size=Decimal("10")),),
+            fee_model=FeeModel(fee_rate=Decimal("0.02")),
+            min_tick=Decimal("0.01"),
+            min_order_size=Decimal("5"),
+            quote_ttl=_dt.timedelta(seconds=30),
+        )
+
+    def witness(family_key: str, q: float) -> SimpleNamespace:
+        return SimpleNamespace(
+            family_key=family_key,
+            bin_ids=("20C",),
+            yes_point_q=np.array([q]),
+            q_version=bind_day0_probability_semantics(f"q-{family_key}"),
+            witness_identity=f"witness-{family_key}",
+            probability_content_identity=f"content-{family_key}",
+            posterior_identity_hash=f"posterior-{family_key}",
+            source_truth_identity=f"source-{family_key}",
+            resolution_identity=f"resolution-{family_key}",
+            topology_identity=f"topology-{family_key}",
+            band_alpha=0.05,
+            band_basis="current-day0",
+            captured_at_utc=at,
+        )
+
+    family_a = "family-a"
+    family_b = "family-b"
+    evaluations = tuple(
+        SimpleNamespace(
+            candidate_id=f"candidate-{family_key}",
+            family_key=family_key,
+            bin_id="20C",
+            condition_id=f"condition-{family_key}",
+            side="YES",
+            token_id=f"token-{family_key}",
+            action="BUY",
+            status="REJECTED",
+            rejection_reason=(
+                "STRATEGY_POLICY_GATED:day0_nowcast_entry:"
+                "sources=risk_action:gate"
+            ),
+        )
+        for family_key in (family_a, family_b)
+    )
+    assets = tuple(
+        SimpleNamespace(
+            family_key=family_key,
+            bin_id="20C",
+            condition_id=f"condition-{family_key}",
+            side="YES",
+            token_id=f"token-{family_key}",
+            curve=curve(
+                f"token-{family_key}",
+                "0.20" if family_key == family_a else "0.30",
+            ),
+            captured_at_utc=at,
+        )
+        for family_key in (family_a, family_b)
+    )
+    events = global_batch_runtime._day0_market_relative_alpha_shadow_events(
+        selected=SimpleNamespace(
+            decision=SimpleNamespace(candidate_evaluations=evaluations)
+        ),
+        probability_witnesses={
+            family_a: witness(family_a, 0.90),
+            family_b: witness(family_b, 0.80),
+        },
+        book_epoch=SimpleNamespace(
+            assets=assets,
+            witness_identity="book-epoch",
+        ),
+        family_context_by_key={
+            family_a: {
+                "city": "Alpha",
+                "target_date": "2026-08-11",
+                "metric": "high",
+            },
+            family_b: {
+                "city": "Beta",
+                "target_date": "2026-08-11",
+                "metric": "high",
+            },
+        },
+        selection_epoch_identity="selection-epoch",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+    )
+
+    assert len(events) == 1
+    assert events[0].city == "Alpha"
+    assert events[0].q_live == pytest.approx(0.90)
+    assert events[0].hypothetical_fill_price == pytest.approx(0.20)
+    envelope = json.loads(events[0].envelope_json)
+    assert envelope["selection_rule"].endswith("min_order_vwap_v1")
+    assert envelope["q"] == pytest.approx(0.90)
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    first = global_batch_runtime._record_day0_market_relative_alpha_shadows(
+        conn, events
+    )
+    second = global_batch_runtime._record_day0_market_relative_alpha_shadows(
+        conn, events
+    )
+    assert first == second
+    assert conn.execute(
+        "SELECT COUNT(*) FROM no_trade_regret_events"
+    ).fetchone()[0] == 1
+    conn.close()

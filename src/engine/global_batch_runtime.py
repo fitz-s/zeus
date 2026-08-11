@@ -61,6 +61,7 @@ from src.solve.solver import (
     CurrentFamilyProbabilityAuthority,
     ExecutableSellCurve,
     executable_curve_identity,
+    family_payoff_point_q,
     family_payoff_q_samples,
 )
 from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
@@ -4205,6 +4206,261 @@ def _family_key(event: OpportunityEvent, payload: Mapping[str, object]) -> str:
     )
 
 
+_DAY0_ALPHA_SHADOW_REASON = (
+    "MARKET_RELATIVE_ALPHA_SHADOW:day0_nowcast_entry"
+)
+_DAY0_ALPHA_SHADOW_SELECTION_RULE = (
+    "earliest_complete_global_cut_max_abs_q_minus_"
+    "executable_min_order_vwap_v1"
+)
+
+
+def _native_buy_min_order_vwap(
+    curve: ExecutableCostCurve,
+) -> tuple[float, float] | None:
+    """Return raw and fee-adjusted VWAP for the venue's minimum BUY size."""
+
+    remaining = Decimal(curve.min_order_size)
+    raw_cost = Decimal("0")
+    for level in curve.levels:
+        take = min(remaining, Decimal(level.size))
+        if take > 0:
+            raw_cost += take * Decimal(level.price)
+            remaining -= take
+        if remaining <= Decimal("1e-9"):
+            break
+    if remaining > Decimal("1e-9"):
+        return None
+    shares = Decimal(curve.min_order_size)
+    raw_vwap = raw_cost / shares
+    fee_adjusted = curve.avg_cost_for_shares(shares).value
+    if not (
+        raw_vwap.is_finite()
+        and Decimal("0") < raw_vwap < Decimal("1")
+        and math.isfinite(float(fee_adjusted))
+        and 0.0 < float(fee_adjusted) < 1.0
+    ):
+        return None
+    return float(raw_vwap), float(fee_adjusted)
+
+
+def _day0_market_relative_alpha_shadow_events(
+    *,
+    selected: object,
+    probability_witnesses: Mapping[str, object],
+    book_epoch: CurrentGlobalBookEpoch | None,
+    family_context_by_key: Mapping[str, Mapping[str, str]],
+    selection_epoch_identity: str,
+    selection_cut_at_utc: datetime,
+    decision_at_utc: datetime,
+) -> tuple[object, ...]:
+    """Freeze no-money Day0 evidence that can eventually drain its entry gate.
+
+    One immutable candidate is chosen per target-date/metric cluster at the
+    first complete cut that reaches this writer.  The choice rule uses only
+    decision-time q and executable minimum-order VWAP, so settlement cannot
+    influence which member of a correlated cluster is graded later.
+    """
+
+    if book_epoch is None:
+        return ()
+    from src.events.day0_authority import (
+        DAY0_PROBABILITY_SEMANTICS_REVISION,
+        day0_probability_semantics_revision,
+    )
+    from src.strategy.live_inference.no_trade_regret import NoTradeRegretEvent
+
+    decision = getattr(selected, "decision", None)
+    evaluations = tuple(
+        getattr(decision, "candidate_evaluations", ()) or ()
+    )
+    assets = {
+        (
+            str(asset.family_key),
+            str(asset.bin_id),
+            str(asset.condition_id),
+            str(asset.side),
+            str(asset.token_id),
+        ): asset
+        for asset in tuple(getattr(book_epoch, "assets", ()) or ())
+    }
+    selected_by_cluster: dict[tuple[str, str], dict[str, object]] = {}
+    for evaluation in evaluations:
+        reason = str(getattr(evaluation, "rejection_reason", "") or "")
+        source_prefix = (
+            "STRATEGY_POLICY_GATED:day0_nowcast_entry:sources="
+        )
+        if (
+            str(getattr(evaluation, "action", "") or "").upper() != "BUY"
+            or str(getattr(evaluation, "status", "") or "").upper()
+            != "REJECTED"
+            or not reason.startswith(source_prefix)
+            or "risk_action:gate" not in reason[len(source_prefix) :].split(",")
+        ):
+            continue
+        family_key = str(getattr(evaluation, "family_key", "") or "")
+        bin_id = str(getattr(evaluation, "bin_id", "") or "")
+        condition_id = str(
+            getattr(evaluation, "condition_id", "") or ""
+        )
+        side = str(getattr(evaluation, "side", "") or "").upper()
+        token_id = str(getattr(evaluation, "token_id", "") or "")
+        context = family_context_by_key.get(family_key)
+        witness = probability_witnesses.get(family_key)
+        asset = assets.get(
+            (family_key, bin_id, condition_id, side, token_id)
+        )
+        if context is None or witness is None or asset is None:
+            continue
+        city = str(context.get("city") or "").strip()
+        target_date = str(context.get("target_date") or "").strip()
+        metric = str(context.get("metric") or "").strip().lower()
+        q_version = str(getattr(witness, "q_version", "") or "")
+        revision = day0_probability_semantics_revision(q_version)
+        if (
+            not city
+            or not target_date
+            or metric not in {"high", "low"}
+            or side not in {"YES", "NO"}
+            or revision != DAY0_PROBABILITY_SEMANTICS_REVISION
+        ):
+            continue
+        q = family_payoff_point_q(witness, bin_id=bin_id, side=side)
+        market_prices = _native_buy_min_order_vwap(asset.curve)
+        if (
+            q is None
+            or not math.isfinite(float(q))
+            or not 0.0 <= float(q) <= 1.0
+            or market_prices is None
+        ):
+            continue
+        raw_vwap, fee_adjusted = market_prices
+        envelope = {
+            "schema_version": 1,
+            "strategy_key": "day0_nowcast_entry",
+            "decision_law_id": "predicted_bin_ev_v1",
+            "probability_semantics_revision": revision,
+            "selection_rule": _DAY0_ALPHA_SHADOW_SELECTION_RULE,
+            "selection_epoch_identity": selection_epoch_identity,
+            "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
+            "decision_at_utc": decision_at_utc.isoformat(),
+            "family_key": family_key,
+            "city": city,
+            "target_date": target_date,
+            "metric": metric,
+            "bin_id": bin_id,
+            "condition_id": condition_id,
+            "side": side,
+            "token_id": token_id,
+            "q": float(q),
+            "q_version": q_version,
+            "probability_witness_identity": str(
+                getattr(witness, "witness_identity", "") or ""
+            ),
+            "probability_content_identity": str(
+                getattr(witness, "probability_content_identity", "") or ""
+            ),
+            "posterior_identity_hash": str(
+                getattr(witness, "posterior_identity_hash", "") or ""
+            ),
+            "source_truth_identity": str(
+                getattr(witness, "source_truth_identity", "") or ""
+            ),
+            "resolution_identity": str(
+                getattr(witness, "resolution_identity", "") or ""
+            ),
+            "topology_identity": str(
+                getattr(witness, "topology_identity", "") or ""
+            ),
+            "band_alpha": getattr(witness, "band_alpha", None),
+            "band_basis": str(getattr(witness, "band_basis", "") or ""),
+            "probability_captured_at_utc": getattr(
+                witness, "captured_at_utc", decision_at_utc
+            ).isoformat(),
+            "book_epoch_identity": book_epoch.witness_identity,
+            "book_snapshot_id": asset.curve.snapshot_id,
+            "book_hash": asset.curve.book_hash,
+            "book_captured_at_utc": asset.captured_at_utc.isoformat(),
+            "min_order_size": str(asset.curve.min_order_size),
+            "raw_min_order_vwap": raw_vwap,
+            "fee_adjusted_min_order_cost": fee_adjusted,
+        }
+        candidate = {
+            "claimed_edge": abs(float(q) - raw_vwap),
+            "tie_break": (family_key, bin_id, side, token_id),
+            "event": NoTradeRegretEvent(
+                event_id=(
+                    "market-relative-alpha-shadow-v1:"
+                    f"day0_nowcast_entry:{revision}:{target_date}:{metric}"
+                ),
+                rejection_stage="RISK_GUARD",
+                rejection_reason=_DAY0_ALPHA_SHADOW_REASON,
+                regret_bucket="RISK_CAP",
+                condition_id=condition_id,
+                token_id=token_id,
+                outcome_label=bin_id,
+                decision_time=decision_at_utc.isoformat(),
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                family_id=family_key,
+                bin_label=bin_id,
+                direction=f"buy_{side.lower()}",
+                q_live=float(q),
+                c_fee_adjusted=fee_adjusted,
+                p_fill_lcb=1.0,
+                native_quote_available=True,
+                source_status="current_day0_probability_authority",
+                family_complete=True,
+                hypothetical_order_type="MARKETABLE_LIMIT",
+                hypothetical_fill_status="EXECUTABLE_AT_DECISION",
+                hypothetical_fill_price=raw_vwap,
+                causal_snapshot_id=str(
+                    getattr(witness, "witness_identity", "") or ""
+                ),
+                executable_snapshot_id=asset.curve.snapshot_id,
+                envelope_json=json.dumps(
+                    envelope,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ),
+        }
+        cluster = (target_date, metric)
+        incumbent = selected_by_cluster.get(cluster)
+        if incumbent is None or (
+            candidate["claimed_edge"], candidate["tie_break"]
+        ) > (incumbent["claimed_edge"], incumbent["tie_break"]):
+            selected_by_cluster[cluster] = candidate
+    return tuple(
+        selected_by_cluster[cluster]["event"]
+        for cluster in sorted(selected_by_cluster)
+    )
+
+
+def _record_day0_market_relative_alpha_shadows(
+    conn: object,
+    events: Sequence[object],
+) -> tuple[str, ...]:
+    """Persist shadow certificates without widening a DB transaction boundary."""
+
+    if not events or not isinstance(conn, sqlite3.Connection):
+        return ()
+    try:
+        from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
+
+        ledger = NoTradeRegretLedger(conn)
+        return tuple(ledger.insert_idempotent(event) for event in events)
+    except Exception as exc:  # noqa: BLE001 - evidence cannot mask venue outcome
+        # This evidence only drains a new-entry gate.  A write failure therefore
+        # keeps Day0 blocked, but must not suppress held SELL/HOLD/CASH handling.
+        _LOG.error(
+            "Day0 market-relative alpha shadow persistence unavailable: %s",
+            type(exc).__name__,
+        )
+        return ()
+
+
 def _forecast_carrier_matches(
     event: OpportunityEvent,
     payload: Mapping[str, object],
@@ -4569,6 +4825,7 @@ def process_current_global_batch(
     scoped_rejection_by_event: dict[str, str] = {}
     selection_snapshot_release: Callable[[], None] | None = None
     actuation_started = False
+    pending_alpha_shadow_events: dict[str, object] = {}
     prepared_loser_receipts: dict[str, EventSubmissionReceipt] = {}
     preflight_rejection_receipts: dict[str, EventSubmissionReceipt] = {}
     batch_started = time.monotonic()
@@ -5840,6 +6097,31 @@ def process_current_global_batch(
                 time.monotonic() - selection_compute_started,
                 len(prepared_for_selection),
             )
+            family_context_by_key = {
+                family_key: {
+                    "city": str(payload.get("city") or "").strip(),
+                    "target_date": str(
+                        payload.get("target_date") or ""
+                    ).strip(),
+                    "metric": str(payload.get("metric") or "").strip().lower(),
+                }
+                for family_key, scope_event in full_scope_event_by_family.items()
+                for payload in (payload_reader(scope_event),)
+            }
+            alpha_shadow_events = _day0_market_relative_alpha_shadow_events(
+                selected=selected,
+                probability_witnesses=attempt_probabilities,
+                book_epoch=attempt_book_epoch,
+                family_context_by_key=family_context_by_key,
+                selection_epoch_identity=attempt_selection_epoch_identity,
+                selection_cut_at_utc=scope_at,
+                decision_at_utc=selection_at,
+            )
+            for shadow_event in alpha_shadow_events:
+                pending_alpha_shadow_events.setdefault(
+                    str(getattr(shadow_event, "event_id", "")),
+                    shadow_event,
+                )
             receipt_store_started = time.monotonic()
             receipt_row_id = _store_global_auction_receipt(
                 trade_conn,
@@ -7000,3 +7282,14 @@ def process_current_global_batch(
         return reject(f"GLOBAL_AUCTION_FAILED:{type(exc).__name__}:{exc}")
     finally:
         release_selection_snapshot()
+        alpha_shadow_events = tuple(pending_alpha_shadow_events.values())
+        recorded_alpha_shadow_ids = _record_day0_market_relative_alpha_shadows(
+            world_conn,
+            alpha_shadow_events,
+        )
+        if alpha_shadow_events:
+            _LOG.info(
+                "Day0 market-relative alpha shadow cut: candidates=%d recorded=%d",
+                len(alpha_shadow_events),
+                len(recorded_alpha_shadow_ids),
+            )

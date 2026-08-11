@@ -4225,6 +4225,189 @@ class TestQkernelMarketRelativeAlphaEvidence:
             f"revision={DAY0_PROBABILITY_SEMANTICS_REVISION})"
         )
 
+    def test_day0_shadow_joins_only_later_verified_exact_condition(self, tmp_path):
+        from src.events.day0_authority import (
+            DAY0_PROBABILITY_SEMANTICS_REVISION,
+            bind_day0_probability_semantics,
+        )
+        from src.state.schema.no_trade_regret_events_schema import ensure_table
+        from src.strategy.live_inference.no_trade_regret import (
+            NoTradeRegretEvent,
+            NoTradeRegretLedger,
+        )
+
+        decision_at = datetime(2026, 8, 10, 16, tzinfo=timezone.utc)
+        q_version = bind_day0_probability_semantics("q-shadow")
+        envelope = {
+            "schema_version": 1,
+            "strategy_key": "day0_nowcast_entry",
+            "decision_law_id": "predicted_bin_ev_v1",
+            "probability_semantics_revision": (
+                DAY0_PROBABILITY_SEMANTICS_REVISION
+            ),
+            "selection_rule": (
+                "earliest_complete_global_cut_max_abs_q_minus_"
+                "executable_min_order_vwap_v1"
+            ),
+            "selection_epoch_identity": "selection",
+            "selection_cut_at_utc": decision_at.isoformat(),
+            "decision_at_utc": decision_at.isoformat(),
+            "family_key": "family",
+            "city": "Helsinki",
+            "target_date": "2026-08-10",
+            "metric": "high",
+            "bin_id": "23C",
+            "condition_id": "condition-23c",
+            "side": "YES",
+            "token_id": "token-yes",
+            "q": 0.90,
+            "q_version": q_version,
+            "probability_witness_identity": "witness",
+            "probability_content_identity": "content",
+            "posterior_identity_hash": "posterior",
+            "source_truth_identity": "source",
+            "resolution_identity": "resolution",
+            "topology_identity": "topology",
+            "band_alpha": 0.05,
+            "band_basis": "current-day0",
+            "probability_captured_at_utc": decision_at.isoformat(),
+            "book_epoch_identity": "book-epoch",
+            "book_snapshot_id": "book-snapshot",
+            "book_hash": "book-hash",
+            "book_captured_at_utc": decision_at.isoformat(),
+            "min_order_size": "5",
+            "raw_min_order_vwap": 0.20,
+            "fee_adjusted_min_order_cost": 0.21,
+        }
+        conn = sqlite3.connect(":memory:")
+        ensure_table(conn)
+        NoTradeRegretLedger(conn).insert_idempotent(
+            NoTradeRegretEvent(
+                event_id=(
+                    "market-relative-alpha-shadow-v1:"
+                    "day0_nowcast_entry:"
+                    f"{DAY0_PROBABILITY_SEMANTICS_REVISION}:"
+                    "2026-08-10:high"
+                ),
+                rejection_stage="RISK_GUARD",
+                rejection_reason=(
+                    "MARKET_RELATIVE_ALPHA_SHADOW:day0_nowcast_entry"
+                ),
+                regret_bucket="RISK_CAP",
+                condition_id="condition-23c",
+                token_id="token-yes",
+                outcome_label="23C",
+                decision_time=decision_at.isoformat(),
+                city="Helsinki",
+                target_date="2026-08-10",
+                metric="high",
+                family_id="family",
+                bin_label="23C",
+                direction="buy_yes",
+                q_live=0.90,
+                c_fee_adjusted=0.21,
+                p_fill_lcb=1.0,
+                native_quote_available=True,
+                source_status="current_day0_probability_authority",
+                family_complete=True,
+                hypothetical_order_type="MARKETABLE_LIMIT",
+                hypothetical_fill_status="EXECUTABLE_AT_DECISION",
+                hypothetical_fill_price=0.20,
+                causal_snapshot_id="witness",
+                executable_snapshot_id="book-snapshot",
+                envelope_json=json.dumps(envelope, sort_keys=True),
+            )
+        )
+        conn.execute(
+            "UPDATE no_trade_regret_events SET created_at=?",
+            ((decision_at + timedelta(minutes=1)).isoformat(),),
+        )
+        conn.commit()
+
+        forecasts_path = tmp_path / "forecasts.db"
+        forecasts = sqlite3.connect(forecasts_path)
+        forecasts.executescript(
+            """
+            CREATE TABLE market_events (
+                condition_id TEXT,
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                outcome TEXT
+            );
+            CREATE TABLE settlement_outcomes (
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT,
+                settled_at TEXT,
+                authority TEXT
+            );
+            """
+        )
+        forecasts.execute(
+            "INSERT INTO market_events VALUES (?,?,?,?,?)",
+            (
+                "condition-23c",
+                "Helsinki",
+                "2026-08-10",
+                "high",
+                "YES",
+            ),
+        )
+        forecasts.execute(
+            "INSERT INTO settlement_outcomes VALUES (?,?,?,?,?)",
+            (
+                "Helsinki",
+                "2026-08-10",
+                "high",
+                "2026-08-11T10:00:00+00:00",
+                "VERIFIED",
+            ),
+        )
+        forecasts.commit()
+        forecasts.close()
+
+        rows, status = (
+            riskguard_module._settled_day0_market_relative_alpha_shadow_rows(
+                conn,
+                window_days=7.0,
+                as_of=datetime(2026, 8, 12, tzinfo=timezone.utc),
+                forecasts_connection_factory=lambda: sqlite3.connect(
+                    forecasts_path
+                ),
+            )
+        )
+
+        assert status["status"] == "ok"
+        assert status["settlement_ready_count"] == 1
+        assert rows == [
+            {
+                "trade_id": conn.execute(
+                    "SELECT regret_event_id FROM no_trade_regret_events"
+                ).fetchone()[0],
+                "strategy": "day0_nowcast_entry",
+                "probability_semantics_ready": True,
+                "probability_semantics_revisions": (
+                    DAY0_PROBABILITY_SEMANTICS_REVISION,
+                ),
+                "decision_law_id": "predicted_bin_ev_v1",
+                "settled_at": "2026-08-11T10:00:00+00:00",
+                "entry_market_benchmark_ready": True,
+                "entry_market_benchmark": 0.20,
+                "entry_market_benchmark_family": (
+                    "Helsinki",
+                    "2026-08-10",
+                    "high",
+                ),
+                "p_posterior": 0.90,
+                "outcome": 1,
+                "evidence_source": (
+                    "no_trade_regret_events_day0_shadow_v1"
+                ),
+            }
+        ]
+        conn.close()
+
     def test_tick_persists_qkernel_gate_and_keeps_held_lanes_green(
         self,
         monkeypatch,
