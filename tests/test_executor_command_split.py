@@ -397,6 +397,11 @@ def _cutover_guard_live_enabled(monkeypatch):
 
     monkeypatch.setattr("src.control.cutover_guard.assert_submit_allowed", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.riskguard.policy.is_entries_paused", lambda: False)
+    monkeypatch.setattr(
+        "src.riskguard.policy.get_edge_threshold_multiplier",
+        lambda: 1.0,
+    )
     monkeypatch.setattr("src.state.collateral_ledger.assert_buy_preflight", lambda *args, **kwargs: None)
     monkeypatch.setattr("src.state.collateral_ledger.assert_sell_preflight", lambda *args, **kwargs: None)
     # Pre-submit identity binding resolves the canonical funder address via the
@@ -1114,7 +1119,10 @@ def _allow_entry_submit_until_client(monkeypatch):
         "_entry_actionable_certificate_payload_and_component",
         lambda *args, **kwargs: (
             {"component": "entry_actionable_certificate", "allowed": True, "reason": "test"},
-            {"actionable_certificate_hash": "hash-test"},
+            {
+                "actionable_certificate_hash": "hash-test",
+                "strategy_key": "center_buy",
+            },
         ),
     )
     monkeypatch.setattr(
@@ -1229,6 +1237,80 @@ class TestLiveOrderCommandSplit:
         assert bound_envelope.condition_id == "condition-test"
         assert bound_envelope.selected_outcome_token_id == intent.token_id
 
+    def test_fresh_strategy_gate_blocks_before_command_persistence(
+        self,
+        mem_conn,
+        monkeypatch,
+    ):
+        """A gate committed after selection must still stop venue submission."""
+        from src.execution.executor import _live_order
+
+        _allow_entry_submit_until_client(monkeypatch)
+        intent = _make_entry_intent(mem_conn)
+        now = datetime.now(timezone.utc)
+        mem_conn.execute(
+            """
+            INSERT INTO risk_actions (
+                action_id, strategy_key, action_type, value, issued_at,
+                effective_until, reason, source, precedence, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "risk-action-submit-race",
+                "center_buy",
+                "gate",
+                "true",
+                (now - timedelta(seconds=1)).isoformat(),
+                (now + timedelta(hours=1)).isoformat(),
+                "test submit-time gate",
+                "riskguard",
+                10,
+                "active",
+            ),
+        )
+
+        with patch("src.data.polymarket_client.PolymarketClient") as MockClient:
+            mock_inst = MagicMock()
+            MockClient.return_value = mock_inst
+            result = _live_order(
+                trade_id="trd-strategy-policy-submit-race",
+                intent=intent,
+                shares=18.19,
+                conn=mem_conn,
+                decision_id="dec-strategy-policy-submit-race",
+            )
+
+        assert result.status == "rejected"
+        assert result.reason == (
+            "strategy_policy_pre_submit:gated:sources=risk_action:gate"
+        )
+        assert mock_inst.place_limit_order.called is False
+        assert mem_conn.execute(
+            "SELECT COUNT(*) FROM venue_commands WHERE position_id=?",
+            ("trd-strategy-policy-submit-race",),
+        ).fetchone()[0] == 0
+
+    def test_submit_strategy_policy_authority_loss_fails_closed(
+        self,
+        mem_conn,
+    ):
+        from src.execution.executor import (
+            _entry_strategy_policy_submit_component,
+        )
+
+        intent = _make_entry_intent(mem_conn)
+        mem_conn.execute("DROP TABLE risk_actions")
+
+        component = _entry_strategy_policy_submit_component(
+            mem_conn,
+            intent,
+            {"strategy_key": "center_buy"},
+        )
+
+        assert component["allowed"] is False
+        assert component["reason"] == "authority_schema_missing"
+        assert component["details"]["risk_actions_ready"] is False
+
     def test_entry_submit_requested_persists_execution_capability_proof(self, mem_conn, monkeypatch):
         """Entry SUBMIT_REQUESTED carries one pre-submit capability proof."""
         import json
@@ -1309,6 +1391,7 @@ class TestLiveOrderCommandSplit:
             "decision_source_integrity",
             "entry_economics",
             "entry_actionable_certificate",
+            "strategy_policy_submit",
             "executable_snapshot_gate",
         }
         assert components_by_name["entry_economics"]["allowed"] is True
@@ -3870,7 +3953,10 @@ class TestLiveOrderCommandSplit:
             "_entry_actionable_certificate_payload_and_component",
             lambda *args, **kwargs: (
                 {"component": "entry_actionable_certificate", "allowed": True, "reason": "test"},
-                {"actionable_certificate_hash": "hash-test"},
+                {
+                    "actionable_certificate_hash": "hash-test",
+                    "strategy_key": "center_buy",
+                },
             ),
         )
 
@@ -3948,7 +4034,10 @@ class TestLiveOrderCommandSplit:
             "_entry_actionable_certificate_payload_and_component",
             lambda *args, **kwargs: (
                 {"component": "entry_actionable_certificate", "allowed": True, "reason": "test"},
-                {"actionable_certificate_hash": "hash-test"},
+                {
+                    "actionable_certificate_hash": "hash-test",
+                    "strategy_key": "center_buy",
+                },
             ),
         )
         monkeypatch.setattr(
@@ -5828,7 +5917,10 @@ def test_v2_preflight_payload_shape(mem_conn, monkeypatch):
         "_entry_actionable_certificate_payload_and_component",
         lambda *args, **kwargs: (
             {"component": "entry_actionable_certificate", "allowed": True, "reason": "test"},
-            {"actionable_certificate_hash": "hash-test"},
+            {
+                "actionable_certificate_hash": "hash-test",
+                "strategy_key": "center_buy",
+            },
         ),
     )
     monkeypatch.setattr(

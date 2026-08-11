@@ -1724,6 +1724,95 @@ def _entry_economics_component(
         global_limit_bound_authorized=global_limit_bound_authorized,
         day0_observation_authority=(day0_authority_errors == ()),
     )
+
+
+def _entry_strategy_policy_submit_component(
+    conn: sqlite3.Connection,
+    intent: ExecutionIntent,
+    actionable_payload: Mapping[str, Any] | None,
+    *,
+    checked_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Re-read mutable strategy admission inside the command transaction.
+
+    SCOPE: one live ENTRY command for the certificate's exact strategy.
+    DRAIN: every submit attempt opens a fresh attached admission transaction
+    and re-reads both automated and manual policy authorities.
+    RESET: a later attempt proceeds only after the exact strategy is no longer
+    gated or exit-only; held SELL/HOLD/CASH lanes are never consulted here.
+    """
+
+    strategy_key = ""
+    if isinstance(actionable_payload, Mapping):
+        strategy_key = str(actionable_payload.get("strategy_key") or "").strip()
+    if not strategy_key:
+        strategy_key = str(getattr(intent, "strategy_key", "") or "").strip()
+    if not strategy_key:
+        return _capability_component(
+            "strategy_policy_submit",
+            allowed=False,
+            reason="strategy_key_missing",
+        )
+
+    try:
+        risk_actions_ready = conn.execute(
+            "SELECT 1 FROM main.sqlite_master "
+            "WHERE type='table' AND name='risk_actions' LIMIT 1"
+        ).fetchone()
+        manual_authority_ready = conn.execute(
+            "SELECT 1 FROM world.sqlite_master "
+            "WHERE type IN ('table','view') AND name='control_overrides' LIMIT 1"
+        ).fetchone()
+    except sqlite3.Error as exc:
+        return _capability_component(
+            "strategy_policy_submit",
+            allowed=False,
+            reason="authority_read_failed",
+            strategy_key=strategy_key,
+            error=type(exc).__name__,
+        )
+    if risk_actions_ready is None or manual_authority_ready is None:
+        return _capability_component(
+            "strategy_policy_submit",
+            allowed=False,
+            reason="authority_schema_missing",
+            strategy_key=strategy_key,
+            risk_actions_ready=risk_actions_ready is not None,
+            manual_authority_ready=manual_authority_ready is not None,
+        )
+
+    from src.riskguard.policy import resolve_strategy_policy
+
+    try:
+        policy = resolve_strategy_policy(
+            conn,
+            strategy_key,
+            checked_at or datetime.now(timezone.utc),
+        )
+    except Exception as exc:  # noqa: BLE001 - authority loss blocks venue submit
+        return _capability_component(
+            "strategy_policy_submit",
+            allowed=False,
+            reason="authority_read_failed",
+            strategy_key=strategy_key,
+            error=type(exc).__name__,
+        )
+    sources = ",".join(str(source) for source in policy.sources)
+    if policy.gated or policy.exit_only:
+        return _capability_component(
+            "strategy_policy_submit",
+            allowed=False,
+            reason="gated" if policy.gated else "exit_only",
+            strategy_key=strategy_key,
+            sources=sources,
+        )
+    return _capability_component(
+        "strategy_policy_submit",
+        strategy_key=strategy_key,
+        sources=sources,
+    )
+
+
 def _entry_actionable_certificate_payload_and_component(
     conn: sqlite3.Connection,
     intent: ExecutionIntent,
@@ -8486,6 +8575,45 @@ def _live_order(
             # Restart the sanctioned attached admission now so the closure
             # read and every admission write share a post-commit snapshot.
             begin_fresh_entry_admission(conn)
+            strategy_policy_submit_component = (
+                _entry_strategy_policy_submit_component(
+                    conn,
+                    intent,
+                    actionable_payload,
+                )
+            )
+            if not strategy_policy_submit_component.get("allowed"):
+                reason = str(
+                    strategy_policy_submit_component.get("reason")
+                    or "strategy_policy_submit_blocked"
+                )
+                strategy_policy_details = (
+                    strategy_policy_submit_component.get("details") or {}
+                )
+                sources = str(strategy_policy_details.get("sources") or "")
+                conn.rollback()
+                logger.warning(
+                    "_live_order: fresh strategy policy blocked command "
+                    "persistence for trade_id=%s token=%s reason=%s sources=%s",
+                    trade_id,
+                    intent.token_id,
+                    reason,
+                    sources,
+                )
+                return OrderResult(
+                    trade_id=trade_id,
+                    status="rejected",
+                    reason=(
+                        f"strategy_policy_pre_submit:{reason}"
+                        + (f":sources={sources}" if sources else "")
+                    ),
+                    submitted_price=intent.limit_price,
+                    shares=shares,
+                    order_role="entry",
+                    idempotency_key=idem.value,
+                    command_id=command_id,
+                    command_state="REJECTED",
+                )
             collateral_component = _assert_collateral_allows_buy(
                 intent,
                 spend_micro=required_pusd_micro,
@@ -8660,6 +8788,7 @@ def _live_order(
                             ws_gap_component,
                             collateral_refresh_component,
                             collateral_component,
+                            strategy_policy_submit_component,
                             entries_pause_component,
                             cooldown_component,
                             duplicate_same_token_component,
