@@ -34523,13 +34523,19 @@ def _prepare_current_global_probability_family(
                         "exact_yes_payoffs": exact_yes_payoffs,
                     }
                 )
-                q_version = stable_hash(
-                    {
-                        "authority": probability_authority,
-                        "posterior_identity_hash": posterior_identity_hash,
-                        "topology_identity": omega.topology_hash,
-                        "exact_yes_payoffs": exact_yes_payoffs,
-                    }
+                from src.events.day0_authority import (
+                    bind_day0_probability_semantics,
+                )
+
+                q_version = bind_day0_probability_semantics(
+                    stable_hash(
+                        {
+                            "authority": probability_authority,
+                            "posterior_identity_hash": posterior_identity_hash,
+                            "topology_identity": omega.topology_hash,
+                            "exact_yes_payoffs": exact_yes_payoffs,
+                        }
+                    )
                 )
                 authority_certificate_hash = stable_hash(
                     {
@@ -34960,7 +34966,7 @@ def _prepare_current_global_probability_family(
             "source_available_at": bundle.source_available_at,
         }
         source_truth_identity = stable_hash(source_truth)
-    q_version = stable_hash(
+    raw_q_version = stable_hash(
         {
             "authority": probability_authority,
             "posterior_identity_hash": posterior_identity_hash,
@@ -34969,6 +34975,12 @@ def _prepare_current_global_probability_family(
             "point_q": [float(value) for value in point_q],
         }
     )
+    if current_day0_payload is not None:
+        from src.events.day0_authority import bind_day0_probability_semantics
+
+        q_version = bind_day0_probability_semantics(raw_q_version)
+    else:
+        q_version = raw_q_version
     authority_certificate_hash = stable_hash(
         {
             "event_id": event.event_id,

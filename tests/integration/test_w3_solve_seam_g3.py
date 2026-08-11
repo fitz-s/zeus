@@ -6507,6 +6507,15 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     )
 
     witness = prepared.probability_witness
+    from src.events.day0_authority import (
+        DAY0_PROBABILITY_SEMANTICS_REVISION,
+        day0_probability_semantics_revision,
+    )
+
+    assert (
+        day0_probability_semantics_revision(witness.q_version)
+        == DAY0_PROBABILITY_SEMANTICS_REVISION
+    )
     binding = day0_payload["_edli_global_day0_binding"]
     assert witness.band_alpha == pytest.approx(0.05)
     assert witness.band_basis == era._GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS
