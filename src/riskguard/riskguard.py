@@ -48,6 +48,11 @@ from src.riskguard.metrics import (
     directional_accuracy,
     evaluate_brier,
 )
+from src.riskguard.policy import (
+    FORWARD_CAPITAL_CREDENTIAL_ACTION,
+    FORWARD_CAPITAL_CREDENTIAL_ACTION_ID_PREFIX,
+    FORWARD_CAPITAL_REQUIRED_STRATEGIES,
+)
 from src.riskguard.risk_level import RiskLevel, overall_level
 from src.runtime import bankroll_provider
 from src.runtime.bankroll_provider import BankrollOfRecord
@@ -79,7 +84,11 @@ RISKGUARD_SETTLEMENT_LIMIT = 50
 RISKGUARD_BRIER_SCAN_LIMIT = 200
 from src.state.portfolio_loader_policy import choose_portfolio_truth_source
 from src.state.strategy_tracker import load_tracker
-from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
+from src.contracts.freshness_registry import (
+    SOURCE_THRESHOLDS,
+    FreshnessLevel,
+    registry as _freshness_registry,
+)
 
 logger = logging.getLogger(__name__)
 TRAILING_LOSS_ROW_TOLERANCE_USD = 0.01
@@ -3573,6 +3582,68 @@ def _qkernel_market_relative_alpha_evidence(
     }
 
 
+def _forward_capital_gain_credential_reason(
+    evidence: Mapping[str, object],
+    *,
+    strategy_key: str,
+    probability_semantics_revision: str,
+    semantics_binding_ready: bool,
+    required_evalue: float,
+) -> str | None:
+    """Return the exact positive forward-capital proof encoded in a lease.
+
+    A credential is not a score or an operator assertion. It exists only when
+    one current-law/current-semantics cohort has both the required sequential
+    model-over-market evidence and strictly positive settled executable capital
+    P&L. Any missing identity, stale semantics binding, or non-positive capital
+    result returns no credential and leaves submit-time policy fail-closed.
+    """
+
+    if (
+        strategy_key not in FORWARD_CAPITAL_REQUIRED_STRATEGIES
+        or not semantics_binding_ready
+        or not probability_semantics_revision
+        or evidence.get("strategy_key") != strategy_key
+        or evidence.get("validated") is not True
+    ):
+        return None
+    eligible = [
+        cohort
+        for cohort in (evidence.get("cohorts") or [])
+        if isinstance(cohort, Mapping)
+        and cohort.get("validated") is True
+        and cohort.get("capital_gain_validated") is True
+        and cohort.get("decision_law_id")
+        == "executable_min_order_capital_gain_v2"
+        and tuple(cohort.get("probability_semantics_revisions") or ())
+        == (probability_semantics_revision,)
+        and float(cohort.get("model_over_market_evalue") or 0.0)
+        >= required_evalue
+        and float(cohort.get("hypothetical_capital_committed_usd") or 0.0)
+        > 0.0
+        and float(cohort.get("hypothetical_realized_pnl_usd") or 0.0) > 0.0
+    ]
+    if not eligible:
+        return None
+    strongest = max(
+        eligible,
+        key=lambda cohort: (
+            float(cohort["model_over_market_evalue"]),
+            float(cohort["hypothetical_realized_pnl_usd"]),
+        ),
+    )
+    return (
+        "forward_capital_gain_validated("
+        "law=executable_min_order_capital_gain_v2,"
+        f"revision={probability_semantics_revision},"
+        f"model_evalue={float(strongest['model_over_market_evalue'])},"
+        f"clusters={int(strongest['independent_cluster_count'])},"
+        f"capital_usd={float(strongest['hypothetical_capital_committed_usd'])},"
+        f"pnl_usd={float(strongest['hypothetical_realized_pnl_usd'])}"
+        ")"
+    )
+
+
 def _day0_market_relative_alpha_observation(
     semantics_binding: Mapping[str, object],
     causal_alpha_evidence: Mapping[str, object],
@@ -3815,7 +3886,9 @@ def _sync_riskguard_strategy_gate_actions(
         WHERE source = 'riskguard'
           AND action_type = 'gate'
           AND status = 'active'
-        """
+          AND action_id NOT LIKE ?
+        """,
+        (f"{FORWARD_CAPITAL_CREDENTIAL_ACTION_ID_PREFIX}%",),
     ).fetchall()
     existing_by_strategy = {str(row["strategy_key"]): str(row["action_id"]) for row in existing_rows}
     expired_count = 0
@@ -3866,6 +3939,115 @@ def _sync_riskguard_strategy_gate_actions(
         "status": "emitted",
         "emitted_count": len(recommended),
         "expired_count": expired_count,
+    }
+
+
+def _sync_forward_capital_gain_credentials(
+    conn: sqlite3.Connection,
+    credentials: Mapping[str, str],
+    *,
+    issued_at: str,
+) -> dict[str, int | str]:
+    """Lease current-law positive forward-capital proof into risk_actions.
+
+    SCOPE: only ENTRY admission for the two proof-required strategies.
+    DRAIN: every RiskGuard tick re-grades settled forward evidence and refreshes
+    a credential for at most the normal RiskGuard freshness budget.
+    RESET: missing/non-positive evidence expires the credential immediately;
+    a stopped or blocked RiskGuard lets the short lease expire fail-closed.
+    """
+
+    if not _table_exists(conn, "risk_actions"):
+        return {
+            "status": "skipped_missing_table",
+            "emitted_count": 0,
+            "expired_count": 0,
+        }
+    issued = datetime.fromisoformat(issued_at.replace("Z", "+00:00"))
+    if issued.tzinfo is None:
+        issued = issued.replace(tzinfo=timezone.utc)
+    lease_seconds = float(
+        SOURCE_THRESHOLDS["riskguard_last_check"]["stale_seconds"]
+    )
+    effective_until = (issued + timedelta(seconds=lease_seconds)).isoformat()
+    existing_rows = conn.execute(
+        """
+        SELECT action_id, strategy_key
+        FROM risk_actions
+        WHERE source = 'riskguard'
+          AND action_type = ?
+          AND status = 'active'
+          AND action_id LIKE ?
+        """,
+        (
+            FORWARD_CAPITAL_CREDENTIAL_ACTION,
+            f"{FORWARD_CAPITAL_CREDENTIAL_ACTION_ID_PREFIX}%",
+        ),
+    ).fetchall()
+    existing_by_strategy = {
+        str(row["strategy_key"]): str(row["action_id"])
+        for row in existing_rows
+    }
+    emitted_count = 0
+    expired_count = 0
+    for strategy in sorted(FORWARD_CAPITAL_REQUIRED_STRATEGIES):
+        reason = str(credentials.get(strategy) or "").strip()
+        action_id = existing_by_strategy.get(
+            strategy,
+            f"{FORWARD_CAPITAL_CREDENTIAL_ACTION_ID_PREFIX}{strategy}",
+        )
+        if not reason:
+            if strategy in existing_by_strategy:
+                conn.execute(
+                    """
+                    UPDATE risk_actions
+                    SET effective_until = ?, status = 'expired'
+                    WHERE action_id = ?
+                    """,
+                    (issued_at, action_id),
+                )
+                expired_count += 1
+            continue
+        conn.execute(
+            """
+            INSERT INTO risk_actions (
+                action_id,
+                strategy_key,
+                action_type,
+                value,
+                issued_at,
+                effective_until,
+                reason,
+                source,
+                precedence,
+                status
+            ) VALUES (?, ?, ?, 'false', ?, ?, ?, 'riskguard', 100, 'active')
+            ON CONFLICT(action_id) DO UPDATE SET
+                strategy_key = excluded.strategy_key,
+                action_type = excluded.action_type,
+                value = excluded.value,
+                issued_at = excluded.issued_at,
+                effective_until = excluded.effective_until,
+                reason = excluded.reason,
+                source = excluded.source,
+                precedence = excluded.precedence,
+                status = excluded.status
+            """,
+            (
+                action_id,
+                strategy,
+                FORWARD_CAPITAL_CREDENTIAL_ACTION,
+                issued_at,
+                effective_until,
+                reason,
+            ),
+        )
+        emitted_count += 1
+    return {
+        "status": "emitted",
+        "emitted_count": emitted_count,
+        "expired_count": expired_count,
+        "lease_seconds": int(lease_seconds),
     }
 
 
@@ -3957,6 +4139,7 @@ def _refresh_riskguard_auxiliary_bookkeeping(
     zeus_conn: sqlite3.Connection,
     *,
     recommended_strategy_gate_reasons: dict[str, list[str]],
+    forward_capital_gain_credentials: Mapping[str, str] | None = None,
     now: str,
     position_view: dict | None = None,
 ) -> tuple[dict, dict, dict]:
@@ -4000,6 +4183,13 @@ def _refresh_riskguard_auxiliary_bookkeeping(
             zeus_conn,
             recommended_strategy_gate_reasons,
             issued_at=now,
+        )
+        durable_action_status["forward_capital_gain_credentials"] = (
+            _sync_forward_capital_gain_credentials(
+                zeus_conn,
+                forward_capital_gain_credentials or {},
+                issued_at=now,
+            )
         )
         strategy_health_refresh = refresh_strategy_health(
             zeus_conn,
@@ -4545,6 +4735,13 @@ def _tick_once() -> RiskLevel:
             window_days=market_relative_alpha_window_days,
             as_of=market_relative_alpha_as_of,
         )
+        qkernel_forward_capital_gain_evidence = _market_relative_alpha_evidence(
+            brier_actuating_rows + qkernel_market_relative_alpha_shadow_rows,
+            strategy_key="forecast_qkernel_entry",
+            rejection_evalue=market_relative_alpha_evalue,
+            window_days=market_relative_alpha_window_days,
+            as_of=market_relative_alpha_as_of,
+        )
         qkernel_live_realized_capital_curve = (
             _qkernel_live_realized_capital_curve(
                 zeus_conn,
@@ -4579,7 +4776,56 @@ def _tick_once() -> RiskLevel:
                 required_evalue=market_relative_alpha_evalue,
             )
         )
-        day0_market_relative_alpha_gate_required = False
+        forward_capital_gain_credentials = {
+            strategy: reason
+            for strategy, reason in (
+                (
+                    "forecast_qkernel_entry",
+                    _forward_capital_gain_credential_reason(
+                        qkernel_forward_capital_gain_evidence,
+                        strategy_key="forecast_qkernel_entry",
+                        probability_semantics_revision=(
+                            CURRENT_EVIDENCE_SEMANTICS_REVISION
+                        ),
+                        semantics_binding_ready=(
+                            probability_semantics_binding.get("status") == "ok"
+                            or qkernel_market_relative_alpha_shadow_status.get(
+                                "status"
+                            ) == "ok"
+                        ),
+                        required_evalue=market_relative_alpha_evalue,
+                    ),
+                ),
+                (
+                    "day0_nowcast_entry",
+                    _forward_capital_gain_credential_reason(
+                        day0_market_relative_alpha_evidence,
+                        strategy_key="day0_nowcast_entry",
+                        probability_semantics_revision=str(
+                            day0_probability_semantics_binding.get(
+                                "current_revision"
+                            )
+                            or ""
+                        ),
+                        semantics_binding_ready=(
+                            day0_probability_semantics_binding.get("status")
+                            == "ok"
+                            or day0_market_relative_alpha_shadow_status.get(
+                                "status"
+                            ) == "ok"
+                        ),
+                        required_evalue=market_relative_alpha_evalue,
+                    ),
+                ),
+            )
+            if reason
+        }
+        qkernel_market_relative_alpha_gate_required = (
+            "forecast_qkernel_entry" not in forward_capital_gain_credentials
+        )
+        day0_market_relative_alpha_gate_required = (
+            "day0_nowcast_entry" not in forward_capital_gain_credentials
+        )
         probability_identity_ready_count = sum(
             bool(row.get("probability_identity_ready", False))
             for row in brier_candidate_rows
@@ -4695,9 +4941,9 @@ def _tick_once() -> RiskLevel:
         execution_observed = int(execution_overall.get("terminal_observed", 0) or 0)
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
-        # Historical/shadow alpha evidence is learning telemetry. It never
-        # becomes a durable strategy admission action; current probability
-        # semantics and executable expected growth remain the live authority.
+        # Historical fills remain attribution only. The separate forward
+        # current-law shadow cohort may mint a short-lived positive-capital
+        # credential; its absence is enforced fail-closed by strategy policy.
         probability_semantics_level = RiskLevel.GREEN
         if probability_semantics_binding.get("status") == "unavailable":
             probability_semantics_level = RiskLevel.DATA_DEGRADED
@@ -4838,6 +5084,7 @@ def _tick_once() -> RiskLevel:
         ) = _refresh_riskguard_auxiliary_bookkeeping(
             zeus_conn,
             recommended_strategy_gate_reasons=recommended_strategy_gate_reasons,
+            forward_capital_gain_credentials=forward_capital_gain_credentials,
             now=now,
             position_view=portfolio_truth.get("_strategy_health_position_view"),
         )
@@ -5111,7 +5358,12 @@ def _tick_once() -> RiskLevel:
                     day0_probability_semantics_binding
                 ),
                 "market_relative_alpha_evidence": market_relative_alpha_evidence,
-                "market_relative_alpha_admission_role": "observational",
+                "qkernel_forward_capital_gain_evidence": (
+                    qkernel_forward_capital_gain_evidence
+                ),
+                "market_relative_alpha_admission_role": (
+                    "short_lived_forward_capital_credential"
+                ),
                 "qkernel_market_relative_alpha_shadow": (
                     qkernel_market_relative_alpha_shadow_status
                 ),
@@ -5124,7 +5376,9 @@ def _tick_once() -> RiskLevel:
                 "day0_market_relative_alpha_evidence": (
                     day0_market_relative_alpha_evidence
                 ),
-                "day0_market_relative_alpha_admission_role": "observational",
+                "day0_market_relative_alpha_admission_role": (
+                    "short_lived_forward_capital_credential"
+                ),
                 "day0_market_relative_alpha_observation": (
                     day0_market_relative_alpha_observation
                 ),
@@ -5136,6 +5390,12 @@ def _tick_once() -> RiskLevel:
                 ),
                 "day0_market_relative_alpha_gate_required": (
                     day0_market_relative_alpha_gate_required
+                ),
+                "qkernel_market_relative_alpha_gate_required": (
+                    qkernel_market_relative_alpha_gate_required
+                ),
+                "forward_capital_gain_credentials": sorted(
+                    forward_capital_gain_credentials
                 ),
                 "day0_market_relative_alpha_gate_confirmation": (
                     day0_market_relative_alpha_gate_confirmation

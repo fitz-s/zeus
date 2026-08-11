@@ -3,7 +3,7 @@
 **Status:** Live replacement probability law. Runtime rows use `forecast_posteriors.runtime_layer='live'`; no second row-authority label or alternate runtime layer exists.
 **Supersedes:** `BAYES_PRECISION_FUSION_SPEC.md` (deleted).  
 **Created:** 2026-06-09  
-**Last audited:** 2026-07-15 (source-clock live q retains absolute ENS/provider-center disagreement and its executable band combines finite-member and distribution-free moment ambiguity symmetrically for YES/NO)
+**Last audited:** 2026-08-11 (source-clock live q retains its current-evidence band; zero-money forward shadow evidence now owns cold-start validation and a short-lived positive-capital credential owns Day0/qkernel live ENTRY eligibility)
 **Authority basis:** Commits 140d75ff6d · 6860f00a21 · edc598b440 · 94b584cc3f · 49492f1528 · 2b6936d3b5 · 9c594c9fc3 · df8199ef8e · e80c101c4c · 8541bc93cd · 8f20d39863 · a70436d478 · a1c2163e46 plus June 18 live-runtime cleanup. Historical experiment reports remain evidence only; they do not define the live execution layer.
 
 ---
@@ -332,16 +332,20 @@ carrier; a changed point forces re-decision.
 **Statistical vs absolute honesty:**
 - Forecast superiority (bin-hit, MAE, bias) is settlement-graded, temporal holdout (TRAIN≤2026-05-10 / TEST 05-11..06-08), no look-ahead.
 - BACKTEST RESULT (wszeibgi0): de-bias is the dominant lever. Non-regional 39 cities: bin-hit +4.6 pt, MAE 1.435→1.305, bias −0.515→+0.071. Regional 12 cities: bin-hit +11.6 pt, MAE 1.101→0.850. Optimal = per-model de-bias then equal-weight.
-- Realized trading EV is measured only from forward real fills. The
-  strategy-selection settlement-2026-06-09 analysis showed in-sample EV was
+- Realized trading EV is measured only from forward settlement-graded decisions.
+  The strategy-selection settlement-2026-06-09 analysis showed in-sample EV was
   inflated; forward temporal holdout collapses to +1.2¢..−2.7¢ with large
-  day-variance. That result is learning and falsification evidence, not a
-  circular admission prerequisite: a current causal probability witness that
-  passes the live content, freshness, JIT book, portfolio, expected-log-growth,
-  and Fractional Kelly contracts may enter the capital auction before its first
-  fill. Forward fills then update walk-forward attribution and may reduce or
-  remove future authority; their absence cannot itself block every action that
-  could produce them.
+  day-variance. Cold-start exploration therefore uses zero-money executable
+  counterfactuals frozen in `no_trade_regret_events`, not real capital. A Day0 or
+  qkernel ENTRY reaches the live capital auction only while RiskGuard holds an
+  unexpired credential proving a current-semantics,
+  `executable_min_order_capital_gain_v2` shadow cohort both beats the governed
+  model-over-market e-value threshold and has strictly positive executable
+  minimum-order realized P&L. Missing, stale, identity-mismatched, or
+  non-positive evidence blocks new ENTRY before manual overrides and is
+  rechecked at submit. The credential does not waive current content,
+  freshness, JIT book, portfolio, expected-log-growth, or Fractional Kelly
+  contracts, and it never changes held SELL/HOLD/CASH authority.
 
 **Iron rules:** (1) coverage != currency — five instances fixed today, zero tolerance for recurrence. (2) source-identity — a model's live product must match its de-bias product. (3) no in-sample promotion. (4) buy_no derives from forecast YES bin — cold-bias corrupts the family. (5) operator promotion requires settlement-graded evidence at the same evidence class as icon_eu.
 
