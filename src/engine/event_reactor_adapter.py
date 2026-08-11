@@ -600,6 +600,7 @@ def _is_global_jit_authority_failure(reason: object) -> bool:
         "GLOBAL_BUY_JIT_BID_LEVEL_INVALID",
         "GLOBAL_BUY_JIT_ASK_LEVEL_INVALID",
         "GLOBAL_BUY_JIT_MARKET_METADATA_CONFLICT",
+        "GLOBAL_BUY_JIT_LIQUIDATION_CAPACITY_INFEASIBLE",
         "GLOBAL_SELL_JIT_CLOCK_INVALID",
         "GLOBAL_SELL_JIT_NEG_RISK_AUTHORITY_MISSING",
         "GLOBAL_SELL_JIT_TOKEN_MISMATCH",
@@ -13487,6 +13488,17 @@ def _global_preflight_entry_jit_receipt(
         if str(getattr(candidate, "execution_mode", "") or "").upper() == (
             "TAKER_LIMIT"
         ):
+            from src.solve.solver import current_legal_liquidation_capacity
+
+            liquidation_capacity = current_legal_liquidation_capacity(
+                current_candidate.native_bid_levels
+            )
+            if liquidation_capacity + Decimal("1e-9") < shares:
+                raise ValueError(
+                    "GLOBAL_BUY_JIT_LIQUIDATION_CAPACITY_INFEASIBLE:"
+                    f"token_id={candidate.token_id}:required_shares={shares}:"
+                    f"legal_bid_shares={liquidation_capacity}"
+                )
             executable_shares = sum(
                 (
                     level.size

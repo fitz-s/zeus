@@ -139,6 +139,9 @@ def _global_candidate(
         executable_cost_curve=curve,
         resolution_identity=resolution_identity,
         neg_risk=False,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.05"), size=Decimal("1000000")),
+        ),
         eligibility_reason=reason,
     )
 
@@ -1029,6 +1032,9 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
                 executable_cost_curve=curve,
                 resolution_identity="resolution-joint",
                 neg_risk=False,
+                native_bid_levels=(
+                    BookLevel(price=Decimal("0.05"), size=Decimal(depth)),
+                ),
             )
         )
     endowment = S.FamilyPortfolioEndowment(
@@ -1649,6 +1655,9 @@ def test_deterministic_day0_payoff_selects_exact_bin_and_rejects_unknown_sibling
         ledger_snapshot_id="ledger-current",
         book_captured_at_utc=captured_at,
         neg_risk=False,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.05"), size=Decimal("100")),
+        ),
     )
     unknown = S.global_candidate_from_native(
         SimpleNamespace(
@@ -1670,6 +1679,9 @@ def test_deterministic_day0_payoff_selects_exact_bin_and_rejects_unknown_sibling
         ledger_snapshot_id="ledger-current",
         book_captured_at_utc=captured_at,
         neg_risk=False,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.05"), size=Decimal("100")),
+        ),
     )
 
     decision = _global_select(
@@ -2001,6 +2013,9 @@ def test_family_entry_block_removes_higher_growth_buy_before_same_family_sell():
         executable_cost_curve=buy_curve,
         resolution_identity=sell.resolution_identity,
         neg_risk=False,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.05"), size=Decimal("20")),
+        ),
     )
     unblocked = _global_select(
         (sell, buy),
@@ -2458,6 +2473,53 @@ def test_global_buy_generation_omits_untyped_maker_sibling():
 
     assert len(proposals) == 1
     assert proposals[0].execution_mode == "TAKER_LIMIT"
+    assert proposals[0].eligibility_reason == (
+        "CURRENT_LEGAL_LIQUIDATION_CAPACITY_MISSING"
+    )
+
+
+def test_global_taker_buy_requires_current_legal_liquidation_depth():
+    candidate = _global_candidate(
+        candidate_id="taker-born-unexitable",
+        family="taker-born-unexitable-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.05", "100"),),
+        min_order="5",
+    )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.04"), size=Decimal("100")),
+        ),
+    )
+
+    decision = _global_select((candidate,), cap="5")
+
+    assert decision.candidate is None
+    assert decision.rejection_reasons[candidate.candidate_id] == "DEPTH_INFEASIBLE"
+
+
+def test_global_taker_buy_size_does_not_exceed_current_legal_liquidation_depth():
+    candidate = _global_candidate(
+        candidate_id="taker-repairable-prefix",
+        family="taker-repairable-prefix-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.05", "100"),),
+        min_order="5",
+    )
+    candidate = replace(
+        candidate,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.05"), size=Decimal("25")),
+        ),
+    )
+
+    decision = _global_select((candidate,), cap="5")
+
+    assert decision.candidate is candidate
+    assert Decimal("20") <= decision.shares <= Decimal("25")
 
 
 def test_current_maker_buy_witness_can_win_on_exact_partial_distribution():

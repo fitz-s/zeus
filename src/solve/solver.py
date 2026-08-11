@@ -221,6 +221,7 @@ GlobalEligibilityReason = Literal[
     "ROBUST_MAJORITY_LOSS",
     "FRACTIONAL_KELLY_TARGET_REACHED",
     "LIVE_UNIT_PRICE_OUT_OF_BOUNDS",
+    "CURRENT_LEGAL_LIQUIDATION_CAPACITY_MISSING",
     "NON_POSITIVE_ROBUST_OBJECTIVE",
 ]
 
@@ -374,6 +375,21 @@ def passive_buy_proposal_curve(
         min_tick=curve.min_tick,
         min_order_size=curve.min_order_size,
         quote_ttl=curve.quote_ttl,
+    )
+
+
+def current_legal_liquidation_capacity(
+    native_bid_levels: Sequence[BookLevel],
+) -> Decimal:
+    """Return same-token depth currently sellable inside the live price band."""
+
+    return sum(
+        (
+            Decimal(level.size)
+            for level in native_bid_levels
+            if _live_unit_price_in_band(Decimal(level.price))
+        ),
+        Decimal("0"),
     )
 
 
@@ -2106,6 +2122,14 @@ def global_candidates_from_native(
         and eligibility_reason is None
     ):
         eligibility_reason = "DETERMINISTIC_PAYOFF_NOT_PROVED"
+    bids = tuple(native_bid_levels)
+    taker_eligibility_reason = eligibility_reason
+    if (
+        taker_eligibility_reason is None
+        and current_legal_liquidation_capacity(bids)
+        < Decimal(curve.min_order_size)
+    ):
+        taker_eligibility_reason = "CURRENT_LEGAL_LIQUIDATION_CAPACITY_MISSING"
     common = dict(
         family_key=probability_witness.family_key,
         bin_id=binding.bin_id,
@@ -2119,8 +2143,7 @@ def global_candidates_from_native(
         ledger_snapshot_id=str(ledger_snapshot_id),
         executable_cost_curve=curve,
         resolution_identity=probability_witness.resolution_identity,
-        native_bid_levels=tuple(native_bid_levels),
-        eligibility_reason=eligibility_reason,
+        native_bid_levels=bids,
         neg_risk=neg_risk,
     )
     taker = GlobalSingleOrderCandidate(
@@ -2132,6 +2155,7 @@ def global_candidates_from_native(
             execution_mode="TAKER_LIMIT",
             proposal_identity=executable_curve_identity(curve),
         ),
+        eligibility_reason=taker_eligibility_reason,
         **common,
     )
     if include_maker:
@@ -2157,6 +2181,7 @@ def global_candidates_from_native(
             rest_deadline_minutes=maker_fill_witness.rest_deadline_minutes,
             maker_fill_witness=maker_fill_witness,
             asset_epoch_identity=asset_epoch_identity,
+            eligibility_reason=eligibility_reason,
         )
         return (taker, maker)
     return (taker,)
@@ -5273,6 +5298,12 @@ def _score_global_single_order(
         candidate.economic_cost_curve,
         spend_limit_usd=optimization_limit,
     )
+    if candidate.execution_mode == "TAKER_LIMIT":
+        liquidation_capacity = current_legal_liquidation_capacity(
+            candidate.native_bid_levels
+        )
+        capacity_max_shares = min(capacity_max_shares, liquidation_capacity)
+        raw_max_shares = min(raw_max_shares, liquidation_capacity)
     raw_min_shares = _single_order_min_marketable_shares(
         candidate.economic_cost_curve
     )
