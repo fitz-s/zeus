@@ -27,6 +27,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
+from enum import Enum
 from inspect import Parameter, signature
 from types import SimpleNamespace
 from typing import Callable, Optional, Sequence
@@ -68,6 +69,14 @@ _HELD_MONITOR_CLOB_CLIENT = None
 _HELD_MONITOR_CLOB_CLIENT_FACTORY = None
 _HELD_MONITOR_CLOB_CLIENT_LOCK = threading.Lock()
 GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS = 30.0
+
+
+class GlobalSellSnapshotReauctionDebtStatus(str, Enum):
+    """Bounded monitor classification of one durable global SELL debt."""
+
+    DEBT = "DEBT"
+    NO_DEBT = "NO_DEBT"
+    DEFERRED = "DEFERRED"
 
 
 def preserve_held_sell_reauction_deadline(
@@ -964,10 +973,20 @@ def _held_sell_reauction_obligation(
 def latest_held_sell_reauction_obligation(
     conn: sqlite3.Connection | None,
     position: Position,
+    *,
+    strict: bool = False,
+    deadline_monotonic: float | None = None,
 ) -> dict[str, object]:
     """Return the newest durable versioned SELL obligation for a position."""
 
     if conn is None:
+        return {}
+    if (
+        deadline_monotonic is not None
+        and _time_module.monotonic() >= float(deadline_monotonic)
+    ):
+        if strict:
+            raise TimeoutError("held SELL obligation deadline expired")
         return {}
     position_id = str(getattr(position, "trade_id", "") or "")
     if not position_id:
@@ -984,11 +1003,29 @@ def latest_held_sell_reauction_obligation(
             (position_id,),
         ).fetchall()
     except (sqlite3.Error, AttributeError):
+        if strict:
+            raise
+        return {}
+    if (
+        deadline_monotonic is not None
+        and _time_module.monotonic() >= float(deadline_monotonic)
+    ):
+        if strict:
+            raise TimeoutError("held SELL obligation deadline expired")
         return {}
     for row in rows:
+        if (
+            deadline_monotonic is not None
+            and _time_module.monotonic() >= float(deadline_monotonic)
+        ):
+            if strict:
+                raise TimeoutError("held SELL obligation deadline expired")
+            return {}
         try:
             payload = json.loads(str(row[0] or "{}"))
         except (TypeError, json.JSONDecodeError):
+            if strict:
+                raise ValueError("held SELL obligation payload is unreadable")
             continue
         obligation = payload.get("held_sell_reauction_obligation")
         if (
@@ -1518,86 +1555,169 @@ def needs_global_sell_snapshot_reauction(
     position: Position,
     conn: sqlite3.Connection | None = None,
 ) -> bool:
-    """Whether canonical runtime state carries an unserved fresh-cut debt."""
+    """Compatibility boolean view of global SELL debt classification."""
 
-    runtime_error = _is_global_sell_snapshot_reauction_error(
-        getattr(position, "last_exit_error", "")
+    return (
+        classify_global_sell_snapshot_reauction_debt(
+            position,
+            conn,
+        )
+        is GlobalSellSnapshotReauctionDebtStatus.DEBT
     )
+
+
+def classify_global_sell_snapshot_reauction_debt(
+    position: Position,
+    conn: sqlite3.Connection | None,
+    *,
+    auxiliary_deadline: float | None = None,
+) -> GlobalSellSnapshotReauctionDebtStatus:
+    """Classify one global SELL debt without borrowing the primary reserve.
+
+    SCOPE: one held position's durable reauction obligation. DRAIN: the next
+    monitor pass repeats this bounded classification from canonical truth.
+    RESET: only an authoritative no-debt result or a recovered obligation.
+    """
+
+    if (
+        auxiliary_deadline is not None
+        and _time_module.monotonic() >= float(auxiliary_deadline)
+    ):
+        return GlobalSellSnapshotReauctionDebtStatus.DEFERRED
     if conn is None:
-        if _is_post_only_cross_reauction_error(
+        runtime_error = _is_global_sell_snapshot_reauction_error(
             getattr(position, "last_exit_error", "")
-        ):
-            return False
-        return runtime_error
+        )
+        return (
+            GlobalSellSnapshotReauctionDebtStatus.DEBT
+            if runtime_error
+            and not _is_post_only_cross_reauction_error(
+                getattr(position, "last_exit_error", "")
+            )
+            else GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+        )
+
     trade_id = str(getattr(position, "trade_id", "") or "")
     if not trade_id:
-        return False
+        return GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+
+    def classify_from_row(row, payload, obligation):
+        if obligation.get("schema_version") == 4:
+            unarmed_residual = (
+                isinstance(obligation.get("residual_proof"), dict)
+                and not str(obligation.get("request_id") or "").strip()
+                and not str(obligation.get("attempt_identity") or "").strip()
+                and not str(obligation.get("completion_deadline_at") or "").strip()
+            )
+            closed_market_hold = (
+                str(row[0]) == "MONITOR_REFRESHED"
+                and payload.get("semantic_event")
+                == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
+                and str(payload.get("hold_reason") or "")
+                in {
+                    "MARKET_CLOSED_AWAITING_SETTLEMENT",
+                    "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED",
+                }
+                and payload.get("exit_order_submitted") is False
+                and payload.get("exit_failure") is False
+            )
+            if unarmed_residual and closed_market_hold:
+                return GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+            return (
+                GlobalSellSnapshotReauctionDebtStatus.DEBT
+                if _held_sell_reauction_recovery_due(
+                    obligation,
+                    durable_reserved=(
+                        payload.get("global_sell_reauction_status")
+                        == "durable_wake_reserved"
+                    ),
+                )
+                else GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+            )
+        if payload.get("global_sell_reauction_status") == "durable_wake_reserved":
+            return GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+        canonical_debt = (
+            str(row[0]) == "EXIT_RETRY_RELEASED"
+            and payload.get("release_reason")
+            == "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
+            and _is_global_sell_snapshot_reauction_error(payload.get("error"))
+        )
+        if canonical_debt and _is_post_only_cross_reauction_error(payload.get("error")):
+            canonical_debt = _post_only_cross_reauction_proof_for_position(
+                conn,
+                position,
+            )
+        return (
+            GlobalSellSnapshotReauctionDebtStatus.DEBT
+            if canonical_debt or bool(obligation)
+            else GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+        )
+
     try:
-        row = conn.execute(
-            """
-            SELECT event_type, payload_json
-             FROM position_events
-             WHERE position_id = ?
-               AND event_type IN ('EXIT_RETRY_RELEASED', 'MONITOR_REFRESHED')
-             ORDER BY sequence_no DESC, datetime(occurred_at) DESC
-             LIMIT 1
-            """,
-            (trade_id,),
-        ).fetchone()
-    except (sqlite3.Error, AttributeError):
-        return False
-    if row is None:
-        return False
-    try:
-        payload = json.loads(str(row[1] or "{}"))
-    except (TypeError, json.JSONDecodeError):
-        return False
-    obligation = latest_held_sell_reauction_obligation(conn, position)
-    if obligation.get("schema_version") == 4:
-        unarmed_residual = (
-            isinstance(obligation.get("residual_proof"), dict)
-            and not str(obligation.get("request_id") or "").strip()
-            and not str(obligation.get("attempt_identity") or "").strip()
-            and not str(obligation.get("completion_deadline_at") or "").strip()
+        if auxiliary_deadline is None:
+            row = conn.execute(
+                """
+                SELECT event_type, payload_json
+                 FROM position_events
+                 WHERE position_id = ?
+                   AND event_type IN ('EXIT_RETRY_RELEASED', 'MONITOR_REFRESHED')
+                 ORDER BY sequence_no DESC, datetime(occurred_at) DESC
+                 LIMIT 1
+                """,
+                (trade_id,),
+            ).fetchone()
+            if row is None:
+                return GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+            payload = json.loads(str(row[1] or "{}"))
+            if not isinstance(payload, dict):
+                return GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+            obligation = latest_held_sell_reauction_obligation(
+                conn,
+                position,
+            )
+            return classify_from_row(row, payload, obligation)
+        with _held_monitor_preparation_deadline(
+            conn,
+            float(auxiliary_deadline),
+        ) as ensure_live:
+            row = conn.execute(
+                """
+                SELECT event_type, payload_json
+                 FROM position_events
+                 WHERE position_id = ?
+                   AND event_type IN ('EXIT_RETRY_RELEASED', 'MONITOR_REFRESHED')
+                 ORDER BY sequence_no DESC, datetime(occurred_at) DESC
+                 LIMIT 1
+                """,
+                (trade_id,),
+            ).fetchone()
+            ensure_live()
+            if row is None:
+                return GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+            payload = json.loads(str(row[1] or "{}"))
+            if not isinstance(payload, dict):
+                return GlobalSellSnapshotReauctionDebtStatus.DEFERRED
+            obligation = latest_held_sell_reauction_obligation(
+                conn,
+                position,
+                strict=True,
+                deadline_monotonic=auxiliary_deadline,
+            )
+            ensure_live()
+            return classify_from_row(row, payload, obligation)
+    except (
+        AttributeError,
+        IndexError,
+        sqlite3.Error,
+        TimeoutError,
+        TypeError,
+        ValueError,
+    ):
+        return (
+            GlobalSellSnapshotReauctionDebtStatus.DEFERRED
+            if auxiliary_deadline is not None
+            else GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
         )
-        closed_market_hold = (
-            str(row[0]) == "MONITOR_REFRESHED"
-            and payload.get("semantic_event")
-            == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
-            and str(payload.get("hold_reason") or "")
-            in {
-                "MARKET_CLOSED_AWAITING_SETTLEMENT",
-                "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED",
-            }
-            and payload.get("exit_order_submitted") is False
-            and payload.get("exit_failure") is False
-        )
-        if unarmed_residual and closed_market_hold:
-            # SCOPE: only an unarmed residual placeholder copied into an exact
-            # market-closed hold. DRAIN: settlement/reconciliation owns the
-            # residual after executable venue truth no longer exists. RESET: a
-            # later executable monitor event or armed request no longer matches
-            # this gate and resumes ordinary global SELL recovery.
-            return False
-        return _held_sell_reauction_recovery_due(
-            obligation,
-            durable_reserved=(
-                payload.get("global_sell_reauction_status")
-                == "durable_wake_reserved"
-            ),
-        )
-    if payload.get("global_sell_reauction_status") == "durable_wake_reserved":
-        return False
-    canonical_debt = (
-        str(row[0]) == "EXIT_RETRY_RELEASED"
-        and
-        payload.get("release_reason")
-        == "GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED"
-        and _is_global_sell_snapshot_reauction_error(payload.get("error"))
-    )
-    if canonical_debt and _is_post_only_cross_reauction_error(payload.get("error")):
-        return _post_only_cross_reauction_proof_for_position(conn, position)
-    return canonical_debt or bool(obligation)
 
 
 def _is_runtime_submit_gate_block_error(error: str) -> bool:

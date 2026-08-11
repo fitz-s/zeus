@@ -5937,13 +5937,14 @@ def execute_monitoring_phase(
         build_exit_intent,
         check_pending_exits,
         check_pending_retries,
+        classify_global_sell_snapshot_reauction_debt,
         execute_exit,
+        GlobalSellSnapshotReauctionDebtStatus,
         has_global_sell_snapshot_reauction_retry,
         _is_non_executable_dust_hold,
         handle_exit_pending_missing,
         is_exit_cooldown_active,
         latest_held_sell_reauction_obligation,
-        needs_global_sell_snapshot_reauction,
         preserve_held_sell_reauction_deadline,
         recover_global_sell_snapshot_reauction_debt,
         release_backoff_exhausted_pending_exit_for_redecision,
@@ -6375,10 +6376,6 @@ def execute_monitoring_phase(
                 for field in global_retry_runtime_fields
             }
             for position in tuple(getattr(portfolio, "positions", ()) or ())
-            if (
-                has_global_snapshot_retry_runtime(position)
-                or needs_global_sell_snapshot_reauction(position, conn)
-            )
         }
 
     def restore_global_retry_runtime(
@@ -6587,7 +6584,31 @@ def execute_monitoring_phase(
                 len(portfolio_positions) - index
             )
             break
-        if needs_global_sell_snapshot_reauction(position, conn):
+        debt_status = classify_global_sell_snapshot_reauction_debt(
+            position,
+            conn,
+            auxiliary_deadline=auxiliary_deadline,
+        )
+        if debt_status is GlobalSellSnapshotReauctionDebtStatus.DEFERRED:
+            # SCOPE: unclassified positions in this held-monitor pass. DRAIN:
+            # the next pass reclassifies each against canonical truth. RESET:
+            # a bounded DEBT or NO_DEBT classification.
+            deferred = len(portfolio_positions) - index
+            defer_optional_maintenance(
+                "GLOBAL_SELL_DEBT_CLASSIFICATION_DEFERRED",
+                deferred,
+            )
+            summary["global_sell_snapshot_reauction_scan_deadline_deferred"] = deferred
+            summary["global_sell_snapshot_reauction_classification_deferred"] = (
+                summary.get("global_sell_snapshot_reauction_classification_deferred", 0)
+                + deferred
+            )
+            summary["global_sell_snapshot_reauction_debts_pending"] = (
+                summary.get("global_sell_snapshot_reauction_debts_pending", 0)
+                + deferred
+            )
+            break
+        if debt_status is GlobalSellSnapshotReauctionDebtStatus.DEBT:
             committed_debt_candidates.append(position)
     committed_debt_positions = tuple(committed_debt_candidates)
     if committed_debt_positions:
@@ -7697,6 +7718,24 @@ def execute_monitoring_phase(
                         delattr(pos, _HELD_MONITOR_DEADLINE_ATTR)
                     except AttributeError:
                         pass
+                if time.monotonic() >= monitor_deadline:
+                    # SCOPE: this refresh and remaining positions. DRAIN: the
+                    # next monitor pass refreshes them under a fresh deadline.
+                    # RESET: a completed in-budget refresh.
+                    deferred_count = len(monitor_positions) - position_index
+                    summary["held_monitor_primary_belief_read_deferred"] = (
+                        summary.get("held_monitor_primary_belief_read_deferred", 0)
+                        + deferred_count
+                    )
+                    summary["held_monitor_positions_deferred"] = deferred_count
+                    summary["held_monitor_defer_reason"] = (
+                        "MONITOR_DEADLINE_EXPIRED_AFTER_REFRESH"
+                    )
+                    summary["held_monitor_deadline_deferred_positions"] = deferred_count
+                    summary["held_monitor_deadline_defer_reason"] = (
+                        "MONITOR_DEADLINE_EXPIRED_AFTER_REFRESH"
+                    )
+                    break
             if monitoring_non_executable_dust:
                 current_min_order_size = getattr(
                     pos,

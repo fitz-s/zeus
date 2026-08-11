@@ -18477,8 +18477,12 @@ def test_global_sell_debt_drain_auxiliary_deadline_preserves_primary_refresh(
     )
     monkeypatch.setattr(
         exit_lifecycle,
-        "needs_global_sell_snapshot_reauction",
-        lambda position, _conn: position is debt,
+        "classify_global_sell_snapshot_reauction_debt",
+        lambda position, _conn, **_kwargs: (
+            exit_lifecycle.GlobalSellSnapshotReauctionDebtStatus.DEBT
+            if position is debt
+            else exit_lifecycle.GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+        ),
     )
     recovered: list[str] = []
 
@@ -19038,8 +19042,10 @@ def test_expired_monitor_deadline_defers_global_sell_debt_without_refresh(
     position.exit_state = "retry_pending"
     monkeypatch.setattr(
         exit_lifecycle,
-        "needs_global_sell_snapshot_reauction",
-        lambda *_args, **_kwargs: True,
+        "classify_global_sell_snapshot_reauction_debt",
+        lambda *_args, **_kwargs: (
+            exit_lifecycle.GlobalSellSnapshotReauctionDebtStatus.DEBT
+        ),
     )
     monkeypatch.setattr(
         exit_lifecycle,
@@ -19094,8 +19100,10 @@ def test_global_sell_debt_drain_stops_after_first_attempt_exhausts_deadline(
     monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(
         exit_lifecycle,
-        "needs_global_sell_snapshot_reauction",
-        lambda *_args, **_kwargs: True,
+        "classify_global_sell_snapshot_reauction_debt",
+        lambda *_args, **_kwargs: (
+            exit_lifecycle.GlobalSellSnapshotReauctionDebtStatus.DEBT
+        ),
     )
 
     def recover(position, **_kwargs):
@@ -19130,6 +19138,159 @@ def test_global_sell_debt_drain_stops_after_first_attempt_exhausts_deadline(
     assert attempted == ["bounded-global-sell-debt-0"]
     assert summary["global_sell_snapshot_reauction_deadline_deferred"] == 1
     assert summary["global_sell_snapshot_reauction_debts_pending"] == 2
+
+
+def test_decision_log_406128_global_retry_snapshot_is_memory_only(monkeypatch):
+    """Preflight rollback snapshot must not issue a debt-classification read."""
+    from src.engine import cycle_runtime
+    from src.execution import exit_lifecycle
+
+    position = _make_position(
+        trade_id="decision-log-406128",
+        state="holding",
+        chain_state="synced",
+    )
+    clock = [0.0]
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "has_global_sell_snapshot_reauction_retry",
+        lambda *_args, **_kwargs: pytest.fail("snapshot must not classify retry debt"),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "needs_global_sell_snapshot_reauction",
+        lambda *_args, **_kwargs: pytest.fail("snapshot must not issue debt SQL"),
+    )
+
+    def pending_preflight(*_args, deadline_monotonic, **_kwargs):
+        clock[0] = deadline_monotonic
+        return {"filled": 0, "retried": 0, "unchanged": 0, "filled_positions": []}
+
+    monkeypatch.setattr(exit_lifecycle, "check_pending_exits", pending_preflight)
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: [],
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("decision_log_406128"),
+        held_position_monitor_budget_seconds=6.0,
+    )
+
+    assert summary["global_sell_snapshot_reauction_scan_deadline_deferred"] == 1
+
+
+def test_decision_log_406131_debt_classification_defers_when_sql_spends_deadline(
+    monkeypatch,
+):
+    """A late canonical read is typed DEFERRED, never mistaken for no debt."""
+    from src.execution import exit_lifecycle
+
+    clock = [0.0]
+
+    class Result:
+        def __init__(self, row=None):
+            self.row = row
+
+        def fetchone(self):
+            return self.row
+
+    class Conn:
+        def __init__(self):
+            self.busy_ms = 30_000
+            self.handler = None
+            self.history_queries = 0
+
+        def execute(self, sql, _params=()):
+            if sql == "PRAGMA busy_timeout":
+                return Result((self.busy_ms,))
+            if sql.startswith("PRAGMA busy_timeout = "):
+                self.busy_ms = int(sql.rsplit(" ", 1)[-1])
+                return Result()
+            if "FROM position_events" in sql:
+                clock[0] = 2.0
+                self.history_queries += 1
+                return Result(("MONITOR_REFRESHED", "{}"))
+            raise AssertionError(sql)
+
+        def set_progress_handler(self, handler, _opcodes):
+            self.handler = handler
+
+    conn = Conn()
+    position = _make_position(trade_id="decision-log-406131", state="pending_exit")
+    monkeypatch.setattr(exit_lifecycle._time_module, "monotonic", lambda: clock[0])
+
+    status = exit_lifecycle.classify_global_sell_snapshot_reauction_debt(
+        position,
+        conn,
+        auxiliary_deadline=1.0,
+    )
+
+    assert status is exit_lifecycle.GlobalSellSnapshotReauctionDebtStatus.DEFERRED
+    assert conn.history_queries == 1
+    assert conn.handler is None
+    assert conn.busy_ms == 30_000
+
+
+def test_monitor_refresh_deadline_defers_before_canonical_emit(monkeypatch):
+    """A refresh that consumes its claim budget cannot append stale monitor truth."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(
+        trade_id="refresh-deadline-before-canonical-emit",
+        state="day0_window",
+        chain_state="synced",
+    )
+    clock = [0.0]
+    canonical_emits = []
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: [position],
+    )
+
+    def refresh(*_args):
+        clock[0] = 6.0
+        return _monitor_test_edge_context(position)
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", refresh)
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: canonical_emits.append(True),
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda *_args, **_kwargs: pytest.fail("expired refresh must defer before decision"),
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("refresh_deadline_before_canonical_emit"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=6.0,
+    )
+
+    assert canonical_emits == []
+    assert summary["held_monitor_defer_reason"] == "MONITOR_DEADLINE_EXPIRED_AFTER_REFRESH"
+    assert summary["held_monitor_deadline_deferred_positions"] == 1
 
 
 def test_market_velocity_uses_causal_source_time_not_legacy_text_order(tmp_path):
