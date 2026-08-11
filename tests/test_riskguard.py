@@ -4652,6 +4652,62 @@ class TestQkernelMarketRelativeAlphaEvidence:
         ) is not None
         conn.close()
 
+    def test_qkernel_likelihood_win_without_capital_gain_is_not_validated(self):
+        rows = [
+            {
+                **self._row("qkernel-win", city="Alpha", q=0.90, outcome=1),
+                "strategy": "forecast_qkernel_entry",
+                "decision_law_id": "executable_min_order_capital_gain_v2",
+                "probability_semantics_revisions": (
+                    riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                ),
+                "capital_gain_proof_ready": True,
+                "hypothetical_capital_committed_usd": 0.30,
+                "hypothetical_realized_pnl_usd": 4.70,
+            },
+            {
+                **self._row("qkernel-loss", city="Beta", q=0.20, outcome=0),
+                "strategy": "forecast_qkernel_entry",
+                "decision_law_id": "executable_min_order_capital_gain_v2",
+                "probability_semantics_revisions": (
+                    riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                ),
+                "capital_gain_proof_ready": True,
+                "hypothetical_capital_committed_usd": 6.00,
+                "hypothetical_realized_pnl_usd": -6.00,
+            },
+        ]
+        conn = self._conn()
+        for index, row in enumerate(rows):
+            conn.execute(
+                "INSERT INTO position_current VALUES (?,?,?,?,?)",
+                (
+                    row["trade_id"],
+                    0.05,
+                    row["city"],
+                    f"2026-08-{9 + index:02d}",
+                    "high",
+                ),
+            )
+            conn.execute(
+                "INSERT INTO execution_fact VALUES (?,'entry','2026-08-10','filled',?,1)",
+                (row["trade_id"], 0.05),
+            )
+
+        evidence = riskguard_module._market_relative_alpha_evidence(
+            riskguard_module._bind_entry_market_benchmarks(conn, rows),
+            strategy_key="forecast_qkernel_entry",
+            rejection_evalue=10.0,
+            as_of=datetime(2026, 8, 11, tzinfo=timezone.utc),
+        )
+
+        cohort = evidence["cohorts"][0]
+        assert cohort["model_over_market_evalue"] > 10.0
+        assert cohort["hypothetical_realized_pnl_usd"] == pytest.approx(-1.30)
+        assert cohort["capital_gain_validated"] is False
+        assert evidence["validated"] is False
+        conn.close()
+
     def test_current_day0_without_validated_causal_evidence_is_observed(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 

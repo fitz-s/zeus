@@ -3475,9 +3475,12 @@ def _market_relative_alpha_evidence(
             and capital_pnl > 0.0
         )
         statistical_validation = model_over_market_evalue >= rejection_evalue
-        validated = statistical_validation and (
-            strategy_key != "day0_nowcast_entry" or capital_gain_validated
-        )
+        # A probability system can beat the market on log score while still
+        # lose money at the executable prices and minimum sizes that were
+        # available at decision time.  Both entry strategies therefore require
+        # the same positive forward-capital proof; likelihood evidence alone is
+        # diagnostic, never validation for re-opening capital.
+        validated = statistical_validation and capital_gain_validated
         cohort_evidence.append(
             {
                 "decision_law_id": decision_law_id,
