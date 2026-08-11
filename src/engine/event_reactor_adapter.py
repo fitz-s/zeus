@@ -20510,8 +20510,19 @@ def _build_live_execution_command_certificates(
                 or executable_snapshot.payload.get("selected_snapshot_id")
                 or ""
             )
-            _k1_elected_snapshot = None
-            if _k1_elected_id:
+            # A global cut already revalidated this exact snapshot identity and
+            # sealed its current metadata/book before final intent construction.
+            # Re-reading the selection-time DB row here can cap the new JIT book
+            # with an older freshness deadline, making submit-time evidence stale
+            # at birth. Keep the existing min-deadline safety law, but apply it to
+            # the current sealed authority that actually reached this seam.
+            _k1_elected_snapshot = (
+                global_jit_handoff.authority.snapshot
+                if global_jit_handoff is not None
+                and global_candidate is not None
+                else None
+            )
+            if _k1_elected_snapshot is None and _k1_elected_id:
                 try:
                     _k1_elected_snapshot = get_snapshot(trade_conn, _k1_elected_id)
                 except Exception:  # noqa: BLE001 - fail-soft: never block submit on a read

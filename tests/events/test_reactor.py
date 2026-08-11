@@ -389,11 +389,19 @@ def test_global_builder_uses_sealed_book_and_one_final_provider_call(monkeypatch
         orderbook_depth_jsonb=depth,
     )
     provider_calls = []
+    persisted_snapshot_bases = []
 
     def spy_provider(final_intent, _snapshot, _decision_time, *, sealed_book_override=None):
         provider_calls.append((dict(final_intent.payload), sealed_book_override))
         return witness
 
+    monkeypatch.setattr(
+        era,
+        "persist_presubmit_jit_snapshot",
+        lambda _conn, elected_snapshot, **_kwargs: persisted_snapshot_bases.append(
+            elected_snapshot
+        ),
+    )
     monkeypatch.setattr(era, "validate_final_intent_cert_for_existing_executor", lambda _c: "native-hash")
     monkeypatch.setattr(era, "_release_live_order_build_stale_transaction", lambda *_a, **_k: None)
     monkeypatch.setattr(era, "_entry_global_submit_suppression_reason", lambda: None)
@@ -401,11 +409,14 @@ def test_global_builder_uses_sealed_book_and_one_final_provider_call(monkeypatch
     monkeypatch.setattr(era, "_run_live_order_build_savepoint", lambda *_a, **_k: (SimpleNamespace(), SimpleNamespace(), SimpleNamespace()))
     handoff = SimpleNamespace(authority=SimpleNamespace(snapshot=snapshot), candidate=candidate)
 
+    live_cap_conn = sqlite3.connect(":memory:")
+    trade_conn = sqlite3.connect(":memory:")
     result = era._build_live_execution_command_certificates(
         event=event,
         receipt=receipt,
         decision_time=decision_time,
-        live_cap_conn=sqlite3.connect(":memory:"),
+        live_cap_conn=live_cap_conn,
+        trade_conn=trade_conn,
         pre_submit_authority_provider=spy_provider,
         live_order_schema_initialized=True,
         global_jit_handoff=handoff,
@@ -422,6 +433,7 @@ def test_global_builder_uses_sealed_book_and_one_final_provider_call(monkeypatch
     assert final_intent_payload["post_only"] is False
     assert sealed_override is not None
     assert sealed_override.snapshot_id == "snap-sealed"
+    assert persisted_snapshot_bases == [snapshot]
 
 
 def _store() -> tuple[sqlite3.Connection, EventStore]:
