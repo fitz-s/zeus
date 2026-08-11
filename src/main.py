@@ -1793,6 +1793,7 @@ def _assert_cascade_liveness_contract(scheduler) -> None:
 
 
 _heartbeat_fails = 0
+_BOOT_HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 def _write_heartbeat() -> None:
     """Write the coarse process heartbeat without consulting runtime state."""
@@ -1827,6 +1828,39 @@ def _write_heartbeat() -> None:
         if _heartbeat_fails >= 3:
             logger.critical("FATAL: Heartbeat failed 3 consecutive times. Halting daemon to prevent zombie state.")
             os._exit(1)
+
+
+def _start_boot_process_heartbeat(
+    *,
+    interval_seconds: float = _BOOT_HEARTBEAT_INTERVAL_SECONDS,
+) -> tuple[threading.Event, threading.Thread]:
+    """Keep process liveness current until APScheduler owns the heartbeat."""
+
+    stop = threading.Event()
+    _write_heartbeat()
+
+    def _pulse() -> None:
+        while not stop.wait(interval_seconds):
+            _write_heartbeat()
+
+    thread = threading.Thread(
+        target=_pulse,
+        name="zeus-boot-process-heartbeat",
+        daemon=True,
+    )
+    thread.start()
+    return stop, thread
+
+
+def _stop_boot_process_heartbeat(
+    stop: threading.Event,
+    thread: threading.Thread,
+) -> None:
+    """Handoff the process pulse to the scheduler without a stale window."""
+
+    stop.set()
+    thread.join()
+    _write_heartbeat()
 
 
 @_scheduler_job("live_health_composite")
@@ -9157,6 +9191,15 @@ def main():
     # the exact running process without treating later worktree drift as authority.
     _write_loaded_sha_state(_boot.get("sha"))
 
+    # The launchd watchdog evaluates process liveness independently from
+    # scheduler readiness. Canonical DB boot checks can legitimately take
+    # longer than its stale threshold, so publish the same coarse PID-bound
+    # process heartbeat throughout boot. Scheduler health remains a separate
+    # proof surface and takes ownership only after every job is registered.
+    _boot_heartbeat_stop, _boot_heartbeat_thread = (
+        _start_boot_process_heartbeat()
+    )
+
     _startup_required_sidecar_head_check(boot_sha=_boot.get("sha"))
 
     # Proxy health gate: strip dead HTTP_PROXY so data-only mode works
@@ -9681,6 +9724,10 @@ def main():
 
     jobs = [j.id for j in scheduler.get_jobs()]
     logger.info("Scheduler ready. %d jobs: %s", len(jobs), jobs)
+    _stop_boot_process_heartbeat(
+        _boot_heartbeat_stop,
+        _boot_heartbeat_thread,
+    )
 
     try:
         scheduler.start()
