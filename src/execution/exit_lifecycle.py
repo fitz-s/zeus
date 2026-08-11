@@ -2376,6 +2376,87 @@ class GlobalSellExecutionAuthority:
         return self.limit_price()
 
 
+@dataclass(frozen=True)
+class StrategyHoldRejectionSellAuthority:
+    """Typed taker authority when the current strategy q may no longer HOLD."""
+
+    position_id: str
+    token_id: str
+    strategy_key: str
+    selected_method: str
+    probability_authority: str
+    current_validations: tuple[str, ...]
+    policy_reason: str
+    snapshot_id: str
+    snapshot_hash: str
+    best_bid: Decimal
+    shares: Decimal
+    expires_at_utc: str
+
+
+def _strategy_hold_rejection_marketable_authority_error(
+    conn: sqlite3.Connection,
+    intent: object,
+    *,
+    limit_price: float,
+    shares: float,
+    now: datetime | None = None,
+) -> str | None:
+    """Re-prove strategy policy, immutable snapshot, and taker economics."""
+
+    authority = getattr(intent, "marketable_sell_execution_authority", None)
+    if not isinstance(authority, StrategyHoldRejectionSellAuthority):
+        return "strategy_hold_rejection_sell_authority_required"
+    if (
+        authority.position_id != str(getattr(intent, "trade_id", "") or "")
+        or authority.token_id != str(getattr(intent, "token_id", "") or "")
+        or Decimal(str(limit_price)) != authority.best_bid
+        or Decimal(str(shares)) != authority.shares
+        or Decimal(str(getattr(intent, "best_bid", "NaN"))) != authority.best_bid
+        or str(getattr(intent, "submit_order_type", "") or "").upper() != "FAK"
+        or str(getattr(intent, "executable_snapshot_id", "") or "")
+        != authority.snapshot_id
+    ):
+        return "strategy_hold_rejection_sell_authority_binding_mismatch"
+    try:
+        deadline = datetime.fromisoformat(
+            authority.expires_at_utc.replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        return "strategy_hold_rejection_sell_authority_deadline_invalid"
+    if deadline.tzinfo is None:
+        return "strategy_hold_rejection_sell_authority_deadline_invalid"
+    if (now or _utcnow()).astimezone(timezone.utc) > deadline.astimezone(timezone.utc):
+        return "strategy_hold_rejection_sell_authority_expired"
+    try:
+        from src.control.control_plane import (
+            current_strategy_hold_authority_rejection,
+        )
+
+        current_reason = current_strategy_hold_authority_rejection(
+            authority.strategy_key,
+            probability_authority=authority.probability_authority,
+            selected_method=authority.selected_method,
+            current_validations=authority.current_validations,
+        )
+    except Exception:
+        return "strategy_hold_rejection_sell_policy_unavailable"
+    if current_reason != authority.policy_reason:
+        return "strategy_hold_rejection_sell_policy_superseded"
+    from src.state.snapshot_repo import get_snapshot
+
+    snapshot = get_snapshot(conn, authority.snapshot_id)
+    if snapshot is None:
+        return "strategy_hold_rejection_sell_snapshot_missing"
+    if (
+        str(snapshot.selected_outcome_token_id) != authority.token_id
+        or str(snapshot.executable_snapshot_hash) != authority.snapshot_hash
+        or Decimal(str(snapshot.orderbook_top_bid)) != authority.best_bid
+    ):
+        return "strategy_hold_rejection_sell_snapshot_superseded"
+    return None
+
+
 def _global_sell_execution_authority_shape_error(
     authority: object | None,
 ) -> str | None:
@@ -5742,6 +5823,71 @@ def _execute_live_exit(
             log_exit_retry_event(conn, position, reason=liquidity_reason, error=liquidity_error)
         return f"exit_blocked: {liquidity_error.removeprefix('exit_')}"
 
+    strategy_marketable_authority = None
+    if strategy_hold_rejection_authorized:
+        snapshot_bid = _positive_decimal(
+            snapshot_context.get("executable_snapshot_orderbook_top_bid")
+        )
+        snapshot_id = str(
+            snapshot_context.get("executable_snapshot_id") or ""
+        ).strip()
+        snapshot_hash = str(
+            snapshot_context.get("executable_snapshot_hash") or ""
+        ).strip()
+        deadline = str(
+            snapshot_context.get("execution_authority_deadline_utc") or ""
+        ).strip()
+        receipt = exit_intent.probability_receipt
+        probability_authority = (
+            str(receipt.get("probability_authority") or "")
+            if isinstance(receipt, Mapping)
+            else ""
+        )
+        from src.control.control_plane import (
+            current_strategy_hold_authority_rejection,
+        )
+
+        policy_reason = current_strategy_hold_authority_rejection(
+            str(getattr(position, "strategy_key", "") or ""),
+            probability_authority=probability_authority,
+            selected_method=str(getattr(position, "selected_method", "") or ""),
+            current_validations=(getattr(position, "applied_validations", []) or []),
+        )
+        if (
+            snapshot_bid is None
+            or not LIVE_ORDER_MIN_UNIT_PRICE
+            <= snapshot_bid
+            <= LIVE_ORDER_MAX_UNIT_PRICE
+            or not snapshot_id
+            or not snapshot_hash
+            or not deadline
+            or not policy_reason
+        ):
+            return "exit_blocked: strategy_hold_rejection_sell_authority_unavailable"
+        exit_intent = replace(
+            exit_intent,
+            best_bid=float(snapshot_bid),
+            exact_limit_price=float(snapshot_bid),
+            submit_order_type="FAK",
+        )
+        strategy_marketable_authority = StrategyHoldRejectionSellAuthority(
+            position_id=position.trade_id,
+            token_id=token_id,
+            strategy_key=str(getattr(position, "strategy_key", "") or ""),
+            selected_method=str(getattr(position, "selected_method", "") or ""),
+            probability_authority=probability_authority,
+            current_validations=tuple(
+                str(value)
+                for value in (getattr(position, "applied_validations", []) or [])
+            ),
+            policy_reason=policy_reason,
+            snapshot_id=snapshot_id,
+            snapshot_hash=snapshot_hash,
+            best_bid=snapshot_bid,
+            shares=Decimal(str(exit_intent.shares)),
+            expires_at_utc=deadline,
+        )
+
     # execute_exit_order owns the final targeted CTF refresh, persistence, and
     # reservation immediately before command persistence.  A second lifecycle
     # check here used the fetch-only preparation seam as if it had persisted,
@@ -5948,12 +6094,16 @@ def _execute_live_exit(
                 marketable_certificate_hash
             ),
             marketable_sell_execution_authority=(
-                global_sell_authority
-                if global_authorized
-                and global_sell_authority is not None
-                and global_sell_authority.jit_candidate.execution_mode
-                == "TAKER_LIMIT"
-                else None
+                strategy_marketable_authority
+                if strategy_marketable_authority is not None
+                else (
+                    global_sell_authority
+                    if global_authorized
+                    and global_sell_authority is not None
+                    and global_sell_authority.jit_candidate.execution_mode
+                    == "TAKER_LIMIT"
+                    else None
+                )
             ),
             global_sell_execution_authority=(
                 global_sell_authority if global_authorized else None

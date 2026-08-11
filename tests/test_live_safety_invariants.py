@@ -16593,7 +16593,16 @@ def test_rejected_current_hold_authority_reaches_reduce_only_submit(monkeypatch)
     monkeypatch.setattr(
         exit_lifecycle,
         "_latest_or_capture_exit_snapshot_context",
-        lambda *_args, **_kwargs: {},
+        lambda *_args, **_kwargs: {
+            "executable_snapshot_id": "strategy-rejection-snapshot",
+            "executable_snapshot_hash": "strategy-rejection-book",
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "1",
+            "executable_snapshot_neg_risk": False,
+            "execution_authority_deadline_utc": "2099-01-01T00:00:00+00:00",
+            "executable_snapshot_orderbook_top_bid": "0.45",
+            "executable_snapshot_orderbook_top_ask": "0.46",
+        },
     )
     monkeypatch.setattr(
         exit_lifecycle,
@@ -16638,6 +16647,72 @@ def test_rejected_current_hold_authority_reaches_reduce_only_submit(monkeypatch)
     assert len(submitted) == 1
     assert submitted[0]["shares"] == pos.effective_shares
     assert submitted[0]["submit_order_type"] == "FAK"
+    assert submitted[0]["exact_limit_price"] == 0.45
+    assert isinstance(
+        submitted[0]["marketable_sell_execution_authority"],
+        exit_lifecycle.StrategyHoldRejectionSellAuthority,
+    )
+
+
+def test_executor_reproves_strategy_rejection_taker_authority(monkeypatch):
+    """The final SDK boundary accepts only current policy plus the exact book."""
+    from src.control import control_plane
+    from src.execution import executor, exit_lifecycle
+
+    _install_market_alpha_rejection(monkeypatch)
+    policy_reason = (
+        "market_relative_alpha_rejected("
+        "evalue=12.688312,clusters=2,law=predicted_bin_ev_v1)"
+    )
+    authority = exit_lifecycle.StrategyHoldRejectionSellAuthority(
+        position_id="strategy-exit-position",
+        token_id="strategy-exit-token",
+        strategy_key="forecast_qkernel_entry",
+        selected_method="replacement_posterior",
+        probability_authority="forecast_posteriors",
+        current_validations=("belief_source=forecast_posteriors;fresh",),
+        policy_reason=policy_reason,
+        snapshot_id="strategy-exit-snapshot",
+        snapshot_hash="strategy-exit-book",
+        best_bid=Decimal("0.32"),
+        shares=Decimal("25"),
+        expires_at_utc="2099-01-01T00:00:00+00:00",
+    )
+    intent = SimpleNamespace(
+        trade_id=authority.position_id,
+        token_id=authority.token_id,
+        best_bid=0.32,
+        submit_order_type="FAK",
+        executable_snapshot_id=authority.snapshot_id,
+        marketable_sell_execution_authority=authority,
+    )
+    monkeypatch.setattr(
+        "src.state.snapshot_repo.get_snapshot",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            selected_outcome_token_id=authority.token_id,
+            executable_snapshot_hash=authority.snapshot_hash,
+            orderbook_top_bid=Decimal("0.32"),
+        ),
+    )
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        assert executor._marketable_sell_certificate_error(
+            conn,
+            intent,
+            limit_price=0.32,
+            shares=25.0,
+        ) is None
+
+        monkeypatch.setattr(control_plane, "strategy_gates", lambda: {})
+        assert executor._marketable_sell_certificate_error(
+            conn,
+            intent,
+            limit_price=0.32,
+            shares=25.0,
+        ) == "strategy_hold_rejection_sell_policy_superseded"
+    finally:
+        conn.close()
 
 
 def test_spoofed_hold_authority_rejection_cannot_reach_venue(monkeypatch):
