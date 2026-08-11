@@ -23682,6 +23682,14 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
             (
                 "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
                 "FamilyAuthorityUnavailable:"
+                "GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH"
+            ),
+            True,
+        ),
+        (
+            (
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:"
                 "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
             ),
             True,
@@ -23825,6 +23833,8 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
                     raise ValueError(
                         "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
                     )
+                if "CONDITIONING_OBSERVATION_MISMATCH" in ineligible_reason:
+                    raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH")
                 if "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason:
                     raise ValueError(
                         "GLOBAL_DAY0_PROVISIONAL_REVISION_"
@@ -23849,6 +23859,7 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
         prepare_event = captured["prepare_event"]
         if (
             "CONDITIONING_OBSERVATION_TIME_MISMATCH" in ineligible_reason
+            or "CONDITIONING_OBSERVATION_MISMATCH" in ineligible_reason
             or "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason
             or "RAW_PROVENANCE_MISSING" in ineligible_reason
             or "REPLACEMENT_CONDITIONING_MISSING" in ineligible_reason
@@ -23863,6 +23874,8 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
                 reason_suffix = "GLOBAL_DAY0_RAW_PROVENANCE_MISSING"
             elif "REPLACEMENT_CONDITIONING_MISSING" in ineligible_reason:
                 reason_suffix = "GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING"
+            elif "CONDITIONING_OBSERVATION_MISMATCH" in ineligible_reason:
+                reason_suffix = "GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH"
             else:
                 reason_suffix = "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
             assert held_receipt.reason == (
@@ -23901,6 +23914,7 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
         2
         if (
             "CONDITIONING_OBSERVATION_TIME_MISMATCH" in ineligible_reason
+            or "CONDITIONING_OBSERVATION_MISMATCH" in ineligible_reason
             or "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason
             or "RAW_PROVENANCE_MISSING" in ineligible_reason
             or "REPLACEMENT_CONDITIONING_MISSING" in ineligible_reason
