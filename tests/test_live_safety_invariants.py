@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Lifecycle: created=2026-03-31; last_reviewed=2026-08-11; last_reused=2026-08-11
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-08-10
+# Last reused/audited: 2026-08-11
 # Authority basis: finite-evidence single-q global SELL ownership; 7-day capital-loop audit
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -9953,6 +9953,187 @@ def test_monitor_entry_selection_guard_does_not_force_exit_over_fresh_positive_e
     assert decision.trigger == "ENTRY_SELECTION_GUARD_INVALID_HOLD_CURRENT_EDGE"
     assert "current_edge=0.2800" in decision.reason
     assert summary["entry_selection_guard_invalid_current_ev_holds"] == 1
+
+
+def _install_market_alpha_rejection(monkeypatch):
+    from src.control import control_plane
+
+    monkeypatch.setattr(
+        control_plane,
+        "strategy_gates",
+        lambda: {
+            "forecast_qkernel_entry": SimpleNamespace(
+                enabled=False,
+                reason_snapshot={
+                    "reason": (
+                        "market_relative_alpha_rejected("
+                        "evalue=12.688312,clusters=2,law=predicted_bin_ev_v1)"
+                    )
+                },
+            )
+        },
+    )
+
+
+def test_monitor_rejected_current_q_authority_cannot_authorize_hold(monkeypatch):
+    """A current-law alpha rejection must beat the rejected q's positive edge."""
+    from src.engine import cycle_runtime
+
+    _install_market_alpha_rejection(monkeypatch)
+    pos = _make_position(
+        strategy_key="forecast_qkernel_entry",
+        chain_shares=25.0,
+        selected_method="replacement_posterior",
+    )
+    pos.last_monitor_prob = 0.71
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_edge = 0.39
+    pos.last_monitor_market_price_is_fresh = True
+    context = SimpleNamespace(
+        best_bid=0.32,
+        current_market_price_is_fresh=True,
+        probability_receipt={"probability_authority": "forecast_posteriors"},
+    )
+    summary = {}
+
+    decision = cycle_runtime._entry_selection_guard_exit_decision(
+        conn=None,
+        pos=pos,
+        exit_context=context,
+        summary=summary,
+        exit_decision=ExitDecision(False, reason="HOLD", trigger="HOLD"),
+    )
+
+    assert decision is not None
+    assert decision.should_exit is True
+    assert decision.trigger == "STRATEGY_HOLD_AUTHORITY_REJECTED"
+    assert cycle_runtime._global_auction_owns_statistical_sell(
+        decision,
+        decision.reason,
+    ) is False
+    assert summary["strategy_hold_authority_rejected_direct_exits"] == 1
+
+
+def test_monitor_rejected_q_uses_current_validation_when_receipt_is_absent(monkeypatch):
+    """Day0 zero-observation fallback cannot hide forecast q behind a null receipt."""
+    from src.engine import cycle_runtime
+
+    _install_market_alpha_rejection(monkeypatch)
+    pos = _make_position(
+        strategy_key="forecast_qkernel_entry",
+        chain_shares=25.0,
+        selected_method="replacement_posterior",
+        applied_validations=[
+            "day0_unobserved_prefix_zero_observation_proven:replacement_posterior_authority",
+            "belief_source=forecast_posteriors;age_h=1.0;fresh",
+        ],
+    )
+
+    decision = cycle_runtime._entry_selection_guard_exit_decision(
+        conn=None,
+        pos=pos,
+        exit_context=SimpleNamespace(
+            best_bid=0.24,
+            current_market_price_is_fresh=True,
+            probability_receipt=None,
+        ),
+        summary={},
+    )
+
+    assert decision is not None
+    assert decision.should_exit is True
+    assert decision.trigger == "STRATEGY_HOLD_AUTHORITY_REJECTED"
+
+
+def test_monitor_rejected_q_waits_for_legal_in_band_bid(monkeypatch):
+    """Authority rejection persists as named debt when the venue cannot fill legally."""
+    from src.engine import cycle_runtime
+
+    _install_market_alpha_rejection(monkeypatch)
+    pos = _make_position(
+        strategy_key="forecast_qkernel_entry",
+        chain_shares=25.0,
+        selected_method="replacement_posterior",
+    )
+    decision = cycle_runtime._entry_selection_guard_exit_decision(
+        conn=None,
+        pos=pos,
+        exit_context=SimpleNamespace(
+            best_bid=0.04,
+            current_market_price_is_fresh=True,
+            probability_receipt={"probability_authority": "forecast_posteriors"},
+        ),
+        summary={},
+    )
+
+    assert decision is not None
+    assert decision.should_exit is False
+    assert decision.trigger == (
+        "STRATEGY_HOLD_AUTHORITY_REJECTED_NO_EXECUTABLE_BID"
+    )
+    assert "reduce_only_waiting_for_in_band_bid" in decision.applied_validations
+
+
+def test_monitor_rejected_entry_law_does_not_override_independent_day0_q(monkeypatch):
+    """A fresh Day0 observation law remains independent HOLD/SELL authority."""
+    from src.engine import cycle_runtime
+
+    _install_market_alpha_rejection(monkeypatch)
+    pos = _make_position(
+        strategy_key="forecast_qkernel_entry",
+        chain_shares=25.0,
+        selected_method="day0_observation_remaining_window",
+    )
+
+    decision = cycle_runtime._entry_selection_guard_exit_decision(
+        conn=None,
+        pos=pos,
+        exit_context=SimpleNamespace(
+            best_bid=0.32,
+            current_market_price_is_fresh=True,
+            probability_receipt={
+                "probability_authority": "day0_observation_remaining_window"
+            },
+        ),
+        summary={},
+    )
+
+    assert decision is None
+
+
+def test_monitor_non_alpha_strategy_gate_does_not_invent_exit(monkeypatch):
+    """Only the exact empirical alpha rejection changes held-q authority."""
+    from src.control import control_plane
+    from src.engine import cycle_runtime
+
+    monkeypatch.setattr(
+        control_plane,
+        "strategy_gates",
+        lambda: {
+            "forecast_qkernel_entry": SimpleNamespace(
+                enabled=False,
+                reason_snapshot={"reason": "probability_semantics_authority_unavailable"},
+            )
+        },
+    )
+    pos = _make_position(
+        strategy_key="forecast_qkernel_entry",
+        chain_shares=25.0,
+        selected_method="replacement_posterior",
+    )
+
+    decision = cycle_runtime._entry_selection_guard_exit_decision(
+        conn=None,
+        pos=pos,
+        exit_context=SimpleNamespace(
+            best_bid=0.32,
+            current_market_price_is_fresh=True,
+            probability_receipt={"probability_authority": "forecast_posteriors"},
+        ),
+        summary={},
+    )
+
+    assert decision is None
 
 
 def test_monitor_entry_selection_guard_does_not_force_exit_on_immature_day0():

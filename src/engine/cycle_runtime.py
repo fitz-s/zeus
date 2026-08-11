@@ -3513,14 +3513,17 @@ _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS = frozenset(
 # correlated endowment, and capital ranking. Statistical authority is therefore
 # the default, not an allowlist: a new trigger must not fall through to a local
 # submit that the execution boundary will reject. RED, recomputed absorbing
-# Day0 facts, and an exact zero-support posterior are the only direct
-# reduce-only authorities. The last case is statistical in provenance but
-# deterministic in action: positive cash strictly dominates a zero-payoff token
-# in every represented branch.
+# Day0 facts, and exact zero support remain direct reduce-only authorities. A
+# durable market-relative rejection of the exact HOLD q is also direct: the
+# global auction cannot compare HOLD using the probability witness RiskGuard
+# just invalidated. Zero support is statistical in provenance but deterministic
+# in action: positive cash strictly dominates a zero-payoff token in every
+# represented branch.
 _DIRECT_REDUCE_ONLY_SELL_TRIGGERS = (
     "RED_FORCE_EXIT",
     "DAY0_HARD_FACT_BIN_DEAD",
     "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
+    "STRATEGY_HOLD_AUTHORITY_REJECTED",
 )
 
 _FAMILY_OVERLAY_MIN_DIRECT_SELL_ADVANTAGE_USD = 0.05
@@ -3651,6 +3654,65 @@ def _entry_qkernel_selection_guard_verdict(conn, pos) -> dict[str, object] | Non
     }
 
 
+def _current_strategy_hold_authority_rejection(pos, exit_context) -> str | None:
+    """Return the exact live policy reason that invalidates this HOLD witness.
+
+    A market-relative alpha rejection says the current q law no longer has
+    authority to claim that HOLD beats executable cash.  It is not a price stop:
+    the same position remains under ordinary redecision when its current belief
+    comes from an independent Day0 observation law.
+
+    SCOPE: open ``forecast_qkernel_entry`` positions whose current held belief is
+    still ``forecast_posteriors`` and whose exact durable RiskGuard gate reason is
+    ``market_relative_alpha_rejected``.  Absorbing Day0 facts are decided before
+    this seam and independent Day0 probability authorities are excluded here.
+    DRAIN: every held-position monitor cycle re-reads the durable strategy policy
+    after refreshing current probability and book evidence; an in-band bid emits
+    a reduce-only decision through the normal canonical exit lifecycle.
+    RESET: RiskGuard expires the durable gate when the bounded current-law cohort
+    clears; ``strategy_gates()`` then returns enabled and this predicate is false.
+    """
+
+    if str(getattr(pos, "strategy_key", "") or "") != "forecast_qkernel_entry":
+        return None
+    receipt = getattr(exit_context, "probability_receipt", None)
+    receipt_authority = (
+        str(receipt.get("probability_authority") or "")
+        if isinstance(receipt, Mapping)
+        else ""
+    )
+    current_validations = tuple(
+        str(value or "")
+        for value in (getattr(pos, "applied_validations", []) or [])
+    )
+    validation_authority = (
+        str(getattr(pos, "selected_method", "") or "")
+        == "replacement_posterior"
+        and any(
+            value.startswith("belief_source=forecast_posteriors;")
+            or value.endswith(":replacement_posterior_authority")
+            for value in current_validations
+        )
+    )
+    if receipt_authority != "forecast_posteriors" and not validation_authority:
+        return None
+    try:
+        from src.control.control_plane import strategy_gates
+
+        gate = strategy_gates().get("forecast_qkernel_entry")
+    except Exception:
+        return None
+    if gate is None or bool(getattr(gate, "enabled", True)):
+        return None
+    snapshot = getattr(gate, "reason_snapshot", None)
+    if not isinstance(snapshot, Mapping):
+        return None
+    reason = str(snapshot.get("reason") or "").strip()
+    if not reason.startswith("market_relative_alpha_rejected("):
+        return None
+    return reason
+
+
 def _entry_selection_guard_exit_decision(
     *,
     conn,
@@ -3660,10 +3722,90 @@ def _entry_selection_guard_exit_decision(
     exit_decision=None,
 ) -> object | None:
     verdict = _entry_qkernel_selection_guard_verdict(conn, pos)
-    if verdict is None:
+    hold_authority_rejection = _current_strategy_hold_authority_rejection(
+        pos,
+        exit_context,
+    )
+    if verdict is None and hold_authority_rejection is None:
         return None
-    if not verdict.get("invalid_reason"):
+    if hold_authority_rejection is None and not verdict.get("invalid_reason"):
         return None
+
+    if hold_authority_rejection is not None:
+        if exit_decision is not None and bool(
+            getattr(exit_decision, "should_exit", False)
+        ):
+            summary["strategy_hold_authority_existing_exit_preserved"] = (
+                summary.get("strategy_hold_authority_existing_exit_preserved", 0)
+                + 1
+            )
+            return None
+
+        shares = _position_real_exposure_shares(pos)
+        best_bid = _finite_float_or_none(getattr(exit_context, "best_bid", None))
+        quote_fresh = bool(
+            getattr(exit_context, "current_market_price_is_fresh", False)
+        )
+        from src.state.portfolio import ExitDecision as _ExitDecision
+
+        if (
+            shares <= 0.0
+            or best_bid is None
+            or not quote_fresh
+            or not 0.05 <= best_bid <= 0.95
+        ):
+            summary["strategy_hold_authority_rejected_no_executable_bid"] = (
+                summary.get(
+                    "strategy_hold_authority_rejected_no_executable_bid",
+                    0,
+                )
+                + 1
+            )
+            return _ExitDecision(
+                False,
+                "STRATEGY_HOLD_AUTHORITY_REJECTED_NO_EXECUTABLE_BID "
+                f"({hold_authority_rejection})",
+                urgency="immediate",
+                trigger="STRATEGY_HOLD_AUTHORITY_REJECTED_NO_EXECUTABLE_BID",
+                selected_method=(
+                    getattr(pos, "selected_method", "")
+                    or getattr(pos, "entry_method", "")
+                ),
+                applied_validations=list(
+                    dict.fromkeys(
+                        [
+                            *(getattr(pos, "applied_validations", []) or []),
+                            "strategy_hold_authority_rejected",
+                            "reduce_only_waiting_for_in_band_bid",
+                        ]
+                    )
+                ),
+            )
+
+        summary["strategy_hold_authority_rejected_direct_exits"] = (
+            summary.get("strategy_hold_authority_rejected_direct_exits", 0) + 1
+        )
+        return _ExitDecision(
+            True,
+            "STRATEGY_HOLD_AUTHORITY_REJECTED "
+            f"({hold_authority_rejection}; best_bid={best_bid:.4f})",
+            urgency="immediate",
+            trigger="STRATEGY_HOLD_AUTHORITY_REJECTED",
+            selected_method=(
+                getattr(pos, "selected_method", "")
+                or getattr(pos, "entry_method", "")
+            ),
+            applied_validations=list(
+                dict.fromkeys(
+                    [
+                        *(getattr(pos, "applied_validations", []) or []),
+                        "strategy_hold_authority_rejected",
+                        "riskguard_market_relative_alpha_rejection",
+                        "global_auction_comparison_inapplicable:hold_q_invalid",
+                    ]
+                )
+            ),
+        )
 
     summary["entry_selection_guard_invalid_positions"] = (
         summary.get("entry_selection_guard_invalid_positions", 0) + 1
