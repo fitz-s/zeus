@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
+from types import MappingProxyType
 
 from src.data.market_topology_rows import (
     _database_names,
@@ -130,11 +131,12 @@ def _hwm_table_ref_columns(
 
 @dataclass(frozen=True)
 class _FrozenInputHwm:
-    conn: sqlite3.Connection
+    conn: sqlite3.Connection | None
     decision_iso: str
     requests: frozenset[tuple[str, str, str]]
     artifact_loaded: bool
     artifact_cycles: Mapping[tuple[str, str, str], datetime]
+    blocker_reason: str | None = None
 
 
 _FROZEN_INPUT_HWM: ContextVar[_FrozenInputHwm | None] = ContextVar(
@@ -264,11 +266,17 @@ def latest_raw_artifact_input_cycle(
     frozen = _FROZEN_INPUT_HWM.get()
     if (
         frozen is not None
-        and frozen.conn is conn
+        and (frozen.conn is None or frozen.conn is conn)
         and frozen.decision_iso == decision_iso
-        and frozen.artifact_loaded
         and key in frozen.requests
     ):
+        if frozen.blocker_reason:
+            raise ReplacementInputHwmReadUnavailable(
+                frozen.blocker_reason,
+                basis="frozen_artifact_input_hwm_prefetch_unavailable",
+            )
+        if not frozen.artifact_loaded:
+            return None
         return frozen.artifact_cycles.get(key)
     table_ref = _authority_table_ref(conn, "raw_forecast_artifacts")
     if table_ref is None:
@@ -754,23 +762,23 @@ def _batch_artifact_cycles(
     return True, cycles
 
 
-def prime_frozen_replacement_artifact_hwm(
+def freeze_replacement_artifact_hwm(
     conn: sqlite3.Connection,
     *,
     requests: Iterable[tuple[str, str, str]],
     decision_time: datetime,
-) -> Callable[[], None]:
-    """Prime artifact HWMs for one explicitly owned read transaction."""
+) -> _FrozenInputHwm | None:
+    """Read one immutable artifact-HWM cut for a set of held families."""
 
     if not isinstance(conn, sqlite3.Connection) or not conn.in_transaction:
-        return lambda: None
+        return None
     normalized = frozenset(
         (str(city), str(target_date), str(metric))
         for city, target_date, metric in requests
         if city and target_date and metric
     )
     if not normalized:
-        return lambda: None
+        return None
     decision_iso = decision_time.astimezone(UTC).isoformat()
     artifact_loaded = False
     artifact_cycles: dict[tuple[str, str, str], datetime] = {}
@@ -788,15 +796,48 @@ def prime_frozen_replacement_artifact_hwm(
             basis="raw_artifact_input_hwm_read_unavailable",
         )
 
-    token = _FROZEN_INPUT_HWM.set(
-        _FrozenInputHwm(
-            conn=conn,
-            decision_iso=decision_iso,
-            requests=normalized,
-            artifact_loaded=artifact_loaded,
-            artifact_cycles=artifact_cycles,
-        )
+    return _FrozenInputHwm(
+        conn=None,
+        decision_iso=decision_iso,
+        requests=normalized,
+        artifact_loaded=artifact_loaded,
+        artifact_cycles=MappingProxyType(dict(artifact_cycles)),
     )
+
+
+def frozen_replacement_artifact_hwm_unavailable(
+    *,
+    requests: Iterable[tuple[str, str, str]],
+    decision_time: datetime,
+    blocker_reason: str,
+) -> _FrozenInputHwm | None:
+    """Build one cycle-scoped UNKNOWN verdict after a failed batch read."""
+
+    normalized = frozenset(
+        (str(city), str(target_date), str(metric))
+        for city, target_date, metric in requests
+        if city and target_date and metric
+    )
+    if not normalized:
+        return None
+    return _FrozenInputHwm(
+        conn=None,
+        decision_iso=decision_time.astimezone(UTC).isoformat(),
+        requests=normalized,
+        artifact_loaded=False,
+        artifact_cycles=MappingProxyType({}),
+        blocker_reason=str(blocker_reason or "batch read unavailable"),
+    )
+
+
+def install_frozen_replacement_artifact_hwm(
+    snapshot: _FrozenInputHwm | None,
+) -> Callable[[], None]:
+    """Install an immutable HWM cut for one synchronous consumer call."""
+
+    if snapshot is None:
+        return lambda: None
+    token = _FROZEN_INPUT_HWM.set(snapshot)
     released = False
 
     def release() -> None:
@@ -807,6 +848,31 @@ def prime_frozen_replacement_artifact_hwm(
         _FROZEN_INPUT_HWM.reset(token)
 
     return release
+
+
+def prime_frozen_replacement_artifact_hwm(
+    conn: sqlite3.Connection,
+    *,
+    requests: Iterable[tuple[str, str, str]],
+    decision_time: datetime,
+) -> Callable[[], None]:
+    """Prime artifact HWMs for one explicitly owned read transaction."""
+
+    snapshot = freeze_replacement_artifact_hwm(
+        conn,
+        requests=requests,
+        decision_time=decision_time,
+    )
+    if snapshot is not None:
+        snapshot = _FrozenInputHwm(
+            conn=conn,
+            decision_iso=snapshot.decision_iso,
+            requests=snapshot.requests,
+            artifact_loaded=snapshot.artifact_loaded,
+            artifact_cycles=snapshot.artifact_cycles,
+            blocker_reason=snapshot.blocker_reason,
+        )
+    return install_frozen_replacement_artifact_hwm(snapshot)
 
 
 def _posterior_provenance_for_cycle(

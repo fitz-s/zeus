@@ -5784,6 +5784,120 @@ def _release_monitor_write_lock_boundary(conn, summary: dict, deps, *, boundary:
         return True
 
 
+def _prefetch_held_replacement_artifact_hwm(
+    positions,
+    *,
+    decision_time: datetime,
+    deadline_monotonic: float,
+    clob,
+    summary: dict,
+    deps,
+) -> None:
+    """Freeze one causal artifact-HWM cut before serial held redecision."""
+
+    from src.data.replacement_input_hwm import (
+        ReplacementInputHwmReadUnavailable,
+        freeze_replacement_artifact_hwm,
+        frozen_replacement_artifact_hwm_unavailable,
+    )
+    from src.engine.monitor_refresh import install_monitor_replacement_hwm_snapshot
+    from src.state.chain_reconciliation import resolve_position_metric
+    from src.state.db import get_forecasts_connection_read_only
+
+    requests: set[tuple[str, str, str]] = set()
+    for position in positions:
+        try:
+            metric = resolve_position_metric(position)[0]
+        except Exception as exc:  # noqa: BLE001 - malformed identity fails later in its own lane.
+            summary["held_monitor_hwm_identity_errors"] = (
+                summary.get("held_monitor_hwm_identity_errors", 0) + 1
+            )
+            deps.logger.warning(
+                "held monitor HWM prefetch skipped malformed family %s: %s",
+                getattr(position, "trade_id", ""),
+                exc,
+            )
+            continue
+        requests.add(
+            (str(position.city), str(position.target_date), str(metric))
+        )
+    summary["held_monitor_hwm_prefetch_family_count"] = len(requests)
+    if not requests:
+        install_monitor_replacement_hwm_snapshot(clob, None)
+        summary["held_monitor_hwm_prefetch_status"] = "not_required"
+        return
+
+    snapshot = None
+    forecasts = None
+    started = time.monotonic()
+    blocker_reason = ""
+    try:
+        if started >= deadline_monotonic:
+            raise ReplacementInputHwmReadUnavailable(
+                "held monitor HWM batch deadline elapsed before read",
+                basis="held_monitor_hwm_prefetch_deadline",
+            )
+        forecasts = get_forecasts_connection_read_only()
+        remaining = max(0.001, deadline_monotonic - time.monotonic())
+        forecasts.execute(f"PRAGMA busy_timeout = {max(1, min(1000, int(remaining * 1000)))}")
+
+        def _deadline_expired() -> int:
+            return int(time.monotonic() >= deadline_monotonic)
+
+        forecasts.set_progress_handler(_deadline_expired, 1_000)
+        forecasts.execute("BEGIN")
+        snapshot = freeze_replacement_artifact_hwm(
+            forecasts,
+            requests=requests,
+            decision_time=decision_time,
+        )
+    except ReplacementInputHwmReadUnavailable as exc:
+        blocker_reason = exc.blocker_reason()
+    except sqlite3.OperationalError as exc:
+        blocker_reason = (
+            "REPLACEMENT_RAW_INPUT_HWM:"
+            "basis=held_monitor_hwm_prefetch_sqlite_unavailable:"
+            f"detail={str(exc)[:200]}"
+        )
+    except Exception as exc:  # noqa: BLE001 - one batch bug must fail closed, not fan out.
+        blocker_reason = (
+            "REPLACEMENT_RAW_INPUT_HWM:"
+            "basis=held_monitor_hwm_prefetch_failed:"
+            f"detail={type(exc).__name__}:{str(exc)[:200]}"
+        )
+        deps.logger.exception("held monitor HWM batch prefetch failed")
+    finally:
+        if forecasts is not None:
+            try:
+                forecasts.set_progress_handler(None, 0)
+                forecasts.rollback()
+            except sqlite3.Error:
+                pass
+            forecasts.close()
+
+    if snapshot is None:
+        snapshot = frozen_replacement_artifact_hwm_unavailable(
+            requests=requests,
+            decision_time=decision_time,
+            blocker_reason=blocker_reason or "held monitor HWM batch unavailable",
+        )
+        summary["held_monitor_hwm_prefetch_status"] = "unavailable"
+        summary["held_monitor_hwm_prefetch_blocker"] = blocker_reason
+        deps.logger.warning(
+            "held monitor HWM batch unavailable: families=%d elapsed_s=%.3f reason=%s",
+            len(requests),
+            time.monotonic() - started,
+            blocker_reason,
+        )
+    else:
+        summary["held_monitor_hwm_prefetch_status"] = "ready"
+    summary["held_monitor_hwm_prefetch_elapsed_seconds"] = round(
+        time.monotonic() - started,
+        6,
+    )
+    install_monitor_replacement_hwm_snapshot(clob, snapshot)
+
+
 
 def execute_monitoring_phase(
     conn,
@@ -5805,6 +5919,7 @@ def execute_monitoring_phase(
         _HELD_MONITOR_DEADLINE_ATTR,
         _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
         install_monitor_day0_family_cache,
+        install_monitor_replacement_hwm_snapshot,
         monitor_quote_refresh,
         refresh_position,
     )
@@ -6551,7 +6666,8 @@ def execute_monitoring_phase(
         summary["held_monitor_positions_deferred"] = len(monitor_positions)
         summary["held_monitor_defer_reason"] = "urgent_day0_wake"
         return portfolio_dirty, tracker_dirty
-    install_monitor_day0_family_cache(clob)
+    install_monitor_day0_family_cache(clob, decision_time=monitor_now_utc)
+    install_monitor_replacement_hwm_snapshot(clob, None)
 
     durable_hard_facts = {}
     from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
@@ -6581,6 +6697,20 @@ def execute_monitoring_phase(
         if verdict is not None:
             durable_hard_facts[id(pos)] = verdict
     summary["held_monitor_durable_hard_facts"] = len(durable_hard_facts)
+    hwm_prefetch_positions = [
+        pos for pos in monitor_positions if id(pos) not in durable_hard_facts
+    ]
+    _prefetch_held_replacement_artifact_hwm(
+        hwm_prefetch_positions,
+        decision_time=monitor_now_utc,
+        deadline_monotonic=min(
+            monitor_deadline,
+            time.monotonic() + primary_reserve_seconds,
+        ),
+        clob=clob,
+        summary=summary,
+        deps=deps,
+    )
     structural_win_position_ids = frozenset(
         id(pos)
         for pos in monitor_positions

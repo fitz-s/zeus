@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,6 +40,9 @@ from src.data.replacement_input_hwm import (
     _exact_current_value_serving_lag,
     _exact_consumed_anchor_artifact_cycle,
     _posterior_provenance_for_cycle,
+    freeze_replacement_artifact_hwm,
+    frozen_replacement_artifact_hwm_unavailable,
+    install_frozen_replacement_artifact_hwm,
     latest_raw_artifact_input_cycle,
     latest_raw_model_input_cycle,
     latest_used_raw_model_input_mark,
@@ -61,6 +67,180 @@ class _Evidence:
 @dataclass(frozen=True)
 class _BaselineBundle:
     evidence: _Evidence
+
+
+def test_cycle_frozen_artifact_hwm_is_reused_across_connections(tmp_path) -> None:
+    db_path = tmp_path / "forecast.db"
+    writer = sqlite3.connect(db_path)
+    writer.execute(
+        """
+        CREATE TABLE raw_forecast_artifacts (
+            source_id TEXT,
+            source_cycle_time TEXT,
+            captured_at TEXT,
+            source_available_at TEXT,
+            artifact_metadata_json TEXT
+        )
+        """
+    )
+    requests = (
+        ("Shanghai", "2026-08-12", "high"),
+        ("Ankara", "2026-08-13", "high"),
+    )
+    for city, target_date, metric in requests:
+        writer.execute(
+            "INSERT INTO raw_forecast_artifacts VALUES (?, ?, ?, ?, ?)",
+            (
+                "openmeteo_ecmwf_ifs_9km",
+                "2026-08-11T12:00:00+00:00",
+                "2026-08-11T12:05:00+00:00",
+                "2026-08-11T12:05:00+00:00",
+                json.dumps(
+                    {"city": city, "target_date": target_date, "metric": metric}
+                ),
+            ),
+        )
+    writer.commit()
+    writer.close()
+
+    decision_time = datetime(2026, 8, 11, 13, tzinfo=UTC)
+    prefetch = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    prefetch.row_factory = sqlite3.Row
+    prefetch.execute("BEGIN")
+    snapshot = freeze_replacement_artifact_hwm(
+        prefetch,
+        requests=requests,
+        decision_time=decision_time,
+    )
+    prefetch.rollback()
+    prefetch.close()
+
+    consumer = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    consumer.row_factory = sqlite3.Row
+    traced: list[str] = []
+    consumer.set_trace_callback(traced.append)
+    release = install_frozen_replacement_artifact_hwm(snapshot)
+    try:
+        cycles = {
+            request: latest_raw_artifact_input_cycle(
+                consumer,
+                city=request[0],
+                target_date=request[1],
+                metric=request[2],
+                decision_time=decision_time,
+            )
+            for request in requests
+        }
+    finally:
+        release()
+        consumer.close()
+
+    assert all(cycle is not None for cycle in cycles.values())
+    assert not any(
+        "FROM RAW_FORECAST_ARTIFACTS" in statement.upper() for statement in traced
+    )
+
+
+def test_failed_cycle_hwm_snapshot_blocks_scalar_fanout() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE raw_forecast_artifacts (source_cycle_time TEXT)"
+    )
+    decision_time = datetime(2026, 8, 11, 13, tzinfo=UTC)
+    request = ("Shanghai", "2026-08-12", "high")
+    snapshot = frozen_replacement_artifact_hwm_unavailable(
+        requests=(request,),
+        decision_time=decision_time,
+        blocker_reason="forced batch deadline",
+    )
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+    release = install_frozen_replacement_artifact_hwm(snapshot)
+    try:
+        with pytest.raises(ReplacementInputHwmReadUnavailable) as raised:
+            latest_raw_artifact_input_cycle(
+                conn,
+                city=request[0],
+                target_date=request[1],
+                metric=request[2],
+                decision_time=decision_time,
+            )
+    finally:
+        release()
+        conn.close()
+
+    assert raised.value.basis == "frozen_artifact_input_hwm_prefetch_unavailable"
+    assert not any(
+        "FROM RAW_FORECAST_ARTIFACTS" in statement.upper() for statement in traced
+    )
+
+
+def test_held_hwm_prefetch_batches_unique_families(monkeypatch) -> None:
+    import src.data.replacement_input_hwm as input_hwm
+    import src.engine.cycle_runtime as runtime
+    import src.engine.monitor_refresh as monitor_refresh
+    import src.state.db as db
+
+    positions = [
+        SimpleNamespace(
+            trade_id="shanghai-yes",
+            city="Shanghai",
+            target_date="2026-08-12",
+            temperature_metric="high",
+        ),
+        SimpleNamespace(
+            trade_id="shanghai-no",
+            city="Shanghai",
+            target_date="2026-08-12",
+            temperature_metric="high",
+        ),
+        SimpleNamespace(
+            trade_id="ankara-no",
+            city="Ankara",
+            target_date="2026-08-13",
+            temperature_metric="high",
+        ),
+    ]
+    captured_requests: list[frozenset[tuple[str, str, str]]] = []
+    snapshot = object()
+
+    def forecasts_connection() -> sqlite3.Connection:
+        return sqlite3.connect(":memory:")
+
+    def freeze(_conn, *, requests, decision_time):
+        assert decision_time == datetime(2026, 8, 11, 13, tzinfo=UTC)
+        captured_requests.append(frozenset(requests))
+        return snapshot
+
+    installed: list[object] = []
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", forecasts_connection)
+    monkeypatch.setattr(input_hwm, "freeze_replacement_artifact_hwm", freeze)
+    monkeypatch.setattr(
+        monitor_refresh,
+        "install_monitor_replacement_hwm_snapshot",
+        lambda _clob, value: installed.append(value) or True,
+    )
+    summary: dict[str, object] = {}
+    runtime._prefetch_held_replacement_artifact_hwm(
+        positions,
+        decision_time=datetime(2026, 8, 11, 13, tzinfo=UTC),
+        deadline_monotonic=time.monotonic() + 1.0,
+        clob=object(),
+        summary=summary,
+        deps=SimpleNamespace(logger=logging.getLogger(__name__)),
+    )
+
+    assert captured_requests == [
+        frozenset(
+            {
+                ("Shanghai", "2026-08-12", "high"),
+                ("Ankara", "2026-08-13", "high"),
+            }
+        )
+    ]
+    assert installed == [snapshot]
+    assert summary["held_monitor_hwm_prefetch_family_count"] == 2
+    assert summary["held_monitor_hwm_prefetch_status"] == "ready"
 
 
 def test_preloaded_market_topology_hash_matches_database_read() -> None:

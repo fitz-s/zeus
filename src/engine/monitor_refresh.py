@@ -114,6 +114,7 @@ HELD_MONITOR_QUOTE_READ_MAX_SECONDS = 1.0
 HELD_MONITOR_PROBABILITY_PREPARE_MAX_SECONDS = 2.5
 HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS = 2.5
 _MONITOR_DAY0_FAMILY_CACHE_ATTR = "_zeus_monitor_day0_family_cache"
+_MONITOR_REPLACEMENT_HWM_SNAPSHOT_ATTR = "_zeus_monitor_replacement_hwm_snapshot"
 _DAY0_MATERIALIZATION_VISIBILITY_RETRY_SECONDS = 0.1
 _DAY0_MATERIALIZATION_VISIBILITY_RETRY_BUDGET_SECONDS = 0.35
 _DAY0_CANONICAL_OBSERVATION_EVENT_NOT_VISIBLE = (
@@ -162,6 +163,7 @@ class _CurrentGlobalDay0FamilySnapshot:
 
 @dataclass
 class _CurrentGlobalDay0FamilyCache:
+    decision_time: datetime | None = None
     snapshots: dict[
         tuple[str, str, str], list[_CurrentGlobalDay0FamilySnapshot]
     ] = field(default_factory=dict)
@@ -392,15 +394,29 @@ def current_monitor_orderbook_batch(
     return selected, captured_at
 
 
-def install_monitor_day0_family_cache(clob) -> bool:
+def install_monitor_day0_family_cache(
+    clob,
+    *,
+    decision_time: datetime | None = None,
+) -> bool:
     """Install a fresh family cache for one held-monitor cycle."""
 
     try:
         setattr(
             clob,
             _MONITOR_DAY0_FAMILY_CACHE_ATTR,
-            _CurrentGlobalDay0FamilyCache(),
+            _CurrentGlobalDay0FamilyCache(decision_time=decision_time),
         )
+    except (AttributeError, TypeError):
+        return False
+    return True
+
+
+def install_monitor_replacement_hwm_snapshot(clob, snapshot: object) -> bool:
+    """Install one immutable held-family HWM cut on the cycle-local client."""
+
+    try:
+        setattr(clob, _MONITOR_REPLACEMENT_HWM_SNAPSHOT_ATTR, snapshot)
     except (AttributeError, TypeError):
         return False
     return True
@@ -5599,6 +5615,11 @@ def monitor_probability_refresh(
                 current = _refresh_current_global_day0_probability(
                     pos,
                     trade_conn=conn,
+                    decision_time=(
+                        day0_family_cache.decision_time
+                        if day0_family_cache is not None
+                        else None
+                    ),
                     family_cache=day0_family_cache,
                     deadline_monotonic=deadline_monotonic,
                 )
@@ -5675,6 +5696,11 @@ def monitor_probability_refresh(
             temperature_metric=str(getattr(pos, "temperature_metric", "high")),
             bin_label=pos.bin_label,
             direction=str(getattr(pos.direction, "value", pos.direction)),
+            now=(
+                day0_family_cache.decision_time
+                if day0_family_cache is not None
+                else None
+            ),
             max_age_hours=monitor_belief_max_age_hours(),
             deadline_monotonic=primary_belief_deadline,
         )
@@ -6061,6 +6087,18 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
     if city is None:
         raise ValueError(f"Unknown city {pos.city} for trade {pos.trade_id}")
 
+    from src.data.replacement_input_hwm import (
+        install_frozen_replacement_artifact_hwm,
+    )
+
+    monitor_deadline = getattr(pos, _HELD_MONITOR_DEADLINE_ATTR, None)
+    release_hwm_snapshot = install_frozen_replacement_artifact_hwm(
+        (
+            getattr(clob, _MONITOR_REPLACEMENT_HWM_SNAPSHOT_ATTR, None)
+            if monitor_deadline is not None
+            else None
+        )
+    )
     try:
         target_d = date.fromisoformat(pos.target_date)
         day0_family_cache = getattr(
@@ -6070,17 +6108,15 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         )
         if not isinstance(day0_family_cache, _CurrentGlobalDay0FamilyCache):
             day0_family_cache = None
+        if monitor_deadline is None:
+            day0_family_cache = None
         refreshed_p_posterior, refresh_pos, prob_refresh_is_fresh = monitor_probability_refresh(
             pos,
             conn=conn,
             city=city,
             target_d=target_d,
             day0_family_cache=day0_family_cache,
-            deadline_monotonic=getattr(
-                pos,
-                _HELD_MONITOR_DEADLINE_ATTR,
-                None,
-            ),
+            deadline_monotonic=monitor_deadline,
         )
         pos.selected_method = refresh_pos.selected_method
         pos.applied_validations = list(getattr(refresh_pos, "applied_validations", []) or [])
@@ -6166,6 +6202,8 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
         current_p_posterior = float("nan")
         pos.last_monitor_edge = float("nan")
         _append_monitor_validation(pos, "monitor_probability_refresh_failed")
+    finally:
+        release_hwm_snapshot()
 
     # Probability refresh may persist a world-owned Day0 observation fact.
     # Start the trade-owned quote evidence only after that write completes, so
