@@ -1071,10 +1071,16 @@ def load_latest_collateral_snapshot_read_only(
     try:
         rows = conn.execute(
             """
+            -- Bound history I/O by append identity, then resolve producer
+            -- commit interleaving causally inside the 32-row witness window.
             SELECT *
-              FROM collateral_ledger_snapshots
+              FROM (
+                    SELECT *
+                      FROM collateral_ledger_snapshots
+                     ORDER BY id DESC
+                     LIMIT 32
+                   ) AS append_tail
              ORDER BY julianday(captured_at) DESC, id DESC
-             LIMIT 32
             """
         ).fetchall()
         has_active_ctf_exposure = (

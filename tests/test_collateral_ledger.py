@@ -47,6 +47,7 @@ from src.state.collateral_ledger import (
     DEFAULT_COLLATERAL_BUSY_TIMEOUT_MS,
     SQLITE_SIGNED_INTEGER_MAX,
     init_collateral_schema,
+    load_latest_collateral_snapshot_read_only,
     require_pusd_redemption_allowed,
 )
 
@@ -267,6 +268,87 @@ def test_path_backed_collateral_ledger_bad_timeout_env_falls_back(tmp_path, monk
             assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == DEFAULT_COLLATERAL_BUSY_TIMEOUT_MS
     finally:
         ledger.close()
+
+
+def test_latest_snapshot_read_is_bounded_and_preserves_causal_tail_order():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    init_collateral_schema(db)
+    base = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    rows = [
+        (
+            index,
+            index,
+            0,
+            "{}",
+            "{}",
+            (base + timedelta(seconds=index)).isoformat(),
+            "CHAIN",
+        )
+        for index in range(5_000)
+    ]
+    db.executemany(
+        """
+        INSERT INTO collateral_ledger_snapshots (
+            pusd_balance_micro,
+            pusd_allowance_micro,
+            usdc_e_legacy_balance_micro,
+            ctf_token_balances_json,
+            ctf_token_allowances_json,
+            captured_at,
+            authority_tier
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        rows,
+    )
+    newer_fact_time = base + timedelta(days=1)
+    db.execute(
+        """
+        INSERT INTO collateral_ledger_snapshots (
+            pusd_balance_micro,
+            pusd_allowance_micro,
+            usdc_e_legacy_balance_micro,
+            ctf_token_balances_json,
+            ctf_token_allowances_json,
+            captured_at,
+            authority_tier
+        ) VALUES (20000000, 20000000, 0, '{}', '{}', ?, 'CHAIN')
+        """,
+        (newer_fact_time.isoformat(),),
+    )
+    db.execute(
+        """
+        INSERT INTO collateral_ledger_snapshots (
+            pusd_balance_micro,
+            pusd_allowance_micro,
+            usdc_e_legacy_balance_micro,
+            ctf_token_balances_json,
+            ctf_token_allowances_json,
+            captured_at,
+            authority_tier
+        ) VALUES (10000000, 10000000, 0, '{}', '{}', ?, 'CHAIN')
+        """,
+        ((newer_fact_time - timedelta(seconds=1)).isoformat(),),
+    )
+
+    progress_calls = 0
+
+    def _abort_unbounded_history_scan() -> int:
+        nonlocal progress_calls
+        progress_calls += 1
+        return int(progress_calls > 50)
+
+    db.set_progress_handler(_abort_unbounded_history_scan, 100)
+    try:
+        snapshot = load_latest_collateral_snapshot_read_only(db, witness="pusd")
+    finally:
+        db.set_progress_handler(None, 0)
+        db.close()
+
+    assert snapshot is not None
+    assert snapshot.pusd_balance_micro == 20_000_000
+    assert snapshot.captured_at == newer_fact_time
+    assert progress_calls <= 50
 
 
 def test_live_collateral_refresh_skips_when_refresh_lane_is_busy(monkeypatch):
