@@ -210,6 +210,16 @@ Durable trading rules:
   `robust_*`. After each action passes its own law, globally ranked
   fixed proposals share one posterior-mean expected-log-growth comparison;
   direction never licenses incomparable objective scores.
+- New Day0/qkernel ENTRY additionally requires an unexpired RiskGuard
+  `forward-capital` credential. RiskGuard may mint that short lease only from a
+  settlement-graded, current-semantics, `executable_min_order_capital_gain_v2`
+  shadow cohort whose model-over-market e-value passes the governed threshold
+  and whose executable minimum-order realized P&L is strictly positive. Missing,
+  non-positive, identity-mismatched, or stale evidence fails closed before manual
+  overrides and is rechecked at submit. Zero-money `no_trade_regret_events`
+  supply the cold-start/learning lane; real capital is not the exploration tier.
+  This credential constrains new ENTRY only and never authorizes an otherwise
+  non-positive order or alters held SELL/HOLD/CASH comparison.
 - Whenever both are executable, a held SELL exposes immediate-taker and
   maker-rest as separate fixed proposals on that same comparison axis. JIT
   rebinding must preserve the selected execution mode rather than silently

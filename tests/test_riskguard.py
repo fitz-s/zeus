@@ -596,6 +596,11 @@ def _insert_control_override(
 def _neutralize_hard_safety(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(policy_module, "is_entries_paused", lambda: False)
     monkeypatch.setattr(policy_module, "get_edge_threshold_multiplier", lambda: 1.0)
+    monkeypatch.setattr(
+        policy_module,
+        "FORWARD_CAPITAL_REQUIRED_STRATEGIES",
+        frozenset(),
+    )
 
 
 def _mock_trailing_loss_tick(
@@ -5296,10 +5301,16 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert level == RiskLevel.GREEN
         assert risk_row["level"] == RiskLevel.GREEN.value
         assert details["market_relative_alpha_evidence"]["rejected"] is True
-        assert details["market_relative_alpha_admission_role"] == "observational"
+        assert details["market_relative_alpha_admission_role"] == (
+            "short_lived_forward_capital_credential"
+        )
         assert details["market_relative_alpha_gate_confirmation"] == {}
-        assert details["day0_market_relative_alpha_admission_role"] == "observational"
-        assert details["day0_market_relative_alpha_gate_required"] is False
+        assert details["day0_market_relative_alpha_admission_role"] == (
+            "short_lived_forward_capital_credential"
+        )
+        assert details["day0_market_relative_alpha_gate_required"] is True
+        assert details["qkernel_market_relative_alpha_gate_required"] is True
+        assert details["forward_capital_gain_credentials"] == []
         assert details["day0_market_relative_alpha_gate_confirmation"] == {}
         assert {
             row["strategy_key"]: (row["status"], row["reason"])
@@ -5443,6 +5454,265 @@ class TestRiskGuardExecutionQualityLocalization:
 
 
 class TestStrategyPolicyResolver:
+    def test_forward_capital_credential_lease_emits_and_expires(self):
+        conn = _policy_conn()
+        issued = datetime(2026, 8, 11, 19, 0, tzinfo=timezone.utc)
+
+        emitted = riskguard_module._sync_forward_capital_gain_credentials(
+            conn,
+            {
+                "forecast_qkernel_entry": (
+                    "forward_capital_gain_validated("
+                    "law=executable_min_order_capital_gain_v2)"
+                )
+            },
+            issued_at=issued.isoformat(),
+        )
+        row = conn.execute(
+            "SELECT value,issued_at,effective_until,status FROM risk_actions "
+            "WHERE action_id=?",
+            ("riskguard:forward-capital:forecast_qkernel_entry",),
+        ).fetchone()
+
+        assert emitted == {
+            "status": "emitted",
+            "emitted_count": 1,
+            "expired_count": 0,
+            "lease_seconds": 300,
+        }
+        assert row["value"] == "false"
+        assert row["issued_at"] == issued.isoformat()
+        assert row["effective_until"] == (
+            issued + timedelta(minutes=5)
+        ).isoformat()
+        assert row["status"] == "active"
+
+        expired = riskguard_module._sync_forward_capital_gain_credentials(
+            conn,
+            {},
+            issued_at=(issued + timedelta(minutes=1)).isoformat(),
+        )
+        row = conn.execute(
+            "SELECT effective_until,status FROM risk_actions WHERE action_id=?",
+            ("riskguard:forward-capital:forecast_qkernel_entry",),
+        ).fetchone()
+
+        assert expired["emitted_count"] == 0
+        assert expired["expired_count"] == 1
+        assert row["effective_until"] == (
+            issued + timedelta(minutes=1)
+        ).isoformat()
+        assert row["status"] == "expired"
+        conn.close()
+
+    def test_forward_capital_credential_requires_current_law_and_positive_pnl(self):
+        revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        cohort = {
+            "decision_law_id": "executable_min_order_capital_gain_v2",
+            "probability_semantics_revisions": [revision],
+            "independent_cluster_count": 3,
+            "model_over_market_evalue": 12.5,
+            "hypothetical_capital_committed_usd": 4.0,
+            "hypothetical_realized_pnl_usd": 1.25,
+            "capital_gain_validated": True,
+            "validated": True,
+        }
+        evidence = {
+            "strategy_key": "forecast_qkernel_entry",
+            "validated": True,
+            "cohorts": [cohort],
+        }
+
+        reason = riskguard_module._forward_capital_gain_credential_reason(
+            evidence,
+            strategy_key="forecast_qkernel_entry",
+            probability_semantics_revision=revision,
+            semantics_binding_ready=True,
+            required_evalue=10.0,
+        )
+
+        assert reason is not None
+        assert "pnl_usd=1.25" in reason
+        assert (
+            riskguard_module._forward_capital_gain_credential_reason(
+                {**evidence, "cohorts": [{**cohort, "hypothetical_realized_pnl_usd": 0.0}]},
+                strategy_key="forecast_qkernel_entry",
+                probability_semantics_revision=revision,
+                semantics_binding_ready=True,
+                required_evalue=10.0,
+            )
+            is None
+        )
+        assert (
+            riskguard_module._forward_capital_gain_credential_reason(
+                {**evidence, "cohorts": [{**cohort, "decision_law_id": "predicted_bin_ev_v1"}]},
+                strategy_key="forecast_qkernel_entry",
+                probability_semantics_revision=revision,
+                semantics_binding_ready=True,
+                required_evalue=10.0,
+            )
+            is None
+        )
+
+    def test_forward_capital_credential_absence_cannot_be_manually_ungated(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(policy_module, "is_entries_paused", lambda: False)
+        monkeypatch.setattr(
+            policy_module,
+            "get_edge_threshold_multiplier",
+            lambda: 1.0,
+        )
+        conn = _policy_conn()
+        now = datetime(2026, 8, 11, 19, 0, tzinfo=timezone.utc)
+        _insert_control_override(
+            conn,
+            override_id="manual-qkernel-ungate",
+            target_type="strategy",
+            target_key="forecast_qkernel_entry",
+            action_type="gate",
+            value="false",
+            issued_at=(now - timedelta(seconds=1)).isoformat(),
+            effective_until=None,
+        )
+
+        policy = policy_module.resolve_strategy_policy(
+            conn,
+            "forecast_qkernel_entry",
+            now,
+        )
+
+        assert policy.gated is True
+        assert policy.sources == ["hard_safety:forward_capital_gain_unproven"]
+        conn.close()
+
+    def test_active_forward_capital_credential_allows_normal_policy_resolution(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(policy_module, "is_entries_paused", lambda: False)
+        monkeypatch.setattr(
+            policy_module,
+            "get_edge_threshold_multiplier",
+            lambda: 1.0,
+        )
+        conn = _policy_conn()
+        now = datetime(2026, 8, 11, 19, 0, tzinfo=timezone.utc)
+        _insert_risk_action(
+            conn,
+            action_id="riskguard:forward-capital:day0_nowcast_entry",
+            strategy_key="day0_nowcast_entry",
+            action_type=policy_module.FORWARD_CAPITAL_CREDENTIAL_ACTION,
+            value="false",
+            issued_at=(now - timedelta(minutes=1)).isoformat(),
+            effective_until=(now + timedelta(minutes=4)).isoformat(),
+        )
+        conn.execute(
+            "UPDATE risk_actions SET reason=? WHERE action_id=?",
+            (
+                "forward_capital_gain_validated("
+                "law=executable_min_order_capital_gain_v2)",
+                "riskguard:forward-capital:day0_nowcast_entry",
+            ),
+        )
+
+        policy = policy_module.resolve_strategy_policy(
+            conn,
+            "day0_nowcast_entry",
+            now,
+        )
+
+        assert policy.gated is False
+        assert policy.sources == ["hard_safety:forward_capital_gain_validated"]
+        conn.close()
+
+    def test_forward_capital_credential_does_not_override_normal_risk_gate(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(policy_module, "is_entries_paused", lambda: False)
+        monkeypatch.setattr(
+            policy_module,
+            "get_edge_threshold_multiplier",
+            lambda: 1.0,
+        )
+        conn = _policy_conn()
+        now = datetime(2026, 8, 11, 19, 0, tzinfo=timezone.utc)
+        riskguard_module._sync_forward_capital_gain_credentials(
+            conn,
+            {
+                "forecast_qkernel_entry": (
+                    "forward_capital_gain_validated("
+                    "law=executable_min_order_capital_gain_v2)"
+                )
+            },
+            issued_at=now.isoformat(),
+        )
+        riskguard_module._sync_riskguard_strategy_gate_actions(
+            conn,
+            {},
+            issued_at=(now + timedelta(seconds=1)).isoformat(),
+        )
+        assert conn.execute(
+            "SELECT status FROM risk_actions WHERE action_id=?",
+            ("riskguard:forward-capital:forecast_qkernel_entry",),
+        ).fetchone()["status"] == "active"
+        _insert_risk_action(
+            conn,
+            action_id="riskguard:gate:forecast_qkernel_entry",
+            strategy_key="forecast_qkernel_entry",
+            action_type="gate",
+            value="true",
+            issued_at=now.isoformat(),
+            effective_until=(now + timedelta(minutes=5)).isoformat(),
+        )
+
+        policy = policy_module.resolve_strategy_policy(
+            conn,
+            "forecast_qkernel_entry",
+            now,
+        )
+
+        assert policy.gated is True
+        assert policy.sources == [
+            "hard_safety:forward_capital_gain_validated",
+            "risk_action:gate",
+        ]
+        conn.close()
+
+    def test_expired_forward_capital_credential_restores_hard_gate(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(policy_module, "is_entries_paused", lambda: False)
+        monkeypatch.setattr(
+            policy_module,
+            "get_edge_threshold_multiplier",
+            lambda: 1.0,
+        )
+        conn = _policy_conn()
+        now = datetime(2026, 8, 11, 19, 0, tzinfo=timezone.utc)
+        _insert_risk_action(
+            conn,
+            action_id="riskguard:forward-capital:forecast_qkernel_entry",
+            strategy_key="forecast_qkernel_entry",
+            action_type=policy_module.FORWARD_CAPITAL_CREDENTIAL_ACTION,
+            value="false",
+            issued_at=(now - timedelta(minutes=6)).isoformat(),
+            effective_until=(now - timedelta(minutes=1)).isoformat(),
+        )
+
+        policy = policy_module.resolve_strategy_policy(
+            conn,
+            "forecast_qkernel_entry",
+            now,
+        )
+
+        assert policy.gated is True
+        assert policy.sources == ["hard_safety:forward_capital_gain_unproven"]
+        conn.close()
+
     def test_resolve_strategy_policy_defaults_without_rows(self, monkeypatch):
         _neutralize_hard_safety(monkeypatch)
         conn = _policy_conn()
