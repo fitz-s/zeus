@@ -1948,6 +1948,53 @@ def test_raw_hwm_blocks_when_exact_consumed_model_is_superseded() -> None:
     assert "model=gfs" in result.reason_code
 
 
+def test_raw_hwm_keeps_carrier_for_isolated_next_cycle_provider() -> None:
+    """One provider >3h ahead cannot invalidate the last coherent carrier."""
+    conn = _conn()
+    posterior_id = _insert_posterior(conn)
+    consumed: dict[str, dict[str, object]] = {}
+    for model in ("ecmwf_ifs", "icon_eu"):
+        _insert_raw_model_forecast(
+            conn,
+            model=model,
+            source_cycle_time=_dt(0),
+            captured_at=_dt(0, 5),
+            source_available_at=_dt(0, 5),
+        )
+        consumed[model] = {
+            "raw_model_forecast_id": int(
+                conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            ),
+            "served_cycle": _dt(0).isoformat(),
+            "captured_at": _dt(0, 5).isoformat(),
+            "served_via": "single_runs",
+        }
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(_with_current_value_serving(consumed)), posterior_id),
+    )
+    _insert_raw_model_forecast(
+        conn,
+        model="icon_eu",
+        source_cycle_time=_dt(6),
+        captured_at=_dt(6, 5),
+        source_available_at=_dt(6, 5),
+    )
+
+    reason = replacement_live_input_lag_reason(
+        conn,
+        city="Shanghai",
+        target_date="2026-06-07",
+        metric="high",
+        decision_time=_dt(7),
+        posterior_source_cycle_time=_dt(0),
+        posterior_computed_at=_dt(0, 5),
+        posterior_provenance=_with_current_value_serving(consumed),
+    )
+
+    assert reason is None
+
+
 def test_raw_hwm_fails_closed_on_unverifiable_current_value_provenance() -> None:
     conn = _conn()
     posterior_id = _insert_posterior(conn)
