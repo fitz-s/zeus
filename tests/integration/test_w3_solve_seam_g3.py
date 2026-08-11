@@ -13459,7 +13459,7 @@ def test_global_preflight_jit_worse_curve_replaces_and_reauctions(monkeypatch):
     assert isinstance(stable.global_jit_candidate, era._GlobalJitHandoff)
 
 
-def test_global_preflight_jit_rejects_buy_that_lost_legal_liquidation_depth(
+def test_global_preflight_jit_rejects_buy_that_lost_precliff_liquidation_depth(
     monkeypatch,
 ):
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
@@ -13525,7 +13525,7 @@ def test_global_preflight_jit_rejects_buy_that_lost_legal_liquidation_depth(
         book_quote_provider=lambda token_id: {
             "asset_id": token_id,
             "hash": "jit-book-a",
-            "bids": [{"price": "0.04", "size": "100"}],
+            "bids": [{"price": "0.05", "size": "100"}],
             "asks": [{"price": "0.06", "size": "100"}],
         },
     )
@@ -13533,7 +13533,7 @@ def test_global_preflight_jit_rejects_buy_that_lost_legal_liquidation_depth(
     assert rejected.proof_accepted is False
     assert rejected.reason.startswith(
         "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
-        "GLOBAL_BUY_JIT_LIQUIDATION_CAPACITY_INFEASIBLE:"
+        "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
     )
 
 

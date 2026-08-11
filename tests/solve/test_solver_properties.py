@@ -140,7 +140,7 @@ def _global_candidate(
         resolution_identity=resolution_identity,
         neg_risk=False,
         native_bid_levels=(
-            BookLevel(price=Decimal("0.05"), size=Decimal("1000000")),
+            BookLevel(price=Decimal("0.06"), size=Decimal("1000000")),
         ),
         eligibility_reason=reason,
     )
@@ -1033,7 +1033,7 @@ def test_family_joint_fractional_kelly_owns_one_shared_final_vector(monkeypatch)
                 resolution_identity="resolution-joint",
                 neg_risk=False,
                 native_bid_levels=(
-                    BookLevel(price=Decimal("0.05"), size=Decimal(depth)),
+                    BookLevel(price=Decimal("0.06"), size=Decimal(depth)),
                 ),
             )
         )
@@ -1656,7 +1656,7 @@ def test_deterministic_day0_payoff_selects_exact_bin_and_rejects_unknown_sibling
         book_captured_at_utc=captured_at,
         neg_risk=False,
         native_bid_levels=(
-            BookLevel(price=Decimal("0.05"), size=Decimal("100")),
+            BookLevel(price=Decimal("0.06"), size=Decimal("100")),
         ),
     )
     unknown = S.global_candidate_from_native(
@@ -1680,7 +1680,7 @@ def test_deterministic_day0_payoff_selects_exact_bin_and_rejects_unknown_sibling
         book_captured_at_utc=captured_at,
         neg_risk=False,
         native_bid_levels=(
-            BookLevel(price=Decimal("0.05"), size=Decimal("100")),
+            BookLevel(price=Decimal("0.06"), size=Decimal("100")),
         ),
     )
 
@@ -2014,7 +2014,7 @@ def test_family_entry_block_removes_higher_growth_buy_before_same_family_sell():
         resolution_identity=sell.resolution_identity,
         neg_risk=False,
         native_bid_levels=(
-            BookLevel(price=Decimal("0.05"), size=Decimal("20")),
+            BookLevel(price=Decimal("0.06"), size=Decimal("20")),
         ),
     )
     unblocked = _global_select(
@@ -2474,11 +2474,12 @@ def test_global_buy_generation_omits_untyped_maker_sibling():
     assert len(proposals) == 1
     assert proposals[0].execution_mode == "TAKER_LIMIT"
     assert proposals[0].eligibility_reason == (
-        "CURRENT_LEGAL_LIQUIDATION_CAPACITY_MISSING"
+        "CURRENT_PRECLIFF_LIQUIDATION_CAPACITY_MISSING"
     )
 
 
-def test_global_taker_buy_requires_current_legal_liquidation_depth():
+@pytest.mark.parametrize("bid_price", ("0.04", "0.05"))
+def test_global_taker_buy_requires_current_precliff_liquidation_depth(bid_price):
     candidate = _global_candidate(
         candidate_id="taker-born-unexitable",
         family="taker-born-unexitable-family",
@@ -2490,7 +2491,7 @@ def test_global_taker_buy_requires_current_legal_liquidation_depth():
     candidate = replace(
         candidate,
         native_bid_levels=(
-            BookLevel(price=Decimal("0.04"), size=Decimal("100")),
+            BookLevel(price=Decimal(bid_price), size=Decimal("100")),
         ),
     )
 
@@ -2500,7 +2501,7 @@ def test_global_taker_buy_requires_current_legal_liquidation_depth():
     assert decision.rejection_reasons[candidate.candidate_id] == "DEPTH_INFEASIBLE"
 
 
-def test_global_taker_buy_size_does_not_exceed_current_legal_liquidation_depth():
+def test_global_taker_buy_size_does_not_exceed_current_precliff_liquidation_depth():
     candidate = _global_candidate(
         candidate_id="taker-repairable-prefix",
         family="taker-repairable-prefix-family",
@@ -2512,7 +2513,8 @@ def test_global_taker_buy_size_does_not_exceed_current_legal_liquidation_depth()
     candidate = replace(
         candidate,
         native_bid_levels=(
-            BookLevel(price=Decimal("0.05"), size=Decimal("25")),
+            BookLevel(price=Decimal("0.05"), size=Decimal("100")),
+            BookLevel(price=Decimal("0.06"), size=Decimal("25")),
         ),
     )
 
@@ -2601,7 +2603,7 @@ def test_current_maker_buy_witness_can_win_on_exact_partial_distribution():
     )
 
 
-def test_passive_buy_caps_rest_to_current_legal_liquidation_depth():
+def test_passive_buy_caps_rest_to_current_precliff_liquidation_depth():
     taker = _global_candidate(
         candidate_id="maker-liquidation-cap-taker",
         family="maker-liquidation-cap-family",

@@ -221,7 +221,7 @@ GlobalEligibilityReason = Literal[
     "ROBUST_MAJORITY_LOSS",
     "FRACTIONAL_KELLY_TARGET_REACHED",
     "LIVE_UNIT_PRICE_OUT_OF_BOUNDS",
-    "CURRENT_LEGAL_LIQUIDATION_CAPACITY_MISSING",
+    "CURRENT_PRECLIFF_LIQUIDATION_CAPACITY_MISSING",
     "NON_POSITIVE_ROBUST_OBJECTIVE",
 ]
 
@@ -331,7 +331,7 @@ def passive_buy_proposal_curve(
     *,
     native_bid_levels: Sequence[BookLevel],
 ) -> ExecutableCostCurve | None:
-    """Price one post-only BUY with current legal liquidation capacity."""
+    """Price one post-only BUY with current pre-cliff liquidation capacity."""
 
     bids = tuple(native_bid_levels)
     if not bids:
@@ -339,14 +339,7 @@ def passive_buy_proposal_curve(
     best_bid = max(Decimal(level.price) for level in bids)
     maker_price = best_bid + Decimal(curve.min_tick)
     best_ask = Decimal(curve.levels[0].price)
-    liquidation_capacity = sum(
-        (
-            Decimal(level.size)
-            for level in bids
-            if _live_unit_price_in_band(Decimal(level.price))
-        ),
-        Decimal("0"),
-    )
+    liquidation_capacity = current_precliff_liquidation_capacity(bids)
     proposal_capacity = min(
         Decimal(curve.levels[0].size),
         liquidation_capacity,
@@ -365,9 +358,9 @@ def passive_buy_proposal_curve(
         snapshot_id=curve.snapshot_id,
         book_hash=curve.book_hash,
         # A maker fill is adverse-selection evidence.  Never rest more shares
-        # than the same captured book can currently liquidate through venue-
-        # legal bids.  This is a capacity witness, not a claim that those bids
-        # survive into the future or a synthetic terminal payoff.
+        # than the same captured book can currently liquidate above the venue
+        # floor.  A floor bid is executable now but provides no downward-tick
+        # redecision slack.  This witness does not claim that bids persist.
         levels=(BookLevel(price=maker_price, size=proposal_capacity),),
         # See passive_sell_proposal_curve: current maker authority uses the
         # exact submitted limit, without an assumed fee or rebate.
@@ -378,16 +371,19 @@ def passive_buy_proposal_curve(
     )
 
 
-def current_legal_liquidation_capacity(
+def current_precliff_liquidation_capacity(
     native_bid_levels: Sequence[BookLevel],
 ) -> Decimal:
-    """Return same-token depth currently sellable inside the live price band."""
+    """Return same-token depth sellable with one downward-tick slack above floor."""
 
     return sum(
         (
             Decimal(level.size)
             for level in native_bid_levels
-            if _live_unit_price_in_band(Decimal(level.price))
+            if Decimal(level.price).is_finite()
+            and LIVE_ORDER_MIN_UNIT_PRICE
+            < Decimal(level.price)
+            <= LIVE_ORDER_MAX_UNIT_PRICE
         ),
         Decimal("0"),
     )
@@ -2126,10 +2122,10 @@ def global_candidates_from_native(
     taker_eligibility_reason = eligibility_reason
     if (
         taker_eligibility_reason is None
-        and current_legal_liquidation_capacity(bids)
+        and current_precliff_liquidation_capacity(bids)
         < Decimal(curve.min_order_size)
     ):
-        taker_eligibility_reason = "CURRENT_LEGAL_LIQUIDATION_CAPACITY_MISSING"
+        taker_eligibility_reason = "CURRENT_PRECLIFF_LIQUIDATION_CAPACITY_MISSING"
     common = dict(
         family_key=probability_witness.family_key,
         bin_id=binding.bin_id,
@@ -5299,7 +5295,7 @@ def _score_global_single_order(
         spend_limit_usd=optimization_limit,
     )
     if candidate.execution_mode == "TAKER_LIMIT":
-        liquidation_capacity = current_legal_liquidation_capacity(
+        liquidation_capacity = current_precliff_liquidation_capacity(
             candidate.native_bid_levels
         )
         capacity_max_shares = min(capacity_max_shares, liquidation_capacity)
