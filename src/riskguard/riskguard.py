@@ -2752,13 +2752,14 @@ def _submission_schedule_fee_usd(
     return rate * price * (1.0 - price) * quantity
 
 
-def _day0_live_realized_capital_curve(
+def _live_realized_capital_curve(
     conn: sqlite3.Connection,
     *,
+    strategy_key: str,
     window_days: float,
     as_of: datetime | None = None,
 ) -> dict[str, object]:
-    """Grade current-semantics Day0 fills on realized net capital only.
+    """Grade current-semantics live fills on realized net capital only.
 
     A profitable early exit is capital truth but not a binary-outcome grade;
     probability accuracy is not capital gain. Only exact entry fills plus an
@@ -2766,10 +2767,10 @@ def _day0_live_realized_capital_curve(
     reduced by the frozen fee schedule because venue facts may omit fees.
     """
 
-    from src.events.day0_authority import (
-        DAY0_PROBABILITY_SEMANTICS_REVISION,
-        day0_probability_semantics_revision,
-    )
+    if strategy_key not in {"day0_nowcast_entry", "forecast_qkernel_entry"}:
+        raise ValueError("live capital strategy is not canonical")
+
+    from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
     evaluated_at = as_of or datetime.now(timezone.utc)
     if evaluated_at.tzinfo is None:
@@ -2777,8 +2778,13 @@ def _day0_live_realized_capital_curve(
     cutoff = evaluated_at - timedelta(days=window_days)
     status: dict[str, object] = {
         "status": "awaiting_current_law_fills",
+        "strategy_key": strategy_key,
         "decision_law_id": "predicted_bin_ev_v1",
-        "probability_semantics_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+        "probability_semantics_revision": (
+            DAY0_PROBABILITY_SEMANTICS_REVISION
+            if strategy_key == "day0_nowcast_entry"
+            else CURRENT_EVIDENCE_SEMANTICS_REVISION
+        ),
         "window_days": window_days,
         "evaluated_at": evaluated_at.isoformat(),
         "filled_position_count": 0,
@@ -2851,7 +2857,7 @@ def _day0_live_realized_capital_curve(
         "JOIN venue_commands AS vc ON vc.position_id=pc.position_id "
         "JOIN execution_fact AS ef ON ef.command_id=vc.command_id "
         "JOIN venue_submission_envelopes AS vse ON vse.envelope_id=vc.envelope_id "
-        "WHERE pc.strategy_key='day0_nowcast_entry' "
+        "WHERE pc.strategy_key=? "
         "AND pc.decision_law_id='predicted_bin_ev_v1' "
         "AND vc.intent_kind='ENTRY' AND ef.order_role='entry' "
         "AND ef.filled_at IS NOT NULL "
@@ -2861,7 +2867,7 @@ def _day0_live_realized_capital_curve(
         "WHERE order_role='entry' AND filled_at>=? "
         "AND lower(COALESCE(terminal_exec_status,''))='filled') "
         "ORDER BY pc.position_id,ef.filled_at,vc.command_id",
-        (cutoff.isoformat(),),
+        (strategy_key, cutoff.isoformat()),
     ).fetchall()
     if not entry_rows:
         return status
@@ -2884,6 +2890,7 @@ def _day0_live_realized_capital_curve(
         )
         position["entries"].append(
             {
+                "command_id": str(raw[7] or ""),
                 "q_version": str(raw[8] or ""),
                 "fill_price": raw[9],
                 "shares": raw[10],
@@ -2893,22 +2900,95 @@ def _day0_live_realized_capital_curve(
             }
         )
 
+    for position in positions.values():
+        deduped: dict[str, dict[str, object]] = {}
+        conflict = False
+        for entry in position["entries"]:
+            command_id = str(entry["command_id"] or "")
+            incumbent = deduped.get(command_id)
+            if not command_id:
+                conflict = True
+                continue
+            if incumbent is None:
+                deduped[command_id] = entry
+                continue
+            try:
+                same_economics = (
+                    str(incumbent["q_version"]) == str(entry["q_version"])
+                    and math.isclose(
+                        float(incumbent["fill_price"]),
+                        float(entry["fill_price"]),
+                        rel_tol=0.0,
+                        abs_tol=1e-12,
+                    )
+                    and math.isclose(
+                        float(incumbent["shares"]),
+                        float(entry["shares"]),
+                        rel_tol=0.0,
+                        abs_tol=1e-12,
+                    )
+                )
+            except (TypeError, ValueError):
+                same_economics = False
+            if not same_economics:
+                conflict = True
+                continue
+            if str(entry["filled_at"]) > str(incumbent["filled_at"]):
+                deduped[command_id] = entry
+        position["entries"] = list(deduped.values())
+        position["entry_identity_conflict"] = conflict
+
     blocked_reasons: dict[str, int] = status["blocked_reasons"]  # type: ignore[assignment]
 
     def block(reason: str) -> None:
         blocked_reasons[reason] = blocked_reasons.get(reason, 0) + 1
 
+    if strategy_key == "day0_nowcast_entry":
+        from src.events.day0_authority import day0_probability_semantics_revision
+
+        current_position_ids = {
+            position_id
+            for position_id, position in positions.items()
+            if {
+                day0_probability_semantics_revision(str(entry["q_version"]))
+                for entry in position["entries"]
+            }
+            == {DAY0_PROBABILITY_SEMANTICS_REVISION}
+        }
+        semantics_binding: dict[str, object] = {
+            "status": "ok",
+            "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
+        }
+    else:
+        probes = [
+            {
+                "trade_id": position_id,
+                "strategy": strategy_key,
+                "entry_q_versions": tuple(
+                    str(entry["q_version"])
+                    for entry in position["entries"]
+                ),
+            }
+            for position_id, position in positions.items()
+        ]
+        classified, semantics_binding = _bind_qkernel_probability_semantics(probes)
+        current_position_ids = {
+            str(row["trade_id"])
+            for row in classified
+            if row.get("probability_semantics_ready") is True
+        }
+    status["probability_semantics_binding"] = semantics_binding
+
     current_positions: dict[str, dict[str, object]] = {}
     for position_id, position in positions.items():
         entries: list[dict[str, object]] = position["entries"]  # type: ignore[assignment]
-        revisions = {
-            day0_probability_semantics_revision(str(entry["q_version"]))
-            for entry in entries
-        }
-        if revisions != {DAY0_PROBABILITY_SEMANTICS_REVISION}:
+        if position_id not in current_position_ids:
             status["excluded_superseded_position_count"] = (
                 int(status["excluded_superseded_position_count"]) + 1
             )
+            continue
+        if position["entry_identity_conflict"]:
+            block("entry_command_economics_conflict")
             continue
         entry_notional = 0.0
         entry_fee = 0.0
@@ -3114,6 +3194,72 @@ def _day0_live_realized_capital_curve(
     else:
         status["status"] = "nonpositive"
     return status
+
+
+def _day0_live_realized_capital_curve(
+    conn: sqlite3.Connection,
+    *,
+    window_days: float,
+    as_of: datetime | None = None,
+) -> dict[str, object]:
+    return _live_realized_capital_curve(
+        conn,
+        strategy_key="day0_nowcast_entry",
+        window_days=window_days,
+        as_of=as_of,
+    )
+
+
+def _qkernel_live_realized_capital_curve(
+    conn: sqlite3.Connection,
+    *,
+    window_days: float,
+    as_of: datetime | None = None,
+) -> dict[str, object]:
+    return _live_realized_capital_curve(
+        conn,
+        strategy_key="forecast_qkernel_entry",
+        window_days=window_days,
+        as_of=as_of,
+    )
+
+
+def _live_realized_capital_gate_reason(
+    curve: Mapping[str, object],
+    *,
+    strategy_key: str,
+) -> str | None:
+    """Keep each strategy in one-trial probation until real net gain exists."""
+
+    status = str(curve.get("status") or "unavailable")
+    filled = int(curve.get("filled_position_count") or 0)
+    realized = int(curve.get("realized_position_count") or 0)
+    try:
+        net_pnl = float(curve.get("net_realized_pnl_usd") or 0.0)
+    except (TypeError, ValueError):
+        net_pnl = math.nan
+    law = "executable_min_order_capital_gain_v2"
+    if status == "capital_truth_degraded" or (
+        status == "capital_truth_unavailable" and (filled > 0 or realized > 0)
+    ):
+        return (
+            "live_capital_truth_unavailable("
+            f"strategy={strategy_key},status={status},filled={filled},"
+            f"realized={realized},law={law})"
+        )
+    if filled > 0 and realized == 0:
+        return (
+            "live_capital_probation_in_flight("
+            f"strategy={strategy_key},filled={filled},"
+            f"open={curve.get('open_position_count')},law={law})"
+        )
+    if realized > 0 and (not math.isfinite(net_pnl) or net_pnl <= 0.0):
+        return (
+            "live_capital_nonpositive("
+            f"strategy={strategy_key},filled={filled},realized={realized},"
+            f"net_pnl={round(net_pnl, 6)},law={law})"
+        )
+    return None
 
 
 def _market_relative_alpha_evidence(
@@ -3398,34 +3544,26 @@ def _day0_market_relative_alpha_gate_reason(
     ]
     shadow_validated = any(cohort.get("validated") is True for cohort in cohorts)
     if live_capital_curve is not None:
-        live_status = str(live_capital_curve.get("status") or "unavailable")
-        filled = int(live_capital_curve.get("filled_position_count") or 0)
-        realized = int(live_capital_curve.get("realized_position_count") or 0)
-        try:
-            net_pnl = float(live_capital_curve.get("net_realized_pnl_usd") or 0.0)
-        except (TypeError, ValueError):
-            net_pnl = math.nan
-        if shadow_validated and live_status in {
-            "capital_truth_unavailable",
-            "capital_truth_degraded",
-        }:
+        if (
+            shadow_validated
+            and str(live_capital_curve.get("status"))
+            == "capital_truth_unavailable"
+        ):
             return (
                 "live_capital_truth_unavailable("
-                f"status={live_status},filled={filled},realized={realized},"
+                "strategy=day0_nowcast_entry,status=capital_truth_unavailable,"
+                "filled=0,realized=0,"
                 "law=executable_min_order_capital_gain_v2)"
             )
-        if shadow_validated and filled > 0 and realized == 0:
-            return (
-                "live_capital_probation_in_flight("
-                f"filled={filled},open={live_capital_curve.get('open_position_count')},"
-                "law=executable_min_order_capital_gain_v2)"
-            )
-        if realized > 0 and (not math.isfinite(net_pnl) or net_pnl <= 0.0):
-            return (
-                "live_capital_nonpositive("
-                f"filled={filled},realized={realized},net_pnl={round(net_pnl, 6)},"
-                "law=executable_min_order_capital_gain_v2)"
-            )
+        live_reason = _live_realized_capital_gate_reason(
+            live_capital_curve,
+            strategy_key="day0_nowcast_entry",
+        )
+        if live_reason is not None and (
+            shadow_validated
+            or str(live_capital_curve.get("status")) == "nonpositive"
+        ):
+            return live_reason
     if shadow_validated:
         return None
     strongest = (
@@ -4365,6 +4503,19 @@ def _tick_once() -> RiskLevel:
             window_days=market_relative_alpha_window_days,
             as_of=market_relative_alpha_as_of,
         )
+        qkernel_live_realized_capital_curve = (
+            _qkernel_live_realized_capital_curve(
+                zeus_conn,
+                window_days=market_relative_alpha_window_days,
+                as_of=market_relative_alpha_as_of,
+            )
+        )
+        qkernel_live_realized_capital_gate_reason = (
+            _live_realized_capital_gate_reason(
+                qkernel_live_realized_capital_curve,
+                strategy_key="forecast_qkernel_entry",
+            )
+        )
         (
             day0_market_relative_alpha_shadow_rows,
             day0_market_relative_alpha_shadow_status,
@@ -4537,6 +4688,12 @@ def _tick_once() -> RiskLevel:
                     f"law={strongest['decision_law_id']}"
                     ")"
                 ),
+            )
+        if qkernel_live_realized_capital_gate_reason is not None:
+            _append_reason(
+                recommended_strategy_gate_reasons,
+                "forecast_qkernel_entry",
+                qkernel_live_realized_capital_gate_reason,
             )
         probability_semantics_level = RiskLevel.GREEN
         if probability_semantics_binding.get("status") == "unavailable":
@@ -4983,6 +5140,9 @@ def _tick_once() -> RiskLevel:
                 "market_relative_alpha_evidence": market_relative_alpha_evidence,
                 "market_relative_alpha_gate_confirmation": (
                     market_relative_alpha_gate_confirmation
+                ),
+                "qkernel_live_realized_capital_curve": (
+                    qkernel_live_realized_capital_curve
                 ),
                 "day0_market_relative_alpha_evidence": (
                     day0_market_relative_alpha_evidence

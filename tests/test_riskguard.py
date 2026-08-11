@@ -4389,7 +4389,8 @@ class TestQkernelMarketRelativeAlphaEvidence:
         )
         assert reason == (
             "live_capital_nonpositive("
-            "filled=1,realized=1,net_pnl=-0.175409,"
+            "strategy=day0_nowcast_entry,filled=1,realized=1,"
+            "net_pnl=-0.175409,"
             "law=executable_min_order_capital_gain_v2)"
         )
         conn.close()
@@ -4423,7 +4424,8 @@ class TestQkernelMarketRelativeAlphaEvidence:
         )
         assert reason == (
             "live_capital_probation_in_flight("
-            "filled=1,open=1,law=executable_min_order_capital_gain_v2)"
+            "strategy=day0_nowcast_entry,filled=1,open=1,"
+            "law=executable_min_order_capital_gain_v2)"
         )
         conn.close()
 
@@ -4452,6 +4454,78 @@ class TestQkernelMarketRelativeAlphaEvidence:
             required_evalue=10.0,
             live_capital_curve=curve,
         ) is None
+        conn.close()
+
+    def test_qkernel_realized_loss_is_an_independent_entry_gate(
+        self,
+        monkeypatch,
+    ):
+        conn = self._live_capital_conn(
+            phase="economically_closed",
+            gross_pnl=-0.50,
+            exit_price=0.17,
+        )
+        conn.execute(
+            "UPDATE position_current SET strategy_key='forecast_qkernel_entry'"
+        )
+        conn.execute(
+            "UPDATE venue_commands SET q_version='qkernel-current' "
+            "WHERE intent_kind='ENTRY'"
+        )
+        conn.execute(
+            "INSERT INTO execution_fact VALUES (?,?,?,?,?,?,?)",
+            (
+                "entry-command",
+                "current-trial",
+                "entry",
+                "2026-08-11T15:08:03+00:00",
+                "filled",
+                0.25,
+                6.24,
+            ),
+        )
+        conn.commit()
+
+        def classify(rows):
+            return (
+                [
+                    {
+                        **row,
+                        "probability_semantics_ready": True,
+                        "probability_semantics_revisions": (
+                            riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                        ),
+                    }
+                    for row in rows
+                ],
+                {"status": "ok", "current_count": len(rows)},
+            )
+
+        monkeypatch.setattr(
+            riskguard_module,
+            "_bind_qkernel_probability_semantics",
+            classify,
+        )
+        curve = riskguard_module._qkernel_live_realized_capital_curve(
+            conn,
+            window_days=7.0,
+            as_of=datetime(2026, 8, 11, 17, tzinfo=timezone.utc),
+        )
+
+        assert curve["status"] == "nonpositive"
+        assert curve["strategy_key"] == "forecast_qkernel_entry"
+        assert curve["filled_position_count"] == 1
+        assert curve["blocked_position_count"] == 0
+        assert curve["realized_position_count"] == 1
+        reason = riskguard_module._live_realized_capital_gate_reason(
+            curve,
+            strategy_key="forecast_qkernel_entry",
+        )
+        assert reason == (
+            "live_capital_nonpositive("
+            "strategy=forecast_qkernel_entry,filled=1,realized=1,"
+            "net_pnl=-0.602523,law=executable_min_order_capital_gain_v2)"
+        )
         conn.close()
 
     def test_same_target_date_high_and_low_count_as_one_evidence_cluster(self):
