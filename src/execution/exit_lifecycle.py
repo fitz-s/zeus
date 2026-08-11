@@ -756,6 +756,45 @@ def _global_sell_fak_no_fill_reauction_error(
     return error if str(error).startswith("global_sell_exit_fak_no_fill_reauction:") else ""
 
 
+def _mark_strategy_hold_fak_no_fill_redecision(
+    position: Position,
+    *,
+    reason: str,
+    sell_result: OrderResult,
+    conn: sqlite3.Connection | None,
+) -> bool:
+    """Immediately re-decide a proved no-side-effect strategy-local FAK."""
+
+    proof = _global_sell_fak_no_fill_reauction_error(conn, sell_result)
+    if not proof:
+        return False
+    error = "strategy_hold_exit_fak_no_fill_redecision:venue_fak_no_match_400"
+    _mark_pending_exit(position)
+    position.last_exit_error = error
+    position.exit_state = "retry_pending"
+    position.order_status = "retry_pending"
+    position.next_exit_retry_at = _utcnow().isoformat()
+    _dual_write_canonical_pending_exit_if_available(
+        conn,
+        position,
+        reason=reason,
+        error=error,
+        event_type="EXIT_ORDER_REJECTED",
+        extra_payload={
+            "status": "strategy_hold_fak_no_fill_redecision_pending",
+            "retry_count": int(getattr(position, "exit_retry_count", 0) or 0),
+            "next_retry_at": position.next_exit_retry_at,
+            "fak_no_fill_command_id": str(sell_result.command_id or ""),
+        },
+    )
+    logger.info(
+        "STRATEGY HOLD FAK NO-FILL REDECISION %s: budget not consumed; eligible=%s",
+        position.trade_id,
+        position.next_exit_retry_at,
+    )
+    return True
+
+
 def _post_only_cross_command_id_for_position(
     conn: sqlite3.Connection | None,
     position: Position,
@@ -6185,6 +6224,17 @@ def _execute_live_exit(
                         conn=conn,
                         reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_LOCKED_SUBMIT]",
                     )
+            if (
+                strategy_hold_rejection_authorized
+                and sell_error == "venue_fak_no_match_400"
+                and _mark_strategy_hold_fak_no_fill_redecision(
+                    position,
+                    reason=f"{exit_context.exit_reason} [FAK_NO_FILL_REDECISION]",
+                    sell_result=sell_result,
+                    conn=conn,
+                )
+            ):
+                return "exit_retry: strategy_hold_fak_no_fill_redecision"
             if _is_below_min_order_sell_error(sell_error):
                 dust_reason = f"{exit_context.exit_reason} [DUST: {sell_error}]"
                 _mark_exit_dust_hold(

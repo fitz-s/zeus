@@ -11070,6 +11070,28 @@ def test_global_fak_zero_fill_reauctions_immediately_with_durable_proof(
     assert exit_lifecycle.has_global_sell_snapshot_reauction_retry(position, conn)
     assert exit_lifecycle._relinquished_global_sell_command_id(conn, position) == command_id
 
+    position.exit_retry_count = 4
+    position.next_exit_retry_at = ""
+    position.exit_state = "exit_intent"
+    assert exit_lifecycle._mark_strategy_hold_fak_no_fill_redecision(
+        position,
+        reason="STRATEGY_HOLD_AUTHORITY_REJECTED [FAK_NO_FILL_REDECISION]",
+        sell_result=OrderResult(
+            trade_id=position_id,
+            status="rejected",
+            reason="venue_fak_no_match_400",
+            command_id=command_id,
+            command_state="REJECTED",
+        ),
+        conn=conn,
+    )
+    assert position.exit_state == "retry_pending"
+    assert position.exit_retry_count == 4
+    assert position.next_exit_retry_at == now.isoformat()
+    assert position.last_exit_error == (
+        "strategy_hold_exit_fak_no_fill_redecision:venue_fak_no_match_400"
+    )
+
 
 def test_persisted_exit_envelope_rejects_non_maker_non_fak_mode(conn):
     from src.state.venue_command_repo import insert_command
