@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-04; last_reused=2026-08-04
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-11; last_reused=2026-08-11
 # Purpose: Current single-live scheduler set and causal executor-class assignment.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-08-04
+# Last reused or audited: 2026-08-11
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR6);
 #   operator spec §7 (Scheduler adapter / executor classes).
 """PR6: registry -> scheduler executor-class assignment (pure planner, daemon wiring deferred)."""
@@ -800,7 +800,8 @@ def test_replacement_availability_pending_callback_runs_broad_fusion_catchup(
         assert result["reseed_maintenance_status"] == (
             "SOURCE_COMMIT_RESEEDS_DEFERRED"
         )
-        assert result["source_clock_cursor_advanced_sources"] == ("icon_global",)
+        assert result["source_clock_cursor_advanced_sources"] == ()
+        assert result["source_clock_cursor_deferred_sources"] == ("icon_global",)
         assert fusion_calls == [{"changed_sources": None}]
         assert cycle_calls == []
     finally:
@@ -1072,8 +1073,9 @@ def test_pending_callback_broad_trigger_persists_missed_revision_before_cursor(
 
     assert result["reseed_maintenance_status"] == "SOURCE_COMMIT_RESEEDS_DEFERRED"
     assert result["broad_fusion_upgrade_seeds_enqueued"] == 1
-    assert result["source_clock_cursor_advanced_sources"] == ("icon_global",)
-    assert len(cursor_evidence) == 1
+    assert result["source_clock_cursor_advanced_sources"] == ()
+    assert result["source_clock_cursor_deferred_sources"] == ("icon_global",)
+    assert cursor_evidence == []
     assert callback_thread is not None and not callback_thread.is_alive()
 
 
@@ -1328,9 +1330,15 @@ def test_replacement_availability_notification_error_keeps_global_reseed(
     assert result["source_commit_notification_errors"]
     assert fusion_calls == [{"changed_sources": None}]
     assert cycle_calls == [{}]
-    assert result.get("reseed_maintenance_status") != (
-        "SOURCE_COMMIT_RESEEDS_PUBLISHED"
+    assert result["reseed_maintenance_status"] == (
+        "SOURCE_BROAD_RESEEDS_RETRYABLE"
     )
+    assert result["reseed_errors"] == (
+        "fusion_upgrade:RESEED_CONFIGURATION_UNAVAILABLE",
+        "cycle_advance:RESEED_CONFIGURATION_UNAVAILABLE",
+    )
+    assert result["source_clock_cursor_advanced_sources"] == ()
+    assert result["source_clock_cursor_deferred_sources"] == ("icon_global",)
     assert ingest_main._REPLACEMENT_BPF_NO_PROGRESS_FAILURES == 0
     assert ingest_main._REPLACEMENT_BPF_NO_PROGRESS_RETRY_NOT_BEFORE_MONOTONIC == 0.0
 
@@ -1536,6 +1544,11 @@ def test_replacement_maintenance_uses_one_parent_deadline(monkeypatch) -> None:
         return {
             "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
             "timeboxed_incomplete": True,
+            "written_row_count": 2,
+            "committed_families": (
+                ("Shanghai", "2026-08-12", "high"),
+                ("Munich", "2026-08-13", "high"),
+            ),
         }
 
     monkeypatch.setattr(
@@ -1548,26 +1561,178 @@ def test_replacement_maintenance_uses_one_parent_deadline(monkeypatch) -> None:
         "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
         _extras,
     )
-    reseeds: list[str] = []
+    reseeds: list[tuple[str, object, object]] = []
     monkeypatch.setattr(
         prod,
         "_enqueue_fusion_upgrade_reseeds_if_needed",
-        lambda _cfg: reseeds.append("fusion"),
+        lambda _cfg, *, scopes=None, limit=None: (
+            reseeds.append(("fusion", scopes, limit))
+            or {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 2}
+        ),
     )
     monkeypatch.setattr(
         prod,
         "_enqueue_cycle_advance_reseeds_if_needed",
-        lambda _cfg: reseeds.append("cycle"),
+        lambda _cfg, *, scopes=None, limit=None: (
+            reseeds.append(("cycle", scopes, limit))
+            or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 2}
+        ),
     )
 
     result = ingest_main._replacement_maintenance_tick.__wrapped__()
 
     assert budgets == [("current", 10.0), ("extras", 3.0)]
-    assert reseeds == []
+    scopes = (
+        ("Munich", "2026-08-13", "high"),
+        ("Shanghai", "2026-08-12", "high"),
+    )
+    assert reseeds == [("fusion", scopes, 2), ("cycle", scopes, 2)]
+    assert result["status"] == "REPLACEMENT_MAINTENANCE_PARTIAL"
+    assert result["reseed_maintenance_status"] == (
+        "REPLACEMENT_MAINTENANCE_COMMITTED_RESEEDS_PUBLISHED"
+    )
+    assert result["committed_family_count"] == 2
+
+
+def test_replacement_maintenance_does_not_publish_failsoft_committed_reseed(
+    monkeypatch,
+) -> None:
+    """A trigger error remains retryable; it is never evidence that q was reseeded."""
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    now = [100.0]
+    monkeypatch.setattr(ingest_main.time, "monotonic", lambda: now[0])
+    monkeypatch.setenv(
+        ingest_main.REPLACEMENT_CURRENT_TARGET_POLL_TIMEOUT_SECONDS_ENV,
+        "10",
+    )
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC",
+        0.0,
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download."
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+
+    def _current(_cfg, *, max_wall_clock_seconds):
+        now[0] += 7.0
+        return {"status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS"}
+
+    def _extras(_cfg, *, max_wall_clock_seconds):
+        now[0] += max_wall_clock_seconds
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+            "timeboxed_incomplete": True,
+            "written_row_count": 1,
+            "committed_families": (("Shanghai", "2026-08-12", "high"),),
+        }
+
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        _current,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        _extras,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda *_args, **_kwargs: {
+            "status": "FUSION_UPGRADE_TRIGGER_FAILSOFT_SKIPPED",
+            "error": "seed writer unavailable",
+        },
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda *_args, **_kwargs: {
+            "status": "CYCLE_ADVANCE_TRIGGER",
+            "seeds_enqueued": 1,
+        },
+    )
+
+    result = ingest_main._replacement_maintenance_tick.__wrapped__()
+
     assert result["status"] == "REPLACEMENT_MAINTENANCE_PARTIAL"
     assert result["reseed_maintenance_status"] == (
         "REPLACEMENT_MAINTENANCE_RESEEDS_DEFERRED_DEADLINE"
     )
+    assert result["committed_fusion_upgrade_status"] == (
+        "FUSION_UPGRADE_TRIGGER_FAILSOFT_SKIPPED"
+    )
+    assert result["committed_cycle_advance_status"] == "CYCLE_ADVANCE_TRIGGER"
+    assert "committed_fusion_upgrade:FUSION_UPGRADE_TRIGGER_FAILSOFT_SKIPPED" in (
+        result["maintenance_errors"]
+    )
+
+
+def test_replacement_maintenance_broad_none_is_retryable(monkeypatch) -> None:
+    """Missing broad trigger configuration cannot disappear as a completed repair."""
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC",
+        0.0,
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download."
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        lambda *_args, **_kwargs: {
+            "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS"
+        },
+    )
+    monkeypatch.setattr(
+        prod,
+        "_download_bayes_precision_fusion_extra_raw_inputs_if_needed",
+        lambda *_args, **_kwargs: {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_NO_TARGETS"
+        },
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda *_args, **_kwargs: {
+            "status": "CYCLE_ADVANCE_TRIGGER",
+            "seeds_enqueued": 0,
+        },
+    )
+
+    result = ingest_main._replacement_maintenance_tick.__wrapped__()
+
+    assert result["status"] == "REPLACEMENT_MAINTENANCE_PARTIAL"
+    assert result["maintenance_errors"] == (
+        "fusion_upgrade:RESEED_CONFIGURATION_UNAVAILABLE",
+    )
+    assert result["cycle_advance_status"] == "CYCLE_ADVANCE_TRIGGER"
 
 
 def test_replacement_maintenance_quota_cooldown_is_partial_but_reseeds(

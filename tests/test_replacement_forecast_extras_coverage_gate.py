@@ -1,6 +1,6 @@
 # Created: 2026-06-16
-# Last reused or audited: 2026-08-05
-# Lifecycle: created=2026-06-16; last_reviewed=2026-08-05; last_reused=2026-08-05
+# Last reused or audited: 2026-08-11
+# Lifecycle: created=2026-06-16; last_reviewed=2026-08-11; last_reused=2026-08-11
 # Authority basis: docs/evidence/timing_audit/capture_reactor_stall_rootcause_2026-06-16.md
 #   (PRIMARY/CODE fix) + docs/evidence/timing_audit/impl_flat_threshold_capture_fix_2026-06-16.md.
 #   BAYES_PRECISION_FUSION_SPEC §6 F1 (the q-path consumes the persisted single_runs capture).
@@ -870,6 +870,13 @@ def test_source_clock_scoped_capture_batches_city_dates_into_priority_request(
     )
     assert report["target_count"] == 8
     assert report["written_row_count"] == 8
+    assert report["committed_families"] == tuple(
+        sorted(
+            (city, "2026-07-16", metric)
+            for city in _Report.affected_cities
+            for metric in ("high", "low")
+        )
+    )
     assert report["global_models_expected"] == 1
     assert report["fanout_errors"] == ()
     assert all({metric for _, metric in group} == {"high", "low"} for group in seen)

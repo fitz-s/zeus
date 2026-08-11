@@ -1760,6 +1760,16 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             for source_reports in reports_by_source.values()
             for item in source_reports
         ]
+        committed_families = tuple(
+            sorted(
+                {
+                    tuple(str(part) for part in scope)
+                    for item in reports
+                    for scope in (item.get("committed_families") or ())
+                    if isinstance(scope, (tuple, list)) and len(scope) == 3
+                }
+            )
+        )
         report = {
             "status": status,
             "cycle": max(source_cycles.values()).isoformat(),
@@ -1785,6 +1795,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             "written_row_count": sum(
                 int(item.get("written_row_count") or 0) for item in reports
             ),
+            "committed_families": committed_families,
             "pruned_row_count": sum(
                 int(item.get("pruned_row_count") or 0) for item in reports
             ),
@@ -2493,6 +2504,7 @@ def _enqueue_fusion_upgrade_reseeds_if_needed(
     scopes: Sequence[tuple[str, str, str]] | None = None,
     changed_sources: Sequence[str] | None = None,
     manifest_snapshot: dict[str, object] | None = None,
+    limit: int | None = None,
 ) -> dict[str, object] | None:
     """Enqueue scopes whose provider set or consumed raw input revision changed.
 
@@ -2517,7 +2529,11 @@ def _enqueue_fusion_upgrade_reseeds_if_needed(
             forecast_db=Path(str(forecast_db)),
             seed_dir=Path(str(seed_dir)),
             raw_manifest_dir=Path(str(raw_manifest_dir)),
-            limit=int(cfg.get("seed_limit") or cfg.get("limit") or 10),
+            limit=int(
+                limit
+                if limit is not None
+                else cfg.get("seed_limit") or cfg.get("limit") or 10
+            ),
             scopes=scopes,
             changed_sources=changed_sources,
             computed_at=computed_at,

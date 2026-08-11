@@ -2491,6 +2491,10 @@ _REPLACEMENT_MAINTENANCE_EXTRAS_RETRYABLE_STATUSES = frozenset(
         "BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE",
     }
 )
+_REPLACEMENT_RESEED_SUCCESS_STATUS = {
+    "fusion_upgrade": "FUSION_UPGRADE_TRIGGER",
+    "cycle_advance": "CYCLE_ADVANCE_TRIGGER",
+}
 
 
 def _replacement_maintenance_lane_error(
@@ -2513,6 +2517,17 @@ def _replacement_maintenance_lane_error(
     if status in retryable_statuses:
         return f"{lane}:{status}"
     return f"{lane}:UNRECOGNIZED_STATUS:{status or 'MISSING'}"
+
+
+def _replacement_reseed_error(prefix: str, report: object) -> str | None:
+    """Require the trigger's sole success receipt; absence remains retryable debt."""
+    expected = _REPLACEMENT_RESEED_SUCCESS_STATUS[prefix]
+    if not isinstance(report, dict):
+        return f"{prefix}:RESEED_CONFIGURATION_UNAVAILABLE"
+    status = str(report.get("status") or "")
+    if status == expected:
+        return None
+    return f"{prefix}:{status or 'RESEED_STATUS_MISSING'}"
 
 
 @_scheduler_job("ingest_replacement_maintenance")
@@ -2620,6 +2635,61 @@ def _replacement_maintenance_tick():
         )
     if cooldown_seconds > 0:
         report["cooldown_seconds"] = cooldown_seconds
+    committed_scopes = tuple(
+        sorted(
+            {
+                tuple(str(part) for part in scope)
+                for scope in (
+                    extras_report.get("committed_families") or ()
+                    if isinstance(extras_report, dict)
+                    else ()
+                )
+                if isinstance(scope, (tuple, list)) and len(scope) == 3
+            }
+        )
+    )
+    committed_reseed_errors: list[str] = []
+    committed_reseed_report_count = 0
+    if committed_scopes:
+        report["committed_family_count"] = len(committed_scopes)
+        # A timebox limits transport work, not the reaction to rows already
+        # committed. SCOPE: only committed (city, date, metric) families.
+        # DRAIN: enqueue their fusion/cycle materialization seeds immediately.
+        # RESET: each trigger's durable raw-revision marker becomes current.
+        for prefix, reseed in (
+            ("fusion_upgrade", _enqueue_fusion_upgrade_reseeds_if_needed),
+            ("cycle_advance", _enqueue_cycle_advance_reseeds_if_needed),
+        ):
+            try:
+                reseed_report = reseed(
+                    cfg,
+                    scopes=committed_scopes,
+                    limit=len(committed_scopes),
+                )
+            except Exception as exc:  # noqa: BLE001 - isolate the two drains
+                committed_reseed_errors.append(
+                    f"committed_{prefix}:{type(exc).__name__}: {str(exc)[:180]}"
+                )
+                logger.warning(
+                    "replacement maintenance committed %s failed: %s",
+                    prefix,
+                    exc,
+                )
+                continue
+            if reseed_report is None:
+                reseed_error = _replacement_reseed_error(prefix, reseed_report)
+                committed_reseed_errors.append(f"committed_{reseed_error}")
+                continue
+            reseed_status = str(reseed_report.get("status") or "")
+            report[f"committed_{prefix}_status"] = reseed_status
+            report[f"committed_{prefix}_seeds_enqueued"] = reseed_report.get(
+                "seeds_enqueued"
+            )
+            reseed_error = _replacement_reseed_error(prefix, reseed_report)
+            if reseed_error is not None:
+                committed_reseed_errors.append(f"committed_{reseed_error}")
+                continue
+            committed_reseed_report_count += 1
     maintenance_errors = [
         error
         for error in (
@@ -2642,6 +2712,7 @@ def _replacement_maintenance_tick():
         )
         if error is not None
     ]
+    maintenance_errors.extend(committed_reseed_errors)
     download_timeboxed = any(
         isinstance(lane_report, dict)
         and bool(lane_report.get("timeboxed_incomplete"))
@@ -2649,7 +2720,9 @@ def _replacement_maintenance_tick():
     )
     if download_timeboxed or _remaining_budget() <= 0.0:
         report["reseed_maintenance_status"] = (
-            "REPLACEMENT_MAINTENANCE_RESEEDS_DEFERRED_DEADLINE"
+            "REPLACEMENT_MAINTENANCE_COMMITTED_RESEEDS_PUBLISHED"
+            if committed_reseed_report_count == 2
+            else "REPLACEMENT_MAINTENANCE_RESEEDS_DEFERRED_DEADLINE"
         )
     else:
         for prefix, reseed in (
@@ -2669,9 +2742,13 @@ def _replacement_maintenance_tick():
                 )
                 logger.warning("replacement maintenance %s failed: %s", prefix, exc)
                 continue
+            reseed_error = _replacement_reseed_error(prefix, reseed_report)
             if reseed_report is not None:
-                report[f"{prefix}_status"] = reseed_report.get("status")
+                reseed_status = str(reseed_report.get("status") or "")
+                report[f"{prefix}_status"] = reseed_status
                 report[f"{prefix}_seeds_enqueued"] = reseed_report.get("seeds_enqueued")
+            if reseed_error is not None:
+                maintenance_errors.append(reseed_error)
     if maintenance_errors:
         report["status"] = "REPLACEMENT_MAINTENANCE_PARTIAL"
         report["retryable"] = True
@@ -2730,6 +2807,7 @@ def _replacement_availability_poll_tick():
         manifest_snapshot = None
         if scopes is not None:
             manifest_snapshot = prepared_manifest_snapshot or {}
+        reseed_errors = list(report.get("reseed_errors") or ())
         upgrade_report = (
             _enqueue_fusion_upgrade_reseeds_if_needed(
                 cfg,
@@ -2746,7 +2824,16 @@ def _replacement_availability_poll_tick():
         if upgrade_report is not None:
             report["fusion_upgrade_status"] = upgrade_report.get("status")
             report["fusion_upgrade_seeds_enqueued"] = upgrade_report.get("seeds_enqueued")
+        upgrade_error = _replacement_reseed_error(
+            "fusion_upgrade",
+            upgrade_report,
+        )
+        if upgrade_error is not None:
+            reseed_errors.append(upgrade_error)
         if not include_cycle_advance:
+            if reseed_errors:
+                report["reseed_errors"] = tuple(dict.fromkeys(reseed_errors))
+                report["retryable"] = True
             return report
         cycle_advance_report = (
             _enqueue_cycle_advance_reseeds_if_needed(cfg)
@@ -2782,6 +2869,15 @@ def _replacement_availability_poll_tick():
                         "enqueued",
                     )
                 }
+        cycle_error = _replacement_reseed_error(
+            "cycle_advance",
+            cycle_advance_report,
+        )
+        if cycle_error is not None:
+            reseed_errors.append(cycle_error)
+        if reseed_errors:
+            report["reseed_errors"] = tuple(dict.fromkeys(reseed_errors))
+            report["retryable"] = True
         return report
 
     _station_reseed_report: dict[str, object] | None = None
@@ -2908,7 +3004,9 @@ def _replacement_availability_poll_tick():
             and int(source_clock_anchor_report.get("written_manifest_count") or 0) > 0
         ):
             _attach_reseed_reports(source_clock_anchor_report)
-            anchor_reseed_published = True
+            anchor_reseed_published = not bool(
+                source_clock_anchor_report.get("reseed_errors")
+            )
     notified_source_scopes: set[tuple[str, str, str, str]] = set()
     anchor_scopes_attempted: set[tuple[str, str, str]] = set()
     fallback_reseed_published = False
@@ -3023,6 +3121,11 @@ def _replacement_availability_poll_tick():
             )
         else:
             _attach_reseed_reports(report)
+        if report.get("reseed_errors"):
+            raise RuntimeError(
+                "source commit reseed unproven: "
+                + ",".join(str(error) for error in report["reseed_errors"])
+            )
         with publish_state_lock:
             for key in (
                 "anchor_scope_status",
@@ -3072,6 +3175,12 @@ def _replacement_availability_poll_tick():
     # No raw input can land while the provider quota is cooling down. Run one
     # catch-up scan, then suppress identical JSON-heavy reseed scans until the
     # downloader can make progress again.
+    notification_errors = tuple(
+        report.get("source_commit_notification_errors") or ()
+    )
+    pending_notifications = int(
+        report.get("source_commit_notifications_pending") or 0
+    )
     if (
         report.get("status")
         == "SOURCE_CLOCK_BPF_SCOPED_QUOTA_COOLDOWN_SKIPPED"
@@ -3086,12 +3195,6 @@ def _replacement_availability_poll_tick():
             float(report.get("cooldown_seconds") or 0)
         )
     else:
-        notification_errors = tuple(
-            report.get("source_commit_notification_errors") or ()
-        )
-        pending_notifications = int(
-            report.get("source_commit_notifications_pending") or 0
-        )
         if (
             (scoped_reseed_completed or pending_notifications > 0)
             and not notification_errors
@@ -3113,11 +3216,24 @@ def _replacement_availability_poll_tick():
             ):
                 if key in broad_fusion_report:
                     report[f"broad_{key}"] = broad_fusion_report[key]
-            report["reseed_maintenance_status"] = (
-                "SOURCE_COMMIT_RESEEDS_DEFERRED"
-                if pending_notifications > 0
-                else "SOURCE_COMMIT_RESEEDS_PUBLISHED"
-            )
+            broad_errors = tuple(broad_fusion_report.get("reseed_errors") or ())
+            if broad_errors:
+                report["reseed_errors"] = tuple(
+                    dict.fromkeys((*tuple(report.get("reseed_errors") or ()), *broad_errors))
+                )
+                report["retryable"] = True
+            if pending_notifications > 0:
+                report["reseed_maintenance_status"] = (
+                    "SOURCE_COMMIT_RESEEDS_DEFERRED"
+                )
+            elif broad_errors:
+                report["reseed_maintenance_status"] = (
+                    "SOURCE_COMMIT_RESEEDS_RETRYABLE"
+                )
+            else:
+                report["reseed_maintenance_status"] = (
+                    "SOURCE_COMMIT_RESEEDS_PUBLISHED"
+                )
         elif (
             (anchor_reseed_published or pending_notifications > 0)
             and not notification_errors
@@ -3131,9 +3247,29 @@ def _replacement_availability_poll_tick():
             # No committed callback completed, or at least one callback failed.
             # Preserve the broad scan as the authoritative catch-up path.
             report = _attach_reseed_reports(report)
-    cursor_sources = source_clock_scoped_download_cursor_sources(
-        report,
-        source_clock_report=source_clock_report,
+            report["reseed_maintenance_status"] = (
+                "SOURCE_BROAD_RESEEDS_RETRYABLE"
+                if notification_errors or report.get("reseed_errors")
+                else "SOURCE_BROAD_RESEEDS_PUBLISHED"
+            )
+    reseed_publication_proven = (
+        not notification_errors
+        and pending_notifications == 0
+        and not report.get("reseed_errors")
+        and report.get("reseed_maintenance_status")
+        in {
+            "SOURCE_ANCHOR_RESEEDS_PUBLISHED",
+            "SOURCE_BROAD_RESEEDS_PUBLISHED",
+            "SOURCE_COMMIT_RESEEDS_PUBLISHED",
+        }
+    )
+    cursor_sources = (
+        source_clock_scoped_download_cursor_sources(
+            report,
+            source_clock_report=source_clock_report,
+        )
+        if reseed_publication_proven
+        else ()
     )
     advanced_sources = (
         advance_source_clock_cursor(source_clock_report, sources=cursor_sources)
