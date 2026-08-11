@@ -553,6 +553,21 @@ def configure_global_allocator(allocator: RiskAllocator | None, governor_state: 
         _GLOBAL_GOVERNOR_STATE = governor_state
 
 
+@contextmanager
+def global_actuation_authority_lease() -> Iterator[None]:
+    """Keep one refreshed allocator/governor pair coherent through submit.
+
+    Callers refresh the pair while holding this lease, then perform exactly one
+    side-effect boundary before releasing it. Concurrent collateral or control
+    refreshes wait instead of revoking authority between refresh and submit.
+    The lease does not manufacture authority: all normal allocator, governor,
+    kill-switch, and executor checks still run inside it.
+    """
+
+    with _GLOBAL_ALLOCATION_LOCK:
+        yield
+
+
 def configure_global_governor_state(governor_state: GovernorState | None) -> None:
     global _GLOBAL_GOVERNOR_STATE
     with _GLOBAL_ALLOCATION_LOCK:

@@ -46,6 +46,7 @@ from src.risk_allocator import (
     count_open_reconcile_findings,
     count_unknown_side_effects,
     current_global_entry_capacity_usd,
+    global_actuation_authority_lease,
     load_cap_policy,
     load_position_lots,
     refresh_global_allocator,
@@ -393,6 +394,32 @@ def test_submit_reader_waits_for_one_coherent_allocator_governor_publication():
     assert isinstance(result[0], governor_module.AllocationDecision)
     assert result[0].allowed
     assert seen_states == ["new-pair"]
+
+
+def test_actuation_lease_blocks_concurrent_revocation_through_submit():
+    """A refresh wake cannot clear authority between refresh and side effect."""
+
+    configured = threading.Event()
+    revoke_done = threading.Event()
+
+    def revoke_authority() -> None:
+        configured.wait(timeout=1)
+        configure_global_allocator(None, None)
+        revoke_done.set()
+
+    thread = threading.Thread(target=revoke_authority)
+    try:
+        with global_actuation_authority_lease():
+            configure_global_allocator(RiskAllocator(), _state())
+            thread.start()
+            configured.set()
+            assert not revoke_done.wait(timeout=0.05)
+            assert assert_global_submit_allows(reduce_only=True).allowed
+        assert revoke_done.wait(timeout=1)
+        thread.join(timeout=1)
+        assert risk_allocator_summary()["configured"] is False
+    finally:
+        clear_global_allocator()
 
 
 def test_submit_rechecks_current_pair_after_auction_authority_was_captured():

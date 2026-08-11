@@ -3744,6 +3744,18 @@ def build_exit_intent(position: Position, exit_context: ExitContext) -> ExitInte
         shares=position.effective_shares,
         current_market_price=float(exit_context.current_market_price) if exit_context.current_market_price is not None else 0.0,
         best_bid=exit_context.best_bid,
+        # This action exists because the current strategy q lost empirical
+        # authority. Its invalid HOLD model cannot also price a maker wait;
+        # bind the reduce-only action to immediate partial-fill semantics at
+        # the current executable bid. All submit-time snapshot, price-band,
+        # allocator, collateral, and venue gates remain cumulative.
+        submit_order_type=(
+            "FAK"
+            if str(exit_context.exit_reason or "").startswith(
+                "STRATEGY_HOLD_AUTHORITY_REJECTED "
+            )
+            else None
+        ),
         decision_id=f"exit:{position.trade_id}:{decision_digest}",
         probability_receipt=probability_receipt,
         fresh_prob=float(exit_context.fresh_prob) if exit_context.fresh_prob is not None else None,

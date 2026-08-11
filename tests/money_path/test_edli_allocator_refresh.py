@@ -358,6 +358,21 @@ def test_held_position_monitor_refreshes_allocator_before_exit_monitor():
     )
 
 
+def test_rejected_hold_exit_refresh_and_submit_share_one_authority_lease():
+    """Concurrent collateral wakes cannot revoke a direct exit between its gates."""
+    import inspect
+
+    from src.engine import cycle_runtime
+
+    source = inspect.getsource(cycle_runtime.execute_monitoring_phase)
+    branch = source[source.index('if exit_trigger == "STRATEGY_HOLD_AUTHORITY_REJECTED":'):]
+    lease = branch.index("with global_actuation_authority_lease():")
+    refresh = branch.index("_refresh_global_allocator_for_held_position_monitor(")
+    submit = branch.index("outcome = execute_exit(")
+
+    assert lease < refresh < submit
+
+
 def test_chain_sync_read_lane_cannot_submit_exits():
     """Restart safety: the chain-sync read lane cannot submit exits.
 

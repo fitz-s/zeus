@@ -16637,6 +16637,7 @@ def test_rejected_current_hold_authority_reaches_reduce_only_submit(monkeypatch)
     assert outcome == "sell_pending: order=strategy-rejection-sell, status=OPEN"
     assert len(submitted) == 1
     assert submitted[0]["shares"] == pos.effective_shares
+    assert submitted[0]["submit_order_type"] == "FAK"
 
 
 def test_spoofed_hold_authority_rejection_cannot_reach_venue(monkeypatch):

@@ -8256,19 +8256,62 @@ def execute_monitoring_phase(
                 )
 
                 _invalidate_global_holding_coverage()
-                outcome = execute_exit(
-                    portfolio=portfolio,
-                    position=pos,
-                    exit_context=replace(exit_context, exit_reason=exit_reason),
-                    clob=clob,
-                    conn=conn,
-                    exit_intent=exit_intent,
-                    hard_fact_authority=(
-                        _hard_fact
-                        if exit_trigger == "DAY0_HARD_FACT_BIN_DEAD"
-                        else None
-                    ),
-                )
+                if exit_trigger == "STRATEGY_HOLD_AUTHORITY_REJECTED":
+                    from src.execution.exit_lifecycle import (
+                        _refresh_global_allocator_for_held_position_monitor,
+                    )
+                    from src.risk_allocator import global_actuation_authority_lease
+
+                    # A collateral wake may revoke process-wide allocator state
+                    # while a multi-position monitor is between decisions. For
+                    # this direct reduce-only action, refresh current authority
+                    # and keep that exact pair coherent through one submit.
+                    with global_actuation_authority_lease():
+                        submit_refresh = (
+                            _refresh_global_allocator_for_held_position_monitor(
+                                conn,
+                                portfolio,
+                            )
+                        )
+                        summary["strategy_hold_exit_submit_allocator_refreshes"] = (
+                            summary.get(
+                                "strategy_hold_exit_submit_allocator_refreshes",
+                                0,
+                            )
+                            + 1
+                        )
+                        if not submit_refresh.get("configured"):
+                            summary[
+                                "strategy_hold_exit_submit_allocator_refresh_failures"
+                            ] = summary.get(
+                                "strategy_hold_exit_submit_allocator_refresh_failures",
+                                0,
+                            ) + 1
+                        outcome = execute_exit(
+                            portfolio=portfolio,
+                            position=pos,
+                            exit_context=replace(
+                                exit_context,
+                                exit_reason=exit_reason,
+                            ),
+                            clob=clob,
+                            conn=conn,
+                            exit_intent=exit_intent,
+                        )
+                else:
+                    outcome = execute_exit(
+                        portfolio=portfolio,
+                        position=pos,
+                        exit_context=replace(exit_context, exit_reason=exit_reason),
+                        clob=clob,
+                        conn=conn,
+                        exit_intent=exit_intent,
+                        hard_fact_authority=(
+                            _hard_fact
+                            if exit_trigger == "DAY0_HARD_FACT_BIN_DEAD"
+                            else None
+                        ),
+                    )
                 if outcome.startswith("exit_filled:"):
                     tracker.record_exit(pos)
                     tracker_dirty = True
