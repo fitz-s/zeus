@@ -400,10 +400,18 @@ def _connect_read_only(db_path: Path) -> sqlite3.Connection:
 
 
 def get_trade_connection(
-    *, write_class: WriteClass | str | None = None,
+    *,
+    write_class: WriteClass | str | None = None,
+    busy_timeout_ms: int | None = None,
+    deadline_monotonic: float | None = None,
 ) -> sqlite3.Connection:
     """Trade DB connection (zeus_trades.db)."""
-    return _connect(_zeus_trade_db_path(), write_class=write_class)
+    return _connect(
+        _zeus_trade_db_path(),
+        write_class=write_class,
+        busy_timeout_ms=busy_timeout_ms,
+        deadline_monotonic=deadline_monotonic,
+    )
 
 
 def get_trade_connection_read_only() -> sqlite3.Connection:
@@ -1216,7 +1224,10 @@ def get_trade_connection_with_world_optional(
 
 
 def get_trade_connection_with_world_required(
-    *, write_class: WriteClass | str | None = None,
+    *,
+    write_class: WriteClass | str | None = None,
+    busy_timeout_ms: int | None = None,
+    deadline_monotonic: float | None = None,
 ) -> sqlite3.Connection:
     """Trade connection with world/forecasts ATTACHed or fail closed.
 
@@ -1228,17 +1239,37 @@ def get_trade_connection_with_world_required(
     from src.state.db_writer_lock import canonical_lock_order
 
     resolved = _resolve_write_class(write_class)
-    conn = get_trade_connection(write_class=resolved)
+    conn = get_trade_connection(
+        write_class=resolved,
+        busy_timeout_ms=busy_timeout_ms,
+        deadline_monotonic=deadline_monotonic,
+    )
     try:
-        attached = {row[1] for row in conn.execute("PRAGMA database_list").fetchall()}
+        def _remaining_timeout_ms() -> int:
+            timeout_ms = _db_busy_timeout_ms() if busy_timeout_ms is None else busy_timeout_ms
+            if deadline_monotonic is None:
+                return timeout_ms
+            remaining = float(deadline_monotonic) - time.monotonic()
+            if not math.isfinite(remaining) or remaining <= 0.0:
+                raise TimeoutError("DB_CONNECTION_DEADLINE_EXPIRED")
+            return min(timeout_ms, max(1, math.ceil(remaining * 1000.0)))
+
+        def _execute(sql: str, parameters: tuple[object, ...] = ()) -> sqlite3.Cursor:
+            _apply_busy_timeout(conn, busy_timeout_ms=_remaining_timeout_ms())
+            return conn.execute(sql, parameters)
+
+        attached = {row[1] for row in _execute("PRAGMA database_list").fetchall()}
         if "world" not in attached:
             if resolved is not None:
                 _ = canonical_lock_order([_zeus_trade_db_path(), ZEUS_WORLD_DB_PATH])
                 _cnt_inc("db_trade_with_world_canonical_order_total")
-            conn.execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
+            _execute("ATTACH DATABASE ? AS world", (str(ZEUS_WORLD_DB_PATH),))
             attached.add("world")
         if "forecasts" not in attached:
-            conn.execute("ATTACH DATABASE ? AS forecasts", (str(ZEUS_FORECASTS_DB_PATH),))
+            _execute(
+                "ATTACH DATABASE ? AS forecasts",
+                (str(ZEUS_FORECASTS_DB_PATH),),
+            )
             attached.add("forecasts")
         return conn
     except Exception:

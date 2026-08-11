@@ -73,6 +73,8 @@ from src.strategy.live_inference.live_admission import (
 UTC = timezone.utc
 
 DEFAULT_REACTOR_CYCLE_BUDGET_SECONDS = 22.0
+DEFAULT_REACTOR_CONSTRUCT_WORK_CUT_SECONDS = 45.0
+DEFAULT_REACTOR_CONSTRUCT_CONNECT_CUT_SECONDS = 1.0
 DEFAULT_REACTOR_FETCH_BATCH_LIMIT = 50
 DEFAULT_SNAPSHOT_BLOCK_RETRY_DELAY_SECONDS = 60.0
 DEFAULT_SNAPSHOT_BLOCK_RETRY_MAX_DELAY_SECONDS = 600.0
@@ -7689,10 +7691,18 @@ def run_edli_event_reactor_cycle(
         riskguard_allows_new_entries,
     )
     from src.engine.event_bound_final_intent import submit_event_bound_final_intent_via_existing_executor
+    from src.engine.global_auction_universe import (
+        WorkContext,
+        WorkDeferred,
+        WorkDeferredCode,
+        bounded_work_sqlite,
+    )
     from src.events.event_store import EventStore
     from src.risk_allocator import snapshot_global_auction_capital_authority
     from src.state.db import ZEUS_FORECASTS_DB_PATH, get_forecasts_connection_read_only, get_trade_connection_with_world_required, get_world_connection
     from src.strategy.live_inference.no_trade_regret import NoTradeRegretLedger
+
+    _reactor_construct_complete = True
 
     if not active_lock.acquire(blocking=False):
         _log.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
@@ -8153,6 +8163,52 @@ def run_edli_event_reactor_cycle(
             return False
         if _yield_for_held_position_monitor("reactor_construct"):
             return False
+        try:
+            construct_cut_seconds = float(
+                edli_cfg.get(
+                    "reactor_construct_work_cut_seconds",
+                    DEFAULT_REACTOR_CONSTRUCT_WORK_CUT_SECONDS,
+                )
+            )
+        except (TypeError, ValueError):
+            construct_cut_seconds = DEFAULT_REACTOR_CONSTRUCT_WORK_CUT_SECONDS
+        if not math.isfinite(construct_cut_seconds) or construct_cut_seconds <= 0.0:
+            construct_cut_seconds = DEFAULT_REACTOR_CONSTRUCT_WORK_CUT_SECONDS
+        if (
+            held_sell_completion_cycle
+            or committed_day0_wake
+            or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+        ):
+            def _construct_monitor_cancelled() -> bool:
+                return False
+        else:
+            _, _construct_monitor_cancelled = (
+                _global_auction_monitor_cancellation_probe(
+                    held_position_monitor_pending,
+                    monitor_debt_pending=held_position_monitor_debt_pending,
+                    completion_due=False,
+                )
+            )
+        construct_context = WorkContext(
+            deadline_monotonic=time.monotonic() + construct_cut_seconds,
+            cancel_requested=lambda: (
+                _urgent_wake_pending() or _construct_monitor_cancelled()
+            ),
+        )
+        _reactor_construct_complete = False
+
+        def _construct_checkpoint(stage: str) -> None:
+            construct_context.checkpoint(f"reactor_construct:{stage}")
+
+        def _construct_sql(stage: str, operation):
+            with bounded_work_sqlite(
+                trade_conn,
+                construct_context,
+                stage=f"reactor_construct:{stage}",
+                shared_connection=True,
+            ) as bounded_conn:
+                return operation(bounded_conn)
+
         # THROUGHPUT STRUCTURAL FIX (2026-06-01): the executable-snapshot refresh
         # (_refresh_pending_family_snapshots) runs a full-universe Gamma scan
         # (find_weather_markets → _get_active_events, benchmarked ~76s COLD; TTL 300s
@@ -8166,9 +8222,30 @@ def run_edli_event_reactor_cycle(
         # microseconds) and reaches process_pending → submit in seconds. Decision
         # semantics are UNCHANGED: a family not yet captured by the warm job still
         # requeues via the reactor's existing EXECUTABLE_SNAPSHOT_RETRY path (fail-closed).
-        trade_conn = get_trade_connection_with_world_required(write_class=None)
+        _construct_checkpoint("before_trade_connection")
+        connect_cut_seconds = construct_context.clipped_timeout(
+            DEFAULT_REACTOR_CONSTRUCT_CONNECT_CUT_SECONDS,
+            stage="reactor_construct:trade_connection_budget",
+        )
+        try:
+            trade_conn = get_trade_connection_with_world_required(
+                write_class=None,
+                busy_timeout_ms=max(1, math.ceil(connect_cut_seconds * 1000.0)),
+                deadline_monotonic=min(
+                    construct_context.deadline_monotonic,
+                    time.monotonic() + connect_cut_seconds,
+                ),
+            )
+        except TimeoutError as exc:
+            raise WorkDeferred(
+                WorkDeferredCode.DEADLINE,
+                stage="reactor_construct:trade_connection",
+                remaining_s=construct_context.remaining(),
+            ) from exc
+        _construct_checkpoint("after_trade_connection")
 
         regret_ledger = NoTradeRegretLedger(conn)
+        _construct_checkpoint("after_regret_ledger")
         # Configure the process-wide risk allocator/governor BEFORE the submit adapter is
         # built so the live submit path's select_global_order_type does not raise
         # AllocationDenied("allocator_not_configured"). The legacy discover cycle wires this
@@ -8194,8 +8271,13 @@ def run_edli_event_reactor_cycle(
         _portfolio_state_provider = None
         _portfolio_snapshot = None
         try:
-            _portfolio_snapshot = load_runtime_open_portfolio(trade_conn)
+            _portfolio_snapshot = _construct_sql(
+                "portfolio",
+                load_runtime_open_portfolio,
+            )
             _portfolio_state_provider = lambda: _portfolio_snapshot  # noqa: E731 — cycle-scoped closure
+        except WorkDeferred:
+            raise
         except Exception as _portfolio_exc:  # noqa: BLE001 — mode-sensitive fail-closed below
             _log.warning(
                 "EDLI reactor: portfolio snapshot load failed; live entry will fail closed: %r",
@@ -8207,9 +8289,12 @@ def run_edli_event_reactor_cycle(
                 "EDLI reactor: live entry blocked this cycle because portfolio_state_unavailable"
             )
         if _live_entry_block_reason is None:
-            _alloc_refresh = _edli_refresh_global_allocator(
-                trade_conn,
-                portfolio_snapshot=_portfolio_snapshot,
+            _alloc_refresh = _construct_sql(
+                "allocator",
+                lambda bounded_conn: _edli_refresh_global_allocator(
+                    bounded_conn,
+                    portfolio_snapshot=_portfolio_snapshot,
+                ),
             )
             if not _alloc_refresh.get("configured"):
                 _alloc_reason = _alloc_refresh.get("entry", {}).get("reason") or "allocator_not_configured"
@@ -8222,9 +8307,13 @@ def run_edli_event_reactor_cycle(
                 )
             elif _alloc_refresh.get("configured"):
                 try:
+                    _construct_checkpoint("before_capital_authority")
                     _auction_capital_authority = (
                         snapshot_global_auction_capital_authority()
                     )
+                    _construct_checkpoint("after_capital_authority")
+                except WorkDeferred:
+                    raise
                 except Exception as _capacity_exc:  # noqa: BLE001 - incoherent pair blocks live lane
                     _live_entry_block_reason = (
                         f"capital_authority_snapshot:{type(_capacity_exc).__name__}:"
@@ -8241,6 +8330,7 @@ def run_edli_event_reactor_cycle(
         # and portfolio reads; use the actual processing timestamp so fresh executable/book
         # parent certificates are never later than the decision they support.
         process_pending_decision_time = datetime.now(timezone.utc)
+        _construct_checkpoint("decision_time")
         # Decision-triggered targeted substrate marker: when the adapter sees stale
         # executable prices, it marks the family for sidecar capture and returns
         # False so the stale event requeues fail-closed. Snapshot writes are owned
@@ -8259,6 +8349,7 @@ def run_edli_event_reactor_cycle(
         _reactor_family_market_absence_provider = (
             _edli_reactor_family_market_absence_provider()
         )
+        _construct_checkpoint("after_provider_factories")
         _live_jit_book_quote_provider = (
             _edli_pre_submit_jit_book_quote_provider(
                 trade_conn,
@@ -8303,14 +8394,16 @@ def run_edli_event_reactor_cycle(
             ),
             exact_held_completion=active_held_sell_completion_cycle,
         )
-        _monitor_completion_mode = (
-            _global_auction_completion_mode(
+        _construct_checkpoint("before_completion_mode")
+        _monitor_completion_mode = _construct_sql(
+            "completion_mode",
+            lambda bounded_conn: _global_auction_completion_mode(
                 completion_due=_monitor_completion_due_at_start,
                 exact_held_completion=(
                     active_held_sell_completion_cycle
                 ),
-                trade_conn=trade_conn,
-            )
+                trade_conn=bounded_conn,
+            ),
         )
         if (
             get_current_level() != RiskLevel.GREEN
@@ -8321,6 +8414,7 @@ def run_edli_event_reactor_cycle(
                 "no canonical runtime-open held exposure"
             )
             return not completion_wake
+        _construct_checkpoint("before_adapter")
         submit_adapter = event_bound_live_adapter_from_trade_conn(
             trade_conn,
             live_cap_conn=conn,
@@ -8371,10 +8465,12 @@ def run_edli_event_reactor_cycle(
             ),
             held_family_provider=held_family_provider,
         )
+        _construct_checkpoint("after_adapter")
 
         entry_risk_gate = riskguard_allows_new_entries(
             get_current_level=get_current_level
         )
+        _construct_checkpoint("before_reactor")
         reactor = OpportunityEventReactor(
             store,
             source_truth_gate=edli_source_truth_gate,
@@ -8427,7 +8523,9 @@ def run_edli_event_reactor_cycle(
             world_schema_initialized=True,
             config=ReactorConfig(),
         )
+        _construct_checkpoint("after_reactor")
         _log_stage("reactor_construct")
+        _reactor_construct_complete = True
         _rr = reactor.process_pending(
             decision_time=process_pending_decision_time,
             limit=proof_limit,
@@ -8547,6 +8645,22 @@ def run_edli_event_reactor_cycle(
             _rr.processed, _rr.proof_accepted, _rr.rejected, _rr.retried, _rr.dead_lettered,
             getattr(_rr, "claim_lock_bounces", 0), _rr.rejection_reasons[:8],
         )
+    except WorkDeferred as exc:
+        if _reactor_construct_complete:
+            raise
+        # INV-47 SCOPE: only this in-flight reactor cut. DRAIN: durable events
+        # stay pending and the held monitor receives the released single-writer
+        # turn. RESET: the next scheduler/wake invocation creates a fresh
+        # WorkContext; periodic monitor preemption reserves one ordinary global
+        # cut so unrelated evidence-complete families remain admissible.
+        _log.info(
+            "EDLI reactor deferred during reactor_construct: code=%s stage=%s "
+            "remaining_s=%.3f",
+            exc.code.value,
+            exc.stage,
+            exc.remaining_s,
+        )
+        return False
     finally:
         try:
             try:

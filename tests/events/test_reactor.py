@@ -5131,6 +5131,199 @@ def test_monitor_debt_yields_before_runtime_setup_and_releases_reactor_lock(
     assert not lock.locked()
 
 
+@pytest.mark.parametrize("preemption", (False, True), ids=("deadline", "monitor"))
+def test_reactor_construct_slow_sql_is_bounded_and_releases_resources(
+    monkeypatch,
+    tmp_path,
+    preemption,
+):
+    import src.engine.event_reactor_adapter as adapter_module
+    import src.events.reactor as reactor_module
+    import src.main as main
+    import src.runtime.bankroll_provider as bankroll_provider
+    import src.state.db as db
+    import src.state.portfolio as portfolio_module
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+    from src.runtime import reactor_wake
+
+    world_path = tmp_path / "world.db"
+    forecasts_path = tmp_path / "forecasts.db"
+    trade_path = tmp_path / "trades.db"
+    world = sqlite3.connect(world_path)
+    init_schema(world)
+    world.close()
+    sqlite3.connect(forecasts_path).close()
+    sqlite3.connect(trade_path).close()
+
+    opened: list[sqlite3.Connection] = []
+    trade_connection_kwargs: list[dict[str, object]] = []
+    query_entered = threading.Event()
+    monitor_pressure = threading.Event()
+
+    def world_connection():
+        conn = sqlite3.connect(world_path)
+        conn.row_factory = sqlite3.Row
+        opened.append(conn)
+        return conn
+
+    def forecasts_connection():
+        conn = sqlite3.connect(forecasts_path)
+        opened.append(conn)
+        return conn
+
+    def trade_connection(**kwargs):
+        trade_connection_kwargs.append(dict(kwargs))
+        conn = sqlite3.connect(trade_path)
+        opened.append(conn)
+        return conn
+
+    def slow_portfolio(conn):
+        first = [True]
+
+        def mark_started():
+            if first[0]:
+                first[0] = False
+                query_entered.set()
+            return 0
+
+        conn.create_function("reactor_construct_started", 0, mark_started)
+        conn.execute(
+            """
+            WITH RECURSIVE slow(value) AS (
+              SELECT reactor_construct_started()
+              UNION ALL
+              SELECT value + 1 FROM slow WHERE value < 100000000
+            )
+            SELECT SUM(value) FROM slow
+            """
+        ).fetchone()
+        pytest.fail("slow construct SQL must be interrupted")
+
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda *_args, **_kwargs: {
+            "enabled": True,
+            "event_writer_enabled": True,
+            "forecast_snapshot_trigger_enabled": False,
+            "day0_extreme_trigger_enabled": False,
+            "reactor_construct_work_cut_seconds": 5.0 if preemption else 0.05,
+        },
+    )
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(
+        main,
+        "_start_venue_background_maintenance_after_reactor_if_required",
+        lambda: None,
+    )
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: None)
+    monkeypatch.setattr(bankroll_provider, "warm_from_collateral_snapshot", lambda: True)
+    monkeypatch.setattr(db, "ZEUS_FORECASTS_DB_PATH", forecasts_path)
+    monkeypatch.setattr(db, "get_world_connection", world_connection)
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", forecasts_connection)
+    monkeypatch.setattr(db, "get_trade_connection_with_world_required", trade_connection)
+    monkeypatch.setattr(db, "world_write_mutex", lambda: threading.Lock())
+    monkeypatch.setattr(portfolio_module, "load_runtime_open_portfolio", slow_portfolio)
+    monkeypatch.setattr(
+        adapter_module,
+        "event_bound_live_adapter_from_trade_conn",
+        lambda *_args, **_kwargs: pytest.fail("deferred construct must not build a venue adapter"),
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_pending",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_paused_entry_wake_should_park",
+        lambda **_kwargs: False,
+    )
+    reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+    def reserve_completion(**_kwargs):
+        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+        return True
+
+    monkeypatch.setattr(
+        reactor_module,
+        "request_global_auction_completion",
+        reserve_completion,
+    )
+
+    armer = None
+    if preemption:
+        def arm_monitor():
+            assert query_entered.wait(2.0)
+            monitor_pressure.set()
+
+        armer = threading.Thread(target=arm_monitor)
+        armer.start()
+
+    lock = threading.Lock()
+    started = time.monotonic()
+    assert reactor_module.run_edli_event_reactor_cycle(
+        active_lock=lock,
+        held_position_monitor_debt_pending=monitor_pressure.is_set,
+    ) is False
+    elapsed = time.monotonic() - started
+    if armer is not None:
+        armer.join(timeout=2.0)
+        assert not armer.is_alive()
+    assert query_entered.is_set()
+    assert elapsed < 2.0
+    assert not lock.locked()
+    bounded_trade_calls = [
+        kwargs
+        for kwargs in trade_connection_kwargs
+        if kwargs.get("deadline_monotonic") is not None
+    ]
+    assert len(bounded_trade_calls) == 1
+    assert 1 <= int(bounded_trade_calls[0]["busy_timeout_ms"]) <= 1000
+    assert float(bounded_trade_calls[0]["deadline_monotonic"]) > started
+    if preemption:
+        due_at_start, unrelated_family_probe = (
+            reactor_module._global_auction_monitor_cancellation_probe(
+                lambda: False
+            )
+        )
+        assert due_at_start is True
+        assert unrelated_family_probe() is False
+    reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            conn.execute("SELECT 1")
+
+
+def test_reactor_construct_normal_live_observed_cut_remains_buy_capable():
+    from src.engine.global_auction_universe import WorkContext
+    from src.events import reactor
+
+    clock = [0.0]
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        due_at_start, monitor_cancelled = (
+            reactor._global_auction_monitor_cancellation_probe(
+                lambda: False,
+                monitor_debt_pending=lambda: False,
+            )
+        )
+        context = WorkContext(
+            deadline_monotonic=reactor.DEFAULT_REACTOR_CONSTRUCT_WORK_CUT_SECONDS,
+            cancel_requested=monitor_cancelled,
+            monotonic=lambda: clock[0],
+        )
+
+        assert due_at_start is False
+        clock[0] = 28.408
+        assert context.checkpoint("reactor_construct:normal_buy") > 16.0
+        assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set() is False
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
 def test_producer_fast_path_skips_metar_ledger_recovery_sync():
     from src.events.reactor import run_edli_event_reactor_cycle
 
