@@ -23702,6 +23702,14 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
             ),
             True,
         ),
+        (
+            (
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:"
+                "GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING"
+            ),
+            True,
+        ),
     ),
 )
 def test_global_batch_excludes_typed_current_q_ineligible_family(
@@ -23824,6 +23832,8 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
                     )
                 if "RAW_PROVENANCE_MISSING" in ineligible_reason:
                     raise ValueError("GLOBAL_DAY0_RAW_PROVENANCE_MISSING")
+                if "REPLACEMENT_CONDITIONING_MISSING" in ineligible_reason:
+                    raise ValueError("GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING")
                 raise ValueError(
                     "GLOBAL_DAY0_SOURCE_CLOCK_BOUND_BLOCKED:"
                     "REPLACEMENT_RAW_INPUT_HWM:"
@@ -23841,6 +23851,7 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
             "CONDITIONING_OBSERVATION_TIME_MISMATCH" in ineligible_reason
             or "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason
             or "RAW_PROVENANCE_MISSING" in ineligible_reason
+            or "REPLACEMENT_CONDITIONING_MISSING" in ineligible_reason
         ):
             held_receipt = captured["prepare_held_event"](event_a, decision_at)
             assert held_receipt.prepared_global_family is None
@@ -23850,6 +23861,8 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
                 )
             elif "RAW_PROVENANCE_MISSING" in ineligible_reason:
                 reason_suffix = "GLOBAL_DAY0_RAW_PROVENANCE_MISSING"
+            elif "REPLACEMENT_CONDITIONING_MISSING" in ineligible_reason:
+                reason_suffix = "GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING"
             else:
                 reason_suffix = "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
             assert held_receipt.reason == (
@@ -23890,6 +23903,7 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
             "CONDITIONING_OBSERVATION_TIME_MISMATCH" in ineligible_reason
             or "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason
             or "RAW_PROVENANCE_MISSING" in ineligible_reason
+            or "REPLACEMENT_CONDITIONING_MISSING" in ineligible_reason
         )
         else 1
     )
