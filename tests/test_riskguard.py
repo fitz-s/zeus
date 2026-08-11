@@ -3712,6 +3712,8 @@ class TestStrategyBrierMinSample:
         assert "opening_inertia" not in out["degraded_strategies"]
         assert out["by_strategy"]["opening_inertia"]["thin_sample_no_verdict"] is True
 
+
+class TestStrategyBrierMinSampleContinued:
     def test_shared_recorded_mechanism_requires_one_recorded_decision_law(self):
         rows = [
             {
@@ -3949,6 +3951,307 @@ class TestStrategyBrierMinSample:
         )
         assert level == expected_active_level
         assert row["level"] == expected_active_level.value
+
+
+class TestQkernelMarketRelativeAlphaEvidence:
+    """Thin samples may actuate only through sequential market-relative proof."""
+
+    @staticmethod
+    def _row(
+        trade_id: str,
+        *,
+        city: str,
+        q: float,
+        outcome: int,
+    ) -> dict:
+        return {
+            "trade_id": trade_id,
+            "strategy": "forecast_qkernel_entry",
+            "decision_law_id": "predicted_bin_ev_v1",
+            "probability_semantics_ready": True,
+            "probability_semantics_revisions": (
+                "stale_ensemble_absolute_disagreement_v2",
+            ),
+            "p_posterior": q,
+            "outcome": outcome,
+            "city": city,
+            "settled_at": "2026-08-10T22:00:00+00:00",
+        }
+
+    @staticmethod
+    def _conn() -> sqlite3.Connection:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute(
+            """
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                entry_price REAL,
+                city TEXT,
+                target_date TEXT,
+                temperature_metric TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE execution_fact (
+                position_id TEXT,
+                order_role TEXT,
+                filled_at TEXT,
+                terminal_exec_status TEXT,
+                fill_price REAL,
+                shares REAL
+            )
+            """
+        )
+        return conn
+
+    def test_live_failure_path_rejects_without_counting_correlated_dates_twice(self):
+        rows = [
+            self._row("helsinki-yes", city="Helsinki", q=0.3720459264, outcome=0),
+            self._row("helsinki-no", city="Helsinki", q=0.9998639330, outcome=1),
+            self._row("guangzhou", city="Guangzhou", q=0.4484491333, outcome=0),
+            self._row("tel-aviv", city="Tel Aviv", q=0.9059764849, outcome=0),
+        ]
+        prices = {
+            "helsinki-yes": 0.06,
+            "helsinki-no": 0.82,
+            "guangzhou": 0.06,
+            "tel-aviv": 0.30,
+        }
+        conn = self._conn()
+        conn.executemany(
+            "INSERT INTO position_current VALUES (?,?,?,?,?)",
+            [
+                (
+                    row["trade_id"],
+                    prices[row["trade_id"]],
+                    row["city"],
+                    "2026-08-10" if row["city"] != "Tel Aviv" else "2026-08-09",
+                    "high",
+                )
+                for row in rows
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO execution_fact VALUES (?,'entry','2026-08-10','filled',?,1)",
+            [(trade_id, price) for trade_id, price in prices.items()],
+        )
+
+        bound = riskguard_module._bind_entry_market_benchmarks(conn, rows)
+        evidence = riskguard_module._qkernel_market_relative_alpha_evidence(
+            bound,
+            rejection_evalue=10.0,
+            as_of=datetime(2026, 8, 11, tzinfo=timezone.utc),
+        )
+
+        assert evidence["status"] == "rejected"
+        assert evidence["rejected"] is True
+        assert len(evidence["cohorts"]) == 1
+        cohort = evidence["cohorts"][0]
+        assert cohort["candidate_count"] == 4
+        assert cohort["independent_cluster_count"] == 2
+        assert cohort["market_over_model_evalue"] > 12.0
+        conn.close()
+
+    def test_one_loss_below_sequential_evidence_boundary_does_not_gate(self):
+        conn = self._conn()
+        conn.execute(
+            "INSERT INTO position_current VALUES (?,?,?,?,?)",
+            ("one-loss", 0.20, "NYC", "2026-08-10", "high"),
+        )
+        conn.execute(
+            "INSERT INTO execution_fact VALUES (?,'entry','2026-08-10','filled',?,1)",
+            ("one-loss", 0.20),
+        )
+        rows = [self._row("one-loss", city="NYC", q=0.79, outcome=0)]
+
+        evidence = riskguard_module._qkernel_market_relative_alpha_evidence(
+            riskguard_module._bind_entry_market_benchmarks(conn, rows),
+            rejection_evalue=10.0,
+            as_of=datetime(2026, 8, 11, tzinfo=timezone.utc),
+        )
+
+        assert evidence["status"] == "ok"
+        assert evidence["rejected"] is False
+        assert evidence["cohorts"][0]["market_over_model_evalue"] < 10.0
+        conn.close()
+
+    def test_missing_executable_benchmark_is_visible_but_non_actuating(self):
+        conn = self._conn()
+        rows = [self._row("missing", city="NYC", q=0.99, outcome=0)]
+
+        evidence = riskguard_module._qkernel_market_relative_alpha_evidence(
+            riskguard_module._bind_entry_market_benchmarks(conn, rows),
+            rejection_evalue=10.0,
+            as_of=datetime(2026, 8, 11, tzinfo=timezone.utc),
+        )
+
+        assert evidence == {
+            "status": "no_evidence",
+            "rejection_evalue": 10.0,
+            "window_days": 7.0,
+            "evaluated_at": "2026-08-11T00:00:00+00:00",
+            "rejected": False,
+            "missing_benchmark_count": 1,
+            "cohorts": [],
+        }
+        conn.close()
+
+    def test_tick_persists_qkernel_gate_and_keeps_held_lanes_green(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        rows = [
+            _settlement_row(
+                trade_id="helsinki-yes",
+                strategy="forecast_qkernel_entry",
+                p_posterior=0.3720459264,
+                outcome=0,
+            ),
+            _settlement_row(
+                trade_id="helsinki-no",
+                strategy="forecast_qkernel_entry",
+                p_posterior=0.9998639330,
+                outcome=1,
+            ),
+            _settlement_row(
+                trade_id="guangzhou",
+                strategy="forecast_qkernel_entry",
+                p_posterior=0.4484491333,
+                outcome=0,
+            ),
+            _settlement_row(
+                trade_id="tel-aviv",
+                strategy="forecast_qkernel_entry",
+                p_posterior=0.9059764849,
+                outcome=0,
+            ),
+        ]
+        for row in rows:
+            row["probability_semantics_revisions"] = (
+                "stale_ensemble_absolute_disagreement_v2",
+            )
+            row["settled_at"] = datetime.now(timezone.utc).isoformat()
+
+        _init_empty_canonical_portfolio_schema(zeus_db)
+        _persist_decision_law_identities(zeus_db, rows)
+        conn = get_connection(zeus_db)
+        prices = {
+            "helsinki-yes": (0.06, "Helsinki", "2026-08-10"),
+            "helsinki-no": (0.82, "Helsinki", "2026-08-10"),
+            "guangzhou": (0.06, "Guangzhou", "2026-08-10"),
+            "tel-aviv": (0.30, "Tel Aviv", "2026-08-09"),
+        }
+        for trade_id, (price, city, target_date) in prices.items():
+            conn.execute(
+                "UPDATE position_current "
+                "SET entry_price=?,city=?,target_date=?,temperature_metric='high' "
+                "WHERE position_id=?",
+                (price, city, target_date, trade_id),
+            )
+            conn.execute(
+                "INSERT INTO execution_fact ("
+                "intent_id,position_id,order_role,filled_at,fill_price,shares,"
+                "terminal_exec_status) VALUES (?,?,?,?,?,?,?)",
+                (
+                    f"entry-{trade_id}",
+                    trade_id,
+                    "entry",
+                    datetime.now(timezone.utc).isoformat(),
+                    price,
+                    1.0,
+                    "filled",
+                ),
+            )
+        conn.commit()
+        conn.close()
+
+        def _fake_get_connection(path=None, **_kwargs):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        tracker = SimpleNamespace(
+            summary=lambda: {},
+            edge_compression_check=lambda: [],
+            accounting={},
+        )
+        _patch_riskguard_bankroll(monkeypatch)
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(
+            riskguard_module,
+            "load_portfolio",
+            lambda: PortfolioState(bankroll=211.37),
+        )
+        monkeypatch.setattr(riskguard_module, "load_tracker", lambda: tracker)
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda *_, **__: rows,
+        )
+
+        level = riskguard_module.tick()
+        risk_row = get_connection(risk_db).execute(
+            "SELECT level,details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(risk_row["details_json"])
+        gate = get_connection(zeus_db).execute(
+            "SELECT strategy_key,status,reason FROM risk_actions "
+            "WHERE action_id='riskguard:gate:forecast_qkernel_entry'"
+        ).fetchone()
+
+        assert level == RiskLevel.GREEN
+        assert risk_row["level"] == RiskLevel.GREEN.value
+        assert details["market_relative_alpha_evidence"]["rejected"] is True
+        assert details["market_relative_alpha_gate_confirmation"] == {
+            "forecast_qkernel_entry": True,
+        }
+        assert dict(gate) == {
+            "strategy_key": "forecast_qkernel_entry",
+            "status": "active",
+            "reason": (
+                "market_relative_alpha_rejected("
+                "evalue=12.688312,clusters=2,law=predicted_bin_ev_v1)"
+            ),
+        }
+
+        monkeypatch.setattr(
+            riskguard_module,
+            "_refresh_riskguard_auxiliary_bookkeeping",
+            lambda *_, **__: (
+                {
+                    "status": "skipped_dependency_lock",
+                    "emitted_count": 0,
+                    "expired_count": 0,
+                },
+                {
+                    "status": "skipped_dependency_lock",
+                    "rows_written": 0,
+                    "missing_required_tables": [],
+                    "missing_optional_tables": [],
+                    "settlement_authority_missing_tables": [],
+                    "omitted_fields": [],
+                },
+                {"status": "empty", "by_strategy": {}, "stale_strategy_keys": []},
+            ),
+        )
+
+        degraded_level = riskguard_module.tick()
+        degraded_row = get_connection(risk_db).execute(
+            "SELECT level,details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        degraded_details = json.loads(degraded_row["details_json"])
+
+        assert degraded_level == RiskLevel.YELLOW
+        assert degraded_details["strategy_signal_level"] == RiskLevel.YELLOW.value
+        assert degraded_details["market_relative_alpha_gate_confirmation"] == {
+            "forecast_qkernel_entry": False,
+        }
 
 
 class TestRiskGuardExecutionQualityLocalization:

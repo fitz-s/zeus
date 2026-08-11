@@ -165,6 +165,8 @@
     "brier_yellow": 0.25,
     "brier_orange": 0.3,
     "brier_red": 0.35,
+    "market_relative_alpha_rejection_evalue": 10.0,
+    "market_relative_alpha_window_days": 7.0,
     "accuracy_orange": 0.45,
     "win_rate_yellow": 0.4,
     "win_rate_orange": 0.35,

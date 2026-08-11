@@ -25,6 +25,7 @@ Graduated response: GREEN → YELLOW → ORANGE → RED.
 import hashlib
 import json
 import logging
+import math
 import os
 import shutil
 import sqlite3
@@ -2197,6 +2198,251 @@ def _riskguard_brier_actuating_rows(
     return actuating
 
 
+def _bind_entry_market_benchmarks(
+    conn: sqlite3.Connection,
+    rows: list[dict],
+) -> list[dict]:
+    """Bind each settled probability claim to its canonical entry fills."""
+
+    output = [dict(row) for row in rows]
+    trade_ids = sorted(
+        {
+            str(row.get("trade_id") or "").strip()
+            for row in output
+            if str(row.get("trade_id") or "").strip()
+        }
+    )
+    bindings: dict[str, tuple[float, str, str, str]] = {}
+    required_columns = {
+        "position_current": {
+            "position_id",
+            "city",
+            "target_date",
+            "temperature_metric",
+        },
+        "execution_fact": {
+            "position_id",
+            "order_role",
+            "filled_at",
+            "terminal_exec_status",
+            "fill_price",
+            "shares",
+        },
+    }
+    schema_ready = bool(trade_ids) and all(
+        _table_exists(conn, table)
+        and required.issubset(
+            {
+                str(column[1])
+                for column in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+        )
+        for table, required in required_columns.items()
+    )
+    if schema_ready:
+        fill_parts: dict[str, list[tuple[float, float]]] = {
+            trade_id: [] for trade_id in trade_ids
+        }
+        identities: dict[str, tuple[str, str, str]] = {}
+        invalid: set[str] = set()
+        for start in range(0, len(trade_ids), 500):
+            chunk = trade_ids[start : start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            for bound in conn.execute(
+                "SELECT pc.position_id,ef.fill_price,ef.shares,"
+                "pc.city,pc.target_date,pc.temperature_metric "
+                "FROM position_current AS pc "
+                "LEFT JOIN execution_fact AS ef ON ef.position_id=pc.position_id "
+                "AND ef.order_role='entry' AND ef.filled_at IS NOT NULL "
+                "AND lower(COALESCE(ef.terminal_exec_status,''))='filled' "
+                f"WHERE pc.position_id IN ({placeholders})",
+                tuple(chunk),
+            ).fetchall():
+                trade_id = str(bound[0] or "").strip()
+                identities[trade_id] = (
+                    str(bound[3] or "").strip(),
+                    str(bound[4] or "").strip(),
+                    str(bound[5] or "").strip(),
+                )
+                try:
+                    price = float(bound[1])
+                    shares = float(bound[2])
+                except (TypeError, ValueError):
+                    invalid.add(trade_id)
+                    continue
+                if (
+                    not math.isfinite(price)
+                    or not math.isfinite(shares)
+                    or not 0.0 < price < 1.0
+                    or shares <= 0.0
+                ):
+                    invalid.add(trade_id)
+                    continue
+                fill_parts[trade_id].append((price, shares))
+
+        for trade_id, parts in fill_parts.items():
+            identity = identities.get(trade_id)
+            if trade_id in invalid or not parts or identity is None or not all(identity):
+                continue
+            total_shares = sum(shares for _price, shares in parts)
+            price = sum(price * shares for price, shares in parts) / total_shares
+            city, target_date, metric = identity
+            bindings[trade_id] = (price, city, target_date, metric)
+
+    for row in output:
+        binding = bindings.get(str(row.get("trade_id") or "").strip())
+        row["entry_market_benchmark_ready"] = binding is not None
+        if binding is None:
+            row["entry_market_benchmark"] = None
+            row["entry_market_benchmark_family"] = ()
+            continue
+        price, city, target_date, metric = binding
+        row["entry_market_benchmark"] = price
+        row["entry_market_benchmark_family"] = (city, target_date, metric)
+    return output
+
+
+def _qkernel_market_relative_alpha_evidence(
+    rows: list[dict],
+    *,
+    rejection_evalue: float,
+    window_days: float = 7.0,
+    as_of: datetime | None = None,
+) -> dict[str, object]:
+    """Test current qkernel claims against their executable market benchmark.
+
+    For one binary claim, ``market/model`` likelihood is a valid sequential
+    e-value because both probabilities were fixed before the outcome. Sibling
+    bins and same-day weather errors are correlated, so each target-date/metric
+    cluster contributes only its largest ex-ante claimed edge. This is a
+    capital-alpha test, not a stop-loss: it asks whether the model that
+    authorized entry is beating the price paid.
+
+    SCOPE: only new ``forecast_qkernel_entry`` exposure via its durable strategy
+    gate; held monitoring, reduce-only SELL, reconciliation, and settlement run.
+    DRAIN: every RiskGuard tick rebinds immutable fills and settled outcomes.
+    RESET: replacement probability semantics supersede the rejected cohort, or
+    its bounded seven-day capital evidence ages out; a passing current cohort
+    expires the durable strategy action on the next tick.
+    """
+
+    if not math.isfinite(rejection_evalue) or rejection_evalue <= 1.0:
+        raise ValueError("market-relative alpha rejection_evalue must exceed 1")
+    if not math.isfinite(window_days) or window_days <= 0.0 or window_days > 7.0:
+        raise ValueError("market-relative alpha window_days must be in (0, 7]")
+    evaluated_at = as_of or datetime.now(timezone.utc)
+    if evaluated_at.tzinfo is None:
+        evaluated_at = evaluated_at.replace(tzinfo=timezone.utc)
+    not_before = evaluated_at - timedelta(days=window_days)
+
+    cohorts: dict[tuple[str, tuple[str, ...]], dict[tuple[str, str], dict]] = {}
+    missing_benchmark_count = 0
+    for row in rows:
+        if str(row.get("strategy") or "").strip() != "forecast_qkernel_entry":
+            continue
+        if row.get("probability_semantics_ready") is not True:
+            continue
+        try:
+            settled_at = datetime.fromisoformat(
+                str(row.get("settled_at") or "").replace("Z", "+00:00")
+            )
+        except ValueError:
+            continue
+        if settled_at.tzinfo is None:
+            settled_at = settled_at.replace(tzinfo=timezone.utc)
+        if settled_at < not_before or settled_at > evaluated_at:
+            continue
+        if not row.get("entry_market_benchmark_ready", False):
+            missing_benchmark_count += 1
+            continue
+        try:
+            q = float(row["p_posterior"])
+            market = float(row["entry_market_benchmark"])
+            outcome = int(row["outcome"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        family = tuple(row.get("entry_market_benchmark_family") or ())
+        if (
+            len(family) != 3
+            or not all(str(value).strip() for value in family)
+            or outcome not in {0, 1}
+            or not math.isfinite(q)
+            or not math.isfinite(market)
+            or not 0.0 <= q <= 1.0
+            or not 0.0 < market < 1.0
+        ):
+            continue
+        revisions = tuple(
+            sorted(
+                str(revision).strip()
+                for revision in (row.get("probability_semantics_revisions") or ())
+                if str(revision).strip()
+            )
+        )
+        cohort_key = (str(row.get("decision_law_id") or "").strip(), revisions)
+        evidence_cluster = (
+            str(family[1]).strip(),
+            str(family[2]).strip(),
+        )
+        candidate = {
+            "trade_id": str(row.get("trade_id") or ""),
+            "q": q,
+            "market": market,
+            "outcome": outcome,
+            "claimed_edge": abs(q - market),
+        }
+        cluster_rows = cohorts.setdefault(cohort_key, {})
+        incumbent = cluster_rows.get(evidence_cluster)
+        if incumbent is None or (
+            candidate["claimed_edge"], candidate["trade_id"]
+        ) > (incumbent["claimed_edge"], incumbent["trade_id"]):
+            cluster_rows[evidence_cluster] = candidate
+
+    cohort_evidence: list[dict[str, object]] = []
+    for (decision_law_id, revisions), cluster_rows in sorted(cohorts.items()):
+        log_model_over_market = 0.0
+        for row in cluster_rows.values():
+            q = min(max(float(row["q"]), 1e-12), 1.0 - 1e-12)
+            market = min(max(float(row["market"]), 1e-12), 1.0 - 1e-12)
+            outcome = int(row["outcome"])
+            model_probability = q if outcome else 1.0 - q
+            market_probability = market if outcome else 1.0 - market
+            log_model_over_market += math.log(model_probability / market_probability)
+        market_over_model_evalue = math.exp(min(700.0, -log_model_over_market))
+        cohort_evidence.append(
+            {
+                "decision_law_id": decision_law_id,
+                "probability_semantics_revisions": list(revisions),
+                "independent_cluster_count": len(cluster_rows),
+                "candidate_count": sum(
+                    1
+                    for row in rows
+                    if str(row.get("strategy") or "").strip()
+                    == "forecast_qkernel_entry"
+                    and str(row.get("decision_law_id") or "").strip()
+                    == decision_law_id
+                    and tuple(sorted(row.get("probability_semantics_revisions") or ()))
+                    == revisions
+                    and row.get("entry_market_benchmark_ready", False)
+                ),
+                "log_model_over_market": round(log_model_over_market, 6),
+                "market_over_model_evalue": round(market_over_model_evalue, 6),
+                "rejected": market_over_model_evalue >= rejection_evalue,
+            }
+        )
+
+    rejected = [cohort for cohort in cohort_evidence if cohort["rejected"]]
+    return {
+        "status": "rejected" if rejected else ("ok" if cohort_evidence else "no_evidence"),
+        "rejection_evalue": rejection_evalue,
+        "window_days": window_days,
+        "evaluated_at": evaluated_at.isoformat(),
+        "rejected": bool(rejected),
+        "missing_benchmark_count": missing_benchmark_count,
+        "cohorts": cohort_evidence,
+    }
+
+
 # Below this many settled observations a per-strategy Brier score is noise,
 # not a verdict (a single loss at p=0.6 scores 0.36 > brier_red). Thin
 # strategies are still counted in the portfolio pool and the loss gates.
@@ -3029,6 +3275,10 @@ def _tick_once() -> RiskLevel:
             settlement_scan_rows,
             probability_semantics_binding,
         ) = _bind_qkernel_probability_semantics(settlement_scan_rows)
+        settlement_scan_rows = _bind_entry_market_benchmarks(
+            zeus_conn,
+            settlement_scan_rows,
+        )
         settlement_rows = settlement_scan_rows[:RISKGUARD_SETTLEMENT_LIMIT]
         brier_candidate_rows = settlement_scan_rows[:RISKGUARD_BRIER_SCAN_LIMIT]
         settlement_row_storage_sources = sorted({str(r.get("source", "unknown")) for r in settlement_rows})
@@ -3078,6 +3328,15 @@ def _tick_once() -> RiskLevel:
 
         brier_metric_rows = _riskguard_brier_metric_rows(brier_candidate_rows)
         brier_actuating_rows = _riskguard_brier_actuating_rows(brier_metric_rows)
+        market_relative_alpha_evidence = _qkernel_market_relative_alpha_evidence(
+            brier_actuating_rows,
+            rejection_evalue=float(
+                thresholds.get("market_relative_alpha_rejection_evalue", 10.0)
+            ),
+            window_days=float(
+                thresholds.get("market_relative_alpha_window_days", 7.0)
+            ),
+        )
         probability_identity_ready_count = sum(
             bool(row.get("probability_identity_ready", False))
             for row in brier_candidate_rows
@@ -3193,6 +3452,27 @@ def _tick_once() -> RiskLevel:
         execution_observed = int(execution_overall.get("terminal_observed", 0) or 0)
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
+        if market_relative_alpha_evidence["rejected"]:
+            rejected_cohorts = [
+                cohort
+                for cohort in market_relative_alpha_evidence["cohorts"]
+                if cohort["rejected"]
+            ]
+            strongest = max(
+                rejected_cohorts,
+                key=lambda cohort: float(cohort["market_over_model_evalue"]),
+            )
+            _append_reason(
+                recommended_strategy_gate_reasons,
+                "forecast_qkernel_entry",
+                (
+                    "market_relative_alpha_rejected("
+                    f"evalue={strongest['market_over_model_evalue']},"
+                    f"clusters={strongest['independent_cluster_count']},"
+                    f"law={strongest['decision_law_id']}"
+                    ")"
+                ),
+            )
         probability_semantics_level = RiskLevel.GREEN
         if probability_semantics_binding.get("status") == "unavailable":
             probability_semantics_level = RiskLevel.DATA_DEGRADED
@@ -3336,6 +3616,24 @@ def _tick_once() -> RiskLevel:
             now=now,
             position_view=portfolio_truth.get("_strategy_health_position_view"),
         )
+        market_relative_alpha_gate_confirmation: dict[str, bool] = {}
+        if market_relative_alpha_evidence["rejected"]:
+            if durable_action_status.get("status") == "emitted":
+                market_relative_alpha_gate_confirmation = (
+                    _confirm_active_durable_strategy_gates(
+                        zeus_conn,
+                        ["forecast_qkernel_entry"],
+                    )
+                )
+            else:
+                market_relative_alpha_gate_confirmation = {
+                    "forecast_qkernel_entry": False,
+                }
+            if not market_relative_alpha_gate_confirmation.get(
+                "forecast_qkernel_entry",
+                False,
+            ):
+                strategy_signal_level = RiskLevel.YELLOW
         if brier_strategy_localization.get("status") == "pending_durable_strategy_gate":
             if durable_action_status.get("status") == "emitted":
                 brier_level = RiskLevel.GREEN
@@ -3600,6 +3898,10 @@ def _tick_once() -> RiskLevel:
                 "brier_strategy_localization": brier_strategy_localization,
                 "probability_semantics_level": probability_semantics_level.value,
                 "probability_semantics_binding": probability_semantics_binding,
+                "market_relative_alpha_evidence": market_relative_alpha_evidence,
+                "market_relative_alpha_gate_confirmation": (
+                    market_relative_alpha_gate_confirmation
+                ),
                 "settlement_quality_level": settlement_quality_level.value,
                 "execution_quality_level": execution_quality_level.value,
                 "strategy_signal_level": strategy_signal_level.value,
