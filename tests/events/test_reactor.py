@@ -7798,8 +7798,9 @@ def test_global_batch_targeted_wake_claims_only_committed_event():
 
 
 @pytest.mark.parametrize("winner_finalized", (True, False))
+@pytest.mark.parametrize("batch_economic_cut_completed", (False, True))
 def test_global_batch_prioritizes_venue_side_effect_and_stops_repeated_waits(
-    monkeypatch, winner_finalized
+    monkeypatch, winner_finalized, batch_economic_cut_completed
 ):
     conn, store = _store()
     events = tuple(
@@ -7837,9 +7838,10 @@ def test_global_batch_prioritizes_venue_side_effect_and_stops_repeated_waits(
             receipts=receipts,
             winner_event_id=winner.event_id,
             venue_submit_count=1,
-            # Even a malformed adapter disposition must never rewrite a batch
-            # that crossed the venue side-effect boundary.
-            economic_cut_completed=True,
+            # A valid successful-submit result is False.  True represents a
+            # malformed legacy producer; either way the venue side effect and
+            # exact held completion cut must remain authoritative.
+            economic_cut_completed=batch_economic_cut_completed,
             held_sell_completion_cut=actuated_cut,
         )
 
@@ -7883,6 +7885,7 @@ def test_global_batch_prioritizes_venue_side_effect_and_stops_repeated_waits(
     result = reactor.process_pending(decision_time=_DT_VENUE_OPEN, limit=3)
 
     assert result.global_auction_completed_non_cancelled == 0
+    assert result.global_held_sell_completion_cuts[0].outcome == "ACTUATED"
     assert calls == (
         [
             (winner.event_id, "VENUE_SUBMIT_ACKED", "TEST_RECEIPT", None),

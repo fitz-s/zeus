@@ -1027,7 +1027,13 @@ class GlobalHeldSellCompletionCut:
 
 @dataclass(frozen=True)
 class GlobalBatchSubmitResult:
-    """Opaque batch-actuation result: all events finalized, at most one venue call."""
+    """Opaque batch-actuation result: all events finalized, at most one venue call.
+
+    ``economic_cut_completed`` means a side-effect-free terminal HOLD/CASH cut.
+    A successful submit instead carries a continuation and remains ``False``;
+    exact held-SELL actuation completion belongs to
+    ``held_sell_completion_cut``.
+    """
 
     receipts: Mapping[str, EventSubmissionReceipt]
     winner_event_id: str | None
@@ -1856,13 +1862,10 @@ class OpportunityEventReactor:
             completion_cut = batch_result.held_sell_completion_cut
             # No-trade is terminal only after every Window-B disposition is
             # durable. A submitted held SELL crossed the venue boundary already.
-            if (
+            if completion_cut.outcome == "CAPITAL_REJECTED" and (
                 completion_cut.economic_cut_completed
                 != batch_result.economic_cut_completed
-                or (
-                    completion_cut.outcome == "CAPITAL_REJECTED"
-                    and not all_claimed_finalized
-                )
+                or not all_claimed_finalized
             ):
                 completion_cut = dataclass_replace(
                     completion_cut,

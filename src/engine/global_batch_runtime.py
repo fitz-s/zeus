@@ -6783,9 +6783,11 @@ def process_current_global_batch(
             receipts=receipts,
             winner_event_id=winner_id,
             venue_submit_count=venue_delta,
-            economic_cut_completed=bool(
-                venue_delta == 1 and winner_receipt.submitted
-            ),
+            # A venue submit is an action, not a terminal HOLD/CASH cut.  The
+            # continuation must re-solve current wealth, probabilities, and
+            # books after the fill.  Held-SELL debt has its own exact ACTUATED
+            # completion cut below and must not overload this batch disposition.
+            economic_cut_completed=False,
             held_sell_completion_cut=held_sell_completion_cut(
                 economic_cut_completed=bool(
                     venue_delta == 1 and winner_receipt.submitted

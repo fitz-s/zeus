@@ -22339,6 +22339,7 @@ def test_global_batch_isolates_missing_restricted_family(monkeypatch):
     assert selected_scopes[0].family_keys == current_scope.family_keys
     assert venue_calls == [1]
     assert result.venue_submit_count == 1
+    assert result.economic_cut_completed is False
     assert result.winner_event_id == event_a.event_id
     assert result.receipts[event_a.event_id].submitted is True
     assert result.receipts[event_b.event_id].reason == (
@@ -26941,7 +26942,7 @@ def test_global_batch_reauctions_complete_cut_on_current_wealth(
             decision_at_utc=decision_at,
             book_deadline_at_utc=decision_at + _dt.timedelta(seconds=30),
             status="EVALUATED",
-            candidate_id=f"coverage-{holding.shares}",
+            candidate_id=candidate.candidate_id,
             sell_book_witness_identity=global_sell_book_witness_identity(
                 sell_curve
             ),
@@ -27144,7 +27145,14 @@ def test_global_batch_reauctions_complete_cut_on_current_wealth(
     else:
         assert result.winner_event_id == event.event_id
         assert result.venue_submit_count == 1
+        assert result.economic_cut_completed is False
         assert result.receipts[event.event_id].submitted is True
+        assert result.held_sell_completion_cut is not None
+        assert result.held_sell_completion_cut.economic_cut_completed is True
+        assert result.held_sell_completion_cut.outcome == "ACTUATED"
+        assert result.held_sell_completion_cut.selected_position_id == (
+            "position-condition-a"
+        )
 
 
 @pytest.mark.parametrize(
