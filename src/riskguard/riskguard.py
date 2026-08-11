@@ -2485,6 +2485,9 @@ def _settled_market_relative_alpha_shadow_rows(
             envelope.get("probability_semantics_revision") or ""
         )
         q_version = str(envelope.get("q_version") or "")
+        posterior_identity_hash = str(
+            envelope.get("posterior_identity_hash") or ""
+        )
         side = str(envelope.get("side") or "").upper()
         expected_fields = {
             "family_key": row["family_id"],
@@ -2501,7 +2504,7 @@ def _settled_market_relative_alpha_shadow_rows(
         revision_identity_ready = (
             day0_probability_semantics_revision(q_version) == revision
             if strategy_key == "day0_nowcast_entry"
-            else bool(q_version)
+            else bool(q_version and posterior_identity_hash)
         )
         if (
             envelope.get("schema_version") != 2
@@ -2615,7 +2618,9 @@ def _settled_market_relative_alpha_shadow_rows(
             {
                 "trade_id": str(row["regret_event_id"]),
                 "strategy": strategy_key,
-                "entry_q_versions": (str(row["envelope"]["q_version"]),),
+                "entry_q_versions": (
+                    str(row["envelope"]["posterior_identity_hash"]),
+                ),
             }
             for row in certificates
         ]

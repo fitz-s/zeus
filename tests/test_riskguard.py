@@ -4931,10 +4931,10 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "side": "YES",
             "token_id": "token-yes",
             "q": 0.90,
-            "q_version": "q-current",
+            "q_version": "joint-q-current",
             "probability_witness_identity": "witness",
             "probability_content_identity": "content",
-            "posterior_identity_hash": "posterior",
+            "posterior_identity_hash": "posterior-current",
             "source_truth_identity": "source",
             "resolution_identity": "resolution",
             "topology_identity": "topology",
@@ -5028,7 +5028,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         forecasts.execute(
             "INSERT INTO forecast_posteriors VALUES (?,?)",
             (
-                "q-current",
+                "posterior-current",
                 json.dumps(
                     {
                         "bayes_precision_fusion": {
@@ -5084,7 +5084,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
                         }
                     }
                 ),
-                "q-current",
+                "posterior-current",
             ),
         )
         forecasts.commit()

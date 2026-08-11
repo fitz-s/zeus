@@ -31962,6 +31962,49 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
     assert qkernel_events[0].rejection_reason == (
         "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
     )
+    assert qkernel_events[0].event_id.startswith(
+        "market-relative-alpha-shadow-v2-posterior-lineage:"
+    )
+    missing_posterior_witnesses = {
+        family_key: SimpleNamespace(
+            **{
+                **vars(qkernel_witness),
+                "posterior_identity_hash": "",
+            }
+        )
+        for family_key, qkernel_witness in qkernel_witnesses.items()
+    }
+    assert (
+        global_batch_runtime._market_relative_alpha_shadow_events(
+            selected=SimpleNamespace(
+                decision=SimpleNamespace(
+                    candidate_evaluations=qkernel_evaluations
+                )
+            ),
+            probability_witnesses=missing_posterior_witnesses,
+            book_epoch=SimpleNamespace(
+                assets=assets,
+                witness_identity="book-epoch",
+            ),
+            family_context_by_key={
+                family_a: {
+                    "city": "Alpha",
+                    "target_date": "2026-08-11",
+                    "metric": "high",
+                },
+                family_b: {
+                    "city": "Beta",
+                    "target_date": "2026-08-11",
+                    "metric": "low",
+                },
+            },
+            selection_epoch_identity="selection-epoch",
+            selection_cut_at_utc=at,
+            decision_at_utc=at,
+            strategy_keys=("forecast_qkernel_entry",),
+        )
+        == ()
+    )
 
     conn = sqlite3.connect(":memory:")
     ensure_table(conn)

@@ -4220,6 +4220,9 @@ _DAY0_ALPHA_SHADOW_SELECTION_RULE = (
 _QKERNEL_ALPHA_SHADOW_REASON = (
     "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
 )
+_QKERNEL_ALPHA_SHADOW_EVENT_VERSION = (
+    "market-relative-alpha-shadow-v2-posterior-lineage"
+)
 _QKERNEL_ALPHA_SHADOW_DECISION_LAW = "executable_min_order_capital_gain_v2"
 _QKERNEL_ALPHA_SHADOW_SELECTION_RULE = _DAY0_ALPHA_SHADOW_SELECTION_RULE
 
@@ -4348,6 +4351,9 @@ def _market_relative_alpha_shadow_events(
         target_date = str(context.get("target_date") or "").strip()
         metric = str(context.get("metric") or "").strip().lower()
         q_version = str(getattr(witness, "q_version", "") or "")
+        posterior_identity_hash = str(
+            getattr(witness, "posterior_identity_hash", "") or ""
+        )
         if strategy_key == "day0_nowcast_entry":
             revision = day0_probability_semantics_revision(q_version)
             probability_ready = revision == DAY0_PROBABILITY_SEMANTICS_REVISION
@@ -4355,13 +4361,15 @@ def _market_relative_alpha_shadow_events(
             shadow_reason = _DAY0_ALPHA_SHADOW_REASON
             decision_law = _DAY0_ALPHA_SHADOW_DECISION_LAW
             selection_rule = _DAY0_ALPHA_SHADOW_SELECTION_RULE
+            event_version = "market-relative-alpha-shadow-v2"
         else:
             revision = CURRENT_EVIDENCE_SEMANTICS_REVISION
-            probability_ready = bool(q_version)
+            probability_ready = bool(q_version and posterior_identity_hash)
             source_status = "current_qkernel_probability_authority"
             shadow_reason = _QKERNEL_ALPHA_SHADOW_REASON
             decision_law = _QKERNEL_ALPHA_SHADOW_DECISION_LAW
             selection_rule = _QKERNEL_ALPHA_SHADOW_SELECTION_RULE
+            event_version = _QKERNEL_ALPHA_SHADOW_EVENT_VERSION
         if (
             not city
             or not target_date
@@ -4408,9 +4416,7 @@ def _market_relative_alpha_shadow_events(
             "probability_content_identity": str(
                 getattr(witness, "probability_content_identity", "") or ""
             ),
-            "posterior_identity_hash": str(
-                getattr(witness, "posterior_identity_hash", "") or ""
-            ),
+            "posterior_identity_hash": posterior_identity_hash,
             "source_truth_identity": str(
                 getattr(witness, "source_truth_identity", "") or ""
             ),
@@ -4439,8 +4445,7 @@ def _market_relative_alpha_shadow_events(
             "tie_break": (family_key, bin_id, side, token_id),
             "event": NoTradeRegretEvent(
                 event_id=(
-                    "market-relative-alpha-shadow-v2:"
-                    f"{strategy_key}:{revision}:{target_date}"
+                    f"{event_version}:{strategy_key}:{revision}:{target_date}"
                 ),
                 rejection_stage="RISK_GUARD",
                 rejection_reason=shadow_reason,
