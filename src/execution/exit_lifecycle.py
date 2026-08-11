@@ -517,6 +517,8 @@ def _is_global_sell_snapshot_reauction_error(error: object) -> bool:
         (
             "global_sell_exit_executable_snapshot_unavailable",
             "global_sell_exit_executable_snapshot_error:",
+            "global_sell_exit_capital_authority_reauction:",
+            "global_sell_exit_partial_residual_reauction:",
             "global_sell_exit_post_only_cross_reauction:",
             "global_sell_exit_fak_no_fill_reauction:",
             "global_sell_exit_terminal_no_fill_reauction:",
@@ -5666,6 +5668,18 @@ def _execute_live_exit(
                 position.trade_id,
                 authority_error,
             )
+            _mark_exit_retry(
+                position,
+                reason=(
+                    f"{exit_context.exit_reason} "
+                    "[CAPITAL_AUTHORITY_RECHECK_AFTER_INTENT]"
+                ),
+                error=(
+                    "global_sell_exit_capital_authority_reauction:"
+                    f"{authority_error}"
+                ),
+                conn=conn,
+            )
             return f"exit_blocked: {authority_error}"
     if global_authorized and global_sell_authority is not None:
         residual_error = _global_sell_partial_residual_min_order_error(
@@ -5677,6 +5691,18 @@ def _execute_live_exit(
             # INV-47 SCOPE: this selected partial SELL only. DRAIN: the next
             # global redecision binds current held shares and a fresh snapshot.
             # RESET: a full close or residual meeting that snapshot's minimum.
+            _mark_exit_retry(
+                position,
+                reason=(
+                    f"{exit_context.exit_reason} "
+                    "[PARTIAL_RESIDUAL_RECHECK_AFTER_INTENT]"
+                ),
+                error=(
+                    "global_sell_exit_partial_residual_reauction:"
+                    f"{residual_error}"
+                ),
+                conn=conn,
+            )
             return f"exit_blocked: {residual_error}"
 
     dust_error = _below_snapshot_min_order_error(

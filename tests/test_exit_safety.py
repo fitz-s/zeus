@@ -11279,11 +11279,37 @@ def test_global_sell_partial_residual_uses_fresh_snapshot_minimum(
         assert error == ""
 
 
-def test_live_global_sell_partial_residual_does_not_reach_venue(conn, monkeypatch):
+@pytest.mark.parametrize(
+    ("authority_error", "planned_shares", "close_position", "expected_error"),
+    (
+        (
+            None,
+            10.17,
+            False,
+            "global_sell_partial_residual_below_snapshot_min_order_size",
+        ),
+        (
+            "global_sell_capital_certificate_expired",
+            15.0,
+            True,
+            "global_sell_capital_certificate_expired",
+        ),
+    ),
+)
+def test_live_post_intent_gate_rejection_is_retryable_without_venue_command(
+    conn,
+    monkeypatch,
+    authority_error,
+    planned_shares,
+    close_position,
+    expected_error,
+):
     from types import SimpleNamespace
 
     from src.execution import exit_lifecycle
+    from src.engine.lifecycle_events import build_position_current_projection
     from src.state.portfolio import ExitContext, PortfolioState, Position
+    from src.state.projection import upsert_position_current
 
     position = Position(
         trade_id="chongqing-global-partial-residual",
@@ -11302,18 +11328,22 @@ def test_live_global_sell_partial_residual_does_not_reach_venue(conn, monkeypatc
         shares=15.0,
         chain_shares=15.0,
         cost_basis_usd=9.0,
+        strategy_key="forecast_qkernel_entry",
+        decision_law_id="predicted_bin_ev_v1",
         env="live",
+        entered_at="2026-08-10T00:00:00+00:00",
     )
+    upsert_position_current(conn, build_position_current_projection(position))
     intent = exit_lifecycle.ExitIntent(
         trade_id=position.trade_id,
         reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
         token_id=YES_TOKEN,
-        shares=10.17,
+        shares=planned_shares,
         current_market_price=0.50,
         best_bid=0.50,
         exact_limit_price=0.50,
         submit_order_type="GTC",
-        close_position=False,
+        close_position=close_position,
     )
     authority = SimpleNamespace(
         jit_candidate=SimpleNamespace(
@@ -11335,11 +11365,6 @@ def test_live_global_sell_partial_residual_does_not_reach_venue(conn, monkeypatc
     )
     monkeypatch.setattr(
         exit_lifecycle,
-        "_record_exit_intent_before_execution_gates",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
         "_latest_or_capture_exit_snapshot_context",
         lambda *_args, **_kwargs: {
             "executable_snapshot_id": "fresh-chongqing-snapshot",
@@ -11349,7 +11374,7 @@ def test_live_global_sell_partial_residual_does_not_reach_venue(conn, monkeypatc
     monkeypatch.setattr(
         exit_lifecycle,
         "_global_sell_capital_certificate_error",
-        lambda *_args, **_kwargs: None,
+        lambda *_args, **_kwargs: authority_error,
     )
     monkeypatch.setattr(
         exit_lifecycle,
@@ -11377,9 +11402,25 @@ def test_live_global_sell_partial_residual_does_not_reach_venue(conn, monkeypatc
         hard_fact_authority=None,
     )
 
-    assert result.startswith(
-        "exit_blocked: global_sell_partial_residual_below_snapshot_min_order_size"
-    )
+    assert result.startswith(f"exit_blocked: {expected_error}")
+    assert position.exit_state == "retry_pending"
+    assert position.order_status == "retry_pending"
+    assert position.exit_retry_count == 0
+    assert position.next_exit_retry_at
+    event_rows = conn.execute(
+        "SELECT event_type, payload_json FROM position_events "
+        "WHERE position_id = ? ORDER BY sequence_no",
+        (position.trade_id,),
+    ).fetchall()
+    assert [row["event_type"] for row in event_rows][-2:] == [
+        "EXIT_INTENT",
+        "EXIT_ORDER_REJECTED",
+    ]
+    assert expected_error in event_rows[-1]["payload_json"]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()[0] == 0
 
 
 def test_live_global_maker_rest_reaches_submit_when_bid_is_below_floor(
