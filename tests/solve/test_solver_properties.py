@@ -2539,6 +2539,50 @@ def test_current_maker_buy_witness_can_win_on_exact_partial_distribution():
     )
 
 
+def test_passive_buy_caps_rest_to_current_legal_liquidation_depth():
+    taker = _global_candidate(
+        candidate_id="maker-liquidation-cap-taker",
+        family="maker-liquidation-cap-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "100"),),
+    )
+
+    maker_curve = S.passive_buy_proposal_curve(
+        taker.executable_cost_curve,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.40"), size=Decimal("3")),
+            BookLevel(price=Decimal("0.39"), size=Decimal("4")),
+            BookLevel(price=Decimal("0.04"), size=Decimal("100")),
+        ),
+    )
+
+    assert maker_curve is not None
+    assert maker_curve.levels == (
+        BookLevel(price=Decimal("0.401"), size=Decimal("7")),
+    )
+
+
+def test_passive_buy_rejects_sub_minimum_legal_liquidation_depth():
+    taker = _global_candidate(
+        candidate_id="maker-liquidation-dust-taker",
+        family="maker-liquidation-dust-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "100"),),
+    )
+
+    maker_curve = S.passive_buy_proposal_curve(
+        taker.executable_cost_curve,
+        native_bid_levels=(
+            BookLevel(price=Decimal("0.40"), size=Decimal("0.5")),
+            BookLevel(price=Decimal("0.04"), size=Decimal("100")),
+        ),
+    )
+
+    assert maker_curve is None
+
+
 def test_current_maker_witness_asset_epoch_drift_excludes_only_maker_sibling():
     taker = _global_candidate(
         candidate_id="maker-epoch-taker", family="maker-epoch-family", side="YES", q=0.80

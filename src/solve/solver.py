@@ -330,7 +330,7 @@ def passive_buy_proposal_curve(
     *,
     native_bid_levels: Sequence[BookLevel],
 ) -> ExecutableCostCurve | None:
-    """Price one post-only BUY from the same current two-sided book."""
+    """Price one post-only BUY with current legal liquidation capacity."""
 
     bids = tuple(native_bid_levels)
     if not bids:
@@ -338,10 +338,24 @@ def passive_buy_proposal_curve(
     best_bid = max(Decimal(level.price) for level in bids)
     maker_price = best_bid + Decimal(curve.min_tick)
     best_ask = Decimal(curve.levels[0].price)
+    liquidation_capacity = sum(
+        (
+            Decimal(level.size)
+            for level in bids
+            if _live_unit_price_in_band(Decimal(level.price))
+        ),
+        Decimal("0"),
+    )
+    proposal_capacity = min(
+        Decimal(curve.levels[0].size),
+        liquidation_capacity,
+    )
     if (
         not _live_unit_price_in_band(maker_price)
         or maker_price <= best_bid
         or maker_price >= best_ask
+        or not proposal_capacity.is_finite()
+        or proposal_capacity < Decimal(curve.min_order_size)
     ):
         return None
     return ExecutableCostCurve(
@@ -349,7 +363,11 @@ def passive_buy_proposal_curve(
         side=curve.side,
         snapshot_id=curve.snapshot_id,
         book_hash=curve.book_hash,
-        levels=(BookLevel(price=maker_price, size=curve.levels[0].size),),
+        # A maker fill is adverse-selection evidence.  Never rest more shares
+        # than the same captured book can currently liquidate through venue-
+        # legal bids.  This is a capacity witness, not a claim that those bids
+        # survive into the future or a synthetic terminal payoff.
+        levels=(BookLevel(price=maker_price, size=proposal_capacity),),
         # See passive_sell_proposal_curve: current maker authority uses the
         # exact submitted limit, without an assumed fee or rebate.
         fee_model=FeeModel(fee_rate=Decimal("0")),
