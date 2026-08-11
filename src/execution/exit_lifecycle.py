@@ -3849,6 +3849,54 @@ def _global_sell_receipt_closure_error(
     return None
 
 
+def _strategy_hold_rejection_exit_authorized(
+    position: Position,
+    exit_context: ExitContext,
+    exit_intent: ExitIntent,
+) -> bool:
+    """Re-prove the current strategy-local HOLD rejection at submit boundary."""
+
+    reason_text = str(exit_intent.reason or "").strip()
+    if not reason_text.startswith("STRATEGY_HOLD_AUTHORITY_REJECTED ("):
+        return False
+    bid = exit_context.best_bid
+    try:
+        bid_value = float(bid)
+    except (TypeError, ValueError):
+        return False
+    if not (
+        exit_context.current_market_price_is_fresh
+        and math.isfinite(bid_value)
+        and LIVE_ORDER_MIN_UNIT_PRICE <= bid_value <= LIVE_ORDER_MAX_UNIT_PRICE
+    ):
+        return False
+    context_receipt = exit_context.probability_receipt
+    intent_receipt = exit_intent.probability_receipt
+    if (dict(context_receipt or {})) != (dict(intent_receipt or {})):
+        return False
+    probability_authority = (
+        str(context_receipt.get("probability_authority") or "")
+        if isinstance(context_receipt, Mapping)
+        else ""
+    )
+    try:
+        from src.control.control_plane import (
+            current_strategy_hold_authority_rejection,
+        )
+
+        policy_reason = current_strategy_hold_authority_rejection(
+            str(getattr(position, "strategy_key", "") or ""),
+            probability_authority=probability_authority,
+            selected_method=str(getattr(position, "selected_method", "") or ""),
+            current_validations=(
+                getattr(position, "applied_validations", []) or []
+            ),
+        )
+    except Exception:
+        return False
+    return bool(policy_reason and policy_reason in reason_text)
+
+
 def _global_sell_capital_certificate_error(
     position: Position,
     exit_intent: ExitIntent,
@@ -5413,11 +5461,23 @@ def _execute_live_exit(
             now=_utcnow(),
         )
     )
+    strategy_hold_rejection_authorized = bool(
+        live_non_red
+        and _strategy_hold_rejection_exit_authorized(
+            position,
+            exit_context,
+            exit_intent,
+        )
+    )
     global_authorized = False
     continuing_existing_exit = bool(
         str(getattr(position, "last_exit_order_id", "") or "")
     )
-    if live_non_red and not hard_fact_authorized:
+    if (
+        live_non_red
+        and not hard_fact_authorized
+        and not strategy_hold_rejection_authorized
+    ):
         preliminary_error = _global_sell_execution_authority_shape_error(
             global_sell_authority
         )
@@ -5532,7 +5592,11 @@ def _execute_live_exit(
                 snapshot_context=snapshot_context,
                 now=_utcnow(),
             )
-        elif hard_fact_authorized or continuing_existing_exit:
+        elif (
+            hard_fact_authorized
+            or strategy_hold_rejection_authorized
+            or continuing_existing_exit
+        ):
             authority_error = None
         else:
             authority_error = "hard_fact_sell_authority_invalid"

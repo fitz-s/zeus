@@ -16574,6 +16574,109 @@ def test_local_exit_without_capital_certificate_cannot_reach_venue(monkeypatch):
     assert pos.exit_state == ""
 
 
+def test_rejected_current_hold_authority_reaches_reduce_only_submit(monkeypatch):
+    """Execution re-proves the same durable rejection instead of demanding invalid q."""
+    from src.execution import exit_lifecycle
+
+    _install_market_alpha_rejection(monkeypatch)
+    policy_reason = (
+        "market_relative_alpha_rejected("
+        "evalue=12.688312,clusters=2,law=predicted_bin_ev_v1)"
+    )
+    pos = _make_position(
+        state="holding",
+        strategy_key="forecast_qkernel_entry",
+        chain_shares=25.0,
+        selected_method="replacement_posterior",
+        applied_validations=["belief_source=forecast_posteriors;age_h=0.5;fresh"],
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "check_sell_collateral",
+        lambda *_args, **_kwargs: (True, ""),
+    )
+    submitted = []
+
+    def place(**kwargs):
+        submitted.append(kwargs)
+        return exit_lifecycle.OrderResult(
+            trade_id=pos.trade_id,
+            status="pending",
+            order_id="strategy-rejection-sell",
+            external_order_id="strategy-rejection-sell",
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", place)
+
+    class Clob:
+        @staticmethod
+        def get_order_status(_order_id):
+            return {"status": "OPEN"}
+
+    context = ExitContext(
+        exit_reason=(
+            "STRATEGY_HOLD_AUTHORITY_REJECTED "
+            f"({policy_reason}; best_bid=0.4500)"
+        ),
+        fresh_prob=0.71,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.45,
+        current_market_price_is_fresh=True,
+        best_bid=0.45,
+        probability_receipt={"probability_authority": "forecast_posteriors"},
+        position_state="holding",
+    )
+
+    outcome = execute_exit(_make_portfolio(pos), pos, context, clob=Clob())
+
+    assert outcome == "sell_pending: order=strategy-rejection-sell, status=OPEN"
+    assert len(submitted) == 1
+    assert submitted[0]["shares"] == pos.effective_shares
+
+
+def test_spoofed_hold_authority_rejection_cannot_reach_venue(monkeypatch):
+    """A reason string without the matching durable control policy remains blocked."""
+    from src.control import control_plane
+    from src.execution import exit_lifecycle
+
+    monkeypatch.setattr(control_plane, "strategy_gates", lambda: {})
+    pos = _make_position(
+        state="holding",
+        strategy_key="forecast_qkernel_entry",
+        chain_shares=25.0,
+        selected_method="replacement_posterior",
+        applied_validations=["belief_source=forecast_posteriors;age_h=0.5;fresh"],
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "place_sell_order",
+        lambda **_kwargs: pytest.fail("spoofed strategy rejection reached venue"),
+    )
+    context = ExitContext(
+        exit_reason=(
+            "STRATEGY_HOLD_AUTHORITY_REJECTED "
+            "(market_relative_alpha_rejected(evalue=12.688312,clusters=2,"
+            "law=predicted_bin_ev_v1); best_bid=0.4500)"
+        ),
+        fresh_prob=0.71,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.45,
+        current_market_price_is_fresh=True,
+        best_bid=0.45,
+        probability_receipt={"probability_authority": "forecast_posteriors"},
+        position_state="holding",
+    )
+
+    outcome = execute_exit(_make_portfolio(pos), pos, context, clob=object())
+
+    assert outcome == "exit_blocked: global_capital_optimal_sell_intent_required"
+
+
 @pytest.mark.parametrize(
     "certificate_update",
     [

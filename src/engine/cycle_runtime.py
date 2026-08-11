@@ -3685,32 +3685,19 @@ def _current_strategy_hold_authority_rejection(pos, exit_context) -> str | None:
         str(value or "")
         for value in (getattr(pos, "applied_validations", []) or [])
     )
-    validation_authority = (
-        str(getattr(pos, "selected_method", "") or "")
-        == "replacement_posterior"
-        and any(
-            value.startswith("belief_source=forecast_posteriors;")
-            or value.endswith(":replacement_posterior_authority")
-            for value in current_validations
-        )
-    )
-    if receipt_authority != "forecast_posteriors" and not validation_authority:
-        return None
     try:
-        from src.control.control_plane import strategy_gates
+        from src.control.control_plane import (
+            current_strategy_hold_authority_rejection,
+        )
 
-        gate = strategy_gates().get("forecast_qkernel_entry")
+        return current_strategy_hold_authority_rejection(
+            str(getattr(pos, "strategy_key", "") or ""),
+            probability_authority=receipt_authority,
+            selected_method=str(getattr(pos, "selected_method", "") or ""),
+            current_validations=current_validations,
+        )
     except Exception:
         return None
-    if gate is None or bool(getattr(gate, "enabled", True)):
-        return None
-    snapshot = getattr(gate, "reason_snapshot", None)
-    if not isinstance(snapshot, Mapping):
-        return None
-    reason = str(snapshot.get("reason") or "").strip()
-    if not reason.startswith("market_relative_alpha_rejected("):
-        return None
-    return reason
 
 
 def _entry_selection_guard_exit_decision(
