@@ -110,6 +110,9 @@ _CURRENT_MONITOR_ORDERBOOK_BATCH: tuple[dict[str, dict], datetime | None] = (
 _HELD_MONITOR_DEADLINE_ATTR = "_zeus_held_monitor_deadline_monotonic"
 _HELD_MONITOR_MIN_ORDER_SIZE_ATTR = "_zeus_held_monitor_min_order_size"
 HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS = 5.0
+HELD_MONITOR_QUOTE_READ_MAX_SECONDS = 1.0
+HELD_MONITOR_PROBABILITY_PREPARE_MAX_SECONDS = 2.5
+HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS = 2.5
 _MONITOR_DAY0_FAMILY_CACHE_ATTR = "_zeus_monitor_day0_family_cache"
 _DAY0_MATERIALIZATION_VISIBILITY_RETRY_SECONDS = 0.1
 _DAY0_MATERIALIZATION_VISIBILITY_RETRY_BUDGET_SECONDS = 0.35
@@ -208,6 +211,17 @@ def _day0_primary_snapshot_read_deadline(
     return primary_deadline
 
 
+def _held_monitor_stage_deadline(
+    outer_deadline_monotonic: float | None,
+    max_seconds: float,
+) -> float:
+    stage_deadline = time.monotonic() + float(max_seconds)
+    if outer_deadline_monotonic is not None:
+        stage_deadline = min(stage_deadline, float(outer_deadline_monotonic))
+    _raise_if_day0_snapshot_read_deadline_elapsed(stage_deadline)
+    return stage_deadline
+
+
 def _raise_if_day0_snapshot_read_deadline_elapsed(
     deadline_monotonic: float | None,
 ) -> None:
@@ -221,11 +235,11 @@ def _raise_if_day0_snapshot_read_deadline_elapsed(
 def _day0_snapshot_sqlite_read_deadline(conn, deadline_monotonic: float | None):
     """Bound one current-Day0 snapshot connection to the held-monitor deadline."""
     if deadline_monotonic is None:
-        yield
+        yield conn
         return
     _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
     if not hasattr(conn, "set_progress_handler"):
-        yield
+        yield conn
         _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
         return
     remaining_ms = max(
@@ -240,7 +254,7 @@ def _day0_snapshot_sqlite_read_deadline(conn, deadline_monotonic: float | None):
 
     conn.set_progress_handler(_deadline_expired, 1_000)
     try:
-        yield
+        yield conn
         _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
     except sqlite3.OperationalError as exc:
         if time.monotonic() >= deadline_monotonic:
@@ -3102,9 +3116,13 @@ def monitor_quote_refresh(
                 )
                 if not callable(hard_deadline_books):
                     return None
+                quote_deadline = _held_monitor_stage_deadline(
+                    float(deadline),
+                    HELD_MONITOR_QUOTE_READ_MAX_SECONDS,
+                )
                 book = hard_deadline_books(
                     [tid],
-                    timeout_seconds=remaining,
+                    timeout_seconds=max(0.0, quote_deadline - time.monotonic()),
                 ).get(tid)
                 if book is None:
                     return None
@@ -4983,32 +5001,79 @@ def _build_current_global_day0_family_snapshot(
         get_forecasts_connection_read_only,
         get_world_connection_read_only,
     )
+    from src.engine.global_auction_universe import (
+        WorkContext,
+        bounded_work_sqlite,
+    )
 
     world = None
     forecasts = None
     hwm_forecasts = None
     try:
-        _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
-        with ExitStack() as sqlite_deadlines:
+        prepare_deadline = _held_monitor_stage_deadline(
+            deadline_monotonic,
+            HELD_MONITOR_PROBABILITY_PREPARE_MAX_SECONDS,
+        )
+        prepare_context = WorkContext(
+            deadline_monotonic=prepare_deadline,
+            monotonic=time.monotonic,
+        )
+        hwm_deadline: list[float | None] = [None]
+        with ExitStack() as prepare_sqlite:
             world = get_world_connection_read_only()
-            sqlite_deadlines.enter_context(
-                _day0_snapshot_sqlite_read_deadline(world, deadline_monotonic)
+            world = prepare_sqlite.enter_context(
+                (
+                    bounded_work_sqlite(
+                        world,
+                        prepare_context,
+                        stage="held_monitor_probability_prepare:world",
+                        shared_connection=True,
+                    )
+                    if isinstance(world, sqlite3.Connection)
+                    else _day0_snapshot_sqlite_read_deadline(
+                        world,
+                        prepare_deadline,
+                    )
+                )
             )
-            _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
             forecasts = get_forecasts_connection_read_only()
-            sqlite_deadlines.enter_context(
-                _day0_snapshot_sqlite_read_deadline(forecasts, deadline_monotonic)
+            forecasts = prepare_sqlite.enter_context(
+                (
+                    bounded_work_sqlite(
+                        forecasts,
+                        prepare_context,
+                        stage="held_monitor_probability_prepare:forecasts",
+                        shared_connection=True,
+                    )
+                    if isinstance(forecasts, sqlite3.Connection)
+                    else _day0_snapshot_sqlite_read_deadline(
+                        forecasts,
+                        prepare_deadline,
+                    )
+                )
             )
             hwm_forecasts = get_forecasts_connection_read_only()
-            if hwm_deadline_monotonic is not None:
-                hwm_busy_ms = max(
-                    0,
-                    int((hwm_deadline_monotonic - time.monotonic()) * 1000.0),
-                )
-                hwm_forecasts.execute(
-                    f"PRAGMA busy_timeout = {min(1_000, hwm_busy_ms)}"
-                )
-            _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
+            prepare_context.checkpoint("held_monitor_probability_prepare:connections")
+
+            def _begin_raw_hwm_read() -> float:
+                if hwm_deadline[0] is None:
+                    prepare_context.checkpoint(
+                        "held_monitor_probability_prepare:hwm_handoff"
+                    )
+                    prepare_sqlite.close()
+                    hwm_deadline[0] = _held_monitor_stage_deadline(
+                        hwm_deadline_monotonic,
+                        HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS,
+                    )
+                    hwm_busy_ms = max(
+                        0,
+                        int((hwm_deadline[0] - time.monotonic()) * 1000.0),
+                    )
+                    hwm_forecasts.execute(
+                        f"PRAGMA busy_timeout = {min(1_000, hwm_busy_ms)}"
+                    )
+                return float(hwm_deadline[0])
+
             row = world.execute(
                 """
             SELECT event_id, event_type, entity_key, source, observed_at,
@@ -5063,9 +5128,9 @@ def _build_current_global_day0_family_snapshot(
                     allow_provisional_day0_replacement=True,
                     probability_use=_CurrentProbabilityUse.HELD_MONITOR,
                     raw_input_hwm_conn=hwm_forecasts,
-                    raw_input_hwm_deadline_monotonic=hwm_deadline_monotonic,
+                    before_raw_input_hwm_read=_begin_raw_hwm_read,
                     raw_input_hwm_read_max_seconds=(
-                        HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+                        HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS
                     ),
                 )
             except ValueError as exc:

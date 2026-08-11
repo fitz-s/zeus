@@ -779,6 +779,142 @@ def test_day0_primary_snapshot_read_does_not_use_visibility_retry_budget(monkeyp
     assert build_deadlines == pytest.approx([15.0])
 
 
+def _day0_event_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE opportunity_events (
+            event_id TEXT,
+            event_type TEXT,
+            entity_key TEXT,
+            source TEXT,
+            observed_at TEXT,
+            available_at TEXT,
+            received_at TEXT,
+            causal_snapshot_id TEXT,
+            payload_hash TEXT,
+            idempotency_key TEXT,
+            priority INTEGER,
+            expires_at TEXT,
+            payload_json TEXT,
+            schema_version INTEGER,
+            created_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX idx_opportunity_events_day0_family_extreme "
+        "ON opportunity_events(event_type)"
+    )
+    at = "2026-06-12T12:00:00+00:00"
+    conn.execute(
+        "INSERT INTO opportunity_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "event-1",
+            "DAY0_EXTREME_UPDATED",
+            "Karachi|2026-06-12|high",
+            "test",
+            at,
+            at,
+            at,
+            "snapshot-1",
+            "payload-hash",
+            "idem-1",
+            1,
+            "2026-06-12T13:00:00+00:00",
+            json.dumps(
+                {
+                    "city": "Karachi",
+                    "target_date": "2026-06-12",
+                    "metric": "high",
+                }
+            ),
+            1,
+            at,
+        ),
+    )
+    return conn
+
+
+def test_day0_hwm_budget_starts_at_actual_prepare_handoff(monkeypatch):
+    import src.engine.event_reactor_adapter as era
+    import src.engine.monitor_refresh as mr
+    import src.state.db as db
+
+    world = _day0_event_connection()
+    forecasts = sqlite3.connect(":memory:")
+    hwm = sqlite3.connect(":memory:")
+    clock = [10.0]
+    observed = {}
+
+    class HandoffObserved(RuntimeError):
+        pass
+
+    def prepare(*_args, **kwargs):
+        clock[0] = 12.0
+        observed["deadline"] = kwargs["before_raw_input_hwm_read"]()
+        raise HandoffObserved
+
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
+    monkeypatch.setattr(mr, "_target_day_has_canonical_observation", lambda *_a, **_k: False)
+    monkeypatch.setattr(mr.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(db, "get_world_connection_read_only", lambda: world)
+    connections = iter((forecasts, hwm))
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", lambda: next(connections))
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
+
+    with pytest.raises(HandoffObserved):
+        mr._build_current_global_day0_family_snapshot(
+            _pos(),
+            trade_conn=sqlite3.connect(":memory:"),
+            decision_time=datetime(2026, 6, 12, 12, tzinfo=timezone.utc),
+            cached_snapshots=(),
+            deadline_monotonic=20.0,
+            hwm_deadline_monotonic=20.0,
+        )
+
+    assert observed["deadline"] == pytest.approx(14.5)
+
+
+def test_day0_prepare_timeout_does_not_start_or_mislabel_hwm(monkeypatch):
+    import src.engine.event_reactor_adapter as era
+    import src.engine.monitor_refresh as mr
+    import src.state.db as db
+    from src.engine.global_auction_universe import WorkDeferred
+
+    world = _day0_event_connection()
+    forecasts = sqlite3.connect(":memory:")
+    hwm = sqlite3.connect(":memory:")
+    clock = [10.0]
+
+    def prepare(*_args, **kwargs):
+        clock[0] = 12.6
+        kwargs["before_raw_input_hwm_read"]()
+        raise AssertionError("expired preparation reached HWM")
+
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
+    monkeypatch.setattr(mr, "_target_day_has_canonical_observation", lambda *_a, **_k: False)
+    monkeypatch.setattr(mr.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(db, "get_world_connection_read_only", lambda: world)
+    connections = iter((forecasts, hwm))
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", lambda: next(connections))
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
+
+    with pytest.raises(WorkDeferred) as raised:
+        mr._build_current_global_day0_family_snapshot(
+            _pos(),
+            trade_conn=sqlite3.connect(":memory:"),
+            decision_time=datetime(2026, 6, 12, 12, tzinfo=timezone.utc),
+            cached_snapshots=(),
+            deadline_monotonic=20.0,
+            hwm_deadline_monotonic=20.0,
+        )
+
+    assert raised.value.stage == "held_monitor_probability_prepare:hwm_handoff"
+    assert "HWM" not in str(raised.value)
+
+
 def test_day0_visibility_retry_fails_closed_when_event_never_publishes(monkeypatch):
     """Canonical observation without its Day0 event never reuses stale or market q."""
     import src.engine.monitor_refresh as mr

@@ -12066,7 +12066,7 @@ def test_held_monitor_prefetch_clears_prior_cycle_when_batch_fetch_fails():
     assert len(warnings) == 1
 
 
-def test_held_monitor_production_book_reads_receive_only_cycle_remaining_time(
+def test_held_monitor_production_book_reads_receive_sealed_quote_budget(
     monkeypatch,
 ):
     from src.data.polymarket_client import PolymarketClient
@@ -12127,7 +12127,7 @@ def test_held_monitor_production_book_reads_receive_only_cycle_remaining_time(
     assert quote is not None
     assert hard_deadline_calls == [
         (["shared-deadline-token"], pytest.approx(7.0)),
-        (["shared-deadline-token"], pytest.approx(7.0)),
+        (["shared-deadline-token"], pytest.approx(1.0)),
     ]
 
 

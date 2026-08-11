@@ -33724,6 +33724,7 @@ def _prepare_current_global_probability_family(
     raw_input_hwm_conn: sqlite3.Connection | None = None,
     raw_input_hwm_deadline_monotonic: float | None = None,
     raw_input_hwm_read_max_seconds: float | None = None,
+    before_raw_input_hwm_read: Callable[[], float | None] | None = None,
 ):
     """Build current simplex or exact-bin payoff authority without price dependency.
 
@@ -33758,6 +33759,12 @@ def _prepare_current_global_probability_family(
 
     if decision_time.tzinfo is None:
         raise ValueError("GLOBAL_PROBABILITY_DECISION_TIME_NAIVE")
+
+    def _raw_input_hwm_deadline() -> float | None:
+        if before_raw_input_hwm_read is not None:
+            return before_raw_input_hwm_read()
+        return raw_input_hwm_deadline_monotonic
+
     if max_age <= timedelta(0):
         raise ValueError("GLOBAL_PROBABILITY_FRESHNESS_CONTRACT_MISSING")
     if not isinstance(allow_unobserved_day0_replacement, bool):
@@ -34000,7 +34007,7 @@ def _prepare_current_global_probability_family(
                 current_bin_topology_hash=current_topology_hash,
                 enforce_raw_input_hwm=True,
                 raw_input_hwm_conn=raw_input_hwm_conn,
-                raw_input_hwm_deadline_monotonic=raw_input_hwm_deadline_monotonic,
+                raw_input_hwm_deadline_monotonic=_raw_input_hwm_deadline(),
                 raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
             )
             if not result.ok or result.bundle is None:
@@ -34109,7 +34116,7 @@ def _prepare_current_global_probability_family(
             current_bin_topology_hash=current_topology_hash,
             enforce_raw_input_hwm=True,
             raw_input_hwm_conn=raw_input_hwm_conn,
-            raw_input_hwm_deadline_monotonic=raw_input_hwm_deadline_monotonic,
+            raw_input_hwm_deadline_monotonic=_raw_input_hwm_deadline(),
             raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
         )
         if not result.ok or result.bundle is None:
@@ -34752,7 +34759,7 @@ def _prepare_current_global_probability_family(
                     current_bin_topology_hash=current_topology_hash,
                     enforce_raw_input_hwm=True,
                     raw_input_hwm_conn=raw_input_hwm_conn,
-                    raw_input_hwm_deadline_monotonic=raw_input_hwm_deadline_monotonic,
+                    raw_input_hwm_deadline_monotonic=_raw_input_hwm_deadline(),
                     raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
                 )
                 if not bound_result.ok or bound_result.bundle is None:

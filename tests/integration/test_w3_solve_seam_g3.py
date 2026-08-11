@@ -5867,10 +5867,17 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
     )
     bundle_read: dict[str, object] = {}
     bundle_read_count = 0
+    hwm_handoffs: list[int] = []
+
+    def begin_hwm_read():
+        hwm_handoffs.append(len(hwm_handoffs) + 1)
+        return 123.0
 
     def read_bundle(*args, **kwargs):
         nonlocal bundle_read_count
         bundle_read_count += 1
+        assert len(hwm_handoffs) == bundle_read_count
+        assert kwargs["raw_input_hwm_deadline_monotonic"] == pytest.approx(123.0)
         bundle_read.update(kwargs)
         return SimpleNamespace(
             ok=True,
@@ -5892,6 +5899,7 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
         topology_conn=forecast,
         decision_time=first_cut,
         max_age=_dt.timedelta(seconds=30),
+        before_raw_input_hwm_read=begin_hwm_read,
     )
     forecast.set_trace_callback(None)
     second_cut = first_cut + _dt.timedelta(seconds=1)
@@ -5901,6 +5909,7 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
         topology_conn=forecast,
         decision_time=second_cut,
         max_age=_dt.timedelta(seconds=20),
+        before_raw_input_hwm_read=begin_hwm_read,
     )
 
     witness = prepared.probability_witness
@@ -5924,6 +5933,7 @@ def test_current_global_probability_prepare_does_not_require_price_snapshot(
         for statement in traced
     )
     assert bundle_read_count == 2
+    assert hwm_handoffs == [1, 2]
     refreshed_witness = refreshed.probability_witness
     assert refreshed.posterior_id == 2
     assert refreshed.probability_authority == "replacement_0_1"
