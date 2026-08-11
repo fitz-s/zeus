@@ -2627,6 +2627,130 @@ def test_passive_buy_caps_rest_to_current_precliff_liquidation_depth():
     )
 
 
+def test_passive_buy_uses_bid_capacity_when_taker_best_ask_is_subminimum():
+    taker = _global_candidate(
+        candidate_id="maker-ask-dust-taker",
+        family="maker-ask-dust-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "0.5"),),
+        min_order="5",
+    )
+
+    maker_curve = S.passive_buy_proposal_curve(
+        taker.executable_cost_curve,
+        native_bid_levels=(BookLevel(price=Decimal("0.40"), size=Decimal("10")),),
+    )
+
+    assert maker_curve is not None
+    assert maker_curve.levels == (
+        BookLevel(price=Decimal("0.401"), size=Decimal("10")),
+    )
+
+
+def test_global_buy_generation_keeps_maker_when_taker_ask_depth_is_subminimum():
+    seed = _global_candidate(
+        candidate_id="maker-ask-dust-generation",
+        family="maker-ask-dust-generation-family",
+        side="YES",
+        q=0.80,
+        levels=(("0.50", "0.5"),),
+        min_order="5",
+    )
+    native = SimpleNamespace(
+        no_trade_reason=None,
+        executable_cost_curve=seed.executable_cost_curve,
+        family_key=seed.family_key,
+        bin_id=seed.bin_id,
+        condition_id=seed.condition_id,
+        side=seed.side,
+        token_id=seed.token_id,
+        hypothesis_id="maker-ask-dust-generation-native",
+    )
+    probability = _global_probability_witness(seed)
+    deterministic_fields = {
+        "family_key": seed.family_key,
+        "bindings": probability.bindings,
+        "exact_yes_payoffs": (("bin", 1), ("other", 0)),
+        "q_version": probability.q_version,
+        "resolution_identity": probability.resolution_identity,
+        "topology_identity": probability.topology_identity,
+        "posterior_identity_hash": probability.posterior_identity_hash,
+        "source_truth_identity": probability.source_truth_identity,
+        "authority_certificate_hash": probability.authority_certificate_hash,
+        "band_alpha": probability.band_alpha,
+        "band_basis": "day0_deterministic_bin_payoff_v1",
+        "captured_at_utc": probability.captured_at_utc,
+    }
+    deterministic_identity = S.deterministic_bin_payoff_witness_identity(
+        **deterministic_fields
+    )
+    deterministic = S.DeterministicBinPayoffWitness(
+        **deterministic_fields,
+        max_age=timedelta(seconds=1),
+        witness_identity=deterministic_identity,
+    )
+    _GLOBAL_PROBABILITY_WITNESSES[deterministic_identity] = deterministic
+    bid_levels = (BookLevel(price=Decimal("0.40"), size=Decimal("10")),)
+    asset_epoch = "maker-ask-dust-generation-epoch"
+    placeholder = SimpleNamespace(
+        fill_probability=1.0,
+        fill_probability_source="placeholder",
+        rest_deadline_minutes=20.0,
+        witness_identity="placeholder",
+    )
+
+    provisional_taker, provisional_maker = S.global_candidates_from_native(
+        native,
+        probability_witness=deterministic,
+        ledger_snapshot_id=seed.ledger_snapshot_id,
+        book_captured_at_utc=seed.book_captured_at_utc,
+        neg_risk=False,
+        native_bid_levels=bid_levels,
+        include_maker=True,
+        maker_fill_witness=placeholder,
+        asset_epoch_identity=asset_epoch,
+    )
+    assert provisional_taker.execution_mode == "TAKER_LIMIT"
+    assert provisional_maker.execution_mode == "MAKER_REST"
+    assert provisional_maker.proposal_cost_curve.levels == (
+        BookLevel(price=Decimal("0.401"), size=Decimal("10")),
+    )
+
+    maker_witness = _current_maker_witness(
+        provisional_maker,
+        proposal=provisional_maker.proposal_cost_curve,
+        asset_epoch=asset_epoch,
+        outcomes=(
+            S.MakerFillOutcome(Decimal("1"), Decimal("1"), Decimal("-0.401")),
+        ),
+    )
+    taker, maker = S.global_candidates_from_native(
+        native,
+        probability_witness=deterministic,
+        ledger_snapshot_id=seed.ledger_snapshot_id,
+        book_captured_at_utc=seed.book_captured_at_utc,
+        neg_risk=False,
+        native_bid_levels=bid_levels,
+        include_maker=True,
+        maker_fill_witness=maker_witness,
+        asset_epoch_identity=asset_epoch,
+    )
+
+    assert taker.execution_mode == "TAKER_LIMIT"
+    assert maker.execution_mode == "MAKER_REST"
+    assert maker.maker_fill_witness is maker_witness
+
+    decision = _global_select(
+        (taker, maker),
+        cap="5",
+        resolution_hours_by_family={seed.family_key: 24.0},
+    )
+
+    assert decision.candidate is maker
+    assert decision.rejection_reasons[taker.candidate_id] == "DEPTH_INFEASIBLE"
+
+
 def test_passive_buy_rejects_sub_minimum_legal_liquidation_depth():
     taker = _global_candidate(
         candidate_id="maker-liquidation-dust-taker",

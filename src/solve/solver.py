@@ -340,10 +340,7 @@ def passive_buy_proposal_curve(
     maker_price = best_bid + Decimal(curve.min_tick)
     best_ask = Decimal(curve.levels[0].price)
     liquidation_capacity = current_precliff_liquidation_capacity(bids)
-    proposal_capacity = min(
-        Decimal(curve.levels[0].size),
-        liquidation_capacity,
-    )
+    proposal_capacity = liquidation_capacity
     if (
         not _live_unit_price_in_band(maker_price)
         or maker_price <= best_bid
