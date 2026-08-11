@@ -3565,25 +3565,19 @@ def _qkernel_market_relative_alpha_evidence(
     }
 
 
-def _day0_market_relative_alpha_gate_reason(
+def _day0_market_relative_alpha_observation(
     semantics_binding: Mapping[str, object],
     causal_alpha_evidence: Mapping[str, object],
     *,
     required_evalue: float,
 ) -> str | None:
-    """Require validated current-law causal alpha evidence for Day0 admission.
+    """Describe current-law causal-alpha evidence without actuating admission.
 
-    INV-47 SCOPE: only new ``day0_nowcast_entry`` exposure; held monitoring,
-    current global SELL/HOLD comparison, settlement, and learning continue.
-    DRAIN: the global auction freezes one no-money current-revision positive-edge
-    executable minimum-order action per independent target date;
-    every RiskGuard tick joins those immutable certificates to later VERIFIED
-    settlement outcomes. RESET: a matching validated model-over-market cohort
-    opens admission; absent, inconclusive, superseded-law, or rejected evidence
-    remains fail-closed under the existing e-value contract. The separate live
-    realized-capital curve remains walk-forward attribution/observability only:
-    sunk P&L, unresolved trials, or degraded retrospective capital telemetry do
-    not veto unrelated current causal alpha.
+    Model-vs-market e-values remain walk-forward learning and attribution. They
+    do not veto a current fixed action: current probability authority, current
+    executable economics, risk, and Kelly own admission. This prevents a thin,
+    unresolved, or superseded historical cohort from blocking unrelated current
+    families while preserving the evidence verbatim for calibration.
     """
 
     if semantics_binding.get("status") != "ok":
@@ -4570,16 +4564,14 @@ def _tick_once() -> RiskLevel:
             window_days=market_relative_alpha_window_days,
             as_of=market_relative_alpha_as_of,
         )
-        day0_market_relative_alpha_gate_reason = (
-            _day0_market_relative_alpha_gate_reason(
+        day0_market_relative_alpha_observation = (
+            _day0_market_relative_alpha_observation(
                 day0_probability_semantics_binding,
                 day0_market_relative_alpha_evidence,
                 required_evalue=market_relative_alpha_evalue,
             )
         )
-        day0_market_relative_alpha_gate_required = (
-            day0_market_relative_alpha_gate_reason is not None
-        )
+        day0_market_relative_alpha_gate_required = False
         probability_identity_ready_count = sum(
             bool(row.get("probability_identity_ready", False))
             for row in brier_candidate_rows
@@ -4695,33 +4687,9 @@ def _tick_once() -> RiskLevel:
         execution_observed = int(execution_overall.get("terminal_observed", 0) or 0)
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
-        if day0_market_relative_alpha_gate_reason is not None:
-            _append_reason(
-                recommended_strategy_gate_reasons,
-                "day0_nowcast_entry",
-                day0_market_relative_alpha_gate_reason,
-            )
-        if market_relative_alpha_evidence["rejected"]:
-            rejected_cohorts = [
-                cohort
-                for cohort in market_relative_alpha_evidence["cohorts"]
-                if cohort["rejected"]
-            ]
-            strongest = max(
-                rejected_cohorts,
-                key=lambda cohort: float(cohort["market_over_model_evalue"]),
-            )
-            _append_reason(
-                recommended_strategy_gate_reasons,
-                "forecast_qkernel_entry",
-                (
-                    "market_relative_alpha_rejected("
-                    f"evalue={strongest['market_over_model_evalue']},"
-                    f"clusters={strongest['independent_cluster_count']},"
-                    f"law={strongest['decision_law_id']}"
-                    ")"
-                ),
-            )
+        # Historical/shadow alpha evidence is learning telemetry. It never
+        # becomes a durable strategy admission action; current probability
+        # semantics and executable expected growth remain the live authority.
         probability_semantics_level = RiskLevel.GREEN
         if probability_semantics_binding.get("status") == "unavailable":
             probability_semantics_level = RiskLevel.DATA_DEGRADED
@@ -4866,37 +4834,7 @@ def _tick_once() -> RiskLevel:
             position_view=portfolio_truth.get("_strategy_health_position_view"),
         )
         market_relative_alpha_gate_confirmation: dict[str, bool] = {}
-        if market_relative_alpha_evidence["rejected"]:
-            # The auxiliary write may lose a transient writer race after this
-            # exact strategy gate was already committed by an earlier tick.
-            # Re-read durable scope unconditionally: write status describes
-            # this attempt, not whether qkernel is currently gated.  Treating
-            # ``skipped_dependency_lock`` as gate absence widened one strategy's
-            # persistence retry into a portfolio-wide YELLOW entry freeze.
-            market_relative_alpha_gate_confirmation = (
-                _confirm_active_durable_strategy_gates(
-                    zeus_conn,
-                    ["forecast_qkernel_entry"],
-                )
-            )
-            if not market_relative_alpha_gate_confirmation.get(
-                "forecast_qkernel_entry",
-                False,
-            ):
-                strategy_signal_level = RiskLevel.YELLOW
         day0_market_relative_alpha_gate_confirmation: dict[str, bool] = {}
-        if day0_market_relative_alpha_gate_required:
-            day0_market_relative_alpha_gate_confirmation = (
-                _confirm_active_durable_strategy_gates(
-                    zeus_conn,
-                    ["day0_nowcast_entry"],
-                )
-            )
-            if not day0_market_relative_alpha_gate_confirmation.get(
-                "day0_nowcast_entry",
-                False,
-            ):
-                strategy_signal_level = RiskLevel.YELLOW
         if brier_strategy_localization.get("status") == "pending_durable_strategy_gate":
             if durable_action_status.get("status") == "emitted":
                 brier_level = RiskLevel.GREEN
@@ -5165,6 +5103,7 @@ def _tick_once() -> RiskLevel:
                     day0_probability_semantics_binding
                 ),
                 "market_relative_alpha_evidence": market_relative_alpha_evidence,
+                "market_relative_alpha_admission_role": "observational",
                 "qkernel_market_relative_alpha_shadow": (
                     qkernel_market_relative_alpha_shadow_status
                 ),
@@ -5176,6 +5115,10 @@ def _tick_once() -> RiskLevel:
                 ),
                 "day0_market_relative_alpha_evidence": (
                     day0_market_relative_alpha_evidence
+                ),
+                "day0_market_relative_alpha_admission_role": "observational",
+                "day0_market_relative_alpha_observation": (
+                    day0_market_relative_alpha_observation
                 ),
                 "day0_market_relative_alpha_shadow": (
                     day0_market_relative_alpha_shadow_status
