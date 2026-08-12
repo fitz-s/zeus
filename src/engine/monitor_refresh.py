@@ -5469,8 +5469,9 @@ def _current_global_monitor_edge_band(
     *,
     alpha: float,
     current_p_market: float,
+    held_probability_point: float,
 ) -> tuple[float, float]:
-    """Map the global solver's lower/upper CVaR q band into held-edge space."""
+    """Map one coherent point-plus-CVaR probability carrier into edge space."""
 
     from src.solve.solver import _lower_cvar
 
@@ -5483,11 +5484,21 @@ def _current_global_monitor_edge_band(
         or (samples > 1.0).any()
         or not 0.0 < float(alpha) < 0.5
         or not np.isfinite(float(current_p_market))
+        or not np.isfinite(float(held_probability_point))
+        or not 0.0 <= float(held_probability_point) <= 1.0
     ):
         raise ValueError("current global monitor probability band is invalid")
     weights = np.ones(samples.size, dtype=float)
     q_lcb = _lower_cvar(samples, weights, float(alpha))
     q_ucb = 1.0 - _lower_cvar(1.0 - samples, weights, float(alpha))
+    # The witness point can carry finite-evidence smoothing that is absent from
+    # the empirical samples (all-zero/all-one tails are the sharp case).  A
+    # confidence carrier that excludes its own authoritative point is
+    # self-contradictory and makes Position.evaluate_exit report
+    # EVIDENCE_UNAVAILABLE despite fresh q and book evidence.  Preserve the
+    # solver tails while closing the carrier over the point used for payoff.
+    q_lcb = min(float(q_lcb), float(held_probability_point))
+    q_ucb = max(float(q_ucb), float(held_probability_point))
     return float(q_lcb - current_p_market), float(q_ucb - current_p_market)
 
 
@@ -6322,6 +6333,7 @@ def refresh_position(conn, clob: PolymarketClient, pos: Position) -> EdgeContext
             global_samples,
             alpha=float(global_alpha),
             current_p_market=current_p_market,
+            held_probability_point=current_p_posterior,
         )
     elif bootstrap_ctx is not None and len(bootstrap_ctx["bins"]) > 1:
         try:

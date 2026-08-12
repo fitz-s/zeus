@@ -1,7 +1,7 @@
 # Created: 2026-05-20
-# Last reused/audited: 2026-07-27
+# Last reused/audited: 2026-08-12
 # Authority basis: PHASE_2_ULTRAPLAN.md §8.2 + §8.3; finite-evidence probability symmetry packet held/entry single-q law
-# Lifecycle: created=2026-05-20; last_reviewed=2026-07-27; last_reused=2026-07-27
+# Lifecycle: created=2026-05-20; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: T5 GREEN antibody — _maybe_write_day0_nowcast gate conditions + write_nowcast_run call.
 # Reuse: Run when _maybe_write_day0_nowcast, write_nowcast_run wiring, or day0 gate logic changes.
 """
@@ -32,7 +32,7 @@ import src.engine.monitor_refresh as monitor_refresh_module
 from src.engine.monitor_refresh import _maybe_write_day0_nowcast
 from src.engine.position_belief import ReplacementBelief
 from src.observability.counters import read as read_counter, reset_all as reset_counters
-from src.state.portfolio import Position
+from src.state.portfolio import ExitContext, Position
 
 
 def test_monitor_utc_parser_shares_observation_timestamp_contract() -> None:
@@ -1212,10 +1212,65 @@ def test_current_global_monitor_edge_band_uses_solver_cvar() -> None:
         [0.2, 0.4, 0.6, 0.8],
         alpha=0.25,
         current_p_market=0.1,
+        held_probability_point=0.5,
     )
 
     assert lower == pytest.approx(0.1)
     assert upper == pytest.approx(0.7)
+
+
+@pytest.mark.parametrize(
+    ("samples", "held_probability_point", "current_p_market"),
+    [
+        ([0.0, 0.0, 0.0, 0.0], 0.003, 0.05),
+        ([1.0, 1.0, 1.0, 1.0], 0.99997, 0.999),
+    ],
+)
+def test_current_global_monitor_edge_band_contains_smoothed_authoritative_point(
+    samples,
+    held_probability_point,
+    current_p_market,
+) -> None:
+    lower, upper = monitor_refresh_module._current_global_monitor_edge_band(
+        samples,
+        alpha=0.25,
+        current_p_market=current_p_market,
+        held_probability_point=held_probability_point,
+    )
+
+    held_lower = lower + current_p_market
+    held_upper = upper + current_p_market
+    assert held_lower <= held_probability_point <= held_upper
+
+
+def test_smoothed_tail_point_can_authorize_sell_reversal() -> None:
+    held_probability = 0.003
+    market_price = 0.05
+    lower, upper = monitor_refresh_module._current_global_monitor_edge_band(
+        [0.0, 0.0, 0.0, 0.0],
+        alpha=0.25,
+        current_p_market=market_price,
+        held_probability_point=held_probability,
+    )
+    pos = _make_position()
+    pos.shares = 10.0
+    pos.chain_shares = 10.0
+    pos.chain_state = "synced"
+
+    decision = pos.evaluate_exit(
+        ExitContext(
+            fresh_prob=held_probability,
+            fresh_prob_is_fresh=True,
+            current_market_price=market_price,
+            current_market_price_is_fresh=True,
+            best_bid=market_price,
+            hours_to_settlement=1.0,
+            position_state="day0_window",
+            current_ci=(lower + market_price, upper + market_price),
+        )
+    )
+
+    assert decision.reason == "SELL_REVERSAL"
 
 
 def test_canonical_monitor_sync_restores_exit_confirmation_from_latest_event() -> None:

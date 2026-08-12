@@ -299,7 +299,7 @@ test_trust_policy:
     tests/test_execution_intent_typed_slippage.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_lifecycle_terminal_predicate.py: {created: "2026-04-26", last_used: "2026-04-26"}
     tests/test_monitor_refresh_ci_fallback.py: {created: "2026-04-26", last_used: "2026-04-26"}
-    tests/test_monitor_refresh_nowcast_wiring.py: {created: "2026-05-20", last_used: "2026-07-28", note: "Monitor Day0 persistence wiring plus exact-observation-version conditioned replacement exit fallback during transient remaining-day member gaps; one-shot visibility retry covers both posterior identity and observation-clock commit races, while the fallback band reaches exit economics without authorizing entry."}
+    tests/test_monitor_refresh_nowcast_wiring.py: {created: "2026-05-20", last_used: "2026-08-12", note: "Monitor Day0 persistence wiring plus exact-observation-version conditioned replacement exit fallback during transient remaining-day member gaps; one-shot visibility retry covers both posterior identity and observation-clock commit races, while the fallback band reaches exit economics without authorizing entry. Current-global confidence carriers include the smoothed authoritative point so all-zero/all-one empirical tails cannot falsely revoke held redecision."}
     tests/test_position_metric_resolver.py: {created: "2026-04-26", last_used: "2026-04-26"}
     # Phase 2 T5: Position.market_slug JSON-only field antibodies (2026-05-20).
     tests/test_position_market_slug_persistence.py: {created: "2026-05-20", last_used: "2026-05-21"}
