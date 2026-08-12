@@ -537,10 +537,13 @@ _POST_ACK_PERSISTENCE_REVIEW_REASONS = frozenset({
     "entry_ack_persistence_failed_after_side_effect",
     "exit_ack_persistence_failed_after_side_effect",
 })
+_BOUND_FAK_EXIT_NO_VENUE_EXPOSURE_REVIEW_REASONS = frozenset({
+    "recovery_order_not_found_at_venue",
+})
 _CONFIRMED_TRADE_REVIEW_REASONS = frozenset({
     "recovery_no_venue_order_id",
     "matched_submit_missing_trade_id",
-}) | _POST_ACK_PERSISTENCE_REVIEW_REASONS
+}) | _POST_ACK_PERSISTENCE_REVIEW_REASONS | _BOUND_FAK_EXIT_NO_VENUE_EXPOSURE_REVIEW_REASONS
 _NO_VENUE_EXPOSURE_REVIEW_REASONS = frozenset({
     "recovery_no_venue_order_id",
     # Older recovery moved an unresolved submit here when its authenticated
@@ -552,7 +555,7 @@ _NO_VENUE_EXPOSURE_REVIEW_REASONS = frozenset({
     # and trade enumeration proves the exact submit identity created no
     # exposure; absence must never be inferred from the missing order id.
     "terminal_rejection_persistence_failed_after_side_effect",
-})
+}) | _BOUND_FAK_EXIT_NO_VENUE_EXPOSURE_REVIEW_REASONS
 _TERMINAL_ENTRY_NO_FILL_COMMAND_STATES = frozenset({
     CommandState.CANCELLED.value,
     CommandState.EXPIRED.value,
@@ -21662,8 +21665,17 @@ def build_review_required_no_venue_exposure_proof(
     if review_reason not in _NO_VENUE_EXPOSURE_REVIEW_REASONS:
         raise ValueError("no-exposure proof only supports no-venue-order-id recovery")
     token_id = str(command.get("token_id") or "")
+    venue_order_id = str(command.get("venue_order_id") or "").strip()
     created_epoch = _epoch_seconds(command.get("created_at")) or 0.0
     now = observed_at or _now_iso()
+    point_order_checked = False
+    point_order = None
+    if review_reason in _BOUND_FAK_EXIT_NO_VENUE_EXPOSURE_REVIEW_REASONS:
+        get_order = getattr(adapter, "get_order", None)
+        if not venue_order_id or not callable(get_order):
+            raise ValueError("bound FAK EXIT absence proof requires exact point-order lookup")
+        point_order_checked = True
+        point_order = _venue_order_payload(get_order(venue_order_id))
     open_orders = list(adapter.get_open_orders())
     trades = list(adapter.get_trades())
     matching_open = [
@@ -21686,6 +21698,7 @@ def build_review_required_no_venue_exposure_proof(
         "owner_scope": "authenticated_funder",
         "observed_at": now,
         "command_id": command_id,
+        "venue_order_id": venue_order_id or None,
         "decision_id": str(command.get("decision_id") or ""),
         "market_id": str(command.get("market_id") or ""),
         "token_id": token_id,
@@ -21699,6 +21712,10 @@ def build_review_required_no_venue_exposure_proof(
         "pagination_scope": "sdk_get_trades_returned_all_visible_user_trades",
         "time_window_start": command.get("created_at"),
         "time_window_end": now,
+        "command_age_seconds": max(0.0, (_epoch_seconds(now) or 0.0) - created_epoch),
+        "point_order_checked": point_order_checked,
+        "point_order_absent": point_order is None if point_order_checked else None,
+        "point_order": point_order,
         "open_order_count": len(open_orders),
         "trade_count": len(trades),
         "matching_open_order_count": len(matching_open),
@@ -21788,11 +21805,79 @@ def _review_no_exposure_predicates(
     conn: sqlite3.Connection,
     command: dict,
 ) -> tuple[dict, list[str]]:
-    predicates, _failures = _review_no_side_effect_predicates(conn, command)
-    predicates.pop("review_required_reason_pre_sdk", None)
     latest_reason = _latest_review_required_payload(
         _command_events(conn, str(command["command_id"]))
     ).get("reason")
+    if latest_reason in _BOUND_FAK_EXIT_NO_VENUE_EXPOSURE_REVIEW_REASONS:
+        envelope = _command_envelope(conn, command.get("envelope_id"))
+        position = _dict_row(
+            conn.execute(
+                "SELECT * FROM position_current WHERE position_id = ? LIMIT 1",
+                (str(command.get("position_id") or ""),),
+            ).fetchone()
+        )
+        requested = _positive_decimal_or_none(command.get("size"))
+        local_shares = _positive_decimal_or_none(position.get("shares"))
+        chain_shares = _positive_decimal_or_none(position.get("chain_shares"))
+        held_token_id = str(
+            position.get("no_token_id")
+            if str(position.get("direction") or "").lower() == "buy_no"
+            else position.get("token_id")
+            or ""
+        )
+        command_id = str(command.get("command_id") or "")
+        event_types = {
+            str(event.get("event_type") or "")
+            for event in _command_events(conn, command_id)
+        }
+        positive_fill_event_types = {
+            "POST_ACKED",
+            "SUBMIT_ACKED",
+            "SUBMIT_UNKNOWN",
+            "SUBMIT_TIMEOUT_UNKNOWN",
+            "CLOSED_MARKET_UNKNOWN",
+            "PARTIAL_FILL_OBSERVED",
+            "FILL_CONFIRMED",
+        }
+        # SCOPE: one bound FAK EXIT whose exact point order is absent.
+        # DRAIN: fresh point/account reads plus a post-submit synced Chain
+        # balance must all prove that the requested shares remain held.
+        # RESET: any order/trade/fill fact or reduced/old Chain balance keeps
+        # the command REVIEW_REQUIRED for the positive-fill recovery lanes.
+        predicates = {
+            "review_reason_bound_order_not_found": True,
+            "intent_is_exit": str(command.get("intent_kind") or "").upper() == "EXIT",
+            "side_is_sell": str(command.get("side") or "").upper() == "SELL",
+            "envelope_is_fak": str(envelope.get("order_type") or "").upper() == "FAK",
+            "venue_order_id_bound": bool(str(command.get("venue_order_id") or "").strip()),
+            "no_raw_response": not str(envelope.get("raw_response_json") or "").strip(),
+            "no_order_facts": _count_facts(conn, "venue_order_facts", command_id) == 0,
+            "no_trade_facts": _count_facts(conn, "venue_trade_facts", command_id) == 0,
+            "no_positive_fill_events": not (event_types & positive_fill_event_types),
+            "position_pending_exit": str(position.get("phase") or "") == "pending_exit",
+            "held_token_matches_command": bool(held_token_id)
+            and held_token_id == str(command.get("token_id") or ""),
+            "chain_state_synced": str(position.get("chain_state") or "").lower() == "synced",
+            "local_shares_cover_requested_exit": (
+                requested is not None
+                and local_shares is not None
+                and local_shares >= requested
+            ),
+            "chain_shares_cover_requested_exit": (
+                requested is not None
+                and chain_shares is not None
+                and chain_shares >= requested
+            ),
+            "chain_observation_after_submit": (
+                (_epoch_seconds(position.get("chain_seen_at")) or 0.0)
+                >= (_epoch_seconds(command.get("created_at")) or float("inf"))
+            ),
+        }
+        failures = [name for name, ok in predicates.items() if not ok]
+        return predicates, failures
+
+    predicates, _failures = _review_no_side_effect_predicates(conn, command)
+    predicates.pop("review_required_reason_pre_sdk", None)
     predicates["review_required_reason_recovery_no_venue_order_id"] = (
         latest_reason in _NO_VENUE_EXPOSURE_REVIEW_REASONS
     )
@@ -21821,6 +21906,21 @@ def clear_review_required_no_venue_exposure(
     latest_reason = _latest_review_required_payload(_command_events(conn, command_id)).get("reason")
     if latest_reason not in _NO_VENUE_EXPOSURE_REVIEW_REASONS:
         raise ValueError("review no-exposure clearance only supports no-venue-order-id recovery")
+    bound_fak_exit = latest_reason in _BOUND_FAK_EXIT_NO_VENUE_EXPOSURE_REVIEW_REASONS
+    if bound_fak_exit:
+        if venue_absence_proof.get("point_order_checked") is not True:
+            raise ValueError("bound FAK EXIT clearance requires exact point-order read")
+        if venue_absence_proof.get("point_order_absent") is not True:
+            raise ValueError("bound FAK EXIT clearance found an exact point order")
+        if str(venue_absence_proof.get("venue_order_id") or "") != str(
+            command.get("venue_order_id") or ""
+        ):
+            raise ValueError("bound FAK EXIT clearance venue_order_id mismatch")
+        if (
+            float(venue_absence_proof.get("command_age_seconds") or 0.0)
+            < _SAFE_REPLAY_MIN_AGE_SECONDS
+        ):
+            raise ValueError("bound FAK EXIT clearance has not reached the safe replay window")
     if int(venue_absence_proof.get("matching_open_order_count", -1)) != 0:
         raise ValueError("review no-exposure clearance found matching open orders")
     if int(venue_absence_proof.get("matching_trade_count", -1)) != 0:
@@ -21836,7 +21936,11 @@ def clear_review_required_no_venue_exposure(
         "reason": "review_cleared_no_venue_exposure",
         "command_id": command_id,
         "decision_id": decision_id,
-        "proof_class": "venue_absence_no_exposure",
+        "proof_class": (
+            "bound_fak_exit_authenticated_absence"
+            if bound_fak_exit
+            else "venue_absence_no_exposure"
+        ),
         "side_effect_boundary_crossed": "unknown",
         "sdk_submit_attempted": "unknown",
         "required_predicates": predicates,
@@ -21844,7 +21948,11 @@ def clear_review_required_no_venue_exposure(
         "source_proof": {
             "source_commit": source_commit,
             "source_function": source_function,
-            "source_reason": "recovery_no_venue_order_id",
+            "source_reason": (
+                latest_reason
+                if bound_fak_exit
+                else "recovery_no_venue_order_id"
+            ),
         },
         "review_required_proof": {
             "reason": latest_reason,
@@ -25800,6 +25908,7 @@ def _restart_no_venue_exit_retry_candidates(conn: sqlite3.Connection) -> list[di
                    cmd.size AS command_size,
                    evt.occurred_at AS rejected_at,
                    evt.payload_json AS rejected_payload_json,
+                   evt.event_type AS terminal_event_type,
                    ROW_NUMBER() OVER (
                        PARTITION BY cmd.position_id
                        ORDER BY datetime(evt.occurred_at) DESC, evt.event_id DESC
@@ -25807,9 +25916,23 @@ def _restart_no_venue_exit_retry_candidates(conn: sqlite3.Connection) -> list[di
               FROM venue_commands cmd
               JOIN venue_command_events evt
                 ON evt.command_id = cmd.command_id
-               AND evt.event_type = 'SUBMIT_REJECTED'
+               AND evt.event_type IN (
+                    'SUBMIT_REJECTED',
+                    'REVIEW_CLEARED_NO_VENUE_EXPOSURE'
+               )
              WHERE cmd.intent_kind = 'EXIT'
-               AND cmd.state IN ('REJECTED', 'SUBMIT_REJECTED')
+               AND (
+                    (
+                        evt.event_type = 'SUBMIT_REJECTED'
+                        AND cmd.state IN ('REJECTED', 'SUBMIT_REJECTED')
+                    )
+                    OR (
+                        evt.event_type = 'REVIEW_CLEARED_NO_VENUE_EXPOSURE'
+                        AND cmd.state = 'EXPIRED'
+                        AND json_extract(evt.payload_json, '$.proof_class') =
+                            'bound_fak_exit_authenticated_absence'
+                    )
+               )
                AND (
                     COALESCE(cmd.venue_order_id, '') = ''
                     OR (
@@ -25820,6 +25943,18 @@ def _restart_no_venue_exit_retry_candidates(conn: sqlite3.Connection) -> list[di
                         AND json_extract(
                             evt.payload_json, '$.safe_replay_permitted'
                         ) = 1
+                        AND NOT EXISTS (
+                            SELECT 1
+                              FROM venue_order_facts order_fact
+                             WHERE order_fact.command_id = cmd.command_id
+                                OR order_fact.venue_order_id = cmd.venue_order_id
+                        )
+                    )
+                    OR (
+                        COALESCE(cmd.venue_order_id, '') != ''
+                        AND evt.event_type = 'REVIEW_CLEARED_NO_VENUE_EXPOSURE'
+                        AND json_extract(evt.payload_json, '$.proof_class') =
+                            'bound_fak_exit_authenticated_absence'
                         AND NOT EXISTS (
                             SELECT 1
                               FROM venue_order_facts order_fact
@@ -25844,6 +25979,7 @@ def _restart_no_venue_exit_retry_candidates(conn: sqlite3.Connection) -> list[di
                rejected.command_size,
                rejected.rejected_at,
                rejected.rejected_payload_json,
+               rejected.terminal_event_type,
                {pc_select}
           FROM latest_rejected_exit rejected
           JOIN position_current pc
@@ -25932,6 +26068,7 @@ def _release_no_venue_exit_to_redecision(
             {
                 "reason": "exit_submit_absence_returned_to_redecision",
                 "proof_class": "submit_rejected_plus_order_and_positive_trade_absence",
+                "terminal_event_type": candidate.get("terminal_event_type"),
                 "command_state": candidate.get("command_state"),
                 "venue_order_id": candidate.get("venue_order_id"),
                 "rejected_at": candidate.get("rejected_at"),

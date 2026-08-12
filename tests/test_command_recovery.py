@@ -3740,6 +3740,75 @@ def _advance_to_cancel_unknown_review_required(conn, command_id="cmd-001", venue
     )
 
 
+def _seed_bound_fak_exit_not_found_review(
+    conn,
+    *,
+    command_id="cmd-bound-fak-exit",
+    position_id="pos-bound-fak-exit",
+    venue_order_id="0xbound-fak-exit",
+    chain_shares=5.0,
+    order_type="FAK",
+):
+    from src.state.venue_command_repo import append_event
+
+    token_id = "tok-bound-fak-exit"
+    _seed_pending_entry_projection(
+        conn,
+        position_id=position_id,
+        command_id="prior-entry-command",
+        order_id="prior-entry-order",
+        token_id=token_id,
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               direction = 'buy_yes',
+               token_id = ?,
+               shares = 5.0,
+               cost_basis_usd = 2.5,
+               order_status = 'exit_intent',
+               chain_state = 'synced',
+               chain_shares = ?,
+               chain_avg_price = 0.5,
+               chain_cost_basis_usd = 2.5,
+               chain_seen_at = '2026-04-26T00:20:00+00:00',
+               updated_at = '2026-04-26T00:20:00+00:00'
+         WHERE position_id = ?
+        """,
+        (token_id, chain_shares, position_id),
+    )
+    _insert(
+        conn,
+        command_id=command_id,
+        position_id=position_id,
+        decision_id=f"exit:{position_id}",
+        intent_kind="EXIT",
+        token_id=token_id,
+        side="SELL",
+        order_type=order_type,
+        size=5.0,
+        price=0.23,
+        created_at="2026-04-26T00:00:00Z",
+    )
+    _advance_to_submitting(
+        conn,
+        command_id=command_id,
+        venue_order_id=venue_order_id,
+    )
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="REVIEW_REQUIRED",
+        occurred_at="2026-04-26T00:01:01Z",
+        payload={
+            "reason": "recovery_order_not_found_at_venue",
+            "venue_order_id": venue_order_id,
+        },
+    )
+    return command_id, position_id, venue_order_id, token_id
+
+
 def _advance_to_acked(
     conn,
     command_id="cmd-001",
@@ -6573,6 +6642,211 @@ class TestRecoveryResolutionTable:
             "submit_rejected_plus_order_and_positive_trade_absence"
         )
         assert event_payload["venue_order_id"] == deterministic_order_id
+
+    def test_bound_fak_exit_absence_expires_and_releases_to_redecision(
+        self, conn, mock_client
+    ):
+        from src.execution.command_recovery import (
+            _reconcile_row,
+            reconcile_restart_no_venue_exit_retry_projections,
+        )
+        from src.execution.command_bus import VenueCommand
+
+        command_id, position_id, venue_order_id, _ = (
+            _seed_bound_fak_exit_not_found_review(conn)
+        )
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+        row = conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+
+        assert _reconcile_row(
+            conn,
+            VenueCommand.from_row(dict(row)),
+            mock_client,
+        ) == "advanced"
+        assert _get_state(conn, command_id) == "EXPIRED"
+        clearance = json.loads(_get_events(conn, command_id)[-1]["payload_json"])
+        assert clearance["proof_class"] == "bound_fak_exit_authenticated_absence"
+        assert clearance["venue_absence_proof"]["venue_order_id"] == venue_order_id
+        assert clearance["venue_absence_proof"]["point_order_checked"] is True
+        assert clearance["venue_absence_proof"]["point_order_absent"] is True
+        assert clearance["required_predicates"]["chain_shares_cover_requested_exit"] is True
+
+        assert reconcile_restart_no_venue_exit_retry_projections(conn) == {
+            "scanned": 1,
+            "advanced": 1,
+            "stayed": 0,
+            "errors": 0,
+        }
+        current = conn.execute(
+            "SELECT phase, order_status FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        assert current["phase"] != "pending_exit"
+        assert current["order_status"] == "filled"
+        latest_position_event = conn.execute(
+            """
+            SELECT event_type, command_id
+              FROM position_events
+             WHERE position_id = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(latest_position_event) == {
+            "event_type": "EXIT_RETRY_RELEASED",
+            "command_id": command_id,
+        }
+
+    def test_bound_fak_exit_absence_stays_when_chain_shares_are_reduced(
+        self, conn, mock_client
+    ):
+        from src.execution.command_recovery import _reconcile_row
+        from src.execution.command_bus import VenueCommand
+
+        command_id, _, _, _ = _seed_bound_fak_exit_not_found_review(
+            conn,
+            chain_shares=4.0,
+        )
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+        row = conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+
+        assert _reconcile_row(
+            conn,
+            VenueCommand.from_row(dict(row)),
+            mock_client,
+        ) == "stayed"
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+
+    def test_bound_fak_exit_absence_stays_when_matching_open_order_exists(
+        self, conn, mock_client
+    ):
+        from src.execution.command_recovery import _reconcile_row
+        from src.execution.command_bus import VenueCommand
+
+        command_id, _, venue_order_id, token_id = (
+            _seed_bound_fak_exit_not_found_review(conn)
+        )
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = [
+            {
+                "id": venue_order_id,
+                "asset_id": token_id,
+                "side": "SELL",
+                "price": "0.23",
+                "original_size": "5.0",
+                "status": "LIVE",
+            }
+        ]
+        mock_client.get_trades.return_value = []
+        row = conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+
+        assert _reconcile_row(
+            conn,
+            VenueCommand.from_row(dict(row)),
+            mock_client,
+        ) == "stayed"
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+
+    def test_bound_fak_exit_absence_cannot_clear_a_matching_trade(
+        self, conn, mock_client
+    ):
+        from src.execution.command_recovery import (
+            build_review_required_no_venue_exposure_proof,
+            clear_review_required_no_venue_exposure,
+        )
+
+        command_id, _, venue_order_id, token_id = (
+            _seed_bound_fak_exit_not_found_review(conn)
+        )
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = [
+            {
+                "id": "trade-bound-fak-exit",
+                "order_id": venue_order_id,
+                "trader_side": "TAKER",
+                "asset_id": token_id,
+                "side": "SELL",
+                "price": "0.23",
+                "size": "5.0",
+                "match_time": "2026-04-26T00:02:00Z",
+            }
+        ]
+
+        proof = build_review_required_no_venue_exposure_proof(
+            conn,
+            command_id,
+            mock_client,
+        )
+        assert proof["matching_trade_count"] == 1
+        with pytest.raises(ValueError, match="matching trades"):
+            clear_review_required_no_venue_exposure(
+                conn,
+                command_id,
+                venue_absence_proof=proof,
+                source_commit="test",
+                source_function="command_recovery._reconcile_row",
+            )
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+
+    def test_bound_order_absence_does_not_clear_non_fak_exit(
+        self, conn, mock_client
+    ):
+        from src.execution.command_recovery import _reconcile_row
+        from src.execution.command_bus import VenueCommand
+
+        command_id, _, _, _ = _seed_bound_fak_exit_not_found_review(
+            conn,
+            order_type="GTC",
+        )
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+        row = conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+
+        assert _reconcile_row(
+            conn,
+            VenueCommand.from_row(dict(row)),
+            mock_client,
+        ) == "stayed"
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+
+    def test_bound_fak_exit_absence_read_failure_remains_review_required(
+        self, conn, mock_client
+    ):
+        from src.execution.command_recovery import _reconcile_row
+        from src.execution.command_bus import VenueCommand
+
+        command_id, _, _, _ = _seed_bound_fak_exit_not_found_review(conn)
+        mock_client.get_order.side_effect = RuntimeError("authenticated point read unavailable")
+        row = conn.execute(
+            "SELECT * FROM venue_commands WHERE command_id = ?",
+            (command_id,),
+        ).fetchone()
+
+        assert _reconcile_row(
+            conn,
+            VenueCommand.from_row(dict(row)),
+            mock_client,
+        ) == "error"
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
 
     def test_edli_confirmed_fill_terminalizes_submitting_without_order_id(
         self, conn, mock_client
