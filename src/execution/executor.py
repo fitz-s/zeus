@@ -45,7 +45,11 @@ from src.contracts.execution_price import (
 from src.contracts.execution_intent import (
     POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD,
 )
-from src.contracts.venue_submission_envelope import assert_live_order_unit_price
+from src.contracts.venue_submission_envelope import (
+    LIVE_ORDER_MAX_UNIT_PRICE,
+    LIVE_ORDER_MIN_UNIT_PRICE,
+    assert_live_order_unit_price,
+)
 from src.contracts.global_auction_receipt import GlobalSellReceiptClosure
 from src.contracts.position_truth import (
     CURRENT_MONEY_RISK_CHAIN_STATES,
@@ -5290,16 +5294,21 @@ def _marketable_sell_certificate_error(
     snapshot = get_snapshot(conn, str(intent.executable_snapshot_id or ""))
     if snapshot is None:
         return "marketable_sell_certificate_snapshot_missing"
+    snapshot_bid = Decimal(str(snapshot.orderbook_top_bid))
     if (
         str(snapshot.selected_outcome_token_id) != intent.token_id
         or str(snapshot.condition_id)
         != str(candidate.condition_id)
         or str(snapshot.raw_orderbook_hash)
         != str(candidate.executable_sell_curve.book_hash)
-        or Decimal(str(snapshot.orderbook_top_bid))
-        != Decimal(str(intent.best_bid))
+        or snapshot_bid != Decimal(str(intent.best_bid))
     ):
         return "marketable_sell_certificate_snapshot_superseded"
+    if not LIVE_ORDER_MIN_UNIT_PRICE <= snapshot_bid <= LIVE_ORDER_MAX_UNIT_PRICE:
+        # INV-47 SCOPE: only this token's certified taker SELL is rejected.
+        # DRAIN: global redecision consumes a fresh executable snapshot.
+        # RESET: no latch is stored; an in-band snapshot passes this gate.
+        return "marketable_sell_snapshot_bid_out_of_bounds"
     return None
 
 
@@ -6530,12 +6539,13 @@ def execute_exit_order(
             executable_bid = Decimal("NaN")
         if (
             not executable_bid.is_finite()
-            or executable_bid <= 0
-            or executable_bid > Decimal("1")
+            or not LIVE_ORDER_MIN_UNIT_PRICE
+            <= executable_bid
+            <= LIVE_ORDER_MAX_UNIT_PRICE
         ):
             # INV-47 SCOPE: only this token's SELL submission is rejected.
             # DRAIN: the next monitor/JIT pass supplies a fresh best bid.
-            # RESET: no latch is stored; a probability-domain bid passes.
+            # RESET: no latch is stored; a fresh in-band bid passes.
             return OrderResult(
                 trade_id=intent.trade_id,
                 status="rejected",
@@ -6670,9 +6680,8 @@ def execute_exit_order(
                 intent_id=intent.intent_id,
                 idempotency_key=idem.value,
             )
-        # The submitted unit price remains inside the absolute live band.  A
-        # counterparty bid and venue price improvement are separate facts and
-        # may be higher than that submitted SELL floor.
+        # The submitted floor and the executable counterparty bid are both
+        # action authority.  Neither may leave the absolute live band.
         selected_order_type = _select_risk_allocator_order_type(conn, intent.executable_snapshot_id)
         try:
             order_type = _resolve_exit_order_type(

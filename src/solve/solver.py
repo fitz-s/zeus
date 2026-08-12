@@ -135,14 +135,14 @@ def _live_sell_limit_price(
     """Return a legal SELL floor for probability-domain counterparty bids."""
 
     if (
-        not best_bid.is_finite()
-        or not deepest_bid.is_finite()
-        or not 0 < deepest_bid <= best_bid <= Decimal("1")
+        not _live_unit_price_in_band(best_bid)
+        or not _live_unit_price_in_band(deepest_bid)
+        or deepest_bid > best_bid
     ):
         return None
-    aligned = (
-        min(deepest_bid, LIVE_ORDER_MAX_UNIT_PRICE) / min_tick
-    ).to_integral_value(rounding=ROUND_FLOOR) * min_tick
+    aligned = (deepest_bid / min_tick).to_integral_value(
+        rounding=ROUND_FLOOR
+    ) * min_tick
     return aligned if aligned >= LIVE_ORDER_MIN_UNIT_PRICE else None
 
 
@@ -373,11 +373,7 @@ def passive_buy_proposal_curve(
 def current_precliff_liquidation_capacity(
     native_bid_levels: Sequence[BookLevel],
 ) -> Decimal:
-    """Return finite positive same-token bid shares strictly above the live floor.
-
-    A legal SELL limit may price-improve against bids above the submit ceiling, so
-    those shares remain current liquidation capacity.
-    """
+    """Return same-token bid shares strictly inside the live action band."""
 
     return sum(
         (
@@ -385,6 +381,7 @@ def current_precliff_liquidation_capacity(
             for level in native_bid_levels
             if Decimal(level.price).is_finite()
             and Decimal(level.price) > LIVE_ORDER_MIN_UNIT_PRICE
+            and Decimal(level.price) <= LIVE_ORDER_MAX_UNIT_PRICE
             and Decimal(level.size).is_finite()
             and Decimal(level.size) > 0
         ),
@@ -588,14 +585,7 @@ def marketable_sell_proposal_curve(
     *,
     capacity: Decimal,
 ) -> ExecutableSellCurve | None:
-    """Preserve venue BID economics for a SELL submitted at a legal floor.
-
-    The public BID is counterparty liquidity, not our submitted unit price.  A
-    bid above the live submission ceiling is therefore strictly better SELL
-    liquidity, not invalid liquidity.  For ordinary books the submitted floor
-    is the deepest selected executable bid; above the ceiling it is the highest
-    legal tick and venue price improvement preserves the observed economics.
-    """
+    """Return executable SELL depth only when every selected bid is in-band."""
 
     requested_capacity = Decimal(capacity)
     if not requested_capacity.is_finite() or requested_capacity <= 0:
@@ -603,7 +593,10 @@ def marketable_sell_proposal_curve(
     remaining = requested_capacity
     levels: list[BookLevel] = []
     for level in curve.levels:
-        if level.price < LIVE_ORDER_MIN_UNIT_PRICE or remaining <= 0:
+        if (
+            not _live_unit_price_in_band(Decimal(level.price))
+            or remaining <= 0
+        ):
             break
         take = min(remaining, Decimal(level.size))
         if take > 0:
@@ -2466,10 +2459,11 @@ def global_sell_candidate_from_holding(
         required_mode=execution_mode,
         maker_fill_witness=maker_fill_witness,
     )
-    if execution_mode is not None and proposal is None:
+    if proposal is None:
+        # INV-47 SCOPE: this held token's SELL candidate only.
+        # DRAIN: the next global cut materializes from a fresh bid curve.
+        # RESET: no latch; an in-band executable proposal restores eligibility.
         return None
-    if proposal is None and eligibility_reason is None:
-        eligibility_reason = "LIVE_UNIT_PRICE_OUT_OF_BOUNDS"
     return GlobalSingleOrderSellCandidate(
         candidate_id=_hash(
             "SELL",

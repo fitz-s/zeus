@@ -545,11 +545,11 @@ These are separate truth surfaces that should not be conflated.
 - `currency: Literal["usd", "probability_units"]`
 
 Live venue submission adds cumulative order-price contracts: every BUY/SELL,
-entry/exit, single/batch order must have a finite unit price inside inclusive
-`[0.05, 0.95]`. A SELL limit is only a floor and a BUY limit is only a ceiling,
-so a legal taker limit cannot constrain favorable price improvement to the same
-two-sided band. Clamping `0.999` to a legal `0.95` SELL floor is therefore
-forbidden. The admitted finite-limit modes are side-aware: ENTRY BUY may use
+entry/exit, single/batch order and the current executable quote authorizing that
+action must have a finite unit price inside inclusive `[0.05, 0.95]`. A legal
+SELL floor cannot turn a `0.999` bid into eligible liquidation depth; clamping
+that bid to a `0.95` submission while retaining its economics is forbidden. The
+admitted finite-limit modes are side-aware: ENTRY BUY may use
 post-only GTC/GTD maker or certified non-post-only FOK/FAK taker; EXIT SELL may
 use post-only GTC/GTD maker or non-post-only FAK taker. Non-post-only GTC/GTD,
 post-only immediate-or-cancel, and SELL FOK fail closed. The order must also be

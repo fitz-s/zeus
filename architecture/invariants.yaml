@@ -958,9 +958,11 @@ invariants:
     statement: >
       Every live BUY or SELL venue submission, including entry, reduce-only
       exit, single-order, and batch paths, must have a finite unit price inside
-      inclusive [0.05, 0.95]. Anything below 0.05 or above 0.95 is rejected at
-      order-creating command persistence, the canonical envelope, and an independent
-      final SDK boundary. CANCEL remains able to remove previously resting tail-priced
+      inclusive [0.05, 0.95]. The current executable quote used to authorize the
+      action is subject to the same band; an in-band submitted floor may not make
+      an out-of-band counterparty bid eligible. Anything below 0.05 or above 0.95
+      is rejected at order-creating command persistence, the canonical envelope,
+      and an independent final SDK boundary. CANCEL remains able to remove previously resting tail-priced
       orders because cancellation creates no trade. This band applies symmetrically to
       BUY and SELL; current snapshot tick alignment/range, minimum size, identity,
       tradeability, fee/depth, and economic authorization remain cumulative
@@ -978,8 +980,13 @@ invariants:
         - tests/test_v2_adapter.py::test_adapter_sdk_boundary_rejects_even_if_envelope_guard_is_bypassed
         - tests/test_v2_adapter.py::TestSubmitBatch::test_out_of_band_price_rejects_entire_batch_before_sdk_contact
         - tests/test_v2_adapter.py::TestSubmitBatch::test_sdk_boundary_rejects_batch_even_if_envelope_guard_is_bypassed
+        - tests/engine/test_milan_incident_direction_law.py::test_day0_absorbing_no_at_999_is_not_a_trade_candidate
+        - tests/solve/test_solver_properties.py::test_global_single_order_sell_holds_above_submit_band
+        - tests/integration/test_w3_solve_seam_g3.py::test_global_sell_high_bid_blocks_selected_taker_at_jit
+        - tests/test_executor.py::TestExecutor::test_certified_high_bid_exit_rejects_before_command_persistence
         - tests/test_executor.py::TestExecutor::test_execute_exit_order_rejects_out_of_band_price_before_persistence
-        - tests/test_venue_command_repo.py::TestAbsoluteLivePriceBand
+        - tests/test_venue_command_repo.py::TestAbsoluteLivePriceBand::test_out_of_band_command_is_rejected_before_persistence
+        - tests/test_venue_command_repo.py::TestAbsoluteLivePriceBand::test_out_of_band_trade_fact_persists_as_observed_truth
         - tests/test_riskguard_red_durable_cmd.py::test_red_cancel_preserves_tail_order_cancellability
         - tests/test_check_live_restart_preflight.py::test_absolute_live_unit_price_band_restart_check_blocks_guard_removal
         - tests/test_check_live_restart_preflight.py::test_absolute_live_unit_price_band_restart_check_blocks_envelope_wiring_removal

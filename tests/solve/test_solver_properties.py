@@ -1,6 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-11
-# Lifecycle: created=2026-07-03; last_reviewed=2026-08-11; last_reused=2026-08-11
+# Last reused/audited: 2026-08-12
+# Lifecycle: created=2026-07-03; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
 
@@ -2630,7 +2630,7 @@ def test_exact_payoff_taker_can_lock_to_settlement_without_exit_depth(
     assert decision.expected_terminal_wealth.win_probability_mean == 1.0
 
 
-def test_current_precliff_capacity_counts_all_positive_depth_above_floor():
+def test_current_precliff_capacity_counts_only_in_band_depth_above_floor():
     levels = (
         BookLevel(price=Decimal("0.05"), size=Decimal("100")),
         BookLevel(price=Decimal("0.0501"), size=Decimal("2")),
@@ -2642,7 +2642,7 @@ def test_current_precliff_capacity_counts_all_positive_depth_above_floor():
         SimpleNamespace(price=Decimal("NaN"), size=Decimal("100")),
     )
 
-    assert S.current_precliff_liquidation_capacity(levels) == Decimal("12")
+    assert S.current_precliff_liquidation_capacity(levels) == Decimal("5")
 
 
 def test_current_maker_buy_witness_can_win_on_exact_partial_distribution():
@@ -3732,23 +3732,43 @@ def test_global_sell_generation_rejects_bids_below_live_price_band(
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_single_order_sell_crosses_best_bid_above_submit_band(side):
-    sell = _global_sell_candidate(
+def test_global_single_order_sell_holds_above_submit_band(side):
+    seed = _global_candidate(
         candidate_id=f"sell-favorable-above-band-{side}",
         family=f"sell-favorable-above-band-{side}-family",
         side=side,
-        held_q=0.20,
-        bids=(("0.999", "10"),),
-        shares="10",
+        q=0.20,
+    )
+    curve = S.ExecutableSellCurve(
+        token_id=seed.token_id,
+        side=side,
+        snapshot_id=f"sell-above-band-{side}-book",
+        book_hash=f"sell-above-band-{side}-hash",
+        levels=(BookLevel(price=Decimal("0.999"), size=Decimal("10")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.001"),
+        min_order_size=Decimal("1"),
+        quote_ttl=timedelta(seconds=1),
+    )
+    holding = SimpleNamespace(
+        family_key=seed.family_key,
+        bin_id=seed.bin_id,
+        side=seed.side,
+        token_id=seed.token_id,
+        position_id=f"position-above-band-{side}",
+        shares=Decimal("10"),
     )
 
-    decision = _global_select((sell,))
+    candidate = S.global_sell_candidate_from_holding(
+        holding,
+        probability_witness=_global_probability_witness(seed),
+        ledger_snapshot_id=f"ledger-above-band-{side}",
+        executable_sell_curve=curve,
+        book_captured_at_utc=_DECISION_AT,
+        neg_risk=False,
+    )
 
-    assert decision.candidate == sell
-    assert sell.execution_mode == "TAKER_LIMIT"
-    assert sell.fill_probability == 1.0
-    assert sell.rest_deadline_minutes is None
-    assert sell.economic_sell_curve.levels[0].price == Decimal("0.999")
+    assert candidate is None
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
@@ -3758,7 +3778,7 @@ def test_global_single_order_sell_holds_certain_winner_despite_high_bid(side):
         family=f"sell-certain-winner-{side}-family",
         side=side,
         held_q=1.0,
-        bids=(("0.999", "10"),),
+        bids=(("0.95", "10"),),
         shares="10",
     )
 
@@ -3771,33 +3791,46 @@ def test_global_single_order_sell_holds_certain_winner_despite_high_bid(side):
     }
 
 
-def test_global_single_order_sell_clamps_submitted_floor_not_counterparty_bid():
-    assert (
-        S._live_sell_limit_price(
-            Decimal("0.98"),
-            Decimal("0.94"),
-            Decimal("0.02"),
-        )
-        == Decimal("0.94")
-    )
-
-
-def test_global_single_order_sell_high_bid_uses_tick_aligned_taker_floor():
-    sell = _global_sell_candidate(
-        candidate_id="sell-high-bid-wide-tick",
-        family="sell-high-bid-wide-tick-family",
-        side="YES",
-        held_q=0.20,
-        bids=(("0.98", "5"), ("0.94", "5")),
-        shares="10",
-        min_tick="0.02",
-    )
-
-    assert sell.execution_mode == "TAKER_LIMIT"
-    assert tuple(level.price for level in sell.economic_sell_curve.levels) == (
+def test_global_single_order_sell_does_not_clamp_above_band_counterparty_bid():
+    assert S._live_sell_limit_price(
         Decimal("0.98"),
         Decimal("0.94"),
+        Decimal("0.02"),
+    ) is None
+
+
+def test_global_single_order_sell_high_bid_has_no_taker_proposal():
+    curve = S.ExecutableSellCurve(
+        token_id="sell-high-bid-wide-tick-token",
+        side="YES",
+        snapshot_id="sell-high-bid-wide-tick-book",
+        book_hash="sell-high-bid-wide-tick-hash",
+        levels=(
+            BookLevel(price=Decimal("0.98"), size=Decimal("5")),
+            BookLevel(price=Decimal("0.94"), size=Decimal("5")),
+        ),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.02"),
+        min_order_size=Decimal("1"),
+        quote_ttl=timedelta(seconds=1),
     )
+
+    proposal, mode, *_ = S.global_sell_execution_terms(
+        curve,
+        capacity=Decimal("10"),
+    )
+
+    assert proposal is None
+    assert mode == "TAKER_LIMIT"
+
+
+def test_precliff_liquidation_capacity_excludes_above_band_bids():
+    assert S.current_precliff_liquidation_capacity(
+        (
+            BookLevel(price=Decimal("0.999"), size=Decimal("20")),
+            BookLevel(price=Decimal("0.95"), size=Decimal("7")),
+        )
+    ) == Decimal("7")
 
 
 def test_global_single_order_sell_legal_depth_is_tick_aligned_without_clamping():

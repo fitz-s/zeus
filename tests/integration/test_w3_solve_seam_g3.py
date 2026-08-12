@@ -30818,14 +30818,6 @@ def test_global_sell_jit_rejects_changed_day0_statistical_authority(monkeypatch)
             None,
         ),
         (
-            (("0.999", "10"),),
-            "0.001",
-            0.95,
-            "FAK",
-            "TAKER_LIMIT",
-            None,
-        ),
-        (
             (("0.60", "10"),),
             "0.01",
             0.61,
@@ -31364,7 +31356,6 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     ("bid_levels", "tick", "execution_mode", "submit_order_type"),
     (
         ((("0.60", "4"), ("0.50", "6")), "0.01", "TAKER_LIMIT", "FAK"),
-        ((("0.999", "10"),), "0.001", "TAKER_LIMIT", "FAK"),
     ),
 )
 def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
@@ -31632,7 +31623,6 @@ def test_global_sell_execution_authority_binds_typed_actuation_and_jit_snapshot(
     ("best_bid", "tick"),
     (
         ("0.95", "0.01"),
-        ("0.999", "0.001"),
     ),
 )
 def test_global_sell_selected_taker_mode_stays_taker_at_jit(
@@ -31992,55 +31982,33 @@ def test_global_sell_current_mode_unavailable_excludes_only_selected_candidate()
     ) == "CANDIDATE_BLOCKED"
 
 
-def test_global_sell_high_bid_binds_legal_fak_floor():
-    from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
-    from src.events.reactor import _is_global_reduce_only_exit_receipt
-
+def test_global_sell_high_bid_blocks_selected_taker_at_jit():
     event = _global_scope_event(city="Alpha", source_run_id="run-high-bid-fak")
     actuation = _adapter_sell_actuation(
         event,
         selected_shares="5",
-        bid_levels=(("0.999", "10"),),
-        min_tick="0.001",
     )
     candidate = actuation.decision.candidate
     assert candidate.execution_mode == "TAKER_LIMIT"
     assert actuation.decision.capital_action_mode == "IMMEDIATE_TAKER_SELL"
-    jit = era._global_sell_candidate_from_raw_book(
-        candidate,
-        {
-            "asset_id": "yes-token",
-            "tick_size": "0.001",
-            "min_order_size": "5",
-            "bids": [{"price": "0.999", "size": "10"}],
-            "asks": [],
-        },
-        captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
-        market_authority=_jit_market_authority(
-            candidate, tick="0.001", min_order_size="5"
-        ),
-    )
-    authority = GlobalSellExecutionAuthority.from_current(
-        actuation=actuation,
-        jit_candidate=jit,
-    )
-
-    assert authority.limit_price() == Decimal("0.95")
-    assert jit.economic_sell_curve.levels[0].price == Decimal("0.999")
-    receipt = era._global_sell_receipt(
-        event,
-        global_actuation=actuation,
-        reason="GLOBAL_SELL_EXIT:filled",
-        proof_accepted=True,
-        submitted=True,
-        jit_candidate=jit,
-        venue_call_started=True,
-        venue_ack_received=True,
-        venue_command_id="cmd-high-bid-fak",
-        venue_command_state="FILLED",
-        venue_order_type="FAK",
-    )
-    assert _is_global_reduce_only_exit_receipt(receipt) is True
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:TAKER_LIMIT",
+    ):
+        era._global_sell_candidate_from_raw_book(
+            candidate,
+            {
+                "asset_id": "yes-token",
+                "tick_size": "0.001",
+                "min_order_size": "5",
+                "bids": [{"price": "0.999", "size": "10"}],
+                "asks": [],
+            },
+            captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
+            market_authority=_jit_market_authority(
+                candidate, tick="0.001", min_order_size="5"
+            ),
+        )
 
 
 def test_global_sell_worse_jit_bid_requires_complete_reauction():

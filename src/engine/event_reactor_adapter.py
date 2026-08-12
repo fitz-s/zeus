@@ -28978,6 +28978,7 @@ def _generate_candidate_proofs(
             c_cost_95pct: float | None = None
             p_fill_lcb = 0.0
             missing_reason: str | None = None
+            action_price_reason: str | None = None
             if independent_no_missing_reason is not None:
                 missing_reason = independent_no_missing_reason
             elif not token_id:
@@ -29004,15 +29005,28 @@ def _generate_candidate_proofs(
                         _sibling_complement_bid = _optional_float(
                             _yes_row.get("orderbook_top_bid")
                         )
-                try:
-                    execution_price, p_fill_lcb, c_cost_95pct = _execution_price_from_snapshot(
-                        row,
-                        selected_token_id=token_id,
-                        direction=direction,
-                        complementary_top_bid=_sibling_complement_bid,
-                    )
-                except ValueError as exc:
-                    missing_reason = str(exc)
+                    try:
+                        execution_price, p_fill_lcb, c_cost_95pct = _execution_price_from_snapshot(
+                            row,
+                            selected_token_id=token_id,
+                            direction=direction,
+                            complementary_top_bid=_sibling_complement_bid,
+                        )
+                        # INV-47 SCOPE: this exact candidate token only.
+                        # DRAIN: the next event/JIT cycle consumes a fresh quote.
+                        # RESET: no latch; an in-band quote restores eligibility.
+                        assert_live_order_unit_price(execution_price.value)
+                    except ValueError as exc:
+                        execution_price = None
+                        p_fill_lcb = 0.0
+                        c_cost_95pct = None
+                        error = str(exc)
+                        action_price_reason = (
+                            f"LIVE_UNIT_PRICE_OUT_OF_BOUNDS:{error}"
+                            if error.startswith("live order unit price")
+                            else None
+                        )
+                        missing_reason = action_price_reason or error
             # FIX C (mode-consistent EV; operator directive 2026-06-10): the
             # trade_score is the CHOSEN execution mode's EV, never the hybrid
             # taker-cost x visible-depth-p_fill. TAKER-chosen scores are
@@ -29134,6 +29148,9 @@ def _generate_candidate_proofs(
                 score = 0.0
                 if missing_reason is None:
                     missing_reason = direction_law_reason
+            if action_price_reason is not None:
+                score = 0.0
+                missing_reason = action_price_reason
             p_value = generated_p_values[(condition_id, direction)]
             passed_prefilter = bool(generated_prefilter.get((condition_id, direction), execution_price is not None and score > 0.0))
             # A structurally non-tradeable candidate must not enter the FDR family
@@ -29146,6 +29163,7 @@ def _generate_candidate_proofs(
                 or buy_no_conservative_evidence_reason is not None
                 or direction_law_reason is not None
                 or maker_fill_authority_reason is not None
+                or action_price_reason is not None
             ):
                 passed_prefilter = False
             proof_execution_mode_intent = (
