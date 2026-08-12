@@ -11321,6 +11321,7 @@ def run_exit_monitor_cycle(
     cadence). Behavior-preserving relocation — was inline in src/main.py.
     """
     from src.engine.cycle_runner import (
+        _execute_force_exit_sweep,
         _execute_monitoring_phase,
         get_connection,
         get_tracker,
@@ -11333,6 +11334,16 @@ def run_exit_monitor_cycle(
     from src.state.canonical_write import commit_then_export
     from src.state.decision_chain import CycleArtifact
     from src.state.decision_chain import store_artifact
+    from src.riskguard.risk_level import RiskLevel
+    from src.riskguard.riskguard import get_current_level
+
+    risk_level = get_current_level()
+    if risk_level is RiskLevel.RED:
+        # RED is portfolio-wide action authority.  A targeted observation wake
+        # cannot narrow the sweep to one family; the scheduled EDLI monitor is
+        # the live owner of the same marker -> evaluate -> submit path that the
+        # unscheduled legacy full cycle uses.
+        target_families = None
 
     if held_position_monitor_active.is_set() and not monitor_claimed:
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
@@ -11359,7 +11370,11 @@ def run_exit_monitor_cycle(
         mark_held_position_monitor_complete()
         return False
 
-    summary: dict = {"monitors": 0, "exits": 0}
+    summary: dict = {
+        "monitors": 0,
+        "exits": 0,
+        "risk_level": risk_level.value,
+    }
     full_book_open_position_count = 0
     succeeded = False
     monitor_completion_marked = False
@@ -11387,6 +11402,14 @@ def run_exit_monitor_cycle(
                 deadline_monotonic=monitor_deadline_monotonic,
             )
             ensure_preparation_live()
+            if risk_level is RiskLevel.RED:
+                summary["force_exit_review_scope"] = "sweep_active_positions"
+                summary["force_exit_sweep_trigger"] = "risk_level_red"
+                summary["force_exit_sweep"] = _execute_force_exit_sweep(
+                    portfolio,
+                    conn=conn,
+                )
+                ensure_preparation_live()
             held_monitor_allocator_refresh = (
                 _refresh_global_allocator_for_held_position_monitor(
                     conn,
@@ -11425,10 +11448,17 @@ def run_exit_monitor_cycle(
                 started_at=datetime.now(timezone.utc).isoformat(),
                 summary=summary,
             )
-            portfolio_dirty = False
+            portfolio_dirty = bool(
+                int(
+                    (summary.get("force_exit_sweep") or {}).get(
+                        "attempted",
+                        0,
+                    )
+                )
+            )
             tracker_dirty = False
             try:
-                portfolio_dirty, tracker_dirty = _execute_monitoring_phase(
+                monitor_portfolio_dirty, tracker_dirty = _execute_monitoring_phase(
                     conn,
                     clob,
                     monitor_portfolio,
@@ -11443,6 +11473,7 @@ def run_exit_monitor_cycle(
                     should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
                     defer_partial_orderbook_gaps=target_families is None,
                 )
+                portfolio_dirty = portfolio_dirty or monitor_portfolio_dirty
             except Exception as exc:
                 logger.error(
                     "exit_monitor: monitoring phase failed: %s",

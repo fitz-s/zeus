@@ -155,6 +155,35 @@ def _held_position_monitor_reservation_count(position_count: int) -> int:
     )
 
 
+def _held_position_monitor_primary_reservation(
+    position_count: int,
+    monitor_budget_seconds: float,
+) -> tuple[int, float]:
+    """Reserve one belief-read tranche per admitted degraded-coverage slot.
+
+    The reservation scheduler admits roughly one third of the held book when a
+    full pass is deadline-degraded.  Reserving only one five-second read let a
+    coherent HWM read plus optional order-book batch consume the whole claim
+    before any admitted position reached canonical redecision.  Keep half the
+    claim available for prerequisites/auxiliary work and reserve at least one
+    complete read.  If the configured claim cannot fund one third of a very
+    large book, reduce this pass's admission count instead of pretending that
+    several positions share one read deadline.
+    """
+
+    from src.engine.monitor_refresh import HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+
+    budget = max(0.0, float(monitor_budget_seconds))
+    single_read = float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS)
+    desired = _held_position_monitor_reservation_count(position_count)
+    capacity = max(
+        1,
+        math.floor(max(single_read, budget / 2.0) / single_read),
+    )
+    admitted = min(desired, capacity)
+    return admitted, single_read * admitted
+
+
 def _held_position_monitor_budget_seconds(override: float | None = None) -> float:
     raw = override
     if raw is None:
@@ -6027,6 +6056,23 @@ def execute_monitoring_phase(
     portfolio_dirty = False
     tracker_dirty = False
 
+    def global_sell_reauction_completion_deadline_at() -> str:
+        armed_at = (
+            deps._utcnow()
+            if callable(getattr(deps, "_utcnow", None))
+            else datetime.now(timezone.utc)
+        )
+        if armed_at.tzinfo is None:
+            armed_at = armed_at.replace(tzinfo=timezone.utc)
+        else:
+            armed_at = armed_at.astimezone(timezone.utc)
+        return (
+            armed_at
+            + timedelta(
+                seconds=GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS
+            )
+        ).isoformat()
+
     def arm_global_sell_reauction_obligation(
         position,
         request: object,
@@ -6042,13 +6088,22 @@ def execute_monitoring_phase(
             armed_at = armed_at.replace(tzinfo=timezone.utc)
         else:
             armed_at = armed_at.astimezone(timezone.utc)
-        armed_at_text = armed_at.isoformat()
-        deadline_text = (
-            armed_at
-            + timedelta(
+        deadline_text = str(
+            getattr(request, "completion_deadline_at", "") or ""
+        ).strip()
+        if deadline_text:
+            deadline_at = datetime.fromisoformat(
+                deadline_text.replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+            armed_at = deadline_at - timedelta(
                 seconds=GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS
             )
-        ).isoformat()
+        else:
+            deadline_at = armed_at + timedelta(
+                seconds=GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS
+            )
+        armed_at_text = armed_at.isoformat()
+        deadline_text = deadline_at.isoformat()
         fields = (
             "request_id",
             "material_identity",
@@ -6324,6 +6379,9 @@ def execute_monitoring_phase(
                 held_best_bid=held_best_bid,
                 bid_observed_at=bid_observed_at,
                 probability_observed_at=probability_observed_at,
+                completion_deadline_at=(
+                    global_sell_reauction_completion_deadline_at()
+                ),
                 book_state=book_state,
                 generation=request_generation or None,
                 scope_identity=request_scope_identity,
@@ -6547,15 +6605,24 @@ def execute_monitoring_phase(
         held_position_monitor_budget_seconds
     )
     monitor_deadline = time.monotonic() + monitor_budget_seconds
-    primary_reserve_seconds = max(
-        0.0,
-        float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS),
+    portfolio_position_count = len(
+        tuple(getattr(portfolio, "positions", ()) or ())
+    )
+    (
+        primary_reserved_position_count,
+        primary_reserve_seconds,
+    ) = _held_position_monitor_primary_reservation(
+        portfolio_position_count,
+        monitor_budget_seconds,
     )
     auxiliary_deadline = monitor_deadline - primary_reserve_seconds
     global_sell_debt_deadline = auxiliary_deadline
     summary["held_monitor_budget_seconds"] = monitor_budget_seconds
     summary["held_monitor_primary_belief_reserve_seconds"] = (
         primary_reserve_seconds
+    )
+    summary["held_monitor_primary_belief_reserved_positions"] = (
+        primary_reserved_position_count
     )
     summary["held_monitor_primary_belief_read_started"] = 0
     summary["held_monitor_primary_belief_read_completed"] = 0
@@ -6662,8 +6729,9 @@ def execute_monitoring_phase(
         conn=conn,
         now_utc=monitor_now_utc,
     )
-    monitor_reservation_count = _held_position_monitor_reservation_count(
-        len(monitor_positions)
+    monitor_reservation_count = min(
+        primary_reserved_position_count,
+        _held_position_monitor_reservation_count(len(monitor_positions)),
     )
     summary["held_monitor_candidates"] = len(monitor_positions)
     if urgent_preemption_requested():
@@ -8335,6 +8403,9 @@ def execute_monitoring_phase(
                     book_state=str(global_sell_request_context["book_state"]),
                     probability_observed_at=str(
                         global_sell_request_context["probability_observed_at"] or ""
+                    ),
+                    completion_deadline_at=(
+                        global_sell_reauction_completion_deadline_at()
                     ),
                     return_request=True,
                     prepare_only=True,

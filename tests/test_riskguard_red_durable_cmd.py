@@ -10,6 +10,8 @@ from __future__ import annotations
 import ast
 import inspect
 import sqlite3
+import threading
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -289,6 +291,112 @@ def test_run_cycle_red_risk_level_triggers_durable_sweep(monkeypatch, tmp_path):
         ).fetchone()[0] == 1
     finally:
         conn.close()
+
+
+def test_live_exit_monitor_owns_red_full_book_sweep(monkeypatch):
+    """The scheduled EDLI monitor, not only legacy run_cycle, acts on RED."""
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.state import canonical_write, decision_chain
+
+    portfolio = PortfolioState(
+        positions=[
+            _position(trade_id="red-paris", city="Paris"),
+            _position(trade_id="red-seoul", city="Seoul"),
+        ]
+    )
+    loaded_scopes = []
+    monitored_ids = []
+    saved_ids = []
+
+    class Conn:
+        def close(self):
+            return None
+
+    def load_portfolio(*, target_families, **_kwargs):
+        loaded_scopes.append(target_families)
+        return portfolio
+
+    def sweep(monitored_portfolio, *, conn):
+        assert conn is not None
+        for position in monitored_portfolio.positions:
+            position.exit_reason = "red_force_exit"
+        return {"attempted": len(monitored_portfolio.positions)}
+
+    def monitor(_conn, _clob, monitored_portfolio, *_args, **_kwargs):
+        monitored_ids.extend(position.trade_id for position in monitored_portfolio.positions)
+        assert all(
+            position.exit_reason == "red_force_exit"
+            for position in monitored_portfolio.positions
+        )
+        return False, False
+
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.RED)
+    monkeypatch.setattr(cycle_runner, "get_connection", lambda **_kwargs: Conn())
+    monkeypatch.setattr(cycle_runner, "load_portfolio", load_portfolio)
+    monkeypatch.setattr(cycle_runner, "_execute_force_exit_sweep", sweep)
+    monkeypatch.setattr(cycle_runner, "_execute_monitoring_phase", monitor)
+    monkeypatch.setattr(cycle_runner, "get_tracker", object)
+    monkeypatch.setattr(cycle_runner, "save_tracker", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        cycle_runner,
+        "save_portfolio",
+        lambda saved, **_kwargs: saved_ids.extend(
+            position.trade_id for position in saved.positions
+        ),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_held_monitor_preparation_deadline",
+        lambda *_args, **_kwargs: nullcontext(lambda: None),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_refresh_global_allocator_for_held_position_monitor",
+        lambda *_args, **_kwargs: {"configured": False},
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_held_monitor_clob_client",
+        lambda: nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_full_book_monitor_made_canonical_progress",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "src.observability.scheduler_health._write_scheduler_health",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(decision_chain, "store_artifact", lambda *_args, **_kwargs: "artifact-red")
+    monkeypatch.setattr(
+        canonical_write,
+        "commit_then_export",
+        lambda _conn, *, db_op, json_exports: (
+            db_op(),
+            [export() for export in json_exports],
+        ),
+    )
+    monkeypatch.setattr("src.observability.status_summary.write_cycle_pulse", lambda *_args, **_kwargs: None)
+
+    active = threading.Event()
+    completed = []
+    result = exit_lifecycle.run_exit_monitor_cycle(
+        held_position_monitor_active=active,
+        mark_held_position_monitor_complete=lambda: (
+            active.clear(),
+            completed.append(True),
+        ),
+        monitor_deadline_monotonic=10**9,
+        target_families={("paris", "2026-04-27", "HIGH")},
+    )
+
+    assert result is True
+    assert loaded_scopes == [None]
+    assert monitored_ids == ["red-paris", "red-seoul"]
+    assert saved_ids == monitored_ids
+    assert completed == [True]
 
 
 def test_red_emit_sole_caller_is_cycle_runner_force_exit_block():

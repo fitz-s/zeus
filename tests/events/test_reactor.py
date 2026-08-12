@@ -3879,6 +3879,53 @@ def test_reactor_wake_day0_still_preempts_older_joint_inputs(tmp_path):
     assert selected.wake_id == "day0-new"
 
 
+def test_expired_exact_held_sell_deadline_preempts_day0(tmp_path):
+    from src.runtime import reactor_wake
+
+    def selected_reason(path, deadline):
+        request = reactor_wake.make_held_sell_reauction_request(
+            position_id=f"held-{path.name}",
+            family=("Paris", "2026-08-13", "high"),
+            probability_content_identity="q-current",
+            held_token_id=f"token-{path.name}",
+            held_best_bid=0.11,
+            bid_observed_at="2026-08-12T12:00:00+00:00",
+            schema_version=4,
+            completion_deadline_at=deadline,
+        )
+        exact = reactor_wake.publish_reactor_wake(
+            source="held_position_monitor",
+            reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+            path=path,
+            wake_id=f"exact-{path.name}",
+            held_sell_reauction_requests=(request,),
+        )
+        day0 = reactor_wake.publish_reactor_wake(
+            source="day0",
+            reason="day0_extreme_event_committed",
+            path=path,
+            wake_id=f"day0-{path.name}",
+        )
+        return reactor_wake.read_reactor_wake(path=path), exact, day0
+
+    future_selected, _future_exact, future_day0 = selected_reason(
+        tmp_path / "future.json",
+        "2099-01-01T00:00:00+00:00",
+    )
+    expired_selected, expired_exact, _expired_day0 = selected_reason(
+        tmp_path / "expired.json",
+        "2000-01-01T00:00:00+00:00",
+    )
+
+    assert future_selected == future_day0
+    assert expired_selected == expired_exact
+    assert expired_selected.held_sell_reauction_requests[0].held_best_bid == 0.11
+    assert (
+        expired_selected.held_sell_reauction_requests[0].completion_deadline_at
+        == "2000-01-01T00:00:00+00:00"
+    )
+
+
 def test_post_terminal_day0_cleanup_gives_one_turn_to_material_input(tmp_path):
     from src.runtime import reactor_wake
 

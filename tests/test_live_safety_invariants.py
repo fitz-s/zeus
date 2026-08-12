@@ -2159,6 +2159,25 @@ def test_monitor_reservation_attempts_full_batch_before_retry(monkeypatch):
     assert [pos.trade_id for pos in third] == ["held-4", "held-0"]
 
 
+def test_monitor_primary_reserve_covers_every_admitted_degraded_tranche():
+    """Auxiliary work cannot spend the time promised to admitted positions."""
+    from src.engine import cycle_runtime
+
+    assert cycle_runtime._held_position_monitor_reservation_count(13) == 5
+    assert cycle_runtime._held_position_monitor_primary_reservation(
+        13,
+        75.0,
+    ) == (5, pytest.approx(25.0))
+    assert cycle_runtime._held_position_monitor_primary_reservation(
+        2,
+        6.0,
+    ) == (1, pytest.approx(5.0))
+    assert cycle_runtime._held_position_monitor_primary_reservation(
+        100,
+        75.0,
+    ) == (7, pytest.approx(35.0))
+
+
 def test_monitor_reservation_targeted_subset_preserves_full_book_fairness(
     monkeypatch,
 ):
@@ -6599,6 +6618,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             held_best_bid=kwargs["held_best_bid"],
             bid_observed_at=kwargs["bid_observed_at"],
             book_state=kwargs["book_state"],
+            completion_deadline_at=kwargs["completion_deadline_at"],
         )
 
     monkeypatch.setattr(
@@ -6834,6 +6854,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
                     pos.temperature_metric,
                 ),
                 "held_token_id": "paris-no",
+                "completion_deadline_at": "2026-07-14T18:00:30+00:00",
                 "return_request": True,
                 "prepare_only": True,
                 **expected_request_context,

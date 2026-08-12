@@ -165,6 +165,7 @@ class HeldSellReauctionRequest:
     book_state: str = "EXECUTABLE"
     probability_observed_at: str = ""
     attempt_identity: str = ""
+    completion_deadline_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -585,6 +586,7 @@ def make_held_sell_reauction_request(
     scope_identity: str = "",
     book_state: str = "EXECUTABLE",
     probability_observed_at: str = "",
+    completion_deadline_at: str = "",
 ) -> HeldSellReauctionRequest:
     """Bind one monitor witness to one non-reusable request generation."""
 
@@ -627,6 +629,21 @@ def make_held_sell_reauction_request(
     clean_generation = str(generation or uuid.uuid4().hex).strip()
     if not clean_generation or len(clean_generation) > 128:
         raise ValueError("HELD_SELL_REAUCTION_GENERATION_INVALID")
+    clean_completion_deadline = str(completion_deadline_at or "").strip()
+    if clean_completion_deadline:
+        try:
+            parsed_deadline = datetime.fromisoformat(
+                clean_completion_deadline.replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "HELD_SELL_REAUCTION_COMPLETION_DEADLINE_INVALID"
+            ) from exc
+        if parsed_deadline.tzinfo is None:
+            raise ValueError("HELD_SELL_REAUCTION_COMPLETION_DEADLINE_INVALID")
+        clean_completion_deadline = parsed_deadline.astimezone(
+            timezone.utc
+        ).isoformat()
     attempt_identity = (
         _held_sell_reauction_attempt_identity(material)
         if int(material.get("schema_version", 1))
@@ -644,6 +661,7 @@ def make_held_sell_reauction_request(
         material_identity=material_identity,
         generation=clean_generation,
         attempt_identity=attempt_identity,
+        completion_deadline_at=clean_completion_deadline,
         **material,
     )
 
@@ -708,6 +726,9 @@ def _clean_held_sell_reauction_requests(
                 book_state=str(get("book_state") or "EXECUTABLE"),
                 probability_observed_at=str(
                     get("probability_observed_at") or ""
+                ),
+                completion_deadline_at=str(
+                    get("completion_deadline_at") or ""
                 ),
             )
         except (TypeError, ValueError):
@@ -998,6 +1019,27 @@ def _queued_wakes(
     return [(queue_file, wake) for queue_file, wake in fresh.items() if wake is not None]
 
 
+def _exact_held_sell_deadline_expired(
+    request: HeldSellReauctionRequest,
+    *,
+    now: datetime,
+) -> bool:
+    """Return whether one exact SELL request exhausted its actuation clock."""
+
+    if int(request.schema_version) != HELD_SELL_REAUCTION_V4:
+        return False
+    deadline_text = str(request.completion_deadline_at or "").strip()
+    if not deadline_text:
+        return False
+    try:
+        deadline = datetime.fromisoformat(deadline_text.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if deadline.tzinfo is None:
+        return False
+    return deadline.astimezone(timezone.utc) <= now.astimezone(timezone.utc)
+
+
 def read_reactor_wake(
     *,
     path: Path | None = None,
@@ -1034,6 +1076,23 @@ def read_reactor_wake(
         for item in _queued_wakes(path, fail_on_error=fail_on_error)
         if item[1].wake_id not in excluded
     ]
+    now = datetime.now(timezone.utc)
+    for _queue_file, wake in queued:
+        if (
+            wake.reason == GLOBAL_AUCTION_COMPLETION_WAKE_REASON
+            and wake.held_sell_reauction_requests
+            and any(
+                _exact_held_sell_deadline_expired(request, now=now)
+                for request in wake.held_sell_reauction_requests
+            )
+        ):
+            # SCOPE: only an exact V4 SELL attempt whose immutable actuation
+            # deadline has expired. DRAIN: select its durable wake until the
+            # global auction writes a matching terminal receipt. RESET: a
+            # receipt removes the wake, while a newer attempt carries its own
+            # deadline. The auction still rebinds current q/book; this priority
+            # never authorizes replay of the request's historical quote.
+            return wake
     if prefer_exact_held_sell:
         for _queue_file, wake in queued:
             if (

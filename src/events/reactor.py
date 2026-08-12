@@ -6672,6 +6672,7 @@ def request_global_auction_completion(
     bid_observed_at: str = "",
     book_state: str | None = None,
     probability_observed_at: str = "",
+    completion_deadline_at: str = "",
     generation: str | None = None,
     scope_identity: str = "",
     schema_version: int = 4,
@@ -6746,6 +6747,7 @@ def request_global_auction_completion(
                 "scope_identity": scope_identity,
                 "book_state": inferred_book_state,
                 "probability_observed_at": probability_observed_at,
+                "completion_deadline_at": completion_deadline_at,
             }
             if generation:
                 held_request_kwargs["generation"] = generation
@@ -6753,7 +6755,7 @@ def request_global_auction_completion(
                 **{
                     key: value
                     for key, value in held_request_kwargs.items()
-                    if key != "generation"
+                    if key not in {"generation", "completion_deadline_at"}
                 }
             )
 
@@ -6854,7 +6856,10 @@ def request_global_auction_completion(
                         **{
                             key: value
                             for key, value in held_request_kwargs.items()
-                            if key != "generation"
+                            if key not in {
+                                "generation",
+                                "completion_deadline_at",
+                            }
                         }
                     )
             matching_versioned_requests = tuple(

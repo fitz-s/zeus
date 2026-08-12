@@ -29,6 +29,64 @@ that rejects partial tranche coverage, the existing complete/no-position/
 future-event/chain-risk cases, and one live restart whose full-book proof and
 canonical CAS reset both pass before entries resume.
 
+## 2026-08-12 Held-capital liveness and RED action closure
+
+Current live evidence disproves the assumption that fresh process heartbeats imply
+fresh held-position decisions.  The daemon remained alive while every actionable
+open position crossed the 240-second canonical `MONITOR_REFRESHED` deadline.  A
+75-second full-book claim reserved only one five-second primary-belief tranche,
+even though its existing degraded-coverage scheduler admits roughly one third of
+the held book.  A 32-second replacement-HWM read followed by a failed 30-second
+order-book batch therefore consumed the claim before any admitted belief tranche
+could make canonical progress.  Recovery observed the durable debt every 30
+seconds but could only contend for the same non-reentrant lane.
+
+The monitor budget must reserve one bounded belief-read tranche for every
+position already selected by the existing degraded-coverage law, capped at half
+the claim so the coherent HWM prerequisite retains a finite half.  Auxiliary
+debt and batch-book work may consume only the remainder.  This does not accept a
+stale forecast or quote, weaken the canonical write, or convert an unavailable
+book into HOLD authority; it guarantees that optional batch work cannot consume
+the time explicitly reserved for causal q/book redecision.  The behavioral
+antibody uses a 13-position pass and proves that five admitted primary tranches
+retain 25 seconds after HWM/auxiliary work rather than sharing one five-second
+reserve.
+
+The live EDLI mesh also omitted the durable RED action law.  `RiskGuard=RED`
+reached the allocator as reduce-only, but the only code that marked positions
+`red_force_exit` remained in the unscheduled legacy `run_cycle`.  The scheduled
+exit owner must therefore invoke the existing idempotent force-exit sweep before
+normal monitoring, widen a targeted wake to the full held book under RED, and
+persist its marker through the same artifact/portfolio commit.  It must not add
+a second order runtime or bypass the existing submit-time RED and executable-book
+checks.
+
+Finally, a prior Seoul SELL proves that a durable global-reauction deadline can
+expire for more than ten minutes without gaining reactor priority.  Expired,
+unreceipted exact held-SELL debt must promote the existing durable wake ahead of
+entry/forecast work while continuing to rebuild from current q/book; an old FAK
+quote is never replay authority.
+
+SCOPE is current positive held exposure, its single-writer monitor claim, current
+RED state, and an exact expired held-SELL obligation.  DRAIN is bounded canonical
+progress for every admitted monitor tranche, the existing RED marker-to-submit
+path, and a terminal exact reauction receipt.  RESET is fresh per-position
+`MONITOR_REFRESHED` evidence, risk below RED, or a matching terminal receipt;
+none is reset by heartbeat, scheduler invocation, stale q, or a timestamp-only
+wake.  Acceptance requires focused budget/RED/deadline-priority antibodies,
+existing monitor/exit/risk suites, live hot-fix landing, exact loaded SHA, fresh
+canonical monitor ages, RED action evidence, and no post-load negative-edge
+executable position lacking bounded intent/command/receipt progression.
+
+The Seoul probability reversal is a separate probability-law defect, not a
+monitor-liveness patch.  The current peak-set atom is
+`P(peak set | city, month, hour)` and can place about 99.3% mass on the observed
+boundary while current slope/provider innovations affect only the remaining
+0.7% branch.  Its replacement must be a causal two-stage posterior conditioned
+on decision-time trajectory evidence and validated walk-forward over at most
+seven days.  No market-price cap, post-outcome label, or uncalibrated constant is
+authorized by this hot-fix slice.
+
 ## 2026-08-12 Fresh target-specific ENS shape is required for entry
 
 The current forecast database contained 190 latest family certificates: 176
