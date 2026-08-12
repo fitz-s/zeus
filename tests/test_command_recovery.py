@@ -4637,6 +4637,45 @@ def test_complete_exit_trade_facts_clear_review_with_typed_proof(conn):
 class TestAuthenticatedEntryTradeFactProjection:
     """A confirmed authenticated fill must become owned wealth immediately."""
 
+    @pytest.mark.parametrize(
+        "bin_suffix",
+        ("32c", "30-31c", "31c-or-below", "35c-or-higher"),
+    )
+    def test_immutable_weather_snapshot_parses_executable_bin_suffix(
+        self,
+        bin_suffix,
+    ):
+        from src.execution.command_recovery import (
+            _weather_identity_from_snapshot_slug,
+        )
+
+        identity = _weather_identity_from_snapshot_slug(
+            {
+                "snapshot_event_slug": (
+                    "highest-temperature-in-singapore-on-august-12-2026-"
+                    f"{bin_suffix}"
+                )
+            }
+        )
+
+        assert identity["city"] == "Singapore"
+        assert identity["target_date"] == "2026-08-12"
+        assert identity["temperature_metric"] == "high"
+        assert identity["unit"] == "C"
+
+    def test_immutable_weather_snapshot_rejects_arbitrary_suffix(self):
+        from src.execution.command_recovery import (
+            _weather_identity_from_snapshot_slug,
+        )
+
+        assert _weather_identity_from_snapshot_slug(
+            {
+                "snapshot_event_slug": (
+                    "highest-temperature-in-singapore-on-august-12-2026-spoof"
+                )
+            }
+        ) == {}
+
     def test_submitting_fill_synthesizes_ack_and_releases_reservation(self, conn):
         from src.execution.command_recovery import (
             reconcile_authenticated_entry_trade_facts,
@@ -4824,7 +4863,7 @@ class TestAuthenticatedEntryTradeFactProjection:
             position_id=position_id,
             decision_id="dec-authenticated-fak-price-improvement",
             token_id=token_id,
-            event_slug="highest-temperature-in-singapore-on-july-24-2026",
+            event_slug="highest-temperature-in-singapore-on-july-24-2026-30c",
             order_type="FAK",
             size=173.0,
             price=0.09,

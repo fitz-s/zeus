@@ -10303,7 +10303,8 @@ def _existing_position_for_incremental_terminal_no_fill(
 
 _WEATHER_EVENT_SLUG_RE = re.compile(
     r"^(?P<metric>highest|lowest)-temperature-in-(?P<city>.+)-on-"
-    r"(?P<month>[a-z]+)-(?P<day>\d{1,2})-(?P<year>\d{4})$"
+    r"(?P<month>[a-z]+)-(?P<day>\d{1,2})-(?P<year>\d{4})"
+    r"(?:-(?:\d+(?:c|f)(?:-or-(?:below|higher))?|\d+-\d+(?:c|f)))?$"
 )
 _MONTH_NAME_TO_NUMBER = {
     "january": "01",

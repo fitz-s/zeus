@@ -3308,3 +3308,26 @@ identity-bound exact-order read and canonical apply. RESET is advancement out of
 - recovery still fences the active reactor before point truth is applied;
 - focused recovery/scheduler tests, compile, diff, hot-fix landing, loaded-SHA,
   and live command/fill projection evidence pass.
+
+## 2026-08-11 Immutable weather snapshot accepts market-bin slug identity
+
+After the identity-bound submit advanced to ACKED, authenticated fill sync
+proved 7.462684 matched shares but rolled its entire transaction back because
+the missing-position recovery parser rejected the real immutable event slug
+`highest-temperature-in-singapore-on-august-12-2026-32c`. The parser accepted
+only a family slug ending at the year, while executable market snapshots bind
+the outcome-bin suffix as part of their event slug.
+
+The repair extends only the weather-slug grammar after a complete
+metric/city/date prefix. It accepts the executable point/range/shoulder forms
+(`32c`, `50-51f`, `31c-or-below`, `90f-or-higher`) and still rejects arbitrary
+suffixes. Complete snapshot and submission-envelope condition, YES/NO token,
+selected-token, runtime city, and canonical market-metadata checks remain
+mandatory before any position is materialized.
+
+SCOPE is missing-position recovery for an authenticated exact-order ENTRY fill.
+DRAIN is the next continuous fill-sync retry. RESET is a parseable immutable
+weather market slug plus all existing identity predicates. Acceptance requires
+the bin-suffixed Singapore fill test to materialize the exact canonical market
+identity, malformed slugs to remain fail-closed, focused recovery/fill tests to
+pass, then exact-SHA deployment and live projection of both current fills.
