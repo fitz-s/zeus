@@ -4500,7 +4500,14 @@ def _closed_by_static_market_end_info(conn, pos, *, decision_time: datetime | No
     }
 
 
-def _closed_non_accepting_market_info(clob, pos, conn=None, *, decision_time: datetime | None = None) -> dict | None:
+def _closed_non_accepting_market_info(
+    clob,
+    pos,
+    conn=None,
+    *,
+    decision_time: datetime | None = None,
+    deadline_monotonic: float | None = None,
+) -> dict | None:
     static_closed = _closed_by_static_market_end_info(
         conn,
         pos,
@@ -4526,12 +4533,37 @@ def _closed_non_accepting_market_info(clob, pos, conn=None, *, decision_time: da
     ):
         return static_closed
 
-    get_market_info = getattr(clob, "get_clob_market_info", None)
+    get_market_info = (
+        getattr(clob, "get_held_clob_market_info", None)
+        if deadline_monotonic is not None
+        else getattr(clob, "get_clob_market_info", None)
+    )
     if condition_id and callable(get_market_info):
-        try:
-            info = get_market_info(condition_id)
-        except Exception:
-            info = None
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        ):
+            return static_closed
+        if deadline_monotonic is None:
+            try:
+                info = get_market_info(condition_id)
+            except Exception:
+                info = None
+        else:
+            remaining = float(deadline_monotonic) - time.monotonic()
+            # The held-risk adapter owns a timeout-capable contract.  Do not
+            # catch its failures here: the position monitor restores its
+            # incomplete refresh state and records the exact failure before
+            # continuing through the remaining book.
+            info = get_market_info(
+                condition_id,
+                timeout=max(0.0, remaining),
+            )
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= float(deadline_monotonic)
+        ):
+            return static_closed
         if info is not None:
             closed = _market_info_value(info, "closed")
             accepting_orders = _market_info_value(info, "accepting_orders", "acceptingOrders")
@@ -6023,10 +6055,13 @@ def execute_monitoring_phase(
     defer_partial_orderbook_gaps: bool = False,
 ):
     from src.engine.monitor_refresh import (
+        _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR,
+        _GLOBAL_MONITOR_ALPHA_ATTR,
         HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
         _GLOBAL_MONITOR_SAMPLES_ATTR,
         _HELD_MONITOR_DEADLINE_ATTR,
         _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
+        _MONITOR_PROBABILITY_RECEIPT_ATTR,
         install_monitor_day0_family_cache,
         install_monitor_replacement_hwm_snapshot,
         monitor_quote_refresh,
@@ -7101,6 +7136,109 @@ def execute_monitoring_phase(
     summary["held_monitor_budget_bypass_scanned"] = 0
     monitor_wealth_witness_cache: dict[str, object] = {}
     deadline_rescue_used = False
+    refresh_owned_attrs = (
+        "last_monitor_at",
+        "last_monitor_best_bid",
+        "last_monitor_best_ask",
+        "last_monitor_bid_size",
+        "last_monitor_bid_ladder",
+        "last_monitor_market_vig",
+        "last_monitor_whale_toxicity",
+        "last_monitor_market_price",
+        "last_monitor_market_price_is_fresh",
+        "last_monitor_prob",
+        "last_monitor_prob_is_fresh",
+        "last_monitor_edge",
+        "selected_method",
+        "applied_validations",
+        "_bootstrap_context",
+        "_day0_monitor_probability_receipt",
+        "_day0_exit_authority_status",
+        "_day0_exit_authority_reason",
+        "_replacement_current_evidence_held_bounds",
+        _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR,
+        _GLOBAL_MONITOR_ALPHA_ATTR,
+        _GLOBAL_MONITOR_SAMPLES_ATTR,
+        _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
+        _MONITOR_PROBABILITY_RECEIPT_ATTR,
+    )
+    missing_refresh_attr = object()
+
+    def snapshot_refresh_state(pos) -> dict[str, object]:
+        snapshot: dict[str, object] = {}
+        for attr in refresh_owned_attrs:
+            value = getattr(pos, attr, missing_refresh_attr)
+            if isinstance(value, list):
+                value = list(value)
+            elif isinstance(value, dict):
+                value = dict(value)
+            snapshot[attr] = value
+        return snapshot
+
+    def restore_refresh_state(pos, snapshot: dict[str, object]) -> None:
+        # Restore only fields owned by refresh_position.  Other threads may
+        # attach unrelated runtime evidence while a bounded read is running;
+        # clearing vars(pos) would erase that evidence.
+        for attr, value in snapshot.items():
+            if value is missing_refresh_attr:
+                try:
+                    delattr(pos, attr)
+                except AttributeError:
+                    pass
+            else:
+                setattr(pos, attr, value)
+
+    def record_position_deadline_expiry(
+        *,
+        position_index: int,
+        position_deadline: float,
+        position_id: str,
+        stage: str,
+    ) -> str | None:
+        """Classify one exhausted child claim without starving the held book."""
+
+        now_monotonic = time.monotonic()
+        if now_monotonic < position_deadline:
+            return None
+        if now_monotonic >= monitor_deadline:
+            # SCOPE: this position and the unvisited tail. DRAIN: the next
+            # monitor pass creates a fresh global claim. RESET: a later pass
+            # completes within its global deadline.
+            deferred_count = len(monitor_positions) - position_index
+            summary["held_monitor_primary_belief_read_deferred"] = (
+                summary.get("held_monitor_primary_belief_read_deferred", 0)
+                + deferred_count
+            )
+            summary["held_monitor_positions_deferred"] = deferred_count
+            summary["held_monitor_defer_reason"] = (
+                "MONITOR_DEADLINE_EXPIRED_AFTER_REFRESH"
+            )
+            summary["held_monitor_deadline_deferred_positions"] = deferred_count
+            summary["held_monitor_deadline_defer_reason"] = (
+                "MONITOR_DEADLINE_EXPIRED_AFTER_REFRESH"
+            )
+            return "global"
+
+        # SCOPE: this exact position attempt only. DRAIN: the fair scheduler
+        # retries it next cycle while this pass continues through the remaining
+        # book. RESET: any complete child attempt clears the transient deadline.
+        summary["held_monitor_primary_belief_read_deferred"] = (
+            summary.get("held_monitor_primary_belief_read_deferred", 0) + 1
+        )
+        summary["held_monitor_positions_deferred"] = (
+            summary.get("held_monitor_positions_deferred", 0) + 1
+        )
+        summary["held_monitor_defer_reason"] = (
+            "PER_POSITION_DEADLINE_EXPIRED"
+        )
+        summary["held_monitor_per_position_deadline_deferred"] = (
+            summary.get("held_monitor_per_position_deadline_deferred", 0) + 1
+        )
+        summary.setdefault(
+            "held_monitor_per_position_deadline_positions",
+            [],
+        ).append({"position_id": position_id, "stage": stage})
+        return "position"
 
     for position_index, pos in enumerate(monitor_positions):
         armed_obligation = None
@@ -7137,6 +7275,15 @@ def execute_monitoring_phase(
             summary["held_monitor_dead_bin_deadline_rescue_position"] = str(
                 getattr(pos, "trade_id", "") or ""
             )
+        position_deadline = (
+            monitor_deadline
+            if deadline_rescue
+            else min(
+                monitor_deadline,
+                time.monotonic()
+                + HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
+            )
+        )
         deadline_rescue_hard_fact = durable_hard_facts.get(id(pos))
         local_dead_bin_deadline_rescue = bool(
             deadline_rescue
@@ -7511,7 +7658,7 @@ def execute_monitoring_phase(
                             None,
                         )
                         network_prefetch_singular_fallback_attempted = True
-                        setattr(pos, _HELD_MONITOR_DEADLINE_ATTR, monitor_deadline)
+                        setattr(pos, _HELD_MONITOR_DEADLINE_ATTR, position_deadline)
                         try:
                             fallback_quote = monitor_quote_refresh(
                                 conn,
@@ -7582,6 +7729,16 @@ def execute_monitoring_phase(
         hours_to_settlement = None
         monitor_result_written = False
         monitor_canonical_failed = False
+        previous_position_deadline = getattr(
+            pos,
+            _HELD_MONITOR_DEADLINE_ATTR,
+            None,
+        )
+        had_previous_position_deadline = hasattr(
+            pos,
+            _HELD_MONITOR_DEADLINE_ATTR,
+        )
+        setattr(pos, _HELD_MONITOR_DEADLINE_ATTR, position_deadline)
         try:
             city = deps.cities_by_name.get(pos.city)
             if city is not None:
@@ -7731,7 +7888,18 @@ def execute_monitoring_phase(
                     pos,
                     conn,
                     decision_time=deps._utcnow(),
+                    deadline_monotonic=position_deadline,
                 )
+            deadline_expiry = record_position_deadline_expiry(
+                position_index=position_index,
+                position_deadline=position_deadline,
+                position_id=str(getattr(pos, "trade_id", "") or ""),
+                stage="closed_market_metadata",
+            )
+            if deadline_expiry is not None:
+                if deadline_expiry == "global":
+                    break
+                continue
             # FIX 2b (2026-06-20): split the day0 closed-market pre-emption by
             # evidence source.
             #   * source="clob_market_info" → the VENUE itself reports
@@ -7894,89 +8062,68 @@ def execute_monitoring_phase(
                 deps,
                 boundary="before_probability_refresh",
             )
-            if _hard_fact is not None and _hard_fact.action == "EXIT_DEAD_BIN":
-                from src.engine.monitor_refresh import refresh_exact_zero_position
+            refresh_position_state = snapshot_refresh_state(pos)
+            try:
+                if _hard_fact is not None and _hard_fact.action == "EXIT_DEAD_BIN":
+                    from src.engine.monitor_refresh import refresh_exact_zero_position
 
-                edge_ctx = refresh_exact_zero_position(
-                    conn,
-                    clob,
-                    pos,
-                    refresh_quote=not local_dead_bin_deadline_rescue,
-                )
-                summary["day0_hard_fact_probability_refresh_bypassed"] = (
-                    summary.get(
-                        "day0_hard_fact_probability_refresh_bypassed",
-                        0,
+                    edge_ctx = refresh_exact_zero_position(
+                        conn,
+                        clob,
+                        pos,
+                        refresh_quote=not local_dead_bin_deadline_rescue,
                     )
-                    + 1
-                )
-            elif _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN":
-                from src.engine.monitor_refresh import refresh_exact_one_position
+                    summary["day0_hard_fact_probability_refresh_bypassed"] = (
+                        summary.get(
+                            "day0_hard_fact_probability_refresh_bypassed",
+                            0,
+                        )
+                        + 1
+                    )
+                elif _hard_fact is not None and _hard_fact.action == "HOLD_STRUCTURAL_WIN":
+                    from src.engine.monitor_refresh import refresh_exact_one_position
 
-                edge_ctx = refresh_exact_one_position(pos)
-                summary["day0_hard_fact_probability_refresh_bypassed"] = (
-                    summary.get(
-                        "day0_hard_fact_probability_refresh_bypassed",
-                        0,
+                    edge_ctx = refresh_exact_one_position(pos)
+                    summary["day0_hard_fact_probability_refresh_bypassed"] = (
+                        summary.get(
+                            "day0_hard_fact_probability_refresh_bypassed",
+                            0,
+                        )
+                        + 1
                     )
-                    + 1
-                )
-                summary["day0_hard_fact_structural_win_quote_bypassed"] = (
-                    summary.get(
-                        "day0_hard_fact_structural_win_quote_bypassed",
-                        0,
+                    summary["day0_hard_fact_structural_win_quote_bypassed"] = (
+                        summary.get(
+                            "day0_hard_fact_structural_win_quote_bypassed",
+                            0,
+                        )
+                        + 1
                     )
-                    + 1
-                )
-            else:
-                # SCOPE: this monitor invocation's remaining quote/probability
-                # work. DRAIN: every admitted network and SQLite read receives
-                # the one cycle deadline; later positions defer when it expires.
-                # RESET: the transient attribute is removed after this refresh,
-                # and the next invocation creates a fresh cycle deadline.
-                setattr(
-                    pos,
-                    _HELD_MONITOR_DEADLINE_ATTR,
-                    monitor_deadline,
-                )
-                summary["held_monitor_primary_belief_read_started"] = (
-                    summary.get("held_monitor_primary_belief_read_started", 0)
-                    + 1
-                )
-                try:
+                else:
+                    summary["held_monitor_primary_belief_read_started"] = (
+                        summary.get("held_monitor_primary_belief_read_started", 0)
+                        + 1
+                    )
                     edge_ctx = refresh_position(conn, clob, pos)
-                finally:
-                    if (
-                        is_durable_debt_network_attempt
-                        and held_token_id
-                    ):
+                    if is_durable_debt_network_attempt and held_token_id:
                         _mark_held_monitor_orderbook_attempted(
                             clob,
                             quote_positions,
                             held_token_id,
                         )
-                    try:
-                        delattr(pos, _HELD_MONITOR_DEADLINE_ATTR)
-                    except AttributeError:
-                        pass
-                if time.monotonic() >= monitor_deadline:
-                    # SCOPE: this refresh and remaining positions. DRAIN: the
-                    # next monitor pass refreshes them under a fresh deadline.
-                    # RESET: a completed in-budget refresh.
-                    deferred_count = len(monitor_positions) - position_index
-                    summary["held_monitor_primary_belief_read_deferred"] = (
-                        summary.get("held_monitor_primary_belief_read_deferred", 0)
-                        + deferred_count
-                    )
-                    summary["held_monitor_positions_deferred"] = deferred_count
-                    summary["held_monitor_defer_reason"] = (
-                        "MONITOR_DEADLINE_EXPIRED_AFTER_REFRESH"
-                    )
-                    summary["held_monitor_deadline_deferred_positions"] = deferred_count
-                    summary["held_monitor_deadline_defer_reason"] = (
-                        "MONITOR_DEADLINE_EXPIRED_AFTER_REFRESH"
-                    )
+            except Exception:
+                restore_refresh_state(pos, refresh_position_state)
+                raise
+            deadline_expiry = record_position_deadline_expiry(
+                position_index=position_index,
+                position_deadline=position_deadline,
+                position_id=str(getattr(pos, "trade_id", "") or ""),
+                stage="refresh",
+            )
+            if deadline_expiry is not None:
+                restore_refresh_state(pos, refresh_position_state)
+                if deadline_expiry == "global":
                     break
+                continue
             if monitoring_non_executable_dust:
                 current_min_order_size = getattr(
                     pos,
@@ -8017,8 +8164,19 @@ def execute_monitoring_phase(
                     pos=pos,
                     exit_context=exit_context,
                     identity_seed_allowed=pending_exit_retry_identity_seed_allowed,
-                    deadline_monotonic=monitor_deadline,
+                    deadline_monotonic=position_deadline,
                 )
+                deadline_expiry = record_position_deadline_expiry(
+                    position_index=position_index,
+                    position_deadline=position_deadline,
+                    position_id=str(getattr(pos, "trade_id", "") or ""),
+                    stage="pending_exit_retry_quote",
+                )
+                if deadline_expiry is not None:
+                    restore_refresh_state(pos, refresh_position_state)
+                    if deadline_expiry == "global":
+                        break
+                    continue
                 if refreshed_retry_quote:
                     summary["pending_exit_retry_current_clob_quote_refreshed"] = (
                         summary.get("pending_exit_retry_current_clob_quote_refreshed", 0) + 1
@@ -8763,6 +8921,17 @@ def execute_monitoring_phase(
                     )
                 )
         finally:
+            if had_previous_position_deadline:
+                setattr(
+                    pos,
+                    _HELD_MONITOR_DEADLINE_ATTR,
+                    previous_position_deadline,
+                )
+            else:
+                try:
+                    delattr(pos, _HELD_MONITOR_DEADLINE_ATTR)
+                except AttributeError:
+                    pass
             _release_monitor_write_lock_boundary(
                 conn,
                 summary,

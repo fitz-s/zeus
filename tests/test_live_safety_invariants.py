@@ -12056,6 +12056,61 @@ def test_day0_closed_market_detection_uses_static_market_end_when_clob_info_miss
     assert info["accepting_orders"] is False
 
 
+def test_closed_market_metadata_uses_bounded_held_risk_client():
+    """Held monitor metadata cannot fall back to an unbounded public request."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="bounded-held-market-info",
+        condition_id="bounded-held-condition",
+        market_id="bounded-held-condition",
+    )
+    observed_timeouts = []
+
+    class BoundedHeldClob:
+        def get_held_clob_market_info(self, condition_id, *, timeout=None):
+            assert condition_id == "bounded-held-condition"
+            observed_timeouts.append(timeout)
+            return {"closed": True, "accepting_orders": False}
+
+        def get_clob_market_info(self, _condition_id):
+            raise AssertionError("held monitor must use the held-risk circuit")
+
+    info = cycle_runtime._closed_non_accepting_market_info(
+        BoundedHeldClob(),
+        pos,
+        deadline_monotonic=time.monotonic() + 5.0,
+    )
+
+    assert info is not None
+    assert info["source"] == "clob_market_info"
+    assert len(observed_timeouts) == 1
+    assert 0.0 < observed_timeouts[0] <= 5.0
+
+
+def test_bounded_closed_market_metadata_does_not_swallow_transport_failure():
+    """A held-risk transport failure remains visible to the monitor failure lane."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="bounded-held-market-info-failure",
+        condition_id="bounded-held-condition-failure",
+        market_id="bounded-held-condition-failure",
+    )
+
+    class FailingHeldClob:
+        def get_held_clob_market_info(self, _condition_id, *, timeout=None):
+            assert timeout is not None
+            raise RuntimeError("held market metadata transport failed")
+
+    with pytest.raises(RuntimeError, match="metadata transport failed"):
+        cycle_runtime._closed_non_accepting_market_info(
+            FailingHeldClob(),
+            pos,
+            deadline_monotonic=time.monotonic() + 5.0,
+        )
+
+
 def test_held_monitor_prefetch_batches_books_and_skips_redundant_market_metadata():
     from src.engine import cycle_runtime, monitor_refresh
 
@@ -19883,6 +19938,232 @@ def test_monitor_refresh_deadline_defers_before_canonical_emit(monkeypatch):
     assert canonical_emits == []
     assert summary["held_monitor_defer_reason"] == "MONITOR_DEADLINE_EXPIRED_AFTER_REFRESH"
     assert summary["held_monitor_deadline_deferred_positions"] == 1
+
+
+def test_one_position_deadline_does_not_blind_remaining_held_book(monkeypatch):
+    """One slow family loses only its own snapshot; later positions still decide."""
+    from src.engine import cycle_runtime
+
+    positions = [
+        _make_position(
+            trade_id=f"isolated-position-deadline-{index}",
+            token_id=f"isolated-position-token-{index}",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(2)
+    ]
+    clock = [0.0]
+    refreshes = []
+    canonical_emits = []
+    evaluated = []
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: positions,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_day0_hard_fact_position_eligible",
+        lambda *_args, **_kwargs: False,
+    )
+
+    def refresh(_conn, _clob, position):
+        refreshes.append(position.trade_id)
+        position.last_monitor_at = f"attempt-{len(refreshes)}"
+        position.last_monitor_prob = 0.60
+        position.last_monitor_prob_is_fresh = True
+        position.last_monitor_best_bid = 0.40
+        position.last_monitor_market_price = 0.40
+        position.last_monitor_market_price_is_fresh = True
+        if len(refreshes) == 1:
+            position.concurrent_evidence = "must-survive-refresh-rollback"
+            clock[0] = 6.0
+        return _monitor_test_edge_context(position)
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: (
+            evaluated.append(self.trade_id)
+            or ExitDecision(False, "CI_OVERLAP_HOLD")
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda _conn, position, **_kwargs: (
+            canonical_emits.append(position.trade_id) or True
+        ),
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(*positions),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("isolated_position_deadline"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=20.0,
+    )
+
+    assert refreshes == [position.trade_id for position in positions]
+    assert evaluated == [positions[1].trade_id]
+    assert canonical_emits == [positions[1].trade_id]
+    assert positions[0].last_monitor_at != "attempt-1"
+    assert positions[0].concurrent_evidence == "must-survive-refresh-rollback"
+    assert summary["held_monitor_per_position_deadline_deferred"] == 1
+    assert summary["held_monitor_positions_deferred"] == 1
+    assert summary["held_monitor_primary_belief_read_completed"] == 1
+    assert summary["monitors"] == 1
+
+
+def test_refresh_exception_restores_owned_state_and_continues_held_book(monkeypatch):
+    """A failed refresh cannot leak a half-updated decision into later work."""
+    from src.engine import cycle_runtime
+
+    positions = [
+        _make_position(
+            trade_id=f"refresh-exception-{index}",
+            token_id=f"refresh-exception-token-{index}",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(2)
+    ]
+    original_prob = positions[0].last_monitor_prob
+    evaluated = []
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: positions,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_day0_hard_fact_position_eligible",
+        lambda *_args, **_kwargs: False,
+    )
+
+    def refresh(_conn, _clob, position):
+        if position is positions[0]:
+            position.last_monitor_prob = 0.01
+            position.last_monitor_prob_is_fresh = True
+            position.applied_validations.append("partial-refresh-must-rollback")
+            position.concurrent_evidence = "must-survive-refresh-exception"
+            raise RuntimeError("refresh transport failed")
+        return _monitor_test_edge_context(position)
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: (
+            evaluated.append(self.trade_id)
+            or ExitDecision(False, "CI_OVERLAP_HOLD")
+        ),
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(*positions),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("refresh_exception_rollback"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=20.0,
+    )
+
+    assert positions[0].last_monitor_prob == original_prob
+    assert "partial-refresh-must-rollback" not in positions[0].applied_validations
+    assert positions[0].concurrent_evidence == "must-survive-refresh-exception"
+    assert evaluated == [positions[1].trade_id]
+    assert summary["monitor_failed"] == 1
+    assert summary["monitors"] == 1
+
+
+def test_closed_market_metadata_child_timeout_continues_held_book(monkeypatch):
+    """Expired venue metadata cannot commit close state or blind later positions."""
+    from src.engine import cycle_runtime
+
+    positions = [
+        _make_position(
+            trade_id=f"closed-metadata-deadline-{index}",
+            token_id=f"closed-metadata-token-{index}",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(2)
+    ]
+    clock = [0.0]
+    refreshes = []
+    canonical_emits = []
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: positions,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_day0_hard_fact_position_eligible",
+        lambda *_args, **_kwargs: False,
+    )
+
+    metadata_calls = []
+
+    def market_info(_clob, position, *_args, **_kwargs):
+        metadata_calls.append(position.trade_id)
+        if position is positions[0]:
+            clock[0] = 6.0
+        return {
+            "closed": True,
+            "accepting_orders": False,
+            "source": "clob_market_info",
+        }
+
+    monkeypatch.setattr(cycle_runtime, "_closed_non_accepting_market_info", market_info)
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda _conn, _clob, position: (
+            refreshes.append(position.trade_id)
+            or _monitor_test_edge_context(position)
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda _conn, position, **_kwargs: (
+            canonical_emits.append(position.trade_id) or True
+        ),
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(*positions),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("closed_metadata_deadline"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=20.0,
+    )
+
+    assert metadata_calls == [position.trade_id for position in positions]
+    assert refreshes == []
+    assert canonical_emits == []
+    assert positions[0].state == "holding"
+    assert summary["held_monitor_per_position_deadline_deferred"] == 1
+    assert summary["held_monitor_positions_deferred"] == 1
 
 
 def test_market_velocity_uses_causal_source_time_not_legacy_text_order(tmp_path):
