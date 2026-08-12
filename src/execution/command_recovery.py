@@ -9212,6 +9212,14 @@ def reconcile_terminal_entry_exposure_obligations(
     }
     if not all(_table_exists(conn, table) for table in required):
         return summary
+    late_fill_corrections = (
+        _exchange_reconcile.reconcile_persisted_terminal_late_entry_fills(
+            conn,
+            command_id=scoped_command_id,
+        )
+    )
+    if late_fill_corrections.get("scanned", 0):
+        summary["terminal_late_fill_corrections"] = late_fill_corrections
     projection_gate_sql = "0"
     settlement_absorption_sql = "0"
     if _table_exists(conn, "position_current") and _table_exists(conn, "position_events"):
@@ -26805,6 +26813,11 @@ def _reconcile_passes_short_conn(
             stale_terminal_finding_candidates = (
                 _stale_local_orphan_terminal_no_fill_candidates(conn)
             )
+            terminal_late_fill_command_ids = (
+                _exchange_reconcile.persisted_terminal_late_entry_fill_command_ids(
+                    conn
+                )
+            )
             if cancel_candidates:
                 # Exact cancel uncertainty globally removes entry authority.
                 # Do not spend its bounded tick on the broader historical
@@ -26912,6 +26925,29 @@ def _reconcile_passes_short_conn(
                 )
         if identity_submit_deferred:
             summary["identity_bound_inflight_deferred"] = identity_submit_deferred
+        terminal_late_fill_result = None
+        if terminal_late_fill_command_ids:
+            late_fill_deadline = _capital_deadline()
+            late_fill_conn_factory = _recovery_apply_conn_factory(
+                conn_factory,
+                scope="live_tick",
+                deadline_monotonic=late_fill_deadline,
+            )
+            terminal_late_fill_result = _run_capital_pass(
+                "terminal_late_entry_fill_fast",
+                lambda: run_db_only_pass(
+                    _exchange_reconcile.reconcile_persisted_terminal_late_entry_fills,
+                    conn_factory=late_fill_conn_factory,
+                    label="recovery.terminal_late_entry_fill_fast",
+                ),
+                deadline_monotonic=late_fill_deadline,
+            )
+            if terminal_late_fill_result is not None:
+                _accumulate(
+                    summary,
+                    "terminal_late_entry_fill_fast",
+                    terminal_late_fill_result,
+                )
         preexisting_obligation_result = None
         if terminal_obligation_open:
             obligation_deadline = _capital_deadline()
@@ -27005,12 +27041,14 @@ def _reconcile_passes_short_conn(
             return (
                 preexisting_terminal_result
                 or identity_result
+                or terminal_late_fill_result
                 or preexisting_obligation_result
             )
         if not cancel_candidates and not terminal_candidates and not partial_candidates:
             return (
                 preexisting_terminal_result
                 or stale_terminal_finding_result
+                or terminal_late_fill_result
                 or preexisting_obligation_result
             )
         cancel_command_ids = {
@@ -27166,6 +27204,7 @@ def _reconcile_passes_short_conn(
         return (
             preexisting_terminal_result
             or stale_terminal_finding_result
+            or terminal_late_fill_result
             or preexisting_obligation_result
             or cancel_result
             or partial_result

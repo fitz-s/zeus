@@ -2101,7 +2101,12 @@ def test_trade_at_exchange_missing_locally_emits_trade_fact_if_order_linkable_el
     assert row["subject_id"] == "trade-ghost"
 
 
-def _seed_terminal_no_fill_command(conn, *, with_reservation: bool = True):
+def _seed_terminal_no_fill_command(
+    conn,
+    *,
+    with_reservation: bool = True,
+    terminal_no_fill: object = True,
+):
     from src.state.venue_command_repo import append_event
 
     seed_command(conn, size=10, price=0.50)
@@ -2112,7 +2117,10 @@ def _seed_terminal_no_fill_command(conn, *, with_reservation: bool = True):
         command_id="cmd-m5",
         event_type="EXPIRED",
         occurred_at=terminal_at.isoformat(),
-        payload={"venue_order_id": "ord-m5", "terminal_no_fill": True},
+        payload={
+            "venue_order_id": "ord-m5",
+            "terminal_no_fill": terminal_no_fill,
+        },
     )
     if with_reservation:
         conn.execute(
@@ -2501,6 +2509,129 @@ def test_authenticated_terminal_full_fill_converts_all_collateral_atomically(con
     ).fetchone()
     assert projection["phase"] == "active"
     assert Decimal(str(projection["shares"])) == Decimal("10")
+
+
+def test_resolved_obligation_still_drains_persisted_terminal_late_fill(conn):
+    from src.execution.command_recovery import (
+        reconcile_terminal_entry_exposure_obligations,
+    )
+    from src.state.entry_exposure_obligation import open_entry_exposure_obligation
+    from src.state.schema.entry_exposure_obligations_schema import ensure_table
+    from src.state.venue_command_repo import append_order_fact, append_trade_fact
+
+    terminal_at = _seed_terminal_no_fill_command(conn)
+    ensure_table(conn)
+    open_entry_exposure_obligation(
+        conn,
+        command_id="cmd-m5",
+        owner_domain="trade",
+        token_id=YES_TOKEN,
+        condition_id="condition-m5",
+        shares=10.0,
+        cost_basis_usd=5.0,
+        now=NOW.isoformat(),
+    )
+    conn.execute(
+        "UPDATE entry_exposure_obligations SET status = 'RESOLVED', "
+        "resolved_at = ?, updated_at = ? WHERE command_id = 'cmd-m5'",
+        (terminal_at.isoformat(), terminal_at.isoformat()),
+    )
+    conn.execute(
+        "UPDATE position_current SET phase = 'day0_window', shares = 6, "
+        "cost_basis_usd = 3, size_usd = 3 WHERE position_id = 'pos-m5'"
+    )
+    append_order_fact(
+        conn,
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="PARTIALLY_MATCHED",
+        remaining_size="4",
+        matched_size="6",
+        source="REST",
+        observed_at=terminal_at + timedelta(minutes=1),
+        raw_payload_hash=hashlib.sha256(b"durable-drain-order").hexdigest(),
+        raw_payload_json={"proof": "authenticated_point_order"},
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-durable-terminal-drain",
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="CONFIRMED",
+        filled_size="6",
+        fill_price="0.50",
+        source="REST",
+        observed_at=terminal_at + timedelta(minutes=1),
+        raw_payload_hash=hashlib.sha256(b"durable-drain-trade").hexdigest(),
+        raw_payload_json={"proof": "authenticated_trade"},
+    )
+
+    summary = reconcile_terminal_entry_exposure_obligations(conn)
+
+    assert summary["terminal_late_fill_corrections"] == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert summary["scanned"] == 0
+    assert summary["stayed"] == 0
+    assert summary["errors"] == 0
+    assert conn.execute(
+        "SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'"
+    ).fetchone()["state"] == "PARTIAL"
+    reservation = conn.execute(
+        """
+        SELECT amount, released_at, converted_amount
+          FROM collateral_reservations
+         WHERE command_id = 'cmd-m5'
+        """
+    ).fetchone()
+    assert dict(reservation) == {
+        "amount": 2000000,
+        "released_at": None,
+        "converted_amount": 0,
+    }
+
+
+def test_numeric_terminal_no_fill_claim_is_not_scheduled_as_boolean_truth(conn):
+    from src.execution.exchange_reconcile import (
+        persisted_terminal_late_entry_fill_command_ids,
+    )
+    from src.state.venue_command_repo import append_order_fact, append_trade_fact
+
+    terminal_at = _seed_terminal_no_fill_command(conn, terminal_no_fill=1)
+    conn.execute(
+        "UPDATE position_current SET phase = 'active', shares = 6, "
+        "cost_basis_usd = 3, size_usd = 3 WHERE position_id = 'pos-m5'"
+    )
+    append_order_fact(
+        conn,
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="PARTIALLY_MATCHED",
+        remaining_size="4",
+        matched_size="6",
+        source="REST",
+        observed_at=terminal_at + timedelta(minutes=1),
+        raw_payload_hash=hashlib.sha256(b"numeric-no-fill-order").hexdigest(),
+        raw_payload_json={"proof": "authenticated_point_order"},
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-numeric-no-fill",
+        venue_order_id="ord-m5",
+        command_id="cmd-m5",
+        state="CONFIRMED",
+        filled_size="6",
+        fill_price="0.50",
+        source="REST",
+        observed_at=terminal_at + timedelta(minutes=1),
+        raw_payload_hash=hashlib.sha256(b"numeric-no-fill-trade").hexdigest(),
+        raw_payload_json={"proof": "authenticated_trade"},
+    )
+
+    assert persisted_terminal_late_entry_fill_command_ids(conn) == []
 
 
 def test_maker_order_trade_links_to_local_command_and_uses_maker_fill_economics(conn):

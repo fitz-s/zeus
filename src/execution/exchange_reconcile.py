@@ -4260,6 +4260,187 @@ def _canonical_event_filled_size(
     return _decimal_text(aggregate) if aggregate > Decimal("0") else fallback
 
 
+def persisted_terminal_late_entry_fill_command_ids(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str | None = None,
+) -> list[str]:
+    """Return open exposure whose terminal no-fill command contradicts facts."""
+
+    required = {
+        "position_current",
+        "venue_commands",
+        "venue_command_events",
+        "venue_order_facts",
+        "venue_trade_facts",
+        "collateral_reservations",
+    }
+    if not all(_table_exists(conn, table) for table in required):
+        return []
+    scoped = str(command_id or "").strip()
+    scope_sql = " AND command.command_id = ?" if scoped else ""
+    params = (scoped,) if scoped else ()
+    rows = conn.execute(
+        f"""
+        SELECT command.command_id
+          FROM venue_commands command
+          JOIN position_current position
+            ON position.position_id = command.position_id
+         WHERE command.intent_kind = 'ENTRY'
+           AND command.side = 'BUY'
+           AND position.phase IN ('active', 'day0_window', 'pending_exit')
+           AND CAST(COALESCE(position.shares, '0') AS REAL) > 0
+           AND command.state IN (
+               'CANCELLED', 'EXPIRED', 'REJECTED', 'SUBMIT_REJECTED'
+           )
+           AND TRIM(COALESCE(command.venue_order_id, '')) <> ''
+           AND EXISTS (
+               SELECT 1
+                 FROM venue_command_events terminal
+                WHERE terminal.command_id = command.command_id
+                  AND terminal.state_after = command.state
+                  AND terminal.sequence_no = (
+                      SELECT MAX(candidate.sequence_no)
+                        FROM venue_command_events candidate
+                       WHERE candidate.command_id = command.command_id
+                         AND candidate.state_after = command.state
+                  )
+                  AND (
+                      terminal.event_type IN (
+                          'REVIEW_CLEARED_NO_VENUE_EXPOSURE',
+                          'REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT'
+                      )
+                      OR (
+                          json_valid(terminal.payload_json)
+                          AND json_type(
+                              terminal.payload_json,
+                              '$.terminal_no_fill'
+                          ) = 'true'
+                      )
+                  )
+           )
+           AND EXISTS (
+               SELECT 1
+                 FROM venue_trade_facts trade
+                WHERE trade.command_id = command.command_id
+                  AND trade.venue_order_id = command.venue_order_id
+                  AND trade.state = 'CONFIRMED'
+                  AND trade.source IN ('REST', 'WS_USER')
+                  AND CAST(COALESCE(trade.filled_size, '0') AS REAL) > 0
+                  AND CAST(COALESCE(trade.fill_price, '0') AS REAL) > 0
+           )
+           {scope_sql}
+         ORDER BY command.updated_at, command.command_id
+        """,
+        params,
+    ).fetchall()
+    return [str(row["command_id"] if hasattr(row, "keys") else row[0]) for row in rows]
+
+
+def reconcile_persisted_terminal_late_entry_fills(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str | None = None,
+    observed_at: datetime | str | None = None,
+) -> dict[str, Any]:
+    """Correct terminal ENTRY commands from already-persisted fill truth.
+
+    The account-wide M5 sweep is event-triggered, so a confirmed trade already
+    in the journal cannot rely on another WS gap to revisit its command. The
+    open position plus contradictory command/facts is itself durable scheduled
+    debt. The strict terminal-late-fill validator remains the only authority.
+    """
+
+    summary: dict[str, Any] = {
+        "scanned": 0,
+        "advanced": 0,
+        "stayed": 0,
+        "errors": 0,
+    }
+    candidate_ids = persisted_terminal_late_entry_fill_command_ids(
+        conn,
+        command_id=command_id,
+    )
+    if not candidate_ids:
+        return summary
+
+    from src.state.venue_command_repo import append_event, get_command
+
+    occurred_at = _coerce_dt(observed_at).isoformat()
+    for candidate_id in candidate_ids:
+        summary["scanned"] += 1
+        command = get_command(conn, candidate_id)
+        if command is None:
+            summary["errors"] += 1
+            continue
+        trade = conn.execute(
+            """
+            SELECT trade_id, venue_order_id, filled_size, fill_price
+              FROM venue_trade_facts
+             WHERE command_id = ?
+               AND venue_order_id = ?
+               AND state = 'CONFIRMED'
+               AND source IN ('REST', 'WS_USER')
+               AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
+               AND CAST(COALESCE(fill_price, '0') AS REAL) > 0
+             ORDER BY julianday(observed_at) DESC, local_sequence DESC
+             LIMIT 1
+            """,
+            (candidate_id, str(command.get("venue_order_id") or "")),
+        ).fetchone()
+        if trade is None:
+            summary["stayed"] += 1
+            continue
+        trade_map = (
+            dict(trade)
+            if hasattr(trade, "keys")
+            else {
+                "trade_id": trade[0],
+                "venue_order_id": trade[1],
+                "filled_size": trade[2],
+                "fill_price": trade[3],
+            }
+        )
+        filled_size = str(trade_map.get("filled_size") or "0")
+        canonical_filled_size = _canonical_event_filled_size(
+            conn,
+            command_id=candidate_id,
+            fallback=filled_size,
+        )
+        event_type = _fill_event_for_command(
+            command,
+            canonical_filled_size,
+            trade_state="CONFIRMED",
+        )
+        if event_type is None:
+            summary["stayed"] += 1
+            continue
+        try:
+            append_event(
+                conn,
+                command_id=candidate_id,
+                event_type=event_type,
+                occurred_at=occurred_at,
+                payload=_fill_event_payload_for_command(
+                    command,
+                    event_type=event_type,
+                    venue_order_id=str(trade_map.get("venue_order_id") or ""),
+                    trade_id=str(trade_map.get("trade_id") or ""),
+                    filled_size=filled_size,
+                    canonical_filled_size=canonical_filled_size,
+                    fill_price=str(trade_map.get("fill_price") or "0"),
+                ),
+            )
+        except ValueError as exc:
+            summary["stayed"] += 1
+            summary.setdefault("rejection_reasons", []).append(
+                {"command_id": candidate_id, "reason": str(exc)}
+            )
+            continue
+        summary["advanced"] += 1
+    return summary
+
+
 def _append_linkable_trade_fact_if_missing(
     conn: sqlite3.Connection,
     command: Mapping[str, Any],

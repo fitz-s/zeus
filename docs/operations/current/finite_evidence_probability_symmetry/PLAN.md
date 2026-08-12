@@ -3465,6 +3465,7 @@ cancel/recovery cadence for any live remainder. RESET is a proof-backed
 No probability, sizing, price band, settlement, or entry-selection law changes.
 
 Allowed files are `src/execution/exchange_reconcile.py`,
+`src/execution/command_recovery.py`,
 `src/state/venue_command_repo.py`, `src/state/collateral_ledger.py`,
 `src/engine/lifecycle_events.py`, `tests/test_exchange_reconcile.py`, and this
 plan. Acceptance requires a terminal-no-fill plus later partial-fill replay to
@@ -3472,3 +3473,13 @@ produce a typed command correction, exact remainder reservation, no lifecycle
 phase regression, unchanged exposure economics, rejection of stale/forged
 corrections, focused regressions, exact-SHA deployment, and zero active
 terminal-command/venue-fact conflicts.
+
+Live verification exposed a missing DRAIN edge after the first deployment:
+the account-wide M5 sweep runs only for a WS-gap latch or unresolved finding,
+so an authenticated fill already persisted after a terminal no-fill event can
+remain contradictory forever without another external trigger. The recurring
+entry-exposure-obligation pass now invokes the same strict correction against
+persisted canonical facts before deciding whether the obligation can close.
+This makes convergence depend on durable debt plus the ordinary command-
+recovery cadence, not on a future WS gap; rejected evidence remains open and
+reports its exact rejection reason.
