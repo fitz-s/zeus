@@ -1690,3 +1690,29 @@ publication barrier.
 - Antibody: the final-wall fixture now mirrors receipt rebinding and asserts
   that full executable and passive proposal identities are unequal before a
   valid witnessed maker is admitted.
+
+### Slice B92 — Canonical monitor debt joins urgent targeted work (2026-08-11)
+
+- Live defect: repeated Day0 targeted monitors refreshed five Day0 positions
+  every few seconds while five active positions crossed the 150-second
+  canonical cadence wall and reached roughly 210 seconds without a decision.
+  Recovery detected the debt, but could lose the single-writer claim to the
+  already-running targeted stream, leaving BUY reduce-only and old capital
+  stale at the same time.
+- Structural invariant: a targeted Day0/forecast claim keeps its urgent family
+  but must also absorb every canonically overdue family. If exact family scope
+  cannot be proven it widens to the full held book. Debt appearing after claim
+  acquisition preempts at the next position boundary so the durable wake can
+  retry with the merged scope.
+- Entry admission uses the same identity: known overdue positions block BUY
+  only in their exact weather families while unrelated current alpha continues
+  to compete. Missing/unreadable family identity remains a global fail-closed
+  block; held SELL/HOLD/CASH evaluation is unchanged.
+- SCOPE: current held-monitor claim only. DRAIN: the existing bounded monitor
+  budget writes fresh per-position decisions for urgent plus overdue families;
+  the 30-second recovery remains an independent backstop. RESET: canonical
+  freshness removes families from the merged scope and clears the existing BUY
+  gate. Quote-only staleness retains its separate retry semantics.
+- Forbidden: widening the 150-second threshold, weakening BUY admission,
+  suppressing Day0 wakes, adding a second writer, or treating a timestamp
+  without fresh q/book evidence as coverage.

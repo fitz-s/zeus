@@ -9130,6 +9130,16 @@ def test_urgent_exit_monitor_finishes_before_newer_day0_wake(monkeypatch) -> Non
         return True
 
     main_module._held_position_monitor_active.clear()
+    monkeypatch.setattr(
+        main_module,
+        "_canonical_overdue_monitor_families",
+        lambda: frozenset(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_debt_pending",
+        lambda: False,
+    )
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
     monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
     monkeypatch.setattr(
@@ -9152,6 +9162,107 @@ def test_urgent_exit_monitor_finishes_before_newer_day0_wake(monkeypatch) -> Non
     )
     assert captured["target_families"] == frozenset({("Paris", "2026-07-17", "high")})
     assert main_module._held_position_monitor_active.is_set() is False
+
+
+def test_targeted_monitor_absorbs_every_canonically_overdue_family(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    captured = {}
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        main_module,
+        "_canonical_overdue_monitor_families",
+        lambda: frozenset(
+            {
+                ("London", "2026-08-12", "high"),
+                ("Moscow", "2026-08-12", "high"),
+            }
+        ),
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+
+    def run(**kwargs) -> bool:
+        captured.update(kwargs)
+        assert kwargs["should_preempt_for_urgent_day0"]() is False
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", run)
+    main_module._held_position_monitor_active.clear()
+    main_module._held_position_monitor_canonical_debt.set()
+    try:
+        assert main_module._exit_monitor_cycle(
+            target_families=frozenset({("Paris", "2026-08-12", "high")}),
+            urgent_day0=True,
+        )
+    finally:
+        main_module._held_position_monitor_active.clear()
+        main_module._held_position_monitor_canonical_debt.clear()
+
+    assert captured["target_families"] == frozenset(
+        {
+            ("Paris", "2026-08-12", "high"),
+            ("London", "2026-08-12", "high"),
+            ("Moscow", "2026-08-12", "high"),
+        }
+    )
+
+
+def test_targeted_monitor_preempts_only_for_new_canonical_cadence_debt(
+    monkeypatch,
+) -> None:
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    callbacks = []
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            return True
+
+        def release(self) -> None:
+            pass
+
+    debt = iter((False, True))
+    monkeypatch.setattr(
+        main_module,
+        "_canonical_overdue_monitor_families",
+        lambda: frozenset({("London", "2026-08-12", "high")}),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_debt_pending",
+        lambda: next(debt),
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+
+    def run(**kwargs) -> bool:
+        callback = kwargs["should_preempt_for_urgent_day0"]
+        callbacks.extend((callback(), callback()))
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", run)
+    main_module._held_position_monitor_active.clear()
+    try:
+        assert main_module._exit_monitor_cycle(
+            target_families=frozenset({("Paris", "2026-08-12", "high")}),
+            urgent_day0=True,
+        )
+    finally:
+        main_module._held_position_monitor_active.clear()
+
+    assert callbacks == [False, True]
 
 
 def test_periodic_exit_monitor_yields_when_day0_arrives_during_handoff(
@@ -10753,6 +10864,58 @@ def test_canonical_monitor_debt_blocks_buy_without_deferring_reactor(
     )
     assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
     assert canonical_debt.is_set() is False
+
+
+def test_canonical_monitor_debt_blocks_only_exact_weather_families(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    from src.events.candidate_binding import weather_family_id
+
+    monkeypatch.setattr(
+        main_module,
+        "_canonical_overdue_monitor_families",
+        lambda: frozenset(
+            {
+                ("London", "2026-08-12", "high"),
+                ("Moscow", "2026-08-12", "low"),
+            }
+        ),
+    )
+
+    global_reason, family_reasons = main_module._canonical_monitor_entry_block_scope(
+        "held_position_monitor_cadence_overdue"
+    )
+
+    assert global_reason is None
+    assert family_reasons == {
+        weather_family_id(
+            city="London",
+            target_date="2026-08-12",
+            metric="high",
+        ): "held_position_monitor_cadence_overdue",
+        weather_family_id(
+            city="Moscow",
+            target_date="2026-08-12",
+            metric="low",
+        ): "held_position_monitor_cadence_overdue",
+    }
+
+
+def test_canonical_monitor_debt_scope_failure_blocks_every_family(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+
+    monkeypatch.setattr(
+        main_module,
+        "_canonical_overdue_monitor_families",
+        lambda: None,
+    )
+
+    assert main_module._canonical_monitor_entry_block_scope(
+        "held_position_monitor_authority_unavailable"
+    ) == ("held_position_monitor_authority_unavailable", {})
 
 
 def test_long_reactor_cut_rechecks_and_yields_when_canonical_monitor_becomes_stale(

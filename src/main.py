@@ -440,6 +440,103 @@ def _held_position_monitor_debt_pending() -> bool:
         _held_position_monitor_canonical_recheck_lock.release()
 
 
+def _canonical_overdue_monitor_families(
+) -> frozenset[tuple[str, str, str]] | None:
+    """Return every family whose current exposure lacks fresh monitor truth.
+
+    ``None`` means the exact family scope could not be proven, so a targeted
+    monitor must widen to the full held book. Quote-only staleness remains out
+    of this set because it has its own retry semantics and is not canonical
+    cadence debt.
+    """
+
+    from src.ops.monitor_cadence import (
+        collect_monitor_cadence_evidence,
+        count_current_monitor_obligations,
+        monitor_cadence_blocking_evidence,
+    )
+    from src.state.db import get_trade_connection_read_only
+
+    conn = None
+    try:
+        now = datetime.now(timezone.utc)
+        conn = get_trade_connection_read_only()
+        obligation_count = count_current_monitor_obligations(conn, now=now)
+        evidence = collect_monitor_cadence_evidence(
+            conn,
+            now=now,
+            max_age_seconds=HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS,
+            monitor_refreshed_only=True,
+            require_fresh_inputs=True,
+            sample_limit=max(1, obligation_count),
+        )
+        blocking = monitor_cadence_blocking_evidence(evidence)
+        stale = list(blocking["blocking_stale_positions"])
+        future = list(evidence.get("future_monitor_events") or ())
+        expected = int(blocking["blocking_stale_position_count"]) + int(
+            evidence.get("future_monitor_event_count") or 0
+        )
+        position_ids = tuple(
+            dict.fromkeys(
+                str(item.get("position_id") or "").strip()
+                for item in (*stale, *future)
+                if str(item.get("position_id") or "").strip()
+            )
+        )
+        if expected == 0:
+            return frozenset()
+        if len(position_ids) != expected:
+            return None
+        placeholders = ",".join("?" for _ in position_ids)
+        rows = conn.execute(
+            f"""
+            SELECT position_id, city, target_date, temperature_metric
+              FROM position_current
+             WHERE position_id IN ({placeholders})
+            """,
+            position_ids,
+        ).fetchall()
+        if len(rows) != len(position_ids):
+            return None
+        families: set[tuple[str, str, str]] = set()
+        for row in rows:
+            family = (
+                str(row["city"] or "").strip(),
+                str(row["target_date"] or "").strip()[:10],
+                str(row["temperature_metric"] or "").strip().lower(),
+            )
+            if not family[0] or not family[1] or family[2] not in {"high", "low"}:
+                return None
+            families.add(family)
+        return frozenset(families)
+    except Exception as exc:  # noqa: BLE001 - unknown scope widens fail-closed.
+        logger.warning(
+            "canonical overdue monitor family scope unavailable; using full book: %s",
+            exc,
+            exc_info=True,
+        )
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _canonical_monitor_entry_block_scope(
+    reason: str,
+) -> tuple[str | None, dict[str, str]]:
+    """Narrow canonical cadence debt to its exact weather families."""
+
+    from src.events.candidate_binding import weather_family_id
+
+    families = _canonical_overdue_monitor_families()
+    if families is None:
+        return reason, {}
+    return None, {
+        weather_family_id(city=city, target_date=target_date, metric=metric): reason
+        for city, target_date, metric in families
+    }
+
+
 def _defer_for_held_position_monitor(job_name: str) -> bool:
     """Give initial held monitoring first access to DB I/O and reactor work.
 
@@ -4355,9 +4452,13 @@ def _edli_event_reactor_cycle(
     canonical_monitor_entry_block = _held_position_monitor_entry_block_reason()
     if canonical_monitor_entry_block is None:
         _held_position_monitor_canonical_debt.clear()
+        monitor_entry_block = None
     else:
         _held_position_monitor_canonical_debt.set()
-    monitor_entry_block = canonical_monitor_entry_block
+        monitor_entry_block, monitor_family_blocks = (
+            _canonical_monitor_entry_block_scope(canonical_monitor_entry_block)
+        )
+        _family_block_reasons.update(monitor_family_blocks)
     if (
         monitor_entry_block is None
         and not _held_position_monitor_bootstrap_complete.is_set()
@@ -8935,6 +9036,40 @@ def _exit_monitor_cycle(
     from src.execution.exit_lifecycle import run_exit_monitor_cycle
 
     urgent_fact = urgent_day0 or urgent_forecast
+    absorbed_overdue_families: frozenset[tuple[str, str, str]] = frozenset()
+    debt_scope_is_full_book = False
+    if (
+        target_families is not None
+        and _held_position_monitor_canonical_debt.is_set()
+    ):
+        overdue_families = _canonical_overdue_monitor_families()
+        if overdue_families is None:
+            # SCOPE: this targeted held-monitor attempt only. DRAIN: one
+            # bounded full-book pass reconstructs exact canonical coverage.
+            # RESET: a later exact read returns a finite family set (possibly
+            # empty), restoring ordinary targeted work.
+            target_families = None
+            debt_scope_is_full_book = True
+        elif overdue_families:
+            # A rapid stream of Day0/forecast wakes must not repeatedly refresh
+            # only its own families while older capital crosses the cadence
+            # wall. One claim evaluates both the urgent fact and every overdue
+            # family; this preserves urgent latency without starving the book.
+            target_families = frozenset((*target_families, *overdue_families))
+            absorbed_overdue_families = overdue_families
+
+    def _unabsorbed_canonical_monitor_debt_pending() -> bool:
+        """Preempt only for debt outside this claim's admitted scope."""
+
+        if not _held_position_monitor_debt_pending():
+            return False
+        if debt_scope_is_full_book:
+            return False
+        current_overdue = _canonical_overdue_monitor_families()
+        return current_overdue is None or not current_overdue.issubset(
+            absorbed_overdue_families
+        )
+
     periodic_full_book = target_families is None and not urgent_fact
     recovery_full_book = bool(recovery_full_book and periodic_full_book)
     if urgent_forecast and (
@@ -9108,7 +9243,10 @@ def _exit_monitor_cycle(
             from src.runtime.reactor_wake import read_reactor_wake
 
             def _day0_wake_pending() -> bool:
-                if _day0_urgent_wake_pending.is_set():
+                if (
+                    _day0_urgent_wake_pending.is_set()
+                    or _unabsorbed_canonical_monitor_debt_pending()
+                ):
                     return True
                 queued = read_reactor_wake()
                 return (
@@ -9122,7 +9260,9 @@ def _exit_monitor_cycle(
             # in-flight urgent batch on every newer observation creates a
             # livelock when observations arrive faster than the batch can scan:
             # the tail positions never receive a MONITOR_REFRESHED decision.
-            should_preempt_for_urgent_day0 = lambda: False
+            should_preempt_for_urgent_day0 = (
+                _unabsorbed_canonical_monitor_debt_pending
+            )
         else:
             # One urgent held-family attempt may preempt a periodic pass. The
             # next pass ignores the same continuous pressure and completes the
