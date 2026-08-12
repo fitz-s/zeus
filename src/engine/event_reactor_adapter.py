@@ -1029,13 +1029,10 @@ def _probe_global_probability_family_cache(
 ) -> object | None:
     if not namespace or not family_key or not event_id or not causal_snapshot_id:
         return None
-    try:
-        cache_key = _global_probability_family_cache_key(
-            family_key,
-            probability_use,
-        )
-    except (TypeError, ValueError):
-        return None
+    cache_key = _global_probability_family_cache_key(
+        family_key,
+        probability_use,
+    )
     with _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK:
         if _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE != namespace:
             return None
@@ -1051,7 +1048,11 @@ def _probe_global_probability_family_cache(
             captured_at_utc=captured_at_utc,
         )
     except (AttributeError, TypeError, ValueError):
-        _evict_global_probability_family_cache(namespace, family_key=family_key)
+        _evict_global_probability_family_cache(
+            namespace,
+            family_key=family_key,
+            probability_use=probability_use,
+        )
         return None
 
 
@@ -1066,13 +1067,10 @@ def _store_global_probability_family_cache(
 ) -> None:
     global _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE
 
-    try:
-        cache_key = _global_probability_family_cache_key(
-            family_key,
-            probability_use,
-        )
-    except (TypeError, ValueError):
-        return
+    cache_key = _global_probability_family_cache_key(
+        family_key,
+        probability_use,
+    )
     if (
         not namespace
         or not family_key
@@ -1168,15 +1166,30 @@ def _evict_global_probability_family_cache(
     namespace: str | None,
     *,
     family_key: str,
+    probability_use: _CurrentProbabilityUse | None = None,
 ) -> None:
     if not namespace or not family_key:
         return
+    scoped_use = (
+        None
+        if probability_use is None
+        else _CurrentProbabilityUse(probability_use)
+    )
+    cache_key = (
+        None
+        if scoped_use is None
+        else _global_probability_family_cache_key(family_key, scoped_use)
+    )
     with _GLOBAL_PROBABILITY_FAMILY_CACHE_LOCK:
         if _GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE == namespace:
-            for cache_key in tuple(_GLOBAL_PROBABILITY_FAMILY_CACHE):
-                if cache_key[0] == family_key:
-                    _GLOBAL_PROBABILITY_FAMILY_CACHE.pop(cache_key, None)
-            _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.pop(family_key, None)
+            if cache_key is not None:
+                _GLOBAL_PROBABILITY_FAMILY_CACHE.pop(cache_key, None)
+            else:
+                for stored_key in tuple(_GLOBAL_PROBABILITY_FAMILY_CACHE):
+                    if stored_key[0] == family_key:
+                        _GLOBAL_PROBABILITY_FAMILY_CACHE.pop(stored_key, None)
+            if scoped_use in {None, _CurrentProbabilityUse.ENTRY}:
+                _GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE.pop(family_key, None)
 
 
 def _evict_superseded_global_probability_family_cache(
@@ -8136,6 +8149,7 @@ def event_bound_live_adapter_from_trade_conn(
                 _evict_global_probability_family_cache(
                     probability_cache_namespace,
                     family_key=family_key,
+                    probability_use=_CurrentProbabilityUse.ENTRY,
                 )
             else:
                 cached = _probe_global_probability_family_cache(
@@ -8231,6 +8245,7 @@ def event_bound_live_adapter_from_trade_conn(
                     _evict_global_probability_family_cache(
                         probability_cache_namespace,
                         family_key=family_key,
+                        probability_use=_CurrentProbabilityUse.HELD_MONITOR,
                     )
                 else:
                     cached = _probe_global_probability_family_cache(

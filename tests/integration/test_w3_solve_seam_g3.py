@@ -9534,6 +9534,49 @@ def test_probability_cache_never_promotes_held_authority_to_entry(monkeypatch):
         is entry_prepared
     )
 
+    era._evict_global_probability_family_cache(
+        namespace,
+        family_key=family_key,
+        probability_use=era._CurrentProbabilityUse.ENTRY,
+    )
+    assert (
+        era._probe_global_probability_family_cache(
+            namespace,
+            family_key=family_key,
+            event_id="event-held",
+            causal_snapshot_id="snapshot-held",
+            captured_at_utc=_dt.datetime(
+                2026, 8, 12, 13, 30, tzinfo=_dt.timezone.utc
+            ),
+            probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
+        )
+        is held_prepared
+    )
+    assert (
+        era._probe_global_probability_family_cache(
+            namespace,
+            family_key=family_key,
+            event_id="event-held",
+            causal_snapshot_id="snapshot-held",
+            captured_at_utc=_dt.datetime(
+                2026, 8, 12, 13, 30, tzinfo=_dt.timezone.utc
+            ),
+            probability_use=era._CurrentProbabilityUse.ENTRY,
+        )
+        is None
+    )
+    with pytest.raises(ValueError):
+        era._probe_global_probability_family_cache(
+            namespace,
+            family_key=family_key,
+            event_id="event-held",
+            causal_snapshot_id="snapshot-held",
+            captured_at_utc=_dt.datetime(
+                2026, 8, 12, 13, 30, tzinfo=_dt.timezone.utc
+            ),
+            probability_use="invalid-purpose",
+        )
+
 
 def test_live_adapter_reuses_ineligible_probability_until_authority_db_changes(
     monkeypatch,
