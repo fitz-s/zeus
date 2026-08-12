@@ -6923,6 +6923,20 @@ def _entry_family_blocked_candidate_reason(
     return f"LIVE_ENTRY_BLOCKED:entry_readiness_family:{block_reason}"
 
 
+def _day0_unresolved_entry_probability_rejection_reason(
+    *,
+    day0_payoff_truth: object,
+) -> str | None:
+    """Contain statistical Day0 entry until its peak-state q is calibrated."""
+
+    if (
+        str(day0_payoff_truth or "").strip().lower()
+        == Day0PayoffTruth.UNRESOLVED.value
+    ):
+        return "GLOBAL_DAY0_UNRESOLVED_ENTRY_PROBABILITY_UNCALIBRATED"
+    return None
+
+
 def event_bound_live_adapter_from_trade_conn(
     trade_conn: sqlite3.Connection,
     *,
@@ -10274,12 +10288,27 @@ def event_bound_live_adapter_from_trade_conn(
                 return "GLOBAL_ENTRY_FEASIBILITY_OWNER_MISSING"
             event_type, metric, day0_truth_by_bin_side = owner
             bin_id = str(getattr(candidate, "bin_id", "") or "").strip()
+            day0_payoff_truth = day0_truth_by_bin_side.get((bin_id, side))
+            # SCOPE: only risk-increasing BUYs whose current Day0 payoff is
+            # unresolved; deterministic Day0 facts, non-Day0 BUYs, and every
+            # SELL/HOLD/CASH proposal remain eligible. DRAIN: replace the
+            # marginal city/month/hour peak-set atom with a causal trajectory-
+            # conditioned posterior and validate it walk-forward. RESET: a
+            # current monotone fact makes this exact side LOCKED/REFUTED, or a
+            # validated probability-semantics revision removes this guard.
+            day0_probability_reason = (
+                _day0_unresolved_entry_probability_rejection_reason(
+                    day0_payoff_truth=day0_payoff_truth,
+                )
+            )
+            if day0_probability_reason is not None:
+                return day0_probability_reason
             try:
                 strategy_key = _event_bound_strategy_key(
                     event_type=event_type,
                     direction=f"buy_{side.lower()}",
                     metric=metric,
-                    day0_payoff_truth=day0_truth_by_bin_side.get((bin_id, side)),
+                    day0_payoff_truth=day0_payoff_truth,
                     require_metric_live=True,
                 )
             except ValueError as exc:

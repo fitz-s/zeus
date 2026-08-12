@@ -277,6 +277,41 @@ on decision-time trajectory evidence and validated walk-forward over at most
 seven days.  No market-price cap, post-outcome label, or uncalibrated constant is
 authorized by this hot-fix slice.
 
+## 2026-08-12 Uncalibrated unresolved Day0 q cannot authorize new capital
+
+Forward live evidence reproduced the same probability-law defect in two new
+families. NYC 84--85F YES was bought while the remaining-day q was about 0.93,
+then the monotone running high reached 86F and made the bin structurally dead.
+Dallas 100--101F NO was bought with held-side q about 0.89 while the current
+fast observation was already near the boundary and the market subsequently
+removed every executable NO bid. These outcomes do not by themselves estimate
+model accuracy, but together with the already-identified marginal peak-set atom
+they disprove authority for spending new capital on that unvalidated q.
+
+The immediate containment removes only BUY proposals whose prepared current
+Day0 payoff truth is `UNRESOLVED` before global capital ranking. The rule binds
+the prepared truth rather than its carrier event label, so a forecast/redecision
+carrier cannot reauthorize the same Day0 q. Deterministic `LOCKED`/`REFUTED`
+Day0 facts, every held SELL/HOLD/CASH proposal, and BUY proposals without Day0
+truth keep their existing current-truth and common-axis comparison paths. This
+is not a replacement probability model and does not claim calibration success.
+
+SCOPE is one risk-increasing BUY side whose current Day0 payoff truth is
+`UNRESOLVED`. DRAIN is the separately planned causal two-stage peak posterior,
+conditioned on decision-time trajectory evidence and validated strictly
+walk-forward over at most seven days. RESET is either a current monotone fact
+that makes the exact side `LOCKED`/`REFUTED`, or a promoted probability-semantics
+revision with validation evidence that removes this containment. No market
+price, stale posterior, or eventual outcome resets it.
+
+Acceptance requires focused antibodies proving unresolved Day0 is rejected
+before strategy/capital checks while hard facts and non-Day0 candidates remain
+eligible; compilation and planning-lock checks; hot-fix landing and exact loaded
+SHA; then current global-auction receipts showing the typed rejection and no
+post-load unresolved Day0 ENTRY command. The broader goal remains active until
+forward chain fills, settlements, and capital-curve evidence establish robust
+capital gain rather than a single favorable trade.
+
 ## 2026-08-12 Fresh target-specific ENS shape is required for entry
 
 The current forecast database contained 190 latest family certificates: 176
