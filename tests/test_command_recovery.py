@@ -9063,6 +9063,65 @@ class TestRecoveryResolutionTable:
         assert after_count == 0
         assert after_markets == ()
 
+    def test_cancel_unknown_absence_cannot_overwrite_positive_order_fact(
+        self, conn, mock_client
+    ):
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=19, price=0.57)
+        _advance_to_cancel_unknown_review_required(
+            conn,
+            venue_order_id="ord-positive-before-absence",
+        )
+        _seed_pending_entry_projection(
+            conn,
+            order_id="ord-positive-before-absence",
+        )
+        _append_order_fact(
+            conn,
+            order_id="ord-positive-before-absence",
+            state="PARTIALLY_MATCHED",
+            matched_size="11.627905",
+            remaining_size="7.372095",
+        )
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] == 0
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+        facts = conn.execute(
+            """
+            SELECT state, matched_size
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+               AND venue_order_id = 'ord-positive-before-absence'
+             ORDER BY local_sequence
+            """
+        ).fetchall()
+        assert [dict(row) for row in facts] == [
+            {"state": "PARTIALLY_MATCHED", "matched_size": "11.627905"}
+        ]
+        assert all(
+            row["event_type"] != "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+            for row in _get_events(conn, "cmd-001")
+        )
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, order_status
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "pending_entry",
+            "shares": 0.0,
+            "cost_basis_usd": 0.0,
+            "order_status": "pending",
+        }
+
     def test_maker_rest_cancel_unknown_legacy_payload_absent_point_order_expires_entry(
         self, conn, mock_client
     ):

@@ -870,6 +870,28 @@ def _explicit_point_order_matched_size(point_order: dict | None) -> str | None:
     return str(value)
 
 
+def _canonical_positive_order_fact_exists(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    venue_order_id: str,
+) -> bool:
+    """Return whether canonical order truth already proves a positive fill."""
+
+    if not command_id or not venue_order_id:
+        return False
+    rows = conn.execute(
+        """
+        SELECT matched_size
+          FROM venue_order_facts
+         WHERE command_id = ?
+           AND venue_order_id = ?
+        """,
+        (command_id, venue_order_id),
+    ).fetchall()
+    return any(_is_positive_decimal(row[0]) for row in rows)
+
+
 def _terminal_point_order_zero_fill_proven(
     conn: sqlite3.Connection,
     *,
@@ -889,6 +911,13 @@ def _terminal_point_order_zero_fill_proven(
         return False, "terminal_matched_size_missing"
     if not _decimal_is_zero(matched_size):
         return False, "terminal_matched_size_positive_or_invalid"
+    venue_order_id = _extract_order_id(point_order or {})
+    if _canonical_positive_order_fact_exists(
+        conn,
+        command_id=command_id,
+        venue_order_id=venue_order_id,
+    ):
+        return False, "terminal_positive_order_fact_exists"
     if _fill_trade_fact_count(conn, command_id) > 0:
         return False, "terminal_positive_trade_fact_exists"
     if _point_order_trade_ids(point_order):
@@ -14619,6 +14648,12 @@ def _append_local_orphan_terminal_order_fact(
 ) -> int:
     command_id = str(command.get("command_id") or "")
     venue_order_id = str(command.get("venue_order_id") or "")
+    if _canonical_positive_order_fact_exists(
+        conn,
+        command_id=command_id,
+        venue_order_id=venue_order_id,
+    ):
+        raise RuntimeError("canonical_positive_order_fact_blocks_terminal_no_fill")
     fact_state = _terminal_fact_state_for_venue_status(
         venue_status,
         venue_resp_present=venue_resp is not None,
@@ -14668,6 +14703,12 @@ def _append_point_order_terminal_no_fill_fact(
 ) -> tuple[int, dict]:
     command_id = str(command.get("command_id") or "")
     venue_order_id = str(command.get("venue_order_id") or "")
+    if _canonical_positive_order_fact_exists(
+        conn,
+        command_id=command_id,
+        venue_order_id=venue_order_id,
+    ):
+        raise RuntimeError("canonical_positive_order_fact_blocks_terminal_no_fill")
     venue_resp_present = (
         point_order is not None
         if venue_resp_present_for_terminal_state is None
@@ -18788,6 +18829,17 @@ def _review_required_cancel_unknown_live_order_recovery(
                 "(point order %s but local trade facts exist)",
                 cmd.command_id,
                 "has no live record" if point_order_no_live_record else "absent",
+            )
+            return "stayed"
+        if _canonical_positive_order_fact_exists(
+            conn,
+            command_id=cmd.command_id,
+            venue_order_id=venue_order_id,
+        ):
+            logger.info(
+                "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
+                "(canonical positive order fact contradicts terminal no-fill)",
+                cmd.command_id,
             )
             return "stayed"
         now = _now_iso()

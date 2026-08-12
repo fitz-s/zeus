@@ -3902,3 +3902,19 @@ not replay the old quote or certificate, and malformed or `>1` values remain
 `backoff_exhausted`. Acceptance requires an exact historical-error antibody,
 global command-ownership proof, fresh-auction debt creation, and a `>1`
 counterexample that remains fail-closed.
+
+The Seoul reconstruction also exposed a separate authority contradiction in
+ENTRY recovery. An authenticated canonical order fact already recorded
+`matched_size=11.627905`, while a later incomplete account read found no local
+trade fact and wrote a new zero-fill fact plus `ENTRY_ORDER_VOIDED`. Order facts
+and trade facts are independent evidence planes; absence from the latter cannot
+negate positive fill truth in the former. Terminal no-fill construction now has
+a shared command+venue-order invariant that refuses every zero-fill append when
+any finite positive canonical matched size exists. The incident branch checks
+the same invariant before mutation and remains `REVIEW_REQUIRED`, allowing the
+existing matched/partial reconciliation lane to establish the economic fill.
+SCOPE is one exact command/order identity; DRAIN is the next matched-order
+reconciliation pass; RESET is authenticated fill projection or an independently
+proved zero-fill identity with no contradictory positive fact. Acceptance
+requires the historical positive-order-fact + absent account-read shape to
+retain the positive fact, emit no clearance/void, and keep review authority.
