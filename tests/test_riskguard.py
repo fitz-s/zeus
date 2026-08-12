@@ -4787,6 +4787,30 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert reason is None
         conn.close()
 
+    def test_confirmed_exit_remains_fee_bearing_realized_capital(self):
+        conn = self._live_capital_conn(
+            phase="economically_closed",
+            gross_pnl=4.68,
+            exit_price=0.999,
+        )
+        conn.execute(
+            "UPDATE execution_fact SET terminal_exec_status='CONFIRMED' "
+            "WHERE order_role='exit'"
+        )
+        conn.commit()
+
+        curve = riskguard_module._day0_live_realized_capital_curve(
+            conn,
+            window_days=7.0,
+            as_of=datetime(2026, 8, 11, 17, tzinfo=timezone.utc),
+        )
+
+        assert curve["status"] == "positive"
+        assert curve["realized_position_count"] == 1
+        assert curve["fee_bound_usd"] == pytest.approx(0.058812)
+        assert curve["net_realized_pnl_usd"] == pytest.approx(4.621188)
+        conn.close()
+
     def test_validated_shadow_ignores_unresolved_live_fill(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 

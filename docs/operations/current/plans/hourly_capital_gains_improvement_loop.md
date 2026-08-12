@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-12 12:10 CDT tick — 首笔全局最优实际退出兑现；current-law capital curve 转正
+- **真实成交:** complete global auction 在同一 current probability/book/wealth cut 中选择 Shanghai `288de757-908` 的 20 YES shares；preflight receipt `415446` 为 `STABLE`。executor 提交合法 `0.95` FAK floor，venue order `0xdafefd...63a43` 全部以改善价 `0.999` 成交，transaction `0x95b23b...4123`；REST confirmed trade fact、wallet fill、zero chain shares 和 lifecycle `economically_closed` 已收敛。
+- **资本结果:** canonical cost basis `$1.40`，gross proceeds `$19.98`，canonical gross realized PnL `+$18.58`。按 entry/exit 各自冻结的 5% weather fee schedule 计上界，entry fee `$0.065100`、exit fee `$0.000999`，该仓 fee-bound net realized PnL `+$18.513901`，realized-capital return 约 `+1263.0%`。这不是 expected EV，也不是未成交报价。
+- **组合证明:** 当前 probability semantics / `predicted_bin_ev_v1` 的 30 天 canonical curve 现为 14 个 realized positions、gross `+$3.25`；现有 live observer 因遗漏 `CONFIRMED` exit fee 报 net `+$1.561298`。修正后应为 fee bound `$1.689701`、net `+$1.560299`、return on realized capital 约 `+3.3827%`。曲线已转正，但收益高度集中于这一笔，不能声明 robust capital gain 或大样本市场优势。
+- **证明链精度修复:** `execution_fact.terminal_exec_status='CONFIRMED'` 是比 `filled` 更强的成交事实；capital curve 过去只 join `filled`，导致该 exit 的 fee 被静默当成 0。修复让 entry/exit 两端都接受 `filled|confirmed`，不接受 pending/matched-only；新增 confirmed-exit fee antibody，RiskGuard 全文件 `158 passed`，Ruff（忽略文件既有 E402/F401/F841）与 `py_compile` 通过。hotfix 尚未部署；entries pause 保持，后续只用更多独立真实成交/结算检验 robustness。
+
 ### 2026-08-12 11:58 CDT tick — bid-only held depth 进入所有阶段的 reauction trigger
 - **最新 live chain:** 并发 money-path commits 已把 above-submit-band current bid 与合法 SELL floor 区分：solver 以当前 0.999 depth 比较经济性，executor 提交不高于 0.95 的 FAK floor，并把实际改善成交单独记账；loaded SHA `f947180e5`。这恢复了 Shanghai 的潜在正 EV 出场，但尚无新 command/fill，所以 forward realized PnL 仍为 `-$8.526401`。
 - **剩余断链:** post-start monitor 已达到 `open=11 / fresh executable=7 / quote-only=4 / blocking stale=0`，却没有新的 held-SELL reauction request。根因是 `monitor_quote_refresh` 只允许 Day0 位置消费 one-sided book；Shanghai 已过本地目标日，虽然 0.999 bid 可立即承接 SELL，monitor 仍把它记为 quote stale，reactor 因 `no exact canonical held-SELL request` 停止在 full auction 之前。
