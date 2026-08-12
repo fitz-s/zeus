@@ -18492,7 +18492,7 @@ def test_exit_monitor_budget_starts_at_claim_and_wrapper_forwards_remaining(
 
     dispatcher_source = inspect.getsource(main._exit_monitor_cycle)
     dispatcher_claim_offset = dispatcher_source.index(
-        "_held_position_monitor_claim.acquire"
+        "_acquire_held_monitor_claim("
     )
     dispatcher_deadline_offset = dispatcher_source.index(
         "monitor_deadline_monotonic ="
