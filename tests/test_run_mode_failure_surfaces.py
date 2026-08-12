@@ -7910,7 +7910,7 @@ def test_edli_command_recovery_cycle_refreshes_allocator_after_mutation(monkeypa
     monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 11)
     monkeypatch.setattr(
         command_recovery,
-        "capital_blocking_cancel_command_count",
+        "capital_blocking_command_count",
         lambda _conn: 0,
     )
     monkeypatch.setattr(
@@ -7969,7 +7969,7 @@ def test_edli_command_recovery_runs_live_tick_during_active_redecision(monkeypat
     monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
     monkeypatch.setattr(
         command_recovery,
-        "capital_blocking_cancel_command_count",
+        "capital_blocking_command_count",
         lambda _conn: 0,
     )
     monkeypatch.setattr(
@@ -8011,7 +8011,7 @@ def test_command_recovery_yields_trade_db_to_overdue_held_monitor(monkeypatch) -
     monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
     monkeypatch.setattr(
         command_recovery,
-        "capital_blocking_cancel_command_count",
+        "capital_blocking_command_count",
         lambda _conn: 0,
     )
     monkeypatch.setattr(
@@ -8053,7 +8053,7 @@ def test_capital_cancel_recovery_keeps_priority_during_held_monitor(monkeypatch)
     monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
     monkeypatch.setattr(
         command_recovery,
-        "capital_blocking_cancel_command_count",
+        "capital_blocking_command_count",
         lambda _conn: 1,
     )
     monkeypatch.setattr(
@@ -8088,7 +8088,7 @@ def test_capital_cancel_recovery_reserves_reactor_then_resets(monkeypatch) -> No
     monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
     monkeypatch.setattr(
         command_recovery,
-        "capital_blocking_cancel_command_count",
+        "capital_blocking_command_count",
         lambda _conn: 3,
     )
     monkeypatch.setattr(
@@ -8127,7 +8127,7 @@ def test_capital_cancel_recovery_resets_handoff_after_failure(monkeypatch) -> No
     monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
     monkeypatch.setattr(
         command_recovery,
-        "capital_blocking_cancel_command_count",
+        "capital_blocking_command_count",
         lambda _conn: 1,
     )
     monkeypatch.setattr(
@@ -8181,7 +8181,7 @@ def test_capital_cancel_recovery_waits_for_active_reactor(monkeypatch) -> None:
     monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
     monkeypatch.setattr(
         command_recovery,
-        "capital_blocking_cancel_command_count",
+        "capital_blocking_command_count",
         lambda _conn: 2,
     )
     monkeypatch.setattr(
@@ -8229,7 +8229,7 @@ def test_capital_cancel_recovery_skips_apply_when_reactor_drain_times_out(
     monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
     monkeypatch.setattr(
         command_recovery,
-        "capital_blocking_cancel_command_count",
+        "capital_blocking_command_count",
         lambda _conn: 1,
     )
     monkeypatch.setattr(
@@ -11193,7 +11193,7 @@ def test_edli_command_recovery_emits_terminal_no_fill_continuation(monkeypatch) 
     )
     monkeypatch.setattr(
         command_recovery,
-        "capital_blocking_cancel_command_count",
+        "capital_blocking_command_count",
         lambda _conn: 0,
     )
     monkeypatch.setattr(

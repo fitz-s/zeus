@@ -29829,6 +29829,33 @@ class TestEdliAbsenceVenueCommandSync:
 # ---------------------------------------------------------------------------
 
 
+def test_capital_blocker_count_includes_only_identity_bound_submits(conn):
+    from src.execution.command_recovery import capital_blocking_command_count
+
+    _insert(conn, command_id="cmd-bound-entry", position_id="pos-bound-entry")
+    _advance_to_submitting(
+        conn,
+        command_id="cmd-bound-entry",
+        venue_order_id="ord-bound-entry",
+    )
+    _insert(conn, command_id="cmd-unbound-entry", position_id="pos-unbound-entry")
+    _advance_to_submitting(conn, command_id="cmd-unbound-entry")
+    _insert(
+        conn,
+        command_id="cmd-bound-exit",
+        position_id="pos-bound-exit",
+        intent_kind="EXIT",
+        side="SELL",
+    )
+    _advance_to_submitting(
+        conn,
+        command_id="cmd-bound-exit",
+        venue_order_id="ord-bound-exit",
+    )
+
+    assert capital_blocking_command_count(conn) == 2
+
+
 def test_live_tick_identity_bound_matched_exit_outruns_account_snapshot(
     tmp_path,
     monkeypatch,

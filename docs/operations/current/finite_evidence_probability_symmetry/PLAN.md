@@ -3281,3 +3281,30 @@ Allowed files are `src/control/live_health.py`,
   `GLOBAL_AUCTION_CANDIDATE_EVIDENCE_INVALID`;
 - focused tests, planning lock, compile, diff, hot-fix landing, loaded-SHA, and
   post-restart health evidence pass.
+
+## 2026-08-11 Identity-bound submit recovery owns capital priority
+
+A real maker submit crossed the venue boundary and persisted its exact
+`venue_order_id`, but ACK persistence lost a DB race. The command remained
+`SUBMITTING` while the venue order was LIVE, and a later point read proved a
+separate newly ACKED order had already partially filled. The scheduled recovery
+counted only unresolved cancels as capital blockers, so persistent held-monitor
+I/O debt could indefinitely defer exact-order recovery and leave current fill
+exposure outside canonical position monitoring.
+
+The repair treats a `SUBMITTING` ENTRY or EXIT with a non-empty persisted venue
+order ID as the same class of exact capital blocker as an unresolved cancel.
+That blocker reserves the existing bounded reactor handoff; the existing
+identity-bound point reader remains the sole authority for advancement. No
+venue absence, replay, cancel, fill, price, probability, or sizing rule changes.
+
+SCOPE is one known-order in-flight command. DRAIN is the next scheduled
+identity-bound exact-order read and canonical apply. RESET is advancement out of
+`SUBMITTING` or removal of the exact capital blocker. Acceptance requires:
+
+- the blocker count includes known-order ENTRY/EXIT submits but excludes an
+  unbound submit whose venue side effect remains unknown;
+- an overdue held monitor cannot defer this exact capital recovery;
+- recovery still fences the active reactor before point truth is applied;
+- focused recovery/scheduler tests, compile, diff, hot-fix landing, loaded-SHA,
+  and live command/fill projection evidence pass.

@@ -7070,7 +7070,7 @@ def _edli_command_recovery_cycle() -> None:
     if _defer_for_held_position_monitor("edli_command_recovery"):
         return
     from src.execution.command_recovery import (
-        capital_blocking_cancel_command_count,
+        capital_blocking_command_count,
         reconcile_unresolved_commands,
         scheduled_recovery_budget_seconds,
     )
@@ -7083,7 +7083,7 @@ def _edli_command_recovery_cycle() -> None:
     try:
         trade_conn = get_trade_connection_read_only()
         try:
-            capital_blockers = capital_blocking_cancel_command_count(trade_conn)
+            capital_blockers = capital_blocking_command_count(trade_conn)
         finally:
             trade_conn.close()
     except Exception as exc:  # noqa: BLE001 - recovery still runs fail-closed.
@@ -7096,7 +7096,9 @@ def _edli_command_recovery_cycle() -> None:
         _held_position_monitor_active.is_set()
         or _held_position_monitor_canonical_debt.is_set()
     ):
-        # SCOPE: only a recovery tick with no exact capital-blocking cancel.
+        # SCOPE: only a recovery tick with no exact capital-blocking venue side
+        # effect. A known-order SUBMITTING command may already be filled and is
+        # current capital until exact point truth advances it.
         # DRAIN: the active/overdue held monitor gets uncontended trade-DB I/O
         # and writes current MONITOR_REFRESHED evidence. RESET: its completion
         # clears the active claim and canonical fresh coverage clears the debt;
@@ -7112,7 +7114,7 @@ def _edli_command_recovery_cycle() -> None:
         _capital_recovery_handoff_pending.set()
         logger.info(
             "edli_command_recovery: reserving reactor handoff for %d "
-            "capital-blocking cancels",
+            "capital-blocking venue side effects",
             capital_blockers,
         )
     reactor_fence_acquired = False
