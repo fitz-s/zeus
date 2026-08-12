@@ -357,7 +357,47 @@ def test_stale_absolute_disagreement_row_has_no_entry_authority() -> None:
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
 
 
-def _read(conn, readiness, *, decision_time):
+def test_stale_absolute_disagreement_row_retains_held_authority() -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        semantics_revision=(
+            STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        ),
+        shape_lag_hours=6.0,
+        stale_shape_reused=True,
+    )
+    readiness = _readiness(
+        posterior_id=posterior_id,
+        computed_at=_dt(6, 7, 30),
+        expires_at=_dt(6, 23),
+        decision_time=_dt(6, 7, 30),
+    )
+
+    result = _read(
+        conn,
+        readiness,
+        decision_time=_dt(6, 12),
+        require_entry_shape_authority=False,
+    )
+
+    assert result.ok is True
+    assert result.bundle is not None
+    assert result.bundle.posterior_id == posterior_id
+
+
+def _read(
+    conn,
+    readiness,
+    *,
+    decision_time,
+    require_entry_shape_authority=True,
+):
     return read_replacement_forecast_bundle(
         conn,
         baseline_bundle=_BaselineBundle(_Evidence("b0-run")),
@@ -367,6 +407,7 @@ def _read(conn, readiness, *, decision_time):
         temperature_metric="high",
         decision_time=decision_time,
         current_bin_topology_hash=_TOPO_HASH,
+        require_entry_shape_authority=require_entry_shape_authority,
     )
 
 

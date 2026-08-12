@@ -181,6 +181,47 @@ def current_evidence_shape_has_entry_authority(provenance: object) -> bool:
     )
 
 
+def current_evidence_shape_has_held_authority(provenance: object) -> bool:
+    """Whether a shape can support reduce-only held-position redecision.
+
+    A bounded older ENS shape is not entry authority, but its untranslated
+    absolute members and explicit disagreement with the current provider
+    center remain statistical evidence for SELL/HOLD/CASH.  The persisted
+    revision and stale flag must agree with the numeric lag exactly.
+    """
+
+    shape = _current_evidence_shape(provenance)
+    if shape is None:
+        return False
+    shape_lag_hours = shape.get("shape_lag_hours")
+    if (
+        isinstance(shape_lag_hours, bool)
+        or not isinstance(shape_lag_hours, (int, float))
+        or float(shape_lag_hours) < 0.0
+    ):
+        return False
+    stale_shape_reused = shape.get("stale_shape_reused")
+    if stale_shape_reused is not None and not isinstance(
+        stale_shape_reused, bool
+    ):
+        return False
+    stale = float(shape_lag_hours) > 0.0
+    if stale and stale_shape_reused is not True:
+        return False
+    if not stale and stale_shape_reused not in (None, False):
+        return False
+    expected_revision = (
+        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        if stale
+        else CURRENT_EVIDENCE_SEMANTICS_REVISION
+    )
+    return (
+        str(shape.get("semantics_revision") or "") == expected_revision
+        and shape.get("translation_applied") is False
+        and not current_evidence_shape_semantics_mismatch(provenance)
+    )
+
+
 def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
     """SQL fragment selecting ONLY tradeable-grade (certified-bootstrap-bounded) posteriors.
 

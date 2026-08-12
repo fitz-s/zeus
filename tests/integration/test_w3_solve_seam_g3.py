@@ -6628,6 +6628,7 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
         allow_unobserved_day0_replacement=True,
         probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
     )
+    assert reads[-1]["require_entry_shape_authority"] is False
     held_after_grace_bin_id = next(
         binding.bin_id
         for binding in held_after_grace.probability_witness.bindings
@@ -6654,6 +6655,7 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
             allow_unobserved_day0_replacement=True,
             probability_use=era._CurrentProbabilityUse.ENTRY,
         )
+    assert reads[-1]["require_entry_shape_authority"] is True
     assert len(reads) == reads_before + 3
     bundle_result["value"] = SimpleNamespace(
         ok=False,

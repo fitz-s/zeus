@@ -34498,6 +34498,7 @@ def _prepare_current_global_probability_family(
                 raw_input_hwm_conn=raw_input_hwm_conn,
                 raw_input_hwm_deadline_monotonic=_raw_input_hwm_deadline(),
                 raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
+                require_entry_shape_authority=entry_authority,
             )
             if not result.ok or result.bundle is None:
                 raise ValueError(
@@ -34607,6 +34608,7 @@ def _prepare_current_global_probability_family(
             raw_input_hwm_conn=raw_input_hwm_conn,
             raw_input_hwm_deadline_monotonic=_raw_input_hwm_deadline(),
             raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
+            require_entry_shape_authority=entry_authority,
         )
         if not result.ok or result.bundle is None:
             raise ValueError(
@@ -35250,6 +35252,7 @@ def _prepare_current_global_probability_family(
                     raw_input_hwm_conn=raw_input_hwm_conn,
                     raw_input_hwm_deadline_monotonic=_raw_input_hwm_deadline(),
                     raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
+                    require_entry_shape_authority=entry_authority,
                 )
                 if not bound_result.ok or bound_result.bundle is None:
                     raise ValueError(

@@ -17,6 +17,7 @@ from src.contracts.settlement_semantics import SettlementSemantics
 from src.data.replacement_forecast_cycle_policy import (
     TRADEABLE_GRADE_QLCB_BASIS,
     current_evidence_shape_has_entry_authority,
+    current_evidence_shape_has_held_authority,
     cycle_age_exceeds_bound,
     replacement_source_cycle_max_age_hours,
 )
@@ -236,8 +237,10 @@ def _parse_utc(value: str, *, field_name: str) -> datetime:
 
 def _live_grade_provenance(
     row_map: Mapping[str, Any],
+    *,
+    require_entry_shape_authority: bool = True,
 ) -> Mapping[str, Any] | None:
-    """Return provenance only when the row can authorize a new entry."""
+    """Return provenance only when the row authorizes the requested risk lane."""
     if str(row_map.get("runtime_layer") or "") != LIVE_RUNTIME_LAYER:
         return None
     if not row_map.get("q_lcb_json"):
@@ -260,7 +263,12 @@ def _live_grade_provenance(
     )
     if not isinstance(shape, Mapping):
         return None
-    if not current_evidence_shape_has_entry_authority(provenance):
+    shape_has_authority = (
+        current_evidence_shape_has_entry_authority
+        if require_entry_shape_authority
+        else current_evidence_shape_has_held_authority
+    )
+    if not shape_has_authority(provenance):
         return None
     return provenance
 
@@ -500,6 +508,7 @@ def read_replacement_forecast_bundle(
     raw_input_hwm_conn: sqlite3.Connection | None = None,
     raw_input_hwm_deadline_monotonic: float | None = None,
     raw_input_hwm_read_max_seconds: float | None = None,
+    require_entry_shape_authority: bool = True,
 ) -> ReplacementForecastBundleReadResult:
     """Read a derived replacement posterior only after B0 executable proof exists.
 
@@ -509,6 +518,9 @@ def read_replacement_forecast_bundle(
     exists (src.data.replacement_input_hwm.replacement_live_input_lag_reason) — fail
     closed on a read-time-stale posterior instead of serving it.
     """
+
+    if not isinstance(require_entry_shape_authority, bool):
+        raise TypeError("require_entry_shape_authority must be bool")
 
     baseline_run_id = _baseline_source_run_id(baseline_bundle)
     if baseline_run_id is None and not require_baseline_bundle:
@@ -618,7 +630,10 @@ def read_replacement_forecast_bundle(
                 "BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_MISMATCH"
             )
         row_map = dict(certified_row)
-    provenance = _live_grade_provenance(row_map)
+    provenance = _live_grade_provenance(
+        row_map,
+        require_entry_shape_authority=require_entry_shape_authority,
+    )
     if provenance is None:
         return ReplacementForecastBundleReadResult("BLOCKED", "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE")
     # Fallback case: we are serving an OLDER live row because a NEWER non-live
@@ -629,7 +644,10 @@ def read_replacement_forecast_bundle(
     # served row (staleness, intermediate-cycle, topology-to-current-market, identity hashes).
     _served_via_tradeable_fallback = (
         int(row_map["posterior_id"]) != int(latest_row_map["posterior_id"])
-        and _live_grade_provenance(latest_row_map) is None
+        and _live_grade_provenance(
+            latest_row_map,
+            require_entry_shape_authority=require_entry_shape_authority,
+        ) is None
     )
     _newer_non_executable_posterior_id = (
         int(latest_row_map["posterior_id"]) if _served_via_tradeable_fallback else None
