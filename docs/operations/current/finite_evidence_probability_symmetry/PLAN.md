@@ -3671,7 +3671,11 @@ zero durable snapshots under transient writer occupancy. They now use the
 existing monitor-aware `RECOVERY_CRITICAL` admission with a bounded one-second
 queue and a 100ms per-row hold/SQLite quantum. A published MONITOR intent still
 overtakes this writer, while a transient non-monitor owner no longer makes every
-held row fail immediately. Network reads and probability authority are
+held row fail immediately. Capture selection priority and writer admission are
+separate typed scopes: pending urgency, open-rest, and non-forced markers may
+move forward in capture order but remain background writers; only canonical
+held condition IDs and forced FC-03 condition IDs enter recovery admission.
+Network reads and probability authority are
 unchanged; only persistence admission changes. Submit-time JIT recapture is
 outside this producer path and retains its own execution authority.
 
@@ -3680,9 +3684,10 @@ DRAIN is a successful short per-row transaction; exact held scope remains
 level-triggered from canonical positions and retries on the existing 20-second
 cadence until durable, while broad scope fast-yields. RESET is a fresh persisted
 snapshot or expiry of its current priority request; a timeout never promotes
-stale data. Acceptance requires behavioral antibodies proving exact priority
-snapshots wait through a transient background probe yet yield to MONITOR, broad
-snapshots remain background, focused substrate/market-scanner tests, exact-SHA
+stale data. Acceptance requires behavioral antibodies proving exact held/forced
+priority snapshots wait through a transient background probe yet yield to
+MONITOR, while broad and pending-urgency snapshots remain background; focused
+substrate/market-scanner tests, exact-SHA
 deployment, and forward evidence that all open positions regain bounded
 canonical monitor age while entry candidates continue to be reconsidered.
 

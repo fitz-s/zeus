@@ -932,6 +932,60 @@ def test_substrate_priority_snapshot_writer_waits_past_background_probe(
     assert acquired.is_set()
 
 
+def test_pending_priority_capture_keeps_background_writer_admission(
+    monkeypatch,
+):
+    """Selection priority alone cannot promote replayable persistence."""
+    from src.data import market_scanner
+
+    condition_id = "pending-urgent-condition"
+    foreground_context = object()
+    background_context = object()
+    observed_contexts = []
+
+    def capture(_conn, **kwargs):
+        observed_contexts.append(kwargs["persist_context_factory"])
+        return {"persisted": True, "snapshot_persistence_tier": "full"}
+
+    monkeypatch.setattr(
+        market_scanner,
+        "capture_executable_market_snapshot",
+        capture,
+    )
+    market = {
+        "city": "Test City",
+        "slug": "test-city-high",
+        "target_date": "2026-08-13",
+        "temperature_metric": "high",
+        "outcomes": [
+            {
+                "condition_id": condition_id,
+                "token_id": "pending-yes",
+                "no_token_id": "pending-no",
+                "label": "30C",
+                "active": True,
+                "closed": False,
+            }
+        ],
+    }
+
+    summary = market_scanner.refresh_executable_market_substrate_snapshots(
+        sqlite3.connect(":memory:"),
+        markets=[market],
+        clob=SimpleNamespace(),
+        max_outcomes=2,
+        budget_seconds=2.0,
+        priority_condition_ids={condition_id},
+        priority_write_condition_ids=(),
+        snapshot_write_context_factory=foreground_context,
+        background_snapshot_write_context_factory=background_context,
+        background_fast_yield=True,
+    )
+
+    assert summary["inserted"] > 0
+    assert observed_contexts == [background_context, background_context]
+
+
 def test_reactor_uses_targeted_decision_refresher_for_blocked_families():
     """Stale event requeues must trigger the same targeted family recapture path."""
 
@@ -2530,6 +2584,7 @@ def test_money_path_priority_cycle_paused_preserves_exact_open_rest_and_held_sco
 
     assert claim_reads == []
     assert calls and calls[0]["priority_condition_ids"] == ["cond-rest", "cond-held"]
+    assert calls[0]["priority_write_condition_ids"] == ("cond-held",)
     assert calls[0]["extra_priority_families"] == condition_families
     assert result["open_rest_priority_condition_ids"] == 1
     assert result["held_position_priority_condition_ids"] == 1
@@ -2590,6 +2645,7 @@ def test_money_path_priority_cycle_paused_fc03_preserves_exact_force_scope(monke
     assert calls and calls[0]["extra_priority_families"] == marker_families
     assert calls[0]["priority_condition_ids"] == marker_condition_ids
     assert calls[0]["force_refresh_condition_ids"] == marker_condition_ids
+    assert calls[0]["priority_write_condition_ids"] == tuple(marker_condition_ids)
     assert calls[0]["include_money_risk_families"] is False
     assert calls[0]["request_priority"] is substrate_observer.RequestPriority.SUBMIT_JIT
     assert result["claim_order_priority_suppressed"] is True
@@ -2651,6 +2707,7 @@ def test_money_path_priority_cycle_paused_marker_without_force_preserves_marker_
     assert calls and calls[0]["extra_priority_families"] == marker_families
     assert calls[0]["priority_condition_ids"] == marker_condition_ids
     assert calls[0]["force_refresh_condition_ids"] == []
+    assert calls[0]["priority_write_condition_ids"] == ()
     assert calls[0]["include_money_risk_families"] is False
     assert result["claim_order_priority_suppressed"] is True
     assert result["claim_order_priority_suppression_reason"] == "entries_paused"
@@ -3254,6 +3311,9 @@ def test_empty_marker_still_discovers_and_services_held_scope(monkeypatch):
 
     assert refresh_calls
     assert refresh_calls[0]["priority_condition_ids"] == ["held-condition"]
+    assert refresh_calls[0]["priority_write_condition_ids"] == (
+        "held-condition",
+    )
     assert result["held_position_priority_condition_ids"] == 1
 
 

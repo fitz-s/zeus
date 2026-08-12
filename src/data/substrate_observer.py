@@ -1583,6 +1583,7 @@ def _refresh_pending_family_snapshots(
     extra_priority_families: Iterable[tuple[str, str, str]] | None = None,
     include_pending_families: bool = True,
     priority_condition_ids: Iterable[str] | None = None,
+    priority_write_condition_ids: Iterable[str] | None = None,
     force_refresh_condition_ids: Iterable[str] | None = None,
     priority_token_ids: Iterable[str] | None = None,
     force_refresh_token_ids: Iterable[str] | None = None,
@@ -1664,6 +1665,13 @@ def _refresh_pending_family_snapshots(
         if str(condition_id or "").strip()
     }
     explicit_priority_conditions = set(priority_conditions)
+    priority_write_conditions = {
+        str(condition_id or "").strip()
+        for condition_id in (priority_write_condition_ids or ())
+        if str(condition_id or "").strip()
+    }
+    if not priority_write_conditions.issubset(explicit_priority_conditions):
+        raise ValueError("priority snapshot writes require exact priority conditions")
     forced_conditions = {
         str(condition_id or "").strip()
         for condition_id in (force_refresh_condition_ids or ())
@@ -2646,6 +2654,7 @@ def _refresh_pending_family_snapshots(
                 budget_seconds=snapshot_budget_s,
                 capture_reserve_seconds=snapshot_reserve_s,
                 priority_condition_ids=priority_conditions,
+                priority_write_condition_ids=priority_write_conditions,
                 force_refresh_condition_ids=forced_conditions,
                 priority_token_ids=priority_tokens,
                 force_refresh_token_ids=forced_tokens,
@@ -3623,6 +3632,12 @@ def _edli_money_path_substrate_priority_cycle_under_intent(
             extra_priority_families=priority_families,
             include_pending_families=False,
             priority_condition_ids=exact_priority_condition_ids,
+            priority_write_condition_ids=tuple(
+                dict.fromkeys(
+                    held_position_priority_condition_ids
+                    + marker_force_refresh_condition_ids
+                )
+            ),
             force_refresh_condition_ids=marker_force_refresh_condition_ids,
             refresh_budget_seconds=priority_budget_s,
             snapshot_reserve_seconds=priority_snapshot_reserve_s,
@@ -3857,6 +3872,9 @@ def refresh_money_path_substrate_now(
             extra_priority_families=clean_families,
             include_pending_families=False,
             priority_condition_ids=clean_condition_ids,
+            priority_write_condition_ids=(
+                clean_condition_ids if force_refresh else ()
+            ),
             force_refresh_condition_ids=(clean_condition_ids if force_refresh else ()),
             priority_token_ids=clean_selected_token_ids,
             force_refresh_token_ids=(

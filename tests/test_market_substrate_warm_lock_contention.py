@@ -580,6 +580,7 @@ def test_priority_capture_keeps_exact_context_but_cooperates_with_monitor(
             max_outcomes=2,
             budget_seconds=30.0,
             priority_condition_ids={condition_id},
+            priority_write_condition_ids={condition_id},
             snapshot_write_context_factory=foreground_context,
             background_snapshot_write_context_factory=background_context,
             background_fast_yield=True,

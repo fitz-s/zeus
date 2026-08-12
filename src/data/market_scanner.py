@@ -4915,6 +4915,7 @@ def refresh_executable_market_substrate_snapshots(
     budget_seconds: float | None = None,
     capture_reserve_seconds: float | None = None,
     priority_condition_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
+    priority_write_condition_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
     force_refresh_condition_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
     priority_token_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
     force_refresh_token_ids: set[str] | frozenset[str] | tuple[str, ...] | list[str] | None = None,
@@ -4945,6 +4946,13 @@ def refresh_executable_market_substrate_snapshots(
         for condition_id in (priority_condition_ids or ())
         if str(condition_id or "").strip()
     }
+    priority_write_conditions = {
+        str(condition_id or "").strip()
+        for condition_id in (priority_write_condition_ids or ())
+        if str(condition_id or "").strip()
+    }
+    if not priority_write_conditions.issubset(priority_conditions):
+        raise ValueError("priority snapshot writes require exact priority scope")
     forced_conditions = {
         str(condition_id or "").strip()
         for condition_id in (force_refresh_condition_ids or ())
@@ -5454,7 +5462,12 @@ def refresh_executable_market_substrate_snapshots(
         selected_token = _selected_token_for_direction(outcome, direction)
         prefetched_book = prefetched_books.get(selected_token) if selected_token else None
         priority_candidate = str(condition_id or "").strip() in priority_conditions
-        background_capture = bool(background_fast_yield and not priority_candidate)
+        priority_write_candidate = (
+            str(condition_id or "").strip() in priority_write_conditions
+        )
+        background_capture = bool(
+            background_fast_yield and not priority_write_candidate
+        )
         priority_candidate_serviced = (
             str(condition_id or "").strip() in priority_direct_clob_service_conditions
         )
