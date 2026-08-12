@@ -768,31 +768,40 @@ def _batch_product_cycle_artifact_cycles(
 ) -> dict[tuple[str, str, str], datetime]:
     """Resolve requested HWMs from newest product-cycle partitions first."""
 
-    with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
-        cycle_rows = conn.execute(
-            f"""
-            SELECT source_cycle_time
-              FROM {table_ref}
-             WHERE source_id = ?
-               AND product_id = ?
-             GROUP BY source_cycle_time
-             ORDER BY source_cycle_time DESC
-            """,
-            (
-                OPENMETEO_ANCHOR_SOURCE_ID,
-                OPENMETEO_ANCHOR_PRODUCT_ID,
-            ),
-        ).fetchall()
     select_path = "artifact_path" if "artifact_path" in columns else "NULL"
     cycles: dict[tuple[str, str, str], datetime] = {}
-    for cycle_row in cycle_rows:
+    cycle_ceiling = decision_iso
+    inclusive_ceiling = True
+    while True:
+        remaining = requests.difference(cycles)
+        if not remaining:
+            break
+        comparison = "<=" if inclusive_ceiling else "<"
+        with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
+            cycle_row = conn.execute(
+                f"""
+                SELECT MAX(source_cycle_time) AS source_cycle_time
+                  FROM {table_ref}
+                 WHERE source_id = ?
+                   AND product_id = ?
+                   AND source_cycle_time {comparison} ?
+                """,
+                (
+                    OPENMETEO_ANCHOR_SOURCE_ID,
+                    OPENMETEO_ANCHOR_PRODUCT_ID,
+                    cycle_ceiling,
+                ),
+            ).fetchone()
+        if cycle_row is None:
+            break
         try:
             source_cycle = cycle_row["source_cycle_time"]
         except Exception:  # noqa: BLE001 - tuple row compatibility
             source_cycle = cycle_row[0]
-        remaining = requests.difference(cycles)
-        if not remaining:
+        if source_cycle in (None, ""):
             break
+        cycle_ceiling = str(source_cycle)
+        inclusive_ceiling = False
         with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
             rows = conn.execute(
                 f"""

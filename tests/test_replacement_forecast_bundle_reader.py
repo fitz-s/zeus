@@ -143,6 +143,132 @@ def test_cycle_frozen_artifact_hwm_is_reused_across_connections(tmp_path) -> Non
     )
 
 
+def test_cycle_hwm_seeks_each_family_back_to_latest_causal_product_cycle(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "forecast.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE raw_forecast_artifacts (
+            source_id TEXT,
+            product_id TEXT,
+            source_cycle_time TEXT,
+            captured_at TEXT,
+            source_available_at TEXT,
+            artifact_path TEXT,
+            artifact_metadata_json TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX idx_raw_forecast_artifacts_product_cycle
+        ON raw_forecast_artifacts(source_id, product_id, source_cycle_time)
+        """
+    )
+    newest = ("Shanghai", "2026-08-12", "high")
+    older = ("Tokyo", "2026-08-12", "high")
+    missing = ("Seoul", "2026-08-12", "high")
+
+    def insert(request, cycle):
+        conn.execute(
+            "INSERT INTO raw_forecast_artifacts VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                OPENMETEO_ANCHOR_SOURCE_ID,
+                OPENMETEO_ANCHOR_PRODUCT_ID,
+                cycle,
+                cycle,
+                cycle,
+                "",
+                json.dumps(
+                    {"city": request[0], "target_date": request[1], "metric": request[2]}
+                ),
+            ),
+        )
+
+    insert(newest, "2026-08-11T14:00:00+00:00")  # Future at decision time.
+    insert(newest, "2026-08-11T12:00:00+00:00")
+    insert(older, "2026-08-11T06:00:00+00:00")
+    conn.commit()
+    plan = conn.execute(
+        """
+        EXPLAIN QUERY PLAN
+        SELECT MAX(source_cycle_time)
+          FROM raw_forecast_artifacts
+         WHERE source_id = ?
+           AND product_id = ?
+           AND source_cycle_time <= ?
+        """,
+        (
+            OPENMETEO_ANCHOR_SOURCE_ID,
+            OPENMETEO_ANCHOR_PRODUCT_ID,
+            "2026-08-11T13:00:00+00:00",
+        ),
+    ).fetchall()
+    assert any(
+        "idx_raw_forecast_artifacts_product_cycle" in str(row[-1])
+        for row in plan
+    )
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+    conn.execute("BEGIN")
+    try:
+        snapshot = freeze_replacement_artifact_hwm(
+            conn,
+            requests=(newest, older, missing),
+            decision_time=datetime(2026, 8, 11, 13, tzinfo=UTC),
+        )
+    finally:
+        conn.rollback()
+
+    complete_traced: list[str] = []
+    conn.set_trace_callback(complete_traced.append)
+    conn.execute("BEGIN")
+    try:
+        complete_snapshot = freeze_replacement_artifact_hwm(
+            conn,
+            requests=(newest, older),
+            decision_time=datetime(2026, 8, 11, 13, tzinfo=UTC),
+        )
+    finally:
+        conn.rollback()
+        conn.close()
+
+    assert snapshot.artifact_cycles[newest] == datetime(
+        2026, 8, 11, 12, tzinfo=UTC
+    )
+    assert snapshot.artifact_cycles[older] == datetime(
+        2026, 8, 11, 6, tzinfo=UTC
+    )
+    assert missing not in snapshot.artifact_cycles
+    hwm_statements = [
+        " ".join(statement.upper().split())
+        for statement in traced
+        if "RAW_FORECAST_ARTIFACTS" in statement.upper()
+    ]
+    cycle_probes = [
+        sql for sql in hwm_statements if "SELECT MAX(SOURCE_CYCLE_TIME)" in sql
+    ]
+    assert len(cycle_probes) == 3  # 12:00, 06:00, then exhausted for missing.
+    assert "SOURCE_CYCLE_TIME <=" in cycle_probes[0]
+    assert all("SOURCE_CYCLE_TIME <" in sql for sql in cycle_probes[1:])
+    assert all("DATETIME(SOURCE_CYCLE_TIME)" not in sql for sql in cycle_probes)
+    assert not any("GROUP BY SOURCE_CYCLE_TIME" in sql for sql in hwm_statements)
+    assert not any("2026-08-11T14:00:00+00:00" in sql for sql in hwm_statements)
+
+    assert complete_snapshot.artifact_cycles == {
+        newest: datetime(2026, 8, 11, 12, tzinfo=UTC),
+        older: datetime(2026, 8, 11, 6, tzinfo=UTC),
+    }
+    complete_probes = [
+        " ".join(statement.upper().split())
+        for statement in complete_traced
+        if "SELECT MAX(SOURCE_CYCLE_TIME)" in statement.upper()
+    ]
+    assert len(complete_probes) == 2
+
+
 def test_cycle_hwm_reuses_unchanged_payload_coverage_and_rechecks_rewrite(
     tmp_path, monkeypatch
 ) -> None:
@@ -458,7 +584,12 @@ def test_cycle_hwm_interrupted_sql_fails_closed_and_removes_handler(
             return super().set_progress_handler(progress_handler, n)
 
         def execute(self, sql, parameters=(), /):
-            if self.progress_active and "SELECT source_cycle_time" in sql:
+            normalized = str(sql).upper()
+            if (
+                self.progress_active
+                and "SELECT" in normalized
+                and "SOURCE_CYCLE_TIME" in normalized
+            ):
                 raise sqlite3.OperationalError("interrupted")
             return super().execute(sql, parameters)
 

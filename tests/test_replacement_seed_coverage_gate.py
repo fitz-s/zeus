@@ -995,10 +995,10 @@ def test_nontransaction_scalar_artifact_hwm_uses_product_cycle_partition() -> No
     cycle_queries = [
         statement.upper()
         for statement in traced
-        if "SELECT SOURCE_CYCLE_TIME" in statement.upper()
-        and "GROUP BY SOURCE_CYCLE_TIME" in statement.upper()
+        if "SELECT MAX(SOURCE_CYCLE_TIME)" in statement.upper()
     ]
     assert cycle_queries
+    assert all("GROUP BY SOURCE_CYCLE_TIME" not in statement for statement in cycle_queries)
     assert all("DATETIME(CAPTURED_AT)" not in statement for statement in cycle_queries)
     assert all(
         "DATETIME(SOURCE_AVAILABLE_AT)" not in statement
