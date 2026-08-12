@@ -18608,6 +18608,92 @@ class TestRecoveryResolutionTable:
             "SELECT 1 FROM position_current WHERE position_id = 'pos-001'"
         ).fetchone() is None
 
+    def test_filled_entry_repair_compares_net_flow_after_exit(
+        self,
+        conn,
+        mock_client,
+    ):
+        """A later EXIT must not make an already-projected ENTRY look missing."""
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, size=13.0, price=0.41)
+        _advance_to_acked(conn, venue_order_id="ord-entry-net")
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-entry-net", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-entry-net",
+            filled_size="12.990168",
+            fill_price="0.41",
+        )
+        _seed_pending_entry_projection(conn, order_id="ord-entry-net")
+        _append_test_filled_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-001",
+            order_id="ord-entry-net",
+            shares=12.990168,
+            cost_basis_usd=5.32596888,
+            size_usd=5.33,
+            entry_price=0.41,
+        )
+
+        _insert(
+            conn,
+            command_id="cmd-exit-net",
+            position_id="pos-001",
+            intent_kind="EXIT",
+            side="SELL",
+            size=12.99,
+            price=0.69,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-exit-net",
+            venue_order_id="ord-exit-net",
+        )
+        append_event(
+            conn,
+            command_id="cmd-exit-net",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={"venue_order_id": "ord-exit-net", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            command_id="cmd-exit-net",
+            order_id="ord-exit-net",
+            trade_id="trade-exit-net",
+            filled_size="12.99",
+            fill_price="0.92",
+        )
+        conn.execute(
+            "UPDATE position_current SET shares = ?, cost_basis_usd = ? "
+            "WHERE position_id = 'pos-001'",
+            (0.000168, 0.00006888),
+        )
+
+        from src.execution.command_recovery import (
+            _latest_unprojected_filled_entry_candidates,
+            reconcile_filled_entry_projection_repairs,
+        )
+
+        assert _latest_unprojected_filled_entry_candidates(conn) == []
+        assert reconcile_filled_entry_projection_repairs(conn, mock_client) == {
+            "scanned": 0,
+            "advanced": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+        assert conn.execute(
+            "SELECT shares FROM position_current WHERE position_id = 'pos-001'"
+        ).fetchone()[0] == pytest.approx(0.000168)
+
     def test_edli_trade_case_rejects_unverified_handwritten_certificate_pair(
         self,
         conn,

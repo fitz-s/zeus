@@ -4091,6 +4091,32 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
                AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
                AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
              GROUP BY fact.command_id, fact.venue_order_id
+        ),
+        position_fill_flow AS (
+            SELECT flow_cmd.position_id,
+                   SUM(
+                       CASE
+                           WHEN flow_cmd.intent_kind = 'ENTRY'
+                            AND flow_cmd.side = 'BUY'
+                           THEN CAST(fact.filled_size AS REAL)
+                           ELSE 0.0
+                       END
+                   ) AS entry_filled_size,
+                   SUM(
+                       CASE
+                           WHEN flow_cmd.intent_kind = 'EXIT'
+                            AND flow_cmd.side = 'SELL'
+                           THEN CAST(fact.filled_size AS REAL)
+                           ELSE 0.0
+                       END
+                   ) AS exit_filled_size
+              FROM economic_trade_fact fact
+              JOIN venue_commands flow_cmd
+                ON flow_cmd.command_id = fact.command_id
+               AND flow_cmd.venue_order_id = fact.venue_order_id
+             WHERE fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+               AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+             GROUP BY flow_cmd.position_id
         )
         SELECT cmd.*,
                entry_fill.fill_fact_count AS fill_fact_count,
@@ -4121,6 +4147,8 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
            AND entry_fill.venue_order_id = cmd.venue_order_id
           LEFT JOIN position_current pc
             ON pc.position_id = cmd.position_id
+          LEFT JOIN position_fill_flow flow
+            ON flow.position_id = cmd.position_id
           LEFT JOIN venue_submission_envelopes env
             ON env.envelope_id = cmd.envelope_id
           LEFT JOIN executable_market_snapshots snap
@@ -4147,6 +4175,28 @@ def _latest_unprojected_filled_entry_candidates(conn: sqlite3.Connection) -> lis
            )
            AND cmd.venue_order_id IS NOT NULL
            AND cmd.venue_order_id != ''
+           AND NOT (
+                pc.position_id IS NOT NULL
+                AND EXISTS (
+                    SELECT 1
+                      FROM position_events projected_entry
+                     WHERE projected_entry.position_id = cmd.position_id
+                       AND projected_entry.event_type = 'ENTRY_ORDER_FILLED'
+                       AND (
+                            projected_entry.command_id = cmd.command_id
+                            OR lower(COALESCE(projected_entry.order_id, '')) =
+                               lower(cmd.venue_order_id)
+                       )
+                )
+                AND ABS(
+                    COALESCE(pc.shares, 0)
+                    - MAX(
+                        0.0,
+                        COALESCE(flow.entry_filled_size, 0)
+                        - COALESCE(flow.exit_filled_size, 0)
+                    )
+                ) <= 0.000001
+           )
            AND (
                 pc.position_id IS NULL
                 OR (
