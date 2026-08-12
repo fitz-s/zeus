@@ -26896,6 +26896,28 @@ def _reconcile_passes_short_conn(
                 bounded_lock_retry_delays=_CAPITAL_RECOVERY_LOCK_RETRY_DELAYS,
             )
 
+        def _capital_apply_conn_factory(deadline_monotonic: float):
+            """Bind exact capital APPLY work to its own fresh writer deadline.
+
+            The ordinary live-tick factory is bound to the cumulative 100 ms
+            maintenance budget before this fast lane starts.  Re-wrapping that
+            factory with a later deadline cannot revive its already-expired
+            inner writer lease.  These passes are trade-owned and already have
+            their own bounded capital deadline, so build the priority lease from
+            the canonical trade-only base for every APPLY attempt.
+            """
+
+            priority_factory = _recovery_priority_conn_factory(
+                capital_conn_factory,
+                scope="live_tick",
+                deadline_monotonic=deadline_monotonic,
+            )
+            return _recovery_apply_conn_factory(
+                priority_factory,
+                scope="live_tick",
+                deadline_monotonic=deadline_monotonic,
+            )
+
         identity_submit_deferred = 0
         with open_tracked(
             read_conn_factory,
@@ -26970,10 +26992,8 @@ def _reconcile_passes_short_conn(
             # candidate set, so project the already-durable terminal truth before
             # any venue I/O or historical fill maintenance can consume the tick.
             terminal_fact_deadline = _capital_deadline()
-            terminal_fact_conn_factory = _recovery_apply_conn_factory(
-                conn_factory,
-                scope="live_tick",
-                deadline_monotonic=terminal_fact_deadline,
+            terminal_fact_conn_factory = _capital_apply_conn_factory(
+                terminal_fact_deadline,
             )
             preexisting_terminal_result = _run_capital_pass(
                 "terminal_order_facts_fast",
@@ -27000,10 +27020,8 @@ def _reconcile_passes_short_conn(
             # reset them from durable truth before any venue or historical
             # maintenance work can consume the live-tick budget.
             finding_deadline = _capital_deadline()
-            finding_conn_factory = _recovery_apply_conn_factory(
-                conn_factory,
-                scope="live_tick",
-                deadline_monotonic=finding_deadline,
+            finding_conn_factory = _capital_apply_conn_factory(
+                finding_deadline,
             )
             stale_terminal_finding_result = _run_capital_pass(
                 "stale_terminal_no_fill_findings_fast",
@@ -27025,10 +27043,8 @@ def _reconcile_passes_short_conn(
         terminal_late_fill_result = None
         if terminal_late_fill_command_ids:
             late_fill_deadline = _capital_deadline()
-            late_fill_conn_factory = _recovery_apply_conn_factory(
-                conn_factory,
-                scope="live_tick",
-                deadline_monotonic=late_fill_deadline,
+            late_fill_conn_factory = _capital_apply_conn_factory(
+                late_fill_deadline,
             )
             terminal_late_fill_result = _run_capital_pass(
                 "terminal_late_entry_fill_fast",
@@ -27048,10 +27064,8 @@ def _reconcile_passes_short_conn(
         preexisting_obligation_result = None
         if terminal_obligation_open:
             obligation_deadline = _capital_deadline()
-            obligation_conn_factory = _recovery_apply_conn_factory(
-                conn_factory,
-                scope="live_tick",
-                deadline_monotonic=obligation_deadline,
+            obligation_conn_factory = _capital_apply_conn_factory(
+                obligation_deadline,
             )
             preexisting_obligation_result = _run_capital_pass(
                 "terminal_entry_exposure_obligations_fast",
@@ -27108,10 +27122,8 @@ def _reconcile_passes_short_conn(
                     venue_order_id=venue_order_id,
                 )
             }
-            identity_conn_factory = _recovery_apply_conn_factory(
-                conn_factory,
-                scope="live_tick",
-                deadline_monotonic=identity_deadline,
+            identity_conn_factory = _capital_apply_conn_factory(
+                identity_deadline,
             )
             identity_result = _run_capital_pass(
                 "identity_bound_inflight_fast",
@@ -27175,16 +27187,7 @@ def _reconcile_passes_short_conn(
         # ordinary live-tick deadline is intentionally tiny and may already be
         # spent by NETWORK; reusing it here makes the capital fast lane
         # structurally unable to reach APPLY.
-        priority_capital_conn_factory = _recovery_priority_conn_factory(
-            capital_conn_factory,
-            scope="live_tick",
-            deadline_monotonic=fast_deadline,
-        )
-        fast_conn_factory = _recovery_apply_conn_factory(
-            priority_capital_conn_factory,
-            scope="live_tick",
-            deadline_monotonic=fast_deadline,
-        )
+        fast_conn_factory = _capital_apply_conn_factory(fast_deadline)
 
         def _apply_cancel(conn, snap_client):
             ps = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}

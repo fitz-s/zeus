@@ -3547,6 +3547,35 @@ identity-bound exact-order read and canonical apply. RESET is advancement out of
 - focused recovery/scheduler tests, compile, diff, hot-fix landing, loaded-SHA,
   and live command/fill projection evidence pass.
 
+## 2026-08-12 Capital recovery owns its deadline at the writer boundary
+
+Forward evidence exposed a deadline-composition defect in the same lane. The
+live-tick coordinator first wrapped its writer factory with the cumulative
+100ms maintenance deadline. `terminal_order_facts_fast` and its sibling capital
+passes later created independent 1.5s deadlines, but wrapped that already-bound
+factory again. Once the outer maintenance deadline elapsed, every capital APPLY
+attempt failed before opening the DB, and the next tick deterministically
+reconstructed the same expired nesting. Durable terminal orders therefore kept
+collateral reservations and entry-exposure obligations open indefinitely even
+though no venue ambiguity remained.
+
+The structural law is single deadline ownership at the writer boundary. Every
+capital pass constructs its priority lease directly from the canonical
+trade-only connection factory using that pass's fresh absolute deadline; it
+never extends or nests an earlier deadline-bound factory. Read/network work,
+venue truth, probability, sizing, and lifecycle semantics are unchanged.
+
+SCOPE is one exact capital-recovery APPLY transaction. DRAIN is the next
+scheduled live-tick pass with its independently bounded capital deadline. RESET
+is successful canonical terminalization/reservation release or a fresh retry on
+the following tick; monitor intent still preempts the writer. Acceptance
+requires a zero maintenance-budget antibody that proves terminal capital truth
+still receives a positive writer lease deadline and advances while an unrelated
+identity-bound submit remains unresolved, plus the full command-recovery suite.
+
+Allowed files are `src/execution/command_recovery.py`,
+`tests/test_command_recovery.py`, and this plan.
+
 ## 2026-08-11 Immutable weather snapshot accepts market-bin slug identity
 
 After the identity-bound submit advanced to ACKED, authenticated fill sync

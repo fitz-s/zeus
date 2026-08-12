@@ -30886,6 +30886,117 @@ def test_unavailable_identity_submit_does_not_starve_durable_terminal_capital_re
         verified.close()
 
 
+def test_terminal_capital_release_owns_fresh_deadline_after_live_budget_expires(
+    tmp_path,
+    monkeypatch,
+):
+    """A durable terminal fact must not inherit the spent maintenance lease."""
+    from contextlib import nullcontext
+
+    from src.execution import command_recovery, venue_sync_contract
+    from src.state import write_coordinator
+    from src.state.db import init_schema, init_schema_trade_only
+
+    db_path = tmp_path / "terminal-capital-deadline.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    init_schema_trade_only(seed)
+    _insert(seed, command_id="cmd-unreadable", position_id="pos-unreadable")
+    _advance_to_submitting(
+        seed,
+        command_id="cmd-unreadable",
+        venue_order_id="ord-unreadable",
+    )
+    _insert(seed, command_id="cmd-release", position_id="pos-release")
+    _advance_to_acked(seed, command_id="cmd-release", venue_order_id="ord-release")
+    _seed_pending_entry_projection(
+        seed,
+        position_id="pos-release",
+        command_id="cmd-release",
+        order_id="ord-release",
+    )
+    _append_order_fact(
+        seed,
+        command_id="cmd-release",
+        order_id="ord-release",
+        state="CANCEL_CONFIRMED",
+        matched_size="0",
+        remaining_size="0",
+    )
+    seed.commit()
+    seed.close()
+
+    def _conn_factory(**_kwargs):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _full_factory(**_kwargs):
+        pytest.fail("capital APPLY must use the trade-only writer base")
+
+    _full_factory.requires_writer_flocks = True
+    _full_factory.supports_nonblocking_flocks = True
+    _full_factory.trade_only_factory = _conn_factory
+    _conn_factory.requires_writer_flocks = True
+    _conn_factory.supports_nonblocking_flocks = True
+
+    lease_deadlines = []
+
+    class _Coordinator:
+        def lease(self, _dbs, **kwargs):
+            lease_deadlines.append(kwargs["deadline_ms"])
+            return nullcontext()
+
+        def has_pending_monitor_waiter(self, _dbs):
+            return False
+
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_conn_factory",
+        _full_factory,
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "default_trade_read_conn_factory",
+        _conn_factory,
+    )
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: _Coordinator(),
+    )
+    monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
+    monkeypatch.setenv("ZEUS_CAPITAL_RECOVERY_DB_BUDGET_SECONDS", "1")
+    monkeypatch.setattr(
+        command_recovery,
+        "_read_identity_bound_point_orders",
+        lambda _order_ids, *, timeout_seconds: ({}, False),
+    )
+    monkeypatch.setattr(
+        venue_sync_contract,
+        "capture_venue_read_snapshot",
+        lambda *_args, **_kwargs: pytest.fail(
+            "identity continuation must defer account snapshot"
+        ),
+    )
+
+    summary = command_recovery.reconcile_unresolved_commands(
+        client=MagicMock(spec_set=["get_order", "place_limit_order"]),
+        scope="live_tick",
+    )
+
+    assert summary["terminal_order_facts"]["advanced"] == 1
+    assert lease_deadlines
+    assert lease_deadlines[0] > 0
+    verified = _conn_factory()
+    try:
+        assert _get_state(verified, "cmd-release") == "EXPIRED"
+        assert _get_state(verified, "cmd-unreadable") == "SUBMITTING"
+    finally:
+        verified.close()
+
+
 def test_proven_fill_obligation_releases_before_identity_point_read(
     tmp_path,
     monkeypatch,
