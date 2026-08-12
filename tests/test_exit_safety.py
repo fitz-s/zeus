@@ -12183,7 +12183,11 @@ def test_reconcile_rejects_invalid_fill_economics(price):
 
 
 @pytest.mark.parametrize("price", ["0.049", "0.951", "0.999"])
-def test_recovery_projects_realized_out_of_band_exit_fill(monkeypatch, price):
+def test_recovery_projects_realized_out_of_band_exit_fill(
+    monkeypatch,
+    caplog,
+    price,
+):
     from src.execution import command_recovery
 
     projected = []
@@ -12197,20 +12201,23 @@ def test_recovery_projects_realized_out_of_band_exit_fill(monkeypatch, price):
         def execute(self, *args, **kwargs):
             return None
 
-    assert command_recovery._append_exit_order_fill_projection(
-        Conn(),
-        command={
-            "command_id": "cmd-realized-fill",
-            "position_id": "pos-realized-fill",
-            "intent_kind": "EXIT",
-        },
-        venue_order_id="order-bad-fill",
-        matched_size="1",
-        fill_price=price,
-        observed_at="2026-08-01T18:00:00Z",
-        event_type="FILL_CONFIRMED",
-    )
+    with caplog.at_level("CRITICAL"):
+        assert command_recovery._append_exit_order_fill_projection(
+            Conn(),
+            command={
+                "command_id": "cmd-realized-fill",
+                "position_id": "pos-realized-fill",
+                "intent_kind": "EXIT",
+            },
+            venue_order_id="order-bad-fill",
+            matched_size="1",
+            fill_price=price,
+            observed_at="2026-08-01T18:00:00Z",
+            event_type="FILL_CONFIRMED",
+        )
     assert projected[0]["fill_price"] == price
+    if Decimal(price) > Decimal("0.95"):
+        assert "projecting realized out-of-band exit fill" not in caplog.text
 
 
 def test_execute_exit_adopts_matching_venue_open_sell_without_local_command(conn, monkeypatch):

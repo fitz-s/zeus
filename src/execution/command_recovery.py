@@ -3471,7 +3471,15 @@ def _append_exit_order_fill_projection(
             fill_price,
         )
         return False
-    if not LIVE_ORDER_MIN_UNIT_PRICE <= observed_fill_price <= LIVE_ORDER_MAX_UNIT_PRICE:
+    sell_price_improvement = (
+        LIVE_ORDER_MAX_UNIT_PRICE < observed_fill_price <= Decimal("1")
+    )
+    if (
+        not sell_price_improvement
+        and not LIVE_ORDER_MIN_UNIT_PRICE
+        <= observed_fill_price
+        <= LIVE_ORDER_MAX_UNIT_PRICE
+    ):
         logger.critical(
             "recovery: projecting realized out-of-band exit fill "
             "command=%s price=%s",
