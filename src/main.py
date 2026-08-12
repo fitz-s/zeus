@@ -109,6 +109,8 @@ _day0_urgent_wake_pending = threading.Event()
 _day0_held_monitor_preempt_requested = threading.Event()
 _forecast_held_monitor_preempt_requested = threading.Event()
 _periodic_exit_monitor_urgent_yielded = threading.Event()
+_held_monitor_preempt_generation_lock = threading.Lock()
+_held_monitor_preempt_generation = 0
 _day0_exit_monitor_attempts_lock = threading.Lock()
 _day0_exit_monitor_attempts: dict[str, bool | None] = {}
 _forecast_exit_monitor_attempts_lock = threading.Lock()
@@ -4908,6 +4910,38 @@ def _urgent_held_monitor_preemption_pending() -> bool:
     )
 
 
+def _urgent_held_monitor_owner_pending() -> bool:
+    """Return whether an urgent attempt still owns the requested handoff."""
+
+    return (
+        _day0_exit_monitor_priority_pending()
+        or _forecast_exit_monitor_priority_pending()
+    )
+
+
+def _held_monitor_preempt_generation_now() -> int:
+    with _held_monitor_preempt_generation_lock:
+        return _held_monitor_preempt_generation
+
+
+def _record_held_monitor_preempt_request() -> None:
+    global _held_monitor_preempt_generation
+
+    with _held_monitor_preempt_generation_lock:
+        _held_monitor_preempt_generation += 1
+
+
+def _acquire_held_monitor_claim(*, periodic_full_book: bool) -> tuple[bool, int]:
+    """Acquire the claim and linearize a periodic preempt baseline."""
+
+    if not periodic_full_book:
+        return _held_position_monitor_claim.acquire(blocking=False), -1
+    with _held_monitor_preempt_generation_lock:
+        acquired = _held_position_monitor_claim.acquire(blocking=False)
+        generation = _held_monitor_preempt_generation if acquired else -1
+    return acquired, generation
+
+
 def _periodic_exit_monitor_should_yield(urgent_pending: bool) -> bool:
     """Give one urgent held-family monitor turn without starving full-book work."""
 
@@ -8910,8 +8944,8 @@ def _exit_monitor_cycle(
         logger.info("forecast exit monitor yielded to pending Day0 urgent wake")
         return False
     if not urgent_fact:
-        urgent_pending = _urgent_held_monitor_preemption_pending()
-        if urgent_pending and _current_periodic_monitor_obligation_count() == 0:
+        urgent_signal_pending = _urgent_held_monitor_preemption_pending()
+        if urgent_signal_pending and _current_periodic_monitor_obligation_count() == 0:
             # SCOPE: the current full-book pass has no positive exposure to
             # monitor. DRAIN: the canonical zero-set removes the writer
             # obligation immediately. RESET: a later positive exposure is
@@ -8925,22 +8959,34 @@ def _exit_monitor_cycle(
                 "canonical monitored exposure is empty"
             )
             return True
-        if _periodic_exit_monitor_should_yield(urgent_pending):
+        # A preempt Event survives the failed claim attempt that created it.
+        # It is a request to the holder that owned the claim at that instant,
+        # not proof that an urgent owner still exists.  A later periodic pass
+        # must therefore yield only to a live attempt; otherwise it immediately
+        # becomes the full-book successor instead of creating an ownerless gap.
+        if _periodic_exit_monitor_should_yield(
+            _urgent_held_monitor_owner_pending()
+        ):
             logger.info("periodic exit_monitor yielded to urgent held-family monitor")
             return True
-    if not _held_position_monitor_claim.acquire(blocking=False):
+    monitor_claim_acquired, preempt_generation_at_claim = (
+        _acquire_held_monitor_claim(periodic_full_book=periodic_full_book)
+    )
+    if not monitor_claim_acquired:
         if urgent_day0:
             # The wake was classified as held-family work, but another monitor
             # owns the single writer lane. Keep a stable signal after the
             # attempt flips None -> False so the current periodic holder cannot
             # miss the urgent handoff race.
             _day0_held_monitor_preempt_requested.set()
+            _record_held_monitor_preempt_request()
         elif urgent_forecast:
             # SCOPE: the currently queued held-family forecast wake. DRAIN: the
             # current periodic monitor cooperatively preempts at its next
             # position boundary. RESET: this urgent monitor acquires the claim,
             # or a completed full-book pass proves its current coverage.
             _forecast_held_monitor_preempt_requested.set()
+            _record_held_monitor_preempt_request()
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
         return False
 
@@ -8951,6 +8997,10 @@ def _exit_monitor_cycle(
     monitor_deadline_monotonic = (
         time.monotonic() + _held_position_monitor_budget_seconds()
     )
+    def _periodic_preemption_requested_since_claim() -> bool:
+        return _urgent_held_monitor_owner_pending() or (
+            _held_monitor_preempt_generation_now() > preempt_generation_at_claim
+        )
 
     if urgent_day0:
         # Owning the claim satisfies any earlier request for the current holder
@@ -9046,7 +9096,7 @@ def _exit_monitor_cycle(
             )
             return False
         if not urgent_fact and _periodic_exit_monitor_should_yield(
-            _urgent_held_monitor_preemption_pending()
+            _periodic_preemption_requested_since_claim()
         ):
             logger.info(
                 "periodic exit_monitor yielded after reactor handoff to urgent "
@@ -9080,7 +9130,7 @@ def _exit_monitor_cycle(
             # same one-turn fairness gate and cannot interrupt urgent forecast.
             should_preempt_for_urgent_day0 = lambda: (
                 _periodic_exit_monitor_should_yield(
-                    _urgent_held_monitor_preemption_pending()
+                    _periodic_preemption_requested_since_claim()
                 )
             )
         monitor_succeeded = run_exit_monitor_cycle(

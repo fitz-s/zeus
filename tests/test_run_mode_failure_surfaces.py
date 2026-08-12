@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-08-10
+# Last reused or audited: 2026-08-11
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Lifecycle: created=2026-05-19; last_reviewed=2026-08-11; last_reused=2026-08-11
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -37,6 +37,7 @@ import inspect
 import json
 import logging
 import sqlite3
+import threading
 import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -8917,7 +8918,7 @@ def test_periodic_exit_monitor_preempts_inflight_for_forecast_debt(
         main_module._held_position_monitor_active.clear()
 
 
-def test_periodic_exit_monitor_forces_full_book_after_one_forecast_yield(
+def test_periodic_exit_monitor_immediately_owns_orphaned_forecast_handoff(
     monkeypatch,
 ) -> None:
     import src.execution.exit_lifecycle as exit_module
@@ -8940,14 +8941,20 @@ def test_periodic_exit_monitor_forces_full_book_after_one_forecast_yield(
         return True
 
     main_module._held_position_monitor_active.clear()
-    main_module._forecast_held_monitor_preempt_requested.set()
+    main_module._forecast_held_monitor_preempt_requested.clear()
     main_module._periodic_exit_monitor_urgent_yielded.clear()
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
     monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", _run)
     try:
-        assert main_module._exit_monitor_cycle() is True
-        assert calls == []
-        assert main_module._periodic_exit_monitor_urgent_yielded.is_set()
+        assert main_module._held_position_monitor_claim.acquire(blocking=False)
+        try:
+            assert main_module._exit_monitor_cycle(
+                target_families=frozenset({("Paris", "2026-07-17", "high")}),
+                urgent_forecast=True,
+            ) is False
+        finally:
+            main_module._held_position_monitor_claim.release()
+        assert main_module._forecast_held_monitor_preempt_requested.is_set()
 
         assert main_module._exit_monitor_cycle() is True
         assert calls == ["run"]
@@ -8957,6 +8964,64 @@ def test_periodic_exit_monitor_forces_full_book_after_one_forecast_yield(
         main_module._forecast_held_monitor_preempt_requested.clear()
         main_module._periodic_exit_monitor_urgent_yielded.clear()
         main_module._held_position_monitor_active.clear()
+
+
+def test_periodic_claim_snapshot_cannot_hide_concurrent_urgent_request(
+    monkeypatch,
+) -> None:
+    """A request that observes the periodic claim is newer than its baseline."""
+    import src.main as main_module
+
+    claim_acquired = threading.Event()
+    allow_claim_return = threading.Event()
+
+    class Claim:
+        def __init__(self) -> None:
+            self.owned = False
+
+        def acquire(self, *, blocking=False):
+            assert blocking is False
+            if self.owned:
+                return False
+            self.owned = True
+            claim_acquired.set()
+            assert allow_claim_return.wait(timeout=2.0)
+            return True
+
+        def release(self) -> None:
+            self.owned = False
+
+    claim = Claim()
+    monkeypatch.setattr(main_module, "_held_position_monitor_claim", claim)
+    monkeypatch.setattr(main_module, "_held_monitor_preempt_generation", 0)
+
+    acquired: list[tuple[bool, int]] = []
+    recorded = threading.Event()
+
+    def periodic() -> None:
+        acquired.append(
+            main_module._acquire_held_monitor_claim(periodic_full_book=True)
+        )
+
+    def urgent() -> None:
+        assert claim.acquire(blocking=False) is False
+        main_module._record_held_monitor_preempt_request()
+        recorded.set()
+
+    periodic_thread = threading.Thread(target=periodic)
+    periodic_thread.start()
+    assert claim_acquired.wait(timeout=2.0)
+    urgent_thread = threading.Thread(target=urgent)
+    urgent_thread.start()
+    assert not recorded.wait(timeout=0.05)
+    allow_claim_return.set()
+    periodic_thread.join(timeout=2.0)
+    urgent_thread.join(timeout=2.0)
+
+    assert acquired == [(True, 0)]
+    assert recorded.is_set()
+    assert main_module._held_monitor_preempt_generation_now() == 1
+    claim.release()
 
 
 def test_targeted_exit_monitor_does_not_complete_full_book_bootstrap(

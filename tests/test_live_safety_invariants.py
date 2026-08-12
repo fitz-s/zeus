@@ -18323,6 +18323,62 @@ def test_pending_exit_preflight_auxiliary_deadline_preserves_primary_refresh(
     assert summary["held_monitor_primary_belief_read_completed"] == 1
 
 
+def test_replacement_hwm_prefetch_precedes_auxiliary_debt_scan(monkeypatch):
+    """Auxiliary O(n) work cannot spend the replacement-HWM reserve first."""
+    from src.engine import cycle_runtime
+    from src.execution import exit_lifecycle
+
+    position = _make_position(trade_id="hwm-before-debt-scan")
+    clock = [0.0]
+    order: list[tuple[str, float]] = []
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: [position],
+    )
+
+    def prefetch(positions, *, deadline_monotonic, **_kwargs):
+        assert positions == [position]
+        order.append(("hwm", deadline_monotonic))
+
+    def classify(*_args, **_kwargs):
+        order.append(("debt", clock[0]))
+        clock[0] = 6.0
+        return exit_lifecycle.GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_replacement_artifact_hwm",
+        prefetch,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "classify_global_sell_snapshot_reauction_debt",
+        classify,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_day0_hard_fact_position_eligible",
+        lambda *_args, **_kwargs: False,
+    )
+
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_hwm_before_debt_scan"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=6.0,
+    )
+
+    assert order == [("hwm", pytest.approx(5.0)), ("debt", 0.0)]
+
+
 def test_global_sell_debt_drain_auxiliary_deadline_preserves_primary_refresh(
     monkeypatch,
 ):

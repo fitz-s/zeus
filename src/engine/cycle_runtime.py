@@ -6569,6 +6569,48 @@ def execute_monitoring_phase(
         summary["exit_preflight_skipped_for_monitor_refresh"] = True
 
     portfolio_positions = tuple(getattr(portfolio, "positions", ()) or ())
+    try:
+        monitor_now_utc = deps._utcnow() if hasattr(deps, "_utcnow") else datetime.now(timezone.utc)
+    except Exception:
+        monitor_now_utc = datetime.now(timezone.utc)
+    if monitor_now_utc.tzinfo is None:
+        monitor_now_utc = monitor_now_utc.replace(tzinfo=timezone.utc)
+    else:
+        monitor_now_utc = monitor_now_utc.astimezone(timezone.utc)
+    monitor_positions = _monitoring_phase_positions(
+        portfolio,
+        conn=conn,
+        now_utc=monitor_now_utc,
+    )
+    monitor_reservation_count = _held_position_monitor_reservation_count(
+        len(monitor_positions)
+    )
+    summary["held_monitor_candidates"] = len(monitor_positions)
+    if urgent_preemption_requested():
+        summary["held_monitor_preempted"] = True
+        summary["held_monitor_positions_deferred"] = len(monitor_positions)
+        summary["held_monitor_defer_reason"] = "urgent_day0_wake"
+        return portfolio_dirty, tracker_dirty
+    install_monitor_day0_family_cache(clob, decision_time=monitor_now_utc)
+    install_monitor_replacement_hwm_snapshot(clob, None)
+
+    # Current replacement evidence is primary money-path truth.  Freeze it
+    # before debt reconstruction or per-position hard-fact classification can
+    # consume the shared claim deadline.  Hard-fact positions do not read this
+    # snapshot, but including every family keeps one complete immutable cut and
+    # avoids a second scalar/fan-out path after preclassification.
+    _prefetch_held_replacement_artifact_hwm(
+        monitor_positions,
+        decision_time=monitor_now_utc,
+        deadline_monotonic=min(
+            monitor_deadline,
+            time.monotonic() + primary_reserve_seconds,
+        ),
+        clob=clob,
+        summary=summary,
+        deps=deps,
+    )
+
     # Debt reconstruction is auxiliary to current economic redecision. Bound
     # the whole scan, not each row independently, so a larger held book cannot
     # spend the 70s auxiliary window on serial lineage reads and leave only the
@@ -6644,31 +6686,6 @@ def execute_monitoring_phase(
                 committed_debt_positions
             )
 
-    try:
-        monitor_now_utc = deps._utcnow() if hasattr(deps, "_utcnow") else datetime.now(timezone.utc)
-    except Exception:
-        monitor_now_utc = datetime.now(timezone.utc)
-    if monitor_now_utc.tzinfo is None:
-        monitor_now_utc = monitor_now_utc.replace(tzinfo=timezone.utc)
-    else:
-        monitor_now_utc = monitor_now_utc.astimezone(timezone.utc)
-    monitor_positions = _monitoring_phase_positions(
-        portfolio,
-        conn=conn,
-        now_utc=monitor_now_utc,
-    )
-    monitor_reservation_count = _held_position_monitor_reservation_count(
-        len(monitor_positions)
-    )
-    summary["held_monitor_candidates"] = len(monitor_positions)
-    if urgent_preemption_requested():
-        summary["held_monitor_preempted"] = True
-        summary["held_monitor_positions_deferred"] = len(monitor_positions)
-        summary["held_monitor_defer_reason"] = "urgent_day0_wake"
-        return portfolio_dirty, tracker_dirty
-    install_monitor_day0_family_cache(clob, decision_time=monitor_now_utc)
-    install_monitor_replacement_hwm_snapshot(clob, None)
-
     durable_hard_facts = {}
     from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
 
@@ -6697,20 +6714,6 @@ def execute_monitoring_phase(
         if verdict is not None:
             durable_hard_facts[id(pos)] = verdict
     summary["held_monitor_durable_hard_facts"] = len(durable_hard_facts)
-    hwm_prefetch_positions = [
-        pos for pos in monitor_positions if id(pos) not in durable_hard_facts
-    ]
-    _prefetch_held_replacement_artifact_hwm(
-        hwm_prefetch_positions,
-        decision_time=monitor_now_utc,
-        deadline_monotonic=min(
-            monitor_deadline,
-            time.monotonic() + primary_reserve_seconds,
-        ),
-        clob=clob,
-        summary=summary,
-        deps=deps,
-    )
     structural_win_position_ids = frozenset(
         id(pos)
         for pos in monitor_positions

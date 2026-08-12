@@ -87,6 +87,40 @@ Restore truthful live entry admission after the global auction reached a real wi
 - Re-sample loaded SHA/PID, open positions, q identity, posterior/FSR identity, reactor completion cadence, and venue command/event counts.
 - Actual order proof requires separate `venue_commands`, submit event, venue ACK/order ID, fill/trade fact, and capital change lines. A candidate or health-clear signal is not an order.
 
+## Slice B88 -- Owned urgent-monitor handoff
+
+- Live evidence: a forecast-targeted monitor lost the single monitor claim and
+  settled its attempt `False`, leaving only the preempt Event. The next periodic
+  invocation treated that ownerless Event as a live urgent owner and returned
+  without running a full-book pass.
+- Invariant: an Event requests preemption from the holder that existed when the
+  request was created; it does not confer ownership after the urgent attempt has
+  ended. A new periodic claimant yields only to a live urgent attempt. Requests
+  created after that claimant acquires the claim remain generation-tracked and
+  may still preempt it.
+- Files: `src/main.py`, `tests/test_run_mode_failure_surfaces.py`, this plan, and
+  existing registry metadata only. No lifecycle, probability, or venue rule changes.
+- Acceptance: claim-busy urgent forecast returns `False` and records a request;
+  after that attempt has ended, the next periodic call runs full-book immediately;
+  a genuinely concurrent urgent attempt can still preempt the current holder.
+
+## Slice B89 -- Reserve replacement HWM before auxiliary monitor work
+
+- Live evidence: current 7-family HWM reads complete in about 0.64s cold and
+  0.01s warm under a 5s deadline, while an already-spent deadline reproduces
+  `sqlite interrupted`. The SQL uses the existing product-cycle index.
+- Root cause: held monitoring performed debt reconstruction and per-position
+  hard-fact classification before freezing the replacement HWM cut, allowing
+  auxiliary O(n) work to spend the primary evidence reserve.
+- Invariant: after the monitor position set is known, freeze one all-family HWM
+  snapshot before auxiliary scans. Hard-fact consumers may ignore the snapshot,
+  but failure remains one batch-wide fail-closed result with no scalar fallback.
+- Files: `src/engine/cycle_runtime.py`, `tests/test_live_safety_invariants.py`,
+  this plan, and existing registry metadata only. No timeout or index change.
+- Acceptance: a debt scan that consumes the remaining claim budget occurs only
+  after HWM prefetch; existing HWM interruption tests retain uniform fail-closed
+  behavior and no scalar fan-out.
+
 ## Slice B69 -- Stable probability-content handoff for held statistical SELL
 
 - Current proof: Seoul position `e582b997-daf` reached held-side q `0` with a

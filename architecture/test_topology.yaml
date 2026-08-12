@@ -2852,6 +2852,8 @@ test_metadata:
       Closes the "scheduler alive but not trading" observability gap (relationship F),
       including exit-projection ordering that treats EXIT_RETRY_RELEASED as the
       canonical authorization for a subsequent held monitor projection.
+      Urgent monitor handoff coverage proves an orphaned preempt request cannot
+      make the next periodic full-book owner yield without a live urgent owner.
       Also proves that the control reader reconstructs the engine's keyed
       candidate-index delta before validating the canonical receipt hash.
       The latest global-auction receipt lookup uses the timestamp index for an
