@@ -188,9 +188,10 @@ def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
     antibody sites. A soft-anchor Wilson-bounded row (non-NULL q_lcb but basis != bootstrap) is
     NOT tradeable-grade, so it does NOT count as coverage and correctly re-seeds for fusion repair.
 
-    Schema-conditional (same convention as the existing clauses): when forecast_posteriors lacks
-    ``provenance_json`` the fragment is empty (no narrowing) rather than erroring. ``alias`` is the
-    table alias with a trailing dot already applied by the caller's existing convention (e.g. "p.").
+    Schema-conditional and fail-closed: when ``forecast_posteriors`` lacks
+    ``provenance_json``, no row can prove current shape authority. ``alias`` is
+    the table alias with a trailing dot already applied by the caller's existing
+    convention (for example, ``"p."``).
     """
     cols = set(posterior_columns)
     fragments: list[str] = []
@@ -199,6 +200,12 @@ def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
     if "q_ucb_json" in cols:
         fragments.append(f"AND {alias}q_ucb_json IS NOT NULL")
     if "provenance_json" not in cols:
+        # FAIL-CLOSED GATE CONTRACT
+        # SCOPE: coverage for the queried city/date/metric family only.
+        # DRAIN: the canonical forecast schema migration adds provenance_json;
+        # normal seed/materialization then writes a current shape certificate.
+        # RESET: the next coverage query with that column present evaluates the
+        # ordinary shape predicate; held-position belief reads are independent.
         fragments.append("AND 0 = 1")
         return "\n              ".join(fragments)
     fragments.append(
