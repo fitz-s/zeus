@@ -13665,6 +13665,18 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             "ValueError:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED",
             "PROBABILITY_SUPERSEDED",
         ),
+        (
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+            "GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:"
+            "ValueError:current_limit_or_cashflow_changed",
+            "MARKET_AUTHORITY_SUPERSEDED",
+        ),
+        (
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+            "GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:"
+            "ValueError:selected_witness_economics_mismatch",
+            "BATCH_BLOCKED",
+        ),
         ("GLOBAL_CURRENT_STATE_ROBUST_MAJORITY_LOSS", "BATCH_BLOCKED"),
         ("GLOBAL_CURRENT_STATE_ECONOMICS_NON_POSITIVE", "BATCH_BLOCKED"),
         (

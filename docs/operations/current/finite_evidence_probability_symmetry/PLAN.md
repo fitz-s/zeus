@@ -4,6 +4,35 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-11 Maker JIT price drift must reauction current market truth
+
+Forward live receipts now reach globally selected, positive posterior-mean
+`MAKER_REST` BUY candidates, but a changed passive limit between selection and
+JIT is emitted as
+`GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:...current_limit_or_cashflow_changed`
+and falls through the generic classifier to `BATCH_BLOCKED`.  That stops the
+complete cut even though the failure names current market-authority drift and
+the existing global runtime already has a bounded full-market reauction lane.
+
+The repair classifies only this exact typed drift as
+`MARKET_AUTHORITY_SUPERSEDED`.  It never reuses the selected price or maker
+witness and never constructs a local replacement candidate: the batch discards
+the old cut, refreshes current Gamma/CLOB/raw books, rebuilds the point-in-time
+maker witness, and compares BUY/SELL/HOLD/CASH again.  All other maker-witness
+failures remain fail-closed because they may be proof corruption rather than a
+new executable market fact.
+
+SCOPE is one selected maker BUY whose JIT passive limit or cashflow differs
+from its sealed selection witness.  DRAIN is the existing single bounded
+full-market-authority reauction.  RESET is a complete new q/book/wealth cut with
+an exact current maker witness; a second drift remains fail-closed under the
+existing retry limit.  Acceptance requires an exact classifier antibody, the
+existing changed-limit rejection antibody, market-supersession batch tests,
+focused money-path regression, loaded-SHA proof, and a forward live receipt
+that either persists/submits the reselected command or names the next exact
+current blocker.  It is not capital-gain proof until venue fill plus later
+exit/settlement and forward PnL evidence exist.
+
 ## 2026-08-11 Point-in-time maker-fill producer
 
 The global auction currently materializes zero `MAKER_REST` candidates because

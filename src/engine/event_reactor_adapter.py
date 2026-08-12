@@ -13196,6 +13196,19 @@ def _global_preflight_block_status(reason: str) -> str:
         # family cache before this classification and rebuilds one complete
         # current q/book/wealth auction without venue I/O.
         return "PROBABILITY_SUPERSEDED"
+    if reason.startswith(
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:"
+    ) and reason.endswith("current_limit_or_cashflow_changed"):
+        # The selected passive price is no longer current, so its typed maker
+        # witness and economics cannot be reused.  This is market-authority
+        # drift, not an unclassified certificate defect: rebuild the complete
+        # Gamma/CLOB/raw-book cut and rank BUY/SELL/HOLD/CASH again.
+        # SCOPE: this selected maker BUY's sealed market cut.
+        # DRAIN: the existing bounded full-market supersession reauction.
+        # RESET: a complete current cut with an exact price-bound witness;
+        # repeat drift remains fail-closed under the reauction limit.
+        return "MARKET_AUTHORITY_SUPERSEDED"
     if (
         reason.startswith("GLOBAL_PREFLIGHT_WEALTH_SUPERSEDED:")
         or reason
