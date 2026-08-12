@@ -5,6 +5,13 @@
 
 ## 现状(forward)
 
+### 2026-08-12 12:35 CDT tick — current-law 前向资本已为正且 truth complete；robust 仍未证明
+- **live 结果:** loaded SHA `b9f9dd0e8`。以 `2026-08-11T00:00:00Z` 为显式起点、`2026-08-12T17:34:52Z` 为 decision-time cut 的 canonical read-only audit 覆盖 55 个真实 filled commands，chain matched/partially-matched fact coverage complete，0 个 pre-boundary entry fills、0 个未分类 fills。
+- **资本证明:** 23 个 realized positions，gross realized PnL `+$24.183599`，submission-schedule fee bound `$2.347814`，net realized PnL `+$21.835785`，realized-capital return `+41.998%`；8 win / 15 loss。Day0 curve 为 13 realized、net `+$2.975415`；qkernel curve 为 10 realized、net `+$18.860370`。两条 strategy curve 的 `blocked_position_count=0`，总状态为 `positive_observed` / `capital_truth_complete=true`。
+- **修复闭环:** `partial|confirmed|filled` 且有 `filled_at` 的 entry/exit facts 进入资本曲线；partial-exit 仓位仅在存在真实 filled exit 且 `remaining_cost = original_entry_notional × remaining_shares / original_entry_shares` 与 canonical residual projection 相符时通过。Tokyo/Singapore dust residuals 因此不再被误判为资本缺失；不改写 DB/PnL，不接受 pending 或 matched-only intent。
+- **未达部分:** 同目标日内的相关仓位按 cluster 合并后只有 3 个独立 target dates；robust e-value `1.717618 < 10`，reason=`INDEPENDENT_CLUSTER_STRENGTH_NOT_ESTABLISHED`。因此只声明当前前向净资本利得已由真实订单/结算证明，不声明大量胜单、稳定胜率或 robust edge。entries pause 保持；后续证据只能由更多独立未来日期在同一 current-law 下自然形成，不能靠扩大风险制造。
+- **验证:** 两轮官方 deploy 均保持 entry pause 与 fresh held cadence；RiskGuard 全文件 `161 passed`，Ruff、`py_compile`、diff check 通过。
+
 ### 2026-08-12 12:18 CDT tick — partial fill 不再从当前资本证明中消失
 - **当前动作:** entries pause 保持；剩余有真实规模且有 bid 的持仓全部 `bid < current q`，强卖会降低 posterior-mean expected capital，因此本 tick 的可执行决策仍为 HOLD，而不是为制造退出记录低卖。
 - **前向审计反例:** 以 `2026-08-11T00:00:00Z` 为显式边界，现有 current-law audit 报告 20 个 realized positions、3 个独立 target-date clusters、fee-bound net `+$15.733464`，但仍 fail-closed 为 `capital_truth_degraded`。根因不是策略亏损，而是资本事实 join 只接受 `execution_fact=filled`：Shanghai `5c16a631-b63` 的第二笔 maker entry 已由两条 venue trade facts 真实成交 5.744678 shares、order fact 为 `PARTIALLY_MATCHED`、execution fact 为 `partial`，且与第一笔合计精确复现 canonical 10.744678 shares / `$4.59468` cost basis，却被审计遗漏；该仓已结算盈利 `+$6.15`。
