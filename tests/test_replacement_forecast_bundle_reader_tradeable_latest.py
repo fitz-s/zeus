@@ -330,7 +330,7 @@ def test_missing_current_evidence_shape_is_not_live_readable() -> None:
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
 
 
-def test_stale_absolute_disagreement_row_has_no_entry_authority() -> None:
+def test_stale_absolute_disagreement_row_retains_entry_authority() -> None:
     conn = _conn()
     posterior_id = _insert_posterior(
         conn,
@@ -354,8 +354,9 @@ def test_stale_absolute_disagreement_row_has_no_entry_authority() -> None:
 
     result = _read(conn, readiness, decision_time=_dt(6, 12))
 
-    assert result.ok is False
-    assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
+    assert result.ok is True
+    assert result.bundle is not None
+    assert result.bundle.posterior_id == posterior_id
 
 
 def test_stale_absolute_disagreement_row_has_held_redecision_authority() -> None:

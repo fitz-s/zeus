@@ -152,15 +152,11 @@ def current_evidence_shape_semantics_mismatch(provenance: object) -> bool:
     return str(shape.get("semantics_revision") or "") != expected
 
 
-def current_evidence_shape_has_entry_authority(provenance: object) -> bool:
-    """Whether the certificate carries a fresh target-specific ENS shape."""
+def _current_evidence_shape_has_probability_authority(
+    provenance: object,
+) -> bool:
+    """Validate same-cycle or bounded latest-causal ENS shape authority."""
 
-    # FAIL-CLOSED GATE CONTRACT
-    # SCOPE: new-entry authority for this one city/date/metric family.
-    # DRAIN: the normal target-specific materializer replaces stale/malformed
-    # shape provenance without disturbing held-position belief reads.
-    # RESET: a current-semantics, numeric lag-zero, untranslated shape whose
-    # stale flag is canonically absent or boolean false restores eligibility.
     shape = _current_evidence_shape(provenance)
     if shape is None:
         return False
@@ -171,51 +167,15 @@ def current_evidence_shape_has_entry_authority(provenance: object) -> bool:
         or not math.isfinite(float(shape_lag_hours))
     ):
         return False
-    stale_shape_reused = shape.get("stale_shape_reused")
-    if stale_shape_reused is not None and stale_shape_reused is not False:
-        return False
-    return (
-        str(shape.get("semantics_revision") or "")
-        == CURRENT_EVIDENCE_SEMANTICS_REVISION
-        and shape_lag_hours == 0.0
-        and shape.get("translation_applied") is False
-        and not current_evidence_shape_semantics_mismatch(provenance)
-    )
-
-
-def current_evidence_shape_has_held_authority(provenance: object) -> bool:
-    """Whether a shape can support reduce-only held-position redecision.
-
-    A bounded older ENS shape is not entry authority, but its untranslated
-    absolute members and explicit disagreement with the current provider
-    center remain statistical evidence for SELL/HOLD/CASH.  The persisted
-    revision and stale flag must agree with the numeric lag exactly.
-    """
-
-    # FAIL-CLOSED GATE CONTRACT
-    # SCOPE: reduce-only redecision for this one held city/date/metric family.
-    # DRAIN: a bounded current or raw-member stale-absolute-disagreement shape
-    # is consumed on the next held refresh; malformed or translated shapes wait
-    # for ordinary rematerialization and never borrow entry-time probability.
-    # RESET: the next semantically exact, untranslated current/stale certificate
-    # restores held redecision for this family only.
-    shape = _current_evidence_shape(provenance)
-    if shape is None:
-        return False
-    shape_lag_hours = shape.get("shape_lag_hours")
-    if (
-        isinstance(shape_lag_hours, bool)
-        or not isinstance(shape_lag_hours, (int, float))
-        or not math.isfinite(float(shape_lag_hours))
-        or float(shape_lag_hours) < 0.0
-    ):
+    lag = float(shape_lag_hours)
+    if lag < 0.0 or lag > replacement_source_cycle_max_age_hours():
         return False
     stale_shape_reused = shape.get("stale_shape_reused")
     if stale_shape_reused is not None and not isinstance(
         stale_shape_reused, bool
     ):
         return False
-    stale = float(shape_lag_hours) > 0.0
+    stale = lag > 0.0
     if stale and stale_shape_reused is not True:
         return False
     if not stale and stale_shape_reused not in (None, False):
@@ -226,10 +186,35 @@ def current_evidence_shape_has_held_authority(provenance: object) -> bool:
         else CURRENT_EVIDENCE_SEMANTICS_REVISION
     )
     return (
-        str(shape.get("semantics_revision") or "") == expected_revision
+        str(shape.get("semantics_revision") or "")
+        == expected_revision
         and shape.get("translation_applied") is False
         and not current_evidence_shape_semantics_mismatch(provenance)
     )
+
+
+def current_evidence_shape_has_entry_authority(provenance: object) -> bool:
+    """Whether current evidence authorizes a new entry."""
+
+    # FAIL-CLOSED GATE CONTRACT
+    # SCOPE: new-entry authority for this one city/date/metric family.
+    # DRAIN: the normal target-specific materializer replaces malformed,
+    # translated, expired, or semantically mismatched shape provenance.
+    # RESET: a coherent same-cycle or bounded latest-causal raw-member shape
+    # restores the authority ratified in replacement_final_form section 1d.
+    return _current_evidence_shape_has_probability_authority(provenance)
+
+
+def current_evidence_shape_has_held_authority(provenance: object) -> bool:
+    """Whether a shape can support reduce-only held-position redecision.
+
+    A bounded latest-causal ENS shape remains probability authority because
+    its untranslated absolute members and explicit disagreement with the
+    current provider center are statistical evidence. The persisted revision
+    and stale flag must agree with the numeric lag exactly.
+    """
+
+    return _current_evidence_shape_has_probability_authority(provenance)
 
 
 def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
@@ -259,31 +244,46 @@ def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
         # ordinary shape predicate; held-position belief reads are independent.
         fragments.append("AND 0 = 1")
         return "\n              ".join(fragments)
+    provenance_expr = (
+        f"(CASE WHEN json_valid({alias}provenance_json) "
+        f"THEN {alias}provenance_json ELSE '{{}}' END)"
+    )
     fragments.append(
-        f"AND json_extract({alias}provenance_json, '$.q_lcb_basis') = "
+        f"AND json_extract({provenance_expr}, '$.q_lcb_basis') = "
         f"'{TRADEABLE_GRADE_QLCB_BASIS}'"
     )
     shape_path = "$.bayes_precision_fusion.current_evidence_shape"
-    # A stale ENS shape remains readable for held-position uncertainty and
-    # rematerialization, but it cannot certify a new live entry. Entry authority
-    # requires a target-specific shape from the same source clock as the center.
-    # Missing lag provenance fails closed instead of being coerced to zero.
-    fragments.extend(
-        [
-            "AND ("
-            f"json_type({alias}provenance_json, '{shape_path}.stale_shape_reused') IS NULL "
-            "OR "
-            f"json_type({alias}provenance_json, '{shape_path}.stale_shape_reused') = 'false')",
-            f"AND json_type({alias}provenance_json, "
-            f"'{shape_path}.translation_applied') = 'false'",
-            f"AND json_type({alias}provenance_json, '{shape_path}.shape_lag_hours') "
-            "IN ('integer', 'real')",
-            f"AND CAST(json_extract({alias}provenance_json, "
-            f"'{shape_path}.shape_lag_hours') AS REAL) = 0.0",
-            f"AND json_extract({alias}provenance_json, "
-            f"'{shape_path}.semantics_revision') = "
-            f"'{CURRENT_EVIDENCE_SEMANTICS_REVISION}'",
-        ]
+    lag_type = f"json_type({provenance_expr}, '{shape_path}.shape_lag_hours')"
+    lag_value = (
+        f"CAST(json_extract({provenance_expr}, "
+        f"'{shape_path}.shape_lag_hours') AS REAL)"
+    )
+    stale_type = (
+        f"json_type({provenance_expr}, '{shape_path}.stale_shape_reused')"
+    )
+    translation_type = (
+        f"json_type({provenance_expr}, '{shape_path}.translation_applied')"
+    )
+    revision_value = (
+        f"json_extract({provenance_expr}, '{shape_path}.semantics_revision')"
+    )
+    max_lag = replacement_source_cycle_max_age_hours()
+    # Same-cycle and bounded latest-causal raw ENS members are both current
+    # evidence under replacement_final_form section 1d. Translated shapes and
+    # lag/flag/revision mismatches remain fail-closed.
+    fragments.append(
+        "AND ("
+        f"{translation_type} = 'false' AND "
+        f"{lag_type} IN ('integer', 'real') AND "
+        f"{lag_value} >= 0.0 AND {lag_value} <= {max_lag!r} AND (("
+        f"{lag_value} = 0.0 AND "
+        f"({stale_type} IS NULL OR {stale_type} = 'false') AND "
+        f"{revision_value} = "
+        f"'{CURRENT_EVIDENCE_SEMANTICS_REVISION}') OR ("
+        f"{lag_value} > 0.0 AND "
+        f"{stale_type} = 'true' AND "
+        f"{revision_value} = "
+        f"'{STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION}')))"
     )
     return "\n              ".join(fragments)
 

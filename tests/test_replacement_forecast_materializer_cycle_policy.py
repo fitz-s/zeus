@@ -116,7 +116,7 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
     assert current_evidence_shape_semantics_mismatch(stale) is True
     assert current_evidence_shape_semantics_mismatch({}) is False
     assert current_evidence_shape_has_entry_authority(current) is True
-    assert current_evidence_shape_has_entry_authority(stale_reused) is False
+    assert current_evidence_shape_has_entry_authority(stale_reused) is True
 
     clause = tradeable_grade_coverage_sql(
         posterior_columns={"q_lcb_json", "q_ucb_json", "provenance_json"},
@@ -127,7 +127,7 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
     assert "current_evidence_shape.translation_applied" in clause
     assert "current_evidence_shape.shape_lag_hours" in clause
     assert CURRENT_EVIDENCE_SEMANTICS_REVISION in clause
-    assert STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION not in clause
+    assert STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION in clause
     assert "ensemble_center_scenarios_v2" not in clause
     assert "ensemble_anomaly_transport_v2" not in clause
 
@@ -152,6 +152,30 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
     del missing_lag["bayes_precision_fusion"]["current_evidence_shape"]["shape_lag_hours"]
     omitted_stale = json.loads(json.dumps(current))
     del omitted_stale["bayes_precision_fusion"]["current_evidence_shape"]["stale_shape_reused"]
+    stale_missing_flag = json.loads(json.dumps(stale_reused))
+    del stale_missing_flag["bayes_precision_fusion"]["current_evidence_shape"][
+        "stale_shape_reused"
+    ]
+    stale_translated = json.loads(json.dumps(stale_reused))
+    stale_translated["bayes_precision_fusion"]["current_evidence_shape"][
+        "translation_applied"
+    ] = True
+    stale_wrong_revision = json.loads(json.dumps(stale_reused))
+    stale_wrong_revision["bayes_precision_fusion"]["current_evidence_shape"][
+        "semantics_revision"
+    ] = CURRENT_EVIDENCE_SEMANTICS_REVISION
+    stale_at_bound = json.loads(json.dumps(stale_reused))
+    stale_at_bound["bayes_precision_fusion"]["current_evidence_shape"][
+        "shape_lag_hours"
+    ] = REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT
+    stale_over_bound = json.loads(json.dumps(stale_reused))
+    stale_over_bound["bayes_precision_fusion"]["current_evidence_shape"][
+        "shape_lag_hours"
+    ] = REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT + 0.001
+    negative_lag = json.loads(json.dumps(stale_reused))
+    negative_lag["bayes_precision_fusion"]["current_evidence_shape"][
+        "shape_lag_hours"
+    ] = -0.001
     malformed_shapes = []
     for field, value in (
         ("shape_lag_hours", False),
@@ -164,9 +188,22 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
         malformed_shapes.append(malformed)
     assert is_tradeable(current) is True
     assert is_tradeable(omitted_stale) is True
-    assert is_tradeable(stale_reused) is False
+    assert is_tradeable(stale_reused) is True
+    assert is_tradeable(stale_at_bound) is True
+    assert current_evidence_shape_has_entry_authority(stale_at_bound) is True
+    assert is_tradeable(stale_over_bound) is False
+    assert current_evidence_shape_has_entry_authority(stale_over_bound) is False
+    assert is_tradeable(negative_lag) is False
+    assert current_evidence_shape_has_entry_authority(negative_lag) is False
     assert is_tradeable(missing_lag) is False
     assert current_evidence_shape_has_entry_authority(missing_lag) is False
+    for malformed_stale in (
+        stale_missing_flag,
+        stale_translated,
+        stale_wrong_revision,
+    ):
+        assert is_tradeable(malformed_stale) is False
+        assert current_evidence_shape_has_entry_authority(malformed_stale) is False
     for malformed in malformed_shapes:
         assert is_tradeable(malformed) is False
         assert current_evidence_shape_has_entry_authority(malformed) is False
@@ -176,8 +213,18 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
         malformed["bayes_precision_fusion"]["current_evidence_shape"][
             "shape_lag_hours"
         ] = nonfinite_lag
+        assert is_tradeable(malformed) is False
         assert current_evidence_shape_has_entry_authority(malformed) is False
         assert current_evidence_shape_has_held_authority(malformed) is False
+
+    conn.execute("DELETE FROM posterior")
+    conn.execute(
+        "INSERT INTO posterior VALUES (?, ?, ?)",
+        ("{}", "{}", "{malformed-json"),
+    )
+    assert conn.execute(
+        f"SELECT COUNT(*) FROM posterior p WHERE 1 = 1 {clause}"
+    ).fetchone()[0] == 0
 
     missing_provenance_clause = tradeable_grade_coverage_sql(
         posterior_columns={"q_lcb_json", "q_ucb_json"},
