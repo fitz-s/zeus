@@ -371,9 +371,10 @@ _MONITOR_REFRESH_PRESERVED_COLUMNS = frozenset(
         "chain_cost_basis_usd",
         "chain_seen_at",
         "chain_absence_at",
-        # Fill/correction writers own open-position realized economics.
-        # MONITOR_REFRESHED contributes no execution fact and may only retain
-        # the latest canonical values already present in position_current.
+        # Fill/correction writers own open-position realized economics.  A
+        # generic MONITOR_REFRESHED contributes no execution fact and retains
+        # the current values; a canonical partial-fill repair may carry a new
+        # non-NULL cumulative PnL through this event shape.
         "realized_pnl_usd",
         "exit_price",
     }
@@ -531,6 +532,8 @@ def _preserve_existing_monitor_refresh_authority(
     merged = dict(projection)
     current = {column: row[index] for index, column in enumerate(selected)}
     for column in preserved:
+        if column == "realized_pnl_usd" and projection.get(column) is not None:
+            continue
         merged[column] = current[column]
     if (
         str(current.get("phase") or "") == LifecyclePhase.PENDING_EXIT.value

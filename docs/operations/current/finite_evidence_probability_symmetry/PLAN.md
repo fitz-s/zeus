@@ -30,6 +30,27 @@ expired/fresh antibodies, held reseed cutoff wiring, focused materialization and
 monitor suites, live landing, and a subsequent complete current held-coverage
 auction receipt.
 
+## 2026-08-12 Monitor-shaped fill repair advances realized PnL
+
+The partial-EXIT recovery path appended correct cumulative PnL atoms and folded
+them into a non-NULL projection, but reused the `MONITOR_REFRESHED` projection
+shape to preserve the still-open lifecycle.  The monitor authority merge then
+unconditionally copied the older `position_current.realized_pnl_usd` value over
+the new fold.  When that old value was NULL, canonical current-state PnL stayed
+NULL even though the event ledger already proved the loss or gain.
+
+The merge now distinguishes missing monitor economics from present fill-owned
+economics: NULL input preserves the existing value, while a non-NULL cumulative
+PnL from the append-first fold advances the projection.  No lifecycle, shares,
+cost, or settlement semantics change.
+
+SCOPE is `realized_pnl_usd` on one monitor-shaped canonical projection.  DRAIN
+is the same append-and-project transaction.  RESET is equality between the
+event fold and `position_current`; replaying the same fill remains idempotent.
+Acceptance requires both projection directions (NULL preserves, non-NULL
+advances) and the three partial-EXIT recovery antibodies covering production
+shape, repeated recovery, and multiple trade identities.
+
 ## 2026-08-12 Held belief repairs keep independent RESET lanes
 
 Madrid and Tel Aviv remained under active monitoring but could not form a fresh
