@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused or audited: 2026-07-15
+# Last reused or audited: 2026-08-12
 # Authority basis: design doc §3.3 (objective: expected log terminal wealth over joint
 #   scenarios, full menu, scale by κ, discrete repair, safe prefixes); seam contract verbatim
 #   from qkernel_spine_bridge.py:1332-1400 + family_decision_engine.py:583-635 (FamilyDecision);
@@ -6532,6 +6532,14 @@ def _expected_growth_comparison(
                 expected_fill_fraction * capital_lock_hours
                 + (1.0 - expected_fill_fraction) * rest_hours
             )
+    elif isinstance(candidate, GlobalSingleOrderSellCandidate):
+        # A marketable FAK SELL releases the filled claim immediately; the
+        # family day-end horizon belongs to HOLD, not to this action.  The
+        # current executable quote window is the conservative upper bound on
+        # decision-to-release time and is already certificate-bound.
+        effective_lock_hours = (
+            candidate.executable_sell_curve.quote_ttl.total_seconds() / 3600.0
+        )
     return ExpectedGrowthComparison(
         probability_basis="POSTERIOR_PREDICTIVE_MEAN",
         probability_witness_identity=probability_witness.witness_identity,
@@ -7020,7 +7028,10 @@ def select_global_single_order(
         capital_lock_hours = (
             resolution_at - decision_at_utc.astimezone(timezone.utc)
         ).total_seconds() / 3600.0
-        if not math.isfinite(capital_lock_hours) or capital_lock_hours <= 0.0:
+        if not math.isfinite(capital_lock_hours) or (
+            capital_lock_hours <= 0.0
+            and action_mode != "IMMEDIATE_TAKER_SELL"
+        ):
             return None, "CAPITAL_HORIZON_NON_POSITIVE"
         candidate = score.candidate
         if candidate is None:

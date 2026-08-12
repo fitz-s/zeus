@@ -5,6 +5,13 @@
 
 ## 现状(forward)
 
+### 2026-08-12 11:13 CDT tick — held redecision 已恢复；即时正期望 SELL 不再继承过期目标日时钟
+- **forward 结果仍未达标:** 自 containment pause 后已结算的三笔去重 cohort 为 Seoul `-$6.63`、Tokyo `+$6.683599`、Tokyo `-$8.58`，合计 `-$8.526401`（1 win / 2 loss）。开仓保持暂停；本 tick 前最近一次 deploy 后没有新 venue command、fill 或 settlement，不能声称资本利得。
+- **held truth 活性已部署:** `e0a8d09b9` 让最老 canonical held decision debt 进入固定 primary tranche；官方重启后 monitor cadence 从 9 stale / 2 fresh 恢复到 11 / 11 fresh，loaded SHA 随后被并发 monitor hotfix 推进到 `34cb1d04f`，pause reason 仍为 `single_global_auction_cut_monitor_terminated_no_receipt`。
+- **当前反例:** Shanghai 2026-08-12 HIGH `27C YES` 持仓 20 shares，entry `0.07`，current posterior mean `q=0.9951666667`，current bid `0.999`。point counterfactual 相对 HOLD 为 expected EV `+$0.0756677`、expected Δlog wealth `+0.0001519082`，但全局 selector 因目标日本地午夜已过返回 `CAPITAL_HORIZON_NON_POSITIVE`，没有生成 EXIT command。
+- **第一性修复:** 天气目标日结束只约束 settlement-locked BUY 与 maker 未成交分支；marketable FAK SELL 的已成交 claim 在当前 executable window 内释放现金，不应继承过期 family horizon。solver 现在以 certificate-bound quote/FAK window 作为 decision-to-release 的保守上界，同时保留 `resolution_at_utc` 作为 family attribution；horizon=0 的 BUY 继续 fail-closed。
+- **验证与边界:** solver properties `210 passed`；declared capital evaluator 为 `923 passed / 18 failed`，与 clean live `34cb1d04f` 基线逐项相同，因此没有新增失败，但 evaluator 仍是 red，不能记为 pass。planning-lock、`py_compile`、source Ruff 与 diff check 通过。本修复尚未 deploy；只有部署后新的 complete-scope receipt、EXIT command/FAK fill、canonical reconciliation 与后续 forward PnL 才是结果证据。
+
 ### 2026-08-11 18:46 CDT tick — exact-winner settlement lock 已部署；forward 盈利仍待真实成交/结算证明
 - **部署事实:** hotfix 已通过官方 `deploy_live.py restart live-trading --allow-unpushed` 入口加载为 `536b41f72`；sidecar identity、restart recovery、monitor cadence 与 EDLI queue progress 均通过。随后 health probe 为 `OK`：daemon/forecast/data/heartbeat 运行，risk `GREEN`，blocking gates `0`，loaded/expected SHA 一致。
 - **当前竞价:** 最新 full-scope receipt 覆盖 116 个 family、2081 个 candidate，9 个 held position 中 8 个 SELL 可评分且全部为负 expected EV，1 个没有合法可执行 SELL book；全局 winner 为 CASH，`NO_CURRENT_EXECUTABLE_POSITIVE_ORDER`。9 个持仓的 monitor probability 与 market price 已重新 fresh。

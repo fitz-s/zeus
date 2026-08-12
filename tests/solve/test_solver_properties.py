@@ -560,10 +560,10 @@ def test_global_sell_scores_the_exact_immediate_bid_prefix():
     assert decision.expected_growth is not None
     assert decision.expected_growth.expected_delta_log_wealth > 0.0
     assert decision.expected_growth.expected_ev_usd > 0.0
-    assert decision.capital_lock_hours == pytest.approx(24.0)
+    assert decision.capital_lock_hours == pytest.approx(1.0 / 3600.0)
 
 
-def test_taker_sell_capital_horizon_is_independent_of_quote_ttl():
+def test_taker_sell_capital_horizon_uses_current_execution_window():
     short = _global_sell_candidate(
         candidate_id="sell-short-quote",
         family="sell-short-quote-family",
@@ -578,7 +578,7 @@ def test_taker_sell_capital_horizon_is_independent_of_quote_ttl():
         side="YES",
         held_q=0.30,
         bids=(("0.60", "10"),),
-        quote_ttl_seconds=86400,
+        quote_ttl_seconds=2,
     )
 
     short_decision = _global_select(
@@ -590,7 +590,8 @@ def test_taker_sell_capital_horizon_is_independent_of_quote_ttl():
 
     assert short_decision.candidate is short
     assert long_decision.candidate is long
-    assert short_decision.capital_lock_hours == long_decision.capital_lock_hours == 18.0
+    assert short_decision.capital_lock_hours == pytest.approx(1.0 / 3600.0)
+    assert long_decision.capital_lock_hours == pytest.approx(2.0 / 3600.0)
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
@@ -1803,7 +1804,7 @@ def test_global_single_order_sell_can_beat_positive_buy_and_cash():
         > evaluations[buy.candidate_id].expected_growth.expected_log_growth_per_hour
         > 0
     )
-    expected_lock_hours = 24.0
+    expected_lock_hours = 1.0 / 3600.0
     assert decision.capital_lock_hours == pytest.approx(expected_lock_hours)
     assert decision.robust_log_growth_per_hour == pytest.approx(
         decision.robust_delta_log_wealth / expected_lock_hours
@@ -1877,7 +1878,7 @@ def test_global_single_order_sell_uses_incremental_growth_not_loss_majority():
     assert decision.robust_ev_usd > 0
 
 
-def test_global_single_order_ranks_taker_sell_on_settlement_horizon():
+def test_global_single_order_ranks_immediate_sell_on_execution_horizon():
     sell = _global_sell_candidate(
         candidate_id="sell-runner-up",
         family="sell-runner-family",
@@ -1906,15 +1907,15 @@ def test_global_single_order_ranks_taker_sell_on_settlement_horizon():
         },
     )
 
-    assert decision.candidate is buy
-    assert decision.capital_action_mode == "SETTLEMENT_LOCKED_BUY"
+    assert decision.candidate is sell
+    assert decision.capital_action_mode == "IMMEDIATE_TAKER_SELL"
     evaluations = {
         evaluation.candidate_id: evaluation
         for evaluation in decision.candidate_evaluations
     }
     assert evaluations[buy.candidate_id].expected_growth is not None
     assert evaluations[sell.candidate_id].expected_growth is not None
-    expected_sell_lock_hours = 24.0
+    expected_sell_lock_hours = 1.0 / 3600.0
     assert evaluations[sell.candidate_id].capital_lock_hours == pytest.approx(
         expected_sell_lock_hours
     )
@@ -1923,8 +1924,8 @@ def test_global_single_order_ranks_taker_sell_on_settlement_horizon():
         / expected_sell_lock_hours
     )
     assert (
-        evaluations[buy.candidate_id].expected_growth.expected_log_growth_per_hour
-        > evaluations[sell.candidate_id].expected_growth.expected_log_growth_per_hour
+        evaluations[sell.candidate_id].expected_growth.expected_log_growth_per_hour
+        > evaluations[buy.candidate_id].expected_growth.expected_log_growth_per_hour
         > 0
     )
 
@@ -3057,6 +3058,7 @@ def test_current_maker_sell_witness_binds_actual_holding_and_can_win():
         probability_functional="POSTERIOR_PREDICTIVE_MEAN",
         exit_authority_status="mature",
         exit_authority_reason="current-day0-authority",
+        quote_ttl_seconds=3600,
     )
     maker_curve = S.passive_sell_proposal_curve(
         taker.executable_sell_curve, capacity=Decimal("10")
@@ -5728,7 +5730,7 @@ def test_global_single_order_duration_is_universe_bound_not_candidate_authored()
     )
 
 
-def test_global_single_order_nonpositive_capital_horizon_invalidates_epoch():
+def test_nonpositive_family_horizon_blocks_buy_but_not_immediate_sell():
     buy = _global_candidate(
         candidate_id="elapsed-horizon",
         family="elapsed",
@@ -5753,12 +5755,17 @@ def test_global_single_order_nonpositive_capital_horizon_invalidates_epoch():
         resolution_hours_by_family={"elapsed-sell": 0.0},
     )
 
-    for candidate, decision in ((buy, buy_decision), (sell, sell_decision)):
-        assert decision.candidate is None
-        assert decision.no_trade_reason == "GLOBAL_EPOCH_SUPERSEDED"
-        assert decision.rejection_reasons[candidate.candidate_id] == (
-            "CAPITAL_HORIZON_NON_POSITIVE"
-        )
+    assert buy_decision.candidate is None
+    assert buy_decision.no_trade_reason == "GLOBAL_EPOCH_SUPERSEDED"
+    assert buy_decision.rejection_reasons[buy.candidate_id] == (
+        "CAPITAL_HORIZON_NON_POSITIVE"
+    )
+    assert sell_decision.candidate is sell
+    assert sell_decision.capital_action_mode == "IMMEDIATE_TAKER_SELL"
+    assert sell_decision.capital_lock_hours == pytest.approx(1.0 / 3600.0)
+    assert sell_decision.expected_growth is not None
+    assert sell_decision.expected_growth.expected_delta_log_wealth > 0.0
+    assert sell_decision.expected_growth.expected_ev_usd > 0.0
 
 
 def test_global_single_order_rejects_probability_from_one_bin_welded_to_another_token():

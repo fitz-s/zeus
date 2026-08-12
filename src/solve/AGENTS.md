@@ -74,10 +74,13 @@ current scope, book, wealth, probability, RiskGuard, and venue receipt evidence 
   explicitly myopic. Mean economics live only in
   `expected_*` certificates and may never be written into `robust_*` or LCB/UCB
   fields. After each action-law admission, rank
-  every fixed proposal by one posterior-mean expected Δlog-wealth rate. The horizon is
-  derived from the immutable family city and target local date plus the configured settlement
-  timezone, and is bound into the current scope/universe witness identity — never authored by a
-  candidate. Numerical ties prefer higher expected Δlog, then expected Δlog per dollar, then lower
+  every fixed proposal by one posterior-mean expected Δlog-wealth rate. Settlement-locked BUY
+  and a maker-contingent no-fill branch derive their horizon from the immutable family city and
+  target local date plus the configured settlement timezone, bound into the current
+  scope/universe witness identity. An immediate FAK SELL instead uses its certificate-bound
+  current executable quote window as the conservative capital-release upper bound; it never
+  inherits an already-elapsed family day horizon. Numerical ties prefer higher expected Δlog,
+  then expected Δlog per dollar, then lower
   cash. Expected value is decision-time expectation and must never be named realized capital gain.
   This is not multi-order portfolio optimality.
 - **κ single-owner, typed.** κ=1.0 throughout W3/W4 (the downstream haircut still shades);
