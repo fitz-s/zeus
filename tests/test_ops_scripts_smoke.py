@@ -3089,6 +3089,110 @@ def test_deploy_live_waits_for_post_start_monitor_refresh(monkeypatch, tmp_path)
     assert "post-start monitor cadence verified" in detail
 
 
+def test_deploy_live_quote_only_monitor_staleness_requires_complete_held_auction(
+    monkeypatch, tmp_path
+):
+    dl = _load("deploy_live_monitor_quote_only_auction", "deploy_live.py")
+    state = tmp_path / "state"
+    state.mkdir()
+    trade_db = state / "zeus_trades.db"
+    launched = datetime.now(timezone.utc) - timedelta(seconds=1)
+    conn = sqlite3.connect(trade_db)
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            shares REAL,
+            chain_shares REAL
+        );
+        CREATE TABLE position_events (
+            sequence_no INTEGER PRIMARY KEY,
+            position_id TEXT,
+            event_type TEXT,
+            occurred_at TEXT,
+            payload_json TEXT
+        );
+        CREATE TABLE decision_log (
+            id INTEGER PRIMARY KEY,
+            mode TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            artifact_json TEXT
+        );
+        INSERT INTO position_current VALUES ('pos-1', 'active', 1.0, 1.0);
+        """
+    )
+    monitor_at = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            sequence_no, position_id, event_type, occurred_at, payload_json
+        ) VALUES (1, 'pos-1', 'MONITOR_REFRESHED', ?, ?)
+        """,
+        (
+            monitor_at,
+            json.dumps(
+                {
+                    "last_monitor_prob": 0.99,
+                    "last_monitor_prob_is_fresh": True,
+                    "last_monitor_market_price": 0.999,
+                    "last_monitor_market_price_is_fresh": False,
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    monkeypatch.setattr(dl, "LIVE_REPO", str(tmp_path))
+
+    ok, detail = dl._wait_for_post_start_monitor_cadence(
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is False
+    assert "complete_post_start_held_auction_receipt=missing" in detail
+
+    receipt_at = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO decision_log (
+            id, mode, started_at, completed_at, artifact_json
+        ) VALUES (1, 'global_single_order_auction', ?, ?, ?)
+        """,
+        (
+            receipt_at,
+            receipt_at,
+            json.dumps(
+                {
+                    "completed_at": receipt_at,
+                    "summary": {
+                        "candidate_coverage_complete": True,
+                        "scope_family_coverage_complete": True,
+                        "candidate_evaluation_count": 1,
+                        "full_scope_family_count": 1,
+                        "held_position_coverage_complete": True,
+                        "held_position_expected_count": 1,
+                        "held_position_evaluated_count": 0,
+                        "held_position_excluded_count": 1,
+                    },
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    ok, detail = dl._wait_for_post_start_monitor_cadence(
+        launched_after=launched,
+        timeout_seconds=0,
+    )
+
+    assert ok is True
+    assert "quote_only_positions=1" in detail
+    assert "held_auction_receipt=1" in detail
+
+
 def test_deploy_live_review_management_does_not_replace_monitor_refresh(
     monkeypatch, tmp_path
 ):

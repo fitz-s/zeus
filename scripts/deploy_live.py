@@ -72,7 +72,10 @@ from src.ops.edli_queue import (
     EDLI_REACTOR_PROCESSING_LEASE_SECONDS,
     collect_edli_queue_evidence,
 )
-from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+from src.ops.monitor_cadence import (
+    collect_monitor_cadence_evidence,
+    monitor_cadence_blocking_evidence,
+)
 from src.state.db import query_control_override_state
 from src.control.runtime_code_plane import is_runtime_code_path
 
@@ -596,21 +599,67 @@ def _wait_for_post_start_monitor_cadence(
                     )
                 else:
                     fresh_count = int(cadence["fresh_position_count"])
-                    stale_or_missing = list(cadence["stale_or_missing_positions"])
-                    if int(cadence["stale_or_missing_position_count"]) == 0:
+                    cadence_groups = monitor_cadence_blocking_evidence(cadence)
+                    blocking_count = int(
+                        cadence_groups["blocking_stale_position_count"]
+                    )
+                    quote_only_count = int(
+                        cadence_groups["quote_only_stale_position_count"]
+                    )
+                    stale_or_missing = list(
+                        cadence_groups["blocking_stale_positions"]
+                    )
+                    auction_receipt = (
+                        _latest_complete_global_auction_receipt(
+                            trade_db,
+                            launched_floor=launched_floor,
+                            require_held_coverage_count=open_count,
+                        )
+                        if blocking_count == 0 and quote_only_count > 0
+                        else None
+                    )
+                    if blocking_count == 0 and (
+                        quote_only_count == 0 or auction_receipt is not None
+                    ):
+                        auction_detail = ""
+                        if auction_receipt is not None:
+                            receipt_id, candidate_count, scope_count = auction_receipt
+                            auction_detail = (
+                                f" quote_only_positions={quote_only_count} "
+                                f"held_auction_receipt={receipt_id} "
+                                f"candidates={candidate_count} "
+                                f"scope_families={scope_count}"
+                            )
                         return (
                             True,
                             "post-start monitor cadence verified: "
                             f"fresh_positions={fresh_count} "
-                            f"open_positions={open_count} full_book=true",
+                            f"open_positions={open_count} full_book=true"
+                            f"{auction_detail}",
                         )
+                    if blocking_count == 0 and quote_only_count > 0:
+                        last_detail = (
+                            f"open_positions={open_count} "
+                            f"fresh_positions={fresh_count} "
+                            f"quote_only_positions={quote_only_count} "
+                            "complete_post_start_held_auction_receipt=missing "
+                            f"launched_floor={launched_floor.isoformat()}"
+                        )
+                        if time.monotonic() >= deadline:
+                            return (
+                                False,
+                                "post-start monitor cadence did not verify after restart: "
+                                + last_detail,
+                            )
+                        time.sleep(LIVE_RUNTIME_FRESH_VERIFY_POLL_SECONDS)
+                        continue
                     sample = ", ".join(
                         f"{item['position_id']} last_monitor_refreshed_at={item['last_monitor_refreshed_at']}"
                         for item in stale_or_missing[:5]
                     )
                     last_detail = (
                         f"open_positions={open_count} "
-                        f"stale_or_missing_positions={cadence['stale_or_missing_position_count']} "
+                        f"stale_or_missing_positions={blocking_count} "
                         f"sample={sample or '<empty>'} "
                         f"launched_floor={launched_floor.isoformat()}"
                     )
@@ -1060,6 +1109,7 @@ def _latest_complete_global_auction_receipt(
     trade_db: Path,
     *,
     launched_floor: datetime,
+    require_held_coverage_count: int = 0,
 ) -> tuple[int, int, int] | None:
     """Return a post-launch complete auction as direct reactor progress proof."""
 
@@ -1089,6 +1139,12 @@ def _latest_complete_global_auction_receipt(
             )
             candidate_count = int(summary.get("candidate_evaluation_count") or 0)
             scope_count = int(summary.get("full_scope_family_count") or 0)
+            held_expected_count = int(
+                summary.get("held_position_expected_count") or 0
+            )
+            held_accounted_count = int(
+                summary.get("held_position_evaluated_count") or 0
+            ) + int(summary.get("held_position_excluded_count") or 0)
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
         if (
@@ -1098,6 +1154,14 @@ def _latest_complete_global_auction_receipt(
             and summary.get("scope_family_coverage_complete") is True
             and candidate_count > 0
             and scope_count > 0
+            and (
+                require_held_coverage_count <= 0
+                or (
+                    summary.get("held_position_coverage_complete") is True
+                    and held_expected_count >= require_held_coverage_count
+                    and held_accounted_count >= held_expected_count
+                )
+            )
         ):
             return int(row["id"]), candidate_count, scope_count
     return None

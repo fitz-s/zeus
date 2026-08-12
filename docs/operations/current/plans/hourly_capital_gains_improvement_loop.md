@@ -5,6 +5,13 @@
 
 ## 现状(forward)
 
+### 2026-08-12 11:44 CDT tick — full-auction held proof 接入 deploy cadence；不再把不可执行 quote 冒充未重决策
+- **运行态已生效:** live loaded SHA `e7661feeb`。post-start receipt `415191` 在 boot 后 21 秒完成：11 / 11 families、20 candidates、`candidate_coverage_complete=true`、`scope_family_coverage_complete=true`、`held_position_coverage_complete=true`，winner 为 CASH，reason `NO_CURRENT_EXECUTABLE_POSITIVE_ORDER`。
+- **Shanghai 结果:** position `288de757-908` 在同一 frozen cut 中为 `EXCLUDED / SELL_BOOK_NO_EXECUTABLE_UNIT_PRICE / NO_EXECUTABLE_BOOK`；0.999 不再进入 taker proposal。boot 后 canonical `venue_commands=0`、`venue_command_events=0`、`settlements=0`，因此没有低价退出，也没有新的 realized PnL。
+- **deploy 假失败根因:** monitor cadence 已把 stale inputs 分成 `blocking_stale` 与 `quote_only_stale`，并明确规定后者不能成为全局 cadence debt；`deploy_live.py` 仍读取旧的总 stale count。高价/无 bid/venue 不可执行仓位已经被 full global auction 重决策，却会让部署等待八分钟后失败。
+- **组合证明修复:** deploy 仅在 blocking stale 为零时考虑 quote-only；若 quote-only 非零，必须再取得本次启动后的 complete global-auction receipt，且 receipt 的 held coverage complete、expected/evaluated/excluded 计数覆盖全部 canonical open positions。没有该 receipt 继续 fail-closed。对当前 live DB 的 worktree read-only probe 为 `fresh_positions=6 + quote_only_positions=5 + held_auction_receipt=415191 => 11 open positions fully covered`。
+- **验证:** deploy/cadence suite `85 passed`；其中新增抗体先证明缺 receipt 必须失败，再加入 complete held receipt 后通过。Ruff（保留脚本既有的 post-`sys.path` E402 例外）、`py_compile` 与 diff check 通过。本 gate hotfix 尚未部署；入场 pause 保持。
+
 ### 2026-08-12 11:32 CDT tick — 排除不可提交的高价 SELL 假赢家；高置信仓位回到 HOLD-to-1
 - **forward 结果不变:** containment pause 后去重 settled cohort 仍为 `-$8.526401`（1 win / 2 loss）；本 tick 没有新 command、fill 或 settlement，不能声称资本利得。
 - **部署后证伪:** immediate FAK SELL 的资本释放时钟修复已进入 live loaded tree。Shanghai 20 YES shares 在 `q_mean=0.994666667`、current bid `0.999` 下被统一竞价选为正 expected EV SELL（约 `+$0.075668`），但 executor 按 durable live price law 拒绝 `live_order_executable_price_out_of_bounds: best_bid=0.999`；没有 command 或 fill。
