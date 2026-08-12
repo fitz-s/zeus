@@ -3637,7 +3637,8 @@ def _day0_market_relative_alpha_observation(
 
 # Below this many settled observations a per-strategy Brier score is noise,
 # not a verdict (a single loss at p=0.6 scores 0.36 > brier_red). Thin
-# strategies are still counted in the portfolio pool and the loss gates.
+# Thin rows remain visible in raw portfolio telemetry and the loss gates. They
+# cannot combine across unrelated probability cohorts to manufacture a verdict.
 _STRATEGY_BRIER_MIN_SAMPLE = 10
 
 _PROBABILITY_MECHANISM_SNAPSHOT_PREFIXES = frozenset({
@@ -3660,6 +3661,55 @@ def _probability_mechanism_key(row: dict) -> str | None:
     if not separator or namespace not in _PROBABILITY_MECHANISM_SNAPSHOT_PREFIXES:
         return None
     return f"law:{decision_law_id}:decision_snapshot:{namespace}"
+
+
+def _brier_probability_cohort_keys(row: dict) -> tuple[str, ...]:
+    """Return outcome-independent identities that may share Brier evidence."""
+
+    strategy = str(row.get("strategy") or "").strip()
+    decision_law_id = str(row.get("decision_law_id") or "").strip()
+    if strategy in CANONICAL_STRATEGY_KEYS:
+        owner = f"strategy:{strategy}"
+    elif decision_law_id:
+        owner = f"law:{decision_law_id}"
+    else:
+        return ()
+    revisions = tuple(
+        sorted(
+            str(revision).strip()
+            for revision in (row.get("probability_semantics_revisions") or ())
+            if str(revision).strip()
+        )
+    )
+    revision_identity = ",".join(revisions) if revisions else "unstamped"
+    keys = [f"{owner}:probability_semantics:{revision_identity}"]
+    mechanism = _probability_mechanism_key(row)
+    if mechanism is not None:
+        keys.append(f"mechanism:{mechanism}")
+    return tuple(keys)
+
+
+def _brier_evidence_ready_rows(rows: list[dict]) -> list[dict]:
+    """Keep rows in at least one homogeneous evidence-complete cohort.
+
+    The action law is not the probability law. Two thin strategies using
+    different probability semantics cannot acquire statistical authority by
+    being pooled merely because both actions used the same EV decision law.
+    An explicitly recorded shared probability mechanism may still pool its
+    member strategies.
+    """
+
+    keyed_rows = [(row, _brier_probability_cohort_keys(row)) for row in rows]
+    counts: dict[str, int] = {}
+    for _row, keys in keyed_rows:
+        for key in keys:
+            counts[key] = counts.get(key, 0) + 1
+    ready = {
+        key
+        for key, count in counts.items()
+        if count >= _STRATEGY_BRIER_MIN_SAMPLE
+    }
+    return [row for row, keys in keyed_rows if any(key in ready for key in keys)]
 
 
 def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, object]:
@@ -4614,6 +4664,15 @@ def _tick_once() -> RiskLevel:
         observed_outcomes = [int(r["outcome"]) for r in brier_metric_rows]
         p_forecasts = [float(r["p_posterior"]) for r in brier_actuating_rows]
         outcomes = [int(r["outcome"]) for r in brier_actuating_rows]
+        brier_evidence_ready_rows = _brier_evidence_ready_rows(
+            brier_actuating_rows
+        )
+        evidence_p_forecasts = [
+            float(r["p_posterior"]) for r in brier_evidence_ready_rows
+        ]
+        evidence_outcomes = [
+            int(r["outcome"]) for r in brier_evidence_ready_rows
+        ]
         strategy_settlement_summary = _strategy_settlement_summary(settlement_metric_ready_rows)
         entry_execution_summary = _entry_execution_summary(zeus_conn)
         try:
@@ -4635,6 +4694,11 @@ def _tick_once() -> RiskLevel:
             else 0.0
         )
         b_score = brier_score(p_forecasts, outcomes) if p_forecasts else 0.0
+        evidence_b_score = (
+            brier_score(evidence_p_forecasts, evidence_outcomes)
+            if evidence_p_forecasts
+            else 0.0
+        )
         d_accuracy = directional_accuracy(p_forecasts, outcomes) if p_forecasts else 0.5
 
         # Evaluate levels. Portfolio Brier is the headline quality metric, but
@@ -4647,36 +4711,54 @@ def _tick_once() -> RiskLevel:
         portfolio_brier_raw_level = (
             evaluate_brier(b_score, thresholds) if p_forecasts else RiskLevel.GREEN
         )
-        portfolio_brier_thin_sample = (
-            0 < len(p_forecasts) < _STRATEGY_BRIER_MIN_SAMPLE
-        )
-        # Only rows carrying the currently executable decision-law identity
-        # reach ``brier_actuating_rows``.  Once that same law has enough
-        # settled evidence, discarding a threshold breach would sever the
-        # settlement -> learning -> admission feedback loop and turn
-        # RiskGuard into telemetry.  Thin samples remain record-only; proven
-        # breaches actuate below, scoped to exact canonical strategy keys when
-        # attribution is complete.  A strategy-local Brier breach governs new
-        # exposure only -- it never fabricates price-insensitive SELL authority.
-        #
-        # SCOPE: current-law strategies represented by actuating settlement rows.
-        # DRAIN: every 60-second tick rebinds immutable fill q identities and
-        # recomputes the bounded settlement sample.
-        # RESET: a strategy gate expires when its current-law verdict clears;
-        # superseded/unstamped laws are excluded before this point.
-        portfolio_brier_level = (
-            RiskLevel.GREEN
-            if portfolio_brier_thin_sample
-            else portfolio_brier_raw_level
-        )
-        brier_level = portfolio_brier_level
-        brier_strategy_breakdown = _strategy_brier_breakdown(brier_actuating_rows, thresholds) if p_forecasts else {
+        portfolio_brier_thin_sample = bool(p_forecasts) and not evidence_p_forecasts
+        empty_brier_breakdown = {
             "by_strategy": {},
             "by_mechanism": {},
             "degraded_strategies": {},
             "unclassified_count": 0,
             "classified_count": 0,
         }
+        brier_strategy_breakdown = (
+            _strategy_brier_breakdown(brier_actuating_rows, thresholds)
+            if p_forecasts
+            else empty_brier_breakdown
+        )
+        brier_verdict_breakdown = (
+            _strategy_brier_breakdown(brier_evidence_ready_rows, thresholds)
+            if evidence_p_forecasts
+            else empty_brier_breakdown
+        )
+        risk_level_values = {level.value for level in RiskLevel}
+        degraded_brier_levels = [
+            RiskLevel(str(payload["level"]))
+            for payload in brier_verdict_breakdown.get(
+                "degraded_strategies", {}
+            ).values()
+            if isinstance(payload, dict)
+            and str(payload.get("level") or "") in risk_level_values
+        ]
+        # Only a homogeneous probability cohort with enough evidence may
+        # actuate. The shared EV action law is not a probability identity.
+        # Raw pooled Brier remains telemetry; current-law cohorts retain the
+        # settlement -> learning -> admission feedback loop independently.
+        #
+        # Brier governs entry admission only. It cannot authorize a
+        # price-insensitive held-position liquidation; all unlocalized Brier
+        # breaches are capped to YELLOW below. Current-state RED inputs retain
+        # their normal sweep authority.
+        #
+        # SCOPE: evidence-complete current-law probability cohorts.
+        # DRAIN: every 60-second tick rebinds immutable fill q identities and
+        # recomputes the bounded settlement sample.
+        # RESET: a strategy gate expires when its current-law verdict clears;
+        # superseded/unstamped laws are excluded before this point.
+        portfolio_brier_level = (
+            overall_level(*degraded_brier_levels)
+            if degraded_brier_levels
+            else RiskLevel.GREEN
+        )
+        brier_level = portfolio_brier_level
         brier_strategy_localization: dict[str, object] = {
             "status": "not_applicable",
             "reason": (
@@ -4706,13 +4788,13 @@ def _tick_once() -> RiskLevel:
                 "forecast_qkernel_entry",
                 "probability_semantics_authority_unavailable",
             )
-        degraded_brier_strategies = brier_strategy_breakdown.get(
+        degraded_brier_strategies = brier_verdict_breakdown.get(
             "degraded_strategies", {}
         )
         clean_brier_attribution = (
             isinstance(degraded_brier_strategies, dict)
             and bool(degraded_brier_strategies)
-            and int(brier_strategy_breakdown.get("unclassified_count", 0) or 0) == 0
+            and int(brier_verdict_breakdown.get("unclassified_count", 0) or 0) == 0
             and all(
                 str(strategy) in CANONICAL_STRATEGY_KEYS
                 for strategy in degraded_brier_strategies
@@ -4759,12 +4841,15 @@ def _tick_once() -> RiskLevel:
             }
             _append_brier_degraded_gate_reasons()
         elif portfolio_brier_level != RiskLevel.GREEN:
+            # Historical probability quality can stop new exposure, but it
+            # cannot create price-insensitive SELL authority.
+            brier_level = RiskLevel.YELLOW
             brier_strategy_localization = {
                 "status": "not_localized",
                 "reason": "portfolio_brier_requires_global_level",
                 "portfolio_brier_level": portfolio_brier_level.value,
                 "unclassified_count": int(
-                    brier_strategy_breakdown.get("unclassified_count", 0) or 0
+                    brier_verdict_breakdown.get("unclassified_count", 0) or 0
                 ),
                 "degraded_strategy_count": (
                     len(degraded_brier_strategies)
@@ -4908,11 +4993,7 @@ def _tick_once() -> RiskLevel:
                     # strong localization cannot prove a GREEN residual, block
                     # every new entry (YELLOW) but do not convert historical
                     # scoring error into a price-insensitive RED liquidation.
-                    brier_level = (
-                        RiskLevel.YELLOW
-                        if portfolio_brier_level == RiskLevel.RED
-                        else portfolio_brier_level
-                    )
+                    brier_level = RiskLevel.YELLOW
                     brier_strategy_localization = {
                         **brier_strategy_localization,
                         "status": f"{strong_scope}_residual_portfolio_not_green",
@@ -4926,11 +5007,7 @@ def _tick_once() -> RiskLevel:
             else:
                 # Missing durable scope enforcement falls back to the global
                 # entry block. It does not create SELL authority.
-                brier_level = (
-                    RiskLevel.YELLOW
-                    if portfolio_brier_level == RiskLevel.RED
-                    else portfolio_brier_level
-                )
+                brier_level = RiskLevel.YELLOW
                 brier_strategy_localization = {
                     **brier_strategy_localization,
                     "status": (
@@ -5092,6 +5169,10 @@ def _tick_once() -> RiskLevel:
                 "brier_observed_all_lineage_score": round(float(observed_b_score), 6),
                 "brier_observed_all_lineage_sample_size": len(brier_metric_rows),
                 "brier_actuating_sample_size": len(brier_actuating_rows),
+                "brier_evidence_ready_score": round(float(evidence_b_score), 6),
+                "brier_evidence_ready_sample_size": len(
+                    brier_evidence_ready_rows
+                ),
                 # ORANGE-localization audit surface (2026-07-04): the raw,
                 # unfiltered portfolio view (all strategies pooled) vs. the
                 # view that actually DRIVES admission after any localization
@@ -5104,6 +5185,7 @@ def _tick_once() -> RiskLevel:
                 "localized_orange_scope": localized_orange_scope,
                 "localized_red_scope": localized_red_scope,
                 "brier_strategy_breakdown": brier_strategy_breakdown,
+                "brier_verdict_breakdown": brier_verdict_breakdown,
                 "brier_strategy_localization": brier_strategy_localization,
                 "probability_semantics_level": probability_semantics_level.value,
                 "probability_semantics_binding": probability_semantics_binding,

@@ -1,8 +1,8 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-08-11
+# Last reused/audited: 2026-08-12
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-08-11; last_reused=2026-08-11
+# Lifecycle: created=2026-03-30; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
@@ -3416,10 +3416,10 @@ class TestRiskGuardOrangeLocalization:
         ).fetchone()
         details = json.loads(risk_row["details_json"])
 
-        assert level == RiskLevel.ORANGE
-        assert risk_row["level"] == RiskLevel.ORANGE.value
+        assert level == RiskLevel.YELLOW
+        assert risk_row["level"] == RiskLevel.YELLOW.value
         assert details["portfolio_brier_raw_level"] == "ORANGE"
-        assert details["brier_level"] == "ORANGE"
+        assert details["brier_level"] == "YELLOW"
         assert details["localized_orange_scope"] is False
         assert (
             details["brier_strategy_localization"]["status"]
@@ -3466,10 +3466,10 @@ class TestRiskGuardOrangeLocalization:
         ).fetchone()
         details = json.loads(risk_row["details_json"])
 
-        assert level == RiskLevel.ORANGE
-        assert risk_row["level"] == RiskLevel.ORANGE.value
+        assert level == RiskLevel.YELLOW
+        assert risk_row["level"] == RiskLevel.YELLOW.value
         assert details["portfolio_brier_raw_level"] == "ORANGE"
-        assert details["brier_level"] == "ORANGE"
+        assert details["brier_level"] == "YELLOW"
         assert details["localized_orange_scope"] is False
         assert details["brier_strategy_localization"]["status"] == "orange_residual_portfolio_not_green"
         assert details["brier_strategy_localization"]["residual_brier_level"] == "ORANGE"
@@ -3665,10 +3665,10 @@ class TestRiskGuardOrangeLocalization:
         ).fetchone()
 
         assert gate_row is None
-        assert level == RiskLevel.ORANGE
-        assert risk_row["level"] == RiskLevel.ORANGE.value
+        assert level == RiskLevel.YELLOW
+        assert risk_row["level"] == RiskLevel.YELLOW.value
         assert details["portfolio_brier_raw_level"] == "ORANGE"
-        assert details["brier_level"] == "ORANGE"
+        assert details["brier_level"] == "YELLOW"
         assert details["localized_orange_scope"] is False
         assert (
             details["brier_strategy_localization"]["status"]
@@ -4033,6 +4033,108 @@ class TestStrategyBrierMinSample:
 
 
 class TestStrategyBrierMinSampleContinued:
+    def test_one_strategy_cannot_pool_across_probability_semantics(self):
+        rows = [
+            {
+                "strategy": "forecast_qkernel_entry",
+                "decision_law_id": "predicted_bin_ev_v1",
+                "probability_semantics_revisions": (revision,),
+                "p_posterior": 0.8,
+                "outcome": 0,
+            }
+            for revision in (
+                riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+            )
+            for _ in range(5)
+        ]
+
+        ready = riskguard_module._brier_evidence_ready_rows(rows)
+        assert ready == []
+        breakdown = riskguard_module._strategy_brier_breakdown(
+            ready,
+            {"brier_yellow": 0.25, "brier_orange": 0.30, "brier_red": 0.35},
+        )
+        assert breakdown["degraded_strategies"] == {}
+
+    def test_heterogeneous_thin_probability_laws_do_not_form_portfolio_verdict(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        zeus_db = tmp_path / "zeus.db"
+        risk_db = tmp_path / "risk_state.db"
+        qkernel_rows = [
+            {
+                **_settlement_row(
+                    trade_id=f"qkernel-loss-{i}",
+                    strategy="forecast_qkernel_entry",
+                    p_posterior=0.8,
+                    outcome=0,
+                ),
+                "probability_semantics_revisions": (
+                    riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                ),
+            }
+            for i in range(6)
+        ]
+        day0_rows = []
+        for i in range(5):
+            row = _settlement_row(
+                trade_id=f"day0-loss-{i}",
+                strategy="day0_nowcast_entry",
+                p_posterior=0.8,
+                outcome=0,
+            )
+            row["entry_q_version"] = (
+                f"day0-semrev:{DAY0_PROBABILITY_SEMANTICS_REVISION}:test-{i}"
+            )
+            day0_rows.append(row)
+        rows = qkernel_rows + day0_rows
+
+        def _fake_get_connection(path=None, **_kwargs):
+            if path == riskguard_module.RISK_DB_PATH:
+                return get_connection(risk_db)
+            return get_connection(zeus_db)
+
+        _init_empty_canonical_portfolio_schema(zeus_db)
+        _persist_decision_law_identities(zeus_db, rows)
+        _patch_riskguard_bankroll(monkeypatch)
+        monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
+        monkeypatch.setattr(
+            riskguard_module,
+            "load_portfolio",
+            lambda: PortfolioState(bankroll=211.37),
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "load_tracker",
+            lambda: strategy_tracker_module.StrategyTracker(),
+        )
+        monkeypatch.setattr(
+            riskguard_module,
+            "query_authoritative_settlement_rows",
+            lambda *_, **__: rows,
+        )
+
+        level = riskguard_module.tick()
+        risk_row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(risk_row["details_json"])
+
+        assert details["portfolio_brier_raw_level"] == "RED"
+        assert details["portfolio_brier_level"] == "GREEN"
+        assert details["brier_level"] == "GREEN"
+        assert details["brier_actuating_sample_size"] == 11
+        assert details["brier_evidence_ready_sample_size"] == 0
+        assert details["portfolio_brier_thin_sample_no_verdict"] is True
+        assert details["recommended_strategy_gates"] == []
+        assert level == RiskLevel.GREEN
+        assert risk_row["level"] == RiskLevel.GREEN.value
+
     def test_shared_recorded_mechanism_requires_one_recorded_decision_law(self):
         rows = [
             {
@@ -4082,6 +4184,7 @@ class TestStrategyBrierMinSampleContinued:
         )
         assert out["degraded_strategies"]["settlement_capture"]["member_sample_size"] == 7
         assert out["by_strategy"]["forecast_qkernel_entry"]["level"] == "GREEN"
+        assert riskguard_module._brier_evidence_ready_rows(rows[:14]) == rows[:14]
 
     def test_unlabeled_snapshot_namespace_cannot_pool_thin_legacy_strategies(self):
         rows = [
@@ -4104,10 +4207,10 @@ class TestStrategyBrierMinSampleContinued:
         assert out["degraded_strategies"] == {}
 
     @pytest.mark.parametrize(
-        ("p_posterior", "expected_level"),
+        ("p_posterior", "expected_portfolio_level", "expected_active_level"),
         [
-            (0.51, RiskLevel.YELLOW),
-            (0.56, RiskLevel.ORANGE),
+            (0.51, RiskLevel.YELLOW, RiskLevel.YELLOW),
+            (0.56, RiskLevel.ORANGE, RiskLevel.YELLOW),
         ],
     )
     def test_current_law_brier_breach_stays_global_without_law_gate_consumer(
@@ -4115,7 +4218,8 @@ class TestStrategyBrierMinSampleContinued:
         monkeypatch,
         tmp_path,
         p_posterior,
-        expected_level,
+        expected_portfolio_level,
+        expected_active_level,
     ):
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
@@ -4167,8 +4271,9 @@ class TestStrategyBrierMinSampleContinued:
             """
         ).fetchone()
 
-        assert level == expected_level
-        assert details["brier_level"] == expected_level.value
+        assert level == expected_active_level
+        assert details["portfolio_brier_level"] == expected_portfolio_level.value
+        assert details["brier_level"] == expected_active_level.value
         assert details["brier_strategy_localization"]["status"] == "not_localized"
         assert set(details["brier_strategy_breakdown"]["degraded_strategies"]) == {
             "law:predicted_bin_ev_v1"
