@@ -333,8 +333,14 @@ def publish_current_monitor_orderbook_batch(
     books: dict[str, dict],
     *,
     captured_at_utc: datetime | None,
+    merge: bool = False,
 ) -> int:
-    """Publish one exact network batch for immediate global SELL redecision."""
+    """Publish one exact monitor batch for immediate global SELL redecision.
+
+    ``merge`` joins a later network tranche to the same cycle's already
+    published local tranche while retaining the oldest source capture clock.
+    It never makes either tranche newer than its actual observation.
+    """
 
     global _CURRENT_MONITOR_ORDERBOOK_BATCH
     captured_at = captured_at_utc
@@ -356,9 +362,17 @@ def publish_current_monitor_orderbook_batch(
         if asset_id != token_id:
             continue
         clean[token_id] = dict(raw_book)
-    if not clean:
-        captured_at = None
     with _CURRENT_MONITOR_ORDERBOOK_BATCH_LOCK:
+        if merge:
+            existing_books, existing_at = _CURRENT_MONITOR_ORDERBOOK_BATCH
+            clean = {**existing_books, **clean}
+            captured_at = (
+                min(existing_at, captured_at)
+                if existing_at is not None and captured_at is not None
+                else existing_at or captured_at
+            )
+        if not clean:
+            captured_at = None
         _CURRENT_MONITOR_ORDERBOOK_BATCH = (clean, captured_at)
     return len(clean)
 

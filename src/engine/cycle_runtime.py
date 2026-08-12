@@ -4800,6 +4800,7 @@ def _fresh_local_held_monitor_orderbooks(
     summary: dict,
     deps,
     deadline_monotonic: float | None = None,
+    captured_at_out: list[datetime] | None = None,
 ) -> dict[str, dict]:
     if conn is None:
         return {}
@@ -4837,7 +4838,8 @@ def _fresh_local_held_monitor_orderbooks(
                 VALUES {values_sql}
             )
             SELECT latest.selected_outcome_token_id,
-                   snapshot.orderbook_depth_json
+                   snapshot.orderbook_depth_json,
+                   latest.captured_at
               FROM requested
               JOIN executable_market_snapshot_latest AS latest
                 ON latest.condition_id = requested.condition_id
@@ -4879,9 +4881,10 @@ def _fresh_local_held_monitor_orderbooks(
         return {}
 
     books: dict[str, dict] = {}
+    captured_times: list[datetime] = []
     for row in rows:
         try:
-            token_id, raw_book = row[0], row[1]
+            token_id, raw_book, raw_captured_at = row[0], row[1], row[2]
             book = json.loads(str(raw_book))
         except (IndexError, TypeError, ValueError, json.JSONDecodeError):
             continue
@@ -4894,6 +4897,11 @@ def _fresh_local_held_monitor_orderbooks(
         ).strip()
         if token_id and (not asset_id or asset_id == token_id):
             books[token_id] = book
+            captured_at = _parse_utc_timestamp(raw_captured_at)
+            if captured_at is not None:
+                captured_times.append(captured_at)
+    if captured_at_out is not None and captured_times:
+        captured_at_out.append(min(captured_times))
     return books
 
 
@@ -4953,15 +4961,17 @@ def _prefetch_held_monitor_orderbooks(
         summary["held_monitor_orderbook_prefetch_bypassed"] = True
         install_monitor_orderbook_prefetch(clob, {})
         return frozenset()
-    local_books = _fresh_local_held_monitor_orderbooks(
+    local_capture_times: list[datetime] = []
+    fresh_local_books = _fresh_local_held_monitor_orderbooks(
         conn,
         positions,
         now_utc=now_utc,
         summary=summary,
         deps=deps,
         deadline_monotonic=deadline_monotonic,
+        captured_at_out=local_capture_times,
     )
-    local_books = {**existing_books, **local_books}
+    local_books = {**existing_books, **fresh_local_books}
     summary["held_monitor_orderbooks_local"] = len(local_books)
     missing_token_ids = [
         token_id
@@ -4970,6 +4980,14 @@ def _prefetch_held_monitor_orderbooks(
     ]
     summary["held_monitor_orderbooks_network_requested"] = len(missing_token_ids)
     if local_only or not missing_token_ids or getter is None:
+        published = publish_current_monitor_orderbook_batch(
+            fresh_local_books,
+            captured_at_utc=(
+                min(local_capture_times) if local_capture_times else None
+            ),
+            merge=preserve_existing,
+        )
+        summary["held_monitor_orderbooks_published_for_global_sell"] = published
         attempted = (
             existing_attempted
             | (set(missing_token_ids) if mark_unfetched_attempted else set())
@@ -5025,9 +5043,17 @@ def _prefetch_held_monitor_orderbooks(
         batch_transport_failed
     )
     books = {**local_books, **network_books}
+    publish_books = {**fresh_local_books, **network_books}
+    network_captured_at = datetime.now(timezone.utc) if network_books else None
+    publish_capture_times = [*local_capture_times]
+    if network_captured_at is not None:
+        publish_capture_times.append(network_captured_at)
     published = publish_current_monitor_orderbook_batch(
-        network_books,
-        captured_at_utc=datetime.now(timezone.utc),
+        publish_books,
+        captured_at_utc=(
+            min(publish_capture_times) if publish_capture_times else None
+        ),
+        merge=preserve_existing,
     )
     summary["held_monitor_orderbooks_published_for_global_sell"] = published
     installed = install_monitor_orderbook_prefetch(

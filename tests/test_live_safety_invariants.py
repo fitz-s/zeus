@@ -12189,6 +12189,60 @@ def test_held_monitor_prefetch_batches_books_and_skips_redundant_market_metadata
     )
 
 
+def test_held_monitor_local_books_publish_original_clock_for_global_sell(
+    monkeypatch,
+):
+    from src.engine import cycle_runtime, monitor_refresh
+
+    captured_at = datetime(2026, 8, 12, 14, 35, 16, tzinfo=timezone.utc)
+    position = _make_position(
+        trade_id="local-global-sell-book",
+        condition_id="local-global-sell-condition",
+        market_id="local-global-sell-condition",
+        token_id="local-global-sell-token",
+        direction="buy_yes",
+    )
+    book = {
+        "asset_id": position.token_id,
+        "bids": [{"price": "0.31", "size": "20"}],
+        "asks": [{"price": "0.33", "size": "20"}],
+    }
+
+    def local_books(*_args, captured_at_out, **_kwargs):
+        captured_at_out.append(captured_at)
+        return {position.token_id: book}
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        local_books,
+    )
+    summary = {}
+    cycle_runtime._prefetch_held_monitor_orderbooks(
+        object(),
+        object(),
+        [position],
+        summary,
+        now_utc=captured_at + timedelta(seconds=1),
+        deps=_monitor_test_deps("test_local_global_sell_book"),
+        local_only=True,
+    )
+
+    assert summary["held_monitor_orderbooks_published_for_global_sell"] == 1
+    published = monitor_refresh.current_monitor_orderbook_batch(
+        (position.token_id,),
+        checked_at_utc=captured_at + timedelta(seconds=2),
+        max_age=timedelta(seconds=8),
+    )
+    assert published is not None
+    assert published[0] == {position.token_id: book}
+    assert published[1] == captured_at
+    monitor_refresh.publish_current_monitor_orderbook_batch(
+        {},
+        captured_at_utc=None,
+    )
+
+
 def test_monitor_global_sell_handoff_is_exact_and_does_not_extend_time():
     from src.engine import event_reactor_adapter, monitor_refresh
 
@@ -12216,6 +12270,25 @@ def test_monitor_global_sell_handoff_is_exact_and_does_not_extend_time():
     assert current is not None
     assert set(current[0]) == {"token-current"}
     assert current[1] == captured_at
+    assert monitor_refresh.publish_current_monitor_orderbook_batch(
+        {
+            "token-network": {
+                "asset_id": "token-network",
+                "bids": [{"price": "0.18", "size": "10"}],
+                "asks": [{"price": "0.20", "size": "10"}],
+            }
+        },
+        captured_at_utc=captured_at + timedelta(seconds=1),
+        merge=True,
+    ) == 2
+    merged = monitor_refresh.current_monitor_orderbook_batch(
+        ("token-current", "token-network"),
+        checked_at_utc=captured_at + timedelta(seconds=2),
+        max_age=timedelta(seconds=8),
+    )
+    assert merged is not None
+    assert set(merged[0]) == {"token-current", "token-network"}
+    assert merged[1] == captured_at
     projection = event_reactor_adapter._monitor_first_global_book_projection(
         ("token-current",),
         checked_at=captured_at + timedelta(seconds=2),
