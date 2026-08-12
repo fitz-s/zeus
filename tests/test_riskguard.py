@@ -4135,6 +4135,23 @@ class TestStrategyBrierMinSampleContinued:
         assert level == RiskLevel.GREEN
         assert risk_row["level"] == RiskLevel.GREEN.value
 
+        monkeypatch.setattr(
+            riskguard_module,
+            "_collateral_identity_level",
+            lambda _conn: RiskLevel.RED,
+        )
+        level = riskguard_module.tick()
+        risk_row = get_connection(risk_db).execute(
+            "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        details = json.loads(risk_row["details_json"])
+
+        assert details["portfolio_brier_raw_level"] == "RED"
+        assert details["brier_level"] == "GREEN"
+        assert details["portfolio_brier_level"] == "GREEN"
+        assert level == RiskLevel.RED
+        assert risk_row["level"] == RiskLevel.RED.value
+
     def test_shared_recorded_mechanism_requires_one_recorded_decision_law(self):
         rows = [
             {
