@@ -131,7 +131,11 @@ class TestForwardCapitalAudit:
             },
         )
 
-        result = _forward_capital_summary(activity=activity, curves=curves)
+        result = _forward_capital_summary(
+            activity=activity,
+            curves=curves,
+            robust_evalue_threshold=10.0,
+        )
 
         assert result["status"] == "awaiting_current_law_fills"
         assert result["capital_gain_proven"] is False
@@ -144,6 +148,7 @@ class TestForwardCapitalAudit:
 
         row = {
             "position_id": "p1",
+            "target_date": "2026-08-11",
             "close_type": "SETTLED",
             "realized_at": "2026-08-11T23:00:00+00:00",
             "capital_committed_usd": 2.0,
@@ -173,10 +178,15 @@ class TestForwardCapitalAudit:
             "unclassified_filled_position_count": 0,
         }
 
-        proven = _forward_capital_summary(activity=complete, curves=curves)
+        proven = _forward_capital_summary(
+            activity=complete,
+            curves=curves,
+            robust_evalue_threshold=10.0,
+        )
         degraded = _forward_capital_summary(
             activity={**complete, "chain_fact_coverage_complete": False},
             curves=curves,
+            robust_evalue_threshold=10.0,
         )
 
         assert proven["status"] == "positive_observed"
@@ -189,6 +199,107 @@ class TestForwardCapitalAudit:
         assert proven["net_realized_pnl_usd"] == pytest.approx(0.9)
         assert degraded["status"] == "capital_truth_degraded"
         assert degraded["capital_gain_proven"] is False
+
+    def test_one_profitable_cluster_does_not_prove_robust_capital_gain(self):
+        from scripts.audit_realtime_pnl import _robust_capital_evidence
+
+        evidence = _robust_capital_evidence(
+            [
+                {
+                    "target_date": "2026-08-11",
+                    "capital_committed_usd": 1.0,
+                    "net_realized_pnl_usd": 4.0,
+                }
+            ],
+            threshold=10.0,
+        )
+
+        assert evidence["independent_cluster_count"] == 1
+        assert evidence["evalue"] == pytest.approx(1.3875)
+        assert evidence["threshold_reached"] is False
+
+    def test_same_target_date_positions_are_one_capital_evidence_cluster(self):
+        from scripts.audit_realtime_pnl import _robust_capital_evidence
+
+        evidence = _robust_capital_evidence(
+            [
+                {
+                    "target_date": "2026-08-11",
+                    "capital_committed_usd": 1.0,
+                    "net_realized_pnl_usd": 1.0,
+                },
+                {
+                    "target_date": "2026-08-11",
+                    "capital_committed_usd": 1.0,
+                    "net_realized_pnl_usd": 1.0,
+                },
+            ],
+            threshold=10.0,
+        )
+
+        assert evidence["independent_cluster_count"] == 1
+        assert evidence["clusters"][0]["position_count"] == 2
+        assert evidence["evalue"] == pytest.approx(1.3875)
+
+    def test_repeated_cross_date_capital_gains_can_prove_robustness(self):
+        from scripts.audit_realtime_pnl import _forward_capital_summary
+
+        rows = [
+            {
+                "position_id": f"p{day}",
+                "target_date": f"2026-08-{day:02d}",
+                "close_type": "SETTLED",
+                "realized_at": f"2026-08-{day:02d}T23:00:00+00:00",
+                "capital_committed_usd": 1.0,
+                "gross_realized_pnl_usd": 1.0,
+                "fee_bound_usd": 0.0,
+                "net_realized_pnl_usd": 1.0,
+            }
+            for day in range(1, 7)
+        ]
+        activity = {
+            "chain_fact_coverage_complete": True,
+            "entry_filled_position_count": 6,
+            "unclassified_filled_position_count": 0,
+            "preboundary_entry_fill_count": 0,
+        }
+        result = _forward_capital_summary(
+            activity=activity,
+            curves=(
+                {
+                    "status": "positive",
+                    "filled_position_count": 6,
+                    "open_position_count": 0,
+                    "capital_committed_usd": 6.0,
+                    "curve": rows,
+                },
+            ),
+            robust_evalue_threshold=10.0,
+        )
+
+        assert result["capital_gain_proven"] is True
+        assert result["robust_capital_gain_proven"] is True
+        assert result["robust_capital_evidence"]["evalue"] == pytest.approx(
+            16.534264
+        )
+
+    def test_realized_loss_prevents_robust_capital_claim(self):
+        from scripts.audit_realtime_pnl import _robust_capital_evidence
+
+        evidence = _robust_capital_evidence(
+            [
+                {
+                    "target_date": f"2026-08-{day:02d}",
+                    "capital_committed_usd": 1.0,
+                    "net_realized_pnl_usd": 1.0 if day < 6 else -1.0,
+                }
+                for day in range(1, 7)
+            ],
+            threshold=10.0,
+        )
+
+        assert evidence["threshold_reached"] is False
+        assert evidence["evalue"] < 10.0
 
     def test_audit_requires_explicit_utc_boundary_and_read_only_connection(self):
         import inspect

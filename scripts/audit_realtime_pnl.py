@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -32,6 +33,7 @@ _CURRENT_STRATEGIES = frozenset(
     {"day0_nowcast_entry", "forecast_qkernel_entry"}
 )
 _CURRENT_DECISION_LAW = "predicted_bin_ev_v1"
+_CAPITAL_EVALUE_BETS = (0.0625, 0.125, 0.25, 0.5, 1.0)
 
 
 def _parse_utc(value: str) -> datetime:
@@ -139,6 +141,7 @@ def _forward_capital_summary(
     *,
     activity: dict[str, object],
     curves: Sequence[dict[str, object]],
+    robust_evalue_threshold: float,
 ) -> dict[str, object]:
     rows = [row for curve in curves for row in list(curve.get("curve") or [])]
     rows.sort(
@@ -185,6 +188,13 @@ def _forward_capital_summary(
     loss_count = sum(float(row["net_realized_pnl_usd"]) < 0.0 for row in combined_curve)
     flat_count = realized_count - win_count - loss_count
     observed_gain = capital_truth_complete and realized_count > 0 and net_pnl > 0.0
+    robust_evidence = _robust_capital_evidence(
+        combined_curve,
+        threshold=robust_evalue_threshold,
+    )
+    robust_gain = bool(
+        observed_gain and robust_evidence["threshold_reached"] is True
+    )
 
     if not capital_truth_complete:
         status = "capital_truth_degraded"
@@ -208,8 +218,13 @@ def _forward_capital_summary(
         "capital_truth_complete": capital_truth_complete,
         "capital_gain_proven": observed_gain,
         "capital_gain_proof_reason": reason,
-        "robust_capital_gain_proven": False,
-        "robustness_reason": "INDEPENDENT_CLUSTER_STRENGTH_NOT_ESTABLISHED",
+        "robust_capital_gain_proven": robust_gain,
+        "robustness_reason": (
+            "POSITIVE_REALIZED_CAPITAL_WITH_EVALUE_SUPPORT"
+            if robust_gain
+            else str(robust_evidence["reason"])
+        ),
+        "robust_capital_evidence": robust_evidence,
         "filled_position_count": sum(
             int(curve.get("filled_position_count") or 0) for curve in curves
         ),
@@ -246,9 +261,121 @@ def _forward_capital_summary(
     }
 
 
+def _robust_capital_evidence(
+    rows: Sequence[dict[str, object]],
+    *,
+    threshold: float,
+) -> dict[str, object]:
+    """Test positive forward capital without counting correlated legs twice.
+
+    All positions sharing a target date are one evidence unit, matching the
+    market-relative alpha clustering contract.  For each date, net return is
+    conservatively capped at +100% while a complete loss remains -100%.
+    Products of ``1 + lambda * return`` are e-processes under the null that
+    conditional expected capped return is nonpositive.  Averaging fixed bets
+    preserves that property and avoids selecting a favorable bet after seeing
+    outcomes.  The calculation is evidence only; it never gates live entry.
+    """
+
+    if not math.isfinite(threshold) or threshold <= 1.0:
+        raise ValueError("robust capital e-value threshold must exceed 1")
+
+    clusters: dict[str, dict[str, float | int]] = {}
+    for row in rows:
+        target_date = str(row.get("target_date") or "").strip()
+        try:
+            capital = float(row["capital_committed_usd"])
+            pnl = float(row["net_realized_pnl_usd"])
+        except (KeyError, TypeError, ValueError):
+            target_date = ""
+            capital = math.nan
+            pnl = math.nan
+        if (
+            not target_date
+            or not math.isfinite(capital)
+            or capital <= 0.0
+            or not math.isfinite(pnl)
+        ):
+            return {
+                "status": "unavailable",
+                "reason": "CLUSTER_CAPITAL_IDENTITY_INVALID",
+                "threshold": threshold,
+                "evalue": None,
+                "independent_cluster_count": 0,
+                "clusters": [],
+                "null_hypothesis": "conditional_expected_capped_return_nonpositive",
+            }
+        cluster = clusters.setdefault(
+            target_date,
+            {
+                "capital_committed_usd": 0.0,
+                "net_realized_pnl_usd": 0.0,
+                "position_count": 0,
+            },
+        )
+        cluster["capital_committed_usd"] = (
+            float(cluster["capital_committed_usd"]) + capital
+        )
+        cluster["net_realized_pnl_usd"] = (
+            float(cluster["net_realized_pnl_usd"]) + pnl
+        )
+        cluster["position_count"] = int(cluster["position_count"]) + 1
+
+    wealth = [1.0 for _ in _CAPITAL_EVALUE_BETS]
+    evidence_clusters: list[dict[str, object]] = []
+    for target_date, cluster in sorted(clusters.items()):
+        capital = float(cluster["capital_committed_usd"])
+        pnl = float(cluster["net_realized_pnl_usd"])
+        realized_return = pnl / capital
+        if realized_return < -1.000001:
+            return {
+                "status": "unavailable",
+                "reason": "NET_LOSS_EXCEEDS_COMMITTED_CAPITAL",
+                "threshold": threshold,
+                "evalue": None,
+                "independent_cluster_count": 0,
+                "clusters": evidence_clusters,
+                "null_hypothesis": "conditional_expected_capped_return_nonpositive",
+            }
+        capped_return = min(1.0, max(-1.0, realized_return))
+        for index, bet in enumerate(_CAPITAL_EVALUE_BETS):
+            wealth[index] *= 1.0 + bet * capped_return
+        evidence_clusters.append(
+            {
+                "target_date": target_date,
+                "position_count": int(cluster["position_count"]),
+                "capital_committed_usd": round(capital, 6),
+                "net_realized_pnl_usd": round(pnl, 6),
+                "realized_return": round(realized_return, 6),
+                "capped_return": round(capped_return, 6),
+            }
+        )
+
+    evalue = sum(wealth) / len(wealth)
+    threshold_reached = bool(evidence_clusters) and evalue >= threshold
+    return {
+        "status": "supported" if threshold_reached else "inconclusive",
+        "reason": (
+            "EVALUE_THRESHOLD_REACHED"
+            if threshold_reached
+            else "INDEPENDENT_CLUSTER_STRENGTH_NOT_ESTABLISHED"
+        ),
+        "threshold": threshold,
+        "evalue": round(evalue, 6),
+        "independent_cluster_count": len(evidence_clusters),
+        "clusters": evidence_clusters,
+        "null_hypothesis": "conditional_expected_capped_return_nonpositive",
+        "same_target_date_clustered": True,
+        "positive_return_cap": 1.0,
+        "bet_fractions": list(_CAPITAL_EVALUE_BETS),
+        "threshold_reached": threshold_reached,
+    }
+
+
 def run_audit(
     *,
     since: datetime,
+    robust_evalue_threshold: float,
     as_of: datetime | None = None,
     cohort_id: str | None = None,
     connection: sqlite3.Connection | None = None,
@@ -283,12 +410,16 @@ def run_audit(
         if owns_connection:
             conn.close()
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "cohort_id": str(cohort_id or "forward_current_law"),
         "since": since_utc.isoformat(),
         "as_of": evaluated_at.isoformat(),
         "activity": activity,
-        "capital": _forward_capital_summary(activity=activity, curves=curves),
+        "capital": _forward_capital_summary(
+            activity=activity,
+            curves=curves,
+            robust_evalue_threshold=robust_evalue_threshold,
+        ),
         "strategy_curves": {
             str(curve["strategy_key"]): curve for curve in curves
         },
@@ -311,6 +442,12 @@ def _parser() -> argparse.ArgumentParser:
         help="inclusive audit clock; defaults to current UTC time",
     )
     parser.add_argument("--cohort-id", default="forward_current_law")
+    parser.add_argument(
+        "--robust-evalue-threshold",
+        required=True,
+        type=float,
+        help="explicit evidence threshold (>1) for robust capital gain",
+    )
     return parser
 
 
@@ -319,6 +456,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = run_audit(
             since=args.since,
+            robust_evalue_threshold=args.robust_evalue_threshold,
             as_of=args.as_of,
             cohort_id=args.cohort_id,
         )
