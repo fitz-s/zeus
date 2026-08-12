@@ -131,6 +131,7 @@ in_scope:
 - tests/test_command_recovery.py
 - tests/test_exchange_reconcile.py
 - tests/test_chain_shares_persist_synced.py
+- tests/test_reconcile_chain_mirror.py
 - tests/state/test_inv_chain_only_review_lifecycle.py
 - tests/test_architecture_contracts.py
 - tests/test_money_path_semantic_ci.py

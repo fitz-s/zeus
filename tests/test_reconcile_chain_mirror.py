@@ -259,6 +259,79 @@ def test_wallet_excess_repairs_stale_owned_chain_prefix_without_expanding_positi
     }
 
 
+def test_zero_price_balance_preserves_authenticated_fill_cost_for_owned_slice(
+    trades_conn,
+):
+    position_id = "pos-partial-fill-zero-price-balance"
+    token_id = "tok-partial-fill-zero-price-balance"
+    owned_shares = 0.610168
+    owned_cost = 0.25016888
+    row = _row(
+        position_id=position_id,
+        direction="buy_no",
+        no_token_id=token_id,
+        chain_shares=0.0,
+        shares=owned_shares,
+        fill_authority="venue_confirmed_partial",
+    )
+    chain = {
+        token_id: ChainPositionFact(
+            token_id=token_id,
+            condition_id="cond-1",
+            size=12.9901,
+            avg_price=0.0,
+            cost_basis_usd=0.0,
+            redeemable=False,
+            current_value=5.0,
+            side="No",
+        )
+    }
+
+    finding = classify_local_position(row, chain_by_asset=chain, settlement_by_key={})
+
+    assert finding.classification == SIZE_CORRECTED
+    assert finding.details["reason"] == "chain_projection_stale_prefix"
+    assert finding.details["attributed_chain_shares"] == pytest.approx(owned_shares)
+    _insert_position_current(
+        trades_conn,
+        position_id=position_id,
+        direction="buy_no",
+        no_token_id=token_id,
+        chain_shares=0.0,
+        shares=owned_shares,
+        cost_basis_usd=owned_cost,
+        fill_authority="venue_confirmed_partial",
+    )
+
+    assert apply_size_correction_finding(
+        trades_conn,
+        finding,
+        now=datetime(2026, 8, 12, 3, 50, 45, tzinfo=timezone.utc),
+    ) is True
+    repaired = trades_conn.execute(
+        """
+        SELECT shares, cost_basis_usd, chain_shares, chain_avg_price,
+               chain_cost_basis_usd
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    ).fetchone()
+    assert repaired["shares"] == pytest.approx(owned_shares)
+    assert repaired["cost_basis_usd"] == pytest.approx(owned_cost)
+    assert repaired["chain_shares"] == pytest.approx(owned_shares)
+    assert repaired["chain_avg_price"] == pytest.approx(0.41)
+    assert repaired["chain_cost_basis_usd"] == pytest.approx(owned_cost)
+    event = trades_conn.execute(
+        "SELECT payload_json FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    assert payload["chain_economics_basis"] == (
+        "authenticated_fill_cost_for_chain_confirmed_owned_slice"
+    )
+
+
 def test_wallet_excess_does_not_expand_owned_position():
     row = _row(
         direction="buy_yes",

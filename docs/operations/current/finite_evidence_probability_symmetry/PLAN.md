@@ -4,6 +4,35 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-11 Zero-price balance snapshots retain authenticated fill cost
+
+A forward partial fill exposed a transient canonical tear: the chain mirror
+observed a positive wallet balance before command recovery had projected the
+complete trade fill, and that balance surface carried zero average price and
+zero cost.  The mirror correctly limited attribution to the then-known owned
+shares, but marked the row `synced` without any chain cost.  The strict runtime
+exposure reader then rejected the whole global auction as torn economics,
+excluding held SELL/HOLD/CASH comparison as well as BUY.
+
+The writer now preserves the authenticated venue-trade unit cost for exactly
+the chain-confirmed owned slice when, and only when, the balance snapshot has
+no positive economics and `fill_authority` is trade-verified.  Chain truth
+continues to own quantity; the chronicled venue fill owns cost.  Balance-only
+and fill-unproven positions receive no synthesized economics, wallet excess is
+not adopted, and a positive venue-position price retains priority.  The event
+records the selected economics basis.
+
+SCOPE is one `CHAIN_SIZE_CORRECTED` projection for a trade-verified open
+position with positive attributed chain shares and a zero-price balance
+snapshot.  DRAIN is the same append-first mirror write and the next normal
+global-auction read.  RESET is a later positive venue-position observation or
+new authenticated fill projection; missing authenticated cost remains
+fail-closed.  Acceptance requires the zero-price partial-fill antibody, the
+complete chain-mirror suite, related chain/exchange invariant suites, hot-fix
+landing, loaded-SHA proof, and a forward auction receipt no longer rejected for
+torn chain economics.  This restores decision liveness; realized capital gain
+still requires later fill, exit/settlement, and capital-curve evidence.
+
 ## 2026-08-11 Entry JIT CLOB identity uses the submit lane
 
 After typed maker direction reached executor authority, forward live attempts
