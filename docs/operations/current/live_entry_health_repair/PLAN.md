@@ -1676,3 +1676,17 @@ acquisition order `monitor, recovery`, the same race after the first gate of a
 multi-DB set, and a monitor attempt paused exactly after the final intent check
 but before lease publication. No test may leak a thread, partial gate, or
 publication barrier.
+
+### Slice B91 — Exact JIT maker curve identity at final submit (2026-08-11)
+
+- Runtime defect: JIT receipt persistence correctly names the full executable
+  ask curve in `global_jit_execution_curve_identity`, while the final maker wall
+  compared that field to the passive proposal curve. Those curves are distinct
+  by construction, so a real rebound maker winner remained unsubmitable even
+  though a synthetic test using the proposal identity passed.
+- Structural repair: final submit now compares the JIT execution field to the
+  current candidate's full `execution_curve_identity`; the nested maker witness
+  continues to bind and validate the passive proposal identity separately.
+- Antibody: the final-wall fixture now mirrors receipt rebinding and asserts
+  that full executable and passive proposal identities are unequal before a
+  valid witnessed maker is admitted.

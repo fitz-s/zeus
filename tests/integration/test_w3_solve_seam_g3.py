@@ -31517,9 +31517,7 @@ def _final_maker_economics(candidate, *, validated_at):
         "global_condition_id": candidate.condition_id,
         "global_token_id": candidate.token_id,
         "global_limit_price": str(candidate.maker_fill_witness.limit_price),
-        "global_jit_execution_curve_identity": executable_curve_identity(
-            candidate.economic_cost_curve
-        ),
+        "global_jit_execution_curve_identity": candidate.execution_curve_identity,
         "global_fill_probability": candidate.fill_probability,
         "global_fill_probability_source": (
             candidate.maker_fill_witness.witness_identity
@@ -31540,11 +31538,29 @@ def _final_maker_economics(candidate, *, validated_at):
 
 def test_final_command_maker_wall_accepts_only_exact_current_jit_witness():
     candidate = _current_maker_buy_candidate()
+    passive_identity = executable_curve_identity(
+        candidate.economic_cost_curve
+    )
+    assert candidate.execution_curve_identity != passive_identity
     validated_at = _dt.datetime.now(_dt.timezone.utc)
     economics = _final_maker_economics(
         candidate,
         validated_at=validated_at,
     )
+
+    baseline = copy.deepcopy(economics)
+    baseline["global_jit_execution_curve_identity"] = passive_identity
+    baseline["current_state_identity_hash"] = (
+        era.qkernel_current_state_identity_hash(baseline)
+    )
+    assert era._current_maker_fill_authority_rejection_reason(
+        proof_mode="MAKER",
+        fresh_mode="MAKER",
+        current_candidate=candidate,
+        certificate_economics=baseline,
+        validated_at_utc=validated_at,
+        current_at_utc=validated_at,
+    ) == era._CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
 
     assert era._current_maker_fill_authority_rejection_reason(
         proof_mode="MAKER",

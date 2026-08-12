@@ -19189,10 +19189,7 @@ def _current_maker_fill_authority_rejection_reason(
     ):
         return _CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
     try:
-        from src.solve.solver import (
-            _maker_witness_rejection,
-            executable_curve_identity,
-        )
+        from src.solve.solver import _maker_witness_rejection
 
         if (
             _maker_witness_rejection(
@@ -19206,7 +19203,6 @@ def _current_maker_fill_authority_rejection_reason(
             current_candidate,
             validated_at_utc=validated_at_utc,
         )
-        proposal = getattr(current_candidate, "economic_cost_curve", None)
         witness = getattr(current_candidate, "maker_fill_witness", None)
         declared_identity = str(
             certificate_economics.get("current_state_identity_hash") or ""
@@ -19241,7 +19237,10 @@ def _current_maker_fill_authority_rejection_reason(
                 )
                 or ""
             )
-            == executable_curve_identity(proposal)
+            == str(
+                getattr(current_candidate, "execution_curve_identity", "")
+                or ""
+            )
             and math.isclose(
                 float(certificate_economics.get("global_fill_probability")),
                 float(getattr(current_candidate, "fill_probability", float("nan"))),
