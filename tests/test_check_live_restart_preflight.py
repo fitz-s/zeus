@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-18; last_reviewed=2026-08-03; last_reused=2026-08-08
+# Lifecycle: created=2026-06-18; last_reviewed=2026-08-03; last_reused=2026-08-12
 # Purpose: Regression tests for read-only live restart preflight risk classification.
 # Reuse: pytest tests/test_check_live_restart_preflight.py
 # Authority basis: AGENTS.md live-money restart proof gates.
@@ -6362,7 +6362,10 @@ def test_confirmed_fill_bridge_coverage_accepts_already_bridged_trade(
     assert check.evidence["missing_rest_filled_orphan_count"] == 0
 
 
-def test_preflight_tolerates_retry_pending_without_resting_exit_order(monkeypatch, tmp_path):
+@pytest.mark.parametrize("retry_count", (0, 4))
+def test_preflight_tolerates_retry_pending_without_resting_exit_order(
+    monkeypatch, tmp_path, retry_count
+):
     trade_db, forecast_db, _state_dir = _patch_paths(monkeypatch, tmp_path)
     trade = _init_trade_db(trade_db)
     _init_forecast_db(forecast_db).close()
@@ -6385,10 +6388,11 @@ def test_preflight_tolerates_retry_pending_without_resting_exit_order(monkeypatc
             'retry-pos', 'pending_exit', 'Houston', '2026-06-24', 'high',
             'Will the highest temperature in Houston be between 92-93°F on June 24?',
             'buy_no', 36.0, 36.0, 'filled', 'CI_SEPARATED_REVERSAL',
-            4, '2026-06-24T18:22:42+00:00', 0.055, 1, 0.53, 1,
+            ?, '2026-06-24T18:22:42+00:00', 0.055, 1, 0.53, 1,
             '2026-06-24T17:42:42+00:00'
         )
-        """
+        """,
+        (retry_count,),
     )
     trade.execute(
         """

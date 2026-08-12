@@ -9368,15 +9368,18 @@ def event_bound_live_adapter_from_trade_conn(
                     refreshed_at_by_family=refreshed_at_by_family,
                 ),
             )
+            market_authority_refresh_in_cut = frozenset(
+                market_authority_refresh_family_keys.intersection(probabilities)
+            )
             metadata_refresh_family_keys = metadata_refresh_family_keys.union(
                 held_binding_refresh_family_keys,
-                market_authority_refresh_family_keys,
+                market_authority_refresh_in_cut,
             )
             effective_book_refresh_family_keys = (
                 _effective_global_book_refresh_family_keys(
                     book_refresh_family_keys,
                     metadata_refresh_family_keys,
-                    market_authority_refresh_family_keys,
+                    set(market_authority_refresh_in_cut),
                 )
             )
             if metadata_refresh_family_keys:
@@ -9811,6 +9814,9 @@ def event_bound_live_adapter_from_trade_conn(
                         bind_slice,
                         mode="current_metadata",
                         metadata_sink=full_metadata,
+                        force_current_gamma=bool(
+                            market_authority_refresh_in_cut.intersection(bind_slice)
+                        ),
                     )
                 )
                 if _urgent_book_preemption("after_current_metadata"):
@@ -9825,6 +9831,9 @@ def event_bound_live_adapter_from_trade_conn(
                         bind_slice,
                         mode="current_metadata",
                         metadata_sink=full_metadata,
+                        force_current_gamma=bool(
+                            market_authority_refresh_in_cut.intersection(bind_slice)
+                        ),
                     )
                 )
                 if _urgent_book_preemption("after_day0_current_metadata"):
@@ -9886,6 +9895,11 @@ def event_bound_live_adapter_from_trade_conn(
                             bind_slice,
                             mode="current_metadata",
                             metadata_sink=full_metadata,
+                            force_current_gamma=bool(
+                                market_authority_refresh_in_cut.intersection(
+                                    bind_slice
+                                )
+                            ),
                         )
                     )
                     while True:
@@ -10056,6 +10070,11 @@ def event_bound_live_adapter_from_trade_conn(
                         probabilities,
                         mode="current_metadata_fallback",
                         metadata_sink=full_metadata,
+                        force_current_gamma=bool(
+                            market_authority_refresh_in_cut.intersection(
+                                probabilities
+                            )
+                        ),
                     )
                     if _urgent_book_preemption("after_fallback_metadata"):
                         return probabilities, None

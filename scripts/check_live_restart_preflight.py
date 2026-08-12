@@ -6187,7 +6187,6 @@ def _exit_retry_resumable_by_position() -> dict[str, dict[str, Any]]:
                 ON latest_exit.position_id = pc.position_id
                AND latest_exit.rn = 1
              WHERE pc.phase = 'pending_exit'
-               AND COALESCE(pc.exit_retry_count, 0) > 0
                AND COALESCE(pc.next_exit_retry_at, '') != ''
             """
         ).fetchall()

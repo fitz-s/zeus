@@ -8781,6 +8781,8 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         )
     }
     provider(probabilities, _dt.datetime.now(_dt.timezone.utc))
+    captured["market_authority_refresh"](frozenset({"missing-family"}))
+    provider(probabilities, _dt.datetime.now(_dt.timezone.utc))
     captured["market_authority_refresh"](frozenset({"family"}))
     provider(probabilities, _dt.datetime.now(_dt.timezone.utc))
     rebuilt_adapter = make_adapter()
@@ -8797,14 +8799,18 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         {metadata_key: metadata for metadata_key in metadata_keys},
         {metadata_key: metadata for metadata_key in metadata_keys},
         {metadata_key: metadata for metadata_key in metadata_keys},
+        {metadata_key: metadata for metadata_key in metadata_keys},
     ]
-    assert bind_calls == [True, True, True]
+    assert bind_calls == [True, True, True, True]
+    assert bind_trade_connections[:4] == [trade, trade, None, trade]
     assert refresh_hwm_calls[0] == {}
     assert set(refresh_hwm_calls[1]) == {"family"}
     assert refresh_hwm_calls[1]["family"].tzinfo is not None
-    assert bind_required_tokens == [None, None, None]
-    assert capture_required_tokens == [None, None, None]
+    assert bind_required_tokens == [None, None, None, None]
+    assert capture_required_tokens == [None, None, None, None]
     assert FakeClient.book_fetches == [
+        ("yes-token", "no-token"),
+        ("yes-token", "no-token"),
         ("yes-token", "no-token"),
         ("yes-token", "no-token"),
         ("yes-token", "no-token"),
