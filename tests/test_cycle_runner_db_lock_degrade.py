@@ -253,31 +253,38 @@ def test_live_health_composite_yields_to_held_monitor_with_fresh_status(monkeypa
     assert calls == ["live_health_composite"]
 
 
-def test_live_health_composite_yields_to_held_monitor_with_expired_status(monkeypatch):
-    """Held capital keeps priority even when the observability cut is stale."""
+def test_live_health_composite_breaks_held_monitor_defer_after_status_expires(
+    monkeypatch,
+):
+    """Held-monitor priority cannot indefinitely suppress its health witness."""
 
     import src.control.live_health as live_health
     import src.main as main
+    import src.observability.status_summary as status_summary
 
     calls = []
+    monkeypatch.setattr(main, "_status_summary_refresh_can_defer", lambda: False)
     monkeypatch.setattr(
         main,
         "_defer_for_held_position_monitor",
-        lambda job_name: calls.append(job_name) or True,
-    )
-    monkeypatch.setattr(
-        main,
-        "_status_summary_refresh_can_defer",
-        lambda: pytest.fail("held monitor owns admission before freshness reads"),
+        lambda _name: pytest.fail("expired status must bypass held-monitor defer"),
     )
     monkeypatch.setattr(
         live_health,
         "compute_composite_live_health",
-        lambda: pytest.fail("health scan must not compete with held capital"),
+        lambda: calls.append(("health", None)),
+    )
+    monkeypatch.setattr(
+        status_summary,
+        "write_cycle_pulse",
+        lambda payload: calls.append(("pulse", payload)),
     )
 
     assert main._live_health_composite_cycle.__wrapped__() is None
-    assert calls == ["live_health_composite"]
+    assert calls == [
+        ("pulse", {"mode": "heartbeat_pulse", "heartbeat": True}),
+        ("health", None),
+    ]
 
 
 def test_status_summary_refresh_defer_has_half_budget_backstop(monkeypatch, tmp_path):

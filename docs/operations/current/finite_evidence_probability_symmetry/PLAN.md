@@ -3483,3 +3483,11 @@ persisted canonical facts before deciding whether the obligation can close.
 This makes convergence depend on durable debt plus the ordinary command-
 recovery cadence, not on a future WS gap; rejected evidence remains open and
 reports its exact rejection reason.
+
+The same live proof found that the derived status cut could stay stale while
+the held monitor remained continuously active: the observability job yielded
+before checking its own freshness budget, so the old PID and pre-correction
+command conflict survived every successful scheduler tick. Held-capital I/O
+keeps priority only while both status cuts remain inside half their freshness
+budget; after that backstop, the read-only pulse and composite refresh run so
+operator health cannot ratchet stale. This changes no trading authority.

@@ -1990,10 +1990,13 @@ def _stop_boot_process_heartbeat(
 def _live_health_composite_cycle() -> None:
     """Refresh composite live-health without blocking the heartbeat pulse."""
 
-    if _defer_for_held_position_monitor("live_health_composite"):
+    refresh_can_defer = _status_summary_refresh_can_defer()
+    if refresh_can_defer and _defer_for_held_position_monitor(
+        "live_health_composite"
+    ):
         return
     if (
-        _status_summary_refresh_can_defer()
+        refresh_can_defer
         and _defer_for_active_entry_reactor("live_health_composite")
     ):
         return
