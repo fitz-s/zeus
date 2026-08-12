@@ -859,6 +859,8 @@ def resume_entries(
     *,
     issued_by: str = "control_plane",
     expected_override_issued_at: str | None = None,
+    expected_override_reason: str | None = None,
+    expected_override_issued_by: str | None = None,
 ) -> None:
     """CAS-resume the exact entry pause observed by an operator caller."""
     if issued_by not in {"control_plane", "operator"}:
@@ -866,6 +868,8 @@ def resume_entries(
             f"resume_entries requires issued_by in {{control_plane, operator}}, got {issued_by!r}"
         )
     expected_issued_at = str(expected_override_issued_at or "").strip()
+    expected_reason = str(expected_override_reason or "").strip()
+    expected_issued_by = str(expected_override_issued_by or "").strip()
     now_iso = datetime.now(timezone.utc).isoformat()
     conn = None
     try:
@@ -886,23 +890,41 @@ def resume_entries(
             if current_issued_by != "system_auto_pause":
                 conn.rollback()
                 raise ValueError(
-                    "resume_entries requires expected_override_issued_at for "
-                    "an operator/control-plane pause"
+                    "resume_entries requires expected_override_issued_at, "
+                    "expected_override_reason, and expected_override_issued_by "
+                    "for an operator/control-plane pause"
                 )
             expected_issued_at = current_issued_at
-        if current_issued_at != expected_issued_at:
+            expected_reason = current_reason
+            expected_issued_by = current_issued_by
+        elif current_issued_by == "system_auto_pause":
+            expected_reason = expected_reason or current_reason
+            expected_issued_by = expected_issued_by or current_issued_by
+        elif not expected_reason or not expected_issued_by:
+            conn.rollback()
+            raise ValueError(
+                "resume_entries requires expected_override_issued_at, "
+                "expected_override_reason, and expected_override_issued_by "
+                "for an operator/control-plane pause"
+            )
+        if (
+            current_issued_at != expected_issued_at
+            or current_reason != expected_reason
+            or current_issued_by != expected_issued_by
+        ):
             conn.rollback()
             raise ValueError(
                 "resume_entries override changed: "
-                f"expected={expected_issued_at!r} current={current_issued_at!r}"
+                f"expected={(expected_issued_at, expected_reason, expected_issued_by)!r} "
+                f"current={(current_issued_at, current_reason, current_issued_by)!r}"
             )
         pause_result = expire_control_override(
             conn,
             override_id=AUTO_PAUSE_OVERRIDE_ID,
             expired_at=now_iso,
-            expected_issued_at=current_issued_at,
-            expected_reason=current_reason,
-            expected_issued_by=current_issued_by,
+            expected_issued_at=expected_issued_at,
+            expected_reason=expected_reason,
+            expected_issued_by=expected_issued_by,
         )
         if int(pause_result.get("expired_count") or 0) != 1:
             conn.rollback()

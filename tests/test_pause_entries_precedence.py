@@ -173,6 +173,8 @@ def test_resume_entries_clears_operator_row():
         "test_clear",
         issued_by="control_plane",
         expected_override_issued_at=expected_issued_at,
+        expected_override_reason="manual operator pause",
+        expected_override_issued_by="control_plane",
     )
 
     # Confirm expired after resume
@@ -219,6 +221,26 @@ def test_resume_entries_requires_cas_for_operator_pause():
     conn.close()
 
 
+def test_resume_entries_rejects_issued_at_only_legacy_deploy_release():
+    conn = get_world_connection()
+    _seed_operator_row(conn)
+    state = query_control_override_state(conn)
+    conn.close()
+
+    with pytest.raises(ValueError, match="expected_override_reason"):
+        cp.resume_entries(
+            "legacy_deploy_release",
+            issued_by="control_plane",
+            expected_override_issued_at=state["entries_pause_issued_at"],
+        )
+
+    conn = get_world_connection()
+    preserved = query_control_override_state(conn)
+    conn.close()
+    assert preserved["entries_paused"] is True
+    assert preserved["entries_pause_reason"] == "manual operator pause"
+
+
 def test_resume_entries_preserves_newer_pause_after_stale_observation():
     conn = get_world_connection()
     _seed_operator_row(conn)
@@ -245,6 +267,8 @@ def test_resume_entries_preserves_newer_pause_after_stale_observation():
             "stale_resume",
             issued_by="control_plane",
             expected_override_issued_at=stale_issued_at,
+            expected_override_reason="manual operator pause",
+            expected_override_issued_by="control_plane",
         )
 
     conn = get_world_connection()
