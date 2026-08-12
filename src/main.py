@@ -6181,16 +6181,21 @@ def _yield_incomplete_day0_after_monitor_once(
         )
 
 
-def _paused_forecast_carrier_priority_allowed() -> bool:
+def _paused_forecast_carrier_priority_allowed(
+    *,
+    exposure_priority_served: bool = False,
+) -> bool:
     """Prove a paused no-submit carrier turn cannot defer open exposure."""
 
     # SCOPE: one wake selection may advance a forecast carrier only while the
-    # durable global entry pause is active and canonical monitor exposure is empty;
-    # it never resumes entries or permits BUY submission. DRAIN: exact held-SELL
-    # and fill retain strict priority, while a selected forecast materializes through
-    # the no-submit carrier path before acknowledgement. RESET: pause clear/unreadable
-    # control, nonempty/unknown exposure, or failed selection restores ordinary
-    # Day0-first priority. ChainOnly/foreign inventory remains owned by chain-mirror.
+    # durable global entry pause is active and canonical monitor exposure is either
+    # empty or has completed the selected Day0 monitor turn; it never resumes entries
+    # or permits BUY submission. DRAIN: exact held-SELL and fill retain strict
+    # priority; nonempty exposure gets its Day0 monitor first, then the one-turn yield
+    # advances a selected forecast through the no-submit carrier path before ack.
+    # RESET: pause clear/unreadable control, unknown exposure, failed selection, or
+    # consumption of the one-turn yield restores ordinary Day0-first priority.
+    # ChainOnly/foreign inventory remains owned by chain-mirror.
     try:
         from src.control.control_plane import _refresh_entries_pause_from_durable_state
 
@@ -6200,7 +6205,12 @@ def _paused_forecast_carrier_priority_allowed() -> bool:
             and pause_state.get("entries_paused") is True
         ):
             return False
-        return _current_periodic_monitor_obligation_count() == 0
+        exposure_count = _current_periodic_monitor_obligation_count()
+        if exposure_count is None:
+            return False
+        return exposure_count == 0 or (
+            exposure_count > 0 and exposure_priority_served
+        )
     except Exception:
         logger.warning(
             "paused forecast carrier authority unavailable; retaining Day0 priority",
@@ -6237,7 +6247,9 @@ def _edli_reactor_wake_poll_once() -> bool:
     terminal_day0_cleanup_yield = _edli_terminal_day0_cleanup_yield.is_set()
     _edli_terminal_day0_cleanup_yield.clear()
     paused_forecast_carrier_priority_allowed = (
-        _paused_forecast_carrier_priority_allowed()
+        _paused_forecast_carrier_priority_allowed(
+            exposure_priority_served=bool(day0_post_monitor_yield_ids),
+        )
     )
     try:
         if day0_post_monitor_yield_ids:

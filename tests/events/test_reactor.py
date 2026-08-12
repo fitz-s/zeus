@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-10
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Last reused/audited: 2026-08-12
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -1595,7 +1595,11 @@ def test_published_paused_forecast_wake_materialization_outcome_controls_ack(
     )
     monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
     monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
-    monkeypatch.setattr(main, "_paused_forecast_carrier_priority_allowed", lambda: paused[0])
+    monkeypatch.setattr(
+        main,
+        "_paused_forecast_carrier_priority_allowed",
+        lambda **_kwargs: paused[0],
+    )
     monkeypatch.setattr(main, "_forecast_wake_held_families", lambda _families: frozenset())
     monkeypatch.setattr(main, "_edli_next_redecision_source", lambda: "pause-antibody")
     monkeypatch.setattr(main, "_edli_build_forecast_snapshot_events", build_carrier)
@@ -4119,7 +4123,7 @@ def test_paused_forecast_carrier_priority_preserves_fill_and_exact_held_priority
     )
 
 
-def test_paused_forecast_carrier_priority_requires_pause_and_empty_exposure(monkeypatch):
+def test_paused_forecast_carrier_priority_requires_pause_and_serviced_exposure(monkeypatch):
     import src.control.control_plane as control_plane
     import src.main as main
 
@@ -4140,6 +4144,12 @@ def test_paused_forecast_carrier_priority_requires_pause_and_empty_exposure(monk
     assert main._paused_forecast_carrier_priority_allowed() is True
     exposure[0] = 1
     assert main._paused_forecast_carrier_priority_allowed() is False
+    assert (
+        main._paused_forecast_carrier_priority_allowed(
+            exposure_priority_served=True,
+        )
+        is True
+    )
     exposure[0] = None
     assert main._paused_forecast_carrier_priority_allowed() is False
 
@@ -4248,6 +4258,90 @@ def test_paused_empty_exposure_selects_forecast_carrier_without_day0_yield(
         main._edli_initialize_reactor_wake_cursor()
 
 
+def test_paused_open_exposure_selects_forecast_after_day0_monitor_yield(
+    monkeypatch,
+):
+    """A completed Day0 monitor earns one bounded no-submit carrier turn."""
+
+    import src.control.control_plane as control_plane
+    import src.main as main
+    from src.runtime import reactor_wake
+
+    family = ("Paris", "2026-08-03", "high")
+    forecast = reactor_wake.ReactorWake(
+        "forecast-carrier",
+        "2026-08-02T12:00:00+00:00",
+        "forecast",
+        "forecast_posterior_advanced",
+        forecast_families=(family,),
+    )
+    day0 = reactor_wake.ReactorWake(
+        "day0-monitored",
+        "2026-08-02T12:00:01+00:00",
+        "day0",
+        "day0_extreme_event_committed",
+        forecast_families=(family,),
+    )
+    selections: list[dict[str, object]] = []
+    cycle_kwargs: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        control_plane,
+        "_refresh_entries_pause_from_durable_state",
+        lambda: {"status": "ok", "entries_paused": True},
+    )
+    monkeypatch.setattr(main, "_current_periodic_monitor_obligation_count", lambda: 1)
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_exit_monitor_excluded_wake_ids", lambda: frozenset())
+    monkeypatch.setattr(
+        main,
+        "_collateral_authority_wake_backoff_ids",
+        lambda: frozenset(),
+    )
+    monkeypatch.setattr(main, "_forecast_wake_held_families", lambda _families: frozenset())
+    monkeypatch.setattr(main, "_edli_reactor_active_lock", threading.Lock())
+    monkeypatch.setattr(
+        main,
+        "_edli_event_reactor_cycle",
+        lambda **kwargs: cycle_kwargs.update(kwargs) is None,
+    )
+    monkeypatch.setattr(
+        main,
+        "_acknowledge_edli_reactor_wake_batch",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def read_wake(**kwargs):
+        selections.append(kwargs)
+        return forecast
+
+    monkeypatch.setattr(reactor_wake, "read_reactor_wake", read_wake)
+    monkeypatch.setattr(
+        reactor_wake,
+        "coalescible_reactor_wakes",
+        lambda selected: (selected,),
+    )
+    main._edli_initialize_reactor_wake_cursor()
+    try:
+        main._yield_incomplete_day0_after_monitor_once(
+            day0,
+            monitor_succeeded=True,
+        )
+        assert main._edli_reactor_wake_poll_once() is True
+        assert selections == [
+            {
+                "exclude_wake_ids": frozenset({day0.wake_id}),
+                "prefer_exact_held_sell": True,
+                "prefer_forecast_carrier_progress": True,
+                "fail_on_error": True,
+            }
+        ]
+        assert cycle_kwargs["producer_wake_ids"] == (forecast.wake_id,)
+        assert cycle_kwargs["allow_paused_forecast_snapshot_completion"] is True
+    finally:
+        main._edli_initialize_reactor_wake_cursor()
+
+
 def test_active_foreign_monitor_yields_day0_for_one_material_wake(monkeypatch):
     import src.main as main
     from src.runtime import reactor_wake
@@ -4284,7 +4378,7 @@ def test_active_foreign_monitor_yields_day0_for_one_material_wake(monkeypatch):
     monkeypatch.setattr(
         main,
         "_paused_forecast_carrier_priority_allowed",
-        lambda: False,
+        lambda **_kwargs: False,
     )
     monkeypatch.setattr(
         main,
