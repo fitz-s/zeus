@@ -1,5 +1,5 @@
 # Created: 2026-05-18
-# Last reused/audited: 2026-08-10
+# Last reused/audited: 2026-08-12
 # Authority basis: active finite-evidence plan restart-guard SCOPE/DRAIN/RESET; PRECEDENCE-1
 """Antibody tests for PRECEDENCE-1: pause_entries operator precedence guard.
 
@@ -165,10 +165,15 @@ def test_resume_entries_clears_operator_row():
     # Confirm paused before resume
     state_before = query_control_override_state(conn)
     assert state_before["entries_paused"] is True
+    expected_issued_at = state_before["entries_pause_issued_at"]
     conn.close()
 
     # Call public resume
-    cp.resume_entries("test_clear", issued_by="control_plane")
+    cp.resume_entries(
+        "test_clear",
+        issued_by="control_plane",
+        expected_override_issued_at=expected_issued_at,
+    )
 
     # Confirm expired after resume
     conn2 = get_world_connection()
@@ -194,7 +199,59 @@ def test_resume_entries_clears_operator_row():
 def test_resume_entries_rejects_non_operator_caller():
     """resume_entries must raise ValueError when called with system_auto_pause."""
     with pytest.raises(ValueError, match="resume_entries requires issued_by"):
-        cp.resume_entries("x", issued_by="system_auto_pause")
+        cp.resume_entries(
+            "x",
+            issued_by="system_auto_pause",
+            expected_override_issued_at="2026-08-12T00:00:00+00:00",
+        )
+
+
+def test_resume_entries_requires_cas_for_operator_pause():
+    conn = get_world_connection()
+    _seed_operator_row(conn)
+    conn.close()
+
+    with pytest.raises(ValueError, match="requires expected_override_issued_at"):
+        cp.resume_entries("stale_legacy_resume", issued_by="control_plane")
+
+    conn = get_world_connection()
+    assert query_control_override_state(conn)["entries_paused"] is True
+    conn.close()
+
+
+def test_resume_entries_preserves_newer_pause_after_stale_observation():
+    conn = get_world_connection()
+    _seed_operator_row(conn)
+    stale_issued_at = query_control_override_state(conn)["entries_pause_issued_at"]
+    newer_issued_at = datetime.now(timezone.utc).isoformat()
+    upsert_control_override(
+        conn,
+        override_id=AUTO_PAUSE_OVERRIDE_ID,
+        target_type="global",
+        target_key="entries",
+        action_type="gate",
+        value="true",
+        issued_by="control_plane",
+        issued_at=newer_issued_at,
+        reason="newer operator pause",
+        effective_until=None,
+        precedence=DEFAULT_CONTROL_OVERRIDE_PRECEDENCE,
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(ValueError, match="resume_entries override changed"):
+        cp.resume_entries(
+            "stale_resume",
+            issued_by="control_plane",
+            expected_override_issued_at=stale_issued_at,
+        )
+
+    conn = get_world_connection()
+    state = query_control_override_state(conn)
+    assert state["entries_paused"] is True
+    assert state["entries_pause_reason"] == "newer operator pause"
+    conn.close()
 
 
 def test_entries_pause_read_is_db_authoritative_when_memory_is_stale_false():

@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-11
+# Last reused/audited: 2026-08-12
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -22472,6 +22472,7 @@ def test_global_batch_reduce_only_prefilters_scan_prepare_and_book_scope(
     scan_seen: list[tuple[int, object]] = []
     prepared_seen: list[frozenset[str]] = []
     book_seen: list[frozenset[str]] = []
+    candidate_policy_seen: list[tuple[str | None, str | None]] = []
 
     monkeypatch.setattr(
         global_batch_runtime,
@@ -22487,6 +22488,11 @@ def test_global_batch_reduce_only_prefilters_scan_prepare_and_book_scope(
         global_batch_runtime,
         "_store_global_auction_receipt",
         lambda *_args, **_kwargs: 1,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "current_venue_auction_identity",
+        lambda *_args, **_kwargs: "venue-identity",
     )
     monkeypatch.setattr(
         global_batch_runtime,
@@ -22562,6 +22568,13 @@ def test_global_batch_reduce_only_prefilters_scan_prepare_and_book_scope(
         return probabilities, None
 
     def select(*_args, **_kwargs):
+        policy = _kwargs["candidate_policy_rejection_resolver"]
+        candidate_policy_seen.append(
+            (
+                policy(SimpleNamespace(action="BUY")),
+                policy(SimpleNamespace(action="SELL")),
+            )
+        )
         return PreparedGlobalAuctionResult(
             decision=GlobalSingleOrderDecision(
                 shares=Decimal("0"),
@@ -22639,6 +22652,11 @@ def test_global_batch_reduce_only_prefilters_scan_prepare_and_book_scope(
         held_family_keys,
         held_family_keys,
         frozenset(all_scope.family_keys),
+    ]
+    assert candidate_policy_seen == [
+        ("GLOBAL_BUY_CANDIDATES_DISABLED", None),
+        ("GLOBAL_BUY_CANDIDATES_DISABLED", None),
+        (None, None),
     ]
 
 

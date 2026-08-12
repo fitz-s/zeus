@@ -6786,8 +6786,16 @@ def process_current_global_batch(
                     raise ValueError("GLOBAL_EXCLUDED_CANDIDATE_UNKNOWN")
 
             def candidate_policy(candidate):
+                action = str(
+                    getattr(candidate, "action", "BUY") or "BUY"
+                ).upper()
+                # SCOPE: BUY candidates in this cut only. DRAIN: SELL/HOLD/CASH
+                # remain on the common objective. RESET: the next cut receives
+                # fresh buy_candidates_enabled authority.
+                if not buy_candidates_enabled and action == "BUY":
+                    return "GLOBAL_BUY_CANDIDATES_DISABLED"
                 key = (
-                    str(getattr(candidate, "action", "BUY") or "BUY").upper(),
+                    action,
                     str(getattr(candidate, "family_key", "") or ""),
                     str(getattr(candidate, "bin_id", "") or ""),
                     str(getattr(candidate, "side", "") or ""),

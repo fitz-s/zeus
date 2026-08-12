@@ -851,17 +851,47 @@ def pause_entries(
             pass
 
 
-def resume_entries(reason: str, *, issued_by: str = "control_plane") -> None:
-    """Operator-callable resume. Clears the entries_paused override regardless
-    of who issued it. Mirrors the _apply_command("resume", ...) path.
-    """
+def resume_entries(
+    reason: str,
+    *,
+    issued_by: str = "control_plane",
+    expected_override_issued_at: str | None = None,
+) -> None:
+    """CAS-resume the exact entry pause observed by an operator caller."""
     if issued_by not in {"control_plane", "operator"}:
         raise ValueError(
             f"resume_entries requires issued_by in {{control_plane, operator}}, got {issued_by!r}"
         )
+    expected_issued_at = str(expected_override_issued_at or "").strip()
     now_iso = datetime.now(timezone.utc).isoformat()
+    conn = None
     try:
+        # SCOPE: one selected entries-pause generation. DRAIN: an operator
+        # re-reads its issued_at and retries explicitly. RESET: only that exact
+        # generation may expire; a newer pause remains selected.
         conn = get_world_connection()
+        conn.execute("BEGIN IMMEDIATE")
+        current = _active_entries_pause_row(conn, now_iso=now_iso)
+        current_issued_at = (
+            str(current["issued_at"] or "") if current is not None else ""
+        )
+        current_issued_by = (
+            str(current["issued_by"] or "") if current is not None else ""
+        )
+        if not expected_issued_at:
+            if current_issued_by != "system_auto_pause":
+                conn.rollback()
+                raise ValueError(
+                    "resume_entries requires expected_override_issued_at for "
+                    "an operator/control-plane pause"
+                )
+            expected_issued_at = current_issued_at
+        if current_issued_at != expected_issued_at:
+            conn.rollback()
+            raise ValueError(
+                "resume_entries override changed: "
+                f"expected={expected_issued_at!r} current={current_issued_at!r}"
+            )
         expire_control_override(
             conn,
             override_id=AUTO_PAUSE_OVERRIDE_ID,
@@ -873,12 +903,21 @@ def resume_entries(reason: str, *, issued_by: str = "control_plane") -> None:
             expired_at=now_iso,
         )
         conn.commit()
-        conn.close()
         logger.warning("ENTRIES_RESUMED reason=%s issued_by=%s", reason, issued_by)
+    except ValueError:
+        logger.warning(
+            "ENTRIES_RESUME_CAS_REFUSED reason=%s issued_by=%s",
+            reason,
+            issued_by,
+        )
+        raise
     except Exception as exc:
         logger.error("Failed to persist resume to DB: %s", exc, exc_info=True)
         _control_state["control_db_fault"] = True
         raise
+    finally:
+        if conn is not None:
+            conn.close()
     # Refresh in-memory state from DB so downstream callers see the cleared pause
     refresh_control_state()
 
