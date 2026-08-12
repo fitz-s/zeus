@@ -4918,7 +4918,7 @@ def _missing_entry_projection_from_linked_fill(
         "last_monitor_edge": None,
         "last_monitor_market_price": None,
         "decision_snapshot_id": str(command.get("snapshot_id") or snapshot.get("snapshot_id") or ""),
-        "entry_method": str(_meta("entry_method", "exchange_reconcile_fill_recovery") or ""),
+        "entry_method": str(_meta("entry_method", "qkernel_spine") or ""),
         "strategy_key": str(_meta("strategy_key", "opening_inertia") or "opening_inertia"),
         "edge_source": str(_meta("edge_source", "exchange_reconcile_linked_fill") or ""),
         "discovery_mode": str(_meta("discovery_mode", "exchange_reconcile") or ""),

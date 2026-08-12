@@ -5252,7 +5252,11 @@ def _edli_trade_case_for_command(
         and no_token_id
     ):
         return {}
-    method = "qkernel_spine" if qkernel_certified else "venue_fact_recovery"
+    # ``entry_method`` is the probability-refresh mechanism consumed by
+    # monitor_refresh, not the provenance of the historical fill evidence.
+    # A venue-fact-only recovery must therefore reseed through the current
+    # qkernel path; ``discovery_mode`` retains the recovery provenance below.
+    method = "qkernel_spine"
     discovery_mode = "update_reaction" if qkernel_certified else "venue_fact_recovery"
     return {
         "trade_id": str(command.get("position_id") or ""),

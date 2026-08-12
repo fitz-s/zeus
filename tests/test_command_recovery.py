@@ -20545,7 +20545,7 @@ class TestRecoveryResolutionTable:
             "shares": pytest.approx(40.25),
             "entry_price": pytest.approx(0.44),
             "order_status": "filled",
-            "entry_method": "venue_fact_recovery",
+            "entry_method": "qkernel_spine",
             "strategy_key": "day0_nowcast_entry",
             "p_posterior": pytest.approx(0.0),
             "entry_ci_width": pytest.approx(0.0),
@@ -20566,6 +20566,14 @@ class TestRecoveryResolutionTable:
             "ENTRY_ORDER_POSTED",
             "ENTRY_ORDER_FILLED",
         ]
+        from src.contracts.semantic_types import EntryMethod
+
+        assert EntryMethod(current["entry_method"]) is EntryMethod.QKERNEL_SPINE
+        assert EntryMethod("venue_fact_recovery") is EntryMethod.QKERNEL_SPINE
+        assert (
+            EntryMethod("exchange_reconcile_fill_recovery")
+            is EntryMethod.QKERNEL_SPINE
+        )
 
     def test_partial_edli_entry_without_projection_recovers_active_partial_position_from_events(
         self,
