@@ -106,6 +106,77 @@ class TestForwardCapitalAudit:
         assert activity["preboundary_entry_fill_count"] == 1
         conn.close()
 
+    def test_activity_counts_confirmed_and_partial_execution_facts(self):
+        from scripts.audit_realtime_pnl import _cohort_activity
+
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(
+            "CREATE TABLE venue_commands (command_id TEXT, intent_kind TEXT, "
+            "state TEXT, created_at TEXT);"
+            "CREATE TABLE execution_fact (command_id TEXT, position_id TEXT, "
+            "order_role TEXT, filled_at TEXT, terminal_exec_status TEXT);"
+            "CREATE TABLE venue_order_facts (command_id TEXT, state TEXT);"
+            "CREATE TABLE position_current (position_id TEXT, strategy_key TEXT, "
+            "decision_law_id TEXT);"
+        )
+        conn.executemany(
+            "INSERT INTO venue_commands VALUES (?,?,?,?)",
+            (
+                ("confirmed", "ENTRY", "FILLED", "2026-08-11T23:10:00+00:00"),
+                ("partial", "ENTRY", "EXPIRED", "2026-08-11T23:12:00+00:00"),
+            ),
+        )
+        conn.executemany(
+            "INSERT INTO execution_fact VALUES (?,?,?,?,?)",
+            (
+                (
+                    "confirmed",
+                    "confirmed-position",
+                    "entry",
+                    "2026-08-11T23:11:00+00:00",
+                    "CONFIRMED",
+                ),
+                (
+                    "partial",
+                    "partial-position",
+                    "entry",
+                    "2026-08-11T23:13:00+00:00",
+                    "partial",
+                ),
+            ),
+        )
+        conn.executemany(
+            "INSERT INTO venue_order_facts VALUES (?,?)",
+            (("confirmed", "MATCHED"), ("partial", "PARTIALLY_MATCHED")),
+        )
+        conn.executemany(
+            "INSERT INTO position_current VALUES (?,?,?)",
+            (
+                (
+                    "confirmed-position",
+                    "forecast_qkernel_entry",
+                    "predicted_bin_ev_v1",
+                ),
+                (
+                    "partial-position",
+                    "day0_nowcast_entry",
+                    "predicted_bin_ev_v1",
+                ),
+            ),
+        )
+
+        activity = _cohort_activity(
+            conn,
+            since=datetime(2026, 8, 11, 23, tzinfo=timezone.utc),
+            as_of=datetime(2026, 8, 12, 0, tzinfo=timezone.utc),
+        )
+
+        assert activity["entry_filled_position_count"] == 2
+        assert activity["filled_command_count"] == 2
+        assert activity["chain_matched_fact_count"] == 2
+        assert activity["chain_fact_coverage_complete"] is True
+        conn.close()
+
     def test_zero_realized_positions_never_prove_capital_gain(self):
         from scripts.audit_realtime_pnl import _forward_capital_summary
 
@@ -4809,6 +4880,69 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert curve["realized_position_count"] == 1
         assert curve["fee_bound_usd"] == pytest.approx(0.058812)
         assert curve["net_realized_pnl_usd"] == pytest.approx(4.621188)
+        conn.close()
+
+    def test_partial_entry_fill_contributes_exact_realized_capital(self):
+        from src.events.day0_authority import bind_day0_probability_semantics
+
+        conn = self._live_capital_conn(
+            phase="settled",
+            gross_pnl=3.62,
+            exit_price=None,
+        )
+        fee_json = json.dumps({"fee_rate_fraction": 0.05})
+        conn.execute(
+            "INSERT INTO venue_submission_envelopes VALUES (?,?,?)",
+            ("partial-envelope", 1, fee_json),
+        )
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?,?,?,?,?)",
+            (
+                "partial-command",
+                "current-trial",
+                "ENTRY",
+                bind_day0_probability_semantics("partial-current-q"),
+                "partial-envelope",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO execution_fact VALUES (?,?,?,?,?,?,?)",
+            (
+                "partial-command",
+                "current-trial",
+                "entry",
+                "2026-08-11T15:30:00+00:00",
+                "partial",
+                0.53,
+                2.0,
+            ),
+        )
+        conn.execute(
+            "UPDATE position_current SET cost_basis_usd=2.62,realized_pnl_usd=3.62"
+        )
+        conn.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?)",
+            (
+                "current-trial",
+                2,
+                "SETTLED",
+                "2026-08-11T16:52:07+00:00",
+                json.dumps({"pnl": 3.62}),
+            ),
+        )
+        conn.commit()
+
+        curve = riskguard_module._day0_live_realized_capital_curve(
+            conn,
+            window_days=7.0,
+            as_of=datetime(2026, 8, 11, 17, tzinfo=timezone.utc),
+        )
+
+        assert curve["status"] == "positive"
+        assert curve["blocked_position_count"] == 0
+        assert curve["realized_position_count"] == 1
+        assert curve["realized_capital_committed_usd"] == pytest.approx(2.6785)
+        assert curve["net_realized_pnl_usd"] == pytest.approx(3.5615)
         conn.close()
 
     def test_validated_shadow_ignores_unresolved_live_fill(self):

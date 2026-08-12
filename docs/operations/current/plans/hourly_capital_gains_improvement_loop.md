@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-12 12:18 CDT tick — partial fill 不再从当前资本证明中消失
+- **当前动作:** entries pause 保持；剩余有真实规模且有 bid 的持仓全部 `bid < current q`，强卖会降低 posterior-mean expected capital，因此本 tick 的可执行决策仍为 HOLD，而不是为制造退出记录低卖。
+- **前向审计反例:** 以 `2026-08-11T00:00:00Z` 为显式边界，现有 current-law audit 报告 20 个 realized positions、3 个独立 target-date clusters、fee-bound net `+$15.733464`，但仍 fail-closed 为 `capital_truth_degraded`。根因不是策略亏损，而是资本事实 join 只接受 `execution_fact=filled`：Shanghai `5c16a631-b63` 的第二笔 maker entry 已由两条 venue trade facts 真实成交 5.744678 shares、order fact 为 `PARTIALLY_MATCHED`、execution fact 为 `partial`，且与第一笔合计精确复现 canonical 10.744678 shares / `$4.59468` cost basis，却被审计遗漏；该仓已结算盈利 `+$6.15`。
+- **最小修复:** RiskGuard capital curve 与 forward audit 只扩大到带 `filled_at` 的 `filled|confirmed|partial` execution facts；链上覆盖相应接受 `MATCHED|PARTIALLY_MATCHED`。pending、matched-only、零成交和未确认 intent 仍不计入资本事实；交易准入、订单选择、概率、Kelly、settlement 与 pause 均不改变。
+- **验证:** RiskGuard 全文件 `160 passed`；Ruff、`py_compile` 与 `git diff --check` 通过。尚未 live；部署后必须在 canonical DB 上重跑同边界 audit，清除所有 capital-identity blockers，并重新报告实际 net/e-value，不能把预期修复值或单笔胜出冒充 robust proof。
+
 ### 2026-08-12 12:10 CDT tick — 首笔全局最优实际退出兑现；current-law capital curve 转正
 - **真实成交:** complete global auction 在同一 current probability/book/wealth cut 中选择 Shanghai `288de757-908` 的 20 YES shares；preflight receipt `415446` 为 `STABLE`。executor 提交合法 `0.95` FAK floor，venue order `0xdafefd...63a43` 全部以改善价 `0.999` 成交，transaction `0x95b23b...4123`；REST confirmed trade fact、wallet fill、zero chain shares 和 lifecycle `economically_closed` 已收敛。
 - **资本结果:** canonical cost basis `$1.40`，gross proceeds `$19.98`，canonical gross realized PnL `+$18.58`。按 entry/exit 各自冻结的 5% weather fee schedule 计上界，entry fee `$0.065100`、exit fee `$0.000999`，该仓 fee-bound net realized PnL `+$18.513901`，realized-capital return 约 `+1263.0%`。这不是 expected EV，也不是未成交报价。

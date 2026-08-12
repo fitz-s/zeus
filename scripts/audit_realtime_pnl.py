@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-03-30; last_reviewed=2026-08-11; last_reused=2026-08-11
+# Lifecycle: created=2026-03-30; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: Prove forward-cohort realized capital from current-law canonical fill and close facts.
 # Reuse: Require explicit UTC --since; never include earlier portfolio history.
 """Read-only forward realized-capital audit.
@@ -69,7 +69,8 @@ def _cohort_activity(
         "JOIN venue_commands AS vc ON vc.command_id=ef.command_id "
         "WHERE ef.filled_at>=? AND ef.filled_at<=? "
         "AND vc.created_at>=? AND vc.created_at<=? "
-        "AND lower(COALESCE(ef.terminal_exec_status,''))='filled' "
+        "AND lower(COALESCE(ef.terminal_exec_status,'')) "
+        "IN ('filled','confirmed','partial') "
         "GROUP BY ef.order_role ORDER BY ef.order_role",
         (since_iso, as_of_iso, since_iso, as_of_iso),
     ).fetchall()
@@ -80,11 +81,13 @@ def _cohort_activity(
         "JOIN venue_commands AS vc ON vc.command_id=ef.command_id "
         "WHERE ef.filled_at>=? AND ef.filled_at<=? "
         "AND vc.created_at>=? AND vc.created_at<=? "
-        "AND lower(COALESCE(ef.terminal_exec_status,''))='filled'"
+        "AND lower(COALESCE(ef.terminal_exec_status,'')) "
+        "IN ('filled','confirmed','partial')"
         ") "
         "SELECT COUNT(*),SUM(CASE WHEN EXISTS ("
         "SELECT 1 FROM venue_order_facts AS vof "
-        "WHERE vof.command_id=filled.command_id AND upper(vof.state)='MATCHED'"
+        "WHERE vof.command_id=filled.command_id "
+        "AND upper(vof.state) IN ('MATCHED','PARTIALLY_MATCHED')"
         ") THEN 1 ELSE 0 END) FROM filled",
         (since_iso, as_of_iso, since_iso, as_of_iso),
     ).fetchone()
@@ -95,7 +98,8 @@ def _cohort_activity(
         "JOIN venue_commands AS vc ON vc.command_id=ef.command_id "
         "WHERE ef.order_role='entry' AND ef.filled_at>=? AND ef.filled_at<=? "
         "AND vc.created_at>=? AND vc.created_at<=? "
-        "AND lower(COALESCE(ef.terminal_exec_status,''))='filled'",
+        "AND lower(COALESCE(ef.terminal_exec_status,'')) "
+        "IN ('filled','confirmed','partial')",
         (since_iso, as_of_iso, since_iso, as_of_iso),
     ).fetchall()
     preboundary_entry_fill_count = int(
@@ -105,7 +109,8 @@ def _cohort_activity(
             "JOIN venue_commands AS vc ON vc.command_id=ef.command_id "
             "WHERE ef.order_role='entry' AND ef.filled_at>=? AND ef.filled_at<=? "
             "AND vc.created_at<? "
-            "AND lower(COALESCE(ef.terminal_exec_status,''))='filled'",
+            "AND lower(COALESCE(ef.terminal_exec_status,'')) "
+            "IN ('filled','confirmed','partial')",
             (since_iso, as_of_iso, since_iso),
         ).fetchone()[0]
         or 0

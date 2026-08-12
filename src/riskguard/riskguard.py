@@ -2959,11 +2959,13 @@ def _live_realized_capital_curve(
         "AND pc.decision_law_id='predicted_bin_ev_v1' "
         "AND vc.intent_kind='ENTRY' AND ef.order_role='entry' "
         "AND ef.filled_at IS NOT NULL "
-        "AND lower(COALESCE(ef.terminal_exec_status,'')) IN ('filled','confirmed') "
+        "AND lower(COALESCE(ef.terminal_exec_status,'')) "
+        "IN ('filled','confirmed','partial') "
         "AND pc.position_id IN ("
         "SELECT position_id FROM execution_fact "
         "WHERE order_role='entry' AND filled_at>=? "
-        "AND lower(COALESCE(terminal_exec_status,'')) IN ('filled','confirmed')) "
+        "AND lower(COALESCE(terminal_exec_status,'')) "
+        "IN ('filled','confirmed','partial')) "
         "ORDER BY pc.position_id,ef.filled_at,vc.command_id",
         (strategy_key, cutoff.isoformat()),
     ).fetchall()
@@ -3163,7 +3165,8 @@ def _live_realized_capital_curve(
         "JOIN venue_submission_envelopes AS vse ON vse.envelope_id=vc.envelope_id "
         "WHERE vc.intent_kind='EXIT' AND ef.order_role='exit' "
         "AND ef.filled_at IS NOT NULL "
-        "AND lower(COALESCE(ef.terminal_exec_status,'')) IN ('filled','confirmed') "
+        "AND lower(COALESCE(ef.terminal_exec_status,'')) "
+        "IN ('filled','confirmed','partial') "
         f"AND vc.position_id IN ({placeholders})",
         tuple(position_ids),
     ).fetchall()
