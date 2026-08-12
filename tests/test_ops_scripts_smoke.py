@@ -3281,7 +3281,7 @@ def test_deploy_live_post_start_monitor_wait_is_per_position(
     assert "pos-2" in detail
 
 
-def test_deploy_live_post_start_monitor_wait_accepts_one_coverage_tranche(
+def test_deploy_live_post_start_monitor_wait_rejects_partial_coverage_tranche(
     monkeypatch, tmp_path
 ):
     dl = _load("deploy_live_monitor_cadence_wait_tranche", "deploy_live.py")
@@ -3346,10 +3346,9 @@ def test_deploy_live_post_start_monitor_wait_accepts_one_coverage_tranche(
         timeout_seconds=0,
     )
 
-    assert ok is True
-    assert "progress_positions=2" in detail
-    assert "required_progress=2" in detail
-    assert "remaining_for_continuous_coverage=4" in detail
+    assert ok is False
+    assert "stale_or_missing_positions=4" in detail
+    assert "pos-2" in detail
 
 
 def test_deploy_live_post_start_monitor_wait_rejects_future_monitor_event(

@@ -4,6 +4,31 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-12 Deploy monitor gate and restart reset share one proof
+
+Production loaded the intended SHA and began held-position monitoring, but the
+deploy command accepted one coverage tranche and immediately asked the restart
+guard to prove full-book coverage.  Production accepted four of twelve fresh
+decisions as sufficient; four positions were still stale when the reset proof
+ran, so the global entry pause remained selected even though the monitor
+continued to drain normally.  This is a control-flow contradiction, not
+evidence that the fresh-entry universe lacks alpha.
+
+The post-start monitor gate now waits for the same full-book condition consumed
+by the restart-guard reset: every canonical open position has a fresh
+`MONITOR_REFRESHED` decision after this boot, with no future-dated event.  It
+does not weaken input freshness, chain-risk, queue, or loaded-SHA checks.  The
+existing eight-minute bound covers the documented three two-minute coverage
+cycles plus launch jitter.
+
+SCOPE is only this deploy invocation's global entry pause.  DRAIN is the
+recurring held monitor covering every canonical open position.  RESET is zero
+stale/missing and zero future monitor events against the launch floor; a newly
+opened or stale position restores the wait.  Acceptance requires an antibody
+that rejects partial tranche coverage, the existing complete/no-position/
+future-event/chain-risk cases, and one live restart whose full-book proof and
+canonical CAS reset both pass before entries resume.
+
 ## 2026-08-12 Fresh target-specific ENS shape is required for entry
 
 The current forecast database contained 190 latest family certificates: 176
