@@ -3752,3 +3752,32 @@ admission gate;
 
 Allowed files are `src/engine/cycle_runtime.py`,
 `tests/test_live_safety_invariants.py`, and this plan.
+
+## 2026-08-12 Sub-min health binds the held outcome token and current book
+
+Production health classified two `buy_no` holdings with the YES outcome token's
+book because its read model joined every position through `token_id`.  It then
+reported those positions as currently unexitable even when the selected
+snapshot's freshness deadline had expired.  Shares below the venue minimum
+were real, but the quoted bid, ask, and current executable classification were
+not evidence for the asset Zeus actually held.
+
+The health read model now derives the exit identity symmetrically:
+`buy_yes -> token_id`, `buy_no -> no_token_id`.  Missing direction, held token,
+or condition identity fails closed.  Only an exact latest snapshot for that
+exit token whose aware UTC freshness deadline is still in force may compare
+held shares with `min_order_size`; missing, malformed, naive, or expired
+freshness is typed read-unavailable rather than promoted to `UNEXITABLE`.
+
+SCOPE is the read-only sub-min live-health surface for one open position.
+DRAIN is the existing market-snapshot producer publishing a fresh exact held-
+token row. RESET is a valid direction/condition/held-token identity plus a
+fresh exact snapshot. This surface remains observability evidence: it neither
+authorizes a top-up/sell sequence nor creates a blanket entry veto for
+unrelated families.
+
+Acceptance requires opposite YES/NO books to select the held token, both
+directions to retain symmetry, invalid identity and stale/malformed freshness
+to fail closed, fresh sub-min and at-min arithmetic to remain exact, focused
+health tests and compilation to pass, then exact-SHA deployment and a live
+sample showing the correct held token identity.

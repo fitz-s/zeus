@@ -3836,7 +3836,9 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
         "shares",
         "chain_shares",
         "token_id",
+        "no_token_id",
         "condition_id",
+        "direction",
     }
     required_snapshot_columns = {
         "condition_id",
@@ -3873,7 +3875,6 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
         "city",
         "target_date",
         "bin_label",
-        "direction",
         "exit_reason",
         "updated_at",
     )
@@ -3895,17 +3896,22 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
                    pc.shares,
                    pc.chain_shares,
                    pc.token_id,
+                   pc.no_token_id,
                    pc.condition_id,
+                   pc.direction,
+                   CASE
+                       WHEN pc.direction = 'buy_yes' THEN pc.token_id
+                       WHEN pc.direction = 'buy_no' THEN pc.no_token_id
+                       ELSE NULL
+                   END AS exit_token_id,
                    CASE
                        WHEN COALESCE(CAST(pc.chain_shares AS REAL), 0.0) > 0.0
                        THEN COALESCE(CAST(pc.chain_shares AS REAL), 0.0)
                        ELSE COALESCE(CAST(pc.shares AS REAL), 0.0)
                    END AS held_shares,
                    {optional_position_select}
-              FROM position_current pc
+             FROM position_current pc
              WHERE pc.phase IN ('active', 'day0_window', 'pending_exit')
-               AND COALESCE(pc.token_id, '') != ''
-               AND COALESCE(pc.condition_id, '') != ''
                AND (
                    COALESCE(CAST(pc.chain_shares AS REAL), 0.0) > 0.0
                    OR COALESCE(CAST(pc.shares AS REAL), 0.0) > 0.0
@@ -3918,6 +3924,8 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
                ap.chain_shares,
                ap.held_shares,
                ap.token_id,
+               ap.no_token_id,
+               ap.exit_token_id,
                ap.condition_id,
                ap.city,
                ap.target_date,
@@ -3935,7 +3943,7 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
           FROM active_positions ap
           LEFT JOIN executable_market_snapshot_latest l
             ON l.condition_id = ap.condition_id
-           AND l.selected_outcome_token_id = ap.token_id
+           AND l.selected_outcome_token_id = ap.exit_token_id
           LEFT JOIN executable_market_snapshots s
             ON s.snapshot_id = l.snapshot_id
         """,
@@ -3946,6 +3954,26 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
             "ok": False,
             "issue": f"SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:{sample_err}",
             "evaluated": True,
+        }
+    invalid_exit_identity_rows = [
+        row
+        for row in rows
+        if str(row.get("direction") or "") not in {"buy_yes", "buy_no"}
+        or not str(row.get("exit_token_id") or "").strip()
+        or not str(row.get("condition_id") or "").strip()
+    ]
+    if invalid_exit_identity_rows:
+        return {
+            "ok": False,
+            "issue": (
+                "SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:"
+                "EXIT_TOKEN_IDENTITY_MISSING_OR_INVALID"
+            ),
+            "evaluated": True,
+            "invalid_exit_token_position_ids": [
+                str(row.get("position_id") or "")
+                for row in invalid_exit_identity_rows
+            ],
         }
     missing_exact_rows = [
         row
@@ -3966,8 +3994,30 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
             ],
         }
 
+    stale_or_missing_snapshot_rows: list[dict] = []
     partial_rows: list[dict] = []
+    now_utc = (
+        now.replace(tzinfo=timezone.utc)
+        if now.tzinfo is None
+        else now.astimezone(timezone.utc)
+    )
     for row in rows:
+        freshness_raw = row.get("snapshot_freshness_deadline")
+        freshness_deadline = None
+        if isinstance(freshness_raw, str) and freshness_raw.strip():
+            try:
+                freshness_deadline = datetime.fromisoformat(
+                    freshness_raw.strip().replace("Z", "+00:00")
+                )
+            except ValueError:
+                freshness_deadline = None
+        if freshness_deadline is not None and freshness_deadline.tzinfo is not None:
+            freshness_deadline = freshness_deadline.astimezone(timezone.utc)
+        else:
+            freshness_deadline = None
+        if freshness_deadline is None or freshness_deadline <= now_utc:
+            stale_or_missing_snapshot_rows.append(row)
+            continue
         try:
             held_shares = float(row.get("held_shares") or 0.0)
             min_order_size = float(row.get("min_order_size") or 0.0)
@@ -3993,11 +4043,22 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
             continue
         age_seconds = _age_seconds(str(row.get("snapshot_captured_at") or ""), now)
         row["snapshot_age_seconds"] = age_seconds
-        row["snapshot_freshness_expired"] = (
-            str(row.get("snapshot_freshness_deadline") or "")
-            < now.astimezone(timezone.utc).isoformat()
-        )
+        row["snapshot_freshness_expired"] = False
         partial_rows.append(row)
+
+    if stale_or_missing_snapshot_rows:
+        return {
+            "ok": False,
+            "issue": (
+                "SUB_MIN_PARTIAL_POSITION_READ_UNAVAILABLE:"
+                "EXIT_TOKEN_SNAPSHOT_STALE_OR_MISSING"
+            ),
+            "evaluated": True,
+            "stale_or_missing_snapshot_position_ids": [
+                str(row.get("position_id") or "")
+                for row in stale_or_missing_snapshot_rows
+            ],
+        }
 
     partial_rows.sort(key=lambda row: str(row.get("position_id") or ""))
     partial_rows.sort(

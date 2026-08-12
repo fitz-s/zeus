@@ -1,8 +1,8 @@
 # Created: 2026-05-19
-# Last reused or audited: 2026-08-11
+# Last reused or audited: 2026-08-12
 # Authority basis: codereview-may19-2.md relationship F
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-1
-# Lifecycle: created=2026-05-19; last_reviewed=2026-08-11; last_reused=2026-08-11
+# Lifecycle: created=2026-05-19; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: Relationship-F antibody — assert that compute_composite_live_health()
 #   surfaces DEGRADED when run_mode has failed or status_summary is stale, even
 #   when the heartbeat is OK (closing the "scheduler alive but not trading" gap).
@@ -1979,6 +1979,7 @@ def _write_sub_min_partial_position_db(
                 shares REAL,
                 chain_shares REAL,
                 token_id TEXT,
+                no_token_id TEXT,
                 condition_id TEXT,
                 city TEXT,
                 target_date TEXT,
@@ -1997,6 +1998,7 @@ def _write_sub_min_partial_position_db(
                 'partial',
                 ?,
                 ?,
+                'token-yes-sub-min',
                 'token-no-sub-min',
                 'cond-sub-min',
                 'Taipei',
@@ -4818,10 +4820,175 @@ def test_sub_min_partial_position_degrades_when_held_shares_below_snapshot_minim
     assert surface["sub_min_partial_position_count"] == 1
     sample = surface["sub_min_partial_position_sample"][0]
     assert sample["position_id"] == "pos-sub-min"
+    assert sample["exit_token_id"] == "token-no-sub-min"
     assert sample["held_shares"] == pytest.approx(3.8)
     assert sample["min_order_size"] == "5"
     assert sample["orderbook_top_ask"] == "ABSENT"
     assert "sub_min_partial_position" in result["failing_surfaces"]
+
+
+def test_sub_min_partial_position_buy_no_uses_no_token_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute(
+            "INSERT INTO executable_market_snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "snap-yes-sub-min",
+                "cond-sub-min",
+                "token-yes-sub-min",
+                "2",
+                "0.80",
+                "0.84",
+                (now - timedelta(seconds=5)).isoformat(),
+                (now + timedelta(minutes=1)).isoformat(),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO executable_market_snapshot_latest VALUES (?, ?, ?)",
+            ("cond-sub-min", "token-yes-sub-min", "snap-yes-sub-min"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    surface = compute_composite_live_health(state_dir=sd, now=now)["surfaces"][
+        "sub_min_partial_position"
+    ]
+
+    assert surface["issue"] == "SUB_MIN_PARTIAL_POSITION_UNEXITABLE:n=1"
+    sample = surface["sub_min_partial_position_sample"][0]
+    assert sample["exit_token_id"] == "token-no-sub-min"
+    assert sample["min_order_size"] == "5"
+    assert sample["orderbook_top_bid"] == "0.999"
+
+
+def test_sub_min_partial_position_buy_yes_uses_yes_token_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute(
+            "UPDATE position_current SET direction = 'buy_yes' WHERE position_id = 'pos-sub-min'"
+        )
+        conn.execute(
+            "INSERT INTO executable_market_snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "snap-yes-sub-min",
+                "cond-sub-min",
+                "token-yes-sub-min",
+                "3",
+                "0.80",
+                "0.84",
+                (now - timedelta(seconds=5)).isoformat(),
+                (now + timedelta(minutes=1)).isoformat(),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO executable_market_snapshot_latest VALUES (?, ?, ?)",
+            ("cond-sub-min", "token-yes-sub-min", "snap-yes-sub-min"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    surface = compute_composite_live_health(state_dir=sd, now=now)["surfaces"][
+        "sub_min_partial_position"
+    ]
+
+    assert surface["ok"] is True
+    assert surface["sub_min_partial_position_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("direction", "no_token_id"),
+    (("buy_no", None), ("unknown", "token-no-sub-min")),
+)
+def test_sub_min_partial_position_fails_closed_on_invalid_exit_token_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    direction: str,
+    no_token_id: str | None,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute(
+            "UPDATE position_current SET direction = ?, no_token_id = ? "
+            "WHERE position_id = 'pos-sub-min'",
+            (direction, no_token_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    surface = compute_composite_live_health(state_dir=sd, now=now)["surfaces"][
+        "sub_min_partial_position"
+    ]
+
+    assert surface["ok"] is False
+    assert surface["issue"].endswith("EXIT_TOKEN_IDENTITY_MISSING_OR_INVALID")
+    assert surface["invalid_exit_token_position_ids"] == ["pos-sub-min"]
+
+
+@pytest.mark.parametrize(
+    "freshness_deadline",
+    (
+        None,
+        "malformed",
+        "2026-08-12T15:00:00",
+        "2026-08-12T15:00:00+00:00",
+    ),
+)
+def test_sub_min_partial_position_fails_closed_on_unusable_snapshot_freshness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    freshness_deadline: str | None,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime(2026, 8, 12, 16, 0, tzinfo=timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute(
+            "UPDATE executable_market_snapshots SET freshness_deadline = ? "
+            "WHERE snapshot_id = 'snap-sub-min'",
+            (freshness_deadline,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    surface = compute_composite_live_health(state_dir=sd, now=now)["surfaces"][
+        "sub_min_partial_position"
+    ]
+
+    assert surface["ok"] is False
+    assert surface["issue"].endswith("EXIT_TOKEN_SNAPSHOT_STALE_OR_MISSING")
+    assert surface["stale_or_missing_snapshot_position_ids"] == ["pos-sub-min"]
 
 
 def test_sub_min_partial_position_allows_size_at_snapshot_minimum(
@@ -4862,7 +5029,7 @@ def test_sub_min_partial_position_reports_exact_count_when_sample_truncates(
             conn.execute(
                 """
                 INSERT INTO position_current
-                SELECT ?, phase, order_status, shares, chain_shares, ?, ?, city,
+                SELECT ?, phase, order_status, shares, chain_shares, token_id, ?, ?, city,
                        target_date, bin_label, direction, exit_reason, updated_at
                   FROM position_current
                  WHERE position_id = 'pos-sub-min'
