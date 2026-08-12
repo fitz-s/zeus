@@ -4,6 +4,30 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-12 Held freshness uses the provider vector clock
+
+The replacement posterior has two different clocks: one causal ENS/anchor
+carrier in `source_cycle_time`, and one exact per-provider value vector in
+`bayes_precision_fusion.current_value_serving`.  The held reader already
+verified the latter against current raw-row identities, but then independently
+compared the newest scalar provider cycle with the older carrier and vetoed the
+same posterior again.  A fully current mixed-clock posterior therefore became
+permanently stale even after its repair seed had consumed the new provider
+rows.
+
+The scalar cycle difference is now telemetry only.  Freshness is invalidated
+by the existing exact vector-HWM reason when a provider row is superseded,
+late, missing, mismatched, or unverifiable.  A posterior is fresh across mixed
+clocks only when its causal shape remains legal and every used provider's exact
+served row is still current.
+
+SCOPE is one held `(city, target_date, metric)` posterior read.  DRAIN is the
+existing input-revision/cycle materializer.  RESET is exact equality between
+persisted `current_value_serving` identities and the current coherent provider
+frontier; an unconsumed or unverifiable row remains fail-closed.  Acceptance
+requires paired antibodies for a consumed newer provider vector and a truly
+superseding coherent provider vector, plus forward live Madrid monitor proof.
+
 ## 2026-08-12 Expired held belief can rematerialize its same causal cycle
 
 The held monitor expires a replacement posterior on its computation clock even

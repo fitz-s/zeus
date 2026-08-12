@@ -884,8 +884,14 @@ def load_replacement_belief(
         raw_cycle_lag_hours = (
             latest_raw_cycle_time - source_cycle_time
         ).total_seconds() / 3600.0
-        fresh = False
-        freshness_basis = latest_raw_cycle_basis or "source_cycle_time_live_input_lag"
+        # ``source_cycle_time`` is the ENS/anchor carrier clock, not the
+        # complete multi-provider value clock.  A source-clock posterior may
+        # legitimately consume newer deterministic-provider rows while
+        # retaining an older causal shape carrier.  The vector-aware HWM check
+        # below compares exact ``current_value_serving`` row identities and is
+        # the sole authority for whether such an input remains unconsumed.
+        # Keep the scalar lag as telemetry, but never let it veto exact proof
+        # that the posterior already consumed every current provider revision.
     if raw_input_lag_reason:
         fresh = False
         freshness_basis = _raw_input_lag_basis(raw_input_lag_reason) or "replacement_raw_input_hwm"

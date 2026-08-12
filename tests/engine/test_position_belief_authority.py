@@ -928,7 +928,7 @@ class TestLoadReplacementBelief:
         assert belief.raw_cycle_lag_hours is None
 
     def test_partial_newer_used_model_does_not_stale_rich_posterior(self, forecasts_db):
-        """One early provider cannot invalidate the last complete source-clock carrier."""
+        """Incomplete rich provenance fails closed instead of guessing consumption."""
         posterior_cycle = NOW - timedelta(hours=12)
         _insert(
             forecasts_db,
@@ -990,9 +990,127 @@ class TestLoadReplacementBelief:
         belief = _load(forecasts_db)
 
         assert belief is not None
-        assert belief.fresh is True
-        assert belief.freshness_basis == "source_cycle_time"
-        assert belief.raw_input_lag_reason is None
+        assert belief.fresh is False
+        assert belief.raw_input_lag_reason is not None
+        assert "current_value_serving_provenance_unverifiable" in (
+            belief.raw_input_lag_reason
+        )
+
+    @pytest.mark.parametrize("supersede_ecmwf", (False, True))
+    def test_vector_clock_uses_exact_consumed_provider_rows(
+        self, forecasts_db, supersede_ecmwf
+    ):
+        """Provider clocks may exceed the ENS carrier only when exact rows agree."""
+        carrier_cycle = NOW - timedelta(hours=12)
+        provider_cycle = NOW - timedelta(hours=6)
+        computed_at = NOW - timedelta(hours=1)
+        conn = sqlite3.connect(forecasts_db)
+        for ddl in (
+            "ALTER TABLE raw_model_forecasts ADD COLUMN raw_model_forecast_id INTEGER",
+            "ALTER TABLE raw_model_forecasts ADD COLUMN model TEXT",
+            "ALTER TABLE raw_model_forecasts ADD COLUMN forecast_value_c REAL",
+            "ALTER TABLE raw_model_forecasts ADD COLUMN lead_days INTEGER",
+        ):
+            conn.execute(ddl)
+        rows = (
+            (101, "ecmwf_ifs", provider_cycle, computed_at - timedelta(minutes=10), 37.2),
+            (102, "icon_eu", provider_cycle, computed_at - timedelta(minutes=20), 37.6),
+        )
+        for raw_id, model, cycle, captured_at, value in rows:
+            conn.execute(
+                """
+                INSERT INTO raw_model_forecasts (
+                    city, target_date, metric, source_cycle_time, endpoint,
+                    coverage_status, captured_at, source_available_at,
+                    raw_model_forecast_id, model, forecast_value_c, lead_days
+                ) VALUES (?, ?, ?, ?, 'single_runs', 'COVERED', ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    "Karachi", "2026-06-12", "high", cycle.isoformat(),
+                    captured_at.isoformat(), captured_at.isoformat(), raw_id,
+                    model, value,
+                ),
+            )
+        if supersede_ecmwf:
+            newer_cycle = NOW - timedelta(hours=3)
+            for raw_id, model, value in (
+                (103, "ecmwf_ifs", 38.1),
+                (104, "icon_eu", 38.0),
+            ):
+                conn.execute(
+                    """
+                    INSERT INTO raw_model_forecasts (
+                        city, target_date, metric, source_cycle_time, endpoint,
+                        coverage_status, captured_at, source_available_at,
+                        raw_model_forecast_id, model, forecast_value_c, lead_days
+                    ) VALUES (?, ?, ?, ?, 'single_runs', 'COVERED', ?, ?, ?, ?, ?, 1)
+                    """,
+                    (
+                        "Karachi", "2026-06-12", "high", newer_cycle.isoformat(),
+                        (NOW - timedelta(minutes=20)).isoformat(),
+                        (NOW - timedelta(minutes=20)).isoformat(), raw_id,
+                        model, value,
+                    ),
+                )
+        conn.commit()
+        conn.close()
+
+        _insert(
+            forecasts_db,
+            posterior_id="vector-clock",
+            computed_at=computed_at.isoformat(),
+            source_cycle_time=carrier_cycle.isoformat(),
+            q={BIN: 0.242},
+            shape_source_cycle_time=carrier_cycle,
+        )
+        conn = sqlite3.connect(forecasts_db)
+        conn.execute(
+            "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+            (
+                json.dumps(
+                    {
+                        "bayes_precision_fusion": {
+                            "used_models": ["ecmwf_ifs", "icon_eu"],
+                            "current_value_serving": {
+                                model: {
+                                    "raw_model_forecast_id": raw_id,
+                                    "served_cycle": cycle.isoformat(),
+                                    "captured_at": captured_at.isoformat(),
+                                    "served_via": "single_runs",
+                                }
+                                for raw_id, model, cycle, captured_at, _value in rows
+                            },
+                            "current_evidence_shape": {
+                                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                                "shape_lag_hours": 0.0,
+                                "source_cycle_time": carrier_cycle.isoformat(),
+                                "stale_shape_reused": False,
+                                "translation_applied": False,
+                            },
+                        },
+                        "q_bootstrap_samples_basis":
+                            "global_simplex_current_finite_moment_evidence_v3",
+                        "q_bootstrap_samples_by_bin": {BIN: [0.242, 0.242]},
+                    }
+                ),
+                "vector-clock",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        belief = _load(forecasts_db)
+
+        assert belief is not None
+        assert belief.latest_raw_cycle_time is not None
+        assert belief.raw_cycle_lag_hours is not None
+        assert belief.fresh is (not supersede_ecmwf)
+        if supersede_ecmwf:
+            assert belief.raw_input_lag_reason is not None
+            assert "used_raw_model_forecasts_superseded" in belief.raw_input_lag_reason
+        else:
+            assert belief.raw_input_lag_reason is None
+            assert belief.freshness_basis == "source_cycle_time"
 
     def test_newer_raw_artifact_cycle_marks_posterior_stale_before_raw_model_rows(self, forecasts_db):
         """Anchor artifacts are upstream live inputs; monitor freshness cannot
