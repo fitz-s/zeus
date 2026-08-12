@@ -18527,6 +18527,12 @@ def test_pending_exit_preflight_auxiliary_deadline_preserves_primary_refresh(
         position=position,
     )
     observed_deadlines: list[float] = []
+    preparation_order: list[str] = []
+
+    def hwm_prefetch(positions, *, deadline_monotonic, **_kwargs):
+        assert positions == [position]
+        assert deadline_monotonic == pytest.approx(1.0)
+        preparation_order.append("hwm")
 
     def pending_preflight(
         _portfolio,
@@ -18537,11 +18543,17 @@ def test_pending_exit_preflight_auxiliary_deadline_preserves_primary_refresh(
         global_sell_reauction_requester,
     ):
         del conn, global_sell_reauction_requester
+        preparation_order.append("preflight")
         observed_deadlines.append(deadline_monotonic)
         clock[0] = deadline_monotonic
         return {"filled": 0, "retried": 0, "unchanged": 0, "filled_positions": []}
 
     monkeypatch.setattr(exit_lifecycle, "check_pending_exits", pending_preflight)
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_replacement_artifact_hwm",
+        hwm_prefetch,
+    )
     summary = {"monitors": 0, "exits": 0}
 
     cycle_runtime.execute_monitoring_phase(
@@ -18557,6 +18569,7 @@ def test_pending_exit_preflight_auxiliary_deadline_preserves_primary_refresh(
     )
 
     assert observed_deadlines == [pytest.approx(1.0)]
+    assert preparation_order == ["hwm", "preflight"]
     assert evaluations == [position.trade_id]
     assert summary["held_monitor_primary_belief_read_started"] == 1
     assert summary["held_monitor_primary_belief_read_completed"] == 1

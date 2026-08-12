@@ -6664,6 +6664,43 @@ def execute_monitoring_phase(
     summary["held_monitor_primary_belief_read_deferred"] = 0
     summary["held_monitor_optional_maintenance_deferred"] = 0
 
+    # Freeze current probability authority before pending-exit recovery can
+    # spend the auxiliary tranche on venue reads.  A recovered order state is
+    # useful, but it cannot outrank the fresh belief cut needed to re-decide
+    # every still-held share.  The preflight below consumes only whatever
+    # remains before ``auxiliary_deadline``; the primary per-position reserve
+    # therefore always starts with either one causal HWM snapshot or one typed
+    # DATA_DEGRADED snapshot, never an unattempted read caused by preflight.
+    portfolio_positions = tuple(getattr(portfolio, "positions", ()) or ())
+    try:
+        monitor_now_utc = (
+            deps._utcnow()
+            if hasattr(deps, "_utcnow")
+            else datetime.now(timezone.utc)
+        )
+    except Exception:
+        monitor_now_utc = datetime.now(timezone.utc)
+    if monitor_now_utc.tzinfo is None:
+        monitor_now_utc = monitor_now_utc.replace(tzinfo=timezone.utc)
+    else:
+        monitor_now_utc = monitor_now_utc.astimezone(timezone.utc)
+    monitor_positions = _monitoring_phase_positions(
+        portfolio,
+        conn=conn,
+        now_utc=monitor_now_utc,
+    )
+    install_monitor_day0_family_cache(clob, decision_time=monitor_now_utc)
+    install_monitor_replacement_hwm_snapshot(clob, None)
+    _prefetch_held_replacement_artifact_hwm(
+        monitor_positions,
+        decision_time=monitor_now_utc,
+        deadline_monotonic=auxiliary_deadline,
+        sql_timeout_seconds=primary_reserve_seconds,
+        clob=clob,
+        summary=summary,
+        deps=deps,
+    )
+
     # Preflight may release a due retry back to its economic holding phase
     # before the normal monitor pass. Preserve the preflight identity fact so
     # a stale snapshot may still recover only the held token identity; the
@@ -6750,15 +6787,9 @@ def execute_monitoring_phase(
     else:
         summary["exit_preflight_skipped_for_monitor_refresh"] = True
 
+    # Preflight may close or release positions.  Recompute the execution set,
+    # while retaining the preflight-preceding HWM cut over its family superset.
     portfolio_positions = tuple(getattr(portfolio, "positions", ()) or ())
-    try:
-        monitor_now_utc = deps._utcnow() if hasattr(deps, "_utcnow") else datetime.now(timezone.utc)
-    except Exception:
-        monitor_now_utc = datetime.now(timezone.utc)
-    if monitor_now_utc.tzinfo is None:
-        monitor_now_utc = monitor_now_utc.replace(tzinfo=timezone.utc)
-    else:
-        monitor_now_utc = monitor_now_utc.astimezone(timezone.utc)
     monitor_positions = _monitoring_phase_positions(
         portfolio,
         conn=conn,
@@ -6774,23 +6805,6 @@ def execute_monitoring_phase(
         summary["held_monitor_positions_deferred"] = len(monitor_positions)
         summary["held_monitor_defer_reason"] = "urgent_day0_wake"
         return portfolio_dirty, tracker_dirty
-    install_monitor_day0_family_cache(clob, decision_time=monitor_now_utc)
-    install_monitor_replacement_hwm_snapshot(clob, None)
-
-    # Current replacement evidence is primary money-path truth, but its shared
-    # batch is still preparation: it must finish inside the auxiliary tranche
-    # so an unavailable HWM becomes a canonical DATA_DEGRADED redecision rather
-    # than consuming the time promised to every admitted position.
-    hwm_deadline = auxiliary_deadline
-    _prefetch_held_replacement_artifact_hwm(
-        monitor_positions,
-        decision_time=monitor_now_utc,
-        deadline_monotonic=hwm_deadline,
-        sql_timeout_seconds=primary_reserve_seconds,
-        clob=clob,
-        summary=summary,
-        deps=deps,
-    )
 
     # Debt reconstruction is auxiliary to current economic redecision. Bound
     # the whole scan, not each row independently, so a larger held book cannot
