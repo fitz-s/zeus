@@ -13994,6 +13994,102 @@ class TestRecoveryResolutionTable:
             "errors": 0,
         }
 
+    def test_filled_entry_reobservation_preserves_post_reduction_exposure(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=5.0, price=0.34)
+        _advance_to_acked(conn, venue_order_id="ord-001")
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={"venue_order_id": "ord-001", "venue_status": "MATCHED"},
+        )
+        _append_trade_fact(
+            conn,
+            state="MATCHED",
+            filled_size="5",
+            fill_price="0.34",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        from src.execution.command_recovery import (
+            reconcile_filled_entry_projection_repairs,
+        )
+
+        first = reconcile_filled_entry_projection_repairs(conn, mock_client)
+        assert first == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        sequence_no = conn.execute(
+            "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
+            "WHERE position_id = 'pos-001'"
+        ).fetchone()[0]
+        conn.execute(
+            """INSERT INTO position_events (
+                   event_id, position_id, event_version, sequence_no, event_type,
+                   occurred_at, phase_before, phase_after, strategy_key,
+                   source_module, payload_json, order_id, caused_by, env
+               ) VALUES (?, 'pos-001', 1, ?, 'MONITOR_REFRESHED', ?,
+                         'active', 'active', 'opening_inertia',
+                         'tests.test_command_recovery', ?, 'ord-exit',
+                         'partial_exit_fill', 'test')""",
+            (
+                "pos-001:post-entry-reduction",
+                sequence_no,
+                "2026-04-26T00:07:00Z",
+                json.dumps(
+                    {
+                        "semantic_event": "CAPITAL_REDUCTION_FILLED",
+                        "filled_shares": "4.9",
+                        "remaining_shares": "0.1",
+                        "remaining_cost_basis_usd": "0.034",
+                    },
+                    sort_keys=True,
+                ),
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET shares = 0.1,
+                   cost_basis_usd = 0.034,
+                   chain_shares = 0.1,
+                   chain_cost_basis_usd = 0.034
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            trade_id="trade-001",
+            filled_size="5",
+            fill_price="0.34",
+        )
+
+        second = reconcile_filled_entry_projection_repairs(conn, mock_client)
+
+        assert second == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, chain_shares,
+                   chain_cost_basis_usd
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """,
+        ).fetchone()
+        assert dict(current) == pytest.approx(
+            {
+                "phase": "active",
+                "shares": 0.1,
+                "cost_basis_usd": 0.034,
+                "chain_shares": 0.1,
+                "chain_cost_basis_usd": 0.034,
+            }
+        )
+
     def test_partial_entry_trade_fact_projects_active_exposure_immediately(
         self,
         conn,

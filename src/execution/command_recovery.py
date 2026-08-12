@@ -5840,15 +5840,43 @@ def _append_filled_entry_projection_repair(
         venue_order_id = str(candidate.get("venue_order_id") or "")
         existing_fill = conn.execute(
             """
-            SELECT 1
+            SELECT sequence_no
               FROM position_events
              WHERE position_id = ?
                AND event_type = 'ENTRY_ORDER_FILLED'
                AND (command_id = ? OR lower(COALESCE(order_id, '')) = lower(?))
+             ORDER BY sequence_no DESC
              LIMIT 1
             """,
             (position_id, command_id, venue_order_id),
         ).fetchone()
+        if existing_fill is not None:
+            later_reduction = conn.execute(
+                """
+                SELECT 1
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND sequence_no > ?
+                   AND (
+                        event_type = 'EXIT_ORDER_FILLED'
+                        OR (
+                            json_valid(payload_json)
+                            AND json_extract(payload_json, '$.semantic_event')
+                                = 'CAPITAL_REDUCTION_FILLED'
+                        )
+                   )
+                 LIMIT 1
+                """,
+                (position_id, int(existing_fill["sequence_no"])),
+            ).fetchone()
+            if later_reduction is not None:
+                logger.info(
+                    "recovery: preserve post-reduction exposure on filled entry "
+                    "reobservation command_id=%s position_id=%s",
+                    command_id,
+                    position_id,
+                )
+                return False
         before_shares = _float_or_none(candidate.get("projected_shares"))
         before_cost = _float_or_none(candidate.get("projected_cost_basis_usd"))
         expected_shares = _float_or_none(candidate.get("fill_filled_size"))

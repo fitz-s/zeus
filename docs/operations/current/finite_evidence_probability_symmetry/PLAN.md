@@ -35,6 +35,8 @@ capital-reduction event and could resurrect the sold quantity.  ENTRY facts
 remain immutable acquisition provenance, but once a later canonical
 `CAPITAL_REDUCTION_FILLED` or `EXIT_ORDER_FILLED` exists they no longer have
 current-exposure authority; reobservation must preserve the reduced projection.
+The restart recovery projection pass applies the same rule and classifies that
+reobservation as a stable no-op rather than a repair error.
 
 SCOPE is one authenticated EXIT/SELL command and one stable economic fill
 identity.  DRAIN is the normal recorded-fill economics recovery pass after a
