@@ -4525,6 +4525,10 @@ def _day0_absorbing_hard_fact_overlay(
             city=city,
             now=datetime.now(timezone.utc),
             world_conn=conn,
+            # The held-monitor claim is deadline-bound. Direct WU fetching is
+            # producer work and can retain the entire position book past that
+            # claim; consume only timestamped canonical evidence here.
+            durable_only=True,
         )
         if verdict is None:
             return None

@@ -14814,7 +14814,7 @@ def test_day0_absorbing_hard_fact_dominates_replacement_posterior(monkeypatch):
     monkeypatch.setattr(monitor_refresh, "_is_position_target_local_day", lambda *a, **k: True)
     monkeypatch.setattr(
         "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
-        lambda *, position, city, now=None, world_conn=None: HardFactVerdict(
+        lambda *, position, city, now=None, world_conn=None, durable_only=False: HardFactVerdict(
             action="HOLD_STRUCTURAL_WIN",
             reason="running low extreme 20 killed bin [21.0,21.0]",
             metric="low",
@@ -14891,7 +14891,7 @@ def test_active_same_day_absorbing_hard_fact_dominates_replacement_posterior(mon
     monkeypatch.setattr(monitor_refresh, "_is_position_target_local_day", lambda *a, **k: True)
     monkeypatch.setattr(
         "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
-        lambda *, position, city, now=None, world_conn=None: HardFactVerdict(
+        lambda *, position, city, now=None, world_conn=None, durable_only=False: HardFactVerdict(
             action="HOLD_STRUCTURAL_WIN",
             reason="running low extreme 20 killed bin [21.0,21.0]",
             metric="low",
@@ -14916,6 +14916,41 @@ def test_active_same_day_absorbing_hard_fact_dominates_replacement_posterior(mon
     assert edge_ctx.p_posterior == pytest.approx(1.0)
     assert monitor_refresh.SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT in pos.applied_validations
     assert "forecast_posteriors_dominated_by_day0_hard_fact" in pos.applied_validations
+
+
+def test_day0_absorbing_hard_fact_monitor_consumes_durable_evidence_only(monkeypatch):
+    """A held monitor must never put direct WU I/O inside its global claim."""
+    from src.engine import monitor_refresh
+
+    pos = _make_position(
+        state="day0_window",
+        city="Tokyo",
+        target_date="2026-06-18",
+        bin_label="21°C on June 18?",
+        direction="buy_no",
+        temperature_metric="low",
+    )
+    city = SimpleNamespace(name="Tokyo")
+    observed = []
+
+    def evaluate(**kwargs):
+        observed.append(kwargs)
+        return None
+
+    monkeypatch.setattr(monitor_refresh, "_is_position_target_local_day", lambda *a, **k: True)
+    monkeypatch.setattr(
+        "src.execution.day0_hard_fact_exit.evaluate_hard_fact_exit",
+        evaluate,
+    )
+
+    assert monitor_refresh._day0_absorbing_hard_fact_overlay(
+        pos=pos,
+        conn=object(),
+        city=city,
+        target_d=date(2026, 6, 18),
+    ) is None
+    assert len(observed) == 1
+    assert observed[0]["durable_only"] is True
 
 
 def test_day0_high_morning_observation_is_not_exit_authority():
