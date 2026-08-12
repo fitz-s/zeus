@@ -46,6 +46,7 @@ from src.contracts.execution_intent import (
     POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD,
 )
 from src.contracts.venue_submission_envelope import (
+    LIVE_ORDER_MAX_UNIT_PRICE,
     LIVE_ORDER_MIN_UNIT_PRICE,
     assert_live_order_unit_price,
 )
