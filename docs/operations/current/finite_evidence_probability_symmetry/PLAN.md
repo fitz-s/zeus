@@ -4,6 +4,30 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-11 Entry JIT CLOB identity uses the submit lane
+
+After typed maker direction reached executor authority, forward live attempts
+were still reauctioned under `GLOBAL_JIT_CLOB_MARKET_UNAVAILABLE`.  An exact
+current probe showed the endpoint and market were healthy: the default client
+was denied locally as `POLYMARKET_SCAN_LEASE_BUSY:...scan_in_flight`, while the
+same `/markets/{condition_id}` request with `RequestPriority.SUBMIT_JIT`
+returned the current two-token market immediately.  The JIT path already used
+that priority for Gamma and for the full book cut, but omitted it on the final
+CLOB market-identity client and therefore self-contended with its own scan.
+
+The repair explicitly gives that one current CLOB identity request the existing
+FC-03 submit priority.  It does not bypass the governor, reuse a cached market,
+change request budgets, or admit a missing/invalid response.
+
+SCOPE is one selected entry candidate's submit-time CLOB market identity read.
+DRAIN is the existing bounded request and full-market reauction.  RESET is a
+fresh response whose condition, token ownership, lifecycle, tick, minimum size,
+neg-risk, fee schedule, and raw book all agree; any transport or semantic
+failure remains fail-closed.  Acceptance requires a call-site priority
+antibody, focused JIT/global-auction tests, diff/compile checks, hot-fix landing,
+loaded-SHA proof, and a forward live submit outcome.  Venue fill and later
+realized PnL remain separate proof lines.
+
 ## 2026-08-11 Typed direction must retain global maker authority
 
 Forward live submission reached a verified global `MAKER_REST` winner with

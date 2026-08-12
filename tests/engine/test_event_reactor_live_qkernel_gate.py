@@ -3144,6 +3144,14 @@ def test_global_maker_certificate_accepts_exact_current_fill_witness():
     ) is None
 
 
+def test_global_entry_jit_clob_identity_uses_submit_priority():
+    import inspect
+
+    source = inspect.getsource(era._global_preflight_entry_jit_receipt)
+
+    assert "public_request_priority=RequestPriority.SUBMIT_JIT" in source
+
+
 @pytest.mark.parametrize(
     ("mutate", "reason"),
     (

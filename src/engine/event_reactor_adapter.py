@@ -13763,7 +13763,10 @@ def _global_preflight_entry_jit_receipt(
                     priority=RequestPriority.SUBMIT_JIT,
                 )
 
-            with PolymarketClient(public_http_timeout=timeout) as authority_clob:
+            with PolymarketClient(
+                public_http_timeout=timeout,
+                public_request_priority=RequestPriority.SUBMIT_JIT,
+            ) as authority_clob:
                 market_authority = _current_global_market_authority(
                     condition_id=str(
                         getattr(candidate, "condition_id", "") or ""
