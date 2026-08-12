@@ -123,6 +123,18 @@ class _PreparedFillSync:
     recorded_facts: frozenset[tuple[str, str, str, str, str]]
 
 
+def _fill_sync_schema_ready(conn: sqlite3.Connection) -> bool:
+    rows = conn.execute(
+        "SELECT name FROM sqlite_master "
+        "WHERE type = 'table' AND name IN "
+        "('fill_sync_watermarks', 'wallet_fill_observations')"
+    ).fetchall()
+    return {str(row[0]) for row in rows} == {
+        "fill_sync_watermarks",
+        "wallet_fill_observations",
+    }
+
+
 def _coerce_dt(value: datetime | str | None) -> datetime:
     if value is None:
         return datetime.now(timezone.utc)
@@ -615,16 +627,20 @@ def _sync_fills_coordinated(
         "deadline_ms": FILL_SYNC_DB_WRITE_LEASE_DEADLINE_MS,
         "max_hold_ms": FILL_SYNC_DB_WRITE_MAX_HOLD_MS,
     }
-    with coordinator.transaction(
-        (DBIdentity.TRADE,),
-        owner="fill_synchronizer_schema",
-        **transaction_kwargs,
-    ) as tx:
-        ensure_watermark_table(tx.connection)
-        ensure_wallet_fill_observations_table(tx.connection)
-
     reader = get_trade_connection_read_only()
     try:
+        if not _fill_sync_schema_ready(reader):
+            reader.close()
+            reader = None
+            with coordinator.transaction(
+                (DBIdentity.TRADE,),
+                owner="fill_synchronizer_schema",
+                **transaction_kwargs,
+            ) as tx:
+                ensure_watermark_table(tx.connection)
+                ensure_wallet_fill_observations_table(tx.connection)
+            reader = get_trade_connection_read_only()
+        assert reader is not None
         prepared = _prepare_fill_sync(
             reader,
             adapter,
@@ -632,7 +648,8 @@ def _sync_fills_coordinated(
             observed_at=observed_at,
         )
     finally:
-        reader.close()
+        if reader is not None:
+            reader.close()
 
     with coordinator.transaction(
         (DBIdentity.TRADE,),

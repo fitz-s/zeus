@@ -1629,9 +1629,11 @@ queue behind an invisible SQLite owner, delaying the fresh book/probability
 decision cycle even though their own coordinator priority was correct.
 
 The live scheduler path must split one cycle into immutable preparation and
-atomic publication. Schema readiness receives a short BACKGROUND_RECOVERY TRADE
-unit; watermark read, authenticated `get_trades`, raw parsing, command lookup,
-and idempotency snapshots run on a read-only connection with no writer lease;
+atomic publication. Schema readiness is checked read-only; only a genuinely
+missing cold-start schema receives a short BACKGROUND_RECOVERY TRADE unit, so
+the hot path has no redundant writer admission. Watermark read, authenticated
+`get_trades`, raw parsing, command lookup, and idempotency snapshots run on a
+read-only connection with no writer lease;
 observation/fact append, command projection, and watermark advance then commit
 inside one short unified TRADE transaction. Contention fails the scheduler tick
 closed and retries on the existing cadence; it does not widen SQLite timeout or

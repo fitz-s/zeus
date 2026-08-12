@@ -3243,7 +3243,7 @@ files:
   src/ingest/fill_synchronizer.py:
     zone: K2_runtime
     authority_role: continuous_authenticated_fill_fact_producer
-    why: Continuously reads authenticated venue fills, freezes venue/parsing/read-side evidence outside every writer lease, then atomically appends observations and attributed facts, advances command projections, and publishes the coverage watermark inside one unified TRADE WriteCoordinator transaction. The scheduler reports contention as retryable failure; it never bypasses the writer turnstile or holds a canonical write transaction across venue I/O.
+    why: Continuously reads authenticated venue fills, freezes venue/parsing/read-side evidence outside every writer lease, then atomically appends observations and attributed facts, advances command projections, and publishes the monotonic coverage watermark inside one unified TRADE WriteCoordinator transaction. Existing schema is checked read-only so the hot path requests no redundant schema writer lease; a missing cold-start schema is created through its own coordinated unit. The scheduler reports contention as retryable failure; it never bypasses the writer turnstile or holds a canonical write transaction across venue I/O.
     downstream:
     - src/ingest/price_channel_daemon.py
     - src/execution/command_recovery.py

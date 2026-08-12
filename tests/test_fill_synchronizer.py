@@ -585,6 +585,8 @@ def test_live_sync_fetches_outside_unified_trade_transaction(tmp_path, monkeypat
     seed = sqlite3.connect(db_path)
     seed.row_factory = sqlite3.Row
     init_schema(seed)
+    fill_synchronizer_mod.ensure_watermark_table(seed)
+    fill_synchronizer_mod.ensure_wallet_fill_observations_table(seed)
     _seed_command(seed, command_id="cmd-coordinated", venue_order_id="ord-coordinated")
     seed.close()
 
@@ -652,7 +654,7 @@ def test_live_sync_fetches_outside_unified_trade_transaction(tmp_path, monkeypat
     )
 
     assert result["appended"] == 1
-    assert owners == ["fill_synchronizer_schema", "fill_synchronizer"]
+    assert owners == ["fill_synchronizer"]
     assert adapter.since_calls == [None]
     check = sqlite3.connect(db_path)
     try:
