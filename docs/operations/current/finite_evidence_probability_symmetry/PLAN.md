@@ -3818,3 +3818,34 @@ abandoned and closed;
 existing HWM-before-auxiliary ordering must remain intact, typed unavailable
 behavior must retain fail-closed authority, and post-deploy decision artifacts
 must show HWM wall time bounded while primary position attempts continue.
+
+## 2026-08-12 Favorable SELL quotes are not submitted prices
+
+Forward global-auction receipt `415033` selected an immediate Shanghai held
+SELL after current probability and book evidence made it capital-positive. The
+solver correctly mapped the current `0.999` counterparty bid to a legal `0.95`
+submitted SELL floor, but the final executor independently required the
+counterparty bid itself to lie inside the submitted-action band and rejected
+the exit before command persistence. This collapsed two different facts:
+the price Zeus submits and the better price the venue may execute.
+
+The final side-effect boundary now accepts a finite SELL counterparty bid in
+the probability domain `[0.05, 1]` while continuing to require every submitted
+limit, envelope, command, and SDK request to remain inside inclusive
+`[0.05, 0.95]`. A bid above `0.95` therefore improves execution through the
+legal floor; it never authorizes an above-band submission. Values above `1`,
+below `0.05`, or non-finite remain invalid.
+
+SCOPE is one reduce-only SELL intent at the final executor boundary. DRAIN is
+the next current global auction/JIT pass rebuilding the intent from current q
+and book. RESET is a current probability-domain bid plus an independently
+in-band submitted floor; no stale quote or old winner is replay authority.
+Acceptance requires an executor antibody proving `best_bid=0.999` persists and
+submits exactly `0.95`, an invalid `1.001` bid still rejects before persistence,
+focused executor tests, planning lock, compile/diff checks, hot-fix landing,
+exact loaded-SHA proof, and forward winner -> venue command -> fill/progression
+evidence.
+
+Allowed files are `src/execution/executor.py`, `tests/test_executor.py`,
+`architecture/test_topology.yaml`, `architecture/source_rationale.yaml`, and
+this plan.

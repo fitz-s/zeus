@@ -2,7 +2,7 @@
 # Purpose: Regression coverage for executor and portfolio mechanics under R3 cutover preflight opt-outs.
 # Reuse: Run when executor order submission or portfolio save/load mechanics change.
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-01
+# Last reused/audited: 2026-08-12
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; R3 Z1 cutover guard audit.
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P0-1 side-effect boundary fault injection.
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P2-1 required live ATTACH seam.
@@ -2020,58 +2020,12 @@ class TestExecutor:
             "venue_order_id": "sell-boundary-exit-1",
         }
 
-    def test_certified_high_bid_exit_rejects_before_command_persistence(
-        self,
-        monkeypatch,
-    ):
-        token_id = "yes-token-certified-high-bid-exit"
-        decision_id = "decision-certified-high-bid-exit"
-
-        class ClientMustNotBeConstructed:
-            def __init__(self):
-                raise AssertionError("above-band exit must stop before SDK contact")
-
-        monkeypatch.setattr(
-            "src.data.polymarket_client.PolymarketClient",
-            ClientMustNotBeConstructed,
-        )
-        monkeypatch.setattr(
-            "src.execution.executor._marketable_sell_certificate_error",
-            lambda *_args, **_kwargs: None,
-        )
-
-        result = execute_exit_order(
-            create_exit_order_intent(
-                trade_id="trade-certified-high-bid-exit",
-                token_id=token_id,
-                shares=12.0,
-                current_price=0.999,
-                best_bid=0.999,
-                exact_limit_price=0.95,
-                submit_order_type="FAK",
-                **_snapshot_kwargs(
-                    token_id,
-                    direction="sell_yes",
-                    min_tick_size=Decimal("0.001"),
-                    final_limit_price=Decimal("0.95"),
-                    snapshot_top_ask=Decimal("1.0"),
-                    snapshot_top_bid=Decimal("0.999"),
-                ),
-            ),
-            conn=_TEST_CONN,
-            decision_id=decision_id,
-        )
-
-        assert result.status == "rejected"
-        assert "live_order_executable_price_out_of_bounds" in str(result.reason)
-        assert _TEST_CONN.execute(
-            "SELECT COUNT(*) FROM venue_commands WHERE decision_id = ?",
-            (decision_id,),
-        ).fetchone()[0] == 0
-
     @pytest.mark.parametrize(
         ("best_bid", "min_tick", "expected_limit"),
-        (("0.94", "0.01", "0.94"),),
+        (
+            ("0.94", "0.01", "0.94"),
+            ("0.999", "0.001", "0.95"),
+        ),
     )
     @pytest.mark.parametrize(
         "include_certificate_projection",
@@ -2306,10 +2260,11 @@ class TestExecutor:
             **projection_kwargs,
         )
 
+        decision_id = f"decision-real-typed-taker-authority-{slug}"
         result = execute_exit_order(
             executor_intent,
             conn=_TEST_CONN,
-            decision_id=f"decision-real-typed-taker-authority-{slug}",
+            decision_id=decision_id,
         )
 
         assert result.status == "filled", result.reason
@@ -2320,6 +2275,14 @@ class TestExecutor:
             "size": pytest.approx(5.0),
             "side": "SELL",
             "order_type": "FAK",
+        }
+        command = _TEST_CONN.execute(
+            "SELECT state, price FROM venue_commands WHERE decision_id = ?",
+            (decision_id,),
+        ).fetchone()
+        assert dict(command) == {
+            "state": "FILLED",
+            "price": pytest.approx(float(expected_limit)),
         }
 
     @pytest.mark.parametrize("price", [0.0, 0.049, 0.951, 0.998, 1.0])
@@ -2345,7 +2308,7 @@ class TestExecutor:
         assert "live_order_unit_price_out_of_bounds" in str(result.reason)
         assert after == before
 
-    def test_execute_exit_order_rejects_out_of_band_best_bid_before_persistence(self):
+    def test_execute_exit_order_rejects_bid_outside_probability_domain_before_persistence(self):
         before = _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]
         token_id = "yes-token-out-of-band-best-bid"
 
@@ -2355,7 +2318,7 @@ class TestExecutor:
                 token_id=token_id,
                 shares=12.0,
                 current_price=0.95,
-                best_bid=0.999,
+                best_bid=1.001,
                 exact_limit_price=0.95,
                 **_snapshot_kwargs(
                     token_id,

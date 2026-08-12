@@ -5304,10 +5304,10 @@ def _marketable_sell_certificate_error(
         or snapshot_bid != Decimal(str(intent.best_bid))
     ):
         return "marketable_sell_certificate_snapshot_superseded"
-    if not LIVE_ORDER_MIN_UNIT_PRICE <= snapshot_bid <= LIVE_ORDER_MAX_UNIT_PRICE:
+    if not LIVE_ORDER_MIN_UNIT_PRICE <= snapshot_bid <= Decimal("1"):
         # INV-47 SCOPE: only this token's certified taker SELL is rejected.
         # DRAIN: global redecision consumes a fresh executable snapshot.
-        # RESET: no latch is stored; an in-band snapshot passes this gate.
+        # RESET: no latch is stored; a probability-domain snapshot bid passes.
         return "marketable_sell_snapshot_bid_out_of_bounds"
     return None
 
@@ -6541,8 +6541,11 @@ def execute_exit_order(
             not executable_bid.is_finite()
             or not LIVE_ORDER_MIN_UNIT_PRICE
             <= executable_bid
-            <= LIVE_ORDER_MAX_UNIT_PRICE
+            <= Decimal("1")
         ):
+            # The bid is counterparty economics, not our submitted limit.  A
+            # bid above the submit band can fill a legal SELL floor at a better
+            # price; only values outside the probability domain are invalid.
             # INV-47 SCOPE: only this token's SELL submission is rejected.
             # DRAIN: the next monitor/JIT pass supplies a fresh best bid.
             # RESET: no latch is stored; a fresh in-band bid passes.
