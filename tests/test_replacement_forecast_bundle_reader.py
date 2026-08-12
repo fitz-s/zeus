@@ -272,6 +272,7 @@ def test_cycle_hwm_sql_deadline_is_not_installed_during_payload_validation(
         progress_active = False
         progress_transitions: list[bool]
         bounded_sql_count = 0
+        wall_stall_injected = False
 
         def set_progress_handler(self, progress_handler, n):
             if progress_handler is not None:
@@ -287,6 +288,9 @@ def test_cycle_hwm_sql_deadline_is_not_installed_during_payload_validation(
             if self.progress_active:
                 assert self.bounded_sql_count == 0
                 self.bounded_sql_count += 1
+                if not self.wall_stall_injected:
+                    self.wall_stall_injected = True
+                    clock[0] = 0.11
             return super().execute(sql, parameters)
 
     db_path = tmp_path / "forecast.db"
@@ -361,6 +365,7 @@ def test_cycle_hwm_sql_deadline_is_not_installed_during_payload_validation(
     validation_transition_counts: list[int] = []
     clock = [0.0]
     monkeypatch.setattr(input_hwm.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(input_hwm.time, "thread_time", lambda: 0.0)
 
     def validate_payload(**_kwargs):
         nonlocal validation_calls
@@ -514,6 +519,40 @@ def test_cycle_hwm_expired_sql_deadline_fails_closed(tmp_path) -> None:
     assert exc_info.value.blocker_reason().startswith(
         "basis=raw_artifact_input_hwm_sql_deadline:sqlite_error="
     )
+
+
+def test_cycle_hwm_sql_cpu_deadline_fails_closed_and_removes_handler(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    class TrackingConnection(sqlite3.Connection):
+        progress_active = False
+
+        def set_progress_handler(self, progress_handler, n):
+            self.progress_active = progress_handler is not None
+            return super().set_progress_handler(progress_handler, n)
+
+    conn = sqlite3.connect(
+        tmp_path / "forecast.db",
+        factory=TrackingConnection,
+    )
+    cpu_clock = iter((0.0, 0.11))
+    monkeypatch.setattr(input_hwm.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(input_hwm.time, "thread_time", lambda: next(cpu_clock))
+
+    try:
+        with pytest.raises(ReplacementInputHwmReadUnavailable) as exc_info:
+            with input_hwm._bounded_hwm_sql(
+                conn,
+                deadline_monotonic=1.0,
+                sql_timeout_seconds=0.1,
+            ):
+                conn.execute("SELECT 1").fetchone()
+    finally:
+        conn.close()
+
+    assert exc_info.value.basis == "raw_artifact_input_hwm_sql_deadline"
+    assert conn.progress_active is False
 
 
 def test_cycle_hwm_payload_cache_preserves_absent_path_semantics(tmp_path) -> None:

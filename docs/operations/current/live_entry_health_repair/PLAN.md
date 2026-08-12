@@ -1801,6 +1801,11 @@ publication barrier.
   cancellation domain while remaining inside the caller's bounded monitor
   deadline. A deadline crossed by either phase fails closed with typed evidence;
   it never returns a partial or stale snapshot.
+- Runtime scheduling time is not SQLite execution time. SQLite lock waiting
+  remains bounded by wall-clock `busy_timeout`; VM progress is bounded by the
+  executing thread's CPU clock; the outer monitor wall deadline still bounds
+  their composition. Reactor/GIL preemption therefore cannot turn an indexed
+  millisecond read into a false SQL timeout.
 - SCOPE: the dedicated read-only connection used by held-position replacement
   HWM prefetch. DRAIN: each bounded SQL statement materializes its causal rows,
   then exact immutable payload validation completes before the monitor consumes

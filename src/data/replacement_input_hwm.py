@@ -137,13 +137,13 @@ def _bounded_hwm_sql(
         yield
         return
     started = time.monotonic()
-    sql_deadline = float(deadline_monotonic)
+    outer_deadline = float(deadline_monotonic)
+    remaining = outer_deadline - started
+    sql_cpu_deadline = None
     if sql_timeout_seconds is not None:
-        sql_deadline = min(
-            sql_deadline,
-            started + max(0.0, float(sql_timeout_seconds)),
-        )
-    remaining = sql_deadline - started
+        sql_timeout = max(0.0, float(sql_timeout_seconds))
+        remaining = min(remaining, sql_timeout)
+        sql_cpu_deadline = time.thread_time() + sql_timeout
     if remaining <= 0.0:
         _raise_hwm_deadline_elapsed(
             basis="raw_artifact_input_hwm_sql_deadline",
@@ -152,12 +152,24 @@ def _bounded_hwm_sql(
         f"PRAGMA busy_timeout = {max(1, min(1000, int(remaining * 1000)))}"
     )
     conn.set_progress_handler(
-        lambda: int(time.monotonic() >= sql_deadline),
+        lambda: int(
+            time.monotonic() >= outer_deadline
+            or (
+                sql_cpu_deadline is not None
+                and time.thread_time() >= sql_cpu_deadline
+            )
+        ),
         1_000,
     )
     try:
         yield
-        if time.monotonic() >= sql_deadline:
+        if (
+            time.monotonic() >= outer_deadline
+            or (
+                sql_cpu_deadline is not None
+                and time.thread_time() >= sql_cpu_deadline
+            )
+        ):
             _raise_hwm_deadline_elapsed(
                 basis="raw_artifact_input_hwm_sql_deadline",
             )
