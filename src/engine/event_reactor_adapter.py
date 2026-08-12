@@ -33539,7 +33539,7 @@ _GLOBAL_DAY0_DETERMINISTIC_BIN_PAYOFF_BAND_BASIS = (
     "day0_deterministic_bin_payoff_v1"
 )
 _GLOBAL_DAY0_CURRENT_SETTLEMENT_SIMPLEX_BAND_BASIS = (
-    "current_coherent_day0_fast_residual_peak_state_remaining_model_bootstrap_v5"
+    "current_coherent_day0_fast_residual_remaining_model_bootstrap_v6"
 )
 _GLOBAL_DAY0_CONDITIONED_REPLACEMENT_SIMPLEX_BAND_BASIS = (
     "current_coherent_day0_conditioned_replacement_simplex_v1"
@@ -33624,34 +33624,22 @@ def _day0_peak_set_probability_for_distribution(
     payload: dict[str, object],
     metric: str,
 ) -> float | None:
-    """Validate the latent peak-set probability used by the HIGH generator."""
+    """Reject marginal clock frequency as conditional live probability.
+
+    ``diurnal_peak_prob`` estimates P(peak set | city, month, local hour).  A
+    live distribution needs P(peak set | today's current state and remaining
+    path).  The former remains useful telemetry, but using it as the latter
+    double-counts the historical clock prior and can overwhelm today's rising
+    temperature and provider trajectory.  No validated conditional basis is
+    live yet, so the remaining-path generator is the sole statistical source.
+    """
 
     basis = str(payload.get("_edli_day0_peak_set_probability_basis") or "").strip()
     if metric != "high" or not basis:
         return None
     if basis != _DAY0_PEAK_SET_PROBABILITY_BASIS:
         raise ValueError("GLOBAL_DAY0_PEAK_SET_PROBABILITY_BASIS_INVALID")
-    from src.events.day0_authority import (
-        DAY0_ABSORBING_FINALITIES,
-        day0_evidence_finality,
-    )
-
-    if day0_evidence_finality(payload) not in DAY0_ABSORBING_FINALITIES:
-        return None
-    try:
-        peak_set_probability = float(
-            payload["_edli_day0_peak_set_probability"]
-        )
-        sample_count = int(payload["_edli_day0_peak_set_sample_count"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise ValueError("GLOBAL_DAY0_PEAK_SET_EVIDENCE_INVALID") from exc
-    if (
-        not math.isfinite(peak_set_probability)
-        or not 0.0 < peak_set_probability < 1.0
-        or sample_count < _DAY0_PEAK_SET_MIN_EMPIRICAL_SAMPLES
-    ):
-        raise ValueError("GLOBAL_DAY0_PEAK_SET_EVIDENCE_INVALID")
-    return peak_set_probability
+    return None
 
 
 def _sample_day0_extreme_with_peak_state(

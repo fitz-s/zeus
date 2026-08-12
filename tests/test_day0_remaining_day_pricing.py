@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-11
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-11; last_reused=2026-08-11
+# Last reused or audited: 2026-08-12
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -1717,8 +1717,8 @@ class TestRemainingDayMembers:
         assert p_raw[2] < 0.12
         assert p_raw.sum() == pytest.approx(1.0)
 
-    def test_empirical_peak_set_state_moves_probability_before_book_collapse(self):
-        """San Francisco replay: causal peak state, not the later settlement."""
+    def test_marginal_peak_set_frequency_is_telemetry_not_live_q(self):
+        """A city/month/hour marginal cannot override today's remaining path."""
         import src.engine.event_reactor_adapter as era
         from src.config import runtime_cities_by_name
         from src.contracts.settlement_semantics import SettlementSemantics
@@ -1739,7 +1739,7 @@ class TestRemainingDayMembers:
             ),
         }
 
-        point = era._day0_remaining_p_raw_vector(
+        point_with_telemetry = era._day0_remaining_p_raw_vector(
             np.array([73.228, 69.402, 73.139, 76.309], dtype=float),
             city=city,
             settlement_semantics=SettlementSemantics.for_city(city),
@@ -1747,11 +1747,25 @@ class TestRemainingDayMembers:
             payload=payload,
             extra_member_sigma=0.0,
         )
+        point_without_telemetry = era._day0_remaining_p_raw_vector(
+            np.array([73.228, 69.402, 73.139, 76.309], dtype=float),
+            city=city,
+            settlement_semantics=SettlementSemantics.for_city(city),
+            bins=bins,
+            payload={
+                "metric": "high",
+                "rounded_value": 70,
+                "settlement_source": "wu_icao_history",
+            },
+            extra_member_sigma=0.0,
+        )
 
-        assert point[1] < 0.05
-        assert point.sum() == pytest.approx(1.0)
-        assert payload["_edli_day0_peak_set_mixture_basis"] == (
-            "peak_set_atom_plus_truncated_remaining_path_v1"
+        assert point_with_telemetry == pytest.approx(point_without_telemetry)
+        assert point_with_telemetry[1] > 0.20
+        assert point_with_telemetry.sum() == pytest.approx(1.0)
+        assert "_edli_day0_peak_set_mixture_basis" not in payload
+        assert payload["_edli_day0_probability_operator"] == (
+            "extreme_observed_then_noisy_future_v1"
         )
 
     def test_fast_residual_frontier_moves_peak_atom_before_slow_wu_catches_up(self):
@@ -2011,7 +2025,7 @@ class TestRemainingDayMembers:
         assert era._day0_peak_set_probability_for_distribution(
             payload=empirical_payload,
             metric="high",
-        ) == pytest.approx(0.8)
+        ) is None
 
     def test_peak_set_bootstrap_rows_remain_coherent_simplexes(self):
         import src.engine.event_reactor_adapter as era

@@ -4,6 +4,33 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-12 Marginal peak time is not today's conditional peak state
+
+The Day0 HIGH generator mixed a historical `diurnal_peak_prob` atom into the
+current remaining-path distribution.  That table estimates only
+`P(peak already set | city, month, local hour)`.  It does not condition on
+today's temperature slope, time since the running high, fast observation
+innovation, provider trajectories, or remaining-path spread.  Live Dallas and
+NYC fills exposed the category error: roughly 0.90 selected-side entry beliefs
+collapsed to 0.0041 and 0 after the current temperature kept rising.
+
+The empirical clock probability remains attached as telemetry, but it no
+longer enters point q, bootstrap rows, held value, or order ranking.  Until a
+strictly causal walk-forward conditional model is proven, the current
+observation boundary plus current remaining provider path is the sole
+statistical Day0 distribution.  Existing unresolved-Day0 BUY containment stays
+in force, so this change cannot reopen entries; locked/refuted hard facts remain
+unchanged, and SELL must still beat HOLD/CASH on the unified capital objective.
+
+SCOPE is the statistical Day0 HIGH distribution for unresolved payoffs.  DRAIN
+is immediate recomputation under probability basis v6 on the next monitor or
+auction cycle.  RESET is a new q witness that excludes the marginal atom; a
+future peak-state atom may return only with a named conditional basis and
+strict walk-forward proof.  Acceptance requires a relationship antibody that
+the same remaining path produces the same q with or without marginal telemetry,
+the focused Day0 probability suite, zero new ENTRY commands while paused, and
+a post-load held-capital auction receipt on the new basis.
+
 ## 2026-08-12 Paused probability carriers still redecide held capital
 
 The post-hot-fix restart correctly kept new ENTRY commands at zero, but its
