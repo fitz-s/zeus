@@ -3706,3 +3706,49 @@ timeliness removes the row and the next wake recalculates the oldest debt.
 Acceptance requires selector and real-reactor tests proving a K-sized page
 contains no more than K-1 targets when debt exists, no debt is claimed without
 the explicit reserve, and current posterior/pause/submit fences remain intact.
+
+## 2026-08-12 Held-monitor probability work is admission bounded
+
+Forward receipts proved that the held monitor could have fresh local books for
+14 of 15 positions and still exhaust its full wall-clock claim after starting
+slow probability refreshes serially.  The existing one-third reservation chose
+the positions that should receive the bounded belief tranche, but it affected
+only ordering: every ordinary position could still start a five-second belief
+read until the global deadline was gone.  One slow family therefore blinded the
+unvisited tail even when quote acquisition used no network.
+
+The repair makes the existing fair bounded-coverage selection the guaranteed
+admission contract.  Durable hard-fact exits and structural wins retain their
+exact-probability lane.  If any admitted statistical read consumes its bounded
+deadline or fails, no non-admitted tail read may start in that pass; those
+positions retain the already-prefetched current quote but emit no probability
+freshness or action authority, and rotate into the next pass.  When the entire
+admitted slice completes quickly, the monitor may use genuine remaining time
+for the tail, preserving normal full-book throughput.  Quote acquisition,
+probability law, exit economics, lifecycle, and venue submission are unchanged.
+
+SCOPE is one non-hard-fact held position in one monitor pass.  DRAIN is the
+next recurring pass's fair bounded-coverage selection.  RESET is admission to
+that pass followed by a complete fresh probability witness; a timeout advances
+only attempt fairness and never manufactures freshness.  Acceptance requires:
+
+- a 15-position local-book pass whose admitted belief reads consume their full
+  allowance starts no more than the admitted one-third slice and starts no tail
+  reads after the first expiry;
+- the next pass admits a disjoint fair slice rather than retrying the same
+  positions;
+- a fully successful fast admitted slice may continue through the tail while
+  the global deadline still has a complete per-position allowance;
+- hard-fact exact-zero/exact-one actions remain outside the statistical belief
+admission gate;
+- equal-urgency admitted positions consume an already-current local book before
+  a network-dependent peer;
+- expiry in any admitted child stage (venue-close metadata, q refresh, or
+  pending-exit retry quote) closes non-admitted statistical tail admission, and
+  receipt ID lists enumerate every position counted as deferred;
+- focused held-monitor tests, compile, planning lock, exact-SHA deployment, and
+  forward receipt evidence show bounded q starts without full-book deadline
+  exhaustion.
+
+Allowed files are `src/engine/cycle_runtime.py`,
+`tests/test_live_safety_invariants.py`, and this plan.

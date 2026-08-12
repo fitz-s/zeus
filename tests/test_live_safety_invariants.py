@@ -410,6 +410,15 @@ def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
         chain_state="synced",
     )
     portfolio = _make_portfolio(first, second, third)
+    with cycle_runtime._HELD_MONITOR_CURSOR_LOCK:
+        cycle_runtime._HELD_MONITOR_ATTEMPT_STATE_BY_LANE.pop(
+            "bounded_coverage",
+            None,
+        )
+        cycle_runtime._HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE.pop(
+            "bounded_coverage",
+            None,
+        )
     visited: list[str] = []
     readthrough_deadlines: list[float] = []
     clock = [0.0]
@@ -498,10 +507,144 @@ def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
     assert summary.get("held_monitor_defer_reason", "") == expected_reason
     assert summary["monitors"] == expected_count
     assert len(monitor_results) == expected_count
-    assert readthrough_deadlines == [pytest.approx(6.0)] * expected_count
+    assert readthrough_deadlines == [pytest.approx(5.0)] * expected_count
     assert all(
         not hasattr(position, "_zeus_held_monitor_deadline_monotonic")
         for position in (first, second, third)
+    )
+
+
+def test_monitor_probability_reads_are_bounded_to_fair_admitted_slice(
+    monkeypatch,
+):
+    """Local quotes cannot let serial slow q reads consume the full-book claim."""
+    from src.engine import cycle_runtime
+
+    positions = [
+        _make_position(
+            trade_id=f"belief-admission-{index:02d}",
+            token_id=f"belief-admission-token-{index:02d}",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(15)
+    ]
+    clock = [0.0]
+    started_by_pass: list[list[str]] = []
+
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: positions,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_day0_hard_fact_position_eligible",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {
+            position.token_id: {
+                "asset_id": position.token_id,
+                "bids": [{"price": "0.40", "size": "20"}],
+                "asks": [{"price": "0.42", "size": "20"}],
+            }
+            for position in positions
+        },
+    )
+
+    current_started: list[str] = []
+
+    def slow_refresh(_conn, _clob, position):
+        current_started.append(position.trade_id)
+        clock[0] += 5.0
+        return _monitor_test_edge_context(position)
+
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        slow_refresh,
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+
+    for pass_index in range(2):
+        clock[0] = 0.0
+        current_started = []
+        summary = {"monitors": 0, "exits": 0}
+        cycle_runtime.execute_monitoring_phase(
+            None,
+            SimpleNamespace(),
+            _make_portfolio(*positions),
+            _monitor_test_artifact(),
+            _monitor_test_tracker(),
+            summary,
+            deps=_monitor_test_deps(f"belief_admission_{pass_index}"),
+            run_exit_preflight=False,
+            held_position_monitor_budget_seconds=75.0,
+        )
+        started_by_pass.append(list(current_started))
+        assert current_started == summary[
+            "held_monitor_primary_belief_admitted_position_ids"
+        ]
+        assert summary["held_monitor_primary_belief_read_started"] == 5
+        assert summary["held_monitor_primary_belief_read_completed"] == 0
+        assert summary["held_monitor_primary_belief_read_deferred"] == 15
+        assert summary["held_monitor_positions_deferred"] == 15
+        assert summary["held_monitor_primary_belief_started_position_ids"] == (
+            current_started
+        )
+        assert summary["held_monitor_primary_belief_completed_position_ids"] == []
+        assert summary["held_monitor_primary_belief_expired_position_ids"] == (
+            current_started
+        )
+        assert set(summary["held_monitor_primary_belief_deferred_position_ids"]) == (
+            {position.trade_id for position in positions}
+        )
+        assert clock[0] == pytest.approx(25.0)
+
+    assert set(started_by_pass[0]).isdisjoint(started_by_pass[1])
+
+
+def test_urgent_admitted_coverage_prefers_local_quote_before_network():
+    """Equal-urgency admission consumes a ready local book before network work."""
+    from src.engine import cycle_runtime
+
+    local = _make_position(
+        trade_id="urgent-admitted-local",
+        token_id="urgent-admitted-local-token",
+        state="holding",
+    )
+    network = _make_position(
+        trade_id="urgent-admitted-network",
+        token_id="urgent-admitted-network-token",
+        state="holding",
+    )
+    common = {
+        "deadline_rescue_position_id": None,
+        "durable_debt_position_id": None,
+        "dead_bin_position_ids": frozenset(),
+        "selected_urgent_position_ids": frozenset(),
+        "selected_coverage_position_ids": frozenset({id(local), id(network)}),
+        "has_selected_urgent": True,
+        "reserved_local_position_ids": frozenset(),
+        "reserved_network_position_id": None,
+        "structural_win_position_ids": frozenset(),
+        "network_book_tokens": frozenset({network.token_id}),
+    }
+
+    assert cycle_runtime._held_monitor_schedule_key(local, **common) < (
+        cycle_runtime._held_monitor_schedule_key(network, **common)
     )
 
 
@@ -552,6 +695,9 @@ def test_monitor_defers_before_primary_belief_read_when_reserve_is_unavailable(
     assert summary["held_monitor_deadline_defer_reason"] == (
         "PRIMARY_BELIEF_BUDGET_UNAVAILABLE"
     )
+    assert summary["held_monitor_primary_belief_deferred_position_ids"] == [
+        position.trade_id
+    ]
     assert not hasattr(position, "_zeus_held_monitor_deadline_monotonic")
 
 
@@ -20132,6 +20278,9 @@ def test_monitor_refresh_deadline_defers_before_canonical_emit(monkeypatch):
     assert canonical_emits == []
     assert summary["held_monitor_defer_reason"] == "MONITOR_DEADLINE_EXPIRED_AFTER_REFRESH"
     assert summary["held_monitor_deadline_deferred_positions"] == 1
+    assert summary["held_monitor_primary_belief_deferred_position_ids"] == [
+        position.trade_id
+    ]
 
 
 def test_one_position_deadline_does_not_blind_remaining_held_book(monkeypatch):
@@ -20358,6 +20507,122 @@ def test_closed_market_metadata_child_timeout_continues_held_book(monkeypatch):
     assert positions[0].state == "holding"
     assert summary["held_monitor_per_position_deadline_deferred"] == 1
     assert summary["held_monitor_positions_deferred"] == 1
+
+
+@pytest.mark.parametrize("failure_mode", ("timeout", "exception"))
+def test_admitted_metadata_failure_blocks_only_nonadmitted_statistical_tail(
+    monkeypatch,
+    failure_mode,
+):
+    """Any admitted child failure closes tail admission without blinding peers."""
+    from src.engine import cycle_runtime
+
+    positions = [
+        _make_position(
+            trade_id=f"metadata-admission-{index}",
+            token_id=f"metadata-admission-token-{index}",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(4)
+    ]
+    with cycle_runtime._HELD_MONITOR_CURSOR_LOCK:
+        cycle_runtime._HELD_MONITOR_ATTEMPT_STATE_BY_LANE.pop(
+            "bounded_coverage",
+            None,
+        )
+        cycle_runtime._HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE.pop(
+            "bounded_coverage",
+            None,
+        )
+    clock = [0.0]
+    metadata_calls: list[str] = []
+    refreshes: list[str] = []
+    canonical_emits: list[str] = []
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: positions,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_day0_hard_fact_position_eligible",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {
+            position.token_id: {
+                "asset_id": position.token_id,
+                "bids": [{"price": "0.40", "size": "20"}],
+                "asks": [{"price": "0.42", "size": "20"}],
+            }
+            for position in positions
+        },
+    )
+
+    def market_info(_clob, position, *_args, **_kwargs):
+        metadata_calls.append(position.trade_id)
+        if position is positions[0]:
+            if failure_mode == "timeout":
+                clock[0] = 6.0
+            else:
+                raise RuntimeError("metadata transport failed")
+        return None
+
+    monkeypatch.setattr(cycle_runtime, "_closed_non_accepting_market_info", market_info)
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda _conn, _clob, position: (
+            refreshes.append(position.trade_id)
+            or _monitor_test_edge_context(position)
+        ),
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda _conn, position, **_kwargs: (
+            canonical_emits.append(position.trade_id) or True
+        ),
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        SimpleNamespace(),
+        _make_portfolio(*positions),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("metadata_admission_timeout"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=20.0,
+    )
+
+    assert summary["held_monitor_primary_belief_admitted_position_ids"] == [
+        positions[0].trade_id,
+        positions[1].trade_id,
+    ]
+    assert metadata_calls == [positions[0].trade_id, positions[1].trade_id]
+    assert refreshes == canonical_emits == [positions[1].trade_id]
+    assert summary["held_monitor_primary_belief_expired_position_ids"] == (
+        [positions[0].trade_id] if failure_mode == "timeout" else []
+    )
+    assert summary["held_monitor_primary_belief_failed_position_ids"] == (
+        [positions[0].trade_id] if failure_mode == "exception" else []
+    )
+    assert set(summary["held_monitor_primary_belief_deferred_position_ids"]) == {
+        positions[0].trade_id,
+        positions[2].trade_id,
+        positions[3].trade_id,
+    }
 
 
 def test_market_velocity_uses_causal_source_time_not_legacy_text_order(tmp_path):

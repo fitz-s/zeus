@@ -175,6 +175,12 @@ def _held_position_monitor_primary_reservation(
 
     budget = max(0.0, float(monitor_budget_seconds))
     single_read = float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS)
+    if budget < single_read:
+        # A claim shorter than one complete q read has no statistical
+        # admission capacity.  SCOPE: this pass's statistical slice.  DRAIN:
+        # the next recurring pass recomputes capacity from its own claim.
+        # RESET: a claim at least as large as one complete read.
+        return 0, 0.0
     desired = _held_position_monitor_reservation_count(position_count)
     capacity = max(
         1,
@@ -4641,7 +4647,12 @@ def _held_monitor_schedule_key(
         return -1, urgency
     if has_selected_urgent:
         if position_id in selected_coverage_position_ids:
-            return -1, urgency if urgency < 2 else 2 + int(network_dependent)
+            return -1, (-2 + urgency) * 2 + int(network_dependent)
+        # Durable fairness is service, not admission.  It gets the first
+        # optional slot only after the guaranteed belief slice, so one stale
+        # debt read cannot precede and then expand that bounded slice.
+        if position_id == durable_debt_position_id:
+            return -1, 1
         if position_id in reserved_local_position_ids:
             return -1, 2
         if position_id == reserved_network_position_id:
@@ -4649,12 +4660,14 @@ def _held_monitor_schedule_key(
         if position_id in dead_bin_position_ids or urgency < 2:
             return 0, urgency
         return 1, int(network_dependent)
+    if position_id in selected_coverage_position_ids:
+        return 0, -1 + int(network_dependent)
     if position_id in reserved_local_position_ids:
         return 0, 0
     if position_id == reserved_network_position_id:
         return 0, 1
-    if position_id in selected_coverage_position_ids:
-        return 0, 1 if network_dependent else 0
+    if position_id == durable_debt_position_id:
+        return 0, 2
     return 1, 1 if network_dependent else 0
 
 
@@ -6692,6 +6705,12 @@ def execute_monitoring_phase(
     summary["held_monitor_primary_belief_read_started"] = 0
     summary["held_monitor_primary_belief_read_completed"] = 0
     summary["held_monitor_primary_belief_read_deferred"] = 0
+    summary["held_monitor_primary_belief_started_position_ids"] = []
+    summary["held_monitor_primary_belief_completed_position_ids"] = []
+    summary["held_monitor_primary_belief_expired_position_ids"] = []
+    summary["held_monitor_primary_belief_failed_position_ids"] = []
+    summary["held_monitor_primary_belief_failed_stages"] = []
+    summary["held_monitor_primary_belief_deferred_position_ids"] = []
     summary["held_monitor_optional_maintenance_deferred"] = 0
 
     # Freeze current probability authority before pending-exit recovery can
@@ -6955,24 +6974,6 @@ def execute_monitoring_phase(
         if getattr(durable_hard_facts.get(id(pos)), "action", None)
         == "EXIT_DEAD_BIN"
     )
-    selected_coverage_positions = (
-        _reserve_held_monitor_positions(
-            "bounded_coverage",
-            monitor_positions,
-            limit=monitor_reservation_count,
-            priority_key=lambda pos: (
-                -1
-                if id(pos) in dead_bin_position_ids
-                else _held_monitor_urgency_rank(pos)
-            ),
-            fair_by_attempt=True,
-        )
-        if monitor_budget_seconds > 0.0
-        else []
-    )
-    selected_coverage_position_ids = frozenset(
-        id(pos) for pos in selected_coverage_positions
-    )
     quote_positions = [
         pos for pos in monitor_positions if id(pos) not in structural_win_position_ids
     ]
@@ -7001,6 +7002,28 @@ def execute_monitoring_phase(
     local_book_tokens = frozenset(
         _position_held_token_id(pos) for pos in quote_positions
     ) - network_book_tokens
+    # Quote production precedes belief admission.  This lets the bounded q
+    # consumer prefer already-current local books within equal urgency instead
+    # of opening network work ahead of immediately actionable held positions.
+    selected_coverage_positions = (
+        _reserve_held_monitor_positions(
+            "bounded_coverage",
+            monitor_positions,
+            limit=monitor_reservation_count,
+            priority_key=lambda pos: (
+                -1
+                if id(pos) in dead_bin_position_ids
+                else _held_monitor_urgency_rank(pos),
+                _position_held_token_id(pos) in network_book_tokens,
+            ),
+            fair_by_attempt=True,
+        )
+        if monitor_budget_seconds > 0.0
+        else []
+    )
+    selected_coverage_position_ids = frozenset(
+        id(pos) for pos in selected_coverage_positions
+    )
     local_first_network_gap = bool(
         defer_partial_orderbook_gaps and local_book_tokens and network_book_tokens
     )
@@ -7128,6 +7151,10 @@ def execute_monitoring_phase(
         str(getattr(pos, "trade_id", "") or "")
         for pos in selected_coverage_positions
     ]
+    summary["held_monitor_primary_belief_admitted_position_ids"] = [
+        str(getattr(pos, "trade_id", "") or "")
+        for pos in selected_coverage_positions
+    ]
 
     deadline_rescue_position_id = next(
         (
@@ -7199,6 +7226,7 @@ def execute_monitoring_phase(
     summary["held_monitor_budget_bypass_scanned"] = 0
     monitor_wealth_witness_cache: dict[str, object] = {}
     deadline_rescue_used = False
+    primary_belief_slice_failed = False
     refresh_owned_attrs = (
         "last_monitor_at",
         "last_monitor_best_bid",
@@ -7251,18 +7279,55 @@ def execute_monitoring_phase(
             else:
                 setattr(pos, attr, value)
 
+    def record_primary_belief_deferred_ids(positions) -> None:
+        deferred_ids = summary["held_monitor_primary_belief_deferred_position_ids"]
+        for deferred_position in positions:
+            deferred_id = str(getattr(deferred_position, "trade_id", "") or "")
+            if deferred_id not in deferred_ids:
+                deferred_ids.append(deferred_id)
+
+    def record_admitted_child_failure(position_id: str, stage: str) -> None:
+        """Close tail admission after one admitted statistical child fails."""
+
+        nonlocal primary_belief_slice_failed
+        primary_belief_slice_failed = True
+        failed_ids = summary["held_monitor_primary_belief_failed_position_ids"]
+        if position_id in failed_ids:
+            return
+        failed_ids.append(position_id)
+        summary["held_monitor_primary_belief_failed_stages"].append(
+            {"position_id": position_id, "stage": stage}
+        )
+        summary["held_monitor_primary_belief_read_deferred"] = (
+            summary.get("held_monitor_primary_belief_read_deferred", 0) + 1
+        )
+        summary["held_monitor_positions_deferred"] = (
+            summary.get("held_monitor_positions_deferred", 0) + 1
+        )
+        record_primary_belief_deferred_ids((monitor_positions_by_id[position_id],))
+
     def record_position_deadline_expiry(
         *,
         position_index: int,
         position_deadline: float,
         position_id: str,
         stage: str,
+        blocks_statistical_tail: bool,
     ) -> str | None:
         """Classify one exhausted child claim without starving the held book."""
+
+        nonlocal primary_belief_slice_failed
 
         now_monotonic = time.monotonic()
         if now_monotonic < position_deadline:
             return None
+        if blocks_statistical_tail:
+            primary_belief_slice_failed = True
+            expired_ids = summary[
+                "held_monitor_primary_belief_expired_position_ids"
+            ]
+            if position_id not in expired_ids:
+                expired_ids.append(position_id)
         if now_monotonic >= monitor_deadline:
             # SCOPE: this position and the unvisited tail. DRAIN: the next
             # monitor pass creates a fresh global claim. RESET: a later pass
@@ -7279,6 +7344,9 @@ def execute_monitoring_phase(
             summary["held_monitor_deadline_deferred_positions"] = deferred_count
             summary["held_monitor_deadline_defer_reason"] = (
                 "MONITOR_DEADLINE_EXPIRED_AFTER_REFRESH"
+            )
+            record_primary_belief_deferred_ids(
+                monitor_positions[position_index:]
             )
             return "global"
 
@@ -7301,8 +7369,13 @@ def execute_monitoring_phase(
             "held_monitor_per_position_deadline_positions",
             [],
         ).append({"position_id": position_id, "stage": stage})
+        record_primary_belief_deferred_ids((monitor_positions[position_index],))
         return "position"
 
+    monitor_positions_by_id = {
+        str(getattr(position, "trade_id", "") or ""): position
+        for position in monitor_positions
+    }
     for position_index, pos in enumerate(monitor_positions):
         armed_obligation = None
         completion_request = None
@@ -7331,6 +7404,9 @@ def execute_monitoring_phase(
                 summary["held_monitor_deadline_defer_reason"] = (
                     "MONITOR_DEADLINE_EXPIRED"
                 )
+                record_primary_belief_deferred_ids(
+                    monitor_positions[position_index:]
+                )
             break
         if deadline_rescue:
             deadline_rescue_used = True
@@ -7358,6 +7434,38 @@ def execute_monitoring_phase(
             "action",
             None,
         ) not in {"EXIT_DEAD_BIN", "HOLD_STRUCTURAL_WIN"}
+        admitted_statistical_position = (
+            primary_belief_required
+            and id(pos) in selected_coverage_position_ids
+        )
+        if (
+            not deadline_rescue
+            and primary_belief_required
+            and id(pos) not in selected_coverage_position_ids
+            and primary_belief_slice_failed
+        ):
+            # The fair coverage reservation is the guaranteed admission slice.
+            # Once any admitted q read consumes its deadline, serial tail reads
+            # would be allowed to spend the whole claim even when every quote is
+            # already local.  Fast successful slices may still use remaining
+            # time, preserving normal full-book throughput.
+            # SCOPE: this non-hard-fact position in this monitor pass. DRAIN:
+            # the recurring pass rotates bounded_coverage by attempt identity.
+            # RESET: a new pass whose admitted slice completes without expiry.
+            summary["held_monitor_primary_belief_read_deferred"] = (
+                summary.get("held_monitor_primary_belief_read_deferred", 0)
+                + 1
+            )
+            summary["held_monitor_positions_deferred"] = (
+                summary.get("held_monitor_positions_deferred", 0) + 1
+            )
+            summary["held_monitor_defer_reason"] = (
+                "primary_belief_admitted_slice_failed"
+            )
+            summary["held_monitor_primary_belief_deferred_position_ids"].append(
+                str(getattr(pos, "trade_id", "") or "")
+            )
+            continue
         if (
             not deadline_rescue
             and primary_belief_required
@@ -7365,6 +7473,11 @@ def execute_monitoring_phase(
             and monitor_deadline - time.monotonic()
             < HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
         ):
+            # The admitted tranche owns its initially reserved claim even when
+            # bounded auxiliary work returns just past its deadline.  Everyone
+            # else requires a complete remaining allowance.  SCOPE: this
+            # unstarted tail in this pass.  DRAIN: the next fair pass rotates
+            # admission.  RESET: a complete remaining allowance or admission.
             deferred_count = len(monitor_positions) - position_index
             summary["held_monitor_primary_belief_read_deferred"] = (
                 summary.get("held_monitor_primary_belief_read_deferred", 0)
@@ -7377,6 +7490,9 @@ def execute_monitoring_phase(
             summary["held_monitor_deadline_deferred_positions"] = deferred_count
             summary["held_monitor_deadline_defer_reason"] = (
                 "PRIMARY_BELIEF_BUDGET_UNAVAILABLE"
+            )
+            record_primary_belief_deferred_ids(
+                monitor_positions[position_index:]
             )
             break
         summary["held_monitor_positions_scanned"] = (
@@ -7802,6 +7918,7 @@ def execute_monitoring_phase(
             _HELD_MONITOR_DEADLINE_ATTR,
         )
         setattr(pos, _HELD_MONITOR_DEADLINE_ATTR, position_deadline)
+        admitted_child_stage = None
         try:
             city = deps.cities_by_name.get(pos.city)
             if city is not None:
@@ -7946,6 +8063,7 @@ def execute_monitoring_phase(
                     decision_time=deps._utcnow(),
                 )
             else:
+                admitted_child_stage = "closed_market_metadata"
                 closed_market_info = _closed_non_accepting_market_info(
                     clob,
                     pos,
@@ -7953,11 +8071,16 @@ def execute_monitoring_phase(
                     decision_time=deps._utcnow(),
                     deadline_monotonic=position_deadline,
                 )
+                admitted_child_stage = None
             deadline_expiry = record_position_deadline_expiry(
                 position_index=position_index,
                 position_deadline=position_deadline,
                 position_id=str(getattr(pos, "trade_id", "") or ""),
                 stage="closed_market_metadata",
+                blocks_statistical_tail=(
+                    primary_belief_required
+                    and id(pos) in selected_coverage_position_ids
+                ),
             )
             if deadline_expiry is not None:
                 if deadline_expiry == "global":
@@ -8162,11 +8285,16 @@ def execute_monitoring_phase(
                         + 1
                     )
                 else:
+                    admitted_child_stage = "refresh"
                     summary["held_monitor_primary_belief_read_started"] = (
                         summary.get("held_monitor_primary_belief_read_started", 0)
                         + 1
                     )
+                    summary[
+                        "held_monitor_primary_belief_started_position_ids"
+                    ].append(str(getattr(pos, "trade_id", "") or ""))
                     edge_ctx = refresh_position(conn, clob, pos)
+                    admitted_child_stage = None
                     if is_durable_debt_network_attempt and held_token_id:
                         _mark_held_monitor_orderbook_attempted(
                             clob,
@@ -8174,6 +8302,11 @@ def execute_monitoring_phase(
                             held_token_id,
                         )
             except Exception:
+                if admitted_statistical_position:
+                    record_admitted_child_failure(
+                        str(getattr(pos, "trade_id", "") or ""),
+                        "refresh",
+                    )
                 restore_refresh_state(pos, refresh_position_state)
                 raise
             deadline_expiry = record_position_deadline_expiry(
@@ -8181,6 +8314,10 @@ def execute_monitoring_phase(
                 position_deadline=position_deadline,
                 position_id=str(getattr(pos, "trade_id", "") or ""),
                 stage="refresh",
+                blocks_statistical_tail=(
+                    primary_belief_required
+                    and id(pos) in selected_coverage_position_ids
+                ),
             )
             if deadline_expiry is not None:
                 restore_refresh_state(pos, refresh_position_state)
@@ -8221,6 +8358,7 @@ def execute_monitoring_phase(
                     and _hard_fact.action == "HOLD_STRUCTURAL_WIN"
                 )
             ):
+                admitted_child_stage = "pending_exit_retry_quote"
                 exit_context, refreshed_retry_quote = _refresh_pending_exit_retry_quote_from_current_clob(
                     conn=conn,
                     clob=clob,
@@ -8229,11 +8367,16 @@ def execute_monitoring_phase(
                     identity_seed_allowed=pending_exit_retry_identity_seed_allowed,
                     deadline_monotonic=position_deadline,
                 )
+                admitted_child_stage = None
                 deadline_expiry = record_position_deadline_expiry(
                     position_index=position_index,
                     position_deadline=position_deadline,
                     position_id=str(getattr(pos, "trade_id", "") or ""),
                     stage="pending_exit_retry_quote",
+                    blocks_statistical_tail=(
+                        primary_belief_required
+                        and id(pos) in selected_coverage_position_ids
+                    ),
                 )
                 if deadline_expiry is not None:
                     restore_refresh_state(pos, refresh_position_state)
@@ -8322,6 +8465,9 @@ def execute_monitoring_phase(
                     summary.get("held_monitor_primary_belief_read_completed", 0)
                     + 1
                 )
+                summary[
+                    "held_monitor_primary_belief_completed_position_ids"
+                ].append(str(getattr(pos, "trade_id", "") or ""))
             entry_selection_guard_forced_exit = False
             if not (
                 _hard_fact is not None
@@ -8947,6 +9093,11 @@ def execute_monitoring_phase(
                     summary.get("day0_static_closed_market_tradable_bid_preserved", 0) + 1
                 )
         except Exception as e:
+            if admitted_statistical_position and admitted_child_stage is not None:
+                record_admitted_child_failure(
+                    str(getattr(pos, "trade_id", "") or ""),
+                    admitted_child_stage,
+                )
             deps.logger.error("Monitor failed for %s: %s", pos.trade_id, e, exc_info=True)
             summary["monitor_failed"] = summary.get("monitor_failed", 0) + 1
             reason_prefix = "time_context_failed" if hours_to_settlement is None else f"refresh_failed:{e.__class__.__name__}"
