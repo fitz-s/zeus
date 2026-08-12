@@ -694,7 +694,10 @@ def test_held_hwm_prefetch_batches_unique_families(monkeypatch) -> None:
     captured_requests: list[frozenset[tuple[str, str, str]]] = []
     snapshot = object()
 
-    def forecasts_connection() -> sqlite3.Connection:
+    observed_deadlines: list[float] = []
+
+    def forecasts_connection(*, deadline_monotonic) -> sqlite3.Connection:
+        observed_deadlines.append(deadline_monotonic)
         return sqlite3.connect(":memory:")
 
     def freeze(
@@ -738,6 +741,7 @@ def test_held_hwm_prefetch_batches_unique_families(monkeypatch) -> None:
             }
         )
     ]
+    assert observed_deadlines and observed_deadlines[0] > time.monotonic()
     assert installed == [snapshot]
     assert summary["held_monitor_hwm_prefetch_family_count"] == 2
     assert summary["held_monitor_hwm_prefetch_status"] == "ready"

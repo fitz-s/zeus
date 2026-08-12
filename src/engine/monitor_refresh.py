@@ -5055,6 +5055,7 @@ def _build_current_global_day0_family_snapshot(
             monotonic=time.monotonic,
         )
         hwm_deadline: list[float | None] = [None]
+        hwm_handoff_started = [False]
         with ExitStack() as prepare_sqlite:
             world_seed = get_world_connection_read_only()
             world = prepare_sqlite.enter_context(
@@ -5090,19 +5091,15 @@ def _build_current_global_day0_family_snapshot(
                     )
                 )
             )
-            hwm_forecasts = get_forecasts_connection_read_only()
             prepare_context.checkpoint("held_monitor_probability_prepare:connections")
 
             def _begin_raw_hwm_read() -> float:
-                if hwm_deadline[0] is None:
-                    prepare_context.checkpoint(
-                        "held_monitor_probability_prepare:hwm_handoff"
-                    )
+                prepare_context.checkpoint(
+                    "held_monitor_probability_prepare:hwm_handoff"
+                )
+                _raise_if_day0_snapshot_read_deadline_elapsed(hwm_deadline[0])
+                if not hwm_handoff_started[0]:
                     prepare_sqlite.close()
-                    hwm_deadline[0] = _held_monitor_stage_deadline(
-                        hwm_deadline_monotonic,
-                        HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS,
-                    )
                     hwm_busy_ms = max(
                         0,
                         int((hwm_deadline[0] - time.monotonic()) * 1000.0),
@@ -5110,6 +5107,7 @@ def _build_current_global_day0_family_snapshot(
                     hwm_forecasts.execute(
                         f"PRAGMA busy_timeout = {min(1_000, hwm_busy_ms)}"
                     )
+                    hwm_handoff_started[0] = True
                 return float(hwm_deadline[0])
 
             row = world.execute(
@@ -5162,6 +5160,14 @@ def _build_current_global_day0_family_snapshot(
                 city is not None
                 and not _target_day_has_canonical_observation(world, position)
             )
+            hwm_deadline[0] = _held_monitor_stage_deadline(
+                hwm_deadline_monotonic,
+                HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS,
+            )
+            hwm_forecasts = get_forecasts_connection_read_only(
+                deadline_monotonic=float(hwm_deadline[0]),
+            )
+            _begin_raw_hwm_read()
             try:
                 prepared = _prepare_current_global_probability_family(
                     event,

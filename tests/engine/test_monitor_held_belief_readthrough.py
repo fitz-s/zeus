@@ -611,7 +611,11 @@ def test_readthrough_restamps_expired_seed_ttl_to_decision_now(
     monkeypatch.setattr(rb, "build_replacement_forecast_materialization_request", fake_build)
     monkeypatch.setattr(rb, "build_materialize_request_dataclass", fake_dataclass)
     monkeypatch.setattr(mat, "compute_replacement_posterior_readonly", fake_compute)
-    monkeypatch.setattr(db, "get_forecasts_connection_read_only", lambda: sqlite3.connect(":memory:"))
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_read_only",
+        lambda **_kwargs: sqlite3.connect(":memory:"),
+    )
 
     held_prob, held_lcb, held_ucb = mr._attempt_held_belief_readthrough(
         _pos(),
@@ -688,7 +692,7 @@ def test_readthrough_sqlite_work_is_interrupted_at_monitor_deadline(
     monkeypatch.setattr(
         db,
         "get_forecasts_connection_read_only",
-        lambda: sqlite3.connect(":memory:"),
+        lambda **_kwargs: sqlite3.connect(":memory:"),
     )
 
     started = time.monotonic()
@@ -899,7 +903,7 @@ def test_day0_monitor_selects_latest_event_as_of_frozen_decision_time(monkeypatc
     monkeypatch.setattr(
         db,
         "get_forecasts_connection_read_only",
-        lambda: next(connections),
+        lambda **_kwargs: next(connections),
     )
     monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
 
@@ -942,7 +946,14 @@ def test_day0_hwm_budget_starts_at_actual_prepare_handoff(monkeypatch):
     monkeypatch.setattr(mr.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(db, "get_world_connection_read_only", lambda: world)
     connections = iter((forecasts, hwm))
-    monkeypatch.setattr(db, "get_forecasts_connection_read_only", lambda: next(connections))
+    observed_connection_deadlines = []
+
+    def forecasts_connection(*, deadline_monotonic=None):
+        if deadline_monotonic is not None:
+            observed_connection_deadlines.append(deadline_monotonic)
+        return next(connections)
+
+    monkeypatch.setattr(db, "get_forecasts_connection_read_only", forecasts_connection)
     monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
 
     with pytest.raises(HandoffObserved):
@@ -955,7 +966,8 @@ def test_day0_hwm_budget_starts_at_actual_prepare_handoff(monkeypatch):
             hwm_deadline_monotonic=20.0,
         )
 
-    assert observed["deadline"] == pytest.approx(14.5)
+    assert observed_connection_deadlines == [pytest.approx(12.5)]
+    assert observed["deadline"] == pytest.approx(12.5)
 
 
 def test_day0_prepare_file_reads_do_not_wait_on_shared_snapshot_fence(
@@ -992,7 +1004,7 @@ def test_day0_prepare_file_reads_do_not_wait_on_shared_snapshot_fence(
     monkeypatch.setattr(
         db,
         "get_forecasts_connection_read_only",
-        lambda: read_only(forecasts_path),
+        lambda **_kwargs: read_only(forecasts_path),
     )
     monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
     monkeypatch.setattr(
@@ -1112,7 +1124,7 @@ def test_day0_hwm_handoff_keeps_independent_prepare_reads_alive(
     monkeypatch.setattr(
         db,
         "get_forecasts_connection_read_only",
-        lambda: read_only(forecasts_path),
+        lambda **_kwargs: read_only(forecasts_path),
     )
     monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
     monkeypatch.setattr(mr, "_target_day_has_canonical_observation", lambda *_a, **_k: False)
@@ -1161,7 +1173,11 @@ def test_day0_prepare_timeout_does_not_start_or_mislabel_hwm(monkeypatch):
     monkeypatch.setattr(mr.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(db, "get_world_connection_read_only", lambda: world)
     connections = iter((forecasts, hwm))
-    monkeypatch.setattr(db, "get_forecasts_connection_read_only", lambda: next(connections))
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_read_only",
+        lambda **_kwargs: next(connections),
+    )
     monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
 
     with pytest.raises(WorkDeferred) as raised:

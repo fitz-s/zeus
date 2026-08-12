@@ -28,6 +28,7 @@ import json
 import logging
 import math
 import os
+import queue
 import sqlite3
 import threading
 import time
@@ -389,11 +390,71 @@ def _connect_read_only(
             raise sqlite3.OperationalError("DB_CONNECTION_DEADLINE_EXPIRED")
         return min(timeout_ms, max(1, math.ceil(remaining * 1000.0)))
 
-    conn = sqlite3.connect(
-        f"file:{db_path.resolve()}?mode=ro",
-        uri=True,
-        timeout=max(0.001, remaining_timeout_ms() / 1000.0),
-    )
+    uri = f"file:{db_path.resolve()}?mode=ro"
+    if deadline_monotonic is None:
+        conn = sqlite3.connect(
+            uri,
+            uri=True,
+            timeout=max(0.001, timeout_ms / 1000.0),
+        )
+    else:
+        # sqlite3.connect(timeout=...) bounds SQLite's busy handler, not the
+        # complete file-open call. Held HWM reads own an absolute wall claim,
+        # so acquire on a daemon worker and abandon the handoff at that claim.
+        # The deadline-bound connection is dedicated to the receiving thread;
+        # check_same_thread=False permits that single ownership transfer only.
+        result: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
+        accepted = threading.Event()
+        abandoned = threading.Event()
+
+        def open_until_deadline() -> None:
+            try:
+                opened = sqlite3.connect(
+                    uri,
+                    uri=True,
+                    timeout=remaining_timeout_ms() / 1000.0,
+                    check_same_thread=False,
+                )
+            except BaseException as exc:
+                if not abandoned.is_set():
+                    result.put(("error", exc))
+                return
+            result.put(("connection", opened))
+            while not accepted.wait(0.01):
+                if abandoned.is_set():
+                    opened.close()
+                    return
+
+        opener = threading.Thread(
+            target=open_until_deadline,
+            name="zeus-read-only-deadline-open",
+            daemon=True,
+        )
+        opener.start()
+        remaining = float(deadline_monotonic) - time.monotonic()
+        if not math.isfinite(remaining) or remaining <= 0.0:
+            abandoned.set()
+            raise sqlite3.OperationalError("DB_CONNECTION_DEADLINE_EXPIRED")
+        try:
+            result_kind, value = result.get(timeout=remaining)
+        except queue.Empty as exc:
+            abandoned.set()
+            raise sqlite3.OperationalError(
+                "DB_CONNECTION_DEADLINE_EXPIRED"
+            ) from exc
+        if result_kind == "error":
+            accepted.set()
+            if isinstance(value, BaseException):
+                raise value
+            raise sqlite3.OperationalError("DB_CONNECTION_ERROR_INVALID")
+        conn = value
+        if not isinstance(conn, sqlite3.Connection):
+            accepted.set()
+            raise sqlite3.OperationalError("DB_CONNECTION_RESULT_INVALID")
+        accepted.set()
+        if time.monotonic() >= float(deadline_monotonic):
+            conn.close()
+            raise sqlite3.OperationalError("DB_CONNECTION_DEADLINE_EXPIRED")
     try:
         conn.row_factory = sqlite3.Row
 

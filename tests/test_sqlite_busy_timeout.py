@@ -320,6 +320,50 @@ def test_read_only_factory_deadline_bounds_bootstrap_and_closes(
         captured[0].execute("SELECT 1")
 
 
+def test_read_only_factory_wall_deadline_abandons_slow_connect(
+    monkeypatch, tmp_path
+):
+    """A late sqlite3.connect result is closed instead of blocking HWM work."""
+    from src.state import db as _db
+
+    db_path = tmp_path / "slow-deadline-read.db"
+    sqlite3.connect(db_path).close()
+    real_connect = sqlite3.connect
+    worker_finished = threading.Event()
+    late_connections = []
+
+    def slow_connect(path, **kwargs):
+        time.sleep(0.2)
+        conn = real_connect(path, **kwargs)
+        late_connections.append(conn)
+        worker_finished.set()
+        return conn
+
+    started = time.monotonic()
+    with patch("src.state.db.sqlite3.connect", side_effect=slow_connect):
+        with pytest.raises(
+            sqlite3.OperationalError,
+            match="DB_CONNECTION_DEADLINE_EXPIRED",
+        ):
+            _db._connect_read_only(
+                db_path,
+                deadline_monotonic=time.monotonic() + 0.04,
+            )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.15
+    assert worker_finished.wait(timeout=1.0)
+    deadline = time.monotonic() + 1.0
+    while late_connections and time.monotonic() < deadline:
+        try:
+            late_connections[0].execute("SELECT 1")
+        except sqlite3.ProgrammingError:
+            break
+        time.sleep(0.01)
+    with pytest.raises(sqlite3.ProgrammingError):
+        late_connections[0].execute("SELECT 1")
+
+
 # ---------------------------------------------------------------------------
 # T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH: connect_or_degrade
 # ---------------------------------------------------------------------------

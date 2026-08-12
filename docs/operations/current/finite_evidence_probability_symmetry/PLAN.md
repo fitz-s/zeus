@@ -3796,10 +3796,14 @@ The HWM batch now receives its own absolute wall deadline:
 `min(auxiliary_deadline, started + raw_hwm_max)`.  The SQL allowance is the
 same remaining wall budget, not the primary belief reserve. The read-only
 connection open, initialization PRAGMAs, and snapshot `BEGIN` all consume that
-same absolute deadline; no bootstrap step owns a fresh timeout. Completion
-still freezes one causal HWM cut. Expiry uses the existing typed unavailable
-snapshot and fails probability authority closed; it never reuses an older cut,
-falls back to a scalar belief, or writes a synthetic HOLD decision.
+same absolute deadline; no bootstrap step owns a fresh timeout. Because
+`sqlite3.connect(timeout=...)` limits only SQLite busy handling, deadline-bound
+opens use a daemon handoff: the caller returns unavailable at the wall deadline
+and any late connection is closed by its opener. The batch HWM and the Day0
+held-family HWM both use this same connection contract. Completion still
+freezes one causal HWM cut. Expiry uses the existing typed unavailable snapshot
+and fails probability authority closed; it never reuses an older cut, falls
+back to a scalar belief, or writes a synthetic HOLD decision.
 
 SCOPE is one held-monitor HWM batch. DRAIN is the next bounded monitor pass
 against current raw artifacts. RESET is a complete causal batch within its
@@ -3809,6 +3813,8 @@ probability, submit, price-band, or global-auction gates.
 
 Acceptance requires an oversized HWM wait to receive the 2.5-second absolute
 deadline through connection bootstrap, `BEGIN`, and the matching SQL allowance;
+both HWM caller shapes must pass it and a deliberately delayed connect must be
+abandoned and closed;
 existing HWM-before-auxiliary ordering must remain intact, typed unavailable
 behavior must retain fail-closed authority, and post-deploy decision artifacts
 must show HWM wall time bounded while primary position attempts continue.
