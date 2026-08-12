@@ -60,6 +60,10 @@ class WriteLeaseTimeout(TimeoutError):
     """Raised when a write lease cannot acquire every required DB gate in time."""
 
 
+class _MonitorIntentYield(WriteLeaseTimeout):
+    """Internal retry signal when MONITOR intent appears during acquisition."""
+
+
 class CrossDatabaseTransactionUnsupported(RuntimeError):
     """Raised when a caller requests a fake multi-connection DB transaction."""
 
@@ -126,6 +130,7 @@ class _AcquiredGate:
     lock_path: Path
     fd: int
     process_lock: threading.Lock
+    publication_fd: int | None = None
 
 
 def _coerce_write_class(write_class: WriteClass | str) -> WriteClass:
@@ -352,12 +357,28 @@ class WriteCoordinator:
                         ordered,
                         self._db_paths,
                     )
-                acquired = self._acquire_gates(
-                    ordered,
-                    deadline=deadline,
-                    owner=owner,
-                    priority=resolved_priority,
-                )
+                while True:
+                    try:
+                        acquired = self._acquire_gates(
+                            ordered,
+                            deadline=deadline,
+                            owner=owner,
+                            priority=resolved_priority,
+                        )
+                        break
+                    except _MonitorIntentYield:
+                        if (
+                            resolved_priority is WritePriority.BACKGROUND_RECOVERY
+                            or (deadline is not None and self._clock() >= deadline)
+                        ):
+                            raise
+                        sleep_for = 0.01
+                        if deadline is not None:
+                            sleep_for = max(
+                                0.001,
+                                min(sleep_for, deadline - self._clock()),
+                            )
+                        self._sleep(sleep_for)
             finally:
                 if monitor_waiting:
                     try:
@@ -375,6 +396,7 @@ class WriteCoordinator:
                 acquired_at=acquired_at,
                 _metrics=metrics,
             )
+            self._publish_nonmonitor_lease(acquired)
             try:
                 yield lease
             except BaseException as exc:
@@ -509,6 +531,14 @@ class WriteCoordinator:
                             owner=owner,
                             blocking=priority is not WritePriority.BACKGROUND_RECOVERY,
                         )
+                    if (
+                        priority is not WritePriority.MONITOR
+                        and self._monitor_intent_locked(db_path)
+                    ):
+                        raise _MonitorIntentYield(
+                            "DB writer yielded after turnstile for "
+                            f"owner={owner}: monitor intent visible"
+                        )
                     background = priority is WritePriority.BACKGROUND_RECOVERY
                     self._acquire_process_lock(
                         process_lock,
@@ -525,6 +555,14 @@ class WriteCoordinator:
                         owner=owner,
                         blocking=not background,
                     )
+                    if (
+                        priority is not WritePriority.MONITOR
+                        and self._monitor_intent_locked(db_path)
+                    ):
+                        raise _MonitorIntentYield(
+                            "DB writer yielded before reservation release for "
+                            f"owner={owner}: monitor intent visible"
+                        )
                 except BaseException:
                     self._cleanup_current_gate(
                         turnstile_fd=turnstile_fd,
@@ -565,6 +603,25 @@ class WriteCoordinator:
                         process_lock=process_lock,
                     )
                 )
+            if priority is not WritePriority.MONITOR and any(
+                self._monitor_intent_locked(self._db_paths[db])
+                for db in ordered
+            ):
+                raise _MonitorIntentYield(
+                    "DB writer yielded before DB-set publication for "
+                    f"owner={owner}: monitor intent visible"
+                )
+            if priority is not WritePriority.MONITOR:
+                publication_fds = self._acquire_nonmonitor_publication_barrier(
+                    ordered,
+                    owner=owner,
+                )
+                for gate, publication_fd in zip(
+                    acquired,
+                    publication_fds,
+                    strict=True,
+                ):
+                    gate.publication_fd = publication_fd
             return acquired
         except BaseException as exc:
             cleanup_error = self._release_turnstile_set(
@@ -578,6 +635,63 @@ class WriteCoordinator:
             if isinstance(exc, WriteLeaseTimeout) and cleanup_error is not None:
                 raise cleanup_error from exc
             raise
+
+    def _acquire_nonmonitor_publication_barrier(
+        self,
+        ordered: tuple[DBIdentity, ...],
+        *,
+        owner: str,
+    ) -> list[int]:
+        """Linearize a non-monitor lease against new MONITOR intent.
+
+        The exclusive intent locks remain held after every DB gate is owned and
+        until ``lease`` has built the public lease object.  A MONITOR therefore
+        either publishes intent before this barrier and makes the writer yield,
+        or publishes after the non-monitor lease has linearized.  There is no
+        check-to-publication window in which both can believe they won.
+        """
+
+        fds: list[int] = []
+        try:
+            for db in ordered:
+                path = writer_monitor_intent_path(self._db_paths[db])
+                path.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError as exc:
+                    os.close(fd)
+                    raise _MonitorIntentYield(
+                        "DB writer yielded at lease publication for "
+                        f"owner={owner}: monitor intent visible"
+                    ) from exc
+                except BaseException:
+                    os.close(fd)
+                    raise
+                fds.append(fd)
+            return fds
+        except BaseException:
+            cleanup_error = self._release_turnstile_set(reversed(fds))
+            if cleanup_error is not None:
+                raise cleanup_error
+            raise
+
+    def _publish_nonmonitor_lease(self, acquired: list[_AcquiredGate]) -> None:
+        """Release intent barriers only after gate ownership is publishable."""
+
+        first_error: BaseException | None = None
+        for gate in reversed(acquired):
+            if gate.publication_fd is None:
+                continue
+            try:
+                self._release_turnstile(gate.publication_fd)
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+            finally:
+                gate.publication_fd = None
+        if first_error is not None:
+            raise first_error
 
     def _release_turnstile_set(self, fds) -> BaseException | None:
         """Release every reservation even when one close path faults."""
@@ -925,6 +1039,14 @@ class WriteCoordinator:
     def _release_gates(self, acquired: list[_AcquiredGate]) -> None:
         first_error: BaseException | None = None
         for gate in reversed(acquired):
+            if gate.publication_fd is not None:
+                try:
+                    self._release_turnstile(gate.publication_fd)
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+                finally:
+                    gate.publication_fd = None
             try:
                 fcntl.flock(gate.fd, fcntl.LOCK_UN)
             except BaseException as exc:

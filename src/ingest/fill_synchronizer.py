@@ -105,7 +105,7 @@ from src.state.venue_command_repo import _row_factory_as, append_trade_fact
 logger = logging.getLogger(__name__)
 
 DEFAULT_SOURCE = "polymarket_v2_get_trades"
-FILL_SYNC_DB_WRITE_LEASE_DEADLINE_MS = 25
+FILL_SYNC_DB_WRITE_LEASE_DEADLINE_MS = 1_000
 FILL_SYNC_DB_WRITE_MAX_HOLD_MS = 1_000
 
 _DISPOSITION_ZEUS_ATTRIBUTED = "ZEUS_ATTRIBUTED"
@@ -623,7 +623,7 @@ def _sync_fills_coordinated(
     coordinator = default_runtime_write_coordinator()
     transaction_kwargs = {
         "write_class": "live",
-        "priority": WritePriority.BACKGROUND_RECOVERY,
+        "priority": WritePriority.RECOVERY_CRITICAL,
         "deadline_ms": FILL_SYNC_DB_WRITE_LEASE_DEADLINE_MS,
         "max_hold_ms": FILL_SYNC_DB_WRITE_MAX_HOLD_MS,
     }

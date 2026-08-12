@@ -2743,7 +2743,7 @@ files:
   src/state/write_coordinator.py:
     zone: K2_runtime
     authority_role: db_write_coordination_contract
-    why: Runtime DB write coordinator for declared DB-set leases, same-file writer serialization across LIVE/BULK classes, single-DB BEGIN IMMEDIATE transactions, and telemetry. Its unified writer gate is separate from the shared cutover-lease file, so a pre-opened canonical connection cannot self-contend when a coordinated write unit starts.
+    why: Runtime DB write coordinator for declared DB-set leases, same-file writer serialization across LIVE/BULK classes, single-DB BEGIN IMMEDIATE transactions, and telemetry. MONITOR publishes crash-safe shared intent before waiting; every non-monitor acquisition rechecks that intent during acquisition, then holds an exclusive intent publication barrier from final DB-set ownership until the public lease is constructed. A monitor therefore either publishes first and forces the whole DB-set acquisition to yield/retry, or publishes after the non-monitor lease has linearized; there is no check-to-publication overtake window. Its unified writer gate is separate from the shared cutover-lease file, so a pre-opened canonical connection cannot self-contend when a coordinated write unit starts.
     write_routes:
     - canonical_db_write_coordination
     downstream:
@@ -3243,7 +3243,7 @@ files:
   src/ingest/fill_synchronizer.py:
     zone: K2_runtime
     authority_role: continuous_authenticated_fill_fact_producer
-    why: Continuously reads authenticated venue fills, freezes venue/parsing/read-side evidence outside every writer lease, then atomically appends observations and attributed facts, advances command projections, and publishes the monotonic coverage watermark inside one unified TRADE WriteCoordinator transaction. Existing schema is checked read-only so the hot path requests no redundant schema writer lease; a missing cold-start schema is created through its own coordinated unit. The scheduler reports contention as retryable failure; it never bypasses the writer turnstile or holds a canonical write transaction across venue I/O.
+    why: Continuously reads authenticated venue fills, freezes venue/parsing/read-side evidence outside every writer lease, then atomically appends observations and attributed facts, advances command projections, and publishes the monotonic coverage watermark inside one unified TRADE WriteCoordinator transaction. Existing schema is checked read-only so the hot path requests no redundant schema writer lease; a missing cold-start schema is created through its own coordinated unit. Canonical fill recovery uses bounded RECOVERY_CRITICAL admission: it waits behind visible MONITOR intent instead of overtaking it, but cannot starve forever as disposable background work. The scheduler reports bounded contention as retryable failure; it never bypasses the writer turnstile or holds a canonical write transaction across venue I/O.
     downstream:
     - src/ingest/price_channel_daemon.py
     - src/execution/command_recovery.py

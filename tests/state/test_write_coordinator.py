@@ -1,7 +1,7 @@
 # Created: 2026-06-26
-# Last reused or audited: 2026-07-29
+# Last reused or audited: 2026-08-11
 # Authority basis: docs/operations/current/reports/runtime_db_lock_refactor_design_2026-06-26.md
-# Lifecycle: created=2026-06-26; last_reviewed=2026-07-29; last_reused=2026-07-29
+# Lifecycle: created=2026-06-26; last_reviewed=2026-08-11; last_reused=2026-08-11
 # Purpose: Runtime DB write coordinator skeleton antibodies: unified same-file
 #   LIVE/BULK writer gate, canonical multi-DB lease order, and single-DB
 #   BEGIN IMMEDIATE commit/rollback telemetry.
@@ -10,6 +10,8 @@
 
 from __future__ import annotations
 
+import fcntl
+import os
 import sqlite3
 import threading
 import time
@@ -27,6 +29,7 @@ from src.state.write_coordinator import (
     WriteLeaseTimeout,
     WritePriority,
     unified_writer_lock_path,
+    writer_monitor_waiter_path,
 )
 
 
@@ -36,6 +39,20 @@ def _db_paths(tmp_path: Path) -> dict[DBIdentity, Path]:
         DBIdentity.TRADE: tmp_path / "zeus_trades.db",
         DBIdentity.WORLD: tmp_path / "zeus-world.db",
     }
+
+
+def _exclusive_flock_visible(path: Path) -> bool:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
 
 
 def test_live_and_bulk_share_same_file_gate(tmp_path: Path) -> None:
@@ -101,6 +118,191 @@ def test_background_holder_can_observe_new_monitor_waiter(tmp_path: Path) -> Non
     assert not waiter.is_alive()
     assert waiter_acquired.is_set()
     assert not coordinator.has_pending_monitor_waiter((DBIdentity.TRADE,))
+
+
+def test_recovery_queued_before_monitor_yields_at_final_gate(tmp_path: Path) -> None:
+    coordinator = WriteCoordinator(_db_paths(tmp_path))
+    order: list[str] = []
+    errors: list[BaseException] = []
+
+    def _writer(owner: str, priority: WritePriority) -> None:
+        try:
+            with coordinator.lease(
+                (DBIdentity.TRADE,),
+                owner=owner,
+                priority=priority,
+                deadline_ms=2_000,
+            ):
+                order.append(owner)
+        except BaseException as exc:  # noqa: BLE001 - surfaced below.
+            errors.append(exc)
+
+    waiter_path = writer_monitor_waiter_path(_db_paths(tmp_path)[DBIdentity.TRADE])
+
+    with coordinator.lease((DBIdentity.TRADE,), owner="blocker"):
+        recovery = threading.Thread(
+            target=_writer,
+            args=("recovery", WritePriority.RECOVERY_CRITICAL),
+        )
+        recovery.start()
+        deadline = time.monotonic() + 1.0
+        while not _exclusive_flock_visible(waiter_path) and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert _exclusive_flock_visible(waiter_path)
+
+        monitor = threading.Thread(
+            target=_writer,
+            args=("monitor", WritePriority.MONITOR),
+        )
+        monitor.start()
+        deadline = time.monotonic() + 1.0
+        while (
+            not coordinator.has_pending_monitor_waiter((DBIdentity.TRADE,))
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.005)
+        assert coordinator.has_pending_monitor_waiter((DBIdentity.TRADE,))
+
+    monitor.join(timeout=2.0)
+    recovery.join(timeout=2.0)
+    assert not monitor.is_alive()
+    assert not recovery.is_alive()
+    assert errors == []
+    assert order == ["monitor", "recovery"]
+
+
+def test_multi_db_recovery_yields_when_monitor_arrives_after_first_gate(
+    tmp_path: Path,
+) -> None:
+    paths = _db_paths(tmp_path)
+    coordinator = WriteCoordinator(paths)
+    order: list[str] = []
+    errors: list[BaseException] = []
+
+    def _recovery() -> None:
+        try:
+            with coordinator.lease(
+                (DBIdentity.WORLD, DBIdentity.TRADE),
+                owner="recovery",
+                priority=WritePriority.RECOVERY_CRITICAL,
+                deadline_ms=2_000,
+            ):
+                order.append("recovery")
+        except BaseException as exc:  # noqa: BLE001 - surfaced below.
+            errors.append(exc)
+
+    def _monitor() -> None:
+        try:
+            with coordinator.lease(
+                (DBIdentity.WORLD,),
+                owner="monitor",
+                priority=WritePriority.MONITOR,
+                deadline_ms=2_000,
+            ):
+                order.append("monitor")
+        except BaseException as exc:  # noqa: BLE001 - surfaced below.
+            errors.append(exc)
+
+    with coordinator.lease((DBIdentity.TRADE,), owner="trade-blocker"):
+        recovery = threading.Thread(target=_recovery)
+        recovery.start()
+        world_gate = unified_writer_lock_path(paths[DBIdentity.WORLD])
+        deadline = time.monotonic() + 1.0
+        while not _exclusive_flock_visible(world_gate) and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert _exclusive_flock_visible(world_gate)
+
+        monitor = threading.Thread(target=_monitor)
+        monitor.start()
+        deadline = time.monotonic() + 1.0
+        while (
+            not coordinator.has_pending_monitor_waiter((DBIdentity.WORLD,))
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.005)
+        assert coordinator.has_pending_monitor_waiter((DBIdentity.WORLD,))
+
+    monitor.join(timeout=2.0)
+    recovery.join(timeout=2.0)
+    assert not monitor.is_alive()
+    assert not recovery.is_alive()
+    assert errors == []
+    assert order == ["monitor", "recovery"]
+
+
+def test_monitor_cannot_enter_final_check_to_lease_publication_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _db_paths(tmp_path)
+    coordinator = WriteCoordinator(paths)
+    publication_barrier_owned = threading.Event()
+    release_publication = threading.Event()
+    monitor_started = threading.Event()
+    order: list[str] = []
+    errors: list[BaseException] = []
+    original_barrier = coordinator._acquire_nonmonitor_publication_barrier
+
+    def _pause_after_final_check(ordered, *, owner):
+        fds = original_barrier(ordered, owner=owner)
+        publication_barrier_owned.set()
+        assert release_publication.wait(timeout=1.0)
+        return fds
+
+    monkeypatch.setattr(
+        coordinator,
+        "_acquire_nonmonitor_publication_barrier",
+        _pause_after_final_check,
+    )
+
+    def _recovery() -> None:
+        try:
+            with coordinator.lease(
+                (DBIdentity.TRADE,),
+                owner="recovery",
+                priority=WritePriority.RECOVERY_CRITICAL,
+                deadline_ms=2_000,
+            ):
+                order.append("recovery")
+        except BaseException as exc:  # noqa: BLE001 - surfaced below.
+            errors.append(exc)
+
+    def _monitor() -> None:
+        monitor_started.set()
+        try:
+            with coordinator.lease(
+                (DBIdentity.TRADE,),
+                owner="monitor",
+                priority=WritePriority.MONITOR,
+                deadline_ms=2_000,
+            ):
+                order.append("monitor")
+        except BaseException as exc:  # noqa: BLE001 - surfaced below.
+            errors.append(exc)
+
+    recovery = threading.Thread(target=_recovery)
+    recovery.start()
+    assert publication_barrier_owned.wait(timeout=1.0)
+
+    monitor = threading.Thread(target=_monitor)
+    monitor.start()
+    assert monitor_started.wait(timeout=1.0)
+    deadline = time.monotonic() + 1.0
+    while (
+        not coordinator.has_pending_monitor_waiter((DBIdentity.TRADE,))
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.005)
+    assert coordinator.has_pending_monitor_waiter((DBIdentity.TRADE,))
+    assert order == []
+
+    release_publication.set()
+    recovery.join(timeout=2.0)
+    monitor.join(timeout=2.0)
+    assert not recovery.is_alive()
+    assert not monitor.is_alive()
+    assert errors == []
+    assert order == ["recovery", "monitor"]
 
 
 def test_exit_writer_identity_failure_cannot_bypass_trade_lease() -> None:

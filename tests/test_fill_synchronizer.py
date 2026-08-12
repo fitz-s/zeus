@@ -608,7 +608,7 @@ def test_live_sync_fetches_outside_unified_trade_transaction(tmp_path, monkeypat
             nonlocal transaction_depth
             assert tuple(dbs) == (DBIdentity.TRADE,)
             assert write_class == "live"
-            assert priority is WritePriority.BACKGROUND_RECOVERY
+            assert priority is WritePriority.RECOVERY_CRITICAL
             assert deadline_ms == fill_synchronizer_mod.FILL_SYNC_DB_WRITE_LEASE_DEADLINE_MS
             assert max_hold_ms == fill_synchronizer_mod.FILL_SYNC_DB_WRITE_MAX_HOLD_MS
             owners.append(owner)
@@ -731,7 +731,7 @@ def test_live_sync_real_coordinator_rolls_back_all_rows_after_append_failure(
         check.close()
 
 
-def test_live_cycle_real_background_writer_yields_to_monitor_and_reports_retry(
+def test_live_cycle_real_recovery_writer_times_out_behind_monitor_and_reports_retry(
     tmp_path,
     monkeypatch,
 ):

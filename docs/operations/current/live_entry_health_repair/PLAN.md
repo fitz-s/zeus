@@ -1640,10 +1640,12 @@ closed and retries on the existing cadence; it does not widen SQLite timeout or
 hold a lease across network I/O.
 
 SCOPE is only continuous authenticated fill persistence in the price-channel
-daemon. DRAIN is the bounded BACKGROUND_RECOVERY lease attempt and the existing
-next scheduler tick. RESET is commit/rollback plus coordinator release on every
-path. Monitor intent remains higher priority, while no fill fact or watermark is
-published partially.
+daemon. DRAIN is a bounded RECOVERY_CRITICAL lease attempt and the existing next
+scheduler tick. The recovery waiter observes and remains behind MONITOR intent,
+but unlike disposable BACKGROUND work it waits for a turn within its finite
+deadline so canonical fill truth cannot starve indefinitely. RESET is
+commit/rollback plus coordinator release on every path. No fill fact or
+watermark is published partially.
 
 Authorized files are `src/ingest/fill_synchronizer.py`, its existing test and
 registry rows, and this plan. Forbidden: probability, entry/exit economics,
@@ -1654,3 +1656,23 @@ fact/projection/watermark atomicity and idempotency remain green; contention is
 typed scheduler failure; focused fill, coordinator, price-channel INV-37,
 compilation, planning-lock, and diff checks pass before exact-SHA hot-fix
 deployment.
+
+The live recovery-priority proof exposed a coordinator race that must close in
+the same slice. A non-monitor can own the exclusive monitor-waiter reservation
+and block on the turnstile/file gate; a MONITOR that publishes intent during
+that wait must still linearize first. Every non-monitor therefore rechecks the
+crash-safe intent during acquisition, then atomically acquires an exclusive
+intent publication barrier after owning the complete DB set. The barrier stays
+held until the public lease object exists. A MONITOR consequently either
+publishes first and makes the non-monitor release the entire DB set, or
+publishes after that lease has linearized; no final-check-to-publication window
+remains.
+
+SCOPE is unified writer acquisition ordering for STANDARD,
+RECOVERY_CRITICAL, and BACKGROUND writers. DRAIN is the existing finite lease
+deadline; RESET is full gate/reservation cleanup before retry. Acceptance adds
+a deterministic blocker -> queued recovery -> later monitor race proving
+acquisition order `monitor, recovery`, the same race after the first gate of a
+multi-DB set, and a monitor attempt paused exactly after the final intent check
+but before lease publication. No test may leak a thread, partial gate, or
+publication barrier.
