@@ -65,11 +65,17 @@ from src.events.reactor import (
     GlobalHeldSellCompletionCut,
 )
 from src.solve.solver import (
+    CurrentMakerFillWitness,
     CurrentFamilyProbabilityAuthority,
     ExecutableSellCurve,
+    MakerFillOutcome,
+    current_maker_fill_witness_identity,
     executable_curve_identity,
     family_payoff_point_q,
     family_payoff_q_samples,
+    maker_fill_candidate_binding_identity,
+    passive_buy_proposal_curve,
+    passive_sell_proposal_curve,
 )
 from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
 
@@ -327,6 +333,46 @@ _WEALTH_REAUCTION_MAX_ATTEMPTS = 2
 _PROBABILITY_SUPERSESSION_REAUCTION_MAX_ATTEMPTS = 1
 _CURVE_SUPERSESSION_MAX_ATTEMPTS_PER_CANDIDATE = 2
 _GLOBAL_AUCTION_COMPONENT_MAX_DELTA_DEPTH = 8
+_MAKER_FILL_SAMPLE_WINDOW_DAYS = 30
+_MAKER_FILL_MIN_SAMPLE_SIZE = {"BUY": 30, "SELL": 30}
+_MAKER_FILL_DKW_DELTA = Decimal("0.01")
+_MAKER_FILL_SAMPLE_SOURCE = "canonical_trade_db_actual_maker_outcomes_v1"
+_MAKER_FILL_SAMPLE_MODEL = "empirical_price_improved_gtc_deadline_dkw99_v1"
+
+
+@dataclass(frozen=True)
+class _CurrentMakerFillSample:
+    """Action-specific outcomes possessed by one immutable selection cut."""
+
+    action: str
+    fill_fractions: tuple[Decimal, ...]
+    fill_probability_lcb: Decimal
+    sample_identity: str
+    training_cutoff_at_utc: datetime
+    rest_deadline_minutes: float
+
+    def __post_init__(self) -> None:
+        minimum = _MAKER_FILL_MIN_SAMPLE_SIZE.get(self.action)
+        if (
+            minimum is None
+            or len(self.fill_fractions) < minimum
+            or not self.fill_probability_lcb.is_finite()
+            or not Decimal("0") < self.fill_probability_lcb <= Decimal("1")
+            or not self.sample_identity
+            or self.training_cutoff_at_utc.tzinfo is None
+            or not math.isfinite(self.rest_deadline_minutes)
+            or self.rest_deadline_minutes <= 0.0
+            or any(
+                not fraction.is_finite()
+                or fraction < 0
+                or fraction > 1
+                for fraction in self.fill_fractions
+            )
+            or self.fill_probability_lcb
+            > Decimal(sum(fraction > 0 for fraction in self.fill_fractions))
+            / Decimal(len(self.fill_fractions))
+        ):
+            raise ValueError("CURRENT_MAKER_FILL_SAMPLE_INVALID")
 
 
 @dataclass(frozen=True)
@@ -1356,6 +1402,446 @@ def _bind_selection_holdings(
         )
         rebound[event_id] = replace(prepared, holdings_snapshot=holdings)
     return rebound
+
+
+def _maker_fill_utc(raw: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(raw or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _load_current_maker_fill_samples(
+    conn: object,
+    *,
+    selection_cut_at_utc: datetime,
+) -> dict[str, _CurrentMakerFillSample]:
+    """Read actual-policy fill fractions available by one frozen decision cut.
+
+    Early cancels remain zero/partial outcomes.  Treating them as right-censored
+    would overstate the fill rate of the policy Zeus actually executes.
+    """
+
+    if (
+        not isinstance(conn, sqlite3.Connection)
+        or selection_cut_at_utc.tzinfo is None
+    ):
+        return {}
+    from src.state.order_state_predicates import bootstrap_rest_deadline_minutes
+
+    deadline_minutes = float(bootstrap_rest_deadline_minutes())
+    cut = selection_cut_at_utc.astimezone(UTC)
+    try:
+        cursor = conn.execute(
+            """
+            SELECT c.command_id,
+                   CASE c.intent_kind
+                     WHEN 'ENTRY' THEN 'BUY'
+                     WHEN 'EXIT' THEN 'SELL'
+                   END AS action,
+                   c.size,
+                   c.price,
+                   c.created_at,
+                   c.updated_at,
+                   s.orderbook_top_bid,
+                   s.orderbook_top_ask,
+                   s.min_tick_size,
+                   f.fact_id,
+                   f.matched_size,
+                   f.observed_at
+              FROM venue_commands AS c
+              JOIN venue_submission_envelopes AS e
+                ON e.envelope_id = c.envelope_id
+              JOIN executable_market_snapshots AS s
+                ON s.snapshot_id = c.snapshot_id
+              JOIN venue_order_facts AS f
+                ON f.command_id = c.command_id
+             WHERE ((c.intent_kind = 'ENTRY' AND c.side = 'BUY')
+                    OR (c.intent_kind = 'EXIT' AND c.side = 'SELL'))
+               AND e.post_only = 1
+               AND e.order_type = 'GTC'
+               AND s.authority_tier = 'CLOB'
+               AND s.wide_spread_display_substitution = 0
+               AND c.venue_order_id IS NOT NULL
+               AND c.state IN ('CANCELLED', 'EXPIRED', 'FILLED')
+               AND julianday(c.created_at) IS NOT NULL
+               AND julianday(c.updated_at) IS NOT NULL
+               AND julianday(c.created_at) >= julianday(?) - ?
+               AND julianday(c.created_at) <= julianday(?)
+               AND julianday(c.updated_at) <= julianday(?)
+               AND julianday(f.observed_at) IS NOT NULL
+               AND julianday(f.observed_at) <= julianday(?)
+             ORDER BY c.command_id, f.observed_at, f.fact_id
+            """,
+            (
+                cut.isoformat(),
+                float(_MAKER_FILL_SAMPLE_WINDOW_DAYS),
+                cut.isoformat(),
+                cut.isoformat(),
+                cut.isoformat(),
+            ),
+        )
+        names = tuple(column[0] for column in cursor.description or ())
+        rows = tuple(dict(zip(names, row, strict=True)) for row in cursor.fetchall())
+    except (sqlite3.Error, TypeError, ValueError) as exc:
+        _LOG.warning(
+            "current maker-fill samples unavailable: %s:%s",
+            type(exc).__name__,
+            exc,
+        )
+        return {}
+
+    command_rows: dict[str, dict[str, object]] = {}
+    invalid_commands: set[str] = set()
+    for row in rows:
+        command_id = str(row.get("command_id") or "").strip()
+        action = str(row.get("action") or "").strip().upper()
+        created_at = _maker_fill_utc(row.get("created_at"))
+        updated_at = _maker_fill_utc(row.get("updated_at"))
+        observed_at = _maker_fill_utc(row.get("observed_at"))
+        try:
+            size = Decimal(str(row.get("size")))
+            price = Decimal(str(row.get("price")))
+            bid = Decimal(str(row.get("orderbook_top_bid")))
+            ask = Decimal(str(row.get("orderbook_top_ask")))
+            tick = Decimal(str(row.get("min_tick_size")))
+            raw_matched = row.get("matched_size")
+            matched = (
+                Decimal("0")
+                if raw_matched is None or not str(raw_matched).strip()
+                else Decimal(str(raw_matched))
+            )
+        except (ArithmeticError, TypeError, ValueError):
+            invalid_commands.add(command_id)
+            continue
+        tolerance = Decimal("0.00000001")
+        if (
+            not command_id
+            or action not in _MAKER_FILL_MIN_SAMPLE_SIZE
+            or created_at is None
+            or updated_at is None
+            or observed_at is None
+            or not all(
+                value.is_finite()
+                for value in (size, price, bid, ask, tick, matched)
+            )
+            or size <= 0
+            or tick <= 0
+            or bid <= 0
+            or ask <= bid
+            or abs(price - (bid + tick)) > tolerance
+            or price >= ask
+            or matched < 0
+            or matched > size + tolerance
+            or not (created_at <= updated_at <= cut)
+            or not (created_at <= observed_at <= cut)
+        ):
+            invalid_commands.add(command_id)
+            continue
+        command = command_rows.setdefault(
+            command_id,
+            {
+                "action": action,
+                "created_at": created_at,
+                "size": size,
+                "price": price,
+                "matched": Decimal("0"),
+            },
+        )
+        if (
+            command["action"] != action
+            or command["created_at"] != created_at
+            or command["size"] != size
+            or command["price"] != price
+        ):
+            invalid_commands.add(command_id)
+            continue
+        deadline_at = created_at + timedelta(minutes=deadline_minutes)
+        if observed_at <= deadline_at:
+            command["matched"] = max(Decimal(command["matched"]), matched)
+
+    samples_by_action: dict[str, list[tuple[str, Decimal, Decimal, Decimal]]] = {
+        "BUY": [],
+        "SELL": [],
+    }
+    for command_id, row in command_rows.items():
+        if command_id in invalid_commands:
+            continue
+        size = Decimal(row["size"])
+        fraction = min(Decimal("1"), Decimal(row["matched"]) / size)
+        samples_by_action[str(row["action"])].append(
+            (command_id, fraction, size, Decimal(row["price"]))
+        )
+
+    samples: dict[str, _CurrentMakerFillSample] = {}
+    for action, action_rows in samples_by_action.items():
+        minimum = _MAKER_FILL_MIN_SAMPLE_SIZE[action]
+        if len(action_rows) < minimum or not any(row[1] > 0 for row in action_rows):
+            continue
+        empirical_fill_probability = Decimal(
+            sum(row[1] > 0 for row in action_rows)
+        ) / Decimal(len(action_rows))
+        dkw_radius = Decimal(
+            str(
+                math.sqrt(
+                    math.log(2.0 / float(_MAKER_FILL_DKW_DELTA))
+                    / (2.0 * len(action_rows))
+                )
+            )
+        )
+        fill_probability_lcb = max(
+            Decimal("0"), empirical_fill_probability - dkw_radius
+        )
+        if fill_probability_lcb <= 0:
+            continue
+        canonical_rows = tuple(
+            sorted(
+                (command_id, str(fraction), str(size), str(price))
+                for command_id, fraction, size, price in action_rows
+            )
+        )
+        sample_identity = hashlib.sha256(
+            json.dumps(
+                {
+                    "schema": "current-maker-fill-sample-v1",
+                    "action": action,
+                    "selection_cut_at_utc": cut.isoformat(),
+                    "window_days": _MAKER_FILL_SAMPLE_WINDOW_DAYS,
+                    "rest_deadline_minutes": deadline_minutes,
+                    "dkw_delta": str(_MAKER_FILL_DKW_DELTA),
+                    "fill_probability_lcb": str(fill_probability_lcb),
+                    "rows": canonical_rows,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        samples[action] = _CurrentMakerFillSample(
+            action=action,
+            fill_fractions=tuple(sorted(row[1] for row in action_rows)),
+            fill_probability_lcb=fill_probability_lcb,
+            sample_identity=sample_identity,
+            training_cutoff_at_utc=cut,
+            rest_deadline_minutes=deadline_minutes,
+        )
+    return samples
+
+
+def _maker_fill_outcomes(
+    sample: _CurrentMakerFillSample,
+    *,
+    limit_price: Decimal,
+) -> tuple[MakerFillOutcome, ...]:
+    counts: dict[Decimal, int] = {}
+    for fraction in sample.fill_fractions:
+        counts[fraction] = counts.get(fraction, 0) + 1
+    positive_rows = tuple(
+        (fraction, count) for fraction, count in sorted(counts.items()) if fraction > 0
+    )
+    positive_count = Decimal(sum(count for _, count in positive_rows))
+    outcomes = [
+        MakerFillOutcome(
+            probability=Decimal("1") - sample.fill_probability_lcb,
+            fill_fraction=Decimal("0"),
+            proceeds_per_share_usd=Decimal("0"),
+        )
+    ]
+    remaining = sample.fill_probability_lcb
+    for index, (fraction, count) in enumerate(positive_rows):
+        probability = (
+            remaining
+            if index == len(positive_rows) - 1
+            else sample.fill_probability_lcb * Decimal(count) / positive_count
+        )
+        remaining -= probability
+        outcomes.append(
+            MakerFillOutcome(
+                probability=probability,
+                fill_fraction=fraction,
+                proceeds_per_share_usd=(
+                    limit_price if sample.action == "SELL" else -limit_price
+                ),
+            )
+        )
+    return tuple(outcomes)
+
+
+def _bind_current_maker_fill_witnesses(
+    prepared_by_event: Mapping[str, object],
+    *,
+    book_epoch: CurrentGlobalBookEpoch,
+    wealth_witness: object,
+    samples: Mapping[str, _CurrentMakerFillSample],
+    issued_at_utc: datetime,
+) -> tuple[dict[str, object], CurrentGlobalBookEpoch]:
+    """Bind action-specific empirical distributions to exact current proposals."""
+
+    valid_until = book_epoch.captured_at_utc + book_epoch.max_age
+    if issued_at_utc.tzinfo is None or issued_at_utc > valid_until or not samples:
+        return dict(prepared_by_event), book_epoch
+    ledger_snapshot_id = str(getattr(wealth_witness, "ledger_snapshot_id", "") or "")
+    if not ledger_snapshot_id:
+        return dict(prepared_by_event), book_epoch
+    event_by_family = {
+        str(getattr(getattr(prepared, "probability_witness", None), "family_key", "") or ""):
+        str(event_id)
+        for event_id, prepared in prepared_by_event.items()
+    }
+    rebound = dict(prepared_by_event)
+    witness_maps = {
+        event_id: dict(getattr(prepared, "maker_fill_witnesses", {}) or {})
+        for event_id, prepared in prepared_by_event.items()
+    }
+    epoch_witnesses = dict(book_epoch.maker_fill_witness_identities)
+
+    def attach(
+        *,
+        action: str,
+        family_key: str,
+        bin_id: str,
+        condition_id: str,
+        side: str,
+        token_id: str,
+        position_id: str | None,
+        held_shares: Decimal | None,
+        proposal: object,
+    ) -> None:
+        sample = samples.get(action)
+        event_id = event_by_family.get(family_key)
+        levels = tuple(getattr(proposal, "levels", ()) or ())
+        if sample is None or event_id is None or len(levels) != 1:
+            return
+        prepared_key = (bin_id, condition_id, side, token_id, position_id)
+        epoch_key = (family_key, bin_id, side, token_id, position_id)
+        existing = witness_maps[event_id].get(prepared_key)
+        if isinstance(existing, CurrentMakerFillWitness):
+            epoch_witnesses.setdefault(epoch_key, existing.witness_identity)
+            return
+        proposal_identity = executable_curve_identity(proposal)
+        binding = maker_fill_candidate_binding_identity(
+            action=action,
+            family_key=family_key,
+            bin_id=bin_id,
+            condition_id=condition_id,
+            side=side,
+            token_id=token_id,
+            ledger_snapshot_id=ledger_snapshot_id,
+            position_id=position_id,
+            held_shares=held_shares,
+            asset_epoch_identity=book_epoch.witness_identity,
+            proposal_identity=proposal_identity,
+        )
+        limit_price = Decimal(levels[0].price)
+        outcomes = _maker_fill_outcomes(sample, limit_price=limit_price)
+        source_identity = (
+            f"{_MAKER_FILL_SAMPLE_SOURCE}:action={action}:"
+            f"window={_MAKER_FILL_SAMPLE_WINDOW_DAYS}d:n={len(sample.fill_fractions)}:"
+            f"dkw99_lcb={sample.fill_probability_lcb}"
+        )
+        witness_identity = current_maker_fill_witness_identity(
+            candidate_binding_identity=binding,
+            asset_epoch_identity=book_epoch.witness_identity,
+            book_snapshot_id=str(getattr(proposal, "snapshot_id", "") or ""),
+            book_hash=str(getattr(proposal, "book_hash", "") or ""),
+            limit_price=limit_price,
+            rest_deadline_minutes=sample.rest_deadline_minutes,
+            source_identity=source_identity,
+            model_identity=_MAKER_FILL_SAMPLE_MODEL,
+            sample_identity=sample.sample_identity,
+            training_cutoff_at_utc=sample.training_cutoff_at_utc,
+            issued_at_utc=issued_at_utc,
+            valid_until_at_utc=valid_until,
+            outcomes=outcomes,
+        )
+        witness = CurrentMakerFillWitness(
+            witness_identity=witness_identity,
+            candidate_binding_identity=binding,
+            asset_epoch_identity=book_epoch.witness_identity,
+            book_snapshot_id=str(getattr(proposal, "snapshot_id", "") or ""),
+            book_hash=str(getattr(proposal, "book_hash", "") or ""),
+            limit_price=limit_price,
+            rest_deadline_minutes=sample.rest_deadline_minutes,
+            outcomes=outcomes,
+            source_identity=source_identity,
+            model_identity=_MAKER_FILL_SAMPLE_MODEL,
+            sample_identity=sample.sample_identity,
+            training_cutoff_at_utc=sample.training_cutoff_at_utc,
+            issued_at_utc=issued_at_utc,
+            valid_until_at_utc=valid_until,
+        )
+        witness_maps[event_id][prepared_key] = witness
+        epoch_witnesses[epoch_key] = witness.witness_identity
+
+    if "BUY" in samples:
+        for asset in book_epoch.assets:
+            proposal = passive_buy_proposal_curve(
+                asset.curve,
+                native_bid_levels=asset.bid_levels,
+            )
+            if proposal is not None:
+                attach(
+                    action="BUY",
+                    family_key=asset.family_key,
+                    bin_id=asset.bin_id,
+                    condition_id=asset.condition_id,
+                    side=asset.side,
+                    token_id=asset.token_id,
+                    position_id=None,
+                    held_shares=None,
+                    proposal=proposal,
+                )
+    if "SELL" in samples:
+        sell_asset_by_key = {
+            (asset.family_key, asset.bin_id, asset.side, asset.token_id): asset
+            for asset in book_epoch.sell_assets
+        }
+        for event_id, prepared in rebound.items():
+            holdings = tuple(
+                getattr(getattr(prepared, "holdings_snapshot", None), "holdings", ())
+                or ()
+            )
+            for holding in holdings:
+                key = (
+                    str(getattr(holding, "family_key", "") or ""),
+                    str(getattr(holding, "bin_id", "") or ""),
+                    str(getattr(holding, "side", "") or ""),
+                    str(getattr(holding, "token_id", "") or ""),
+                )
+                asset = sell_asset_by_key.get(key)
+                held_shares = Decimal(getattr(holding, "shares", 0)).quantize(
+                    Decimal("0.01"), rounding=ROUND_FLOOR
+                )
+                proposal = (
+                    passive_sell_proposal_curve(asset.curve, capacity=held_shares)
+                    if asset is not None and held_shares > 0
+                    else None
+                )
+                if proposal is not None:
+                    attach(
+                        action="SELL",
+                        family_key=asset.family_key,
+                        bin_id=asset.bin_id,
+                        condition_id=asset.condition_id,
+                        side=asset.side,
+                        token_id=asset.token_id,
+                        position_id=str(getattr(holding, "position_id", "") or "")
+                        or None,
+                        held_shares=held_shares,
+                        proposal=proposal,
+                    )
+
+    for event_id, prepared in rebound.items():
+        rebound[event_id] = replace(
+            prepared,
+            maker_fill_witnesses=witness_maps[event_id],
+        )
+    return rebound, replace(
+        book_epoch,
+        maker_fill_witness_identities=epoch_witnesses,
+    )
 
 
 def _probability_manifest(probabilities: Mapping[str, object]) -> tuple[tuple[str, str], ...]:
@@ -6116,6 +6602,15 @@ def process_current_global_batch(
         )
         log_stage(initial_book_stage, families=len(prepared_by_event))
         probability_manifest = _probability_manifest(probabilities)
+        maker_fill_samples = _load_current_maker_fill_samples(
+            trade_conn,
+            selection_cut_at_utc=scope_at,
+        )
+        _LOG.info(
+            "current maker-fill sample cut: buy_n=%d sell_n=%d",
+            len(getattr(maker_fill_samples.get("BUY"), "fill_fractions", ())),
+            len(getattr(maker_fill_samples.get("SELL"), "fill_fractions", ())),
+        )
         last_selection_receipt_row_id: int | None = None
 
         def bind_rebound_receipt(
@@ -6208,6 +6703,15 @@ def process_current_global_batch(
                         family_key: frozenset(tokens)
                         for family_key, tokens in required_tokens_by_family.items()
                     },
+                )
+                prepared_for_selection, attempt_book_epoch = (
+                    _bind_current_maker_fill_witnesses(
+                        prepared_for_selection,
+                        book_epoch=attempt_book_epoch,
+                        wealth_witness=selection_wealth,
+                        samples=maker_fill_samples,
+                        issued_at_utc=selection_at,
+                    )
                 )
             excluded_candidates = dict(preflight_excluded_by_candidate or {})
             if attempt_book_epoch is not None and excluded_candidates:

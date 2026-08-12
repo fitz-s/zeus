@@ -95,6 +95,7 @@ from src.solve.solver import (
     family_payoff_q_samples,
     global_auction_universe_identity,
     global_candidate_from_native,
+    global_candidates_from_native,
     global_sell_fill_prefix_objective,
     global_sell_execution_terms,
     current_maker_fill_witness_identity,
@@ -121,7 +122,6 @@ from src.contracts.executable_market_snapshot import (
 from src.contracts.execution_price import ExecutionPrice
 from src.contracts.global_auction_receipt import (
     GlobalAuctionReceiptRef,
-    global_auction_artifact_summary_hash,
     global_auction_execution_binding_hash,
     global_auction_receipt_ref_from_artifact,
 )
@@ -3406,6 +3406,276 @@ def test_maker_authority_mappings_are_canonical_immutable_copies():
     assert dict(epoch.maker_fill_witness_identities) == {}
     with pytest.raises(TypeError):
         epoch.maker_fill_witness_identities[key] = "mutation"
+
+
+def _maker_fill_sample_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE venue_commands (
+            command_id TEXT PRIMARY KEY,
+            envelope_id TEXT NOT NULL,
+            snapshot_id TEXT NOT NULL,
+            intent_kind TEXT NOT NULL,
+            side TEXT NOT NULL,
+            size REAL NOT NULL,
+            price REAL NOT NULL,
+            venue_order_id TEXT,
+            state TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE TABLE venue_submission_envelopes (
+            envelope_id TEXT PRIMARY KEY,
+            order_type TEXT NOT NULL,
+            post_only INTEGER NOT NULL
+        );
+        CREATE TABLE executable_market_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            orderbook_top_bid TEXT NOT NULL,
+            orderbook_top_ask TEXT NOT NULL,
+            min_tick_size TEXT NOT NULL,
+            authority_tier TEXT NOT NULL,
+            wide_spread_display_substitution INTEGER NOT NULL
+        );
+        CREATE TABLE venue_order_facts (
+            fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            command_id TEXT NOT NULL,
+            matched_size TEXT,
+            observed_at TEXT NOT NULL
+        );
+        INSERT INTO executable_market_snapshots
+        VALUES ('snapshot', '0.30', '0.40', '0.01', 'CLOB', 0);
+        """
+    )
+    return conn
+
+
+def test_current_maker_fill_sample_is_point_in_time_and_action_specific():
+    conn = _maker_fill_sample_conn()
+    cut = _dt.datetime(2026, 8, 11, 12, 0, tzinfo=_dt.timezone.utc)
+    created = cut - _dt.timedelta(days=1)
+
+    def insert(
+        index: int,
+        *,
+        action: str = "BUY",
+        price: str = "0.31",
+        matched: str = "0",
+        observed_at: _dt.datetime | None = None,
+        created_at: _dt.datetime = created,
+        updated_at: _dt.datetime | None = None,
+    ) -> None:
+        command_id = f"{action.lower()}-{index}"
+        envelope_id = f"envelope-{command_id}"
+        conn.execute(
+            "INSERT INTO venue_submission_envelopes VALUES (?, 'GTC', 1)",
+            (envelope_id,),
+        )
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                command_id,
+                envelope_id,
+                "snapshot",
+                "ENTRY" if action == "BUY" else "EXIT",
+                action,
+                10.0,
+                float(price),
+                f"venue-{command_id}",
+                "FILLED" if matched == "10" else "CANCELLED",
+                created_at.isoformat(),
+                (updated_at or created_at + _dt.timedelta(minutes=11)).isoformat(),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO venue_order_facts(command_id,matched_size,observed_at) "
+            "VALUES (?,?,?)",
+            (
+                command_id,
+                matched,
+                (observed_at or created_at + _dt.timedelta(minutes=10)).isoformat(),
+            ),
+        )
+
+    for index in range(100):
+        insert(
+            index,
+            matched="10" if index < 20 or index == 99 else "5" if index < 30 else "0",
+            observed_at=(
+                created + _dt.timedelta(minutes=21)
+                if index == 99
+                else None
+            ),
+            updated_at=(
+                created + _dt.timedelta(minutes=22)
+                if index == 99
+                else None
+            ),
+        )
+    for index in range(29):
+        insert(index, action="SELL", matched="10" if index == 0 else "0")
+    insert(1000, price="0.32", matched="10")
+    insert(
+        1001,
+        matched="10",
+        created_at=cut + _dt.timedelta(seconds=1),
+        updated_at=cut + _dt.timedelta(minutes=1),
+    )
+
+    samples = global_batch_runtime._load_current_maker_fill_samples(
+        conn,
+        selection_cut_at_utc=cut,
+    )
+
+    assert set(samples) == {"BUY"}
+    assert len(samples["BUY"].fill_fractions) == 100
+    assert samples["BUY"].fill_fractions.count(Decimal("1")) == 20
+    assert samples["BUY"].fill_fractions.count(Decimal("0.5")) == 10
+    assert samples["BUY"].fill_fractions.count(Decimal("0")) == 70
+    assert Decimal("0") < samples["BUY"].fill_probability_lcb < Decimal("0.29")
+    assert samples["BUY"].training_cutoff_at_utc == cut
+
+
+def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy():
+    at = _dt.datetime(2026, 8, 11, 12, 0, tzinfo=_dt.timezone.utc)
+    binding = OutcomeTokenBinding(
+        bin_id="bin",
+        condition_id="condition",
+        yes_token_id="yes-token",
+        no_token_id="no-token",
+    )
+    samples = np.ones((400, 1), dtype=np.float64)
+    witness_fields = {
+        "family_key": "family",
+        "bindings": (binding,),
+        "q_version": "q",
+        "resolution_identity": "resolution",
+        "topology_identity": "topology",
+        "posterior_identity_hash": "posterior",
+        "source_truth_identity": "source",
+        "authority_certificate_hash": "certificate",
+        "band_alpha": 0.05,
+        "band_basis": "current-evidence",
+        "yes_point_q": np.asarray((1.0,)),
+        "yes_q_samples": samples,
+        "captured_at_utc": at,
+    }
+    probability = JointOutcomeProbabilityWitness(
+        **witness_fields,
+        max_age=_dt.timedelta(minutes=3),
+        witness_identity=joint_probability_witness_identity(**witness_fields),
+    )
+    prepared = bridge.PreparedGlobalFamily(
+        decision_id="decision",
+        probability_witness=probability,
+        candidate_seeds=(),
+    )
+    curve = ExecutableCostCurve(
+        token_id="yes-token",
+        side="YES",
+        snapshot_id="snapshot",
+        book_hash="book",
+        levels=(BookLevel(price=Decimal("0.40"), size=Decimal("100")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("5"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    asset = CurrentGlobalBookAsset(
+        family_key="family",
+        bin_id="bin",
+        condition_id="condition",
+        gamma_market_id="gamma",
+        market_event_id="market-event",
+        side="YES",
+        token_id="yes-token",
+        curve=curve,
+        captured_at_utc=at,
+        neg_risk=False,
+        bid_levels=(BookLevel(price=Decimal("0.30"), size=Decimal("100")),),
+    )
+    states = (
+        (
+            "family",
+            "bin",
+            "condition",
+            "YES",
+            "yes-token",
+            "EXECUTABLE",
+            "book",
+            "market-event",
+            "gamma",
+            "False",
+        ),
+    )
+    epoch = CurrentGlobalBookEpoch(
+        assets=(asset,),
+        asset_states=states,
+        captured_at_utc=at,
+        max_age=_dt.timedelta(seconds=30),
+        witness_identity=current_global_book_epoch_identity(
+            asset_states=states,
+            captured_at_utc=at,
+        ),
+    )
+    sample = global_batch_runtime._CurrentMakerFillSample(
+        action="BUY",
+        fill_fractions=(Decimal("0"),) * 80
+        + (Decimal("0.5"),) * 10
+        + (Decimal("1"),) * 10,
+        fill_probability_lcb=Decimal("0.05"),
+        sample_identity="sample",
+        training_cutoff_at_utc=at - _dt.timedelta(minutes=1),
+        rest_deadline_minutes=20.0,
+    )
+
+    rebound, witnessed_epoch = (
+        global_batch_runtime._bind_current_maker_fill_witnesses(
+            {"event": prepared},
+            book_epoch=epoch,
+            wealth_witness=SimpleNamespace(ledger_snapshot_id="ledger"),
+            samples={"BUY": sample},
+            issued_at_utc=at,
+        )
+    )
+    key = ("bin", "condition", "YES", "yes-token", None)
+    maker_witness = rebound["event"].maker_fill_witnesses[key]
+    native = SimpleNamespace(
+        no_trade_reason=None,
+        executable_cost_curve=curve,
+        family_key="family",
+        bin_id="bin",
+        condition_id="condition",
+        side="YES",
+        token_id="yes-token",
+        neg_risk=False,
+        hypothesis_id="hypothesis",
+    )
+    candidates = global_candidates_from_native(
+        native,
+        probability_witness=probability,
+        ledger_snapshot_id="ledger",
+        book_captured_at_utc=at,
+        native_bid_levels=asset.bid_levels,
+        include_maker=True,
+        maker_fill_witness=maker_witness,
+        asset_epoch_identity=epoch.witness_identity,
+        neg_risk=False,
+    )
+
+    assert {candidate.execution_mode for candidate in candidates} == {
+        "TAKER_LIMIT",
+        "MAKER_REST",
+    }
+    maker = next(
+        candidate for candidate in candidates if candidate.execution_mode == "MAKER_REST"
+    )
+    assert maker.fill_probability == pytest.approx(0.05)
+    assert maker.maker_fill_witness.expected_fill_fraction == pytest.approx(0.0375)
+    authority = witnessed_epoch.execution_authority(maker, checked_at_utc=at)
+    assert authority is not None
+    assert authority.maker_witness_identity == maker_witness.witness_identity
 
 
 def test_global_actuation_does_not_blanket_block_existing_family_exposure():

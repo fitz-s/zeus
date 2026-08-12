@@ -4,6 +4,60 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-11 Point-in-time maker-fill producer
+
+The global auction currently materializes zero `MAKER_REST` candidates because
+production never populates the typed maker-witness map.  Reusing the legacy
+all-band `0.19` scalar would fabricate current executable truth and remains
+forbidden.  The canonical trade DB now contains enough action-specific facts to
+construct a stricter producer for ENTRY BUY, but not yet for EXIT SELL.
+
+At the current decision cut, the trailing 30-day canonical cohort contains 488
+terminal, venue-acknowledged ENTRY BUY orders using the exact current grammar:
+post-only GTC at `snapshot best_bid + one tick`, strictly below the captured ask.
+Their append-only order facts provide the actual matched fraction observed no
+later than the 20-minute rest deadline.  Early cancellation is retained as its
+real zero/partial outcome rather than censored away: 114/488 had any fill, 61
+were partial, 53 were full, and mean filled fraction was 0.173587.  A two-sided
+99% Dvoretzky-Kiefer-Wolfowitz radius moves finite-sample uncertainty into the
+no-fill atom before scoring, so the raw 23.36% any-fill frequency is not used as
+authority.  This is a causal lower-bound zero/partial/full distribution, not a
+visible-depth proxy or a fixed fill scalar.  The corresponding EXIT SELL cohort
+has only 20 terminal same-grammar observations, so it does not clear the
+30-sample action-specific minimum and cannot borrow BUY evidence.
+
+The implementation reads only rows whose command update and order facts are at
+or before the immutable selection cut, hashes the exact sample rows, and binds
+the resulting distribution to each current candidate, proposal limit, book
+snapshot/hash, global book epoch, ledger generation, rest deadline, issue time,
+and book expiry.  Each action requires at least 30 eligible rows and a strictly
+positive 99% DKW fill-probability lower bound.  Missing tables, malformed facts,
+thin action-specific samples, a non-positive lower bound, a one-tick grammar
+mismatch, or an expired current book produce no witness and exclude only that
+maker sibling.  Taker, HOLD/CASH, and the other action remain available.
+
+SCOPE is one maker sibling in one current q/book/wealth cut.  DRAIN is the next
+normal complete auction, which re-reads only facts available by its frozen cut
+and rebinds every witness to the new current book.  RESET is an action-specific
+sample cohort meeting the declared minimum plus a fresh coherent book; no
+operator flag or historical constant can reset it.  Acceptance requires
+point-in-time/no-look-ahead and exact-grammar antibodies, a thin-SELL rejection
+antibody, both TAKER_LIMIT and witnessed MAKER_REST BUY candidates in one full
+comparison, selected-mode preservation through JIT, focused money-path tests,
+and a live receipt proving the dual-mode candidate set.  This slice improves
+entry price/capital efficiency; it is not realized capital-gain proof.
+
+Pre-deploy verification: the current canonical read produces BUY `n=488`, raw
+any-fill `0.233607`, DKW99 lower bound `0.159927`, raw expected filled fraction
+`0.173587`, and witnessed expected filled fraction `0.118838`; SELL remains
+unavailable.  The new point-in-time/action-specific/dual-mode antibodies pass
+`3/3`, solver properties pass `209/209`, and reactor plus multiwinner tests pass
+`350/350` under the live Python environment.  The complete global integration
+file is `452 passed / 5 failed`; all five failing node IDs reproduce unchanged
+on the current live checkout and are the existing precliff/price-band fixture
+drift, so they are not represented as green.  Worktree code against live DBs
+passes the read-only boot validation `ALL PASS`.
+
 ## 2026-08-10 Current maker witness survives global-to-JIT handoff
 
 Production repeatedly selected one positive posterior-mean global BUY while the
