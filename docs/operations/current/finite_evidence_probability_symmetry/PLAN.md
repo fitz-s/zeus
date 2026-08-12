@@ -4,6 +4,27 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-12 Pre-SDK terminal rejection closes its entry exposure obligation
+
+An entry command can cross the durable reservation boundary and then fail before
+the venue SDK is called.  Recovery already requires a typed adapter witness and
+records `REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT`, terminalizing the command as
+`REJECTED`.  The entry-obligation reconciler did not recognize that exact event,
+so the command remained an open exposure obligation indefinitely despite the
+same canonical journal proving that no venue side effect was possible.
+
+The terminal no-fill proof set now includes the validated pre-SDK clearance
+event.  Positive trade/execution facts or a nonterminal order fact still veto
+release, and a generic rejection or unvalidated payload cannot mint this event.
+
+SCOPE is one entry command carrying a typed pre-SDK no-side-effect terminal
+event.  DRAIN is the recurring terminal entry-obligation recovery pass.  RESET
+is the obligation's `RESOLVED` transition; commands without the typed event, or
+with contradictory venue exposure, remain open.  Acceptance requires an
+end-to-end antibody that creates the typed clearance through its validated
+writer, releases the obligation exactly once, then proves idempotence, followed
+by live recovery of the historical obligation without a DB edit.
+
 ## 2026-08-12 Held monitor reads the latest causal Day0 event
 
 The held monitor freezes one cycle decision cut before its bounded probability

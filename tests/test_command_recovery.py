@@ -3075,6 +3075,63 @@ def test_terminal_entry_obligation_releases_proven_no_fill_but_not_conflict(conn
     assert statuses[unknown_live] == "OPEN"
 
 
+def test_terminal_entry_obligation_releases_typed_pre_sdk_no_side_effect(conn):
+    from src.execution.command_recovery import (
+        clear_review_required_typed_pre_sdk_rejection,
+        reconcile_terminal_entry_exposure_obligations,
+    )
+    from src.state.venue_command_repo import append_event
+
+    command_id = _insert(
+        conn,
+        command_id="cmd-obligation-pre-sdk-no-side-effect",
+        intent_kind="ENTRY",
+        side="BUY",
+    )
+    _open_test_entry_obligation(conn, command_id)
+    append_event(
+        conn,
+        command_id=command_id,
+        event_type="REVIEW_REQUIRED",
+        occurred_at="2026-08-12T00:01:00Z",
+        payload={
+            "reason": "terminal_rejection_persistence_failed_after_side_effect",
+            "side_effect_boundary_crossed": False,
+            "sdk_submit_attempted": False,
+            "terminal_rejection_witness": {
+                "schema_version": 1,
+                "error_code": "V2_PRE_SUBMIT_EXCEPTION",
+                "error_message": "fee snapshot unavailable",
+                "result_status": "rejected",
+                "pre_sdk_no_side_effect": True,
+            },
+        },
+    )
+    clear_review_required_typed_pre_sdk_rejection(
+        conn,
+        command_id,
+        occurred_at="2026-08-12T00:02:00Z",
+    )
+
+    assert _get_state(conn, command_id) == "REJECTED"
+    assert reconcile_terminal_entry_exposure_obligations(conn) == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    assert conn.execute(
+        "SELECT status FROM entry_exposure_obligations WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()[0] == "RESOLVED"
+    assert reconcile_terminal_entry_exposure_obligations(conn) == {
+        "scanned": 0,
+        "advanced": 0,
+        "stayed": 0,
+        "errors": 0,
+    }
+
+
 def test_multiwinner_loop_recovers_k_sequential_commands_independently(conn):
     """ANTIBODY (docs/operations/current/plans/auction_multiwinner_plan_2026-07-19.md
     §5, item 6): simulate a crash after K sequential submits in one wake (the
