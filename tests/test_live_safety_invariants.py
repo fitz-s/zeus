@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-08-11; last_reused=2026-08-11
+# Lifecycle: created=2026-03-31; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-08-11
+# Last reused/audited: 2026-08-12
 # Authority basis: finite-evidence single-q global SELL ownership; 7-day capital-loop audit
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -1276,6 +1276,79 @@ def test_monitoring_phase_serves_durable_debt_before_bulk_prefetch(monkeypatch):
     ]
     assert summary["held_monitor_durable_debt_position"] == "fairness-0"
     assert summary["held_monitor_durable_debt_network_attempted"] is True
+
+
+def test_monitoring_phase_oldest_debt_precedes_repeating_nonabsorbing_urgency(
+    monkeypatch,
+):
+    """Pending-exit/Day0 wakes cannot starve the oldest canonical refresh."""
+    from src.engine import cycle_runtime
+
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_STATE_BY_LANE", {})
+    monkeypatch.setattr(cycle_runtime, "_HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE", {})
+    oldest = _make_position(
+        trade_id="oldest-active-debt",
+        token_id="oldest-active-token",
+        direction="buy_yes",
+        state="holding",
+        chain_state="synced",
+    )
+    oldest._canonical_monitor_refreshed_at = ""
+    urgent = [
+        _make_position(
+            trade_id=f"repeating-day0-{index}",
+            token_id=f"repeating-day0-token-{index}",
+            direction="buy_yes",
+            state="day0_window",
+            chain_state="synced",
+        )
+        for index in range(2)
+    ]
+    for index, position in enumerate(urgent):
+        position._canonical_monitor_refreshed_at = (
+            f"2026-08-12T15:4{index}:00+00:00"
+        )
+    visited: list[str] = []
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: frozenset(),
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda _conn, _clob, position: (
+            visited.append(position.trade_id)
+            or _monitor_test_edge_context(position)
+        ),
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(*urgent, oldest),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_monitor_oldest_before_nonabsorbing_urgency"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=10.0,
+        should_preempt_for_urgent_day0=lambda: False,
+    )
+
+    assert visited[0] == "oldest-active-debt"
+    assert summary["held_monitor_durable_debt_position"] == "oldest-active-debt"
+    assert "oldest-active-debt" in summary["held_monitor_budget_coverage_positions"]
 
 
 def test_monitoring_phase_active_network_hard_fact_exits_after_local_tranche(

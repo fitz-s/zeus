@@ -1,5 +1,5 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-08-01
+# Last reused/audited: 2026-08-12
 # Authority basis: IOC forward-port (Fix C: allowed_discovery_modes_inverse) — 2026-05-23
 """Heavy runtime helpers extracted from cycle_runner.
 
@@ -4628,13 +4628,17 @@ def _held_monitor_schedule_key(
     )
     if position_id == deadline_rescue_position_id:
         return -4, urgency
-    if position_id in selected_urgent_position_ids:
-        return (-3 if position_id in dead_bin_position_ids else -2), urgency
-    # Durable fairness is service, not selection.  The oldest canonical
-    # monitor debt gets the first optional slot; process-local reservation
-    # attempts must not let an already-served position overtake it.
+    if (
+        position_id in dead_bin_position_ids
+        and position_id in selected_urgent_position_ids
+    ):
+        return -3, urgency
+    # The oldest canonical debt is the first non-absorbing service obligation.
+    # Repeated pending-exit/Day0 wakes must not consume its reserved belief read.
     if position_id == durable_debt_position_id:
-        return -1, -1
+        return -2, -1
+    if position_id in selected_urgent_position_ids:
+        return -1, urgency
     if has_selected_urgent:
         if position_id in selected_coverage_position_ids:
             return -1, urgency if urgency < 2 else 2 + int(network_dependent)
@@ -7058,6 +7062,25 @@ def execute_monitoring_phase(
     durable_debt_position_id = (
         id(durable_debt_position[0]) if durable_debt_position else None
     )
+    if (
+        durable_debt_position
+        and monitor_reservation_count > 0
+        and durable_debt_position_id not in selected_coverage_position_ids
+    ):
+        # The primary reserve is executable capacity, not an accounting label.
+        # Admit the oldest durable debt into that fixed-size tranche so the
+        # low-remaining-budget guard cannot defer it behind rotating coverage.
+        selected_coverage_positions = [
+            durable_debt_position[0],
+            *(
+                pos
+                for pos in selected_coverage_positions
+                if id(pos) != durable_debt_position_id
+            ),
+        ][:monitor_reservation_count]
+        selected_coverage_position_ids = frozenset(
+            id(pos) for pos in selected_coverage_positions
+        )
     ordinary_active_local_positions = [
         pos
         for pos in monitor_positions
