@@ -3669,6 +3669,7 @@ def release_backoff_exhausted_pending_exit_for_redecision(
     *,
     conn: sqlite3.Connection | None = None,
     current_min_order_size: object = None,
+    legacy_favorable_bid_authorized: bool = False,
 ) -> bool:
     """Release a still-held exhausted exit attempt back to live redecision.
 
@@ -3684,6 +3685,13 @@ def release_backoff_exhausted_pending_exit_for_redecision(
     exit_state = getattr(position, "exit_state", "")
     exit_state = getattr(exit_state, "value", exit_state)
     if str(exit_state or "") != "backoff_exhausted":
+        return False
+    if (
+        _is_legacy_favorable_bid_rejection(
+            getattr(position, "last_exit_error", "")
+        )
+        and not legacy_favorable_bid_authorized
+    ):
         return False
     if _is_non_executable_dust_hold(
         position,
@@ -9389,6 +9397,7 @@ def check_pending_retries(
             return release_backoff_exhausted_pending_exit_for_redecision(
                 position,
                 conn=conn,
+                legacy_favorable_bid_authorized=True,
             )
         if not _is_out_of_band_exit_price_error(previous_error):
             return False

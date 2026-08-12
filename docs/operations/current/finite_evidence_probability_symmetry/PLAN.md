@@ -3918,3 +3918,15 @@ reconciliation pass; RESET is authenticated fill projection or an independently
 proved zero-fill identity with no contradictory positive fact. Acceptance
 requires the historical positive-order-fact + absent account-read shape to
 retain the positive fact, emit no clearance/void, and keep review authority.
+
+Adversarial review found two alternate seams that must obey the same law.
+Generic monitor repair may not release a legacy favorable-bid
+`backoff_exhausted` position before command ownership classifies it; the shared
+release helper therefore refuses that debt unless the typed retry classifier
+explicitly authorizes a non-global release. Terminal zero-fill construction
+also revalidates positive matched order truth inside the final repository
+`INSERT ... SELECT WHERE NOT EXISTS` statement, eliminating a cross-connection
+check/append race. A typed contradiction remains `REVIEW_REQUIRED` and lets the
+same-cycle matched-order reconciliation lane drain the positive fill; it is not
+counted as a generic recovery error. Acceptance adds generic-release bypass
+rejection and repository-boundary atomic contradiction antibodies.

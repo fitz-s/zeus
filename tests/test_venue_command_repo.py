@@ -1047,6 +1047,57 @@ def test_bind_signed_submission_identity_retry_is_strict_noop(conn):
     ).fetchone()[0] == 1
 
 
+def test_terminal_zero_fill_append_atomically_rejects_positive_order_truth(conn):
+    from src.state.venue_command_repo import (
+        PositiveOrderFactContradictionError,
+        append_order_fact,
+    )
+
+    _insert(conn, command_id="cmd-positive-order-truth", size=19)
+    append_order_fact(
+        conn,
+        venue_order_id="ord-positive-order-truth",
+        command_id="cmd-positive-order-truth",
+        state="PARTIALLY_MATCHED",
+        remaining_size="7.372095",
+        matched_size="11.627905",
+        source="REST",
+        observed_at="2026-08-12T02:54:41Z",
+        raw_payload_hash="a" * 64,
+        raw_payload_json={"matched_size": "11.627905"},
+    )
+
+    with pytest.raises(
+        PositiveOrderFactContradictionError,
+        match="canonical_positive_order_fact_blocks_terminal_no_fill",
+    ):
+        append_order_fact(
+            conn,
+            venue_order_id="ord-positive-order-truth",
+            command_id="cmd-positive-order-truth",
+            state="VENUE_WIPED",
+            remaining_size="0",
+            matched_size="0",
+            source="REST",
+            observed_at="2026-08-12T02:59:57Z",
+            raw_payload_hash="b" * 64,
+            raw_payload_json={"matched_size": "0"},
+            reject_zero_fill_over_positive_fact=True,
+        )
+
+    facts = conn.execute(
+        """
+        SELECT state, matched_size
+          FROM venue_order_facts
+         WHERE command_id = 'cmd-positive-order-truth'
+         ORDER BY local_sequence
+        """
+    ).fetchall()
+    assert [dict(row) for row in facts] == [
+        {"state": "PARTIALLY_MATCHED", "matched_size": "11.627905"}
+    ]
+
+
 @pytest.mark.parametrize("terminal_state", ["MATCHED", "CANCEL_CONFIRMED", "EXPIRED", "VENUE_WIPED"])
 def test_append_order_fact_preserves_prior_terminal_zero_remainder(conn, terminal_state):
     from src.state.venue_command_repo import append_order_fact

@@ -68,6 +68,7 @@ from src.state.fact_revocation import (
     is_certificate_revoked as _certificate_is_revoked,
 )
 from src.state.venue_command_repo import (
+    PositiveOrderFactContradictionError,
     find_unresolved_commands,
     append_event,
     append_order_fact,
@@ -14653,7 +14654,9 @@ def _append_local_orphan_terminal_order_fact(
         command_id=command_id,
         venue_order_id=venue_order_id,
     ):
-        raise RuntimeError("canonical_positive_order_fact_blocks_terminal_no_fill")
+        raise PositiveOrderFactContradictionError(
+            "canonical_positive_order_fact_blocks_terminal_no_fill"
+        )
     fact_state = _terminal_fact_state_for_venue_status(
         venue_status,
         venue_resp_present=venue_resp is not None,
@@ -14685,6 +14688,7 @@ def _append_local_orphan_terminal_order_fact(
         venue_timestamp=observed_at,
         raw_payload_hash=_payload_hash(payload),
         raw_payload_json=payload,
+        reject_zero_fill_over_positive_fact=True,
     )
 
 
@@ -14708,7 +14712,9 @@ def _append_point_order_terminal_no_fill_fact(
         command_id=command_id,
         venue_order_id=venue_order_id,
     ):
-        raise RuntimeError("canonical_positive_order_fact_blocks_terminal_no_fill")
+        raise PositiveOrderFactContradictionError(
+            "canonical_positive_order_fact_blocks_terminal_no_fill"
+        )
     venue_resp_present = (
         point_order is not None
         if venue_resp_present_for_terminal_state is None
@@ -14757,6 +14763,7 @@ def _append_point_order_terminal_no_fill_fact(
         venue_timestamp=observed_at,
         raw_payload_hash=_payload_hash(payload),
         raw_payload_json=payload,
+        reject_zero_fill_over_positive_fact=True,
     )
     return fact_id, payload
 
@@ -14957,6 +14964,12 @@ def reconcile_local_orphan_no_fill_findings(conn: sqlite3.Connection, client) ->
             )
             summary["advanced"] += 1
             logger.info("recovery: local orphan no-fill %s -> terminal order fact", venue_order_id)
+        except PositiveOrderFactContradictionError:
+            logger.info(
+                "recovery: local orphan %s stayed for positive-fill reconciliation",
+                venue_order_id,
+            )
+            summary["stayed"] += 1
         except Exception as exc:
             logger.error(
                 "recovery: local orphan no-fill reconciliation failed for command %s: %s",
@@ -15506,6 +15519,12 @@ def reconcile_terminal_point_orders(conn: sqlite3.Connection, client) -> dict:
                     terminal_payload=terminal_payload,
                 )
             summary["advanced"] += 1
+        except PositiveOrderFactContradictionError:
+            logger.info(
+                "recovery: terminal point-order %s stayed for positive-fill reconciliation",
+                command_id,
+            )
+            summary["stayed"] += 1
         except Exception as exc:
             logger.error(
                 "recovery: terminal point-order reconciliation failed for command %s: %s",
@@ -25233,7 +25252,15 @@ def _reconcile_passes_inline(
                 summary["errors"] += 1
                 continue
 
-            outcome = _reconcile_row(conn, cmd, client)
+            try:
+                outcome = _reconcile_row(conn, cmd, client)
+            except PositiveOrderFactContradictionError:
+                logger.info(
+                    "recovery: command %s stayed for positive-fill reconciliation",
+                    cmd.command_id,
+                )
+                summary["stayed"] += 1
+                continue
             if outcome == "advanced":
                 summary["advanced"] += 1
             elif outcome == "stayed":

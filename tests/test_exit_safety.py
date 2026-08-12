@@ -8411,6 +8411,11 @@ def test_backoff_exhausted_legacy_favorable_bid_reenters_global_auction(conn):
         reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
     )
 
+    assert not exit_lifecycle.release_backoff_exhausted_pending_exit_for_redecision(
+        position,
+        conn=conn,
+    )
+    assert position.exit_state == "backoff_exhausted"
     assert exit_lifecycle.check_pending_retries(position, conn=conn) is False
     assert position.state == "pending_exit"
     assert position.exit_state == "retry_pending"

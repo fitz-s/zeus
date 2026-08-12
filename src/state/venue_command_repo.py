@@ -57,6 +57,10 @@ _ABSOLUTE_LIVE_PRICE_MIN = Decimal("0.05")
 _ABSOLUTE_LIVE_PRICE_MAX = Decimal("0.95")
 
 
+class PositiveOrderFactContradictionError(RuntimeError):
+    """A terminal zero-fill write conflicts with prior positive order truth."""
+
+
 def _assert_persistable_live_unit_price(price: Decimal | str | float) -> Decimal:
     """Reject commands outside the operator's non-bypassable live price band."""
 
@@ -5610,6 +5614,7 @@ def append_order_fact(
     raw_payload_json: Any = None,
     venue_timestamp: str | datetime.datetime | None = None,
     local_sequence: int | None = None,
+    reject_zero_fill_over_positive_fact: bool = False,
 ) -> int:
     venue_order_id = _require_nonempty("venue_order_id", venue_order_id)
     command_id = _require_nonempty("command_id", command_id)
@@ -5623,6 +5628,13 @@ def append_order_fact(
     )
     raw_payload_hash = _validate_sha256_hex("raw_payload_hash", raw_payload_hash)
     raw_payload_json_s = _coerce_payload_json(raw_payload_json)
+    if reject_zero_fill_over_positive_fact and not (
+        state in _TERMINAL_NO_RESTING_ORDER_FACT_STATES
+        and Decimal(str(matched_size or "0")).is_zero()
+    ):
+        raise ValueError(
+            "reject_zero_fill_over_positive_fact requires terminal zero-fill fact"
+        )
 
     with _savepoint_atomic(conn):
         if state not in _TERMINAL_NO_RESTING_ORDER_FACT_STATES:
@@ -5670,15 +5682,7 @@ def append_order_fact(
             params=(venue_order_id,),
             local_sequence=local_sequence,
         )
-        cur = conn.execute(
-            """
-            INSERT INTO venue_order_facts (
-                venue_order_id, command_id, state, remaining_size, matched_size,
-                source, observed_at, venue_timestamp, local_sequence,
-                raw_payload_hash, raw_payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
+        values = (
                 venue_order_id,
                 command_id,
                 state,
@@ -5690,8 +5694,45 @@ def append_order_fact(
                 seq,
                 raw_payload_hash,
                 raw_payload_json_s,
-            ),
         )
+        if reject_zero_fill_over_positive_fact:
+            # One SQLite statement both revalidates canonical order truth and
+            # appends the zero-fill fact. A concurrent positive writer either
+            # commits before this statement and blocks it, or commits after it
+            # as a later correction; there is no check-then-append window.
+            cur = conn.execute(
+                """
+                INSERT INTO venue_order_facts (
+                    venue_order_id, command_id, state, remaining_size, matched_size,
+                    source, observed_at, venue_timestamp, local_sequence,
+                    raw_payload_hash, raw_payload_json
+                )
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                 WHERE NOT EXISTS (
+                    SELECT 1
+                      FROM venue_order_facts
+                     WHERE command_id = ?
+                       AND venue_order_id = ?
+                       AND CAST(COALESCE(matched_size, '0') AS REAL) > 0
+                 )
+                """,
+                (*values, command_id, venue_order_id),
+            )
+            if cur.rowcount != 1:
+                raise PositiveOrderFactContradictionError(
+                    "canonical_positive_order_fact_blocks_terminal_no_fill"
+                )
+        else:
+            cur = conn.execute(
+                """
+                INSERT INTO venue_order_facts (
+                    venue_order_id, command_id, state, remaining_size, matched_size,
+                    source, observed_at, venue_timestamp, local_sequence,
+                    raw_payload_hash, raw_payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                values,
+            )
         fact_id = int(cur.lastrowid)
         append_provenance_event(
             conn,
