@@ -5046,6 +5046,7 @@ def _build_current_global_day0_family_snapshot(
                         prepare_context,
                         stage="held_monitor_probability_prepare:world",
                         shared_connection=False,
+                        keep_independent_connection_open=True,
                     )
                     if isinstance(world_seed, sqlite3.Connection)
                     else _day0_snapshot_sqlite_read_deadline(
@@ -5062,6 +5063,7 @@ def _build_current_global_day0_family_snapshot(
                         prepare_context,
                         stage="held_monitor_probability_prepare:forecasts",
                         shared_connection=False,
+                        keep_independent_connection_open=True,
                     )
                     if isinstance(forecasts_seed, sqlite3.Connection)
                     else _day0_snapshot_sqlite_read_deadline(
@@ -5165,6 +5167,10 @@ def _build_current_global_day0_family_snapshot(
     finally:
         if hwm_forecasts is not None:
             hwm_forecasts.close()
+        if forecasts is not None and forecasts is not forecasts_seed:
+            forecasts.close()
+        if world is not None and world is not world_seed:
+            world.close()
         if forecasts_seed is not None:
             forecasts_seed.close()
         if world_seed is not None:

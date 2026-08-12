@@ -931,16 +931,31 @@ def test_day0_prepare_file_reads_do_not_wait_on_shared_snapshot_fence(
     monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
 
     original_bounded = universe.bounded_work_sqlite
+    original_connect_read_only = universe._connect_read_only
     shared_flags = []
+    derived = []
+
+    def connect_read_only(path):
+        conn = original_connect_read_only(path)
+        derived.append(conn)
+        return conn
 
     @contextmanager
-    def recording_bounded(conn, work_context, *, stage, shared_connection=False):
+    def recording_bounded(
+        conn,
+        work_context,
+        *,
+        stage,
+        shared_connection=False,
+        keep_independent_connection_open=False,
+    ):
         shared_flags.append((stage, shared_connection))
         with original_bounded(
             conn,
             work_context,
             stage=stage,
             shared_connection=shared_connection,
+            keep_independent_connection_open=keep_independent_connection_open,
         ) as bounded:
             yield bounded
 
@@ -961,6 +976,7 @@ def test_day0_prepare_file_reads_do_not_wait_on_shared_snapshot_fence(
     holder = threading.Thread(target=hold_shared_fence, daemon=True)
     holder.start()
     assert holder_entered.wait(1.0)
+    monkeypatch.setattr(universe, "_connect_read_only", connect_read_only)
     monkeypatch.setattr(universe, "bounded_work_sqlite", recording_bounded)
     started = time.monotonic()
     try:
@@ -982,10 +998,67 @@ def test_day0_prepare_file_reads_do_not_wait_on_shared_snapshot_fence(
         for conn in opened:
             with pytest.raises(sqlite3.ProgrammingError):
                 conn.execute("SELECT 1")
+        for conn in derived:
+            with pytest.raises(sqlite3.ProgrammingError):
+                conn.execute("SELECT 1")
     finally:
         release_holder.set()
         holder.join(2.0)
         holder_conn.close()
+
+
+def test_day0_hwm_handoff_keeps_independent_prepare_reads_alive(
+    monkeypatch,
+    tmp_path,
+):
+    import src.engine.event_reactor_adapter as era
+    import src.engine.monitor_refresh as mr
+    import src.state.db as db
+
+    world_memory = _day0_event_connection()
+    world_path = tmp_path / "world.db"
+    world_memory.commit()
+    with sqlite3.connect(world_path) as target:
+        world_memory.backup(target)
+    world_memory.close()
+    forecasts_path = tmp_path / "forecasts.db"
+    sqlite3.connect(forecasts_path).close()
+
+    def read_only(path):
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    monkeypatch.setattr(db, "get_world_connection_read_only", lambda: read_only(world_path))
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_read_only",
+        lambda: read_only(forecasts_path),
+    )
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
+    monkeypatch.setattr(mr, "_target_day_has_canonical_observation", lambda *_a, **_k: False)
+
+    class HandoffReadSucceeded(RuntimeError):
+        pass
+
+    def prepare(*_args, **kwargs):
+        kwargs["before_raw_input_hwm_read"]()
+        kwargs["forecast_conn"].execute("SELECT 1").fetchone()
+        kwargs["topology_conn"].execute("SELECT 1").fetchone()
+        kwargs["observation_conn"].execute("SELECT 1").fetchone()
+        raise HandoffReadSucceeded
+
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
+
+    with pytest.raises(HandoffReadSucceeded):
+        mr._build_current_global_day0_family_snapshot(
+            _pos(),
+            trade_conn=sqlite3.connect(":memory:"),
+            decision_time=datetime(2026, 6, 12, 12, tzinfo=timezone.utc),
+            cached_snapshots=(),
+            deadline_monotonic=time.monotonic() + 2.5,
+            hwm_deadline_monotonic=time.monotonic() + 2.5,
+        )
 
 
 def test_day0_prepare_timeout_does_not_start_or_mislabel_hwm(monkeypatch):

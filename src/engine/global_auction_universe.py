@@ -165,8 +165,14 @@ def bounded_work_sqlite(
     *,
     stage: str,
     shared_connection: bool = False,
+    keep_independent_connection_open: bool = False,
 ):
-    """Run one bounded read without taking ownership of a shared connection."""
+    """Run one bounded read without taking ownership of a shared connection.
+
+    File-backed non-shared reads normally close their derived connection on
+    exit.  A staged caller may retain that derived connection after releasing
+    this deadline watcher, but then owns exactly one later ``close()``.
+    """
 
     if shared_connection:
         # Some snapshot-scoped readers key frozen state by connection identity.
@@ -285,7 +291,8 @@ def bounded_work_sqlite(
         stopped.set()
         watcher.join()
         read_conn.set_progress_handler(None, 0)
-        read_conn.close()
+        if not keep_independent_connection_open:
+            read_conn.close()
 
 
 @dataclass(frozen=True, init=False)
