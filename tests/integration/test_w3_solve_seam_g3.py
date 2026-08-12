@@ -32150,7 +32150,7 @@ def test_global_sell_current_mode_unavailable_excludes_only_selected_candidate()
     ) == "CANDIDATE_BLOCKED"
 
 
-def test_global_sell_high_bid_improves_selected_taker_at_legal_limit():
+def test_global_sell_high_bid_blocks_selected_taker_at_jit():
     event = _global_scope_event(city="Alpha", source_run_id="run-high-bid-fak")
     actuation = _adapter_sell_actuation(
         event,
@@ -32159,30 +32159,24 @@ def test_global_sell_high_bid_improves_selected_taker_at_legal_limit():
     candidate = actuation.decision.candidate
     assert candidate.execution_mode == "TAKER_LIMIT"
     assert actuation.decision.capital_action_mode == "IMMEDIATE_TAKER_SELL"
-    improved = era._global_sell_candidate_from_raw_book(
-        candidate,
-        {
-            "asset_id": "yes-token",
-            "tick_size": "0.001",
-            "min_order_size": "5",
-            "bids": [{"price": "0.999", "size": "10"}],
-            "asks": [],
-        },
-        captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
-        market_authority=_jit_market_authority(
-            candidate, tick="0.001", min_order_size="5"
-        ),
-    )
-    from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
-
-    authority = GlobalSellExecutionAuthority.from_current(
-        actuation=actuation,
-        jit_candidate=improved,
-    )
-
-    assert improved.economic_sell_curve.levels[0].price == Decimal("0.999")
-    assert authority.limit_price() == actuation.decision.limit_price
-    assert authority.limit_price() <= Decimal("0.95")
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_SELL_JIT_SELECTED_MODE_UNAVAILABLE:TAKER_LIMIT",
+    ):
+        era._global_sell_candidate_from_raw_book(
+            candidate,
+            {
+                "asset_id": "yes-token",
+                "tick_size": "0.001",
+                "min_order_size": "5",
+                "bids": [{"price": "0.999", "size": "10"}],
+                "asks": [],
+            },
+            captured_at_utc=_dt.datetime.now(_dt.timezone.utc),
+            market_authority=_jit_market_authority(
+                candidate, tick="0.001", min_order_size="5"
+            ),
+        )
 
 
 def test_global_sell_worse_jit_bid_requires_complete_reauction():

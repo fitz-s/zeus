@@ -130,7 +130,7 @@ def _live_unit_price_in_band(value: Decimal) -> bool:
 def _live_sell_counterparty_bid(value: Decimal) -> bool:
     return (
         value.is_finite()
-        and LIVE_ORDER_MIN_UNIT_PRICE <= value <= Decimal("1")
+        and LIVE_ORDER_MIN_UNIT_PRICE <= value <= LIVE_ORDER_MAX_UNIT_PRICE
     )
 
 
@@ -389,7 +389,7 @@ def current_precliff_liquidation_capacity(
             for level in native_bid_levels
             if Decimal(level.price).is_finite()
             and Decimal(level.price) > LIVE_ORDER_MIN_UNIT_PRICE
-            and Decimal(level.price) <= Decimal("1")
+            and Decimal(level.price) <= LIVE_ORDER_MAX_UNIT_PRICE
             and Decimal(level.size).is_finite()
             and Decimal(level.size) > 0
         ),

@@ -5,6 +5,13 @@
 
 ## 现状(forward)
 
+### 2026-08-12 11:32 CDT tick — 排除不可提交的高价 SELL 假赢家；高置信仓位回到 HOLD-to-1
+- **forward 结果不变:** containment pause 后去重 settled cohort 仍为 `-$8.526401`（1 win / 2 loss）；本 tick 没有新 command、fill 或 settlement，不能声称资本利得。
+- **部署后证伪:** immediate FAK SELL 的资本释放时钟修复已进入 live loaded tree。Shanghai 20 YES shares 在 `q_mean=0.994666667`、current bid `0.999` 下被统一竞价选为正 expected EV SELL（约 `+$0.075668`），但 executor 按 durable live price law 拒绝 `live_order_executable_price_out_of_bounds: best_bid=0.999`；没有 command 或 fill。
+- **第一性判定:** 0.999 是当前 counterparty quote，却不在允许的新订单价格 `[0.05, 0.95]` 内。把 0.999 经济收益映射成可提交 0.95 floor 会在竞态下允许 0.95 成交；对 `q≈0.9947` 的持仓，该最坏合法成交相对 HOLD 为负，正是用户指出的“高买低卖”机制。正确动作不是绕过 executor，而是让不可执行报价退出 feasible set，继续 HOLD-to-1。
+- **最小修复:** selector 的 live SELL counterparty、precliff capacity 与 JIT mode 都只接受 `[0.05, 0.95]` 当前 bid；高于 0.95 的 book 不再生成/改善 taker proposal，也不再占用全局 winner。合法带内 SELL、maker-rest、BUY、settlement 和既成链上 fill 记录均不改变。
+- **验证边界:** solver 全集加 JIT 抗体 `211 passed`；executor 两条 submit-boundary 抗体 `2 passed`。扩大筛选 `128 passed / 1 failed`，唯一失败为 live baseline 已有的旧 `DummyClient` fixture 在 pre-submit collateral refresh 缺少 `get_collateral_payload`，与本 diff 无关；因此仍不把 declared evaluator 记为 pass。热修复尚未部署，部署后必须以新的 complete-scope receipt 证明 Shanghai 为 HOLD/CASH 或精确的合法替代 winner，且不再出现该 rejected SELL churn。
+
 ### 2026-08-12 11:13 CDT tick — held redecision 已恢复；即时正期望 SELL 不再继承过期目标日时钟
 - **forward 结果仍未达标:** 自 containment pause 后已结算的三笔去重 cohort 为 Seoul `-$6.63`、Tokyo `+$6.683599`、Tokyo `-$8.58`，合计 `-$8.526401`（1 win / 2 loss）。开仓保持暂停；本 tick 前最近一次 deploy 后没有新 venue command、fill 或 settlement，不能声称资本利得。
 - **held truth 活性已部署:** `e0a8d09b9` 让最老 canonical held decision debt 进入固定 primary tranche；官方重启后 monitor cadence 从 9 stale / 2 fresh 恢复到 11 / 11 fresh，loaded SHA 随后被并发 monitor hotfix 推进到 `34cb1d04f`，pause reason 仍为 `single_global_auction_cut_monitor_terminated_no_receipt`。
