@@ -2342,6 +2342,19 @@ class TestExecutor:
 
         assert _venue_submit_fill_price({"avgPrice": price}, side="SELL") == price
 
+    def test_sell_fill_price_improvement_is_not_a_submission_band_breach(
+        self,
+        caplog,
+    ):
+        from src.execution.executor import _venue_submit_fill_price
+
+        with caplog.at_level("CRITICAL"):
+            assert _venue_submit_fill_price(
+                {"avgPrice": "0.999"},
+                side="SELL",
+            ) == "0.999"
+        assert "LIVE_FILL_PRICE_OUT_OF_BOUNDS_RECEIPT" not in caplog.text
+
     @pytest.mark.parametrize("price", ["0", "-0.01", "1.001", "NaN"])
     def test_venue_fill_receipt_rejects_invalid_probability_price(self, price):
         from src.execution.executor import _venue_submit_fill_price

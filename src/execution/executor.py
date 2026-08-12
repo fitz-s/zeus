@@ -3218,30 +3218,40 @@ def _venue_submit_fill_price(
     response_contract = _first_submit_value(result, "_venue_response_contract")
     if response_contract == "POLYMARKET_CLOB_V2_HUMAN_SUBMIT_AMOUNTS":
         value = _first_submit_value(result, "_v2_fill_price")
-        return _venue_fill_price_text_or_none(value)
+        return _venue_fill_price_text_or_none(value, side=side)
     making = _positive_decimal_or_none(_first_submit_value(result, "makingAmount", "making_amount"))
     taking = _positive_decimal_or_none(_first_submit_value(result, "takingAmount", "taking_amount"))
     if making is not None and taking is not None:
         if _venue_submit_side(result, side=side) == "SELL":
-            return _venue_fill_price_text_or_none(taking / making)
-        return _venue_fill_price_text_or_none(making / taking)
+            return _venue_fill_price_text_or_none(taking / making, side="SELL")
+        return _venue_fill_price_text_or_none(making / taking, side="BUY")
     for key in ("avgPrice", "avg_price", "fillPrice", "fill_price", "price"):
         value = _first_submit_value(result, key)
-        observed = _venue_fill_price_text_or_none(value)
+        observed = _venue_fill_price_text_or_none(value, side=side)
         if observed is not None:
             return observed
     return None
 
 
-def _venue_fill_price_text_or_none(value: object) -> str | None:
+def _venue_fill_price_text_or_none(
+    value: object,
+    *,
+    side: str | None = None,
+) -> str | None:
     price = _positive_decimal_or_none(value)
     if price is None or price > Decimal("1"):
         if price is not None:
             logger.critical("INVALID_VENUE_FILL_PRICE_RECEIPT price=%s", price)
         return None
+    sell_price_improvement = (
+        str(side or "").upper() == "SELL"
+        and LIVE_ORDER_MAX_UNIT_PRICE < price <= Decimal("1")
+    )
     try:
         assert_live_order_unit_price(price)
     except ValueError:
+        if sell_price_improvement:
+            return _decimal_text(price)
         logger.critical(
             "LIVE_FILL_PRICE_OUT_OF_BOUNDS_RECEIPT price=%s; "
             "preserving realized venue truth",
