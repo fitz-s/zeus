@@ -2908,7 +2908,7 @@ def _live_realized_capital_curve(
         "position_current": {
             "position_id", "phase", "city", "target_date",
             "temperature_metric", "strategy_key", "decision_law_id",
-            "cost_basis_usd", "realized_pnl_usd",
+            "shares", "cost_basis_usd", "realized_pnl_usd",
         },
         "venue_commands": {
             "command_id", "position_id", "intent_kind", "q_version",
@@ -2950,7 +2950,14 @@ def _live_realized_capital_curve(
         "SELECT pc.position_id,pc.phase,pc.city,pc.target_date,"
         "pc.temperature_metric,pc.cost_basis_usd,pc.realized_pnl_usd,"
         "vc.command_id,vc.q_version,ef.fill_price,ef.shares,ef.filled_at,"
-        "vse.post_only,vse.fee_details_json "
+        "vse.post_only,vse.fee_details_json,pc.shares,"
+        "EXISTS(SELECT 1 FROM venue_commands AS exit_vc "
+        "JOIN execution_fact AS exit_ef ON exit_ef.command_id=exit_vc.command_id "
+        "WHERE exit_vc.position_id=pc.position_id "
+        "AND exit_vc.intent_kind='EXIT' AND exit_ef.order_role='exit' "
+        "AND exit_ef.filled_at IS NOT NULL AND exit_ef.shares>0 "
+        "AND lower(COALESCE(exit_ef.terminal_exec_status,'')) "
+        "IN ('filled','confirmed','partial')) "
         "FROM position_current AS pc "
         "JOIN venue_commands AS vc ON vc.position_id=pc.position_id "
         "JOIN execution_fact AS ef ON ef.command_id=vc.command_id "
@@ -2985,6 +2992,8 @@ def _live_realized_capital_curve(
                 "metric": str(raw[4] or ""),
                 "projection_cost_basis_usd": raw[5],
                 "projection_realized_pnl_usd": raw[6],
+                "projection_shares": raw[14],
+                "has_filled_exit": bool(raw[15]),
                 "entries": [],
             },
         )
@@ -3091,6 +3100,7 @@ def _live_realized_capital_curve(
             block("entry_command_economics_conflict")
             continue
         entry_notional = 0.0
+        entry_shares = 0.0
         entry_fee = 0.0
         entry_times: list[datetime] = []
         valid = True
@@ -3116,20 +3126,36 @@ def _live_realized_capital_curve(
                 valid = False
                 break
             entry_notional += fill_price * shares
+            entry_shares += shares
             entry_fee += fee
             entry_times.append(filled_at)
         try:
             projected_cost = float(position["projection_cost_basis_usd"])
+            projected_shares = float(position["projection_shares"])
         except (TypeError, ValueError):
             projected_cost = math.nan
+            projected_shares = math.nan
+        original_cost_matches = math.isclose(
+            projected_cost, entry_notional, rel_tol=0.0, abs_tol=0.011
+        )
+        residual_cost_matches = (
+            bool(position["has_filled_exit"])
+            and math.isfinite(projected_shares)
+            and entry_shares > 0.0
+            and 0.0 <= projected_shares < entry_shares
+            and math.isclose(
+                projected_cost,
+                entry_notional * projected_shares / entry_shares,
+                rel_tol=0.0,
+                abs_tol=0.011,
+            )
+        )
         if (
             not valid
             or not entry_times
             or not math.isfinite(projected_cost)
             or projected_cost <= 0.0
-            or not math.isclose(
-                projected_cost, entry_notional, rel_tol=0.0, abs_tol=0.011
-            )
+            or not (original_cost_matches or residual_cost_matches)
         ):
             block("entry_capital_identity_incomplete")
             continue

@@ -4696,6 +4696,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 temperature_metric TEXT,
                 strategy_key TEXT,
                 decision_law_id TEXT,
+                shares REAL,
                 cost_basis_usd REAL,
                 realized_pnl_usd REAL
             );
@@ -4730,7 +4731,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
             """
         )
         conn.execute(
-            "INSERT INTO position_current VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO position_current VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
                 "current-trial",
                 phase,
@@ -4739,6 +4740,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 "high",
                 "day0_nowcast_entry",
                 "predicted_bin_ev_v1",
+                6.24,
                 1.56,
                 gross_pnl,
             ),
@@ -4943,6 +4945,31 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert curve["realized_position_count"] == 1
         assert curve["realized_capital_committed_usd"] == pytest.approx(2.6785)
         assert curve["net_realized_pnl_usd"] == pytest.approx(3.5615)
+        conn.close()
+
+    def test_partial_exit_reconciles_original_capital_to_residual_projection(self):
+        conn = self._live_capital_conn(
+            phase="pending_exit",
+            gross_pnl=0.24,
+            exit_price=0.30,
+        )
+        conn.execute(
+            "UPDATE execution_fact SET shares=6.0 WHERE order_role='exit'"
+        )
+        conn.execute(
+            "UPDATE position_current SET shares=0.24,cost_basis_usd=0.06"
+        )
+        conn.commit()
+
+        curve = riskguard_module._day0_live_realized_capital_curve(
+            conn,
+            window_days=7.0,
+            as_of=datetime(2026, 8, 11, 17, tzinfo=timezone.utc),
+        )
+
+        assert curve["blocked_position_count"] == 0
+        assert curve["filled_position_count"] == 1
+        assert curve["capital_committed_usd"] == pytest.approx(1.6185)
         conn.close()
 
     def test_validated_shadow_ignores_unresolved_live_fill(self):
