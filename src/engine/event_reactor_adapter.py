@@ -11932,6 +11932,11 @@ def _bind_global_candidate_executable_snapshot(
             fee_deducted=True,
             currency="probability_units",
         ),
+        # The global decision priced the selected size against its exact curve;
+        # that all-in unit cost is the single execution-cost authority after this
+        # rebind.  Do not retain the family-local proof's scalar (which can be
+        # absent for a globally licensed maker rest) beside the rebound price.
+        c_cost_95pct=float(unit_cost),
     )
 
 

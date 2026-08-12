@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-08-09
+# Last reused/audited: 2026-08-12
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from src.events.day0_authority import assert_live_day0_entry_provenance
 from src.events.reactor import EventSubmissionReceipt, _is_transient_money_path_reason
 from src.riskguard.risk_level import RiskLevel
 from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
+from src.contracts.execution_price import ExecutionPrice
 from src.contracts.execution_intent import DecisionSourceContext
 from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
 from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
@@ -2128,6 +2129,64 @@ def test_current_state_marker_rejects_unsealed_economics_mutation():
 
     assert era._qkernel_current_state_solve_economics(cert) is False
     assert era._valid_qkernel_execution_economics_payload(cert, direction="buy_yes") is None
+
+
+@pytest.mark.parametrize("execution_mode", ("MAKER_REST", "TAKER_LIMIT"))
+def test_global_snapshot_rebind_uses_selected_all_in_unit_cost_for_both_cost_fields(
+    monkeypatch,
+    execution_mode,
+):
+    snapshot = SimpleNamespace(snapshot_id="global-jit-snapshot")
+    row = {"snapshot_id": snapshot.snapshot_id}
+    monkeypatch.setattr(
+        era,
+        "_persist_global_candidate_executable_snapshot",
+        lambda *_args, **_kwargs: (snapshot, row),
+    )
+    proof = era._CandidateProof(
+        candidate=SimpleNamespace(),
+        token_id="token-1",
+        direction="buy_yes",
+        row={"snapshot_id": "family-local-snapshot"},
+        executable_snapshot_id="family-local-snapshot",
+        execution_price=ExecutionPrice(
+            value=0.41,
+            price_type="fee_adjusted",
+            fee_deducted=True,
+            currency="probability_units",
+        ),
+        q_posterior=0.70,
+        q_lcb_5pct=0.60,
+        c_cost_95pct=None,
+        p_fill_lcb=0.50,
+        trade_score=0.20,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        p_cal_vector_hash="p-cal",
+        p_live_vector_hash="p-live",
+        execution_mode_intent=(
+            "MAKER" if execution_mode == "MAKER_REST" else "TAKER"
+        ),
+    )
+    decision = SimpleNamespace(
+        shares="28.20",
+        cost_usd="4.230000",
+        candidate=SimpleNamespace(execution_mode=execution_mode),
+    )
+
+    rebound = era._bind_global_candidate_executable_snapshot(
+        sqlite3.connect(":memory:"),
+        proof=proof,
+        candidate=decision.candidate,
+        decision=decision,
+        decision_time=datetime.now(timezone.utc),
+    )
+
+    assert rebound.execution_price.value == pytest.approx(0.15)
+    assert rebound.c_cost_95pct == pytest.approx(0.15)
+    assert rebound.executable_snapshot_id == snapshot.snapshot_id
+    assert proof.c_cost_95pct is None
 
 
 @pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
