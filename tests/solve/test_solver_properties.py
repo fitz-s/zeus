@@ -15,7 +15,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
+from src.contracts.executable_cost_curve import (
+    BidBookLevel,
+    BookLevel,
+    ExecutableCostCurve,
+    FeeModel,
+)
 from src.contracts.strategy_capital_allocation import (
     STRATEGY_LOG_UTILITY_BASIS,
     StrategyCapitalAllocationWitness,
@@ -3748,7 +3753,7 @@ def test_global_single_order_sell_uses_above_band_counterparty_bid(side):
         side=side,
         snapshot_id=f"sell-above-band-{side}-book",
         book_hash=f"sell-above-band-{side}-hash",
-        levels=(BookLevel(price=Decimal("0.999"), size=Decimal("10")),),
+        levels=(BidBookLevel(price=Decimal("0.999"), size=Decimal("10")),),
         fee_model=FeeModel(fee_rate=Decimal("0")),
         min_tick=Decimal("0.001"),
         min_order_size=Decimal("1"),
@@ -3842,8 +3847,8 @@ def test_global_single_order_sell_high_bid_has_taker_price_improvement():
         snapshot_id="sell-high-bid-wide-tick-book",
         book_hash="sell-high-bid-wide-tick-hash",
         levels=(
-            BookLevel(price=Decimal("0.98"), size=Decimal("5")),
-            BookLevel(price=Decimal("0.94"), size=Decimal("5")),
+            BidBookLevel(price=Decimal("0.98"), size=Decimal("5")),
+            BidBookLevel(price=Decimal("0.94"), size=Decimal("5")),
         ),
         fee_model=FeeModel(fee_rate=Decimal("0")),
         min_tick=Decimal("0.02"),
@@ -3873,6 +3878,35 @@ def test_precliff_liquidation_capacity_includes_above_band_bids():
             BookLevel(price=Decimal("0.95"), size=Decimal("7")),
         )
     ) == Decimal("27")
+
+
+def test_exact_one_sell_bid_is_consumed_with_one_tick_economic_haircut():
+    curve = S.ExecutableSellCurve(
+        token_id="sell-exact-one-token",
+        side="YES",
+        snapshot_id="sell-exact-one-book",
+        book_hash="sell-exact-one-hash",
+        levels=(BidBookLevel(price=Decimal("1"), size=Decimal("10")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.001"),
+        min_order_size=Decimal("1"),
+        quote_ttl=timedelta(seconds=1),
+    )
+
+    proposal, mode, *_ = S.global_sell_execution_terms(
+        curve,
+        capacity=Decimal("10"),
+    )
+
+    assert proposal is not None
+    assert mode == "TAKER_LIMIT"
+    assert curve.levels[0].price == Decimal("1")
+    assert proposal.levels[0].price == Decimal("0.999")
+    assert S._live_sell_limit_price(
+        curve.levels[0].price,
+        proposal.levels[-1].price,
+        curve.min_tick,
+    ) == Decimal("0.95")
 
 
 def test_global_single_order_sell_legal_depth_is_tick_aligned_without_clamping():
@@ -4155,7 +4189,7 @@ def test_global_sell_materializer_floors_chain_fill_dust_to_venue_grid():
         side=seed.side,
         snapshot_id="sell-chain-dust-book",
         book_hash="sell-chain-dust-hash",
-        levels=(BookLevel(price=Decimal("0.80"), size=Decimal("100")),),
+        levels=(BidBookLevel(price=Decimal("0.80"), size=Decimal("100")),),
         fee_model=FeeModel(fee_rate=Decimal("0")),
         min_tick=Decimal("0.001"),
         min_order_size=Decimal("1"),
@@ -4207,7 +4241,7 @@ def test_global_sell_materializer_floors_chain_fill_dust_to_venue_grid():
     assert taker.held_shares == Decimal("72.50")
     assert taker.execution_mode == "TAKER_LIMIT"
     assert taker.proposal_sell_curve.levels == (
-        BookLevel(price=Decimal("0.80"), size=Decimal("72.50")),
+        BidBookLevel(price=Decimal("0.80"), size=Decimal("72.50")),
     )
 
 

@@ -24,7 +24,12 @@ from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
-from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
+from src.contracts.executable_cost_curve import (
+    BidBookLevel,
+    BookLevel,
+    ExecutableCostCurve,
+    FeeModel,
+)
 from src.contracts.executable_market_snapshot import (
     fee_details_from_gamma_fee_schedule,
     fee_rate_fraction_from_details,
@@ -354,7 +359,7 @@ class CurrentGlobalBookAsset:
     curve: ExecutableCostCurve
     captured_at_utc: datetime
     neg_risk: bool
-    bid_levels: tuple[BookLevel, ...] = ()
+    bid_levels: tuple[BidBookLevel, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -899,7 +904,7 @@ def _global_sell_curve(
         return None
     try:
         levels = tuple(
-            BookLevel(
+            BidBookLevel(
                 price=Decimal(str(raw.get("price"))),
                 size=Decimal(str(raw.get("size"))),
             )

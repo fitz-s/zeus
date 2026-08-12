@@ -1,5 +1,5 @@
 # Created: 2026-04-27
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-05; last_reused=2026-08-05
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: U1 snapshot antibodies plus pricing-semantics contract scaffolding.
 # Reuse: Run when executable snapshots, venue_commands gating, or V2 market preflight semantics change.
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
@@ -1342,6 +1342,24 @@ def test_polymarket_client_best_bid_ask_normalizes_unsorted_orderbook(monkeypatc
     monkeypatch.setattr(client, "get_orderbook", fake_orderbook)
 
     assert client.get_best_bid_ask("yes-token") == (0.47, 0.53, 100.0, 25.0)
+
+
+def test_top_book_parser_distinguishes_exact_one_bid_from_ask():
+    assert _top_book_level_decimal(
+        {"bids": [{"price": "1", "size": "7"}]},
+        "bids",
+    ) == (Decimal("1"), Decimal("7"))
+
+    with pytest.raises(ExecutableSnapshotCaptureError, match="price is out of bounds"):
+        _top_book_level_decimal(
+            {"asks": [{"price": "1", "size": "7"}]},
+            "asks",
+        )
+    with pytest.raises(ExecutableSnapshotCaptureError, match="price is out of bounds"):
+        _top_book_level_decimal(
+            {"bids": [{"price": "1.001", "size": "7"}]},
+            "bids",
+        )
 
 
 def test_polymarket_client_orderbook_parse_failure_is_empty_orderbook(monkeypatch):

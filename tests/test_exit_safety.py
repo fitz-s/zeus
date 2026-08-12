@@ -4241,7 +4241,11 @@ def test_chain_size_correction_cannot_overwrite_exit_intent_projection(conn):
     assert current["chain_shares"] == pytest.approx(19.98)
 
 
-def test_pending_exit_without_order_releases_for_redecision(conn):
+def test_pending_exit_without_order_releases_for_favorable_bid_redecision(
+    conn,
+    monkeypatch,
+):
+    from src.execution import exit_lifecycle
     from src.execution.exit_lifecycle import release_pending_exit_without_order_if_retryable
     from src.engine.lifecycle_events import build_position_current_projection
     from src.state.portfolio import Position
@@ -4271,6 +4275,18 @@ def test_pending_exit_without_order_releases_for_redecision(conn):
         condition_id="condition-pending-no-order-release",
     )
     upsert_position_current(conn, build_position_current_projection(position))
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_exit_reject_error",
+        lambda *_args, **_kwargs: "exit_no_in_band_bid",
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_exit_snapshot_context",
+        lambda *_args, **_kwargs: {
+            "executable_snapshot_orderbook_top_bid": "0.999",
+        },
+    )
 
     assert release_pending_exit_without_order_if_retryable(position, conn=conn) is True
     assert position.state == "entered"
@@ -11624,7 +11640,7 @@ def test_live_global_maker_rest_reaches_submit_when_bid_is_below_floor(
     ).fetchone()[0] == 1
 
 
-def test_no_bid_retry_waits_for_fresh_positive_bid_before_release(conn):
+def test_no_bid_retry_releases_on_favorable_above_submit_band_bid(conn):
     from src.engine.lifecycle_events import build_position_current_projection
     from src.execution.exit_lifecycle import check_pending_retries
     from src.state.portfolio import Position
@@ -11707,11 +11723,11 @@ def test_no_bid_retry_waits_for_fresh_positive_bid_before_release(conn):
         no_token_id=NO_TOKEN,
         selected_outcome_token_id=YES_TOKEN,
         outcome_label="YES",
-        snapshot_id="snap-in-band-bid-liquidity-wake",
+        snapshot_id="snap-favorable-bid-liquidity-wake",
         captured_at=now + timedelta(seconds=2),
         freshness_deadline=now + timedelta(minutes=5),
-        orderbook_top_bid=Decimal("0.05"),
-        orderbook_top_ask=Decimal("0.051"),
+        orderbook_top_bid=Decimal("0.999"),
+        orderbook_top_ask=Decimal("1.0"),
     )
 
     assert check_pending_retries(position, conn=conn) is True

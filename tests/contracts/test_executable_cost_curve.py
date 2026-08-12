@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-06-08
+# Last reused or audited: 2026-08-12
 # Authority basis: "bin selection.md" §12.C + §5.3 + §5.4 + §14.3 + Hidden #6/#15/#16
 #                  + operator directive 2026-06-08
 """Relationship tests for ExecutableCostCurve (spec Phase 3, §14.3).
@@ -35,12 +35,22 @@ from decimal import Decimal
 import pytest
 
 from src.contracts.executable_cost_curve import (
+    BidBookLevel,
     BookLevel,
     ExecutableCostCurve,
     FeeModel,
 )
 from src.contracts.execution_price import ExecutionPrice
 from src.strategy.kelly import kelly_size
+
+
+def test_ask_and_counterparty_bid_domains_are_not_collapsed():
+    with pytest.raises(ValueError, match=r"BookLevel.price must be in \(0, 1\)"):
+        BookLevel(price=Decimal("1"), size=Decimal("5"))
+
+    assert BidBookLevel(price=Decimal("1"), size=Decimal("5")).price == Decimal("1")
+    with pytest.raises(ValueError, match=r"BidBookLevel.price must be in \(0, 1\]"):
+        BidBookLevel(price=Decimal("1.001"), size=Decimal("5"))
 
 
 # --------------------------------------------------------------------------

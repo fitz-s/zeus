@@ -99,6 +99,28 @@ class BookLevel:
 
 
 @dataclass(frozen=True)
+class BidBookLevel:
+    """One counterparty BID level, including the exact-certain price ``1``.
+
+    This is deliberately distinct from :class:`BookLevel`: BUY ask depth is
+    strictly inside ``(0, 1)``, while a SELL may consume a venue bid at ``1``
+    through an independently legal submitted limit no greater than ``0.95``.
+    """
+
+    price: Decimal
+    size: Decimal
+
+    def __post_init__(self) -> None:
+        if not (Decimal("0") < self.price <= Decimal("1")):
+            raise ValueError(
+                "BidBookLevel.price must be in (0, 1] probability_units, "
+                f"got {self.price}"
+            )
+        if not (self.size > Decimal("0")):
+            raise ValueError(f"BidBookLevel.size must be > 0, got {self.size}")
+
+
+@dataclass(frozen=True)
 class FeeModel:
     """Polymarket taker fee model — fee_per_share = fee_rate * p * (1 - p).
 

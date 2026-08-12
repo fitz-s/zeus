@@ -6040,7 +6040,15 @@ def _book_row_price_size(row: Any, side: str) -> tuple[Decimal, Decimal]:
         raise ExecutableSnapshotCaptureError(f"CLOB orderbook {side} row is not decimal") from exc
     if not price.is_finite() or not size.is_finite():
         raise ExecutableSnapshotCaptureError(f"CLOB orderbook {side} row is not finite")
-    if price <= 0 or price >= 1:
+    if side == "bids":
+        price_in_domain = Decimal("0") < price <= Decimal("1")
+    elif side == "asks":
+        price_in_domain = Decimal("0") < price < Decimal("1")
+    else:
+        raise ExecutableSnapshotCaptureError(
+            f"unsupported CLOB orderbook side {side!r}"
+        )
+    if not price_in_domain:
         raise ExecutableSnapshotCaptureError(f"CLOB orderbook {side} price is out of bounds")
     if size <= 0:
         raise ExecutableSnapshotCaptureError(f"CLOB orderbook {side} size must be positive")

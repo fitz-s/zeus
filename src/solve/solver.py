@@ -65,7 +65,12 @@ from scipy.optimize import (
     minimize,
 )
 
-from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
+from src.contracts.executable_cost_curve import (
+    BidBookLevel,
+    BookLevel,
+    ExecutableCostCurve,
+    FeeModel,
+)
 from src.contracts.execution_intent import (
     POLYMARKET_MARKETABLE_BUY_MIN_NOTIONAL_USD,
     quantize_submit_shares_for_venue,
@@ -244,7 +249,7 @@ class ExecutableSellCurve:
     side: Literal["YES", "NO"]
     snapshot_id: str
     book_hash: str
-    levels: tuple[BookLevel, ...]
+    levels: tuple[BidBookLevel | BookLevel, ...]
     fee_model: FeeModel
     min_tick: Decimal
     min_order_size: Decimal
@@ -326,7 +331,7 @@ def passive_sell_proposal_curve(
         side=curve.side,
         snapshot_id=curve.snapshot_id,
         book_hash=curve.book_hash,
-        levels=(BookLevel(price=maker_price, size=bounded_capacity),),
+        levels=(BidBookLevel(price=maker_price, size=bounded_capacity),),
         # Maker-fill authority models the submitted post-only limit itself.  Do
         # not credit an unproved rebate or accidentally charge a taker fee.
         fee_model=FeeModel(fee_rate=Decimal("0")),
@@ -339,7 +344,7 @@ def passive_sell_proposal_curve(
 def passive_buy_proposal_curve(
     curve: ExecutableCostCurve,
     *,
-    native_bid_levels: Sequence[BookLevel],
+    native_bid_levels: Sequence[BidBookLevel | BookLevel],
 ) -> ExecutableCostCurve | None:
     """Price one post-only BUY with current pre-cliff liquidation capacity."""
 
@@ -379,7 +384,7 @@ def passive_buy_proposal_curve(
 
 
 def current_precliff_liquidation_capacity(
-    native_bid_levels: Sequence[BookLevel],
+    native_bid_levels: Sequence[BidBookLevel | BookLevel],
 ) -> Decimal:
     """Return shares executable through a legal live SELL floor."""
 
@@ -599,7 +604,7 @@ def marketable_sell_proposal_curve(
     if not requested_capacity.is_finite() or requested_capacity <= 0:
         return None
     remaining = requested_capacity
-    levels: list[BookLevel] = []
+    levels: list[BidBookLevel] = []
     for level in curve.levels:
         if (
             not _live_sell_counterparty_bid(Decimal(level.price))
@@ -608,7 +613,19 @@ def marketable_sell_proposal_curve(
             break
         take = min(remaining, Decimal(level.size))
         if take > 0:
-            levels.append(BookLevel(price=level.price, size=take))
+            # Exact-one is executable counterparty truth, but valuing it as a
+            # literally zero-risk release makes the common finite capital-
+            # efficiency axis undefined. Haircut only that boundary quote by
+            # one current venue tick for economic scoring; the unmodified raw
+            # curve remains the JIT/executor authority and can still fill the
+            # independently legal submitted floor at 1.0.
+            economic_price = min(
+                Decimal(level.price),
+                Decimal("1") - Decimal(curve.min_tick),
+            )
+            if economic_price < LIVE_ORDER_MIN_UNIT_PRICE:
+                break
+            levels.append(BidBookLevel(price=economic_price, size=take))
             remaining -= take
     if not levels:
         return None
@@ -1878,7 +1895,7 @@ class GlobalSingleOrderCandidate:
     executable_cost_curve: ExecutableCostCurve
     resolution_identity: str
     neg_risk: bool
-    native_bid_levels: tuple[BookLevel, ...] = ()
+    native_bid_levels: tuple[BidBookLevel | BookLevel, ...] = ()
     settlement_locked_exact_payoff: bool = False
     execution_mode: Literal["TAKER_LIMIT", "MAKER_REST"] = "TAKER_LIMIT"
     proposal_cost_curve: ExecutableCostCurve | None = None
@@ -2067,7 +2084,7 @@ def global_candidate_from_native(
     ledger_snapshot_id: str,
     book_captured_at_utc: datetime,
     neg_risk: bool,
-    native_bid_levels: Sequence[BookLevel] = (),
+    native_bid_levels: Sequence[BidBookLevel | BookLevel] = (),
     eligibility_reason: GlobalEligibilityReason | None = None,
 ) -> GlobalSingleOrderCandidate:
     """Materialize the immediate-taker proposal after proving token membership."""
@@ -2091,7 +2108,7 @@ def global_candidates_from_native(
     ledger_snapshot_id: str,
     book_captured_at_utc: datetime,
     neg_risk: bool,
-    native_bid_levels: Sequence[BookLevel] = (),
+    native_bid_levels: Sequence[BidBookLevel | BookLevel] = (),
     eligibility_reason: GlobalEligibilityReason | None = None,
     include_maker: bool = False,
     maker_fill_witness: CurrentMakerFillWitness | None = None,

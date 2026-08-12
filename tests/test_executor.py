@@ -122,6 +122,7 @@ def _ensure_snapshot(
     ask_size: str = "100",
     bid_size: str = "100",
     raw_orderbook_hash: str = "c" * 64,
+    omit_ask: bool = False,
 ) -> str:
     from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
     from src.state.snapshot_repo import get_snapshot, insert_snapshot
@@ -134,7 +135,9 @@ def _ensure_snapshot(
     yes_token_id = f"{token_id}-yes" if selected_is_no else token_id
     no_token_id = token_id if selected_is_no else f"{token_id}-no"
     outcome_label = "NO" if selected_is_no else "YES"
-    if snapshot_top_ask is not None:
+    if omit_ask:
+        top_ask = None
+    elif snapshot_top_ask is not None:
         top_ask = snapshot_top_ask
     elif str(direction).startswith("sell_"):
         top_ask = min(Decimal("0.99"), final_limit_price + Decimal("0.01"))
@@ -188,7 +191,11 @@ def _ensure_snapshot(
             orderbook_depth_jsonb=json.dumps(
                 {
                     "bids": [{"price": str(top_bid), "size": bid_size}],
-                    "asks": [{"price": str(top_ask), "size": ask_size}],
+                    "asks": (
+                        []
+                        if top_ask is None
+                        else [{"price": str(top_ask), "size": ask_size}]
+                    ),
                 }
             ),
             raw_gamma_payload_hash="a" * 64,
@@ -2025,6 +2032,7 @@ class TestExecutor:
         (
             ("0.94", "0.01", "0.94"),
             ("0.999", "0.001", "0.95"),
+            ("1.0", "0.001", "0.95"),
         ),
     )
     @pytest.mark.parametrize(
@@ -2169,6 +2177,7 @@ class TestExecutor:
             snapshot_top_ask=Decimal("1.0"),
             snapshot_top_bid=Decimal(best_bid),
             raw_orderbook_hash=jit.executable_sell_curve.book_hash,
+            omit_ask=Decimal(best_bid) == Decimal("1"),
         )
         captured = {}
 

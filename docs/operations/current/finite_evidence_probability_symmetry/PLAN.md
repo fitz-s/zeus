@@ -3862,3 +3862,30 @@ type collapse in `src/solve/solver.py`; this hot-fix therefore also owns
 `tests/solve/test_solver_properties.py` and
 `tests/integration/test_w3_solve_seam_g3.py` so solver, JIT, certificate, and
 final executor boundaries enforce one coherent relationship.
+
+Independent review found two remaining consumers of the old collapsed domain:
+exact bid `1.0` could not be represented by the shared ask-only `BookLevel`, and
+both retry and no-order liquidity recovery treated a favorable `0.999` bid as
+still blocked. The structural closeout introduces a distinct `BidBookLevel`
+whose domain is `(0,1]`; BUY asks retain strict `(0,1)`. Global epoch capture,
+BUY/SELL JIT bid capture, SELL proposal slicing, liquidity admission, retry
+release, no-order release, typed execution authority, and the final executor
+now preserve this distinction end to end. Submitted limits, envelopes,
+commands, and SDK requests remain independently constrained to `[0.05,0.95]`.
+
+The extended allowed set is `src/contracts/executable_cost_curve.py`,
+`src/engine/event_reactor_adapter.py`, `src/engine/global_auction_universe.py`,
+`src/execution/exit_lifecycle.py`, `tests/contracts/test_executable_cost_curve.py`,
+and `tests/test_exit_safety.py`, plus the prior files. Acceptance adds exact
+`1.0` JIT-to-executor proof, `>1` fail-closed proof, and old liquidity-debt
+release on `0.999` without weakening the submit band.
+
+The exact-one antibody then exposed the same collapsed check one layer earlier
+in `src/data/market_scanner.py`: snapshot top-book parsing rejected every price
+`>=1` regardless of side. This plan therefore also owns that file and
+`tests/test_executable_market_snapshot.py`; current market authority must admit
+an exact-one bid but continue rejecting an exact-one ask and any bid above one.
+For finite common-axis scoring only, an exact-one raw bid receives a one-current-
+tick economic haircut; the immutable raw JIT curve and execution authority keep
+the actual `1.0` quote, so Zeus can submit `0.95` and retain favorable fill
+improvement without creating an infinite/undefined efficiency value.

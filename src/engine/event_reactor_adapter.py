@@ -190,6 +190,7 @@ from src.contracts.global_auction_receipt import (
 from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
 from src.contracts.venue_submission_envelope import assert_live_order_unit_price
 from src.contracts.executable_cost_curve import (
+    BidBookLevel,
     BookLevel,
     ExecutableCostCurve,
     FeeModel,
@@ -11471,7 +11472,7 @@ def _global_buy_candidate_from_raw_book(
         bid_levels = tuple(
             sorted(
                 (
-                    BookLevel(
+                    BidBookLevel(
                         price=Decimal(str(raw["price"])),
                         size=Decimal(str(raw["size"])),
                     )
@@ -12181,7 +12182,7 @@ def _global_sell_candidate_from_raw_book(
         raise ValueError("GLOBAL_SELL_JIT_ASK_LEVEL_INVALID")
     try:
         levels = tuple(
-            BookLevel(
+            BidBookLevel(
                 price=Decimal(str(raw["price"])),
                 size=Decimal(str(raw["size"])),
             )

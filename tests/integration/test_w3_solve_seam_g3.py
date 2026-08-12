@@ -110,7 +110,12 @@ from src.solve.solver import (
     select_global_single_order,
     _score_global_single_order,
 )
-from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
+from src.contracts.executable_cost_curve import (
+    BidBookLevel,
+    BookLevel,
+    ExecutableCostCurve,
+    FeeModel,
+)
 from src.contracts.strategy_capital_allocation import (
     STRATEGY_LOG_UTILITY_BASIS,
     StrategyCapitalAllocationWitness,
@@ -30501,7 +30506,7 @@ def _adapter_sell_actuation(
         snapshot_id="selected-sell-book",
         book_hash=book_hash,
         levels=tuple(
-            BookLevel(price=Decimal(price), size=Decimal(size))
+            BidBookLevel(price=Decimal(price), size=Decimal(size))
             for price, size in bid_levels
         ),
         fee_model=FeeModel(fee_rate=Decimal("0")),

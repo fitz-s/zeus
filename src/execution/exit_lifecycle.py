@@ -9426,7 +9426,7 @@ def check_pending_retries(
             snapshot_bid is None
             or not LIVE_ORDER_MIN_UNIT_PRICE
             <= snapshot_bid
-            <= LIVE_ORDER_MAX_UNIT_PRICE
+            <= Decimal("1")
         ):
             return False
 
@@ -10073,7 +10073,7 @@ def _pending_exit_no_order_waits_for_liquidity(
         snapshot_bid is None
         or not LIVE_ORDER_MIN_UNIT_PRICE
         <= snapshot_bid
-        <= LIVE_ORDER_MAX_UNIT_PRICE
+        <= Decimal("1")
     )
 
 
