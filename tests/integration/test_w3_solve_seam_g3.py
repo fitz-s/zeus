@@ -9192,8 +9192,16 @@ def test_superseded_preflight_evicts_only_selected_family_probability_cache(
         era,
         "_GLOBAL_PROBABILITY_FAMILY_CACHE",
         {
-            selected_family: ("event-selected", "binding-selected", object()),
-            other_family: ("event-other", "binding-other", object()),
+            (selected_family, era._CurrentProbabilityUse.ENTRY.value): (
+                "event-selected",
+                "binding-selected",
+                object(),
+            ),
+            (other_family, era._CurrentProbabilityUse.HELD_MONITOR.value): (
+                "event-other",
+                "binding-other",
+                object(),
+            ),
         },
     )
     monkeypatch.setattr(
@@ -9220,9 +9228,14 @@ def test_superseded_preflight_evicts_only_selected_family_probability_cache(
     )
 
     assert evicted is True
-    assert selected_family not in era._GLOBAL_PROBABILITY_FAMILY_CACHE
+    assert not any(
+        key[0] == selected_family
+        for key in era._GLOBAL_PROBABILITY_FAMILY_CACHE
+    )
     assert selected_family not in era._GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE
-    assert other_family in era._GLOBAL_PROBABILITY_FAMILY_CACHE
+    assert any(
+        key[0] == other_family for key in era._GLOBAL_PROBABILITY_FAMILY_CACHE
+    )
     assert other_family in era._GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE
     assert (
         era._evict_superseded_global_probability_family_cache(
@@ -9236,7 +9249,9 @@ def test_superseded_preflight_evicts_only_selected_family_probability_cache(
         )
         is False
     )
-    assert other_family in era._GLOBAL_PROBABILITY_FAMILY_CACHE
+    assert any(
+        key[0] == other_family for key in era._GLOBAL_PROBABILITY_FAMILY_CACHE
+    )
 
 
 def test_model_identity_drift_evicts_pinned_probability_family_cache(monkeypatch):
@@ -9256,7 +9271,13 @@ def test_model_identity_drift_evicts_pinned_probability_family_cache(monkeypatch
     monkeypatch.setattr(
         era,
         "_GLOBAL_PROBABILITY_FAMILY_CACHE",
-        {family_key: ("event-1", "binding-1", object())},
+        {
+            (family_key, era._CurrentProbabilityUse.ENTRY.value): (
+                "event-1",
+                "binding-1",
+                object(),
+            )
+        },
     )
     monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE", {})
     actuation = SimpleNamespace(
@@ -9273,7 +9294,9 @@ def test_model_identity_drift_evicts_pinned_probability_family_cache(monkeypatch
     )
 
     assert evicted is True
-    assert family_key not in era._GLOBAL_PROBABILITY_FAMILY_CACHE
+    assert not any(
+        key[0] == family_key for key in era._GLOBAL_PROBABILITY_FAMILY_CACHE
+    )
 
     # Close the loop: the SAME event_id retried after eviction must MISS the cache
     # (never reissue the dead posterior_id) so the next attempt is forced to bind a
@@ -9285,6 +9308,7 @@ def test_model_identity_drift_evicts_pinned_probability_family_cache(monkeypatch
             event_id="event-1",
             causal_snapshot_id="snapshot-1",
             captured_at_utc=_dt.datetime(2026, 7, 26, 3, 0, tzinfo=_dt.timezone.utc),
+            probability_use=era._CurrentProbabilityUse.ENTRY,
         )
         is None
     )
@@ -9418,6 +9442,97 @@ def test_live_adapter_keeps_held_forecast_q_outside_entry_phase_gate(
     )
     assert cache_stores[0][1]["family_binding_hash"] == "held-binding"
     assert cache_stores[0][1]["prepared"] is prepared
+    assert (
+        cache_stores[0][1]["probability_use"]
+        == era._CurrentProbabilityUse.HELD_MONITOR
+    )
+
+
+def test_probability_cache_never_promotes_held_authority_to_entry(monkeypatch):
+    namespace = "probability-cache-purpose-test"
+    family_key = "family-held-only"
+    held_prepared = object()
+    entry_prepared = object()
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE_NAMESPACE", None)
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_CACHE", {})
+    monkeypatch.setattr(era, "_GLOBAL_PROBABILITY_FAMILY_INELIGIBLE_CACHE", {})
+    monkeypatch.setattr(
+        era,
+        "_reissue_cached_global_probability_family",
+        lambda value, **_kwargs: value,
+    )
+
+    era._store_global_probability_family_cache(
+        namespace,
+        family_key=family_key,
+        event_id="event-held",
+        family_binding_hash="binding-held",
+        prepared=held_prepared,
+        probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
+    )
+
+    assert (
+        era._probe_global_probability_family_cache(
+            namespace,
+            family_key=family_key,
+            event_id="event-held",
+            causal_snapshot_id="snapshot-held",
+            captured_at_utc=_dt.datetime(
+                2026, 8, 12, 13, 30, tzinfo=_dt.timezone.utc
+            ),
+            probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
+        )
+        is held_prepared
+    )
+    assert (
+        era._probe_global_probability_family_cache(
+            namespace,
+            family_key=family_key,
+            event_id="event-held",
+            causal_snapshot_id="snapshot-held",
+            captured_at_utc=_dt.datetime(
+                2026, 8, 12, 13, 30, tzinfo=_dt.timezone.utc
+            ),
+            probability_use=era._CurrentProbabilityUse.ENTRY,
+        )
+        is None
+    )
+
+    era._store_global_probability_family_cache(
+        namespace,
+        family_key=family_key,
+        event_id="event-held",
+        family_binding_hash="binding-entry",
+        prepared=entry_prepared,
+        probability_use=era._CurrentProbabilityUse.ENTRY,
+    )
+
+    assert (
+        era._probe_global_probability_family_cache(
+            namespace,
+            family_key=family_key,
+            event_id="event-held",
+            causal_snapshot_id="snapshot-held",
+            captured_at_utc=_dt.datetime(
+                2026, 8, 12, 13, 30, tzinfo=_dt.timezone.utc
+            ),
+            probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
+        )
+        is held_prepared
+    )
+    assert (
+        era._probe_global_probability_family_cache(
+            namespace,
+            family_key=family_key,
+            event_id="event-held",
+            causal_snapshot_id="snapshot-held",
+            captured_at_utc=_dt.datetime(
+                2026, 8, 12, 13, 30, tzinfo=_dt.timezone.utc
+            ),
+            probability_use=era._CurrentProbabilityUse.ENTRY,
+        )
+        is entry_prepared
+    )
 
 
 def test_live_adapter_reuses_ineligible_probability_until_authority_db_changes(
@@ -13524,6 +13639,7 @@ def test_time_dependent_candidate_caps_are_not_probability_cached(monkeypatch):
         event_id="event",
         family_binding_hash="binding",
         prepared=prepared,
+        probability_use=era._CurrentProbabilityUse.ENTRY,
     )
 
     assert era._GLOBAL_PROBABILITY_FAMILY_CACHE == {}
