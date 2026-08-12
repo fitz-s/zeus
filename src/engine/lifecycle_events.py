@@ -633,6 +633,13 @@ def build_monitor_refreshed_canonical_write(
     )
     projection = build_position_current_projection(position)
     projection["phase"] = phase_after
+    # MONITOR_REFRESHED owns current belief/book observations, not realized
+    # execution economics.  An open runtime Position can lag a partial-exit
+    # fill/correction fold; projecting its non-NULL pnl would overwrite the
+    # canonical cumulative value.  NULL delegates realized PnL preservation to
+    # the projection layer, while open positions never own a terminal exit price.
+    projection["realized_pnl_usd"] = None
+    projection["exit_price"] = None
     event_occurred_at = _non_empty(
         occurred_at,
         getattr(position, "last_monitor_at", ""),

@@ -371,6 +371,11 @@ _MONITOR_REFRESH_PRESERVED_COLUMNS = frozenset(
         "chain_cost_basis_usd",
         "chain_seen_at",
         "chain_absence_at",
+        # Fill/correction writers own open-position realized economics.
+        # MONITOR_REFRESHED contributes no execution fact and may only retain
+        # the latest canonical values already present in position_current.
+        "realized_pnl_usd",
+        "exit_price",
     }
 )
 _MONITOR_SNAPSHOT_COLUMNS = frozenset(
