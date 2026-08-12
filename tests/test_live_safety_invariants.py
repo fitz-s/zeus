@@ -18560,7 +18560,101 @@ def test_replacement_hwm_prefetch_precedes_auxiliary_debt_scan(monkeypatch):
         held_position_monitor_budget_seconds=6.0,
     )
 
-    assert order == [("hwm", pytest.approx(5.0)), ("debt", 0.0)]
+    assert order == [("hwm", pytest.approx(1.0)), ("debt", 0.0)]
+
+
+def test_exhausted_auxiliary_tranche_still_refreshes_one_admitted_position(
+    monkeypatch,
+):
+    """HWM/preclassification may consume auxiliary time, never primary admission."""
+    from src.engine import cycle_runtime
+    from src.execution import day0_hard_fact_exit, exit_lifecycle
+
+    positions = [
+        _make_position(trade_id=f"primary-after-auxiliary-{index}")
+        for index in range(17)
+    ]
+    clock = [0.0]
+    refreshes: list[str] = []
+    canonical_refreshes: list[str] = []
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: positions,
+    )
+
+    def hwm_prefetch(_positions, *, deadline_monotonic, **_kwargs):
+        assert _positions == positions
+        assert deadline_monotonic == pytest.approx(5.0)
+        clock[0] = deadline_monotonic + 0.001
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_replacement_artifact_hwm",
+        hwm_prefetch,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "classify_global_sell_snapshot_reauction_debt",
+        lambda *_args, **_kwargs: pytest.fail(
+            "expired auxiliary debt scan must not start"
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_day0_hard_fact_position_eligible",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        day0_hard_fact_exit,
+        "evaluate_hard_fact_exit",
+        lambda **_kwargs: pytest.fail(
+            "expired auxiliary hard-fact preclassification must not start"
+        ),
+    )
+
+    def refresh(_conn, _clob, position):
+        refreshes.append(position.trade_id)
+        clock[0] += 0.2
+        return _monitor_test_edge_context(position)
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "PRIMARY_RESERVE_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda _conn, position, **_kwargs: (
+            canonical_refreshes.append(position.trade_id) or True
+        ),
+    )
+
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        SimpleNamespace(),
+        _make_portfolio(*positions),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_primary_after_auxiliary_exhaustion"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=10.0,
+    )
+
+    assert refreshes == canonical_refreshes
+    assert len(refreshes) == 1
+    assert summary["held_monitor_primary_belief_read_started"] == 1
+    assert summary["held_monitor_primary_belief_read_completed"] == 1
+    assert summary["held_monitor_hard_fact_preclass_deferred"] == 17
+    assert summary["held_monitor_primary_belief_read_deferred"] == 16
+    assert summary["held_monitor_deadline_defer_reason"] == (
+        "PRIMARY_BELIEF_BUDGET_UNAVAILABLE"
+    )
 
 
 def test_global_sell_debt_drain_auxiliary_deadline_preserves_primary_refresh(

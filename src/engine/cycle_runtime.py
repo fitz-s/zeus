@@ -6742,18 +6742,11 @@ def execute_monitoring_phase(
     install_monitor_day0_family_cache(clob, decision_time=monitor_now_utc)
     install_monitor_replacement_hwm_snapshot(clob, None)
 
-    # Current replacement evidence is primary money-path truth.  Freeze it
-    # before debt reconstruction or per-position hard-fact classification can
-    # consume the shared claim deadline.  Hard-fact positions do not read this
-    # snapshot, but including every family keeps one complete immutable cut and
-    # avoids a second scalar/fan-out path after preclassification.
-    hwm_deadline = min(
-        monitor_deadline,
-        max(
-            time.monotonic() + primary_reserve_seconds,
-            monitor_deadline - primary_reserve_seconds,
-        ),
-    )
+    # Current replacement evidence is primary money-path truth, but its shared
+    # batch is still preparation: it must finish inside the auxiliary tranche
+    # so an unavailable HWM becomes a canonical DATA_DEGRADED redecision rather
+    # than consuming the time promised to every admitted position.
+    hwm_deadline = auxiliary_deadline
     _prefetch_held_replacement_artifact_hwm(
         monitor_positions,
         decision_time=monitor_now_utc,
@@ -6838,7 +6831,15 @@ def execute_monitoring_phase(
     durable_hard_facts = {}
     from src.execution.day0_hard_fact_exit import evaluate_hard_fact_exit
 
-    for pos in monitor_positions:
+    for position_index, pos in enumerate(monitor_positions):
+        if time.monotonic() >= auxiliary_deadline:
+            deferred = len(monitor_positions) - position_index
+            defer_optional_maintenance(
+                "HELD_HARD_FACT_PRECLASS_DEADLINE",
+                deferred,
+            )
+            summary["held_monitor_hard_fact_preclass_deferred"] = deferred
+            break
         city = deps.cities_by_name.get(pos.city)
         if not _day0_hard_fact_position_eligible(pos) or city is None:
             continue
@@ -7150,6 +7151,7 @@ def execute_monitoring_phase(
         if (
             not deadline_rescue
             and primary_belief_required
+            and id(pos) not in selected_coverage_position_ids
             and monitor_deadline - time.monotonic()
             < HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
         ):
