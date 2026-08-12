@@ -11913,13 +11913,17 @@ def _bind_global_candidate_executable_snapshot(
     try:
         shares = Decimal(str(getattr(decision, "shares")))
         cost = Decimal(str(getattr(decision, "cost_usd")))
+        if not shares.is_finite() or not cost.is_finite() or shares <= 0:
+            raise ValueError("non-finite or non-positive global cost inputs")
         unit_cost = cost / shares
+        unit_cost_float = float(unit_cost)
     except (ArithmeticError, TypeError, ValueError) as exc:
         raise ValueError("GLOBAL_JIT_SNAPSHOT_COST_INVALID") from exc
     if (
-        shares <= 0
-        or not unit_cost.is_finite()
+        not unit_cost.is_finite()
         or not (Decimal("0") < unit_cost < Decimal("1"))
+        or not math.isfinite(unit_cost_float)
+        or not (0.0 < unit_cost_float < 1.0)
     ):
         raise ValueError("GLOBAL_JIT_SNAPSHOT_COST_INVALID")
     return dataclass_replace(
@@ -11927,7 +11931,7 @@ def _bind_global_candidate_executable_snapshot(
         row=row,
         executable_snapshot_id=snapshot.snapshot_id,
         execution_price=ExecutionPrice(
-            value=float(unit_cost),
+            value=unit_cost_float,
             price_type="fee_adjusted",
             fee_deducted=True,
             currency="probability_units",
@@ -11936,7 +11940,7 @@ def _bind_global_candidate_executable_snapshot(
         # that all-in unit cost is the single execution-cost authority after this
         # rebind.  Do not retain the family-local proof's scalar (which can be
         # absent for a globally licensed maker rest) beside the rebound price.
-        c_cost_95pct=float(unit_cost),
+        c_cost_95pct=unit_cost_float,
     )
 
 

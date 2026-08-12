@@ -2172,6 +2172,7 @@ def test_global_snapshot_rebind_uses_selected_all_in_unit_cost_for_both_cost_fie
     decision = SimpleNamespace(
         shares="28.20",
         cost_usd="4.230000",
+        expected_fill_price_before_fee="0.14",
         candidate=SimpleNamespace(execution_mode=execution_mode),
     )
 
@@ -2187,6 +2188,57 @@ def test_global_snapshot_rebind_uses_selected_all_in_unit_cost_for_both_cost_fie
     assert rebound.c_cost_95pct == pytest.approx(0.15)
     assert rebound.executable_snapshot_id == snapshot.snapshot_id
     assert proof.c_cost_95pct is None
+
+
+@pytest.mark.parametrize(
+    ("shares", "cost"),
+    (
+        ("NaN", "4.23"),
+        ("sNaN", "4.23"),
+        ("28.20", "NaN"),
+        ("28.20", "Infinity"),
+        ("1", "0.999999999999999999999999999999999999"),
+        ("1", "1e-9999"),
+    ),
+)
+def test_global_snapshot_rebind_rejects_nonfinite_or_float_collapsed_cost(
+    monkeypatch,
+    shares,
+    cost,
+):
+    snapshot = SimpleNamespace(snapshot_id="global-jit-snapshot")
+    monkeypatch.setattr(
+        era,
+        "_persist_global_candidate_executable_snapshot",
+        lambda *_args, **_kwargs: (snapshot, {"snapshot_id": snapshot.snapshot_id}),
+    )
+    proof = era._CandidateProof(
+        candidate=SimpleNamespace(),
+        token_id="token-1",
+        direction="buy_yes",
+        row=None,
+        executable_snapshot_id=None,
+        execution_price=None,
+        q_posterior=0.70,
+        q_lcb_5pct=0.60,
+        c_cost_95pct=None,
+        p_fill_lcb=0.50,
+        trade_score=0.20,
+        p_value=0.01,
+        passed_prefilter=True,
+        native_quote_available=True,
+        p_cal_vector_hash="p-cal",
+        p_live_vector_hash="p-live",
+    )
+
+    with pytest.raises(ValueError, match="GLOBAL_JIT_SNAPSHOT_COST_INVALID"):
+        era._bind_global_candidate_executable_snapshot(
+            sqlite3.connect(":memory:"),
+            proof=proof,
+            candidate=SimpleNamespace(),
+            decision=SimpleNamespace(shares=shares, cost_usd=cost),
+            decision_time=datetime.now(timezone.utc),
+        )
 
 
 @pytest.mark.parametrize(("side", "direction"), (("YES", "buy_yes"), ("NO", "buy_no")))
