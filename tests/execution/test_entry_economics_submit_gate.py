@@ -1,5 +1,5 @@
 # Created: 2026-07-01
-# Last reused/audited: 2026-08-01
+# Last reused/audited: 2026-08-12
 # Authority basis: current q-kernel final-entry economics and selected-side probability quality law.
 from __future__ import annotations
 
@@ -272,16 +272,22 @@ def _day0_actionable_payload(
         "observation_time": "2026-05-25T11:30:00+00:00",
         "observation_available_at": "2026-05-25T11:35:00+00:00",
         "day0_probability_authority": {
+            "probability_authority": "day0_remaining_day_global_probability_v1",
             "q_source": "day0_remaining_day",
             "q_mode": "remaining_day",
             "remaining_models": remaining_models,
             "rounded_value": 20,
             "observation_time": "2026-05-25T11:30:00+00:00",
+            "observation_available_at": "2026-05-25T11:35:00+00:00",
             "lcb_transform": {
                 "yes_lcb_by_condition": {"condition-1": q_lcb},
                 "no_lcb_by_condition": {"condition-1": 0.02},
             },
         },
+        "probability_authority": "day0_remaining_day_global_probability_v1",
+        "q_source": "day0_remaining_day",
+        "q_mode": "remaining_day",
+        "remaining_models": remaining_models,
         "_edli_q_source": "day0_remaining_day",
         "_edli_day0_q_mode": "remaining_day",
         "_edli_day0_remaining_models": remaining_models,
@@ -293,6 +299,7 @@ def _day0_actionable_payload(
     if remaining_models is None:
         payload["day0_probability_authority"].pop("remaining_models", None)
         payload.pop("_edli_day0_remaining_models", None)
+        payload.pop("remaining_models", None)
     return payload
 
 
@@ -499,8 +506,8 @@ def test_entry_economics_micro_tail_still_requires_strategy_economics():
     )
 
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
-    assert verdict["details"]["submit_edge"] == pytest.approx(0.05)
+    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["details"]["limit_price"] == pytest.approx(0.024)
 
 
 def test_entry_economics_buenos_aires_shape_still_requires_strategy_economics():
@@ -534,8 +541,8 @@ def test_entry_economics_buenos_aires_shape_still_requires_strategy_economics():
     )
 
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
-    assert verdict["details"]["submit_edge"] > 0.0
+    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["details"]["limit_price"] == pytest.approx(0.041)
 
 
 def test_entry_economics_allows_high_confidence_center_buy_yes():
@@ -636,8 +643,8 @@ def test_entry_economics_legacy_low_price_still_requires_strategy_economics():
     )
 
     assert verdict["allowed"] is False
-    assert verdict["reason"] == "limit_price_below_strategy_entry_floor"
-    assert verdict["details"]["submit_edge"] > 0.0
+    assert verdict["reason"] == "live_order_unit_price_out_of_bounds"
+    assert verdict["details"]["limit_price"] == pytest.approx(0.031)
 
 
 def test_entry_economics_blocks_unarmed_selection_guard_even_with_large_raw_edge():

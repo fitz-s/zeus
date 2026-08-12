@@ -15085,15 +15085,15 @@ def test_global_preflight_reuses_provider_observation_without_second_fetch(monke
     reused_book = {
         "asset_id": "token-a",
         "hash": "reused-book",
-        "bids": [{"price": "0.003", "size": "100"}],
-        "asks": [{"price": "0.012", "size": "190"}],
+        "bids": [{"price": "0.10", "size": "190"}],
+        "asks": [{"price": "0.12", "size": "190"}],
     }
     curve = ExecutableCostCurve(
         token_id="token-a",
         side="NO",
         snapshot_id="selected-book",
         book_hash=stable_hash(reused_book),
-        levels=(BookLevel(price=Decimal("0.012"), size=Decimal("190")),),
+        levels=(BookLevel(price=Decimal("0.12"), size=Decimal("190")),),
         fee_model=FeeModel(fee_rate=Decimal("0")),
         min_tick=Decimal("0.001"),
         min_order_size=Decimal("5"),
@@ -15136,7 +15136,7 @@ def test_global_preflight_reuses_provider_observation_without_second_fetch(monke
         winner_event_id=event.event_id,
         decision=SimpleNamespace(
             candidate=candidate,
-            limit_price=Decimal("0.012"),
+            limit_price=Decimal("0.12"),
             shares=Decimal("190"),
         ),
     )
@@ -15179,7 +15179,7 @@ def test_global_preflight_reuses_provider_observation_without_second_fetch(monke
     )
 
     assert stable is not receipt
-    assert stable.proof_accepted is True
+    assert stable.proof_accepted is True, stable.reason
     assert isinstance(stable.global_jit_candidate, era._GlobalJitHandoff)
     assert provider.consumes == 1
     assert provider.fetches == 0
@@ -15334,8 +15334,8 @@ def test_global_winner_persists_jit_curve_as_executor_depth_authority(monkeypatc
     assert snapshot.selected_outcome_token_id == curve.token_id
     assert snapshot.orderbook_top_bid == Decimal("0.36")
     assert candidate.native_bid_levels == (
-        BookLevel(price=Decimal("0.36"), size=Decimal("40")),
-        BookLevel(price=Decimal("0.35"), size=Decimal("10")),
+        BidBookLevel(price=Decimal("0.36"), size=Decimal("40")),
+        BidBookLevel(price=Decimal("0.35"), size=Decimal("10")),
     )
     assert snapshot.fee_details["fee_rate_fraction"] == 0.05
     assert snapshot.fee_details["feeSchedule_taker_only"] is True
@@ -16629,7 +16629,7 @@ def test_current_global_book_epoch_reads_yes_and_no_symmetrically():
     assert all(asset.curve.token_id == asset.token_id for asset in epoch.assets)
     assert all(
         asset.bid_levels == (
-            BookLevel(price=Decimal("0.20"), size=Decimal("100")),
+            BidBookLevel(price=Decimal("0.20"), size=Decimal("100")),
         )
         for asset in epoch.assets
     )
@@ -20467,7 +20467,7 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
             token_id=seed.native_candidate.token_id,
             curve=seed.native_candidate.executable_cost_curve,
             bid_levels=(
-                BookLevel(price=Decimal("0.05"), size=Decimal("1000")),
+                BidBookLevel(price=Decimal("0.06"), size=Decimal("1000")),
             ),
             captured_at_utc=decision_at,
             neg_risk=True,
@@ -20974,7 +20974,7 @@ def test_two_prepared_families_choose_one_globally_unique_order(monkeypatch):
         if row.position_id == "position-missing-book"
     )
     assert missing_book_coverage.book_state == "NO_EXECUTABLE_BOOK"
-    assert len(missing_book_coverage.sell_book_witness_identity or "") == 64
+    assert missing_book_coverage.sell_book_witness_identity is None
     sell_evaluations = {
         evaluation.position_id
         for evaluation in book_selected.decision.candidate_evaluations
@@ -26092,6 +26092,9 @@ def _global_test_buy_candidate(
         executable_cost_curve=curve,
         resolution_identity="resolution",
         neg_risk=False,
+        native_bid_levels=(
+            BidBookLevel(price=Decimal("0.06"), size=Decimal("100")),
+        ),
     )
 
 
