@@ -3781,3 +3781,32 @@ directions to retain symmetry, invalid identity and stale/malformed freshness
 to fail closed, fresh sub-min and at-min arithmetic to remain exact, focused
 health tests and compilation to pass, then exact-SHA deployment and a live
 sample showing the correct held token identity.
+
+## 2026-08-12 Held raw-HWM reads cannot spend the primary decision reserve
+
+Production monitor pass `414811` froze an 11-family replacement-input HWM as
+ready but spent 26.110 seconds doing so; pass `414813` spent 29.970 seconds.
+The caller handed the batch the complete auxiliary deadline and a 20-second
+CPU-time SQL allowance, despite the monitor contract already defining a
+2.5-second raw-HWM stage maximum.  An occasional scheduler, busy-wait, or
+validation delay could therefore consume the wall-clock tranche and leave zero
+positions at `refresh_position -> evaluate_exit`.
+
+The HWM batch now receives its own absolute wall deadline:
+`min(auxiliary_deadline, started + raw_hwm_max)`.  The SQL allowance is the
+same remaining wall budget, not the primary belief reserve.  Completion still
+freezes one causal HWM cut. Expiry uses the existing typed unavailable snapshot
+and fails probability authority closed; it never reuses an older cut, falls
+back to a scalar belief, or writes a synthetic HOLD decision.
+
+SCOPE is one held-monitor HWM batch. DRAIN is the next bounded monitor pass
+against current raw artifacts. RESET is a complete causal batch within its
+independent wall deadline. The remaining primary tranche continues to own
+fresh q/book reads and economic decisions; this change does not lower quote,
+probability, submit, price-band, or global-auction gates.
+
+Acceptance requires an oversized HWM wait to receive the 2.5-second absolute
+deadline and matching SQL allowance, existing HWM-before-auxiliary ordering to
+remain intact, typed unavailable behavior to retain fail-closed authority, and
+post-deploy decision artifacts to show HWM wall time bounded while primary
+position attempts continue.

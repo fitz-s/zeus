@@ -18902,6 +18902,55 @@ def test_pending_exit_preflight_auxiliary_deadline_preserves_primary_refresh(
     assert summary["held_monitor_primary_belief_read_completed"] == 1
 
 
+def test_replacement_hwm_prefetch_has_independent_wall_deadline(monkeypatch):
+    """A raw-HWM cut cannot consume the monitor's complete auxiliary tranche."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(trade_id="hwm-independent-wall-deadline")
+    clock = [0.0]
+    observed: list[tuple[float, float]] = []
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: [position],
+    )
+
+    def prefetch(
+        positions,
+        *,
+        deadline_monotonic,
+        sql_timeout_seconds,
+        **_kwargs,
+    ):
+        assert positions == [position]
+        observed.append((deadline_monotonic, sql_timeout_seconds))
+        clock[0] = 20.0
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_replacement_artifact_hwm",
+        prefetch,
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_hwm_independent_wall_deadline"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=20.0,
+    )
+
+    assert observed == [(pytest.approx(2.5), pytest.approx(2.5))]
+    assert summary["held_monitor_hwm_prefetch_budget_seconds"] == pytest.approx(2.5)
+    assert summary["held_monitor_primary_belief_reserve_seconds"] == pytest.approx(10.0)
+
+
 def test_replacement_hwm_prefetch_precedes_auxiliary_debt_scan(monkeypatch):
     """Auxiliary O(n) work cannot spend the replacement-HWM reserve first."""
     from src.engine import cycle_runtime
@@ -18981,8 +19030,8 @@ def test_exhausted_auxiliary_tranche_still_refreshes_one_admitted_position(
 
     def hwm_prefetch(_positions, *, deadline_monotonic, **_kwargs):
         assert _positions == positions
-        assert deadline_monotonic == pytest.approx(5.0)
-        clock[0] = deadline_monotonic + 0.001
+        assert deadline_monotonic == pytest.approx(2.5)
+        clock[0] = 5.001
 
     monkeypatch.setattr(
         cycle_runtime,

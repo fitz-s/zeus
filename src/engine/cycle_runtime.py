@@ -6101,6 +6101,7 @@ def execute_monitoring_phase(
         _DAY0_ZERO_PROBABILITY_EXIT_AUTHORITY_ATTR,
         _GLOBAL_MONITOR_ALPHA_ATTR,
         HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
+        HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS,
         _GLOBAL_MONITOR_SAMPLES_ATTR,
         _HELD_MONITOR_DEADLINE_ATTR,
         _HELD_MONITOR_MIN_ORDER_SIZE_ATTR,
@@ -6740,11 +6741,23 @@ def execute_monitoring_phase(
     )
     install_monitor_day0_family_cache(clob, decision_time=monitor_now_utc)
     install_monitor_replacement_hwm_snapshot(clob, None)
+    hwm_prefetch_started = time.monotonic()
+    hwm_prefetch_deadline = min(
+        auxiliary_deadline,
+        hwm_prefetch_started + HELD_MONITOR_RAW_HWM_READ_MAX_SECONDS,
+    )
+    hwm_prefetch_budget_seconds = max(
+        0.0,
+        hwm_prefetch_deadline - hwm_prefetch_started,
+    )
+    summary["held_monitor_hwm_prefetch_budget_seconds"] = (
+        hwm_prefetch_budget_seconds
+    )
     _prefetch_held_replacement_artifact_hwm(
         monitor_positions,
         decision_time=monitor_now_utc,
-        deadline_monotonic=auxiliary_deadline,
-        sql_timeout_seconds=primary_reserve_seconds,
+        deadline_monotonic=hwm_prefetch_deadline,
+        sql_timeout_seconds=hwm_prefetch_budget_seconds,
         clob=clob,
         summary=summary,
         deps=deps,
