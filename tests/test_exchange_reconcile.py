@@ -2047,6 +2047,46 @@ def test_ws_gap_ignores_account_wide_unlinked_trade_noise(conn):
     assert any(f.kind == "unrecorded_trade" for f in periodic_result)
 
 
+def test_ws_gap_reconcile_limits_maker_repair_to_current_money_path(
+    conn,
+    monkeypatch,
+):
+    from src.execution import exchange_reconcile as reconcile
+
+    scopes = []
+
+    def _record_scope(_conn, *, observed_at, live_tick_scope=False):
+        scopes.append((observed_at, live_tick_scope))
+        return {
+            "scanned": 0,
+            "corrected": 0,
+            "projected": 0,
+            "stayed": 0,
+            "errors": 0,
+        }
+
+    monkeypatch.setattr(
+        reconcile,
+        "reconcile_recorded_maker_fill_economics",
+        _record_scope,
+    )
+
+    reconcile.run_reconcile_sweep(
+        FakeM5Adapter(trades=[], positions=[]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+    reconcile.run_reconcile_sweep(
+        FakeM5Adapter(trades=[], positions=[]),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+
+    assert scopes == [(NOW, True), (NOW, False)]
+
+
 def test_local_RESTING_absent_at_exchange_with_no_trade_marks_canceled_or_wiped_or_suspect(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 

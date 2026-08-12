@@ -1977,6 +1977,27 @@ def test_venue_background_maintenance_is_throttled_between_heartbeat_ticks(monke
     assert calls == [adapter]
 
 
+def test_venue_background_maintenance_defers_until_first_held_monitor_coverage(
+    monkeypatch,
+):
+    from src import main
+
+    calls = []
+    complete = main.threading.Event()
+    monkeypatch.setattr(main, "_held_position_monitor_bootstrap_complete", complete)
+    monkeypatch.setitem(main._BOOT_STATE, "ts", datetime.now(timezone.utc))
+    monkeypatch.setattr(
+        main,
+        "_run_venue_background_maintenance_once",
+        lambda active_adapter: calls.append(active_adapter),
+    )
+
+    assert main._start_venue_background_maintenance_async(object()) == (
+        "deferred_held_position_monitor_bootstrap"
+    )
+    assert calls == []
+
+
 def test_venue_background_maintenance_bypasses_throttle_for_m5_latch(monkeypatch):
     from src import main
 

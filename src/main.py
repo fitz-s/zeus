@@ -2421,6 +2421,18 @@ def _start_venue_background_maintenance_async(adapter=None) -> str:
     global _last_venue_background_maintenance_attempt_at
     if _cycle_lock.locked():
         return "deferred_cycle_running"
+    if (
+        isinstance(_BOOT_STATE.get("ts"), datetime)
+        and not _held_position_monitor_bootstrap_complete.is_set()
+    ):
+        # SCOPE: only slow venue reconciliation launched by the order daemon
+        # during this process's cold-start coverage tranche. The external
+        # heartbeat owner and every fail-closed submit latch remain active.
+        # DRAIN: the first full held-position monitor runs after five seconds;
+        # the recurring heartbeat tick retries this maintenance independently.
+        # RESET: canonical post-boot MONITOR_REFRESHED coverage sets the
+        # bootstrap event; process restart creates a fresh obligation.
+        return "deferred_held_position_monitor_bootstrap"
     reactor_active = _edli_reactor_active()
     reconcile_drain_required = (
         reactor_active and _unresolved_reconcile_findings_exist()

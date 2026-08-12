@@ -483,7 +483,11 @@ def refresh_unresolved_reconcile_findings(
         if finding is not None:
             new_findings.append(finding)
 
-    repair_summary = reconcile_recorded_maker_fill_economics(conn, observed_at=observed)
+    repair_summary = reconcile_recorded_maker_fill_economics(
+        conn,
+        observed_at=observed,
+        live_tick_scope=True,
+    )
     before_remaining = _unresolved_position_drift_count(conn, token_ids) + _unresolved_trade_count(conn, trade_ids)
     if token_ids:
         _resolve_position_drift_tokens_from_current_truth(
@@ -757,7 +761,11 @@ def run_reconcile_sweep(
     _resolve_disappeared_ghost_order_findings(
         adapter, conn, open_order_ids, trades=trades if trades_available else None, observed_at=observed
     )
-    reconcile_recorded_maker_fill_economics(conn, observed_at=observed)
+    reconcile_recorded_maker_fill_economics(
+        conn,
+        observed_at=observed,
+        live_tick_scope=context == "ws_gap",
+    )
     # Fold adopted ghost-SELL economics only after every generic projection
     # writer has finished. The fresh account residual and its chain timestamp
     # must be the final canonical projection of this account snapshot; an
