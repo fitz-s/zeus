@@ -19165,18 +19165,116 @@ def _current_maker_fill_authority_rejection_reason(
     *,
     proof_mode: str | None,
     fresh_mode: str | None,
+    current_candidate: object | None = None,
+    certificate_economics: Mapping[str, object] | None = None,
+    validated_at_utc: datetime | None = None,
+    current_at_utc: datetime | None = None,
 ) -> str | None:
-    """Reject any maker-dependent submit until a typed current witness exists."""
+    """Admit only the exact current JIT maker witness already sealed in qkernel."""
 
     modes = {
         str(value or "").strip().upper()
         for value in (proof_mode, fresh_mode)
     }
-    return (
-        _CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
-        if "MAKER" in modes
-        else None
-    )
+    if "MAKER" not in modes:
+        return None
+    if (
+        modes != {"MAKER"}
+        or current_candidate is None
+        or not isinstance(certificate_economics, Mapping)
+        or not isinstance(validated_at_utc, datetime)
+        or validated_at_utc.tzinfo is None
+        or not isinstance(current_at_utc, datetime)
+        or current_at_utc.tzinfo is None
+    ):
+        return _CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+    try:
+        from src.solve.solver import (
+            _maker_witness_rejection,
+            executable_curve_identity,
+        )
+
+        if (
+            _maker_witness_rejection(
+                current_candidate,
+                decision_at_utc=current_at_utc,
+            )
+            is not None
+        ):
+            return _CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+        expected = _current_maker_fill_witness_certificate_payload(
+            current_candidate,
+            validated_at_utc=validated_at_utc,
+        )
+        proposal = getattr(current_candidate, "economic_cost_curve", None)
+        witness = getattr(current_candidate, "maker_fill_witness", None)
+        declared_identity = str(
+            certificate_economics.get("current_state_identity_hash") or ""
+        )
+        expected_identity = qkernel_current_state_identity_hash(
+            certificate_economics
+        )
+        exact = (
+            str(
+                certificate_economics.get("global_execution_mode") or ""
+            ).strip().upper()
+            == "MAKER_REST"
+            and certificate_economics.get("global_maker_fill_witness")
+            == expected
+            and str(
+                certificate_economics.get("global_family_key") or ""
+            )
+            == str(getattr(current_candidate, "family_key", "") or "")
+            and str(
+                certificate_economics.get("global_condition_id") or ""
+            )
+            == str(getattr(current_candidate, "condition_id", "") or "")
+            and str(certificate_economics.get("global_token_id") or "")
+            == str(getattr(current_candidate, "token_id", "") or "")
+            and Decimal(
+                str(certificate_economics.get("global_limit_price"))
+            )
+            == Decimal(str(getattr(witness, "limit_price", "NaN")))
+            and str(
+                certificate_economics.get(
+                    "global_jit_execution_curve_identity"
+                )
+                or ""
+            )
+            == executable_curve_identity(proposal)
+            and math.isclose(
+                float(certificate_economics.get("global_fill_probability")),
+                float(getattr(current_candidate, "fill_probability", float("nan"))),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            and str(
+                certificate_economics.get("global_fill_probability_source")
+                or ""
+            )
+            == str(getattr(witness, "witness_identity", "") or "")
+            and math.isclose(
+                float(
+                    certificate_economics.get(
+                        "global_rest_deadline_minutes"
+                    )
+                ),
+                float(
+                    getattr(
+                        current_candidate,
+                        "rest_deadline_minutes",
+                        float("nan"),
+                    )
+                ),
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            and bool(declared_identity)
+            and declared_identity == expected_identity
+        )
+    except (ArithmeticError, TypeError, ValueError):
+        exact = False
+    return None if exact else _CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
 _PRICE_MOVED_ABORT_PREFIX = "SUBMIT_ABORTED_PRICE_MOVED"
 
 
@@ -20359,6 +20457,22 @@ def _build_live_execution_command_certificates(
         maker_fill_rejection = _current_maker_fill_authority_rejection_reason(
             proof_mode=proof_order_mode,
             fresh_mode=_fresh_mode,
+            current_candidate=(
+                global_jit_handoff.candidate
+                if global_jit_handoff is not None
+                else None
+            ),
+            certificate_economics=(
+                receipt.qkernel_execution_economics
+                if isinstance(receipt.qkernel_execution_economics, Mapping)
+                else None
+            ),
+            validated_at_utc=(
+                global_jit_handoff.authority.snapshot.captured_at
+                if global_jit_handoff is not None
+                else None
+            ),
+            current_at_utc=datetime.now(UTC),
         )
         if maker_fill_rejection is not None:
             # SCOPE — this new maker-dependent entry only; taker candidates and

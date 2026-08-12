@@ -31510,6 +31510,80 @@ def _current_maker_buy_candidate() -> GlobalSingleOrderCandidate:
     )
 
 
+def _final_maker_economics(candidate, *, validated_at):
+    economics = {
+        "global_execution_mode": "MAKER_REST",
+        "global_family_key": candidate.family_key,
+        "global_condition_id": candidate.condition_id,
+        "global_token_id": candidate.token_id,
+        "global_limit_price": str(candidate.maker_fill_witness.limit_price),
+        "global_jit_execution_curve_identity": executable_curve_identity(
+            candidate.economic_cost_curve
+        ),
+        "global_fill_probability": candidate.fill_probability,
+        "global_fill_probability_source": (
+            candidate.maker_fill_witness.witness_identity
+        ),
+        "global_rest_deadline_minutes": candidate.rest_deadline_minutes,
+        "global_maker_fill_witness": (
+            era._current_maker_fill_witness_certificate_payload(
+                candidate,
+                validated_at_utc=validated_at,
+            )
+        ),
+    }
+    economics["current_state_identity_hash"] = (
+        era.qkernel_current_state_identity_hash(economics)
+    )
+    return economics
+
+
+def test_final_command_maker_wall_accepts_only_exact_current_jit_witness():
+    candidate = _current_maker_buy_candidate()
+    validated_at = _dt.datetime.now(_dt.timezone.utc)
+    economics = _final_maker_economics(
+        candidate,
+        validated_at=validated_at,
+    )
+
+    assert era._current_maker_fill_authority_rejection_reason(
+        proof_mode="MAKER",
+        fresh_mode="MAKER",
+        current_candidate=candidate,
+        certificate_economics=economics,
+        validated_at_utc=validated_at,
+        current_at_utc=validated_at,
+    ) is None
+
+    tampered = copy.deepcopy(economics)
+    tampered["global_maker_fill_witness"]["outcomes"][1][
+        "fill_fraction"
+    ] = "0.5"
+    tampered["current_state_identity_hash"] = (
+        era.qkernel_current_state_identity_hash(tampered)
+    )
+    assert era._current_maker_fill_authority_rejection_reason(
+        proof_mode="MAKER",
+        fresh_mode="MAKER",
+        current_candidate=candidate,
+        certificate_economics=tampered,
+        validated_at_utc=validated_at,
+        current_at_utc=validated_at,
+    ) == era._CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+
+    assert era._current_maker_fill_authority_rejection_reason(
+        proof_mode="MAKER",
+        fresh_mode="MAKER",
+        current_candidate=candidate,
+        certificate_economics=economics,
+        validated_at_utc=validated_at,
+        current_at_utc=(
+            candidate.maker_fill_witness.valid_until_at_utc
+            + _dt.timedelta(microseconds=1)
+        ),
+    ) == era._CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE
+
+
 def test_global_buy_jit_rebinds_exact_maker_witness_to_current_book():
     selected = _current_maker_buy_candidate()
     authority = _jit_market_authority(selected, tick="0.001", min_order_size="5")

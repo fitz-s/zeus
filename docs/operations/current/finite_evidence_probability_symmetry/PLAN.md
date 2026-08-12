@@ -58,6 +58,34 @@ on the current live checkout and are the existing precliff/price-band fixture
 drift, so they are not represented as green.  Worktree code against live DBs
 passes the read-only boot validation `ALL PASS`.
 
+## 2026-08-11 Final maker command compiler closure
+
+Post-deploy receipts proved that the complete auction and JIT preflight now
+preserved the typed maker witness, but the final command compiler still applied
+the retired unconditional maker wall.  A `STABLE` witnessed winner therefore
+ended as `EDLI_LIVE_CERTIFICATE_BUILD_FAILED:CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE`
+before command persistence even though its rebound qkernel certificate carried
+the exact zero/partial/full distribution.
+
+The final wall now admits only the same exact `MAKER_REST` candidate carried by
+the JIT handoff when its typed witness is current at final compilation and its
+serialized witness, candidate/condition/token, passive limit, execution-curve
+identity, fill probability/source, rest deadline, and recomputed certificate
+identity all match the rebound qkernel economics.  Missing JIT handoff, any
+maker/taker mode disagreement, an expired witness, or even a resealed outcome
+mutation retains the existing fail-closed rejection.  Local/unwitnessed makers
+remain unavailable.
+
+SCOPE is one globally selected witnessed maker BUY after stable preflight.
+DRAIN is the same one-shot final compiler and durable command outbox.  RESET is
+an exact current JIT witness matching the already-validated qkernel certificate;
+no flag, scalar prior, or stale selection can reset it.  Acceptance requires
+the exact-witness pass plus resealed-outcome and expiry rejection antibodies,
+the final mode-authority/qkernel/JIT suites, hot-fix landing, loaded-SHA proof,
+and a post-deploy command/venue fact or an exact new current rejection.  It is
+not capital-gain proof until fill, exit/settlement, and forward PnL evidence
+exist.
+
 ## 2026-08-10 Current maker witness survives global-to-JIT handoff
 
 Production repeatedly selected one positive posterior-mean global BUY while the
