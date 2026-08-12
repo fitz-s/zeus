@@ -283,6 +283,43 @@ def test_read_only_factory_closes_connection_when_initialization_fails(
         captured[0].execute("SELECT 1")
 
 
+def test_read_only_factory_deadline_bounds_bootstrap_and_closes(
+    monkeypatch, tmp_path
+):
+    """Connection pragmas share one wall deadline with the caller's read."""
+    from src.state import db as _db
+
+    db_path = tmp_path / "deadline-read-init.db"
+    sqlite3.connect(db_path).close()
+    captured = []
+    connect_timeouts = []
+    clock = [10.0]
+    real_connect = sqlite3.connect
+
+    def fake_connect(path, **kwargs):
+        connect_timeouts.append(kwargs["timeout"])
+        conn = real_connect(path, **kwargs)
+        captured.append(conn)
+        return conn
+
+    def exhaust_deadline(_conn):
+        clock[0] = 10.026
+
+    monkeypatch.setattr(_db.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(_db, "_install_connection_functions", exhaust_deadline)
+    with patch("src.state.db.sqlite3.connect", side_effect=fake_connect):
+        with pytest.raises(
+            sqlite3.OperationalError,
+            match="DB_CONNECTION_DEADLINE_EXPIRED",
+        ):
+            _db._connect_read_only(db_path, deadline_monotonic=10.025)
+
+    assert connect_timeouts == [pytest.approx(0.026)]
+    assert len(captured) == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        captured[0].execute("SELECT 1")
+
+
 # ---------------------------------------------------------------------------
 # T1E-LOCK-TIMEOUT-DEGRADE-NOT-CRASH: connect_or_degrade
 # ---------------------------------------------------------------------------

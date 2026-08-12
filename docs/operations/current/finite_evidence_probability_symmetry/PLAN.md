@@ -3794,10 +3794,12 @@ positions at `refresh_position -> evaluate_exit`.
 
 The HWM batch now receives its own absolute wall deadline:
 `min(auxiliary_deadline, started + raw_hwm_max)`.  The SQL allowance is the
-same remaining wall budget, not the primary belief reserve.  Completion still
-freezes one causal HWM cut. Expiry uses the existing typed unavailable snapshot
-and fails probability authority closed; it never reuses an older cut, falls
-back to a scalar belief, or writes a synthetic HOLD decision.
+same remaining wall budget, not the primary belief reserve. The read-only
+connection open, initialization PRAGMAs, and snapshot `BEGIN` all consume that
+same absolute deadline; no bootstrap step owns a fresh timeout. Completion
+still freezes one causal HWM cut. Expiry uses the existing typed unavailable
+snapshot and fails probability authority closed; it never reuses an older cut,
+falls back to a scalar belief, or writes a synthetic HOLD decision.
 
 SCOPE is one held-monitor HWM batch. DRAIN is the next bounded monitor pass
 against current raw artifacts. RESET is a complete causal batch within its
@@ -3806,7 +3808,7 @@ fresh q/book reads and economic decisions; this change does not lower quote,
 probability, submit, price-band, or global-auction gates.
 
 Acceptance requires an oversized HWM wait to receive the 2.5-second absolute
-deadline and matching SQL allowance, existing HWM-before-auxiliary ordering to
-remain intact, typed unavailable behavior to retain fail-closed authority, and
-post-deploy decision artifacts to show HWM wall time bounded while primary
-position attempts continue.
+deadline through connection bootstrap, `BEGIN`, and the matching SQL allowance;
+existing HWM-before-auxiliary ordering must remain intact, typed unavailable
+behavior must retain fail-closed authority, and post-deploy decision artifacts
+must show HWM wall time bounded while primary position attempts continue.

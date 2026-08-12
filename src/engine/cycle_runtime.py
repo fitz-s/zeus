@@ -6027,8 +6027,20 @@ def _prefetch_held_replacement_artifact_hwm(
                 "held monitor HWM batch deadline elapsed before read",
                 basis="held_monitor_hwm_prefetch_deadline",
             )
-        forecasts = get_forecasts_connection_read_only()
+        forecasts = get_forecasts_connection_read_only(
+            deadline_monotonic=deadline_monotonic,
+        )
+        if time.monotonic() >= deadline_monotonic:
+            raise ReplacementInputHwmReadUnavailable(
+                "held monitor HWM batch deadline elapsed before BEGIN",
+                basis="held_monitor_hwm_prefetch_connection_deadline",
+            )
         forecasts.execute("BEGIN")
+        if time.monotonic() >= deadline_monotonic:
+            raise ReplacementInputHwmReadUnavailable(
+                "held monitor HWM batch deadline elapsed during BEGIN",
+                basis="held_monitor_hwm_prefetch_begin_deadline",
+            )
         snapshot = freeze_replacement_artifact_hwm(
             forecasts,
             requests=requests,

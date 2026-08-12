@@ -18951,6 +18951,40 @@ def test_replacement_hwm_prefetch_has_independent_wall_deadline(monkeypatch):
     assert summary["held_monitor_primary_belief_reserve_seconds"] == pytest.approx(10.0)
 
 
+def test_replacement_hwm_prefetch_threads_deadline_through_connection(monkeypatch):
+    """Forecast connection bootstrap cannot spend past the HWM wall tranche."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(trade_id="hwm-connection-deadline")
+    observed_deadlines: list[float] = []
+    deadline = cycle_runtime.time.monotonic() + 12.5
+
+    def unavailable_connection(*, deadline_monotonic):
+        observed_deadlines.append(deadline_monotonic)
+        raise sqlite3.OperationalError("DB_CONNECTION_DEADLINE_EXPIRED")
+
+    monkeypatch.setattr(
+        "src.state.db.get_forecasts_connection_read_only",
+        unavailable_connection,
+    )
+    summary = {}
+    cycle_runtime._prefetch_held_replacement_artifact_hwm(
+        [position],
+        decision_time=datetime.now(timezone.utc),
+        deadline_monotonic=deadline,
+        sql_timeout_seconds=2.5,
+        clob=object(),
+        summary=summary,
+        deps=_monitor_test_deps("test_hwm_connection_deadline"),
+    )
+
+    assert observed_deadlines == [deadline]
+    assert summary["held_monitor_hwm_prefetch_status"] == "unavailable"
+    assert "DB_CONNECTION_DEADLINE_EXPIRED" in summary[
+        "held_monitor_hwm_prefetch_blocker"
+    ]
+
+
 def test_replacement_hwm_prefetch_precedes_auxiliary_debt_scan(monkeypatch):
     """Auxiliary O(n) work cannot spend the replacement-HWM reserve first."""
     from src.engine import cycle_runtime

@@ -367,7 +367,11 @@ def connect_existing_trade_db_without_journal_bootstrap(
         raise
 
 
-def _connect_read_only(db_path: Path) -> sqlite3.Connection:
+def _connect_read_only(
+    db_path: Path,
+    *,
+    deadline_monotonic: float | None = None,
+) -> sqlite3.Connection:
     """Low-level read-only SQLite connection with bounded lock wait.
 
     Read-only helpers must not create the DB, run write-oriented pragmas, inherit
@@ -376,23 +380,39 @@ def _connect_read_only(db_path: Path) -> sqlite3.Connection:
     """
 
     timeout_ms = int(os.environ.get("ZEUS_DB_READ_BUSY_TIMEOUT_MS", "1000"))
+
+    def remaining_timeout_ms() -> int:
+        if deadline_monotonic is None:
+            return timeout_ms
+        remaining = float(deadline_monotonic) - time.monotonic()
+        if not math.isfinite(remaining) or remaining <= 0.0:
+            raise sqlite3.OperationalError("DB_CONNECTION_DEADLINE_EXPIRED")
+        return min(timeout_ms, max(1, math.ceil(remaining * 1000.0)))
+
     conn = sqlite3.connect(
         f"file:{db_path.resolve()}?mode=ro",
         uri=True,
-        timeout=max(0.001, timeout_ms / 1000.0),
+        timeout=max(0.001, remaining_timeout_ms() / 1000.0),
     )
     try:
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only = ON")
-        conn.execute("PRAGMA foreign_keys=ON")
+
+        def execute_with_deadline(sql: str) -> sqlite3.Cursor:
+            _apply_busy_timeout(conn, busy_timeout_ms=remaining_timeout_ms())
+            cursor = conn.execute(sql)
+            remaining_timeout_ms()
+            return cursor
+
+        execute_with_deadline("PRAGMA query_only = ON")
+        execute_with_deadline("PRAGMA foreign_keys=ON")
         cache_kb = int(os.environ.get("ZEUS_DB_CACHE_KB", "1048576"))
-        conn.execute(f"PRAGMA cache_size = -{cache_kb}")
+        execute_with_deadline(f"PRAGMA cache_size = -{cache_kb}")
         mmap_bytes = int(
             os.environ.get("ZEUS_DB_MMAP_BYTES", str(32 * 1024 * 1024 * 1024))
         )
-        conn.execute(f"PRAGMA mmap_size = {mmap_bytes}")
+        execute_with_deadline(f"PRAGMA mmap_size = {mmap_bytes}")
         _install_connection_functions(conn)
-        conn.execute(f"PRAGMA busy_timeout = {timeout_ms}")
+        _apply_busy_timeout(conn, busy_timeout_ms=remaining_timeout_ms())
         return conn
     except BaseException:
         conn.close()
@@ -457,12 +477,18 @@ def get_world_connection_read_only() -> sqlite3.Connection:
     return _connect_read_only(ZEUS_WORLD_DB_PATH)
 
 
-def get_forecasts_connection_read_only() -> sqlite3.Connection:
+def get_forecasts_connection_read_only(
+    *,
+    deadline_monotonic: float | None = None,
+) -> sqlite3.Connection:
     """Read-only forecasts DB connection (write_class=None).
     T1 thin wrapper — encodes read-only intent in the call site name.
     INV-37: single-DB read; no ATTACH path.
     """
-    return _connect_read_only(ZEUS_FORECASTS_DB_PATH)
+    return _connect_read_only(
+        ZEUS_FORECASTS_DB_PATH,
+        deadline_monotonic=deadline_monotonic,
+    )
 
 
 # --------------------------------------------------------------------------
