@@ -194,6 +194,39 @@ def test_stale_absolute_disagreement_remains_held_monitor_authority(forecasts_db
     assert belief.held_side_prob == pytest.approx(0.242)
 
 
+@pytest.mark.parametrize("provenance_json", (None, "{}", "[]", "{malformed"))
+def test_missing_or_malformed_shape_provenance_has_no_held_authority(
+    forecasts_db,
+    provenance_json,
+):
+    _insert(
+        forecasts_db,
+        posterior_id="missing-shape-held-authority",
+        computed_at=(NOW - timedelta(hours=1)).isoformat(),
+        source_cycle_time=(NOW - timedelta(hours=12)).isoformat(),
+        q={BIN: 0.242, OTHER_BIN: 0.758},
+    )
+    conn = sqlite3.connect(forecasts_db)
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ?",
+        (provenance_json,),
+    )
+    conn.commit()
+    conn.close()
+
+    belief = load_replacement_belief(
+        city="Karachi",
+        target_date="2026-06-12",
+        temperature_metric="high",
+        bin_label=BIN,
+        direction="buy_yes",
+        db_path=forecasts_db,
+        now=NOW,
+    )
+
+    assert belief is None
+
+
 @pytest.mark.parametrize(
     "shape_cycle_time",
     (NOW - timedelta(hours=31), NOW + timedelta(minutes=1)),

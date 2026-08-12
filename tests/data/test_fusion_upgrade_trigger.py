@@ -649,6 +649,41 @@ def _revision_upgrade_kwargs(tmp_path: Path) -> tuple[Path, dict[str, object]]:
     }
 
 
+@pytest.mark.parametrize(
+    "cycle_time",
+    (
+        "2026-07-22T06:59:59+00:00",
+        "2026-07-24T13:00:01+00:00",
+    ),
+)
+def test_outside_causal_cycle_never_reaches_fusion_upgrade_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cycle_time: str,
+) -> None:
+    db, kwargs = _revision_upgrade_kwargs(tmp_path)
+    verdict = _revision_upgrade_verdict()
+    verdict["source_cycle_time"] = cycle_time
+    monkeypatch.setattr(
+        trigger,
+        "scope_capture_offers_larger_provider_set",
+        lambda *_args, **_kwargs: verdict,
+    )
+    monkeypatch.setattr(
+        trigger,
+        "_build_and_write_upgrade_seed",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("outside-bound cycle must not build or publish a seed")
+        ),
+    )
+
+    report = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+
+    assert report["upgrades_detected"] == 1
+    assert report["seeds_enqueued"] == 0
+    assert report["cycle_too_old_skipped"] == 1
+
+
 def test_directory_fsync_uses_portable_readonly_open_and_closes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

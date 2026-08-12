@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
 
@@ -70,6 +71,11 @@ CYCLE_PHASE_SYNOPTIC = "synoptic"
 CYCLE_PHASE_INTERMEDIATE = "experiment"
 _SYNOPTIC_CYCLE_HOURS = frozenset({0, 6, 12, 18})
 _INTERMEDIATE_CYCLE_HOURS = frozenset()
+
+_STRICT_AWARE_ISO_RE = re.compile(
+    r"\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})\Z"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -131,13 +137,22 @@ def _current_evidence_shape(provenance: object) -> Mapping[str, object] | None:
 def current_evidence_shape_source_cycle_time(
     provenance: object,
 ) -> datetime | None:
-    """Return the selected ENS cycle only when its timestamp is timezone-aware."""
+    """Return the selected ENS cycle only for the canonical aware ISO grammar.
+
+    ``datetime.fromisoformat`` also accepts compact offsets such as ``+00`` and
+    ``+0000`` while the SQLite coverage predicate intentionally does not.  The
+    persisted probability certificate must have one language-independent
+    grammar, otherwise Python serving can grant authority to a row that SQL
+    correctly considers uncovered.
+    """
 
     shape = _current_evidence_shape(provenance)
     if shape is None:
         return None
     raw = shape.get("source_cycle_time")
-    if not isinstance(raw, str) or not raw:
+    if not isinstance(raw, str) or _STRICT_AWARE_ISO_RE.fullmatch(raw) is None:
+        return None
+    if raw[-1] != "Z" and (int(raw[-5:-3]) > 23 or int(raw[-2:]) > 59):
         return None
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))

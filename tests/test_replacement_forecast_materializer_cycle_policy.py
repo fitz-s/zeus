@@ -40,6 +40,7 @@ from src.data.replacement_forecast_cycle_policy import (
     current_evidence_shape_has_entry_authority,
     current_evidence_shape_has_held_authority,
     current_evidence_shape_semantics_mismatch,
+    current_evidence_shape_source_cycle_time,
     tradeable_grade_coverage_sql,
 )
 from src.data.replacement_forecast_materializer import (
@@ -53,6 +54,43 @@ from src.state.schema.v2_schema import apply_canonical_schema
 
 UTC = timezone.utc
 _STALE_REASON = "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_TOO_STALE"
+
+
+@pytest.mark.parametrize(
+    "cycle_text",
+    (
+        "2026-06-07T12:00:00+00",
+        "2026-06-07T12:00:00+0000",
+        "2026-06-07T12:00:00+00:99",
+        "2026-06-07T12:00:00",
+    ),
+)
+def test_shape_cycle_timestamp_uses_one_strict_aware_grammar(cycle_text: str) -> None:
+    provenance = {
+        "bayes_precision_fusion": {
+            "current_evidence_shape": {"source_cycle_time": cycle_text}
+        }
+    }
+
+    assert current_evidence_shape_source_cycle_time(provenance) is None
+
+
+@pytest.mark.parametrize(
+    "cycle_text",
+    (
+        "2026-06-07T12:00:00Z",
+        "2026-06-07T12:00:00+00:00",
+        "2026-06-07T12:00:00.123456-05:00",
+    ),
+)
+def test_shape_cycle_timestamp_accepts_canonical_aware_iso(cycle_text: str) -> None:
+    provenance = {
+        "bayes_precision_fusion": {
+            "current_evidence_shape": {"source_cycle_time": cycle_text}
+        }
+    }
+
+    assert current_evidence_shape_source_cycle_time(provenance) is not None
 
 
 def test_current_evidence_semantics_is_probability_identity_and_coverage() -> None:

@@ -851,44 +851,51 @@ def load_replacement_belief(
             return None
     if row is None:
         return None
-    provenance: Mapping[str, object] = {}
+    provenance: Mapping[str, object]
     selected_ensemble_cycle_outside_bound = False
-    if row["provenance_json"] is not None:
-        try:
-            provenance = json.loads(str(row["provenance_json"]))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return None
-        if current_evidence_shape_semantics_mismatch(provenance):
-            logger.warning(
-                "position_belief: current-evidence semantics mismatch for %s/%s/%s; required=%s",
-                city,
-                target_date,
-                temperature_metric,
-                CURRENT_EVIDENCE_SEMANTICS_REVISION,
-            )
-            return None
-        if not current_evidence_shape_has_held_authority(provenance):
-            logger.warning(
-                "position_belief: current-evidence shape lacks held authority for %s/%s/%s",
-                city,
-                target_date,
-                temperature_metric,
-            )
-            return None
-        selected_ensemble_cycle = current_evidence_shape_source_cycle_time(
-            provenance
+    if row["provenance_json"] is None:
+        logger.warning(
+            "position_belief: current-evidence provenance missing for %s/%s/%s",
+            city,
+            target_date,
+            temperature_metric,
         )
-        if (
-            selected_ensemble_cycle is None
-            or cycle_age_outside_bound(now_dt, selected_ensemble_cycle)
-        ):
-            selected_ensemble_cycle_outside_bound = True
-            logger.warning(
-                "position_belief: selected ensemble cycle outside causal bound for %s/%s/%s",
-                city,
-                target_date,
-                temperature_metric,
-            )
+        return None
+    try:
+        decoded_provenance = json.loads(str(row["provenance_json"]))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(decoded_provenance, Mapping):
+        return None
+    provenance = decoded_provenance
+    if current_evidence_shape_semantics_mismatch(provenance):
+        logger.warning(
+            "position_belief: current-evidence semantics mismatch for %s/%s/%s; required=%s",
+            city,
+            target_date,
+            temperature_metric,
+            CURRENT_EVIDENCE_SEMANTICS_REVISION,
+        )
+        return None
+    if not current_evidence_shape_has_held_authority(provenance):
+        logger.warning(
+            "position_belief: current-evidence shape lacks held authority for %s/%s/%s",
+            city,
+            target_date,
+            temperature_metric,
+        )
+        return None
+    selected_ensemble_cycle = current_evidence_shape_source_cycle_time(provenance)
+    if selected_ensemble_cycle is None:
+        return None
+    if cycle_age_outside_bound(now_dt, selected_ensemble_cycle):
+        selected_ensemble_cycle_outside_bound = True
+        logger.warning(
+            "position_belief: selected ensemble cycle outside causal bound for %s/%s/%s",
+            city,
+            target_date,
+            temperature_metric,
+        )
     try:
         q = json.loads(row["q_json"] or "null")
         q_lcb = json.loads(row["q_lcb_json"] or "null")
