@@ -28,6 +28,7 @@ encode the invariant in shared structure, not in N parallel checks):
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections.abc import Mapping
 from datetime import datetime, timezone
@@ -167,6 +168,7 @@ def current_evidence_shape_has_entry_authority(provenance: object) -> bool:
     if (
         isinstance(shape_lag_hours, bool)
         or not isinstance(shape_lag_hours, (int, float))
+        or not math.isfinite(float(shape_lag_hours))
     ):
         return False
     stale_shape_reused = shape.get("stale_shape_reused")
@@ -197,6 +199,7 @@ def current_evidence_shape_has_held_authority(provenance: object) -> bool:
     if (
         isinstance(shape_lag_hours, bool)
         or not isinstance(shape_lag_hours, (int, float))
+        or not math.isfinite(float(shape_lag_hours))
         or float(shape_lag_hours) < 0.0
     ):
         return False

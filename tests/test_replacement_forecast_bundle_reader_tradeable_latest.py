@@ -391,6 +391,40 @@ def test_stale_absolute_disagreement_row_retains_held_authority() -> None:
     assert result.bundle.posterior_id == posterior_id
 
 
+def test_nonfinite_shape_lag_has_no_held_authority() -> None:
+    for shape_lag_hours in (float("nan"), float("inf"), float("-inf")):
+        conn = _conn()
+        posterior_id = _insert_posterior(
+            conn,
+            source_cycle_time=_dt(6, 0),
+            source_available_at=_dt(6, 7),
+            computed_at=_dt(6, 7, 30),
+            q_mode=_FUSED_FULL,
+            with_bounds=True,
+            semantics_revision=(
+                STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+            ),
+            shape_lag_hours=shape_lag_hours,
+            stale_shape_reused=True,
+        )
+        readiness = _readiness(
+            posterior_id=posterior_id,
+            computed_at=_dt(6, 7, 30),
+            expires_at=_dt(6, 23),
+            decision_time=_dt(6, 7, 30),
+        )
+
+        result = _read(
+            conn,
+            readiness,
+            decision_time=_dt(6, 12),
+            require_entry_shape_authority=False,
+        )
+
+        assert result.ok is False
+        assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
+
+
 def _read(
     conn,
     readiness,

@@ -38,6 +38,7 @@ from src.data.replacement_forecast_cycle_policy import (
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     classify_cycle_phase,
     current_evidence_shape_has_entry_authority,
+    current_evidence_shape_has_held_authority,
     current_evidence_shape_semantics_mismatch,
     tradeable_grade_coverage_sql,
 )
@@ -169,6 +170,14 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
     for malformed in malformed_shapes:
         assert is_tradeable(malformed) is False
         assert current_evidence_shape_has_entry_authority(malformed) is False
+
+    for nonfinite_lag in (float("nan"), float("inf"), float("-inf")):
+        malformed = json.loads(json.dumps(stale_reused))
+        malformed["bayes_precision_fusion"]["current_evidence_shape"][
+            "shape_lag_hours"
+        ] = nonfinite_lag
+        assert current_evidence_shape_has_entry_authority(malformed) is False
+        assert current_evidence_shape_has_held_authority(malformed) is False
 
     missing_provenance_clause = tradeable_grade_coverage_sql(
         posterior_columns={"q_lcb_json", "q_ucb_json"},
