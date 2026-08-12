@@ -15824,6 +15824,170 @@ class TestRecoveryResolutionTable:
             "order_status": "partial",
         }
 
+    def test_cancel_failed_late_partial_supersedes_false_venue_wiped_fact(
+        self,
+        conn,
+        mock_client,
+    ):
+        """Authenticated late fill may terminalize only its vanished remainder."""
+        _insert(conn, size=9.3, price=0.53)
+        _advance_to_acked(conn, venue_order_id="ord-late-partial")
+        _seed_pending_entry_projection(conn, order_id="ord-late-partial")
+        terminal_fact_id = _append_order_fact(
+            conn,
+            order_id="ord-late-partial",
+            state="VENUE_WIPED",
+            matched_size="0",
+            remaining_size="0",
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_command_events (
+                event_id, command_id, sequence_no, event_type,
+                occurred_at, payload_json, state_after
+            ) VALUES (
+                'evt-false-no-fill', 'cmd-001', 4,
+                'REVIEW_CLEARED_NO_VENUE_EXPOSURE',
+                '2026-04-26T00:04:00Z',
+                '{"proof_class":"cancel_unknown_terminal_no_fill"}',
+                'EXPIRED'
+            )
+            """
+        )
+        _append_trade_fact(
+            conn,
+            order_id="ord-late-partial",
+            trade_id="trade-late-partial",
+            state="CONFIRMED",
+            filled_size="2.127658",
+            fill_price="0.5300001222000904",
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_order_facts (
+                venue_order_id, command_id, state, remaining_size, matched_size,
+                source, observed_at, venue_timestamp, local_sequence,
+                raw_payload_hash, raw_payload_json
+            ) VALUES (
+                'ord-late-partial', 'cmd-001', 'PARTIALLY_MATCHED',
+                '7.172342', '2.127658', 'REST',
+                '2026-04-26T00:06:00Z', '2026-04-26T00:06:00Z', 2,
+                :payload_hash,
+                '{"reason":"m5_exchange_reconcile_entry_fill_order_fact"}'
+            )
+            """,
+            {"payload_hash": "a" * 64},
+        )
+        conn.execute(
+            """
+            INSERT INTO venue_command_events (
+                event_id, command_id, sequence_no, event_type,
+                occurred_at, payload_json, state_after
+            ) VALUES (
+                'evt-late-partial', 'cmd-001', 5, 'PARTIAL_FILL_OBSERVED',
+                '2026-04-26T00:06:01Z',
+                :payload_json, 'PARTIAL'
+            )
+            """,
+            {
+                "payload_json": json.dumps(
+                    {
+                        "proof_class": "terminal_command_late_fill_correction",
+                        "reason": "authenticated_fill_after_terminal_no_fill",
+                        "command_id": "cmd-001",
+                        "venue_order_id": "ord-late-partial",
+                        "canonical_filled_size": "2.127658",
+                    }
+                )
+            },
+        )
+        conn.execute(
+            "UPDATE venue_commands SET state = 'PARTIAL' WHERE command_id = 'cmd-001'"
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active', chain_state = 'synced',
+                   shares = 2.127658, chain_shares = 2.127658,
+                   cost_basis_usd = 2.127658 * 0.5300001222000904,
+                   chain_cost_basis_usd = 2.127658 * 0.5300001222000904,
+                   entry_price = 0.5300001222000904,
+                   chain_avg_price = 0.5300001222000904,
+                   chain_seen_at = '2026-04-26T00:07:30Z',
+                   fill_authority = 'venue_confirmed_partial',
+                   order_status = 'partial'
+             WHERE position_id = 'pos-001'
+            """
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+        from src.state.venue_command_repo import append_event
+
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_REQUESTED",
+            occurred_at="2026-04-26T00:07:00Z",
+            payload={"venue_order_id": "ord-late-partial"},
+        )
+        append_event(
+            conn,
+            command_id="cmd-001",
+            event_type="CANCEL_FAILED",
+            occurred_at="2026-04-26T00:08:00Z",
+            payload={
+                "venue_order_id": "ord-late-partial",
+                "reason": "ord-late-partial: order can't be found - already canceled or matched",
+            },
+        )
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = [
+            {
+                "id": "trade-late-partial",
+                "status": "CONFIRMED",
+                "taker_order_id": "ord-late-partial",
+                "asset_id": "tok-001",
+                "side": "BUY",
+                "price": "0.5300001222000904",
+                "size": "2.127658",
+                "match_time": "2026-04-26T00:05:00Z",
+            }
+        ]
+        mock_client.get_open_orders.venue_reads_are_complete = True
+        mock_client.get_trades.venue_reads_are_complete = True
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] >= 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        facts = conn.execute(
+            """
+            SELECT fact_id, state, matched_size, remaining_size
+              FROM venue_order_facts
+             WHERE command_id = 'cmd-001'
+             ORDER BY local_sequence, fact_id
+            """
+        ).fetchall()
+        assert facts[0]["fact_id"] == terminal_fact_id
+        assert {
+            key: facts[-1][key]
+            for key in ("state", "matched_size", "remaining_size")
+        } == {
+            "state": "PARTIALLY_MATCHED",
+            "matched_size": "2.127658",
+            "remaining_size": "0",
+        }
+        current = conn.execute(
+            "SELECT phase, shares, chain_shares FROM position_current WHERE position_id='pos-001'"
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": 2.127658,
+            "chain_shares": 2.127658,
+        }
+
     def test_matched_cancel_review_required_pass_clears_already_canceled_positive_trade_fact(
         self,
         conn,

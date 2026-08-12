@@ -397,7 +397,7 @@ def _terminal_partial_correction_proven(
     matched_size: str | None,
     raw_payload_json: Any,
 ) -> bool:
-    """Allow only an exact terminal-partial correction of a false full-fill fact."""
+    """Allow only an exact, causally proven terminal-partial correction."""
 
     if (
         state != "PARTIALLY_MATCHED"
@@ -407,6 +407,133 @@ def _terminal_partial_correction_proven(
         or raw_payload_json.get("proof_class") != "terminal_partial_order_fact"
     ):
         return False
+    required = raw_payload_json.get("required_predicates")
+    if (
+        raw_payload_json.get("reason") == "partial_remainder_absent_from_exchange_open_orders"
+        and isinstance(required, Mapping)
+        and required.get("no_unresolved_later_fill") is True
+    ):
+        venue_read = raw_payload_json.get("venue_read_proof")
+        canonical_proof = raw_payload_json.get("canonical_trade_fact_proof")
+        account_proof = raw_payload_json.get("account_trade_proof")
+        if (
+            raw_payload_json.get("command_id") != command_id
+            or raw_payload_json.get("venue_order_id") != venue_order_id
+            or not isinstance(required, Mapping)
+            or any(
+                required.get(name) is not True
+                for name in {
+                    "exact_command_identity",
+                    "exact_venue_order_identity",
+                    "canonical_confirmed_partial_fill_positive",
+                    "canonical_confirmed_partial_fill_below_command_size",
+                    "point_order_absent_or_no_live_record_or_terminal",
+                    "authenticated_open_order_scan_has_no_match",
+                    "authenticated_open_order_scan_complete",
+                    "authenticated_trade_scan_complete",
+                    "account_trades_equal_canonical_confirmed_fill",
+                    "active_chain_synced_exposure_exactly_covers_fill",
+                    "no_unresolved_later_fill",
+                }
+            )
+            or not isinstance(venue_read, Mapping)
+            or venue_read.get("open_orders_query_complete") is not True
+            or venue_read.get("trades_query_complete") is not True
+            or not isinstance(canonical_proof, Mapping)
+            or not isinstance(account_proof, Mapping)
+            or not _decimal_text_equal(canonical_proof.get("filled_size"), matched_size)
+            or not _decimal_text_equal(account_proof.get("filled_size"), matched_size)
+        ):
+            return False
+        with _row_factory_as(conn, sqlite3.Row):
+            command = conn.execute(
+                """
+                SELECT state, intent_kind, side, size, venue_order_id
+                  FROM venue_commands
+                 WHERE command_id = ?
+                """,
+                (command_id,),
+            ).fetchone()
+            prior_terminal = conn.execute(
+                """
+                SELECT fact_id, state, local_sequence
+                  FROM venue_order_facts
+                 WHERE command_id = ? AND venue_order_id = ?
+                   AND state IN ('EXPIRED', 'VENUE_WIPED')
+                 ORDER BY local_sequence DESC, fact_id DESC
+                 LIMIT 1
+                """,
+                (command_id, venue_order_id),
+            ).fetchone()
+            positive_order = conn.execute(
+                """
+                SELECT fact_id, state, matched_size, remaining_size, source, local_sequence
+                  FROM venue_order_facts
+                 WHERE command_id = ? AND venue_order_id = ?
+                   AND state = 'PARTIALLY_MATCHED'
+                 ORDER BY local_sequence DESC, fact_id DESC
+                 LIMIT 1
+                """,
+                (command_id, venue_order_id),
+            ).fetchone()
+            late_fill_event = conn.execute(
+                """
+                SELECT sequence_no, payload_json
+                  FROM venue_command_events
+                 WHERE command_id = ?
+                   AND event_type = 'PARTIAL_FILL_OBSERVED'
+                   AND state_after = 'PARTIAL'
+                 ORDER BY sequence_no DESC
+                 LIMIT 1
+                """,
+                (command_id,),
+            ).fetchone()
+            latest_event = conn.execute(
+                """
+                SELECT sequence_no, event_type, payload_json
+                  FROM venue_command_events
+                 WHERE command_id = ?
+                 ORDER BY sequence_no DESC
+                 LIMIT 1
+                """,
+                (command_id,),
+            ).fetchone()
+        late_payload = (
+            _review_clearance_json_dict(late_fill_event["payload_json"])
+            if late_fill_event is not None
+            else {}
+        )
+        latest_payload = (
+            _review_clearance_json_dict(latest_event["payload_json"])
+            if latest_event is not None
+            else {}
+        )
+        requested = _decimal_or_none(command["size"]) if command is not None else None
+        matched = _decimal_or_none(matched_size)
+        return bool(
+            command is not None
+            and str(command["state"] or "").upper() == "REVIEW_REQUIRED"
+            and str(command["intent_kind"] or "").upper() == "ENTRY"
+            and str(command["side"] or "").upper() == "BUY"
+            and str(command["venue_order_id"] or "") == venue_order_id
+            and requested is not None
+            and matched is not None
+            and requested - matched > Decimal("0.01")
+            and prior_terminal is not None
+            and positive_order is not None
+            and int(positive_order["local_sequence"]) > int(prior_terminal["local_sequence"])
+            and str(positive_order["source"] or "").upper() in {"REST", "WS_USER"}
+            and _decimal_text_equal(positive_order["matched_size"], matched_size)
+            and (_decimal_or_none(positive_order["remaining_size"]) or Decimal("0")) > 0
+            and late_payload.get("proof_class") == "terminal_command_late_fill_correction"
+            and late_payload.get("command_id") == command_id
+            and late_payload.get("venue_order_id") == venue_order_id
+            and _decimal_text_equal(late_payload.get("canonical_filled_size"), matched_size)
+            and latest_event is not None
+            and int(latest_event["sequence_no"]) > int(late_fill_event["sequence_no"])
+            and str(latest_event["event_type"] or "") == "CANCEL_FAILED"
+            and latest_payload.get("venue_order_id") == venue_order_id
+        )
     proof_fact_id = raw_payload_json.get("latest_order_fact_id")
     if proof_fact_id in (None, ""):
         proof_fact = conn.execute(
