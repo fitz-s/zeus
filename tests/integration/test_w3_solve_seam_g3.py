@@ -103,6 +103,7 @@ from src.solve.solver import (
     joint_probability_content_identity,
     joint_probability_witness_identity,
     portfolio_wealth_identity,
+    passive_buy_proposal_curve,
     passive_sell_proposal_curve,
     maker_fill_candidate_binding_identity,
     MakerFillOutcome,
@@ -30412,7 +30413,7 @@ def _jit_market_authority(candidate, *, tick, min_order_size):
     )
     return era._CurrentGlobalMarketAuthority(
         snapshot=snapshot,
-        fee_rate=candidate.executable_sell_curve.fee_model.fee_rate,
+        fee_rate=curve.fee_model.fee_rate,
     )
 
 
@@ -31438,6 +31439,130 @@ def test_global_sell_selected_taker_mode_stays_taker_at_jit(
     )
 
     assert rebound.execution_mode == "TAKER_LIMIT"
+
+
+def _current_maker_buy_candidate() -> GlobalSingleOrderCandidate:
+    selected_at = _dt.datetime.now(_dt.timezone.utc)
+    base = _global_test_buy_candidate(
+        family_key="Alpha|2026-08-12|high",
+        probability_witness_identity="probability-current",
+        book_identity="selected-maker-buy",
+        price="0.60",
+        captured_at=selected_at,
+        bin_id="20C",
+        condition_id="condition-maker-buy",
+        token_id="token-maker-buy",
+        min_order_size="5",
+    )
+    bids = (BookLevel(price=Decimal("0.40"), size=Decimal("100")),)
+    proposal = passive_buy_proposal_curve(
+        base.executable_cost_curve,
+        native_bid_levels=bids,
+    )
+    assert proposal is not None
+    asset_epoch_identity = "asset-epoch-maker-buy"
+    binding = maker_fill_candidate_binding_identity(
+        action="BUY",
+        family_key=base.family_key,
+        bin_id=base.bin_id,
+        condition_id=base.condition_id,
+        side=base.side,
+        token_id=base.token_id,
+        ledger_snapshot_id=base.ledger_snapshot_id,
+        position_id=None,
+        held_shares=None,
+        asset_epoch_identity=asset_epoch_identity,
+        proposal_identity=executable_curve_identity(proposal),
+    )
+    outcomes = (
+        MakerFillOutcome(Decimal("0.25"), Decimal("1"), Decimal("-0.401")),
+        MakerFillOutcome(Decimal("0.75"), Decimal("0"), Decimal("0")),
+    )
+    witness_fields = {
+        "candidate_binding_identity": binding,
+        "asset_epoch_identity": asset_epoch_identity,
+        "book_snapshot_id": proposal.snapshot_id,
+        "book_hash": proposal.book_hash,
+        "limit_price": proposal.levels[0].price,
+        "rest_deadline_minutes": 20.0,
+        "source_identity": "maker-source-current",
+        "model_identity": "maker-model-current",
+        "sample_identity": "maker-sample-current",
+        "training_cutoff_at_utc": selected_at - _dt.timedelta(hours=1),
+        "issued_at_utc": selected_at - _dt.timedelta(seconds=1),
+        "valid_until_at_utc": selected_at + _dt.timedelta(minutes=1),
+        "outcomes": outcomes,
+    }
+    witness = CurrentMakerFillWitness(
+        witness_identity=current_maker_fill_witness_identity(**witness_fields),
+        **witness_fields,
+    )
+    return replace(
+        base,
+        native_bid_levels=bids,
+        execution_mode="MAKER_REST",
+        proposal_cost_curve=proposal,
+        fill_probability=witness.fill_probability,
+        fill_probability_source=witness.witness_identity,
+        rest_deadline_minutes=witness.rest_deadline_minutes,
+        maker_fill_witness=witness,
+        asset_epoch_identity=asset_epoch_identity,
+    )
+
+
+def test_global_buy_jit_rebinds_exact_maker_witness_to_current_book():
+    selected = _current_maker_buy_candidate()
+    authority = _jit_market_authority(selected, tick="0.001", min_order_size="5")
+
+    rebound = era._global_buy_candidate_from_raw_book(
+        selected,
+        {
+            "asset_id": selected.token_id,
+            "tick_size": "0.001",
+            "min_order_size": "5",
+            "bids": [{"price": "0.40", "size": "100"}],
+            "asks": [{"price": "0.60", "size": "100"}],
+        },
+        captured_at_utc=authority.snapshot.captured_at,
+        market_authority=authority,
+    )
+
+    assert rebound.execution_mode == "MAKER_REST"
+    assert rebound.proposal_cost_curve.levels[0].price == Decimal("0.401")
+    assert rebound.maker_fill_witness.book_snapshot_id == authority.snapshot.snapshot_id
+    assert rebound.maker_fill_witness.book_hash == authority.snapshot.raw_orderbook_hash
+    assert rebound.maker_fill_witness.witness_identity != (
+        selected.maker_fill_witness.witness_identity
+    )
+    assert rebound.fill_probability_source == rebound.maker_fill_witness.witness_identity
+    from src.solve.solver import _maker_witness_rejection
+
+    assert _maker_witness_rejection(
+        rebound,
+        decision_at_utc=authority.snapshot.captured_at,
+    ) is None
+
+
+def test_global_buy_jit_changed_maker_limit_requires_reauction():
+    selected = _current_maker_buy_candidate()
+    authority = _jit_market_authority(selected, tick="0.001", min_order_size="5")
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED",
+    ):
+        era._global_buy_candidate_from_raw_book(
+            selected,
+            {
+                "asset_id": selected.token_id,
+                "tick_size": "0.001",
+                "min_order_size": "5",
+                "bids": [{"price": "0.41", "size": "100"}],
+                "asks": [{"price": "0.60", "size": "100"}],
+            },
+            captured_at_utc=authority.snapshot.captured_at,
+            market_authority=authority,
+        )
 
 
 def test_global_sell_jit_maker_witness_change_requires_complete_reauction():

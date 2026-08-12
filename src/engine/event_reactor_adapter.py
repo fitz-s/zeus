@@ -11419,7 +11419,141 @@ def _global_buy_candidate_from_raw_book(
         quote_ttl=selected_curve.quote_ttl,
         fee_details=market_authority.fee_details,
     )
-    from src.solve.solver import executable_curve_identity
+    from src.solve.solver import (
+        CurrentMakerFillWitness,
+        current_maker_fill_witness_identity,
+        current_precliff_liquidation_capacity,
+        executable_curve_identity,
+        maker_fill_candidate_binding_identity,
+        passive_buy_proposal_curve,
+    )
+
+    proposal = None
+    maker_fill_witness = None
+    selected_execution_mode = str(
+        getattr(candidate, "execution_mode", "") or ""
+    ).strip().upper()
+    if selected_execution_mode == "MAKER_REST":
+        liquidation_capacity = current_precliff_liquidation_capacity(bid_levels)
+        if liquidation_capacity < Decimal(curve.min_order_size):
+            raise ValueError(
+                "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
+                f"token_id={token_id}:"
+                f"precliff_bid_shares={liquidation_capacity}"
+            )
+        selected_witness = getattr(candidate, "maker_fill_witness", None)
+        selected_proposal = getattr(candidate, "proposal_cost_curve", None)
+        asset_epoch_identity = str(
+            getattr(candidate, "asset_epoch_identity", "") or ""
+        ).strip()
+        selected_source = str(
+            getattr(candidate, "fill_probability_source", "") or ""
+        ).strip()
+        try:
+            if (
+                not isinstance(selected_witness, CurrentMakerFillWitness)
+                or selected_proposal is None
+                or not asset_epoch_identity
+                or selected_source != selected_witness.witness_identity
+            ):
+                raise ValueError("selected_witness_missing_or_unbound")
+            selected_binding = maker_fill_candidate_binding_identity(
+                action="BUY",
+                family_key=str(getattr(candidate, "family_key", "") or ""),
+                bin_id=str(getattr(candidate, "bin_id", "") or ""),
+                condition_id=str(getattr(candidate, "condition_id", "") or ""),
+                side=str(getattr(candidate, "side", "") or ""),
+                token_id=token_id,
+                ledger_snapshot_id=str(
+                    getattr(candidate, "ledger_snapshot_id", "") or ""
+                ),
+                position_id=None,
+                held_shares=None,
+                asset_epoch_identity=asset_epoch_identity,
+                proposal_identity=executable_curve_identity(selected_proposal),
+            )
+            if (
+                selected_witness.candidate_binding_identity != selected_binding
+                or selected_witness.asset_epoch_identity != asset_epoch_identity
+                or selected_witness.book_snapshot_id != selected_proposal.snapshot_id
+                or selected_witness.book_hash != selected_proposal.book_hash
+                or selected_witness.limit_price != selected_proposal.levels[0].price
+                or selected_witness.rest_deadline_minutes
+                != getattr(candidate, "rest_deadline_minutes", None)
+                or not math.isclose(
+                    selected_witness.fill_probability,
+                    float(getattr(candidate, "fill_probability", 0.0)),
+                )
+                or any(
+                    outcome.fill_fraction > 0
+                    and outcome.proceeds_per_share_usd
+                    != -selected_proposal.levels[0].price
+                    for outcome in selected_witness.outcomes
+                )
+            ):
+                raise ValueError("selected_witness_economics_mismatch")
+            selected_witness.assert_current_at(captured_at_utc)
+            proposal = passive_buy_proposal_curve(
+                curve,
+                native_bid_levels=bid_levels,
+            )
+            if (
+                proposal is None
+                or proposal.levels[0].price != selected_witness.limit_price
+            ):
+                raise ValueError("current_limit_or_cashflow_changed")
+            current_binding = maker_fill_candidate_binding_identity(
+                action="BUY",
+                family_key=str(getattr(candidate, "family_key", "") or ""),
+                bin_id=str(getattr(candidate, "bin_id", "") or ""),
+                condition_id=str(getattr(candidate, "condition_id", "") or ""),
+                side=str(getattr(candidate, "side", "") or ""),
+                token_id=token_id,
+                ledger_snapshot_id=str(
+                    getattr(candidate, "ledger_snapshot_id", "") or ""
+                ),
+                position_id=None,
+                held_shares=None,
+                asset_epoch_identity=asset_epoch_identity,
+                proposal_identity=executable_curve_identity(proposal),
+            )
+            maker_fill_witness = CurrentMakerFillWitness(
+                witness_identity=current_maker_fill_witness_identity(
+                    candidate_binding_identity=current_binding,
+                    asset_epoch_identity=asset_epoch_identity,
+                    book_snapshot_id=snapshot_id,
+                    book_hash=book_hash,
+                    limit_price=proposal.levels[0].price,
+                    rest_deadline_minutes=selected_witness.rest_deadline_minutes,
+                    source_identity=selected_witness.source_identity,
+                    model_identity=selected_witness.model_identity,
+                    sample_identity=selected_witness.sample_identity,
+                    training_cutoff_at_utc=selected_witness.training_cutoff_at_utc,
+                    issued_at_utc=selected_witness.issued_at_utc,
+                    valid_until_at_utc=selected_witness.valid_until_at_utc,
+                    outcomes=selected_witness.outcomes,
+                ),
+                candidate_binding_identity=current_binding,
+                asset_epoch_identity=asset_epoch_identity,
+                book_snapshot_id=snapshot_id,
+                book_hash=book_hash,
+                limit_price=proposal.levels[0].price,
+                rest_deadline_minutes=selected_witness.rest_deadline_minutes,
+                outcomes=selected_witness.outcomes,
+                source_identity=selected_witness.source_identity,
+                model_identity=selected_witness.model_identity,
+                sample_identity=selected_witness.sample_identity,
+                training_cutoff_at_utc=selected_witness.training_cutoff_at_utc,
+                issued_at_utc=selected_witness.issued_at_utc,
+                valid_until_at_utc=selected_witness.valid_until_at_utc,
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:"
+                f"{type(exc).__name__}:{exc}"
+            ) from exc
+    elif selected_execution_mode != "TAKER_LIMIT":
+        raise ValueError("GLOBAL_BUY_SELECTED_EXECUTION_MODE_INVALID")
 
     return dataclass_replace(
         candidate,
@@ -11427,6 +11561,23 @@ def _global_buy_candidate_from_raw_book(
         book_captured_at_utc=captured_at_utc,
         execution_curve_identity=executable_curve_identity(curve),
         executable_cost_curve=curve,
+        proposal_cost_curve=proposal,
+        maker_fill_witness=maker_fill_witness,
+        fill_probability=(
+            maker_fill_witness.fill_probability
+            if maker_fill_witness is not None
+            else 1.0
+        ),
+        fill_probability_source=(
+            maker_fill_witness.witness_identity
+            if maker_fill_witness is not None
+            else "immediate_taker"
+        ),
+        rest_deadline_minutes=(
+            maker_fill_witness.rest_deadline_minutes
+            if maker_fill_witness is not None
+            else None
+        ),
         native_bid_levels=bid_levels,
         neg_risk=market_authority.neg_risk,
         eligibility_reason=None,
@@ -13357,6 +13508,29 @@ def _rebind_global_jit_receipt_snapshot(
                 ),
             }
         )
+        if str(economics.get("global_execution_mode") or "").strip().upper() == (
+            "MAKER_REST"
+        ):
+            maker_witness = getattr(handoff.candidate, "maker_fill_witness", None)
+            economics.update(
+                {
+                    "global_fill_probability": float(
+                        getattr(handoff.candidate, "fill_probability", 0.0)
+                    ),
+                    "global_fill_probability_source": str(
+                        getattr(maker_witness, "witness_identity", "") or ""
+                    ),
+                    "global_rest_deadline_minutes": float(
+                        getattr(handoff.candidate, "rest_deadline_minutes", 0.0)
+                    ),
+                    "global_maker_fill_witness": (
+                        _current_maker_fill_witness_certificate_payload(
+                            handoff.candidate,
+                            validated_at_utc=snapshot.captured_at,
+                        )
+                    ),
+                }
+            )
         # The JIT authority fields are part of the qkernel certificate identity;
         # recompute the digest after rebinding them and mirror it on BELIEF.
         curve_identity = str(
@@ -13985,6 +14159,7 @@ def _global_current_state_execution_economics(
     decision: object,
     witness: object,
     payoff_q_lcb_cap: float | None = None,
+    decision_time: datetime | None = None,
 ) -> dict[str, Any]:
     """Bind actuation to the current source-clock band and order certificate."""
 
@@ -14394,6 +14569,15 @@ def _global_current_state_execution_economics(
                 ),
             }
         )
+    if str(current.get("global_execution_mode") or "").strip().upper() == "MAKER_REST":
+        if decision_time is None or decision_time.tzinfo is None:
+            raise ValueError("GLOBAL_MAKER_FILL_WITNESS_VALIDATION_CLOCK_REQUIRED")
+        current["global_maker_fill_witness"] = (
+            _current_maker_fill_witness_certificate_payload(
+                candidate,
+                validated_at_utc=decision_time,
+            )
+        )
     current["current_state_identity_hash"] = qkernel_current_state_identity_hash(
         current
     )
@@ -14405,6 +14589,75 @@ def _global_current_state_execution_economics(
             f"GLOBAL_CURRENT_STATE_CERTIFICATE_INVALID:{current_state_reason}"
         )
     return current
+
+
+def _current_maker_fill_witness_certificate_payload(
+    candidate: object,
+    *,
+    validated_at_utc: datetime,
+) -> dict[str, object]:
+    """Serialize one fully rebound maker witness into the decision certificate."""
+
+    from src.solve.solver import (
+        CurrentMakerFillWitness,
+        _maker_witness_rejection,
+        executable_curve_identity,
+    )
+
+    if validated_at_utc.tzinfo is None:
+        raise ValueError("GLOBAL_MAKER_FILL_WITNESS_VALIDATION_CLOCK_REQUIRED")
+    rejection = _maker_witness_rejection(
+        candidate,
+        decision_at_utc=validated_at_utc,
+    )
+    witness = getattr(candidate, "maker_fill_witness", None)
+    if rejection is not None or not isinstance(witness, CurrentMakerFillWitness):
+        raise ValueError(rejection or "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE")
+    action = str(getattr(candidate, "action", "BUY") or "BUY").strip().upper()
+    proposal = (
+        getattr(candidate, "economic_sell_curve", None)
+        if action == "SELL"
+        else getattr(candidate, "economic_cost_curve", None)
+    )
+    if proposal is None:
+        raise ValueError("CURRENT_MAKER_PROPOSAL_INVALID")
+
+    def utc_iso(value: datetime) -> str:
+        return value.astimezone(UTC).isoformat()
+
+    held_shares = getattr(candidate, "held_shares", None)
+    return {
+        "schema_version": 1,
+        "witness_identity": witness.witness_identity,
+        "candidate_binding_identity": witness.candidate_binding_identity,
+        "action": action,
+        "ledger_snapshot_id": str(
+            getattr(candidate, "ledger_snapshot_id", "") or ""
+        ),
+        "position_id": str(getattr(candidate, "position_id", "") or ""),
+        "held_shares": str(held_shares or ""),
+        "asset_epoch_identity": witness.asset_epoch_identity,
+        "proposal_identity": executable_curve_identity(proposal),
+        "book_snapshot_id": witness.book_snapshot_id,
+        "book_hash": witness.book_hash,
+        "limit_price": str(witness.limit_price),
+        "rest_deadline_minutes": float(witness.rest_deadline_minutes),
+        "source_identity": witness.source_identity,
+        "model_identity": witness.model_identity,
+        "sample_identity": witness.sample_identity,
+        "training_cutoff_at_utc": utc_iso(witness.training_cutoff_at_utc),
+        "issued_at_utc": utc_iso(witness.issued_at_utc),
+        "valid_until_at_utc": utc_iso(witness.valid_until_at_utc),
+        "validated_at_utc": utc_iso(validated_at_utc),
+        "outcomes": [
+            {
+                "probability": str(outcome.probability),
+                "fill_fraction": str(outcome.fill_fraction),
+                "proceeds_per_share_usd": str(outcome.proceeds_per_share_usd),
+            }
+            for outcome in witness.outcomes
+        ],
+    }
 
 
 def _global_current_state_economics_seed(proof: "_CandidateProof") -> dict[str, Any]:
@@ -15222,6 +15475,7 @@ def _global_actuation_selected_proof(
             prepared_global_family,
             candidate,
         ),
+        decision_time=decision_time,
     )
     if not all(
         str(cert.get(field) or "").strip()

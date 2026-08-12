@@ -73,10 +73,19 @@ The repair binds only the exact selected BUY proof when the sealed candidate is
 JIT decision time.  It copies the witnessed limit, fill probability, source,
 and deadline into that proof; absent, mismatched, or expired witnesses remain
 blocked.  Taker, SELL, siblings, and unwitnessed maker behavior are unchanged.
+The immutable qkernel certificate and final JIT receipt must carry that complete
+candidate-bound zero/partial/full distribution, not only its scalar fill
+probability.  The final validator recomputes the witness identity, book and
+candidate bindings, temporal window, cashflows, posterior-mean expected
+log-growth, EV, capital efficiency, and lock-time rate.  A refreshed JIT book
+may rebind the witness only when the passive limit is unchanged; any price or
+cashflow drift forces a complete reauction rather than silently changing the
+selected action.
 Acceptance requires an antibody proving both the valid handoff and fail-closed
-invalid-witness twin, the focused integration slice, planning lock, and a live
-receipt showing the old all-candidate maker-witness rejection has disappeared
-without any maker submit lacking typed authority.
+invalid-witness twin, resealed book/outcome-tamper rejection, same-limit JIT
+rebind, changed-limit reauction, the focused integration slice, planning lock,
+and a live receipt showing the old all-candidate maker-witness rejection has
+disappeared without any maker submit lacking typed authority.
 
 ## 2026-08-10 Deploy restart guard reset without entry-queue circularity
 

@@ -36,6 +36,7 @@ from src.events.candidate_binding import MarketTopologyCandidate
 from src.events.day0_authority import assert_live_day0_entry_provenance
 from src.events.reactor import EventSubmissionReceipt, _is_transient_money_path_reason
 from src.riskguard.risk_level import RiskLevel
+from src.contracts.executable_cost_curve import BookLevel, ExecutableCostCurve, FeeModel
 from src.contracts.execution_intent import DecisionSourceContext
 from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
 from src.contracts.strategy_capital_allocation import STRATEGY_LOG_UTILITY_BASIS
@@ -43,9 +44,14 @@ from src.decision_kernel import claims
 from src.decision_kernel.canonicalization import stable_hash
 from src.decision_kernel.certificate import build_certificate
 from src.solve.solver import (
+    CurrentMakerFillWitness,
+    MakerFillOutcome,
     OutcomeTokenBinding,
+    current_maker_fill_witness_identity,
     deterministic_bin_payoff_sample_identity,
     deterministic_bin_payoff_witness_identity,
+    executable_curve_identity,
+    maker_fill_candidate_binding_identity,
 )
 from src.types.market import Bin
 
@@ -287,6 +293,129 @@ def _global_mean_current_qkernel_cert(*, side: str = "YES") -> dict:
         global_proposal_expected_log_growth_per_hour=expected_du / 24.0,
         global_proposal_expected_capital_efficiency=expected_du / expected_cost,
         global_proposal_capital_lock_hours=24.0,
+    )
+    _seal_current_qkernel_cert(cert)
+    return cert
+
+
+def _global_current_maker_qkernel_cert() -> dict:
+    selection_at = datetime(2026, 7, 11, 23, 0, 1, tzinfo=timezone.utc)
+    validated_at = selection_at + timedelta(seconds=1)
+    curve = ExecutableCostCurve(
+        token_id="token-1",
+        side="YES",
+        snapshot_id="jit-snapshot-1",
+        book_hash="jit-venue-book-1",
+        levels=(BookLevel(price=Decimal("0.05"), size=Decimal("100")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("5"),
+        quote_ttl=timedelta(seconds=10),
+    )
+    proposal_identity = executable_curve_identity(curve)
+    asset_epoch_identity = "asset-epoch-1"
+    binding_identity = maker_fill_candidate_binding_identity(
+        action="BUY",
+        family_key="family-1",
+        bin_id="bin-1",
+        condition_id="condition-1",
+        side="YES",
+        token_id="token-1",
+        ledger_snapshot_id="ledger-1",
+        position_id=None,
+        held_shares=None,
+        asset_epoch_identity=asset_epoch_identity,
+        proposal_identity=proposal_identity,
+    )
+    outcomes = (
+        MakerFillOutcome(
+            probability=Decimal("0.5"),
+            fill_fraction=Decimal("0"),
+            proceeds_per_share_usd=Decimal("0"),
+        ),
+        MakerFillOutcome(
+            probability=Decimal("0.5"),
+            fill_fraction=Decimal("1"),
+            proceeds_per_share_usd=Decimal("-0.05"),
+        ),
+    )
+    training_at = selection_at - timedelta(hours=1)
+    issued_at = selection_at - timedelta(seconds=1)
+    valid_until = selection_at + timedelta(seconds=5)
+    witness_identity = current_maker_fill_witness_identity(
+        candidate_binding_identity=binding_identity,
+        asset_epoch_identity=asset_epoch_identity,
+        book_snapshot_id=curve.snapshot_id,
+        book_hash=curve.book_hash,
+        limit_price=Decimal("0.05"),
+        rest_deadline_minutes=20.0,
+        source_identity="maker-fill-source-1",
+        model_identity="maker-fill-model-1",
+        sample_identity="maker-fill-sample-1",
+        training_cutoff_at_utc=training_at,
+        issued_at_utc=issued_at,
+        valid_until_at_utc=valid_until,
+        outcomes=outcomes,
+    )
+    witness = CurrentMakerFillWitness(
+        witness_identity=witness_identity,
+        candidate_binding_identity=binding_identity,
+        asset_epoch_identity=asset_epoch_identity,
+        book_snapshot_id=curve.snapshot_id,
+        book_hash=curve.book_hash,
+        limit_price=Decimal("0.05"),
+        rest_deadline_minutes=20.0,
+        outcomes=outcomes,
+        source_identity="maker-fill-source-1",
+        model_identity="maker-fill-model-1",
+        sample_identity="maker-fill-sample-1",
+        training_cutoff_at_utc=training_at,
+        issued_at_utc=issued_at,
+        valid_until_at_utc=valid_until,
+    )
+    candidate = SimpleNamespace(
+        action="BUY",
+        execution_mode="MAKER_REST",
+        family_key="family-1",
+        bin_id="bin-1",
+        condition_id="condition-1",
+        side="YES",
+        token_id="token-1",
+        ledger_snapshot_id="ledger-1",
+        position_id=None,
+        held_shares=None,
+        asset_epoch_identity=asset_epoch_identity,
+        economic_cost_curve=curve,
+        rest_deadline_minutes=20.0,
+        fill_probability=0.5,
+        fill_probability_source=witness_identity,
+        maker_fill_witness=witness,
+    )
+    cert = _global_mean_current_qkernel_cert()
+    full_du = float(cert["global_expected_delta_log_wealth"])
+    cert.update(
+        global_execution_mode="MAKER_REST",
+        global_family_key="family-1",
+        global_condition_id="condition-1",
+        global_token_id="token-1",
+        global_limit_price="0.05",
+        global_jit_execution_curve_identity=proposal_identity,
+        global_fill_probability=0.5,
+        global_fill_probability_source=witness_identity,
+        global_rest_deadline_minutes=20.0,
+        global_proposal_expected_delta_log_wealth=full_du * 0.5,
+        global_proposal_expected_ev_usd=6.5,
+        global_proposal_expected_log_growth_per_hour=(full_du * 0.5) / 24.0,
+        global_proposal_expected_capital_efficiency=(full_du * 0.5) / 0.5,
+        global_proposal_fill_semantics=(
+            "FILL_WEIGHTED_ZERO_CONTINUATION_LOWER_BOUND"
+        ),
+        global_maker_fill_witness=(
+            era._current_maker_fill_witness_certificate_payload(
+                candidate,
+                validated_at_utc=validated_at,
+            )
+        ),
     )
     _seal_current_qkernel_cert(cert)
     return cert
@@ -3004,6 +3133,43 @@ def test_global_maker_certificate_is_rejected_before_functional_dispatch(
         cert,
         direction="buy_yes",
     ) == "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
+
+
+def test_global_maker_certificate_accepts_exact_current_fill_witness():
+    cert = _global_current_maker_qkernel_cert()
+
+    assert era.qkernel_global_current_state_rejection_reason(
+        cert,
+        direction="buy_yes",
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("mutate", "reason"),
+    (
+        (
+            lambda cert: cert["global_maker_fill_witness"].update(
+                book_hash="different-book"
+            ),
+            "CURRENT_MAKER_FILL_WITNESS_BOOK_MISMATCH",
+        ),
+        (
+            lambda cert: cert["global_maker_fill_witness"]["outcomes"][1].update(
+                probability="0.51"
+            ),
+            "CURRENT_MAKER_FILL_WITNESS_OUTCOMES_INVALID",
+        ),
+    ),
+)
+def test_global_maker_certificate_rejects_resealed_witness_drift(mutate, reason):
+    cert = _global_current_maker_qkernel_cert()
+    mutate(cert)
+    _seal_current_qkernel_cert(cert)
+
+    assert era.qkernel_global_current_state_rejection_reason(
+        cert,
+        direction="buy_yes",
+    ) == reason
 
 
 def test_global_actuation_submit_revalidates_current_wealth_economics(monkeypatch):

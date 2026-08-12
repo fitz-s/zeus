@@ -177,6 +177,7 @@ _QKERNEL_MAKER_REST_IDENTITY_FIELDS: tuple[str, ...] = (
     "global_fill_probability",
     "global_fill_probability_source",
     "global_rest_deadline_minutes",
+    "global_maker_fill_witness",
 )
 
 _QKERNEL_GLOBAL_CURRENT_STATE_MARKERS: tuple[str, ...] = (
@@ -487,7 +488,10 @@ def qkernel_global_current_state_rejection_reason(
     ):
         return "global_proposal_fill_semantics"
     if execution_mode == "MAKER_REST":
-        return _qkernel_global_maker_rest_rejection_reason(economics)
+        return _qkernel_global_maker_rest_rejection_reason(
+            economics,
+            direction=direction,
+        )
     functional = str(
         economics.get("global_probability_functional")
         or "LOWER_CVAR_PARAMETER_DRAWS"
@@ -657,16 +661,306 @@ def qkernel_global_current_state_rejection_reason(
     return None
 
 
-def _qkernel_global_maker_rest_rejection_reason(
-    _economics: Mapping[str, Any],
-) -> str | None:
-    """Fail closed until a typed current partial-fill witness exists."""
+def _maker_fill_parts_hash(*parts: str) -> str:
+    digest = hashlib.sha256()
+    for part in parts:
+        digest.update(part.encode())
+        digest.update(b"\x1f")
+    return digest.hexdigest()
 
-    # SCOPE — one MAKER_REST certificate; taker, HOLD, and CASH remain valid.
-    # DRAIN — every current auction/JIT rebuild re-runs this certificate gate.
-    # RESET — only reviewed code consuming a typed candidate-bound current
-    # partial-fill distribution may replace this unconditional rejection.
-    return "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
+
+def _maker_fill_timestamp(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _qkernel_global_maker_rest_rejection_reason(
+    economics: Mapping[str, Any],
+    *,
+    direction: str | None,
+) -> str | None:
+    """Recompute the candidate-bound partial-fill witness and maker objective."""
+
+    payload = economics.get("global_maker_fill_witness")
+    if not isinstance(payload, Mapping):
+        return "CURRENT_MAKER_FILL_WITNESS_UNAVAILABLE"
+    required_fields = {
+        "schema_version",
+        "witness_identity",
+        "candidate_binding_identity",
+        "action",
+        "ledger_snapshot_id",
+        "position_id",
+        "held_shares",
+        "asset_epoch_identity",
+        "proposal_identity",
+        "book_snapshot_id",
+        "book_hash",
+        "limit_price",
+        "rest_deadline_minutes",
+        "source_identity",
+        "model_identity",
+        "sample_identity",
+        "training_cutoff_at_utc",
+        "issued_at_utc",
+        "valid_until_at_utc",
+        "validated_at_utc",
+        "outcomes",
+    }
+    if set(payload) != required_fields or payload.get("schema_version") != 1:
+        return "CURRENT_MAKER_FILL_WITNESS_SHAPE_INVALID"
+    text_fields = (
+        "witness_identity",
+        "candidate_binding_identity",
+        "action",
+        "ledger_snapshot_id",
+        "asset_epoch_identity",
+        "proposal_identity",
+        "book_snapshot_id",
+        "book_hash",
+        "source_identity",
+        "model_identity",
+        "sample_identity",
+    )
+    if any(not str(payload.get(field) or "").strip() for field in text_fields):
+        return "CURRENT_MAKER_FILL_WITNESS_SHAPE_INVALID"
+    action = str(payload["action"]).strip().upper()
+    direction_text = str(direction or "").strip().lower()
+    if action != "BUY" or (direction_text and not direction_text.startswith("buy_")):
+        return "CURRENT_MAKER_FILL_WITNESS_ACTION_INVALID"
+    try:
+        limit_price = Decimal(str(payload["limit_price"]))
+        rest_deadline = float(payload["rest_deadline_minutes"])
+        outer_limit = Decimal(str(economics.get("global_limit_price")))
+        outer_cost = Decimal(str(economics.get("cost")))
+        outer_fill_probability = float(economics.get("global_fill_probability"))
+        outer_rest_deadline = float(
+            economics.get("global_rest_deadline_minutes")
+        )
+    except (ArithmeticError, TypeError, ValueError):
+        return "CURRENT_MAKER_FILL_WITNESS_NUMERIC_INVALID"
+    if (
+        not all(value.is_finite() for value in (limit_price, outer_limit, outer_cost))
+        or not Decimal("0.05") <= limit_price <= Decimal("0.95")
+        or limit_price != outer_limit
+        or limit_price != outer_cost
+        or not math.isfinite(rest_deadline)
+        or rest_deadline <= 0.0
+        or not math.isclose(
+            rest_deadline,
+            outer_rest_deadline,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        or not math.isfinite(outer_fill_probability)
+    ):
+        return "CURRENT_MAKER_FILL_WITNESS_NUMERIC_INVALID"
+    timestamps = {
+        field: _maker_fill_timestamp(payload.get(field))
+        for field in (
+            "training_cutoff_at_utc",
+            "issued_at_utc",
+            "valid_until_at_utc",
+            "validated_at_utc",
+        )
+    }
+    selection_decision_at = _maker_fill_timestamp(
+        economics.get("global_selection_decision_at")
+    )
+    if any(value is None for value in timestamps.values()) or selection_decision_at is None:
+        return "CURRENT_MAKER_FILL_WITNESS_TEMPORAL_INVALID"
+    training_at = timestamps["training_cutoff_at_utc"]
+    issued_at = timestamps["issued_at_utc"]
+    valid_until = timestamps["valid_until_at_utc"]
+    validated_at = timestamps["validated_at_utc"]
+    assert training_at is not None
+    assert issued_at is not None
+    assert valid_until is not None
+    assert validated_at is not None
+    if not (
+        training_at <= issued_at <= selection_decision_at <= validated_at <= valid_until
+    ):
+        return "CURRENT_MAKER_FILL_WITNESS_TEMPORAL_INVALID"
+    for witness_field, economics_field in (
+        ("book_snapshot_id", "global_jit_book_snapshot_id"),
+        ("book_hash", "global_jit_venue_book_hash"),
+    ):
+        if str(payload[witness_field]) != str(economics.get(economics_field) or ""):
+            return "CURRENT_MAKER_FILL_WITNESS_BOOK_MISMATCH"
+    witness_identity = str(payload["witness_identity"])
+    if witness_identity != str(
+        economics.get("global_fill_probability_source") or ""
+    ):
+        return "CURRENT_MAKER_FILL_WITNESS_SOURCE_MISMATCH"
+    candidate_fields = (
+        "global_family_key",
+        "global_bin_id",
+        "global_condition_id",
+        "side",
+        "global_token_id",
+    )
+    if any(not str(economics.get(field) or "").strip() for field in candidate_fields):
+        return "CURRENT_MAKER_FILL_WITNESS_BINDING_INVALID"
+    expected_binding = _maker_fill_parts_hash(
+        "CURRENT_MAKER_FILL_V1",
+        action,
+        str(economics["global_family_key"]),
+        str(economics["global_bin_id"]),
+        str(economics["global_condition_id"]),
+        str(economics["side"]),
+        str(economics["global_token_id"]),
+        str(payload["ledger_snapshot_id"]),
+        str(payload.get("position_id") or ""),
+        str(payload.get("held_shares") or ""),
+        str(payload["asset_epoch_identity"]),
+        str(payload["proposal_identity"]),
+    )
+    if str(payload["candidate_binding_identity"]) != expected_binding:
+        return "CURRENT_MAKER_FILL_WITNESS_BINDING_INVALID"
+    raw_outcomes = payload.get("outcomes")
+    if not isinstance(raw_outcomes, list) or not raw_outcomes:
+        return "CURRENT_MAKER_FILL_WITNESS_OUTCOMES_INVALID"
+    outcomes: list[tuple[Decimal, Decimal, Decimal]] = []
+    for raw in raw_outcomes:
+        if not isinstance(raw, Mapping) or set(raw) != {
+            "probability",
+            "fill_fraction",
+            "proceeds_per_share_usd",
+        }:
+            return "CURRENT_MAKER_FILL_WITNESS_OUTCOMES_INVALID"
+        try:
+            probability = Decimal(str(raw["probability"]))
+            fraction = Decimal(str(raw["fill_fraction"]))
+            proceeds = Decimal(str(raw["proceeds_per_share_usd"]))
+        except (ArithmeticError, TypeError, ValueError):
+            return "CURRENT_MAKER_FILL_WITNESS_OUTCOMES_INVALID"
+        if (
+            not all(value.is_finite() for value in (probability, fraction, proceeds))
+            or probability <= 0
+            or not Decimal("0") <= fraction <= Decimal("1")
+            or (fraction == 0 and proceeds != 0)
+            or (fraction > 0 and proceeds != -limit_price)
+        ):
+            return "CURRENT_MAKER_FILL_WITNESS_OUTCOMES_INVALID"
+        outcomes.append((probability, fraction, proceeds))
+    probability_total = sum((row[0] for row in outcomes), Decimal("0"))
+    fill_probability = sum(
+        (row[0] for row in outcomes if row[1] > 0),
+        Decimal("0"),
+    )
+    expected_fill_fraction = sum(
+        (row[0] * row[1] for row in outcomes),
+        Decimal("0"),
+    )
+    if (
+        probability_total != Decimal("1")
+        or expected_fill_fraction <= 0
+        or not math.isclose(
+            float(fill_probability),
+            outer_fill_probability,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        return "CURRENT_MAKER_FILL_WITNESS_OUTCOMES_INVALID"
+    identity_rows = tuple(
+        sorted("\x1e".join(str(value) for value in row) for row in outcomes)
+    )
+    expected_witness_identity = _maker_fill_parts_hash(
+        "CURRENT_MAKER_FILL_V2",
+        str(payload["candidate_binding_identity"]),
+        str(payload["asset_epoch_identity"]),
+        str(payload["book_snapshot_id"]),
+        str(payload["book_hash"]),
+        str(limit_price),
+        repr(rest_deadline),
+        str(payload["source_identity"]),
+        str(payload["model_identity"]),
+        str(payload["sample_identity"]),
+        training_at.isoformat(),
+        issued_at.isoformat(),
+        valid_until.isoformat(),
+        *identity_rows,
+    )
+    if witness_identity != expected_witness_identity:
+        return "CURRENT_MAKER_FILL_WITNESS_IDENTITY_MISMATCH"
+    if economics.get("global_probability_functional") != (
+        "POSTERIOR_PREDICTIVE_MEAN"
+    ):
+        return "CURRENT_MAKER_FILL_WITNESS_PROBABILITY_FUNCTIONAL_INVALID"
+    mean_reason = _qkernel_global_mean_buy_rejection_reason(
+        economics,
+        direction=direction,
+    )
+    if mean_reason is not None:
+        return f"CURRENT_MAKER_FILL_WITNESS_MEAN_ECONOMICS:{mean_reason}"
+    if economics.get("global_proposal_fill_semantics") != (
+        "FILL_WEIGHTED_ZERO_CONTINUATION_LOWER_BOUND"
+    ):
+        return "CURRENT_MAKER_FILL_WITNESS_FILL_SEMANTICS_INVALID"
+    try:
+        shares = float(economics["global_target_shares"])
+        win_probability = float(economics["global_terminal_win_probability_mean"])
+        loss_probability = float(economics["global_terminal_loss_probability_mean"])
+        full_loss_payoff = float(economics["global_terminal_loss_payoff_usd"])
+        full_win_payoff = float(economics["global_terminal_win_payoff_usd"])
+        wealth_after_loss = float(economics["global_terminal_wealth_after_loss_usd"])
+        wealth_after_win = float(economics["global_terminal_wealth_after_win_usd"])
+        proposal_du = float(economics["global_proposal_expected_delta_log_wealth"])
+        proposal_ev = float(economics["global_proposal_expected_ev_usd"])
+        proposal_efficiency = float(
+            economics["global_proposal_expected_capital_efficiency"]
+        )
+        proposal_lock = float(economics["global_proposal_capital_lock_hours"])
+        proposal_rate = float(
+            economics["global_proposal_expected_log_growth_per_hour"]
+        )
+    except (KeyError, TypeError, ValueError):
+        return "CURRENT_MAKER_FILL_WITNESS_EXPECTED_GROWTH_INVALID"
+    loss_base = wealth_after_loss - full_loss_payoff
+    win_base = wealth_after_win - full_win_payoff
+    expected_du = 0.0
+    expected_ev = 0.0
+    expected_spend = 0.0
+    for probability, fraction, proceeds_per_share in outcomes:
+        filled = shares * float(fraction)
+        proceeds = filled * float(proceeds_per_share)
+        loss_after = loss_base + proceeds
+        win_after = win_base + filled + proceeds
+        if min(loss_after, win_after, loss_base, win_base) <= 0.0:
+            return "CURRENT_MAKER_FILL_WITNESS_EXPECTED_GROWTH_INVALID"
+        weight = float(probability)
+        expected_du += weight * (
+            loss_probability * math.log(loss_after / loss_base)
+            + win_probability * math.log(win_after / win_base)
+        )
+        expected_ev += weight * (win_probability * filled + proceeds)
+        expected_spend += weight * (-proceeds)
+    if not (
+        expected_spend > 0.0
+        and proposal_lock > 0.0
+        and math.isclose(proposal_du, expected_du, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(proposal_ev, expected_ev, rel_tol=0.0, abs_tol=1e-12)
+        and math.isclose(
+            proposal_efficiency,
+            expected_du / expected_spend,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+        and math.isclose(
+            proposal_rate,
+            proposal_du / proposal_lock,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
+    ):
+        return "CURRENT_MAKER_FILL_WITNESS_EXPECTED_GROWTH_INVALID"
+    return None
 
 
 def _qkernel_global_mean_buy_rejection_reason(
