@@ -361,6 +361,7 @@ def test_cycle_hwm_sql_deadline_is_not_installed_during_payload_validation(
     )
     conn.row_factory = sqlite3.Row
     conn.progress_transitions = []
+    conn.execute("PRAGMA busy_timeout = 777")
     validation_calls = 0
     validation_transition_counts: list[int] = []
     clock = [0.0]
@@ -390,6 +391,7 @@ def test_cycle_hwm_sql_deadline_is_not_installed_during_payload_validation(
             deadline_monotonic=1.0,
             sql_timeout_seconds=0.1,
         )
+        restored_busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
     finally:
         conn.rollback()
         conn.close()
@@ -401,6 +403,7 @@ def test_cycle_hwm_sql_deadline_is_not_installed_during_payload_validation(
     assert validation_transition_counts[1] > validation_transition_counts[0]
     assert True in conn.progress_transitions
     assert conn.progress_transitions[-1] is False
+    assert restored_busy_timeout == 777
 
     clock[0] = 0.0
 
@@ -421,6 +424,7 @@ def test_cycle_hwm_sql_deadline_is_not_installed_during_payload_validation(
     )
     conn.row_factory = sqlite3.Row
     conn.progress_transitions = []
+    conn.execute("PRAGMA busy_timeout = 555")
     conn.execute("BEGIN")
     try:
         with pytest.raises(ReplacementInputHwmReadUnavailable) as exc_info:
@@ -431,6 +435,7 @@ def test_cycle_hwm_sql_deadline_is_not_installed_during_payload_validation(
                 deadline_monotonic=1.0,
                 sql_timeout_seconds=0.1,
             )
+        restored_busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
     finally:
         conn.rollback()
         conn.close()
@@ -439,6 +444,7 @@ def test_cycle_hwm_sql_deadline_is_not_installed_during_payload_validation(
         "raw_artifact_input_hwm_payload_validation_deadline"
     )
     assert conn.progress_active is False
+    assert restored_busy_timeout == 555
 
 
 def test_cycle_hwm_interrupted_sql_fails_closed_and_removes_handler(
@@ -553,6 +559,54 @@ def test_cycle_hwm_sql_cpu_deadline_fails_closed_and_removes_handler(
 
     assert exc_info.value.basis == "raw_artifact_input_hwm_sql_deadline"
     assert conn.progress_active is False
+
+
+def test_cycle_hwm_zero_sql_timeout_without_outer_deadline_fails_closed(
+    tmp_path,
+) -> None:
+    conn = sqlite3.connect(tmp_path / "forecast.db")
+    try:
+        with pytest.raises(ReplacementInputHwmReadUnavailable) as exc_info:
+            with input_hwm._bounded_hwm_sql(
+                conn,
+                deadline_monotonic=None,
+                sql_timeout_seconds=0.0,
+            ):
+                conn.execute("SELECT 1").fetchone()
+    finally:
+        conn.close()
+
+    assert exc_info.value.basis == "raw_artifact_input_hwm_sql_deadline"
+
+
+def test_cycle_hwm_real_vm_cpu_deadline_interrupts_and_restores_connection(
+    tmp_path,
+) -> None:
+    conn = sqlite3.connect(tmp_path / "forecast.db")
+    conn.execute("PRAGMA busy_timeout = 432")
+    try:
+        with pytest.raises(ReplacementInputHwmReadUnavailable) as exc_info:
+            with input_hwm._bounded_hwm_sql(
+                conn,
+                deadline_monotonic=time.monotonic() + 1.0,
+                sql_timeout_seconds=0.001,
+            ):
+                conn.execute(
+                    """
+                    WITH RECURSIVE seq(value) AS (
+                        VALUES(0)
+                        UNION ALL
+                        SELECT value + 1 FROM seq WHERE value < 10000000
+                    )
+                    SELECT SUM(value) FROM seq
+                    """
+                ).fetchone()
+    finally:
+        restored_busy_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        conn.close()
+
+    assert exc_info.value.basis == "raw_artifact_input_hwm_read_unavailable"
+    assert restored_busy_timeout == 432
 
 
 def test_cycle_hwm_payload_cache_preserves_absent_path_semantics(tmp_path) -> None:

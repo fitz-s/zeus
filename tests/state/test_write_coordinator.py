@@ -28,6 +28,7 @@ from src.state.write_coordinator import (
     WriteLeaseTelemetry,
     WriteLeaseTimeout,
     WritePriority,
+    bounded_sqlite_write,
     unified_writer_lock_path,
     writer_monitor_waiter_path,
 )
@@ -53,6 +54,36 @@ def _exclusive_flock_visible(path: Path) -> bool:
         return False
     finally:
         os.close(fd)
+
+
+def test_bounded_sqlite_write_caps_raw_writer_wait_and_restores_timeout(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "bounded-write.db"
+    with sqlite3.connect(path) as setup:
+        setup.execute("CREATE TABLE facts (value TEXT PRIMARY KEY)")
+    coordinator = WriteCoordinator({DBIdentity.TRADE: path})
+    holder = sqlite3.connect(path)
+    holder.execute("BEGIN IMMEDIATE")
+    holder.execute("INSERT INTO facts VALUES ('raw-holder')")
+    writer = sqlite3.connect(path, timeout=30.0)
+    writer.execute("PRAGMA busy_timeout=30000")
+    started = time.monotonic()
+    try:
+        with pytest.raises(WriteLeaseTimeout, match="within hold budget"):
+            with coordinator.lease(
+                (DBIdentity.TRADE,),
+                owner="bounded-antibody",
+                max_hold_ms=80,
+            ) as lease:
+                with bounded_sqlite_write(writer, lease, max_hold_ms=80):
+                    writer.execute("INSERT INTO facts VALUES ('must-not-persist')")
+        assert time.monotonic() - started < 0.25
+        assert writer.execute("PRAGMA busy_timeout").fetchone()[0] == 30_000
+    finally:
+        writer.close()
+        holder.rollback()
+        holder.close()
 
 
 def test_live_and_bulk_share_same_file_gate(tmp_path: Path) -> None:

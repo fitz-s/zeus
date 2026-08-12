@@ -3141,6 +3141,9 @@ def test_monitor_timeout_retries_frozen_attempt_once_into_canonical_projection(
             return False
 
     class AcquiredLease:
+        owner = "monitor_canonical_append_retry"
+        acquired_at = time.monotonic()
+
         def __enter__(self):
             return self
 

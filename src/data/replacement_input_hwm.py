@@ -131,14 +131,20 @@ def _bounded_hwm_sql(
     deadline_monotonic: float | None,
     sql_timeout_seconds: float | None,
 ):
-    """Apply an absolute deadline only while SQLite is executing."""
+    """Bound one SQL statement on a dedicated HWM read connection."""
 
-    if deadline_monotonic is None:
+    if deadline_monotonic is None and sql_timeout_seconds is None:
         yield
         return
     started = time.monotonic()
-    outer_deadline = float(deadline_monotonic)
-    remaining = outer_deadline - started
+    outer_deadline = (
+        None if deadline_monotonic is None else float(deadline_monotonic)
+    )
+    remaining = (
+        float("inf")
+        if outer_deadline is None
+        else outer_deadline - started
+    )
     sql_cpu_deadline = None
     if sql_timeout_seconds is not None:
         sql_timeout = max(0.0, float(sql_timeout_seconds))
@@ -148,28 +154,31 @@ def _bounded_hwm_sql(
         _raise_hwm_deadline_elapsed(
             basis="raw_artifact_input_hwm_sql_deadline",
         )
-    conn.execute(
-        f"PRAGMA busy_timeout = {max(1, min(1000, int(remaining * 1000)))}"
+    previous_busy_timeout_row = conn.execute("PRAGMA busy_timeout").fetchone()
+    previous_busy_timeout_ms = int(
+        (previous_busy_timeout_row[0] if previous_busy_timeout_row else 0) or 0
     )
-    conn.set_progress_handler(
-        lambda: int(
-            time.monotonic() >= outer_deadline
+
+    def deadline_elapsed() -> bool:
+        return bool(
+            (outer_deadline is not None and time.monotonic() >= outer_deadline)
             or (
                 sql_cpu_deadline is not None
                 and time.thread_time() >= sql_cpu_deadline
             )
-        ),
-        1_000,
-    )
+        )
+
+    handler_installed = False
     try:
+        lock_wait_seconds = min(1.0, remaining)
+        conn.execute(
+            "PRAGMA busy_timeout = "
+            f"{max(1, int(lock_wait_seconds * 1000))}"
+        )
+        conn.set_progress_handler(lambda: int(deadline_elapsed()), 1_000)
+        handler_installed = True
         yield
-        if (
-            time.monotonic() >= outer_deadline
-            or (
-                sql_cpu_deadline is not None
-                and time.thread_time() >= sql_cpu_deadline
-            )
-        ):
+        if deadline_elapsed():
             _raise_hwm_deadline_elapsed(
                 basis="raw_artifact_input_hwm_sql_deadline",
             )
@@ -181,7 +190,9 @@ def _bounded_hwm_sql(
             basis="raw_artifact_input_hwm_read_unavailable",
         )
     finally:
-        conn.set_progress_handler(None, 0)
+        if handler_installed:
+            conn.set_progress_handler(None, 0)
+        conn.execute(f"PRAGMA busy_timeout = {previous_busy_timeout_ms}")
 
 
 def _require_hwm_deadline(

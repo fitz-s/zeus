@@ -114,6 +114,61 @@ class WriteLease:
         self._metrics.rows_changed = rows_changed
 
 
+def _sqlite_busy(exc: sqlite3.OperationalError) -> bool:
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int) and (code & 0xFF) in {
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    }:
+        return True
+    message = str(exc).lower()
+    return "database is locked" in message or "database table is locked" in message
+
+
+@contextlib.contextmanager
+def bounded_sqlite_write(
+    conn: sqlite3.Connection,
+    lease: WriteLease,
+    *,
+    max_hold_ms: int,
+    clock: Callable[[], float] | None = None,
+) -> Iterator[None]:
+    """Bound SQLite lock wait by the remaining coordinator hold budget.
+
+    A coordinator lease serializes participating writers, but it cannot stop a
+    legacy/raw SQLite writer.  Without this fence a lease owner can wait on that
+    writer for the connection's default 30 seconds and starve MONITOR.  Busy is
+    therefore a retryable lease timeout, while every other SQL error retains its
+    original type.  The caller's busy timeout is restored on every exit.
+    """
+
+    if max_hold_ms <= 0:
+        raise ValueError("max_hold_ms must be positive")
+    now = clock or time.monotonic
+    remaining_ms = float(max_hold_ms) - max(
+        0.0,
+        (now() - lease.acquired_at) * 1_000.0,
+    )
+    bounded_ms = int(remaining_ms)
+    if bounded_ms <= 0:
+        raise WriteLeaseTimeout(
+            f"SQLite write hold budget exhausted for owner={lease.owner}"
+        )
+    row = conn.execute("PRAGMA busy_timeout").fetchone()
+    previous_ms = int(row[0]) if row is not None else 0
+    conn.execute(f"PRAGMA busy_timeout = {min(previous_ms, bounded_ms)}")
+    try:
+        yield
+    except sqlite3.OperationalError as exc:
+        if _sqlite_busy(exc):
+            raise WriteLeaseTimeout(
+                f"SQLite write deferred within hold budget for owner={lease.owner}"
+            ) from exc
+        raise
+    finally:
+        conn.execute(f"PRAGMA busy_timeout = {previous_ms}")
+
+
 @dataclass(frozen=True)
 class WriteTransaction:
     """Single-DB transaction yielded by ``WriteCoordinator.transaction``."""
@@ -468,17 +523,23 @@ class WriteCoordinator:
             before_changes = int(conn.total_changes)
             began = False
             try:
-                conn.execute(f"BEGIN {tx_mode.value}")
-                began = True
-                yield WriteTransaction(lease=lease, db=db, connection=conn)
-                commit_started = self._clock()
-                conn.commit()
-                commit_ms = (self._clock() - commit_started) * 1000.0
-                rows_changed = max(0, int(conn.total_changes) - before_changes)
-                lease.record_commit(
-                    commit_ms=commit_ms,
-                    rows_changed=rows_changed,
-                )
+                with bounded_sqlite_write(
+                    conn,
+                    lease,
+                    max_hold_ms=max_hold_ms,
+                    clock=self._clock,
+                ) if max_hold_ms is not None else contextlib.nullcontext():
+                    conn.execute(f"BEGIN {tx_mode.value}")
+                    began = True
+                    yield WriteTransaction(lease=lease, db=db, connection=conn)
+                    commit_started = self._clock()
+                    conn.commit()
+                    commit_ms = (self._clock() - commit_started) * 1000.0
+                    rows_changed = max(0, int(conn.total_changes) - before_changes)
+                    lease.record_commit(
+                        commit_ms=commit_ms,
+                        rows_changed=rows_changed,
+                    )
             except BaseException:
                 if began:
                     conn.rollback()

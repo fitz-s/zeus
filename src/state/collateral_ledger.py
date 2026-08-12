@@ -55,6 +55,8 @@ COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS = (
 )
 COLLATERAL_SNAPSHOT_CLOCK_SKEW_SECONDS = 5.0
 DEFAULT_COLLATERAL_BUSY_TIMEOUT_MS = 30_000
+_COLLATERAL_WRITE_LEASE_DEADLINE_MS = 250
+_COLLATERAL_WRITE_LEASE_MAX_HOLD_MS = 250
 
 COLLATERAL_LEDGER_SCHEMA = """
 CREATE TABLE IF NOT EXISTS collateral_ledger_snapshots (
@@ -284,13 +286,12 @@ class CollateralLedger:
             # init idempotent without parking a file handle in the daemon.
             self._db_path = Path(db_path)
             self._owns_conn = True
-            init_conn = _connect_owned_collateral_db(self._db_path)
-            try:
-                init_collateral_schema(init_conn)
-                init_conn.commit()
-            finally:
-                init_conn.close()
             self._conn = None
+            with self._connection_scope(
+                write=True,
+                owner="collateral_schema_init",
+            ) as init_conn:
+                init_collateral_schema(init_conn)
         else:
             self._conn = conn
             if self._conn is not None:
@@ -312,10 +313,43 @@ class CollateralLedger:
         self._db_path = None
 
     @contextmanager
-    def _connection_scope(self):
+    def _connection_scope(
+        self,
+        *,
+        write: bool = False,
+        owner: str = "collateral_read",
+    ):
         if self._db_path is None:
             yield self._conn
             return
+
+        if write:
+            from src.state.db import _zeus_trade_db_path
+
+            if self._db_path.resolve(strict=False) == _zeus_trade_db_path().resolve(
+                strict=False
+            ):
+                from src.state.db_writer_lock import WriteClass
+                from src.state.write_coordinator import (
+                    DBIdentity,
+                    WritePriority,
+                    default_runtime_write_coordinator,
+                )
+
+                coordinator = default_runtime_write_coordinator()
+                with coordinator.transaction(
+                    (DBIdentity.TRADE,),
+                    owner=owner,
+                    write_class=WriteClass.LIVE,
+                    priority=WritePriority.STANDARD,
+                    deadline_ms=_COLLATERAL_WRITE_LEASE_DEADLINE_MS,
+                    max_hold_ms=_COLLATERAL_WRITE_LEASE_MAX_HOLD_MS,
+                    connection_factory=lambda _path: _connect_owned_collateral_db(
+                        self._db_path
+                    ),
+                ) as tx:
+                    yield tx.connection
+                return
 
         conn = _connect_owned_collateral_db(self._db_path)
         try:
@@ -653,15 +687,22 @@ class CollateralLedger:
             while True:
                 attempts += 1
                 try:
-                    with self._connection_scope() as conn:
+                    with self._connection_scope(
+                        write=True,
+                        owner="collateral_reservation_cas",
+                    ) as conn:
                         fn(conn)
                     return
-                except sqlite3.OperationalError as exc:
-                    if _is_busy_error(exc) and attempts < _CAS_BUSY_RETRY_ATTEMPTS:
+                except (sqlite3.OperationalError, TimeoutError) as exc:
+                    retryable = isinstance(exc, TimeoutError) or _is_busy_error(exc)
+                    if retryable and attempts < _CAS_BUSY_RETRY_ATTEMPTS:
                         continue
                     raise
         else:
-            with self._connection_scope() as conn:
+            with self._connection_scope(
+                write=True,
+                owner="collateral_reservation_cas",
+            ) as conn:
                 fn(conn)
 
     @staticmethod
@@ -807,7 +848,10 @@ class CollateralLedger:
                 "release_reason": None,
             }
             return
-        with self._connection_scope() as conn:
+        with self._connection_scope(
+            write=True,
+            owner="collateral_reservation_insert",
+        ) as conn:
             if conn is None:
                 return
             conn.execute(
@@ -834,7 +878,10 @@ class CollateralLedger:
                 row["released_at"] = now
                 row["release_reason"] = reason
             return
-        with self._connection_scope() as conn:
+        with self._connection_scope(
+            write=True,
+            owner="collateral_reservation_release",
+        ) as conn:
             if conn is None:
                 return
             conn.execute(
@@ -941,7 +988,10 @@ class CollateralLedger:
     def _persist_snapshot(self, snapshot: CollateralSnapshot) -> None:
         if self._conn is None and self._db_path is None:
             return
-        with self._connection_scope() as conn:
+        with self._connection_scope(
+            write=True,
+            owner="collateral_snapshot_persist",
+        ) as conn:
             if conn is None:
                 return
             _persist_snapshot_on_connection(conn, snapshot)

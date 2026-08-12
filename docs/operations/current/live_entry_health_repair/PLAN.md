@@ -1810,12 +1810,38 @@ publication barrier.
   HWM prefetch. DRAIN: each bounded SQL statement materializes its causal rows,
   then exact immutable payload validation completes before the monitor consumes
   the snapshot. RESET: the progress handler is removed after every statement,
-  the read transaction is rolled back/closed after the frozen cut, and the next
-  monitor pass starts from a new decision time.
+  the prior `busy_timeout` is restored, the read transaction is rolled
+  back/closed after the frozen cut, and the next monitor pass starts from a new
+  decision time. `sql_timeout_seconds` remains authoritative even when the
+  caller supplies no outer deadline.
 - Forbidden: widening the five-second primary-belief budget, accepting stale
   cycles, tolerating an interrupted/partial HWM, or keeping a progress handler
   active across file I/O. Acceptance: a deliberately slow payload proof cannot
   interrupt a later SQL statement; an actually slow SQL statement still fails
-  closed; caller-owned handlers on non-monitor paths remain unchanged; focused
-  HWM/monitor tests, compilation, planning-lock, and diff checks pass before
-  exact-SHA hot-fix deployment.
+  closed; focused HWM/monitor tests, compilation, planning-lock, and diff checks
+  pass before exact-SHA hot-fix deployment.
+
+### Slice B97 — Drain bound FAK no-fill EXIT ambiguity (2026-08-11)
+
+- Live defect: a deterministic FAK EXIT persisted its signed venue order id and
+  crossed POST, but the point-order read returned no record. Generic recovery
+  moved `SUBMITTING` to `REVIEW_REQUIRED`; that reason had no drain, so a held
+  position remained `pending_exit` even after complete authenticated open-order
+  and trade reads plus a newer unchanged chain balance proved zero fill.
+- Structural invariant: a bound FAK EXIT is terminal no-fill only when the exact
+  order is absent, complete authenticated open-order/trade enumeration finds no
+  matching side effect, canonical local facts contain no fill, and a chain
+  snapshot newer than the command still equals the pre-exit held shares within
+  venue dust. Recovery then appends the canonical zero-fill order fact, expires
+  the command, releases single-flight ownership, and emits a held-sell reauction
+  obligation for immediate fresh redecision.
+- SCOPE: one `REVIEW_REQUIRED` `EXIT/SELL` command whose latest immutable submit
+  event proves FAK and whose reason is `recovery_order_not_found_at_venue`.
+  DRAIN: command recovery repeats authenticated point/open/trade/chain proof on
+  each live tick, then atomically terminalizes and releases the exact command.
+  RESET: `EXPIRED` plus `EXIT_ORDER_VOIDED` or `EXIT_RETRY_RELEASED` removes the
+  pending-exit owner; any live order, trade, positive fill fact, incomplete read,
+  stale chain cut, or changed chain shares keeps it fail-closed.
+- Forbidden: treating order absence alone as no fill, applying entry semantics
+  to held exits, increasing retry timers, or leaving a manual-review terminal
+  with no executable drain.

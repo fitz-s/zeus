@@ -32941,6 +32941,54 @@ def test_global_auction_trade_receipt_contention_is_typed_deferred(
     conn.close()
 
 
+def test_global_auction_raw_sqlite_holder_defers_before_monitor_starvation(
+    tmp_path, monkeypatch
+):
+    from src.engine.global_auction_universe import WorkContext, WorkDeferred
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator
+    import src.state.db as state_db
+    import src.state.decision_chain as decision_chain
+    import src.state.write_coordinator as write_coordinator
+
+    trade_path = tmp_path / "zeus_trades.db"
+    with sqlite3.connect(trade_path) as setup:
+        setup.execute("CREATE TABLE receipt_probe (value TEXT NOT NULL)")
+    coordinator = WriteCoordinator({DBIdentity.TRADE: trade_path})
+    monkeypatch.setattr(state_db, "_zeus_trade_db_path", lambda: trade_path)
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: coordinator,
+    )
+    monkeypatch.setattr(
+        decision_chain,
+        "store_artifact",
+        lambda conn, _artifact: conn.execute(
+            "INSERT INTO receipt_probe VALUES ('unexpected')"
+        ).lastrowid,
+    )
+    raw_holder = sqlite3.connect(trade_path)
+    raw_holder.execute("BEGIN IMMEDIATE")
+    raw_holder.execute("INSERT INTO receipt_probe VALUES ('raw-holder')")
+    conn = sqlite3.connect(trade_path, timeout=30.0)
+    persist = global_batch_runtime._global_auction_artifact_persister(
+        conn,
+        work_context=WorkContext(time.monotonic() + 2.0),
+        owner="test_global_auction_raw_holder",
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(WorkDeferred) as raised:
+            persist(object())
+        assert raised.value.stage == "test_global_auction_raw_holder:write_lease"
+        assert time.monotonic() - started < 0.8
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30_000
+    finally:
+        conn.close()
+        raw_holder.rollback()
+        raw_holder.close()
+
+
 @pytest.mark.parametrize("expiry_mode", ("deadline", "cancel"))
 def test_global_auction_trade_receipt_rolls_back_if_work_expires_during_store(
     tmp_path, monkeypatch, expiry_mode

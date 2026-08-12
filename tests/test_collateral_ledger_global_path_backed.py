@@ -24,6 +24,7 @@ caller conn lifetime without holding the trade DB write lane open.
 from __future__ import annotations
 
 import sqlite3
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -189,6 +190,70 @@ def test_path_backed_ledger_does_not_hold_write_lock_between_calls(
             writer.close()
     finally:
         ledger.close()
+
+
+def test_path_backed_live_collateral_fetches_before_bounded_coordinated_persist(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from src.state import db as state_db
+    from src.state import write_coordinator as coordinator_module
+    from src.state.write_coordinator import (
+        DBIdentity,
+        WriteCoordinator,
+        WriteLeaseTimeout,
+    )
+
+    db_path = tmp_path / "zeus_trades.db"
+    events: list[str] = []
+    coordinator = WriteCoordinator(
+        {DBIdentity.TRADE: db_path},
+        telemetry_sink=lambda row: events.append(row.owner),
+    )
+    monkeypatch.setattr(state_db, "_zeus_trade_db_path", lambda: db_path)
+    monkeypatch.setattr(
+        coordinator_module,
+        "default_runtime_write_coordinator",
+        lambda: coordinator,
+    )
+    ledger = CollateralLedger(db_path=db_path)
+    assert events == ["collateral_schema_init"]
+    events.clear()
+
+    class Adapter:
+        def get_collateral_payload(self):
+            events.append("network_read")
+            return {
+                "pusd_balance_micro": 199_396_602,
+                "pusd_allowance_micro": 9_000_000,
+                "usdc_e_legacy_balance_micro": 0,
+                "ctf_token_balances": {},
+                "ctf_token_allowances": {},
+                "authority_tier": "CHAIN",
+            }
+
+    raw_holder = sqlite3.connect(db_path)
+    raw_holder.execute("BEGIN IMMEDIATE")
+    raw_holder.execute(
+        "INSERT INTO collateral_reservations "
+        "(command_id,reservation_type,token_id,amount,created_at) "
+        "VALUES ('raw-holder','PUSD_BUY',NULL,1,'2026-08-12T00:00:00+00:00')"
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(WriteLeaseTimeout):
+            ledger.refresh(Adapter())
+        assert time.monotonic() - started < 0.6
+        assert events[0] == "network_read"
+        assert events[-1] == "collateral_snapshot_persist"
+    finally:
+        raw_holder.rollback()
+        raw_holder.close()
+
+    snapshot = ledger.refresh(Adapter())
+    assert snapshot.authority_tier == "CHAIN"
+    assert events[-1] == "collateral_snapshot_persist"
+    ledger.close()
 
 
 def test_path_backed_ledger_reads_fresh_chain_snapshot_past_latest_degraded(

@@ -170,6 +170,7 @@ def _global_auction_artifact_persister(
     """Build the only durable auction unit: INSERT plus guarded commit."""
 
     from src.state.decision_chain import store_artifact
+    from src.state.write_coordinator import bounded_sqlite_write
 
     def persist(artifact: object) -> int | None:
         with _global_auction_trade_write_lease(
@@ -179,24 +180,39 @@ def _global_auction_artifact_persister(
         ) as lease:
             before_changes = conn.total_changes
             try:
+                sqlite_hold_ms = _GLOBAL_AUCTION_WRITE_MAX_HOLD_MS
                 if work_context is not None:
-                    work_context.checkpoint(f"{owner}:before_store")
-                row_id = store_artifact(conn, artifact)
-                if work_context is not None:
-                    work_context.checkpoint(f"{owner}:after_store")
-                revoked_reason = before_commit() if before_commit is not None else None
-                if revoked_reason is not None:
-                    raise _GlobalArtifactCommitRevoked(revoked_reason)
-                if work_context is not None:
-                    work_context.checkpoint(f"{owner}:before_commit")
-                commit_started = time.monotonic()
-                conn.commit()
-                if lease is not None:
-                    lease.record_commit(
-                        commit_ms=(time.monotonic() - commit_started) * 1_000.0,
-                        rows_changed=max(0, conn.total_changes - before_changes),
-                    )
-                return row_id
+                    remaining_s = work_context.checkpoint(f"{owner}:before_store")
+                    if math.isfinite(remaining_s):
+                        remaining_ms = math.floor(remaining_s * 1_000.0)
+                        if remaining_ms <= 0:
+                            raise WorkDeferred(
+                                WorkDeferredCode.DEADLINE,
+                                stage=f"{owner}:before_store",
+                                remaining_s=0.0,
+                            )
+                        sqlite_hold_ms = min(sqlite_hold_ms, remaining_ms)
+                with bounded_sqlite_write(
+                    conn,
+                    lease,
+                    max_hold_ms=sqlite_hold_ms,
+                ):
+                    row_id = store_artifact(conn, artifact)
+                    if work_context is not None:
+                        work_context.checkpoint(f"{owner}:after_store")
+                    revoked_reason = before_commit() if before_commit is not None else None
+                    if revoked_reason is not None:
+                        raise _GlobalArtifactCommitRevoked(revoked_reason)
+                    if work_context is not None:
+                        work_context.checkpoint(f"{owner}:before_commit")
+                    commit_started = time.monotonic()
+                    conn.commit()
+                    if lease is not None:
+                        lease.record_commit(
+                            commit_ms=(time.monotonic() - commit_started) * 1_000.0,
+                            rows_changed=max(0, conn.total_changes - before_changes),
+                        )
+                    return row_id
             except BaseException:
                 if conn.in_transaction:
                     conn.rollback()

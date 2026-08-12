@@ -3391,31 +3391,3 @@ weather market slug plus all existing identity predicates. Acceptance requires
 the bin-suffixed Singapore fill test to materialize the exact canonical market
 identity, malformed slugs to remain fail-closed, focused recovery/fill tests to
 pass, then exact-SHA deployment and live projection of both current fills.
-
-## 2026-08-11 Bound FAK EXIT absence returns held capital to redecision
-
-The first current-evidence Tokyo SELL persisted an exact venue order ID but its
-subsequent authenticated point read returned no order. Recovery moved the
-command to `REVIEW_REQUIRED`; because the existing zero-exposure path admitted
-only commands without an order ID, a non-resting FAK could permanently strand
-the position in `pending_exit` even after authenticated account reads and a
-post-submit Chain mirror proved that no shares sold.
-
-The repair admits only a bound `EXIT`/`SELL` with an immutable FAK envelope and
-the exact `recovery_order_not_found_at_venue` reason. It waits through the
-existing safe-replay window, then requires a fresh absent point-order read,
-complete authenticated open-order and trade reads with no matching exposure,
-no canonical order/trade/fill facts, and a synced post-submit Chain balance
-covering the full requested exit. That proof expires the dead command and the
-existing restart projection returns the still-held position to fresh global
-redecision. Any live order, trade, fill fact, stale/reduced Chain balance,
-non-FAK order, or read failure remains fail-closed.
-
-SCOPE is one exact bound FAK EXIT command and its position. DRAIN is the next
-command-recovery pass after the safe-replay age followed by the existing
-no-venue EXIT retry projection. RESET is either proof-backed terminalization
-and fresh redecision, or any positive/ambiguous venue fact retaining
-`REVIEW_REQUIRED`. Acceptance requires positive clearance/release coverage,
-negative venue/trade/Chain/read antibodies, focused recovery tests, money-path
-gates, exact-SHA deployment, and live evidence of a new current decision or an
-exact current rejection.

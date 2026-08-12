@@ -3277,7 +3277,7 @@ def _emit_monitor_refreshed_canonical_if_available(
 
     from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
     from src.state.db import append_many_and_project
-    from src.state.write_coordinator import WriteLeaseTimeout
+    from src.state.write_coordinator import WriteLeaseTimeout, bounded_sqlite_write
 
     position_id = str(getattr(pos, "trade_id", "") or "").strip()
     if not position_id:
@@ -3398,8 +3398,15 @@ def _emit_monitor_refreshed_canonical_if_available(
             owner="monitor_canonical_append",
             deadline_ms=_MONITOR_CANONICAL_WRITE_LEASE_DEADLINE_MS,
             max_hold_ms=_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS,
-        ):
-            return append_frozen_monitor_refreshed()
+        ) as lease:
+            if lease is None:
+                return append_frozen_monitor_refreshed()
+            with bounded_sqlite_write(
+                conn,
+                lease,
+                max_hold_ms=_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS,
+            ):
+                return append_frozen_monitor_refreshed()
     except WriteLeaseTimeout as exc:
         try:
             with _canonical_trade_write_lease(
@@ -3407,8 +3414,15 @@ def _emit_monitor_refreshed_canonical_if_available(
                 owner="monitor_canonical_append_retry",
                 deadline_ms=_MONITOR_CANONICAL_WRITE_RETRY_DEADLINE_MS,
                 max_hold_ms=_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS,
-            ):
-                return append_frozen_monitor_refreshed()
+            ) as lease:
+                if lease is None:
+                    return append_frozen_monitor_refreshed()
+                with bounded_sqlite_write(
+                    conn,
+                    lease,
+                    max_hold_ms=_MONITOR_CANONICAL_WRITE_LEASE_MAX_HOLD_MS,
+                ):
+                    return append_frozen_monitor_refreshed()
         except WriteLeaseTimeout as retry_exc:
             deps.logger.info(
                 "CANONICAL_MONITOR_REFRESHED_RETRY_DEFERRED_NEXT_CYCLE "
