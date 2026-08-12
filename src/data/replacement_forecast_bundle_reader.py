@@ -19,7 +19,8 @@ from src.data.replacement_forecast_cycle_policy import (
     TRADEABLE_GRADE_QLCB_BASIS,
     current_evidence_shape_has_entry_authority,
     current_evidence_shape_has_held_authority,
-    cycle_age_exceeds_bound,
+    cycle_age_outside_bound,
+    current_evidence_shape_source_cycle_time,
     replacement_source_cycle_max_age_hours,
 )
 from src.data.staleness_degrade_ladder import (
@@ -674,38 +675,22 @@ def read_replacement_forecast_bundle(
     # horizon is the SAME constant the materialization-side fail-closed gate uses
     # (src/data/replacement_forecast_cycle_policy.py) so the two gates can never drift.
     _source_cycle_utc = _parse_utc(str(row_map["source_cycle_time"]), field_name="source_cycle_time")
-    if cycle_age_exceeds_bound(decision_utc, _source_cycle_utc):
+    if cycle_age_outside_bound(decision_utc, _source_cycle_utc):
         return ReplacementForecastBundleReadResult(
             "BLOCKED",
             "REPLACEMENT_LIVE_CYCLE_AGE_EXCEEDS_BOUND",
         )
-    fusion = provenance.get("bayes_precision_fusion")
-    shape = (
-        fusion.get("current_evidence_shape")
-        if isinstance(fusion, Mapping)
-        else None
-    )
-    shape_lag_hours = (
-        float(shape.get("shape_lag_hours"))
-        if isinstance(shape, Mapping)
-        else 0.0
-    )
-    if shape_lag_hours > 0.0:
-        raw_ensemble_cycle = shape.get("source_cycle_time")
-        if not isinstance(raw_ensemble_cycle, str) or not raw_ensemble_cycle:
-            return ReplacementForecastBundleReadResult(
-                "BLOCKED",
-                "REPLACEMENT_ENSEMBLE_CYCLE_TIME_MISSING",
-            )
-        ensemble_cycle_utc = _parse_utc(
-            raw_ensemble_cycle,
-            field_name="current_evidence_shape.source_cycle_time",
+    ensemble_cycle_utc = current_evidence_shape_source_cycle_time(provenance)
+    if ensemble_cycle_utc is None:
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED",
+            "REPLACEMENT_ENSEMBLE_CYCLE_TIME_MISSING",
         )
-        if cycle_age_exceeds_bound(decision_utc, ensemble_cycle_utc):
-            return ReplacementForecastBundleReadResult(
-                "BLOCKED",
-                "REPLACEMENT_ENSEMBLE_CYCLE_AGE_EXCEEDS_BOUND",
-            )
+    if cycle_age_outside_bound(decision_utc, ensemble_cycle_utc):
+        return ReplacementForecastBundleReadResult(
+            "BLOCKED",
+            "REPLACEMENT_ENSEMBLE_CYCLE_AGE_EXCEEDS_BOUND",
+        )
     # §4a staleness DEGRADE LADDER (authority doc, 2026-07-17): between the fresh band
     # and the EXPIRED wall handled just above, an aged carrier is GRADED. RED (age > 24h,
     # derived boundary) isolates ENTRY ONLY. HELD_REDECISION is explicitly reduce-only

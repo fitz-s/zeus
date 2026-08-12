@@ -1139,11 +1139,11 @@ def enqueue_fusion_upgrade_reseeds(
             # fresh-cycle materialization instead.
             try:
                 from src.data.replacement_forecast_cycle_policy import (  # noqa: PLC0415
-                    cycle_age_exceeds_bound,
+    cycle_age_outside_bound,
                 )
 
                 _cycle_dt = datetime.fromisoformat(source_cycle_iso.replace("Z", "+00:00"))
-                if cycle_age_exceeds_bound(now, _cycle_dt):
+                if cycle_age_outside_bound(now, _cycle_dt):
                     report["cycle_too_old_skipped"] = int(report.get("cycle_too_old_skipped", 0)) + 1  # type: ignore[arg-type]
                     continue
             except Exception:  # noqa: BLE001 — unparseable cycle: let the materializer decide

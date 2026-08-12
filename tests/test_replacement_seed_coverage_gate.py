@@ -63,6 +63,7 @@ def _seed() -> dict[str, object]:
         "city": _CITY,
         "target_date": _TARGET_DATE,
         "temperature_metric": _METRIC,
+        "computed_at": "2026-06-06T02:00:00+00:00",
         "baseline_source_run_id": _BASELINE_RUN,
         "openmeteo_source_run_id": _OPENMETEO_RUN,
     }
@@ -115,6 +116,7 @@ def _insert_posterior(db_path: str, *, q_lcb_json: str | None) -> None:
                         "current_evidence_shape": {
                             "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
                             "shape_lag_hours": 0.0,
+                            "source_cycle_time": "2026-06-06T00:00:00+00:00",
                             "stale_shape_reused": False,
                             "translation_applied": False,
                         },
@@ -374,6 +376,7 @@ def test_day0_seed_coverage_requires_exact_conditioning_identity(tmp_path) -> No
                                     CURRENT_EVIDENCE_SEMANTICS_REVISION
                                 ),
                                 "shape_lag_hours": 0.0,
+                                "source_cycle_time": "2026-06-06T00:00:00+00:00",
                                 "stale_shape_reused": False,
                                 "translation_applied": False,
                             },
@@ -486,6 +489,7 @@ def test_day0_coverage_prefers_active_provisional_over_fallback_conditioning(tmp
                             "current_evidence_shape": {
                                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
                                 "shape_lag_hours": 0.0,
+                                "source_cycle_time": "2026-06-06T00:00:00+00:00",
                                 "stale_shape_reused": False,
                                 "translation_applied": False,
                             },
@@ -526,6 +530,7 @@ def test_consumed_regional_clock_newer_than_anchor_cycle_is_covered(tmp_path) ->
                         "current_evidence_shape": {
                             "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
                             "shape_lag_hours": 0.0,
+                            "source_cycle_time": "2026-06-06T00:00:00+00:00",
                             "stale_shape_reused": False,
                             "translation_applied": False,
                         },

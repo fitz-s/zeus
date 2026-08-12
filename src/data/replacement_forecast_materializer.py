@@ -36,7 +36,7 @@ from src.data.replacement_forecast_cycle_policy import (
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     TRADEABLE_GRADE_QLCB_BASIS,
     classify_cycle_phase,
-    cycle_age_exceeds_bound,
+    cycle_age_outside_bound,
     replacement_source_cycle_max_age_hours,
 )
 from src.data.openmeteo_ecmwf_ifs9_anchor import (
@@ -1304,7 +1304,7 @@ def _prewrite_block_reasons(request: ReplacementForecastMaterializeRequest) -> t
     # within the empirical max healthy cycle age of 28.8h). Expired-but-rematerializable: the
     # SAME cycle is allowed only WHILE within this bound. Refusing here means a too-stale cycle
     # never even gets re-stamped, so the live gate is never the sole line of defence.
-    if cycle_age_exceeds_bound(computed_at, request_source_cycle_time):
+    if cycle_age_outside_bound(computed_at, request_source_cycle_time):
         reasons.append("REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_TOO_STALE")
     return tuple(reasons)
 

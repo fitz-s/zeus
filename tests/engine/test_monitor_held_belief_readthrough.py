@@ -215,9 +215,13 @@ def test_monitor_read_unavailable_stays_evidence_unavailable_then_recovers(
                     "served_via": "single_runs",
                 }
             },
-            "current_evidence_shape": {
-                "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
-            },
+                "current_evidence_shape": {
+                    "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                    "shape_lag_hours": 0.0,
+                    "source_cycle_time": source_cycle.isoformat(),
+                    "stale_shape_reused": False,
+                    "translation_applied": False,
+                },
         },
         "q_bootstrap_samples_basis": (
             "global_simplex_current_finite_moment_evidence_v3"

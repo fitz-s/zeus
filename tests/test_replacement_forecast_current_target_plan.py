@@ -1542,7 +1542,7 @@ def _create_db(path) -> None:
                 'Paris', '2026-06-09', 'high',
                 '{"baseline_b0":"baseline-current-Paris","openmeteo_ifs9_anchor":"openmeteo-current-Paris"}',
                 'live', 0, '{}', '{}',
-                '{"q_lcb_basis":"fused_center_bootstrap_p05","bayes_precision_fusion":{"current_evidence_shape":{"semantics_revision":"ensemble_center_scenarios_v4","shape_lag_hours":0.0,"translation_applied":false}}}',
+                '{"q_lcb_basis":"fused_center_bootstrap_p05","bayes_precision_fusion":{"current_evidence_shape":{"semantics_revision":"ensemble_center_scenarios_v4","shape_lag_hours":0.0,"source_cycle_time":"2026-06-07T06:00:00+00:00","translation_applied":false}}}',
                 '2026-06-07T06:00:00+00:00', '2026-06-07T10:00:00+00:00'
             )
             """
@@ -1561,7 +1561,7 @@ def _create_db(path) -> None:
                 'Madrid', '2026-06-09', 'high',
                 '{"baseline_b0":"baseline-stale-Madrid","openmeteo_ifs9_anchor":"openmeteo-current-Madrid"}',
                 'live', 0, '{}', '{}',
-                '{"q_lcb_basis":"fused_center_bootstrap_p05","bayes_precision_fusion":{"current_evidence_shape":{"semantics_revision":"ensemble_center_scenarios_v4","shape_lag_hours":0.0,"translation_applied":false}}}',
+                '{"q_lcb_basis":"fused_center_bootstrap_p05","bayes_precision_fusion":{"current_evidence_shape":{"semantics_revision":"ensemble_center_scenarios_v4","shape_lag_hours":0.0,"source_cycle_time":"2026-06-07T06:00:00+00:00","translation_applied":false}}}',
                 '2026-06-07T06:00:00+00:00', '2026-06-07T10:00:00+00:00'
             )
             """
@@ -1866,6 +1866,7 @@ def test_current_target_plan_reseeds_old_probability_semantics(tmp_path) -> None
                             "current_evidence_shape": {
                                 "semantics_revision": "older-law",
                                 "shape_lag_hours": 0.0,
+                                "source_cycle_time": "2026-06-07T06:00:00+00:00",
                                 "stale_shape_reused": False,
                                 "translation_applied": False,
                             }
@@ -1932,6 +1933,7 @@ def test_current_target_plan_reseeds_same_cycle_late_used_model_input(tmp_path) 
                                 "current_evidence_shape": {
                                     "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
                                     "shape_lag_hours": 0.0,
+                                    "source_cycle_time": "2026-06-07T06:00:00+00:00",
                                     "stale_shape_reused": False,
                                     "translation_applied": False,
                                 }

@@ -114,10 +114,20 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
             semantics_revision=CURRENT_EVIDENCE_SEMANTICS_REVISION,
             shape_lag_hours=0.0, stale_shape_reused=False,
             translation_applied=False,
+            shape_source_cycle_time=None,
             q_lcb=None, q_ucb=None, q_samples=None,
             q_samples_basis="global_simplex_current_finite_moment_evidence_v3"):
     if q_samples is None:
         q_samples = {key: [value, value] for key, value in q.items()}
+    if shape_source_cycle_time is not None:
+        shape_cycle = shape_source_cycle_time
+    else:
+        try:
+            shape_cycle = datetime.fromisoformat(
+                str(source_cycle_time or computed_at).replace("Z", "+00:00")
+            ) - timedelta(hours=shape_lag_hours)
+        except ValueError:
+            shape_cycle = NOW
     conn = sqlite3.connect(db_path)
     conn.execute(
         "INSERT INTO forecast_posteriors VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -140,6 +150,7 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
                         "current_evidence_shape": {
                             "semantics_revision": semantics_revision,
                             "shape_lag_hours": shape_lag_hours,
+                            "source_cycle_time": shape_cycle.isoformat(),
                             "stale_shape_reused": stale_shape_reused,
                             "translation_applied": translation_applied,
                         }
@@ -181,6 +192,38 @@ def test_stale_absolute_disagreement_remains_held_monitor_authority(forecasts_db
 
     assert belief is not None
     assert belief.held_side_prob == pytest.approx(0.242)
+
+
+@pytest.mark.parametrize(
+    "shape_cycle_time",
+    (NOW - timedelta(hours=31), NOW + timedelta(minutes=1)),
+)
+def test_selected_ensemble_cycle_outside_bound_has_no_held_authority(
+    forecasts_db,
+    shape_cycle_time,
+):
+    _insert(
+        forecasts_db,
+        posterior_id="selected-ensemble-outside-bound",
+        computed_at=(NOW - timedelta(hours=1)).isoformat(),
+        source_cycle_time=(NOW - timedelta(hours=12)).isoformat(),
+        q={BIN: 0.242, OTHER_BIN: 0.758},
+        shape_source_cycle_time=shape_cycle_time,
+    )
+
+    belief = load_replacement_belief(
+        city="Karachi",
+        target_date="2026-06-12",
+        temperature_metric="high",
+        bin_label=BIN,
+        direction="buy_yes",
+        db_path=forecasts_db,
+        now=NOW,
+    )
+
+    assert belief is not None
+    assert belief.fresh is False
+    assert belief.freshness_basis == "selected_ensemble_cycle_time"
 
 
 def _insert_raw(db_path, *, source_cycle_time, city="Karachi",
@@ -721,6 +764,10 @@ class TestLoadReplacementBelief:
                             "used_models": ["icon_global"],
                             "current_evidence_shape": {
                                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                                "shape_lag_hours": 0.0,
+                                "source_cycle_time": posterior_cycle.isoformat(),
+                                "stale_shape_reused": False,
+                                "translation_applied": False,
                             },
                         },
                         "q_bootstrap_samples_basis":
@@ -828,6 +875,10 @@ class TestLoadReplacementBelief:
                             },
                             "current_evidence_shape": {
                                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                                "shape_lag_hours": 0.0,
+                                "source_cycle_time": posterior_cycle.isoformat(),
+                                "stale_shape_reused": False,
+                                "translation_applied": False,
                             },
                         },
                         "q_bootstrap_samples_basis":

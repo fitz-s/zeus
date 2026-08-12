@@ -406,6 +406,69 @@ def test_stale_shape_selected_ensemble_beyond_outer_bound_is_blocked() -> None:
     )
 
 
+def test_same_cycle_shape_selected_ensemble_future_or_old_is_blocked() -> None:
+    for shape_cycle_time in (_dt(4, 18), _dt(6, 12, 1)):
+        conn = _conn()
+        posterior_id = _insert_posterior(
+            conn,
+            source_cycle_time=_dt(6, 0),
+            source_available_at=_dt(6, 7),
+            computed_at=_dt(6, 7, 30),
+            q_mode=_FUSED_FULL,
+            with_bounds=True,
+            shape_source_cycle_time=shape_cycle_time,
+        )
+        readiness = _readiness(
+            posterior_id=posterior_id,
+            computed_at=_dt(6, 7, 30),
+            expires_at=_dt(6, 23),
+            decision_time=_dt(6, 7, 30),
+        )
+
+        result = _read(conn, readiness, decision_time=_dt(6, 12))
+
+        assert result.ok is False
+        assert (
+            result.reason_code
+            == "REPLACEMENT_ENSEMBLE_CYCLE_AGE_EXCEEDS_BOUND"
+        )
+
+
+def test_same_cycle_shape_without_selected_ensemble_time_is_blocked() -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+    )
+    row = conn.execute(
+        "SELECT provenance_json FROM forecast_posteriors WHERE posterior_id = ?",
+        (posterior_id,),
+    ).fetchone()
+    provenance = json.loads(row[0])
+    del provenance["bayes_precision_fusion"]["current_evidence_shape"][
+        "source_cycle_time"
+    ]
+    conn.execute(
+        "UPDATE forecast_posteriors SET provenance_json = ? WHERE posterior_id = ?",
+        (json.dumps(provenance), posterior_id),
+    )
+    readiness = _readiness(
+        posterior_id=posterior_id,
+        computed_at=_dt(6, 7, 30),
+        expires_at=_dt(6, 23),
+        decision_time=_dt(6, 7, 30),
+    )
+
+    result = _read(conn, readiness, decision_time=_dt(6, 12))
+
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
+
+
 def test_stale_absolute_disagreement_row_has_held_redecision_authority() -> None:
     conn = _conn()
     posterior_id = _insert_posterior(

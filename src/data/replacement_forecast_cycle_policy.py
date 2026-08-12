@@ -128,6 +128,26 @@ def _current_evidence_shape(provenance: object) -> Mapping[str, object] | None:
     return shape if isinstance(shape, Mapping) else None
 
 
+def current_evidence_shape_source_cycle_time(
+    provenance: object,
+) -> datetime | None:
+    """Return the selected ENS cycle only when its timestamp is timezone-aware."""
+
+    shape = _current_evidence_shape(provenance)
+    if shape is None:
+        return None
+    raw = shape.get("source_cycle_time")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
 def current_evidence_shape_semantics_mismatch(provenance: object) -> bool:
     """Whether a shaped certificate was built under different probability law.
 
@@ -159,6 +179,8 @@ def _current_evidence_shape_has_probability_authority(
 
     shape = _current_evidence_shape(provenance)
     if shape is None:
+        return False
+    if current_evidence_shape_source_cycle_time(provenance) is None:
         return False
     shape_lag_hours = shape.get("shape_lag_hours")
     if (
@@ -278,6 +300,15 @@ def tradeable_grade_coverage_sql(
     ens_cycle_value = (
         f"json_extract({provenance_expr}, '{shape_path}.source_cycle_time')"
     )
+    ens_cycle_type = (
+        f"json_type({provenance_expr}, '{shape_path}.source_cycle_time')"
+    )
+    ens_cycle_has_timezone = (
+        f"(substr({ens_cycle_value}, -1, 1) = 'Z' OR ("
+        f"length({ens_cycle_value}) >= 6 AND "
+        f"substr({ens_cycle_value}, -6, 1) IN ('+', '-') AND "
+        f"substr({ens_cycle_value}, -3, 1) = ':'))"
+    )
     max_lag = replacement_source_cycle_max_age_hours()
     # Same-cycle and bounded latest-causal raw ENS members are both current
     # evidence under replacement_final_form section 1d. Translated shapes and
@@ -286,16 +317,17 @@ def tradeable_grade_coverage_sql(
         "AND ("
         f"{translation_type} = 'false' AND "
         f"{lag_type} IN ('integer', 'real') AND "
-        f"{lag_value} >= 0.0 AND {lag_value} <= {max_lag!r} AND (("
+        f"{lag_value} >= 0.0 AND {lag_value} <= {max_lag!r} AND "
+        f"{ens_cycle_type} = 'text' AND {ens_cycle_has_timezone} AND "
+        f"julianday({ens_cycle_value}) IS NOT NULL AND "
+        f"(julianday('{decision_iso}') - julianday({ens_cycle_value})) * 24.0 "
+        f"BETWEEN 0.0 AND {max_lag!r} AND (("
         f"{lag_value} = 0.0 AND "
         f"({stale_type} IS NULL OR {stale_type} = 'false') AND "
         f"{revision_value} = "
         f"'{CURRENT_EVIDENCE_SEMANTICS_REVISION}') OR ("
         f"{lag_value} > 0.0 AND "
         f"{stale_type} = 'true' AND "
-        f"julianday({ens_cycle_value}) IS NOT NULL AND "
-        f"(julianday('{decision_iso}') - julianday({ens_cycle_value})) * 24.0 "
-        f"BETWEEN 0.0 AND {max_lag!r} AND "
         f"{revision_value} = "
         f"'{STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION}')))"
     )
@@ -358,6 +390,23 @@ def cycle_age_exceeds_bound(
     """True iff the source cycle is older than the staleness bound relative to ``reference_time``."""
     bound = replacement_source_cycle_max_age_hours() if max_age_hours is None else float(max_age_hours)
     return cycle_age_hours(reference_time, source_cycle_time) > bound
+
+
+def cycle_age_outside_bound(
+    reference_time: datetime,
+    source_cycle_time: datetime,
+    *,
+    max_age_hours: float | None = None,
+) -> bool:
+    """True when a source cycle is future-dated or older than the causal bound."""
+
+    bound = (
+        replacement_source_cycle_max_age_hours()
+        if max_age_hours is None
+        else float(max_age_hours)
+    )
+    age = cycle_age_hours(reference_time, source_cycle_time)
+    return age < 0.0 or age > bound
 
 
 def classify_cycle_phase(source_cycle_time: datetime) -> str:

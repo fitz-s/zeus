@@ -63,7 +63,11 @@ from src.data.replacement_forecast_readiness import (
 )
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    current_evidence_shape_has_held_authority,
+    current_evidence_shape_source_cycle_time,
     current_evidence_shape_semantics_mismatch,
+    cycle_age_hours,
+    cycle_age_outside_bound,
 )
 
 logger = logging.getLogger(__name__)
@@ -848,6 +852,7 @@ def load_replacement_belief(
     if row is None:
         return None
     provenance: Mapping[str, object] = {}
+    selected_ensemble_cycle_outside_bound = False
     if row["provenance_json"] is not None:
         try:
             provenance = json.loads(str(row["provenance_json"]))
@@ -862,6 +867,28 @@ def load_replacement_belief(
                 CURRENT_EVIDENCE_SEMANTICS_REVISION,
             )
             return None
+        if not current_evidence_shape_has_held_authority(provenance):
+            logger.warning(
+                "position_belief: current-evidence shape lacks held authority for %s/%s/%s",
+                city,
+                target_date,
+                temperature_metric,
+            )
+            return None
+        selected_ensemble_cycle = current_evidence_shape_source_cycle_time(
+            provenance
+        )
+        if (
+            selected_ensemble_cycle is None
+            or cycle_age_outside_bound(now_dt, selected_ensemble_cycle)
+        ):
+            selected_ensemble_cycle_outside_bound = True
+            logger.warning(
+                "position_belief: selected ensemble cycle outside causal bound for %s/%s/%s",
+                city,
+                target_date,
+                temperature_metric,
+            )
     try:
         q = json.loads(row["q_json"] or "null")
         q_lcb = json.loads(row["q_lcb_json"] or "null")
@@ -937,21 +964,19 @@ def load_replacement_belief(
     fresh = 0.0 <= age_hours <= float(max_age_hours)
     if source_cycle_time is not None:
         try:
-            from src.data.replacement_forecast_cycle_policy import (
-                cycle_age_hours,
-                cycle_age_exceeds_bound,
-            )
-
             source_cycle_age_hours = cycle_age_hours(now_dt, source_cycle_time)
             fresh = (
                 0.0 <= age_hours
                 and 0.0 <= source_cycle_age_hours
-                and not cycle_age_exceeds_bound(now_dt, source_cycle_time)
+                and not cycle_age_outside_bound(now_dt, source_cycle_time)
             )
             freshness_basis = "source_cycle_time"
         except Exception:  # noqa: BLE001 - keep the old explicit age gate as fallback
             source_cycle_age_hours = (now_dt - source_cycle_time).total_seconds() / 3600.0
             fresh = 0.0 <= age_hours <= float(max_age_hours)
+    if selected_ensemble_cycle_outside_bound:
+        fresh = False
+        freshness_basis = "selected_ensemble_cycle_time"
     raw_cycle_lag_hours: float | None = None
     if (
         latest_raw_cycle_time is not None
