@@ -3889,3 +3889,16 @@ For finite common-axis scoring only, an exact-one raw bid receives a one-current
 tick economic haircut; the immutable raw JIT curve and execution authority keep
 the actual `1.0` quote, so Zeus can submit `0.95` and retain favorable fill
 improvement without creating an infinite/undefined efficiency value.
+
+Live reconstruction then found a pre-fix Shanghai SELL stranded in
+`backoff_exhausted`: its last rejection was the retired executor error
+`live_order_executable_price_out_of_bounds: best_bid=0.999`. Correcting the
+forward boundary alone cannot clear durable debt created by the old domain
+collapse. Retry recovery now recognizes only that exact legacy shape with a
+finite bid in `(0.95,1]`, first proves that no EXIT command owns the shares,
+then either requests a fresh global q/book/wealth auction for a canonical
+global SELL or releases a non-global exit to normal current redecision. It does
+not replay the old quote or certificate, and malformed or `>1` values remain
+`backoff_exhausted`. Acceptance requires an exact historical-error antibody,
+global command-ownership proof, fresh-auction debt creation, and a `>1`
+counterexample that remains fail-closed.

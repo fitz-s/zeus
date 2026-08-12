@@ -8364,6 +8364,121 @@ def test_backoff_exhausted_sub_floor_rejection_reenters_liquidity_wait(conn):
     assert position.last_exit_error == "exit_no_in_band_bid"
 
 
+def test_backoff_exhausted_legacy_favorable_bid_reenters_global_auction(conn):
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+    from src.state.projection import upsert_position_current
+
+    position = Position(
+        trade_id="pos-backoff-legacy-favorable-bid",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Shanghai",
+        cluster="asia",
+        target_date="2026-08-12",
+        temperature_metric="high",
+        bin_label="27C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.07,
+        size_usd=1.4,
+        shares=20.0,
+        chain_shares=20.0,
+        cost_basis_usd=1.4,
+        chain_cost_basis_usd=1.4,
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        chain_state="synced",
+        exit_state="backoff_exhausted",
+        order_status="backoff_exhausted",
+        exit_retry_count=46,
+        exit_reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        last_exit_error=(
+            "live_order_executable_price_out_of_bounds: best_bid=0.999"
+        ),
+        strategy_key="forecast_qkernel_entry",
+        entered_at=_NOW.isoformat(),
+        env="live",
+    )
+    upsert_position_current(conn, build_position_current_projection(position))
+    _seed_exit_intent_event(
+        conn,
+        position_id=position.trade_id,
+        shares=position.shares,
+        close_position=True,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+    )
+
+    assert exit_lifecycle.check_pending_retries(position, conn=conn) is False
+    assert position.state == "pending_exit"
+    assert position.exit_state == "retry_pending"
+    assert position.order_status == "retry_pending"
+    assert position.exit_retry_count == 46
+    assert position.last_exit_error.startswith(
+        "global_sell_exit_executable_snapshot_error: "
+        "legacy_favorable_bid_rejection:"
+    )
+
+    conn.commit()
+    assert exit_lifecycle.check_pending_retries(
+        position,
+        conn=conn,
+        global_sell_reauction_requester=lambda *_args: True,
+    ) is True
+    if conn.in_transaction:
+        conn.commit()
+    requested = []
+    assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+        position,
+        conn=conn,
+        requester=lambda released, force_new: (
+            requested.append((released.trade_id, force_new)) or True
+        ),
+    ) is True
+    assert requested == [(position.trade_id, True)]
+
+
+def test_backoff_exhausted_impossible_legacy_bid_stays_fail_closed(conn):
+    from src.execution.exit_lifecycle import check_pending_retries
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="pos-backoff-impossible-legacy-bid",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Shanghai",
+        cluster="asia",
+        target_date="2026-08-12",
+        bin_label="27C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.07,
+        size_usd=1.4,
+        shares=20.0,
+        chain_shares=20.0,
+        cost_basis_usd=1.4,
+        state="pending_exit",
+        pre_exit_state="day0_window",
+        chain_state="synced",
+        exit_state="backoff_exhausted",
+        order_status="backoff_exhausted",
+        exit_retry_count=46,
+        last_exit_error=(
+            "live_order_executable_price_out_of_bounds: best_bid=1.001"
+        ),
+        strategy_key="forecast_qkernel_entry",
+        env="live",
+    )
+
+    assert check_pending_retries(position, conn=conn) is False
+    assert position.exit_state == "backoff_exhausted"
+    assert position.order_status == "backoff_exhausted"
+    assert position.exit_retry_count == 46
+
+
 def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, monkeypatch):
     from src.execution import exit_lifecycle
     from src.riskguard.risk_level import RiskLevel

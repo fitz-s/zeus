@@ -419,6 +419,29 @@ def _is_out_of_band_exit_price_error(error: object) -> bool:
         return False
 
 
+def _is_legacy_favorable_bid_rejection(error: object) -> bool:
+    """Recognize the retired executor check that treated a bid as a limit.
+
+    The old boundary rejected a probability-domain counterparty bid above the
+    submitted-action ceiling even though the legal SELL limit remained 0.95.
+    Only that exact historical shape, with a finite bid in ``(0.95, 1]``, is
+    recovery authority; malformed or genuinely impossible prices stay closed.
+    """
+
+    match = re.fullmatch(
+        r"live_order_executable_price_out_of_bounds:\s*"
+        r"best_bid=([0-9]+(?:\.[0-9]+)?)",
+        str(error or "").strip().lower(),
+    )
+    if match is None:
+        return False
+    try:
+        bid = Decimal(match.group(1))
+    except InvalidOperation:
+        return False
+    return LIVE_ORDER_MAX_UNIT_PRICE < bid <= Decimal("1")
+
+
 def _is_exit_liquidity_wait_error(error: object) -> bool:
     return str(error or "") in _EXIT_LIQUIDITY_WAIT_ERRORS or _is_out_of_band_exit_price_error(error)
 
@@ -9348,6 +9371,25 @@ def check_pending_retries(
         return False
 
     if position.exit_state == "backoff_exhausted":
+        if _is_legacy_favorable_bid_rejection(previous_error):
+            if command_ownership == "GLOBAL_NO_COMMAND":
+                _mark_exit_retry(
+                    position,
+                    reason=(
+                        f"{getattr(position, 'exit_reason', '') or 'EXIT'} "
+                        "[LEGACY_FAVORABLE_BID_REAUCTION]"
+                    ),
+                    error=(
+                        "global_sell_exit_executable_snapshot_error: "
+                        f"legacy_favorable_bid_rejection:{previous_error}"
+                    ),
+                    conn=conn,
+                )
+                return False
+            return release_backoff_exhausted_pending_exit_for_redecision(
+                position,
+                conn=conn,
+            )
         if not _is_out_of_band_exit_price_error(previous_error):
             return False
         _mark_exit_retry(
