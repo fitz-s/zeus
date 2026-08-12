@@ -1416,39 +1416,26 @@ def _exact_current_value_serving_lag(
         )
 
     if newer_cycle_changes:
-        # A provider can publish before the rest of its source-clock cohort.
-        # That isolated row is not yet a materializable probability authority:
-        # invalidating the last coherent carrier here would create a blind HOLD
-        # until a second provider arrives. Use the exact same <=3h/two-provider
-        # cohort authority as the materializer; once a changed used model is in
-        # that cohort, the old posterior is genuinely superseded.
-        from src.data.replacement_forecast_materializer import (  # noqa: PLC0415
-            _freshest_coherent_provider_models,
+        # Freshness asks whether the posterior consumed every current input it
+        # claims to use, not whether enough peers have arrived to materialize a
+        # replacement yet.  Waiting for a coherent cohort here would brand an
+        # exactly superseded provider row current and, after the scalar carrier
+        # check is correctly demoted to telemetry, fail open.  The materializer
+        # may still wait for its complete probability shape; held redecision
+        # remains honestly stale until that producer commits a new posterior.
+        model, latest_id, consumed_id, current_cycle, consumed_cycle = (
+            newer_cycle_changes[0]
         )
-
-        cycle_by_model = {
-            model: cycle
-            for model, value in selected.items()
-            if (cycle := _parse_source_cycle_utc(value.served_cycle)) is not None
-        }
-        coherent_models = frozenset(
-            _freshest_coherent_provider_models(cycle_by_model)
+        return (
+            True,
+            "basis=used_raw_model_forecasts_superseded:"
+            f"model={model}:"
+            f"latest_raw_id={latest_id}:"
+            f"consumed_raw_id={consumed_id}:"
+            f"latest_raw_cycle={current_cycle.isoformat()}:"
+            f"consumed_raw_cycle={consumed_cycle.isoformat()}",
+            consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
         )
-        for model, latest_id, consumed_id, current_cycle, consumed_cycle in (
-            newer_cycle_changes
-        ):
-            if model not in coherent_models:
-                continue
-            return (
-                True,
-                "basis=used_raw_model_forecasts_superseded:"
-                f"model={model}:"
-                f"latest_raw_id={latest_id}:"
-                f"consumed_raw_id={consumed_id}:"
-                f"latest_raw_cycle={current_cycle.isoformat()}:"
-                f"consumed_raw_cycle={consumed_cycle.isoformat()}",
-                consumed.get("ecmwf_ifs", (0, consumed_cycle, None))[1],
-            )
 
     anchor = consumed.get("ecmwf_ifs")
     return True, None, anchor[1] if anchor is not None else None

@@ -2763,8 +2763,8 @@ def test_raw_hwm_blocks_when_exact_consumed_model_is_superseded() -> None:
     assert "model=gfs" in result.reason_code
 
 
-def test_raw_hwm_keeps_carrier_for_isolated_next_cycle_provider() -> None:
-    """One provider >3h ahead cannot invalidate the last coherent carrier."""
+def test_raw_hwm_marks_isolated_used_provider_revision_unconsumed() -> None:
+    """One used provider's exact new row is stale even before peers arrive."""
     conn = _conn()
     posterior_id = _insert_posterior(conn)
     consumed: dict[str, dict[str, object]] = {}
@@ -2807,7 +2807,9 @@ def test_raw_hwm_keeps_carrier_for_isolated_next_cycle_provider() -> None:
         posterior_provenance=_with_current_value_serving(consumed),
     )
 
-    assert reason is None
+    assert reason is not None
+    assert "basis=used_raw_model_forecasts_superseded" in reason
+    assert "model=icon_eu" in reason
 
 
 def test_raw_hwm_fails_closed_on_unverifiable_current_value_provenance() -> None:

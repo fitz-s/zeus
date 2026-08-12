@@ -24,9 +24,11 @@ served row is still current.
 SCOPE is one held `(city, target_date, metric)` posterior read.  DRAIN is the
 existing input-revision/cycle materializer.  RESET is exact equality between
 persisted `current_value_serving` identities and the current coherent provider
-frontier; an unconsumed or unverifiable row remains fail-closed.  Acceptance
-requires paired antibodies for a consumed newer provider vector and a truly
-superseding coherent provider vector, plus forward live Madrid monitor proof.
+frontier; an unconsumed or unverifiable row remains fail-closed even when only
+one used provider has advanced and a replacement cohort is not materializable
+yet.  Acceptance requires paired antibodies for a consumed newer provider
+vector, an isolated unconsumed revision, and a superseding coherent provider
+vector, plus forward live Madrid monitor proof.
 
 ## 2026-08-12 Expired held belief can rematerialize its same causal cycle
 
