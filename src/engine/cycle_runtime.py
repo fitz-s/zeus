@@ -6594,10 +6594,17 @@ def execute_monitoring_phase(
     # consume the shared claim deadline.  Hard-fact positions do not read this
     # snapshot, but including every family keeps one complete immutable cut and
     # avoids a second scalar/fan-out path after preclassification.
+    hwm_deadline = min(
+        monitor_deadline,
+        max(
+            time.monotonic() + primary_reserve_seconds,
+            monitor_deadline - primary_reserve_seconds,
+        ),
+    )
     _prefetch_held_replacement_artifact_hwm(
         monitor_positions,
         decision_time=monitor_now_utc,
-        deadline_monotonic=monitor_deadline - primary_reserve_seconds,
+        deadline_monotonic=hwm_deadline,
         sql_timeout_seconds=primary_reserve_seconds,
         clob=clob,
         summary=summary,

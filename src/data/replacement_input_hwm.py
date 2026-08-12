@@ -184,6 +184,36 @@ def _require_hwm_deadline(
         _raise_hwm_deadline_elapsed(basis=basis)
 
 
+def _bounded_artifact_table_ref(
+    conn: sqlite3.Connection,
+    *,
+    deadline_monotonic: float | None,
+    sql_timeout_seconds: float | None,
+) -> str | None:
+    with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
+        attached = _database_names(conn)
+    for candidate in (
+        *(("forecasts.raw_forecast_artifacts",) if "forecasts" in attached else ()),
+        *(("world.raw_forecast_artifacts",) if "world" in attached else ()),
+        "raw_forecast_artifacts",
+    ):
+        with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
+            if _table_ref_exists(conn, candidate):
+                return candidate
+    return None
+
+
+def _bounded_hwm_table_ref_columns(
+    conn: sqlite3.Connection,
+    table_ref: str,
+    *,
+    deadline_monotonic: float | None,
+    sql_timeout_seconds: float | None,
+) -> frozenset[str]:
+    with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
+        return _hwm_table_ref_columns(conn, table_ref)
+
+
 def _hwm_table_ref_columns(
     conn: sqlite3.Connection,
     table_ref: str,
@@ -831,12 +861,19 @@ def _batch_artifact_cycles(
     deadline_monotonic: float | None = None,
     sql_timeout_seconds: float | None = None,
 ) -> tuple[bool, dict[tuple[str, str, str], datetime]]:
-    with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
-        table_ref = _authority_table_ref(conn, "raw_forecast_artifacts")
+    table_ref = _bounded_artifact_table_ref(
+        conn,
+        deadline_monotonic=deadline_monotonic,
+        sql_timeout_seconds=sql_timeout_seconds,
+    )
     if table_ref is None:
         return True, {}
-    with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
-        columns = _hwm_table_ref_columns(conn, table_ref)
+    columns = _bounded_hwm_table_ref_columns(
+        conn,
+        table_ref,
+        deadline_monotonic=deadline_monotonic,
+        sql_timeout_seconds=sql_timeout_seconds,
+    )
     required = {
         "source_cycle_time",
         "captured_at",

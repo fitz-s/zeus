@@ -271,11 +271,23 @@ def test_cycle_hwm_sql_deadline_is_not_installed_during_payload_validation(
     class TrackingConnection(sqlite3.Connection):
         progress_active = False
         progress_transitions: list[bool]
+        bounded_sql_count = 0
 
         def set_progress_handler(self, progress_handler, n):
+            if progress_handler is not None:
+                assert self.progress_active is False
+                self.bounded_sql_count = 0
+            else:
+                assert self.bounded_sql_count <= 1
             self.progress_active = progress_handler is not None
             self.progress_transitions.append(self.progress_active)
             return super().set_progress_handler(progress_handler, n)
+
+        def execute(self, sql, parameters=(), /):
+            if self.progress_active:
+                assert self.bounded_sql_count == 0
+                self.bounded_sql_count += 1
+            return super().execute(sql, parameters)
 
     db_path = tmp_path / "forecast.db"
     artifact_path = tmp_path / "manifest.json"
