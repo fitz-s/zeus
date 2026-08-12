@@ -5159,6 +5159,52 @@ def test_sub_min_partial_position_fails_closed_when_exact_latest_row_missing(
     )
 
 
+def test_sub_min_partial_position_rejects_misdirected_snapshot_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sd = tmp_path / "state"
+    sd.mkdir()
+    _setup_healthy_state(sd)
+    monkeypatch.setattr(live_health, "_dirty_runtime_worktree_paths", lambda **_kwargs: ())
+    now = datetime.now(timezone.utc)
+    _write_sub_min_partial_position_db(sd, now=now, chain_shares=3.8)
+    conn = sqlite3.connect(sd / "zeus_trades.db")
+    try:
+        conn.execute(
+            "INSERT INTO executable_market_snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "snap-wrong-held-token",
+                "cond-other",
+                "token-other",
+                "2",
+                "0.80",
+                "0.84",
+                (now - timedelta(seconds=5)).isoformat(),
+                (now + timedelta(minutes=1)).isoformat(),
+            ),
+        )
+        conn.execute(
+            "UPDATE executable_market_snapshot_latest SET snapshot_id = ? "
+            "WHERE condition_id = 'cond-sub-min' "
+            "AND selected_outcome_token_id = 'token-no-sub-min'",
+            ("snap-wrong-held-token",),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    surface = compute_composite_live_health(state_dir=sd, now=now)["surfaces"][
+        "sub_min_partial_position"
+    ]
+
+    assert surface["ok"] is False
+    assert surface["issue"].endswith(
+        "EXECUTABLE_MARKET_SNAPSHOT_LATEST_EXACT_ROW_MISSING"
+    )
+    assert surface["missing_position_ids"] == ["pos-sub-min"]
+
+
 def test_sub_min_partial_position_query_has_no_correlated_temp_sort(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

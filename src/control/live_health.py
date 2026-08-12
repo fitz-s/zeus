@@ -3946,6 +3946,8 @@ def _sub_min_partial_position_surface(state_dir: Path, now: datetime) -> dict:
            AND l.selected_outcome_token_id = ap.exit_token_id
           LEFT JOIN executable_market_snapshots s
             ON s.snapshot_id = l.snapshot_id
+           AND s.condition_id = ap.condition_id
+           AND s.selected_outcome_token_id = ap.exit_token_id
         """,
         (),
     )
