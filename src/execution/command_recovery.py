@@ -75,7 +75,10 @@ from src.state.venue_command_repo import (
     UNRESOLVED_SIDE_EFFECT_STATES,
 )
 from src.state.write_coordinator import WriteLeaseTimeout
-from src.venue.response_contracts import is_pre_sdk_no_side_effect_rejection
+from src.venue.response_contracts import (
+    VenueOrderNotFound,
+    is_pre_sdk_no_side_effect_rejection,
+)
 
 logger = logging.getLogger(__name__)
 _RECOVERY_MONITOR_PREEMPTION = threading.local()
@@ -975,6 +978,67 @@ def _client_read_items(client, method_name: str) -> SimpleNamespace:
             ),
         )
     raise AttributeError(f"client does not expose {method_name}")
+
+
+def _client_point_order_read(client, order_id: str) -> SimpleNamespace:
+    """Return one authenticated point-order result or an incomplete proof.
+
+    ``None`` is never absence authority.  The live V2 adapter reports an exact
+    authenticated HTTP 404 as ``VenueOrderNotFound``; test/fake clients must
+    explicitly declare the same complete point-read contract.
+    """
+
+    adapter_factory = getattr(client, "_ensure_v2_adapter", None)
+    if callable(adapter_factory):
+        source = adapter_factory()
+        reader = getattr(source, "get_order", None)
+        authenticated = callable(reader)
+    else:
+        source = client
+        reader = getattr(client, "get_order", None)
+        authenticated = bool(
+            getattr(client, "authenticated_point_reads_are_complete", False)
+            or getattr(reader, "authenticated_point_reads_are_complete", False)
+        )
+    source_name = f"{source.__class__.__name__}.get_order"
+    if not callable(reader) or not authenticated:
+        return SimpleNamespace(
+            point_order=None,
+            absent=False,
+            query_complete=False,
+            source=f"{source_name}:unverified",
+            order_id=str(order_id),
+            absence_reason=None,
+        )
+    try:
+        value = reader(str(order_id))
+    except VenueOrderNotFound:
+        return SimpleNamespace(
+            point_order=None,
+            absent=True,
+            query_complete=True,
+            source=f"{source_name}:authenticated_http_404",
+            order_id=str(order_id),
+            absence_reason="authenticated_order_404",
+        )
+    payload = _venue_order_payload(value)
+    if payload is None or str(_extract_order_id(payload) or "") != str(order_id):
+        return SimpleNamespace(
+            point_order=None,
+            absent=False,
+            query_complete=False,
+            source=f"{source_name}:malformed_or_identity_mismatch",
+            order_id=str(order_id),
+            absence_reason=None,
+        )
+    return SimpleNamespace(
+        point_order=payload,
+        absent=False,
+        query_complete=True,
+        source=f"{source_name}:authenticated_point_order",
+        order_id=str(order_id),
+        absence_reason=None,
+    )
 
 
 def _command_mapping(cmd: VenueCommand) -> dict:
@@ -19091,6 +19155,49 @@ def _order_fact_is_terminal_no_fill(fact: dict | None, venue_order_id: str) -> b
     return _decimal_is_zero(fact.get("matched_size"))
 
 
+def _bound_fak_exit_intent_baseline(
+    conn: sqlite3.Connection,
+    command: Mapping[str, object],
+) -> SimpleNamespace | None:
+    """Load the immutable full-position share cut that authorized this EXIT."""
+
+    cutoff = _parse_ts(str(command.get("updated_at") or ""))
+    position_id = str(command.get("position_id") or "")
+    if cutoff is None or not position_id:
+        return None
+    rows = conn.execute(
+        """
+        SELECT event_id, occurred_at, payload_json
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'EXIT_INTENT'
+         ORDER BY sequence_no DESC
+        """,
+        (position_id,),
+    ).fetchall()
+    for row in rows:
+        event = _dict_row(row)
+        occurred_at = _parse_ts(str(event.get("occurred_at") or ""))
+        if occurred_at is None or occurred_at > cutoff:
+            continue
+        payload = _json_dict(event.get("payload_json"))
+        if payload.get("exit_intent_close_position") is not True:
+            continue
+        certificate = payload.get("exit_intent_capital_certificate")
+        certificate = certificate if isinstance(certificate, Mapping) else {}
+        shares = _decimal_or_none(
+            certificate.get("held_shares", payload.get("exit_intent_shares"))
+        )
+        if shares is None or shares <= 0:
+            continue
+        return SimpleNamespace(
+            event_id=str(event.get("event_id") or ""),
+            occurred_at=str(event.get("occurred_at") or ""),
+            shares=shares,
+        )
+    return None
+
+
 def _review_required_bound_fak_exit_recovery(
     conn: sqlite3.Connection,
     cmd: VenueCommand,
@@ -19141,7 +19248,7 @@ def _review_required_bound_fak_exit_recovery(
         return "stayed"
 
     try:
-        point_order = _venue_order_payload(client.get_order(str(cmd.venue_order_id)))
+        point_read = _client_point_order_read(client, str(cmd.venue_order_id))
         open_read = _client_read_items(client, "get_open_orders")
         trade_read = _client_read_items(client, "get_trades")
     except Exception as exc:  # noqa: BLE001 - incomplete venue truth retries later.
@@ -19151,8 +19258,13 @@ def _review_required_bound_fak_exit_recovery(
             exc,
         )
         return "error"
-    if not open_read.query_complete or not trade_read.query_complete:
+    if (
+        not point_read.query_complete
+        or not open_read.query_complete
+        or not trade_read.query_complete
+    ):
         return "stayed"
+    point_order = point_read.point_order
     open_orders = [_raw_payload(order) for order in open_read.items]
     trades = [_raw_payload(trade) for trade in trade_read.items]
     matching_open_orders = _matching_open_orders_for_command(
@@ -19205,24 +19317,20 @@ def _review_required_bound_fak_exit_recovery(
     if matching_open_orders or matching_trades or bound_positive_trades:
         return "stayed"
 
-    point_order_absent = point_order is None
+    point_order_absent = point_read.absent
     if point_order_absent:
         point_order = {
             "orderID": venue_order_id,
             "status": "NOT_FOUND",
-            "source_error": "complete_bound_fak_account_absence",
+            "source_error": point_read.absence_reason,
         }
     point_status = _order_status(point_order)
-    point_no_live_record = _point_order_no_live_record(
-        point_order,
-        expected_order_id=venue_order_id,
-    )
     no_fill_proven, _ = _terminal_point_order_zero_fill_proven(
         conn,
         command_id=cmd.command_id,
         point_order=point_order,
     )
-    if point_no_live_record:
+    if point_order_absent:
         no_fill_proven = True
     if not no_fill_proven:
         return "stayed"
@@ -19231,15 +19339,20 @@ def _review_required_bound_fak_exit_recovery(
     command_updated_at = _parse_ts(command.get("updated_at"))
     shares = _decimal_or_none(command.get("position_shares"))
     chain_shares = _decimal_or_none(command.get("position_chain_shares"))
+    exit_baseline = _bound_fak_exit_intent_baseline(conn, command)
     if (
         chain_seen_at is None
         or command_updated_at is None
-        or chain_seen_at < command_updated_at
+        or chain_seen_at <= command_updated_at
         or shares is None
         or chain_shares is None
+        or exit_baseline is None
         or shares <= 0
         or chain_shares <= 0
-        or abs(shares - chain_shares) > Decimal("0.011")
+        or abs(shares - chain_shares) > _POSITION_PROJECTION_TOLERANCE
+        or abs(shares - exit_baseline.shares) > _POSITION_PROJECTION_TOLERANCE
+        or abs(chain_shares - exit_baseline.shares)
+        > _POSITION_PROJECTION_TOLERANCE
     ):
         return "stayed"
 
@@ -19251,7 +19364,12 @@ def _review_required_bound_fak_exit_recovery(
     conn.execute(f"SAVEPOINT {sp_name}")
     try:
         venue_read_proof = {
+            "point_order_checked": True,
+            "point_order_query_complete": point_read.query_complete,
+            "point_order_source": point_read.source,
+            "point_order_id": point_read.order_id,
             "point_order_absent": point_order_absent,
+            "point_order_absence_reason": point_read.absence_reason,
             "open_orders_query_complete": open_read.query_complete,
             "open_orders_pagination_scope": open_read.pagination_scope,
             "trades_query_complete": trade_read.query_complete,
@@ -19271,7 +19389,7 @@ def _review_required_bound_fak_exit_recovery(
                         "review_bound_fak_exit_no_live_record_terminal_no_fill"
                     ),
                     venue_resp_present_for_terminal_state=(
-                        False if point_no_live_record else None
+                        False if point_order_absent else None
                     ),
                     venue_read_proof=venue_read_proof,
                 )
@@ -19287,6 +19405,9 @@ def _review_required_bound_fak_exit_recovery(
                 "position_shares": str(shares),
                 "chain_shares": str(chain_shares),
                 "shares_delta": str(abs(shares - chain_shares)),
+                "exit_intent_event_id": exit_baseline.event_id,
+                "exit_intent_occurred_at": exit_baseline.occurred_at,
+                "pre_exit_shares": str(exit_baseline.shares),
             },
             "venue_read_proof": venue_read_proof,
         }
@@ -19305,6 +19426,12 @@ def _review_required_bound_fak_exit_recovery(
             "time_window_end": observed_at,
             "open_orders_checked": True,
             "trades_checked": True,
+            "point_order_checked": True,
+            "point_order_query_complete": point_read.query_complete,
+            "point_order_source": point_read.source,
+            "point_order_id": point_read.order_id,
+            "point_order_absent": point_order_absent,
+            "point_order_absence_reason": point_read.absence_reason,
             "open_orders_query_complete": True,
             "trades_query_complete": True,
             "pagination_scope": (
@@ -19329,8 +19456,10 @@ def _review_required_bound_fak_exit_recovery(
             "no_matching_trades": True,
             "open_orders_query_complete": True,
             "trades_query_complete": True,
+            "point_order_query_complete": True,
             "chain_snapshot_newer_than_command": True,
             "chain_shares_unchanged": True,
+            "position_shares_match_exit_intent": True,
             "pending_exit_projection": True,
         }
         append_event(

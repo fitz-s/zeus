@@ -173,7 +173,7 @@ def _bounded_hwm_sql(
         lock_wait_seconds = min(1.0, remaining)
         conn.execute(
             "PRAGMA busy_timeout = "
-            f"{max(1, int(lock_wait_seconds * 1000))}"
+            f"{max(0, int(lock_wait_seconds * 1000))}"
         )
         conn.set_progress_handler(lambda: int(deadline_elapsed()), 1_000)
         handler_installed = True
@@ -190,9 +190,11 @@ def _bounded_hwm_sql(
             basis="raw_artifact_input_hwm_read_unavailable",
         )
     finally:
-        if handler_installed:
-            conn.set_progress_handler(None, 0)
-        conn.execute(f"PRAGMA busy_timeout = {previous_busy_timeout_ms}")
+        try:
+            if handler_installed:
+                conn.set_progress_handler(None, 0)
+        finally:
+            conn.execute(f"PRAGMA busy_timeout = {previous_busy_timeout_ms}")
 
 
 def _require_hwm_deadline(

@@ -3176,8 +3176,10 @@ def _validate_review_bound_fak_exit_no_fill_payload(
         "no_matching_trades",
         "open_orders_query_complete",
         "trades_query_complete",
+        "point_order_query_complete",
         "chain_snapshot_newer_than_command",
         "chain_shares_unchanged",
+        "position_shares_match_exit_intent",
         "pending_exit_projection",
     )
     missing = [name for name in required_true if required.get(name) is not True]
@@ -3234,6 +3236,18 @@ def _validate_review_bound_fak_exit_no_fill_payload(
             """,
             (command_id,),
         ).fetchone()
+        exit_intents = conn.execute(
+            """
+            SELECT event_id, occurred_at, payload_json
+              FROM position_events
+             WHERE position_id = (
+                 SELECT position_id FROM venue_commands WHERE command_id = ?
+             )
+               AND event_type = 'EXIT_INTENT'
+             ORDER BY sequence_no DESC
+            """,
+            (command_id,),
+        ).fetchall()
     if command is None or position is None:
         raise ValueError("bound FAK EXIT no-fill requires command and position")
     if (
@@ -3279,7 +3293,7 @@ def _validate_review_bound_fak_exit_no_fill_payload(
     if (
         chain_seen_at is None
         or command_updated_at is None
-        or chain_seen_at < command_updated_at
+        or chain_seen_at <= command_updated_at
     ):
         raise ValueError("bound FAK EXIT chain cut does not postdate command")
     if _review_clearance_fact_count(conn, "venue_trade_facts", command_id) != 0:
@@ -3291,9 +3305,27 @@ def _validate_review_bound_fak_exit_no_fill_payload(
     fact_read = fact_payload.get("venue_read_proof")
     if not isinstance(fact_read, dict):
         raise ValueError("bound FAK EXIT terminal fact lacks venue read proof")
-    for key in ("open_orders_query_complete", "trades_query_complete"):
+    for key in (
+        "point_order_checked",
+        "point_order_query_complete",
+        "open_orders_query_complete",
+        "trades_query_complete",
+    ):
         if fact_read.get(key) is not True:
             raise ValueError(f"bound FAK EXIT terminal fact requires {key}=true")
+    point_source = str(fact_read.get("point_order_source") or "")
+    if str(fact_read.get("point_order_id") or "") != str(command["venue_order_id"] or ""):
+        raise ValueError("bound FAK EXIT terminal fact point order id mismatch")
+    if not (
+        point_source.endswith(":authenticated_http_404")
+        or point_source.endswith(":authenticated_point_order")
+    ):
+        raise ValueError("bound FAK EXIT terminal fact lacks authenticated point proof")
+    if fact_read.get("point_order_absent") is True and (
+        fact_read.get("point_order_absence_reason") != "authenticated_order_404"
+        or not point_source.endswith(":authenticated_http_404")
+    ):
+        raise ValueError("bound FAK EXIT terminal fact absence proof is invalid")
     if not str(fact_read.get("open_orders_pagination_scope") or "").strip():
         raise ValueError("bound FAK EXIT terminal fact lacks open-order pagination proof")
     if not str(fact_read.get("trades_pagination_scope") or "").strip():
@@ -3303,6 +3335,8 @@ def _validate_review_bound_fak_exit_no_fill_payload(
     if not isinstance(venue_proof, dict):
         raise ValueError("bound FAK EXIT no-fill requires venue_absence_proof")
     for key in (
+        "point_order_checked",
+        "point_order_query_complete",
         "open_orders_checked",
         "trades_checked",
         "open_orders_query_complete",
@@ -3312,6 +3346,17 @@ def _validate_review_bound_fak_exit_no_fill_payload(
             raise ValueError(f"bound FAK EXIT no-fill requires {key}=true")
     if venue_proof.get("owner_scope") != "authenticated_funder":
         raise ValueError("bound FAK EXIT no-fill requires authenticated funder proof")
+    venue_point_source = str(venue_proof.get("point_order_source") or "")
+    if (
+        str(venue_proof.get("point_order_id") or "")
+        != str(command["venue_order_id"] or "")
+        or venue_point_source != point_source
+        or venue_proof.get("point_order_absent")
+        is not fact_read.get("point_order_absent")
+        or venue_proof.get("point_order_absence_reason")
+        != fact_read.get("point_order_absence_reason")
+    ):
+        raise ValueError("bound FAK EXIT venue point proof mismatch")
     if (
         int(venue_proof.get("matching_open_order_count", -1)) != 0
         or int(venue_proof.get("matching_trade_count", -1)) != 0
@@ -3350,10 +3395,62 @@ def _validate_review_bound_fak_exit_no_fill_payload(
     try:
         proof_shares = Decimal(str(chain_proof.get("position_shares")))
         proof_chain_shares = Decimal(str(chain_proof.get("chain_shares")))
+        pre_exit_shares = Decimal(str(chain_proof.get("pre_exit_shares")))
     except (InvalidOperation, TypeError) as exc:
         raise ValueError("bound FAK EXIT chain proof shares are invalid") from exc
-    if proof_shares != shares or proof_chain_shares != chain_shares:
+    if (
+        proof_shares != shares
+        or proof_chain_shares != chain_shares
+        or abs(shares - pre_exit_shares) > Decimal("0.0001")
+        or abs(chain_shares - pre_exit_shares) > Decimal("0.0001")
+    ):
         raise ValueError("bound FAK EXIT chain proof does not match projection")
+    if (
+        str(chain_proof.get("chain_seen_at") or "")
+        != str(position["chain_seen_at"] or "")
+        or str(chain_proof.get("command_updated_at") or "")
+        != str(command["updated_at"] or "")
+    ):
+        raise ValueError("bound FAK EXIT chain proof timestamps mismatch")
+    proof_exit_event_id = str(chain_proof.get("exit_intent_event_id") or "")
+    proof_exit_occurred_at = str(chain_proof.get("exit_intent_occurred_at") or "")
+    baseline_event = None
+    for candidate in exit_intents:
+        candidate_at = _review_clearance_parse_utc(candidate["occurred_at"])
+        if candidate_at is not None and candidate_at <= command_updated_at:
+            baseline_event = candidate
+            break
+    if (
+        baseline_event is None
+        or proof_exit_event_id != str(baseline_event["event_id"] or "")
+        or proof_exit_occurred_at != str(baseline_event["occurred_at"] or "")
+    ):
+        raise ValueError("bound FAK EXIT immutable exit-intent identity mismatch")
+    try:
+        baseline_payload = json.loads(str(baseline_event["payload_json"] or "{}"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("bound FAK EXIT exit-intent payload is invalid") from exc
+    baseline_certificate = baseline_payload.get("exit_intent_capital_certificate")
+    baseline_certificate = (
+        baseline_certificate if isinstance(baseline_certificate, dict) else {}
+    )
+    try:
+        baseline_shares = Decimal(
+            str(
+                baseline_certificate.get(
+                    "held_shares",
+                    baseline_payload.get("exit_intent_shares"),
+                )
+            )
+        )
+    except (InvalidOperation, TypeError) as exc:
+        raise ValueError("bound FAK EXIT exit-intent shares are invalid") from exc
+    if (
+        baseline_payload.get("exit_intent_close_position") is not True
+        or baseline_shares != pre_exit_shares
+        or baseline_shares <= 0
+    ):
+        raise ValueError("bound FAK EXIT exit-intent baseline is unsupported")
     source = payload.get("source_proof")
     if not isinstance(source, dict) or (
         source.get("source_function")

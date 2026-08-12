@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_FLOOR
@@ -192,11 +192,16 @@ def _global_auction_artifact_persister(
                                 remaining_s=0.0,
                             )
                         sqlite_hold_ms = min(sqlite_hold_ms, remaining_ms)
-                with bounded_sqlite_write(
-                    conn,
-                    lease,
-                    max_hold_ms=sqlite_hold_ms,
-                ):
+                sqlite_fence = (
+                    bounded_sqlite_write(
+                        conn,
+                        lease,
+                        max_hold_ms=sqlite_hold_ms,
+                    )
+                    if lease is not None
+                    else nullcontext()
+                )
+                with sqlite_fence:
                     row_id = store_artifact(conn, artifact)
                     if work_context is not None:
                         work_context.checkpoint(f"{owner}:after_store")

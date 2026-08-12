@@ -422,6 +422,7 @@ class PolymarketV2AdapterProtocol(Protocol):
     funder_address: str
     chain_id: int
     sdk_version: str
+    authenticated_point_reads_are_complete: bool
 
     def preflight(self) -> PreflightResult: ...
 
@@ -526,6 +527,8 @@ class IncompleteOrderTruthError(V2ReadUnavailable):
 
 
 class PolymarketV2Adapter:
+    authenticated_point_reads_are_complete = True
+
     def __init__(
         self,
         *,

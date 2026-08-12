@@ -5024,6 +5024,8 @@ def _build_current_global_day0_family_snapshot(
 
     world = None
     forecasts = None
+    world_seed = None
+    forecasts_seed = None
     hwm_forecasts = None
     try:
         prepare_deadline = _held_monitor_stage_deadline(
@@ -5036,34 +5038,34 @@ def _build_current_global_day0_family_snapshot(
         )
         hwm_deadline: list[float | None] = [None]
         with ExitStack() as prepare_sqlite:
-            world = get_world_connection_read_only()
+            world_seed = get_world_connection_read_only()
             world = prepare_sqlite.enter_context(
                 (
                     bounded_work_sqlite(
-                        world,
+                        world_seed,
                         prepare_context,
                         stage="held_monitor_probability_prepare:world",
-                        shared_connection=True,
+                        shared_connection=False,
                     )
-                    if isinstance(world, sqlite3.Connection)
+                    if isinstance(world_seed, sqlite3.Connection)
                     else _day0_snapshot_sqlite_read_deadline(
-                        world,
+                        world_seed,
                         prepare_deadline,
                     )
                 )
             )
-            forecasts = get_forecasts_connection_read_only()
+            forecasts_seed = get_forecasts_connection_read_only()
             forecasts = prepare_sqlite.enter_context(
                 (
                     bounded_work_sqlite(
-                        forecasts,
+                        forecasts_seed,
                         prepare_context,
                         stage="held_monitor_probability_prepare:forecasts",
-                        shared_connection=True,
+                        shared_connection=False,
                     )
-                    if isinstance(forecasts, sqlite3.Connection)
+                    if isinstance(forecasts_seed, sqlite3.Connection)
                     else _day0_snapshot_sqlite_read_deadline(
-                        forecasts,
+                        forecasts_seed,
                         prepare_deadline,
                     )
                 )
@@ -5163,10 +5165,10 @@ def _build_current_global_day0_family_snapshot(
     finally:
         if hwm_forecasts is not None:
             hwm_forecasts.close()
-        if forecasts is not None:
-            forecasts.close()
-        if world is not None:
-            world.close()
+        if forecasts_seed is not None:
+            forecasts_seed.close()
+        if world_seed is not None:
+            world_seed.close()
 
     witness = prepared.probability_witness
     condition_ids = tuple(binding.condition_id for binding in witness.bindings)
@@ -5690,20 +5692,18 @@ def monitor_probability_refresh(
                 + HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
             )
         )
-        belief = load_replacement_belief(
+        belief_kwargs = dict(
             city=pos.city,
             target_date=pos.target_date,
             temperature_metric=str(getattr(pos, "temperature_metric", "high")),
             bin_label=pos.bin_label,
             direction=str(getattr(pos.direction, "value", pos.direction)),
-            now=(
-                day0_family_cache.decision_time
-                if day0_family_cache is not None
-                else None
-            ),
             max_age_hours=monitor_belief_max_age_hours(),
             deadline_monotonic=primary_belief_deadline,
         )
+        if day0_family_cache is not None:
+            belief_kwargs["now"] = day0_family_cache.decision_time
+        belief = load_replacement_belief(**belief_kwargs)
     except Exception as exc:  # noqa: BLE001 — belief read must not kill the monitor
         belief = None
         logger.warning(

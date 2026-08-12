@@ -156,7 +156,13 @@ def bounded_sqlite_write(
         )
     row = conn.execute("PRAGMA busy_timeout").fetchone()
     previous_ms = int(row[0]) if row is not None else 0
-    conn.execute(f"PRAGMA busy_timeout = {min(previous_ms, bounded_ms)}")
+    # The caller can perform non-SQL work after entering this context.  A
+    # timeout computed here would then be stale when its next statement or
+    # COMMIT reaches SQLite.  Participating writers already own the coordinator
+    # lease, so any remaining SQLITE_BUSY/LOCKED comes from a raw/legacy writer:
+    # fail immediately and let the scheduled lane retry instead of spending a
+    # stale budget while MONITOR waits behind us.
+    conn.execute("PRAGMA busy_timeout = 0")
     try:
         yield
     except sqlite3.OperationalError as exc:

@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -875,6 +877,115 @@ def test_day0_hwm_budget_starts_at_actual_prepare_handoff(monkeypatch):
         )
 
     assert observed["deadline"] == pytest.approx(14.5)
+
+
+def test_day0_prepare_file_reads_do_not_wait_on_shared_snapshot_fence(
+    monkeypatch,
+    tmp_path,
+):
+    import src.engine.event_reactor_adapter as era
+    import src.engine.global_auction_universe as universe
+    import src.engine.monitor_refresh as mr
+    import src.state.db as db
+
+    world_memory = _day0_event_connection()
+    world_path = tmp_path / "world.db"
+    world_memory.commit()
+    with sqlite3.connect(world_path) as target:
+        world_memory.backup(target)
+    world_memory.close()
+    forecasts_path = tmp_path / "forecasts.db"
+    sqlite3.connect(forecasts_path).close()
+
+    opened = []
+
+    def read_only(path):
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        opened.append(conn)
+        return conn
+
+    monkeypatch.setattr(
+        db,
+        "get_world_connection_read_only",
+        lambda: read_only(world_path),
+    )
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_read_only",
+        lambda: read_only(forecasts_path),
+    )
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
+    monkeypatch.setattr(
+        mr,
+        "_target_day_has_canonical_observation",
+        lambda *_a, **_k: False,
+    )
+
+    class PreparedWithoutFence(RuntimeError):
+        pass
+
+    def prepare(*_args, **_kwargs):
+        raise PreparedWithoutFence
+
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
+
+    original_bounded = universe.bounded_work_sqlite
+    shared_flags = []
+
+    @contextmanager
+    def recording_bounded(conn, work_context, *, stage, shared_connection=False):
+        shared_flags.append((stage, shared_connection))
+        with original_bounded(
+            conn,
+            work_context,
+            stage=stage,
+            shared_connection=shared_connection,
+        ) as bounded:
+            yield bounded
+
+    holder_entered = threading.Event()
+    release_holder = threading.Event()
+    holder_conn = sqlite3.connect(":memory:", check_same_thread=False)
+
+    def hold_shared_fence():
+        with original_bounded(
+            holder_conn,
+            universe.WorkContext(deadline_monotonic=None),
+            stage="test_shared_holder",
+            shared_connection=True,
+        ):
+            holder_entered.set()
+            assert release_holder.wait(2.0)
+
+    holder = threading.Thread(target=hold_shared_fence, daemon=True)
+    holder.start()
+    assert holder_entered.wait(1.0)
+    monkeypatch.setattr(universe, "bounded_work_sqlite", recording_bounded)
+    started = time.monotonic()
+    try:
+        with pytest.raises(PreparedWithoutFence):
+            mr._build_current_global_day0_family_snapshot(
+                _pos(),
+                trade_conn=sqlite3.connect(":memory:"),
+                decision_time=datetime(2026, 6, 12, 12, tzinfo=timezone.utc),
+                cached_snapshots=(),
+                deadline_monotonic=time.monotonic() + 2.5,
+                hwm_deadline_monotonic=time.monotonic() + 2.5,
+            )
+        assert time.monotonic() - started < 1.0
+        assert holder.is_alive()
+        assert shared_flags == [
+            ("held_monitor_probability_prepare:world", False),
+            ("held_monitor_probability_prepare:forecasts", False),
+        ]
+        for conn in opened:
+            with pytest.raises(sqlite3.ProgrammingError):
+                conn.execute("SELECT 1")
+    finally:
+        release_holder.set()
+        holder.join(2.0)
+        holder_conn.close()
 
 
 def test_day0_prepare_timeout_does_not_start_or_mislabel_hwm(monkeypatch):

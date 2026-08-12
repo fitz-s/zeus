@@ -6263,10 +6263,13 @@ class TestRecoveryResolutionTable:
 
         class CompleteVenue:
             venue_reads_are_complete = True
+            authenticated_point_reads_are_complete = True
 
             @staticmethod
             def get_order(_order_id):
-                return None
+                from src.venue.response_contracts import VenueOrderNotFound
+
+                raise VenueOrderNotFound(_order_id)
 
             @staticmethod
             def get_open_orders():
@@ -6299,6 +6302,29 @@ class TestRecoveryResolutionTable:
         assert stale_chain["advanced"] == 0
         assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
 
+        conn.execute(
+            "UPDATE position_current SET chain_seen_at = ? WHERE position_id = ?",
+            ("2026-04-26T00:03:00+00:00", position_id),
+        )
+        equal_chain_cut = command_recovery.reconcile_unresolved_commands(
+            conn,
+            CompleteVenue(),
+        )
+        assert equal_chain_cut["advanced"] == 0
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+
+        conn.execute(
+            "UPDATE position_current SET shares = 10.0, chain_shares = 10.0, "
+            "chain_seen_at = ? WHERE position_id = ?",
+            ("2026-04-26T00:04:00+00:00", position_id),
+        )
+        moved_balances = command_recovery.reconcile_unresolved_commands(
+            conn,
+            CompleteVenue(),
+        )
+        assert moved_balances["advanced"] == 0
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+
         class PartialVenue(CompleteVenue):
             @staticmethod
             def get_trades():
@@ -6320,11 +6346,23 @@ class TestRecoveryResolutionTable:
             get_open_orders = CompleteVenue.get_open_orders
             get_trades = CompleteVenue.get_trades
 
+        class NullPointVenue(CompleteVenue):
+            @staticmethod
+            def get_order(_order_id):
+                return None
+
         incomplete = command_recovery.reconcile_unresolved_commands(
             conn,
             UnverifiedVenue(),
         )
         assert incomplete["advanced"] == 0
+        assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
+
+        null_point = command_recovery.reconcile_unresolved_commands(
+            conn,
+            NullPointVenue(),
+        )
+        assert null_point["advanced"] == 0
         assert _get_state(conn, command_id) == "REVIEW_REQUIRED"
 
         partial = command_recovery.reconcile_unresolved_commands(
@@ -6338,6 +6376,11 @@ class TestRecoveryResolutionTable:
             (command_id,),
         ).fetchone()[0] == 0
 
+        conn.execute(
+            "UPDATE position_current SET shares = 12.99, chain_shares = 12.99, "
+            "chain_seen_at = ? WHERE position_id = ?",
+            ("2026-04-26T00:04:30+00:00", position_id),
+        )
         summary = command_recovery.reconcile_unresolved_commands(
             conn,
             CompleteVenue(),
@@ -6375,7 +6418,16 @@ class TestRecoveryResolutionTable:
             "position_shares": "12.99",
             "chain_shares": "12.99",
             "shares_delta": "0.00",
+            "exit_intent_event_id": "pos-bound-fak-exit:full_exit_intent:3",
+            "exit_intent_occurred_at": "2026-04-26T00:02:00+00:00",
+            "pre_exit_shares": "12.99",
         }
+        point_proof = payload["terminal_order_fact"]["venue_read_proof"]
+        assert point_proof["point_order_checked"] is True
+        assert point_proof["point_order_query_complete"] is True
+        assert point_proof["point_order_absence_reason"] == (
+            "authenticated_order_404"
+        )
 
     def test_submitting_with_state_only_rejected_resolves_to_submit_rejected(
         self, conn, mock_client

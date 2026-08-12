@@ -33081,3 +33081,29 @@ def test_global_auction_trade_receipt_accepts_unbounded_work_context(
     assert persist(object()) == 1
     assert conn.execute("SELECT COUNT(*) FROM receipt_probe").fetchone()[0] == 1
     conn.close()
+
+
+def test_global_auction_fixture_receipt_does_not_require_canonical_lease(
+    monkeypatch,
+):
+    from src.engine.global_auction_universe import WorkContext
+    import src.state.decision_chain as decision_chain
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE receipt_probe (value TEXT NOT NULL)")
+    monkeypatch.setattr(
+        decision_chain,
+        "store_artifact",
+        lambda target, _artifact: target.execute(
+            "INSERT INTO receipt_probe VALUES ('fixture')"
+        ).lastrowid,
+    )
+    persist = global_batch_runtime._global_auction_artifact_persister(
+        conn,
+        work_context=WorkContext(time.monotonic() + 1.0),
+        owner="test_global_auction_fixture",
+    )
+
+    assert persist(object()) == 1
+    assert conn.execute("SELECT value FROM receipt_probe").fetchone() == ("fixture",)
+    conn.close()
