@@ -1,5 +1,5 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-08-11
+# Last reused/audited: 2026-08-12
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z4.yaml
 #                  + 2026-05-13 collateral_ledger singleton lifecycle remediation
 #                  + 2026-05-17 / 2026-06-17 live collateral DB lock remediation
@@ -1243,6 +1243,115 @@ def release_reservation_for_command_state(
             return False
         raise
     return cursor.rowcount > 0
+
+
+def restore_reservation_for_late_fill(
+    conn: sqlite3.Connection,
+    command_id: str,
+    *,
+    filled_size: Decimal,
+    partial: bool,
+) -> bool:
+    """Rebuild collateral accounting after a falsely terminal command.
+
+    A terminal no-fill conclusion releases the original reservation. If newer
+    authenticated venue truth proves a fill, restore the original reservation,
+    convert the filled fraction into unsettled balance evidence, then keep only
+    a live partial remainder reserved. This records venue truth even if it makes
+    available collateral negative; hiding an already-real side effect is never
+    a valid capital-control response.
+    """
+
+    row = conn.execute(
+        """
+        SELECT command.intent_kind, command.side, command.size, command.price,
+               command.token_id, reservation.reservation_type,
+               reservation.converted_amount, reservation.released_at
+          FROM venue_commands command
+          JOIN collateral_reservations reservation
+            ON reservation.command_id = command.command_id
+         WHERE command.command_id = ?
+        """,
+        (command_id,),
+    ).fetchone()
+    if row is None:
+        raise CollateralInsufficient("late_partial_fill_reservation_missing")
+    intent_kind, side = str(row[0] or "").upper(), str(row[1] or "").upper()
+    requested = Decimal(str(row[2] or "0"))
+    price = Decimal(str(row[3] or "0"))
+    token_id = str(row[4] or "")
+    reservation_type = str(row[5] or "")
+    converted_amount = int(row[6] or 0)
+    released_at = str(row[7] or "")
+    remaining = requested - filled_size
+    if (
+        requested <= 0
+        or price <= 0
+        or filled_size <= 0
+        or remaining < 0
+        or (partial and remaining <= 0)
+        or (not partial and remaining != 0)
+        or converted_amount != 0
+        or not released_at
+    ):
+        raise CollateralInsufficient("late_partial_fill_reservation_shape_invalid")
+
+    if (intent_kind, side, reservation_type) == ("ENTRY", "BUY", "PUSD_BUY"):
+        original_amount = int(
+            (requested * price * Decimal(_MICRO)).to_integral_value(
+                rounding=ROUND_CEILING
+            )
+        )
+        remainder_amount = int(
+            (remaining * price * Decimal(_MICRO)).to_integral_value(
+                rounding=ROUND_CEILING
+            )
+        )
+        token_guard = "token_id IS NULL"
+        params: tuple[Any, ...] = (original_amount, command_id)
+        remainder_params: tuple[Any, ...] = (remainder_amount, command_id)
+    elif (intent_kind, side, reservation_type) == ("EXIT", "SELL", "CTF_SELL"):
+        original_amount = _token_required_units(requested)
+        remainder_amount = _token_required_units(remaining)
+        token_guard = "token_id = ?"
+        params = (original_amount, command_id, token_id)
+        remainder_params = (remainder_amount, command_id, token_id)
+    else:
+        raise CollateralInsufficient("late_partial_fill_reservation_identity_invalid")
+
+    cursor = conn.execute(
+        f"""
+        UPDATE collateral_reservations
+           SET amount = ?, released_at = NULL, release_reason = NULL
+         WHERE command_id = ?
+           AND {token_guard}
+           AND released_at IS NOT NULL
+           AND converted_amount = 0
+        """,
+        params,
+    )
+    if cursor.rowcount != 1:
+        raise CollateralInsufficient("late_fill_reservation_cas_failed")
+    if not convert_reservation_on_fill(conn, command_id, "LATE_FILL_CORRECTION"):
+        raise CollateralInsufficient("late_fill_reservation_conversion_failed")
+    if partial:
+        cursor = conn.execute(
+            f"""
+            UPDATE collateral_reservations
+               SET amount = ?, released_at = NULL, release_reason = NULL,
+                   converted_amount = 0
+             WHERE command_id = ?
+               AND {token_guard}
+               AND released_at IS NOT NULL
+               AND converted_amount > 0
+            """,
+            remainder_params,
+        )
+        if cursor.rowcount != 1:
+            raise CollateralInsufficient(
+                "late_partial_fill_remainder_reservation_cas_failed"
+            )
+    return True
 
 
 def _max_matched_size(conn: sqlite3.Connection, command_id: str) -> Decimal:

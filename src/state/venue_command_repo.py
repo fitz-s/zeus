@@ -1,5 +1,5 @@
 # Created: 2026-04-26
-# Last reused/audited: 2026-07-31
+# Last reused/audited: 2026-08-12
 # Authority basis: docs/operations/task_2026-05-08_object_invariance_wave27/PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-17_live_order_survival/LIVE_ORDER_SURVIVAL_PLAN.md S5
@@ -169,6 +169,19 @@ _TRANSITIONS: dict[tuple[str, str], str] = {
     # from FILLED
     ("FILLED", "PARTIAL_FILL_OBSERVED"):      "PARTIAL",
     ("FILLED", "REVIEW_REQUIRED"):            "REVIEW_REQUIRED",
+
+    # A terminal no-fill conclusion is defeasible only by the strict
+    # authenticated/newer fact validator below. Bare terminal rewrites remain
+    # impossible; a live partial also restores its remainder reservation in
+    # the same savepoint before command state reopens.
+    ("CANCELLED", "PARTIAL_FILL_OBSERVED"):    "PARTIAL",
+    ("CANCELLED", "FILL_CONFIRMED"):           "FILLED",
+    ("EXPIRED", "PARTIAL_FILL_OBSERVED"):      "PARTIAL",
+    ("EXPIRED", "FILL_CONFIRMED"):             "FILLED",
+    ("REJECTED", "PARTIAL_FILL_OBSERVED"):     "PARTIAL",
+    ("REJECTED", "FILL_CONFIRMED"):            "FILLED",
+    ("SUBMIT_REJECTED", "PARTIAL_FILL_OBSERVED"): "PARTIAL",
+    ("SUBMIT_REJECTED", "FILL_CONFIRMED"):        "FILLED",
 
     # from CANCEL_PENDING
     ("CANCEL_PENDING", "CANCEL_ACKED"):       "CANCELLED",
@@ -2448,6 +2461,13 @@ def append_event(
             payload=payload,
             command_id=command_id,
         )
+        terminal_late_partial = _validate_terminal_late_fill_correction_payload(
+            conn=conn,
+            current_state=current_state,
+            event_type=event_type,
+            payload=payload,
+            command_id=command_id,
+        )
         terminal_partial = _validate_terminal_partial_command_correction_payload(
             conn=conn,
             current_state=current_state,
@@ -2455,6 +2475,34 @@ def append_event(
             payload=payload,
             command_id=command_id,
         )
+
+        terminal_late_fill = current_state in {
+            "CANCELLED",
+            "EXPIRED",
+            "REJECTED",
+            "SUBMIT_REJECTED",
+        } and event_type in {"PARTIAL_FILL_OBSERVED", "FILL_CONFIRMED"}
+        if terminal_late_fill:
+            from src.state.collateral_ledger import (
+                CollateralInsufficient,
+                restore_reservation_for_late_fill,
+            )
+
+            try:
+                restored = restore_reservation_for_late_fill(
+                    conn,
+                    command_id,
+                    filled_size=Decimal(str(payload["canonical_filled_size"])),
+                    partial=terminal_late_partial,
+                )
+            except CollateralInsufficient as exc:
+                raise ValueError(
+                    "terminal late-fill correction collateral restore failed"
+                ) from exc
+            if not restored:
+                raise ValueError(
+                    "terminal late-fill correction collateral was not restored"
+                )
 
         state_after = _TRANSITIONS[key]
 
@@ -2591,6 +2639,207 @@ def _validate_entry_submit_payload(
             "ENTRY SUBMIT_REQUESTED entry_economics missing details: "
             + ",".join(detail_missing)
         )
+
+
+def _validate_terminal_late_fill_correction_payload(
+    *,
+    conn: sqlite3.Connection,
+    current_state: str,
+    event_type: str,
+    payload: Optional[dict],
+    command_id: str,
+) -> bool:
+    """Validate a later authenticated fill that defeats terminal no-fill truth.
+
+    Returns whether the correction leaves a live partial remainder whose
+    collateral must be restored before the command transition is committed.
+    """
+
+    terminal_states = {"CANCELLED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED"}
+    if current_state not in terminal_states or event_type not in {
+        "PARTIAL_FILL_OBSERVED",
+        "FILL_CONFIRMED",
+    }:
+        return False
+    if not isinstance(payload, dict):
+        raise ValueError("terminal late-fill correction requires proof payload")
+    if (
+        payload.get("proof_class") != "terminal_command_late_fill_correction"
+        or payload.get("reason") != "authenticated_fill_after_terminal_no_fill"
+        or payload.get("command_id") != command_id
+        or payload.get("terminal_state_before") != current_state
+    ):
+        raise ValueError("terminal late-fill correction proof identity is invalid")
+    required = payload.get("required_predicates")
+    required_names = (
+        "terminal_event_was_no_fill",
+        "terminal_event_precedes_trade_fact",
+        "terminal_event_precedes_order_fact",
+        "authenticated_confirmed_trade_fact",
+        "bound_venue_order_identity",
+        "order_matched_remainder_arithmetic",
+    )
+    if not isinstance(required, Mapping) or any(
+        required.get(name) is not True for name in required_names
+    ):
+        raise ValueError("terminal late-fill correction predicates are incomplete")
+
+    venue_order_id = str(payload.get("venue_order_id") or "")
+    trade_id = str(payload.get("trade_id") or "")
+    canonical_filled = _decimal_or_none(payload.get("canonical_filled_size"))
+    with _row_factory_as(conn, sqlite3.Row):
+        command = conn.execute(
+            """
+            SELECT size, venue_order_id, intent_kind, side
+              FROM venue_commands
+             WHERE command_id = ?
+            """,
+            (command_id,),
+        ).fetchone()
+        terminal_event = conn.execute(
+            """
+            SELECT event_type, occurred_at, payload_json
+              FROM venue_command_events
+             WHERE command_id = ? AND state_after = ?
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (command_id, current_state),
+        ).fetchone()
+        trade_fact = conn.execute(
+            """
+            SELECT state, source, filled_size, fill_price, observed_at
+              FROM venue_trade_facts
+             WHERE command_id = ? AND venue_order_id = ? AND trade_id = ?
+             ORDER BY
+               CASE state WHEN 'CONFIRMED' THEN 3 WHEN 'MINED' THEN 2 ELSE 1 END DESC,
+               local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id, venue_order_id, trade_id),
+        ).fetchone()
+        order_fact = conn.execute(
+            """
+            SELECT state, source, matched_size, remaining_size, observed_at
+              FROM venue_order_facts
+             WHERE command_id = ? AND venue_order_id = ?
+             ORDER BY local_sequence DESC
+             LIMIT 1
+            """,
+            (command_id, venue_order_id),
+        ).fetchone()
+        prior_positive_trades = conn.execute(
+            """
+            SELECT observed_at
+              FROM venue_trade_facts
+             WHERE command_id = ?
+               AND CAST(COALESCE(filled_size, '0') AS REAL) > 0
+            """,
+            (command_id,),
+        ).fetchall()
+        prior_positive_orders = conn.execute(
+            """
+            SELECT observed_at
+              FROM venue_order_facts
+             WHERE command_id = ?
+               AND CAST(COALESCE(matched_size, '0') AS REAL) > 0
+            """,
+            (command_id,),
+        ).fetchall()
+
+    if (
+        command is None
+        or terminal_event is None
+        or trade_fact is None
+        or order_fact is None
+    ):
+        raise ValueError("terminal late-fill correction canonical proof is incomplete")
+    terminal_payload = _review_clearance_json_dict(terminal_event["payload_json"])
+    terminal_event_type = str(terminal_event["event_type"] or "")
+    terminal_no_fill = (
+        terminal_payload.get("terminal_no_fill") is True
+        or terminal_event_type
+        in {
+            "REVIEW_CLEARED_NO_VENUE_EXPOSURE",
+            "REVIEW_CLEARED_NO_VENUE_SIDE_EFFECT",
+        }
+    )
+    terminal_at = _review_clearance_parse_utc(terminal_event["occurred_at"])
+    prior_trade_times = [
+        _review_clearance_parse_utc(row["observed_at"])
+        for row in prior_positive_trades
+    ]
+    prior_order_times = [
+        _review_clearance_parse_utc(row["observed_at"])
+        for row in prior_positive_orders
+    ]
+    prior_positive_before_terminal = terminal_at is None or any(
+        observed_at is None or observed_at <= terminal_at
+        for observed_at in (*prior_trade_times, *prior_order_times)
+    )
+    if not terminal_no_fill or prior_positive_before_terminal:
+        raise ValueError("terminal late-fill correction terminal was not no-fill truth")
+    if (
+        str(command["venue_order_id"] or "") != venue_order_id
+        or not venue_order_id
+        or (
+            str(command["intent_kind"] or "").upper(),
+            str(command["side"] or "").upper(),
+        )
+        not in {("ENTRY", "BUY"), ("EXIT", "SELL")}
+    ):
+        raise ValueError("terminal late-fill correction command identity does not match")
+    if (
+        str(trade_fact["state"] or "").upper() != "CONFIRMED"
+        or str(trade_fact["source"] or "").upper() not in {"REST", "WS_USER"}
+        or not trade_fact_has_positive_fill_economics(trade_fact)
+    ):
+        raise ValueError("terminal late-fill correction trade authority is invalid")
+
+    trade_at = _review_clearance_parse_utc(trade_fact["observed_at"])
+    order_at = _review_clearance_parse_utc(order_fact["observed_at"])
+    if (
+        terminal_at is None
+        or trade_at is None
+        or order_at is None
+        or trade_at <= terminal_at
+        or order_at <= terminal_at
+    ):
+        raise ValueError("terminal late-fill correction evidence is not causally newer")
+
+    requested = _decimal_or_none(command["size"])
+    matched = _decimal_or_none(order_fact["matched_size"])
+    remaining = _decimal_or_none(order_fact["remaining_size"])
+    if (
+        str(order_fact["source"] or "").upper() not in {"REST", "WS_USER"}
+        or requested is None
+        or canonical_filled is None
+        or matched is None
+        or remaining is None
+        or requested <= 0
+        or canonical_filled <= 0
+        or matched <= 0
+        or remaining < 0
+        or abs(matched - canonical_filled) > Decimal("0.000001")
+        or abs(requested - matched - remaining) > Decimal("0.000001")
+    ):
+        raise ValueError("terminal late-fill correction order arithmetic does not match")
+
+    if event_type == "PARTIAL_FILL_OBSERVED":
+        if (
+            str(order_fact["state"] or "").upper() != "PARTIALLY_MATCHED"
+            or remaining <= 0
+            or canonical_filled >= requested
+        ):
+            raise ValueError("terminal late partial correction has no live remainder")
+        return True
+    if (
+        str(order_fact["state"] or "").upper() not in {"MATCHED", "FILLED"}
+        or remaining != 0
+        or canonical_filled != requested
+    ):
+        raise ValueError("terminal late full correction does not cover command")
+    return False
 
 
 def _validate_terminal_partial_command_correction_payload(

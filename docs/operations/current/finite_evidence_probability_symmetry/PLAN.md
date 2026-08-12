@@ -3438,3 +3438,37 @@ releases the lease between candidates, preserves durable retry on uncertainty,
 passes focused and fill-bridge regression tests, then proves after exact-SHA
 deployment that monitor ages stay inside their watchdog and the repair job no
 longer holds the canonical writer continuously.
+
+## 2026-08-12 Terminal no-fill is defeasible by later authenticated fill truth
+
+Seoul exposed a causal contradiction rather than an observability false
+positive: command recovery terminalized an ENTRY as `EXPIRED` from a no-fill
+snapshot; a later authenticated trade fact and a newer point-order fact proved
+11.627905 matched shares with venue remainder, while reconcile repaired only
+the position projection. Command truth stayed terminal and the late position
+event incorrectly claimed `pending_entry -> active` after the position was
+already `day0_window`.
+
+The repair permits the existing fill event grammar to defeat a terminal
+no-fill conclusion only with exact, newer, authenticated positive-fill proof.
+A late partial correction atomically restores collateral for the still-live
+venue remainder before command state can become `PARTIAL`; a full confirmed
+fill becomes `FILLED`. Missing identity, stale/equal evidence, mismatched
+matched/remainder arithmetic, or failed collateral CAS leaves the command
+unchanged and retryable. Entry-fill projection emits from the actual current
+phase, so append-only lifecycle history cannot move backward.
+
+SCOPE is one terminal command contradicted by later facts bound to its exact
+venue order. DRAIN is continuous M5 reconciliation followed by the existing
+cancel/recovery cadence for any live remainder. RESET is a proof-backed
+`PARTIAL`/`FILLED` command consistent with its position and collateral truth.
+No probability, sizing, price band, settlement, or entry-selection law changes.
+
+Allowed files are `src/execution/exchange_reconcile.py`,
+`src/state/venue_command_repo.py`, `src/state/collateral_ledger.py`,
+`src/engine/lifecycle_events.py`, `tests/test_exchange_reconcile.py`, and this
+plan. Acceptance requires a terminal-no-fill plus later partial-fill replay to
+produce a typed command correction, exact remainder reservation, no lifecycle
+phase regression, unchanged exposure economics, rejection of stale/forged
+corrections, focused regressions, exact-SHA deployment, and zero active
+terminal-command/venue-fact conflicts.

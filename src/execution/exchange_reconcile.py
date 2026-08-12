@@ -4343,13 +4343,14 @@ def _append_linkable_trade_fact_if_missing(
                     resolution="trade_finality_confirmed",
                     resolved_at=observed_at,
                 )
+            canonical_filled_size = _canonical_event_filled_size(
+                conn,
+                command_id=str(command["command_id"]),
+                fallback=filled_size,
+            )
             existing_event = _fill_event_for_command(
                 command,
-                _canonical_event_filled_size(
-                    conn,
-                    command_id=str(command["command_id"]),
-                    fallback=filled_size,
-                ),
+                canonical_filled_size,
                 trade_state=state,
             )
             if existing_event is not None:
@@ -4359,15 +4360,33 @@ def _append_linkable_trade_fact_if_missing(
                         command_id=str(command["command_id"]),
                         event_type=existing_event,
                         occurred_at=observed_at.isoformat(),
-                        payload={
-                            "venue_order_id": order_id,
-                            "trade_id": trade_id,
-                            "filled_size": filled_size,
-                            "fill_price": fill_price,
-                            "source": "M5_EXCHANGE_RECONCILE",
-                        },
+                        payload=_fill_event_payload_for_command(
+                            command,
+                            event_type=existing_event,
+                            venue_order_id=order_id,
+                            trade_id=trade_id,
+                            filled_size=filled_size,
+                            canonical_filled_size=canonical_filled_size,
+                            fill_price=fill_price,
+                        ),
                     )
                 except ValueError:
+                    if str(command.get("state") or "") in {
+                        "CANCELLED",
+                        "EXPIRED",
+                        "REJECTED",
+                        "SUBMIT_REJECTED",
+                    }:
+                        return _record_nonfinal_full_exit_fill_finality_finding(
+                            conn,
+                            trade_id=trade_id,
+                            command=command,
+                            raw=raw,
+                            state=state,
+                            filled_size=filled_size,
+                            observed_at=observed_at,
+                            context=context,
+                        )
                     existing_event = None
             elif str(command.get("state") or "") == "FILLED" and state == "CONFIRMED":
                 existing_event = "FILL_CONFIRMED"
@@ -4504,13 +4523,14 @@ def _append_linkable_trade_fact_if_missing(
     latest = get_command(conn, str(command["command_id"]))
     if latest is None:
         return finality_finding
+    canonical_filled_size = _canonical_event_filled_size(
+        conn,
+        command_id=str(latest["command_id"]),
+        fallback=filled_size,
+    )
     event = _fill_event_for_command(
         latest,
-        _canonical_event_filled_size(
-            conn,
-            command_id=str(latest["command_id"]),
-            fallback=filled_size,
-        ),
+        canonical_filled_size,
         trade_state=state,
     )
     if event is None:
@@ -4542,18 +4562,27 @@ def _append_linkable_trade_fact_if_missing(
             command_id=str(latest["command_id"]),
             event_type=event,
             occurred_at=observed_at.isoformat(),
-            payload={
-                "venue_order_id": order_id,
-                "trade_id": trade_id,
-                "filled_size": filled_size,
-                "fill_price": fill_price,
-                "source": "M5_EXCHANGE_RECONCILE",
-            },
+            payload=_fill_event_payload_for_command(
+                latest,
+                event_type=event,
+                venue_order_id=order_id,
+                trade_id=trade_id,
+                filled_size=filled_size,
+                canonical_filled_size=canonical_filled_size,
+                fill_price=fill_price,
+            ),
         )
     except ValueError:
         # The fact is still append-only venue truth.  Illegal command-state
         # transitions stay fail-closed by not inventing grammar or forcing a
         # local command mutation.
+        if str(latest.get("state") or "") in {
+            "CANCELLED",
+            "EXPIRED",
+            "REJECTED",
+            "SUBMIT_REJECTED",
+        }:
+            return finality_finding
         event = None
     _ensure_entry_fill_position_event(
         conn,
@@ -5643,6 +5672,16 @@ def _ensure_entry_fill_position_event(
         events, projection = build_entry_fill_only_canonical_write(
             position,
             sequence_no=sequence_no,
+            phase_after=(
+                phase
+                if phase in {"active", "day0_window", "pending_exit"}
+                else "active"
+            ),
+            phase_before=(
+                phase
+                if phase in {"active", "day0_window", "pending_exit"}
+                else "pending_entry"
+            ),
             source_module="src.execution.exchange_reconcile",
         )
         command_id = str(command.get("command_id") or "")
@@ -6708,6 +6747,52 @@ def _trade_lifecycle_transition_allowed(previous: str, current: str) -> bool:
     return current in allowed.get(previous, set())
 
 
+def _fill_event_payload_for_command(
+    command: Mapping[str, Any],
+    *,
+    event_type: str,
+    venue_order_id: str,
+    trade_id: str,
+    filled_size: str,
+    canonical_filled_size: str,
+    fill_price: str,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "venue_order_id": venue_order_id,
+        "trade_id": trade_id,
+        "filled_size": filled_size,
+        "canonical_filled_size": canonical_filled_size,
+        "fill_price": fill_price,
+        "source": "M5_EXCHANGE_RECONCILE",
+    }
+    terminal_state = str(command.get("state") or "")
+    if terminal_state in {
+        "CANCELLED",
+        "EXPIRED",
+        "REJECTED",
+        "SUBMIT_REJECTED",
+    }:
+        payload.update(
+            {
+                "schema_version": 1,
+                "reason": "authenticated_fill_after_terminal_no_fill",
+                "proof_class": "terminal_command_late_fill_correction",
+                "command_id": str(command.get("command_id") or ""),
+                "terminal_state_before": terminal_state,
+                "correction_event": event_type,
+                "required_predicates": {
+                    "terminal_event_was_no_fill": True,
+                    "terminal_event_precedes_trade_fact": True,
+                    "terminal_event_precedes_order_fact": True,
+                    "authenticated_confirmed_trade_fact": True,
+                    "bound_venue_order_identity": True,
+                    "order_matched_remainder_arithmetic": True,
+                },
+            }
+        )
+    return payload
+
+
 def _fill_event_for_command(
     command: Mapping[str, Any],
     filled_size: str,
@@ -6715,9 +6800,14 @@ def _fill_event_for_command(
     trade_state: str,
 ) -> str | None:
     state = str(command.get("state") or "")
-    if state in {"FILLED", "CANCELLED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED"}:
+    if state == "FILLED":
         return None
     if trade_state in {"FAILED", "RETRYING"}:
+        return None
+    if (
+        state in {"CANCELLED", "EXPIRED", "REJECTED", "SUBMIT_REJECTED"}
+        and trade_state != "CONFIRMED"
+    ):
         return None
     size = _decimal(command.get("size", 0))
     filled = _decimal(filled_size)

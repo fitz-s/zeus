@@ -781,6 +781,7 @@ def build_entry_fill_only_canonical_write(
     *,
     sequence_no: int,
     phase_after: str = ACTIVE,
+    phase_before: str = PENDING_ENTRY,
     decision_id: str | None = None,
     source_module: str = "src.execution.fill_tracker",
 ) -> tuple[list[dict], dict]:
@@ -798,10 +799,15 @@ def build_entry_fill_only_canonical_write(
     day0-window fills). The builder overrides the projection's phase with this
     value so the canonical phase no longer depends on Position.state strings.
     """
-    if phase_after not in {ACTIVE, DAY0_WINDOW}:
+    if phase_after not in {ACTIVE, DAY0_WINDOW, PENDING_EXIT}:
         raise ValueError(
             f"entry fill-only builder requires phase_after in "
-            f"{{ACTIVE, DAY0_WINDOW}}, got {phase_after!r}"
+            f"{{ACTIVE, DAY0_WINDOW, PENDING_EXIT}}, got {phase_after!r}"
+        )
+    if phase_before not in {PENDING_ENTRY, ACTIVE, DAY0_WINDOW, PENDING_EXIT}:
+        raise ValueError(
+            "entry fill-only builder phase_before must be a live entry phase; "
+            f"got {phase_before!r}"
         )
     projection = build_position_current_projection(position)
     projection["phase"] = phase_after
@@ -818,8 +824,8 @@ def build_entry_fill_only_canonical_write(
             event_type="ENTRY_ORDER_FILLED",
             sequence_no=sequence_no,
             occurred_at=filled_at,
-            phase_before=PENDING_ENTRY,
-            phase_after=fold_lifecycle_phase(PENDING_ENTRY, canonical_phase).value,
+            phase_before=phase_before,
+            phase_after=fold_lifecycle_phase(phase_before, canonical_phase).value,
             decision_id=decision_id,
             source_module=source_module,
             order_id=order_id,
