@@ -215,125 +215,6 @@ def _raw_input_lag_basis(reason: str | None) -> str | None:
     return text.split(":", 1)[0].removeprefix("basis=") or None
 
 
-def _latest_raw_single_runs_cycle(
-    conn: sqlite3.Connection,
-    *,
-    city: str,
-    target_date: str,
-    temperature_metric: str,
-    now: datetime,
-) -> datetime | None:
-    """Latest captured raw live-input cycle for the same family, if present."""
-
-    columns = _table_columns(conn, "raw_model_forecasts")
-    required = {"model", "city", "target_date", "metric", "source_cycle_time"}
-    if not required.issubset(columns):
-        return None
-    predicates = ["city = ?", "target_date = ?", "metric = ?"]
-    params: list[object] = [city, target_date, temperature_metric]
-    if "endpoint" in columns:
-        predicates.append("endpoint = 'single_runs'")
-    if "coverage_status" in columns:
-        predicates.append("(coverage_status IS NULL OR coverage_status = 'COVERED')")
-    if "captured_at" in columns:
-        predicates.append("(captured_at IS NULL OR datetime(captured_at) <= datetime(?))")
-        params.append(now.isoformat())
-    if "source_available_at" in columns:
-        predicates.append(
-            "(source_available_at IS NULL OR datetime(source_available_at) <= datetime(?))"
-        )
-        params.append(now.isoformat())
-    anchor_terms = ["model = 'ecmwf_ifs'"]
-    if "source_id" in columns:
-        anchor_terms.append("source_id = 'ecmwf_ifs_single_runs'")
-    if "product_id" in columns:
-        anchor_terms.append("product_id = 'ecmwf_ifs::single_runs'")
-    anchor_expr = " OR ".join(anchor_terms)
-    try:
-        row = conn.execute(
-            f"""
-            SELECT source_cycle_time
-            FROM raw_model_forecasts
-            WHERE {' AND '.join(predicates)}
-              AND datetime(source_cycle_time) <= datetime(?)
-            GROUP BY source_cycle_time
-            HAVING COUNT(DISTINCT model) >= 2
-               AND SUM(CASE WHEN ({anchor_expr}) THEN 1 ELSE 0 END) > 0
-            ORDER BY datetime(source_cycle_time) DESC
-            LIMIT 1
-            """,
-            tuple([*params, now.isoformat()]),
-        ).fetchone()
-    except sqlite3.Error:
-        return None
-    if row is None:
-        return None
-    try:
-        raw_value = row["source_cycle_time"]
-    except (TypeError, IndexError):
-        raw_value = row[0]
-    return _parse_computed_at(raw_value)
-
-
-def _latest_raw_artifact_cycle(
-    conn: sqlite3.Connection,
-    *,
-    city: str,
-    target_date: str,
-    temperature_metric: str,
-    now: datetime,
-) -> datetime | None:
-    """Latest captured current-target raw artifact cycle for the same family."""
-
-    columns = _table_columns(conn, "raw_forecast_artifacts")
-    required = {
-        "source_cycle_time",
-        "captured_at",
-        "source_available_at",
-        "artifact_metadata_json",
-    }
-    if not required.issubset(columns):
-        return None
-    predicates = [
-        "json_extract(artifact_metadata_json, '$.city') = ?",
-        "json_extract(artifact_metadata_json, '$.target_date') = ?",
-        "json_extract(artifact_metadata_json, '$.metric') = ?",
-        "datetime(captured_at) <= datetime(?)",
-        "datetime(source_available_at) <= datetime(?)",
-    ]
-    params: list[object] = [
-        city,
-        target_date,
-        temperature_metric,
-        now.isoformat(),
-        now.isoformat(),
-    ]
-    if "source_id" in columns:
-        predicates.append("source_id = 'openmeteo_ecmwf_ifs_9km'")
-    try:
-        row = conn.execute(
-            f"""
-            SELECT source_cycle_time
-            FROM raw_forecast_artifacts
-            WHERE {' AND '.join(predicates)}
-              AND datetime(source_cycle_time) <= datetime(?)
-            GROUP BY source_cycle_time
-            ORDER BY datetime(source_cycle_time) DESC
-            LIMIT 1
-            """,
-            tuple([*params, now.isoformat()]),
-        ).fetchone()
-    except sqlite3.Error:
-        return None
-    if row is None:
-        return None
-    try:
-        raw_value = row["source_cycle_time"]
-    except (TypeError, IndexError):
-        raw_value = row[0]
-    return _parse_computed_at(raw_value)
-
-
 def _latest_live_input_cycle(
     conn: sqlite3.Connection,
     *,
@@ -342,19 +223,29 @@ def _latest_live_input_cycle(
     temperature_metric: str,
     now: datetime,
 ) -> tuple[datetime | None, str | None]:
-    raw_single_runs_cycle = _latest_raw_single_runs_cycle(
-        conn,
-        city=city,
-        target_date=target_date,
-        temperature_metric=temperature_metric,
-        now=now,
+    # One raw-input authority must serve entry and held redecision.  The shared
+    # readers consume the monitor's frozen cycle cut and use the indexed
+    # product/cycle route.  A private JSON scan here used to ignore that cut,
+    # reopen the large forecast DB for every position, and spend each complete
+    # belief deadline before probability redecision could start.
+    from src.data.replacement_input_hwm import (
+        latest_raw_artifact_input_cycle,
+        latest_raw_model_input_cycle,
     )
-    raw_artifact_cycle = _latest_raw_artifact_cycle(
+
+    raw_single_runs_cycle = latest_raw_model_input_cycle(
         conn,
         city=city,
         target_date=target_date,
-        temperature_metric=temperature_metric,
-        now=now,
+        metric=temperature_metric,
+        decision_time=now,
+    )
+    raw_artifact_cycle = latest_raw_artifact_input_cycle(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=temperature_metric,
+        decision_time=now,
     )
     candidates = [
         (raw_single_runs_cycle, "source_cycle_time_raw_model_forecasts_lag"),

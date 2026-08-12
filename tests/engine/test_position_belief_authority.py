@@ -10,6 +10,8 @@
 #   (BELIEF_AUTHORITY_FAULT) + reseed, never substitute the legacy ENS belief.
 #   2026-07-27 update: fixed-action held probability is the persisted q_json
 #   point; confidence-sample means must not create a second exit probability.
+#   2026-08-12 update: held redecision consumes the shared cycle-frozen raw-input
+#   HWM cut; a private per-position artifact scan may not exhaust monitor cadence.
 """ANTIBODY: held-position belief comes from the SAME authority entry used.
 
 The disease: entry decisions read ``forecast_posteriors`` (replacement chain)
@@ -45,6 +47,7 @@ from src.engine.position_belief import (
     POSTERIOR_PREDICTIVE_MEAN,
     SELECTED_METHOD_REPLACEMENT_POSTERIOR,
     ReplacementBelief,
+    _latest_live_input_cycle,
     _observed_running_extreme_native,
     load_replacement_belief,
 )
@@ -57,6 +60,47 @@ from src.types.metric_identity import MetricIdentity
 NOW = datetime(2026, 6, 12, 12, 0, 0, tzinfo=timezone.utc)
 BIN = "Will the highest temperature in Karachi be 37°C on June 12?"
 OTHER_BIN = "Will the highest temperature in Karachi be 38°C on June 12?"
+
+
+def test_live_input_cycle_uses_shared_frozen_hwm_authority(monkeypatch):
+    """Held belief must not revive its former private raw-artifact scan."""
+    import src.data.replacement_input_hwm as hwm
+
+    seen: list[tuple[str, str, str, str]] = []
+    model_cycle = NOW - timedelta(hours=12)
+    artifact_cycle = NOW - timedelta(hours=6)
+
+    def model_reader(_conn, *, city, target_date, metric, decision_time):
+        seen.append(("model", city, str(target_date), metric))
+        assert decision_time == NOW
+        return model_cycle
+
+    def artifact_reader(_conn, *, city, target_date, metric, decision_time):
+        seen.append(("artifact", city, str(target_date), metric))
+        assert decision_time == NOW
+        return artifact_cycle
+
+    monkeypatch.setattr(hwm, "latest_raw_model_input_cycle", model_reader)
+    monkeypatch.setattr(hwm, "latest_raw_artifact_input_cycle", artifact_reader)
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        cycle, basis = _latest_live_input_cycle(
+            conn,
+            city="Karachi",
+            target_date="2026-06-12",
+            temperature_metric="high",
+            now=NOW,
+        )
+    finally:
+        conn.close()
+
+    assert cycle == artifact_cycle
+    assert basis == "source_cycle_time_raw_forecast_artifacts_lag"
+    assert seen == [
+        ("model", "Karachi", "2026-06-12", "high"),
+        ("artifact", "Karachi", "2026-06-12", "high"),
+    ]
 
 
 @pytest.fixture

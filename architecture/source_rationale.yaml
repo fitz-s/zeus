@@ -1898,7 +1898,7 @@ files:
   src/engine/position_belief.py:
     zone: K2_runtime
     authority_role: replacement_forecast_monitor_exit_belief
-    why: Read-only freshness annotation for held positions during monitor/exit; independently re-derives the latest raw-input cycle (_latest_live_input_cycle, separate implementation from src/data/replacement_input_hwm.py) and sets a fresh=False flag when the served posterior is behind newer raw input. A shaped posterior with a different current-evidence semantics revision is absent authority, not a stale numeric belief. Deliberately never raises (unlike the entry-side tripwire) — held positions must keep being monitored even on stale-flagged data. Not touched by W0.1; consolidating its duplicate raw-HWM query onto src/data/replacement_input_hwm.py is deferred to a later wave.
+    why: Read-only freshness annotation for held positions during monitor/exit; consumes the same indexed and cycle-frozen raw-input HWM authority as entry, then sets a fresh=False flag when the served posterior is behind newer raw input. A shaped posterior with a different current-evidence semantics revision is absent authority, not a stale numeric belief. Deliberately never raises (unlike the entry-side tripwire) — held positions must keep being monitored even on stale-flagged data. The shared HWM route prevents a private per-position JSON scan from exhausting the held-monitor probability deadline after the cycle cut has already been frozen.
     downstream:
     - src/engine/monitor_refresh.py
   src/engine/time_context.py:

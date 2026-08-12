@@ -3828,6 +3828,33 @@ existing HWM-before-auxiliary ordering must remain intact, typed unavailable
 behavior must retain fail-closed authority, and post-deploy decision artifacts
 must show HWM wall time bounded while primary position attempts continue.
 
+## 2026-08-12 Held belief has one raw-input HWM authority
+
+The bounded batch alone did not guarantee progress. After freezing its
+cycle-scoped HWM cut, `position_belief` independently reopened the large
+forecast DB for every held position and recomputed the artifact HWM through an
+older JSON-field scan. That private path neither consumed the frozen cut nor
+used the shared indexed product/cycle reader. Under live writer and scheduler
+load, each duplicate read reached the five-second belief deadline; the monitor
+had fresh books but completed no fresh probability decisions, and later passes
+could only report `previous monitor cycle is still running`.
+
+Held redecision now delegates both model and artifact frontier reads to
+`replacement_input_hwm`, exactly like entry authority. The artifact reader
+therefore consumes the immutable batch snapshot (including its typed
+unavailable verdict) and uses the indexed product/cycle route when no snapshot
+exists. There is no second raw-input interpretation or fallback scan. The
+posterior remains fail-closed when the frozen cut is unavailable; recurring
+monitor passes, not stale probability reuse, provide recovery.
+
+SCOPE is one held family's raw-input freshness proof inside one monitor cut.
+DRAIN is the next recurring batch snapshot plus bounded belief read. RESET is a
+complete current shared HWM cut; no old private query can create another
+authority. Acceptance requires a relationship antibody proving the held reader
+delegates to both shared HWM functions, deadline interruption remains bounded,
+all primary-reserve/deadline monitor antibodies pass, and a current 10-position
+read sample completes every fresh belief inside one tranche before deployment.
+
 ## 2026-08-12 Favorable SELL quotes are not submitted prices
 
 Forward global-auction receipt `415033` selected an immediate Shanghai held
