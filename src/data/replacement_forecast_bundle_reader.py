@@ -16,7 +16,7 @@ from src.config import cities_by_name
 from src.contracts.settlement_semantics import SettlementSemantics
 from src.data.replacement_forecast_cycle_policy import (
     TRADEABLE_GRADE_QLCB_BASIS,
-    current_evidence_shape_semantics_mismatch,
+    current_evidence_shape_has_entry_authority,
     cycle_age_exceeds_bound,
     replacement_source_cycle_max_age_hours,
 )
@@ -237,7 +237,7 @@ def _parse_utc(value: str, *, field_name: str) -> datetime:
 def _live_grade_provenance(
     row_map: Mapping[str, Any],
 ) -> Mapping[str, Any] | None:
-    """Return the parsed provenance only when the row is executable."""
+    """Return provenance only when the row can authorize a new entry."""
     if str(row_map.get("runtime_layer") or "") != LIVE_RUNTIME_LAYER:
         return None
     if not row_map.get("q_lcb_json"):
@@ -260,7 +260,7 @@ def _live_grade_provenance(
     )
     if not isinstance(shape, Mapping):
         return None
-    if current_evidence_shape_semantics_mismatch(provenance):
+    if not current_evidence_shape_has_entry_authority(provenance):
         return None
     return provenance
 

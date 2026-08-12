@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-10
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Last reused/audited: 2026-08-12
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: Protect current-market replacement forecast download and materialization planning.
 # Reuse: Run before changing current replacement target coverage or source-run matching.
 # Authority basis: Replacement forecast coverage must bind to the live baseline source_run, not stale city/date rows.
@@ -1861,7 +1861,10 @@ def test_current_target_plan_reseeds_old_probability_semantics(tmp_path) -> None
                         "q_lcb_basis": "fused_center_bootstrap_p05",
                         "bayes_precision_fusion": {
                             "current_evidence_shape": {
-                                "semantics_revision": "older-law"
+                                "semantics_revision": "older-law",
+                                "shape_lag_hours": 0.0,
+                                "stale_shape_reused": False,
+                                "translation_applied": False,
                             }
                         },
                     }
@@ -1927,7 +1930,10 @@ def test_current_target_plan_reseeds_same_cycle_late_used_model_input(tmp_path) 
                             "q_lcb_basis": "fused_center_bootstrap_p05",
                             "bayes_precision_fusion": {
                                 "current_evidence_shape": {
-                                    "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION
+                                    "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                                    "shape_lag_hours": 0.0,
+                                    "stale_shape_reused": False,
+                                    "translation_applied": False,
                                 }
                             },
                         }

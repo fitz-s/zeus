@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-06-12; last_reviewed=2026-08-01; last_reused=2026-08-01
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: Prove held-position probability authority, freshness, and compact decision lineage.
 # Reuse: pytest tests/engine/test_position_belief_authority.py
 # Authority basis: settlement-losses incident 2026-06-12 (Karachi position:
@@ -50,6 +50,7 @@ from src.engine.position_belief import (
 )
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
 )
 from src.types.metric_identity import MetricIdentity
 
@@ -111,6 +112,8 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
             runtime_layer="live", source_id=LIVE_REPLACEMENT_POSTERIOR_SOURCE_ID,
             posterior_method="openmeteo_ecmwf_ifs9_aifs_sampled_2t_soft_anchor",
             semantics_revision=CURRENT_EVIDENCE_SEMANTICS_REVISION,
+            shape_lag_hours=0.0, stale_shape_reused=False,
+            translation_applied=False,
             q_lcb=None, q_ucb=None, q_samples=None,
             q_samples_basis="global_simplex_current_finite_moment_evidence_v3"):
     if q_samples is None:
@@ -136,6 +139,9 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
                     "bayes_precision_fusion": {
                         "current_evidence_shape": {
                             "semantics_revision": semantics_revision,
+                            "shape_lag_hours": shape_lag_hours,
+                            "stale_shape_reused": stale_shape_reused,
+                            "translation_applied": translation_applied,
                         }
                     },
                     "q_bootstrap_samples_basis": q_samples_basis,
@@ -146,6 +152,35 @@ def _insert(db_path, *, posterior_id, computed_at, q, city="Karachi",
     )
     conn.commit()
     conn.close()
+
+
+def test_stale_absolute_disagreement_remains_held_monitor_authority(forecasts_db):
+    _insert(
+        forecasts_db,
+        posterior_id="stale-shape-held-monitor",
+        computed_at=(NOW - timedelta(hours=1)).isoformat(),
+        source_cycle_time=(NOW - timedelta(hours=12)).isoformat(),
+        q={BIN: 0.242, OTHER_BIN: 0.758},
+        semantics_revision=(
+            STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        ),
+        shape_lag_hours=6.0,
+        stale_shape_reused=True,
+        translation_applied=False,
+    )
+
+    belief = load_replacement_belief(
+        city="Karachi",
+        target_date="2026-06-12",
+        temperature_metric="high",
+        bin_label=BIN,
+        direction="buy_yes",
+        db_path=forecasts_db,
+        now=NOW,
+    )
+
+    assert belief is not None
+    assert belief.held_side_prob == pytest.approx(0.242)
 
 
 def _insert_raw(db_path, *, source_cycle_time, city="Karachi",

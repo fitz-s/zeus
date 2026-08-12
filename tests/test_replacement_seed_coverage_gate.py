@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-28
+# Last reused or audited: 2026-08-12
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (#1 graceful-degradation:
 #   readiness expiring + no fresher cycle => re-materialize from newest persisted cycle) +
 #   tradeable-grade coverage antibody (a NULL-q_lcb / untradeable posterior must not satisfy the
@@ -114,6 +114,9 @@ def _insert_posterior(db_path: str, *, q_lcb_json: str | None) -> None:
                         "used_models": ["gfs_global"],
                         "current_evidence_shape": {
                             "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                            "shape_lag_hours": 0.0,
+                            "stale_shape_reused": False,
+                            "translation_applied": False,
                         },
                     },
                 }
@@ -370,6 +373,9 @@ def test_day0_seed_coverage_requires_exact_conditioning_identity(tmp_path) -> No
                                 "semantics_revision": (
                                     CURRENT_EVIDENCE_SEMANTICS_REVISION
                                 ),
+                                "shape_lag_hours": 0.0,
+                                "stale_shape_reused": False,
+                                "translation_applied": False,
                             },
                         },
                         provenance_key: conditioning,
@@ -479,6 +485,9 @@ def test_day0_coverage_prefers_active_provisional_over_fallback_conditioning(tmp
                             "used_models": ["gfs_global"],
                             "current_evidence_shape": {
                                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                                "shape_lag_hours": 0.0,
+                                "stale_shape_reused": False,
+                                "translation_applied": False,
                             },
                         },
                         "day0_provisional_observation": provisional,
@@ -516,6 +525,9 @@ def test_consumed_regional_clock_newer_than_anchor_cycle_is_covered(tmp_path) ->
                         "used_models": ["gfs_global", "regional_clock"],
                         "current_evidence_shape": {
                             "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                            "shape_lag_hours": 0.0,
+                            "stale_shape_reused": False,
+                            "translation_applied": False,
                         },
                         "current_value_serving": {
                             "gfs_global": {

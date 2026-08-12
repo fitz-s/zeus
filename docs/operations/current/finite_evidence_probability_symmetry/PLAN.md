@@ -4,6 +4,36 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-12 Fresh target-specific ENS shape is required for entry
+
+The current forecast database contained 190 latest family certificates: 176
+used a same-cycle `ensemble_center_scenarios_v4` shape, while 14 reused an ENS
+shape lagged by 6--30 hours.  The stale rows truthfully retained absolute
+ENS/provider-center disagreement and remained readable, but the shared
+tradeable-coverage predicate incorrectly granted them the same new-entry
+authority as a target-specific same-cycle shape.  Six recently settled
+qkernel entries were all admitted under that stale-shape probability identity;
+their common structural defect was the missing current shape, not their city,
+bin, side, or eventual outcome.
+
+The repair separates evidence availability from action authority.  A stale
+shape remains materialized and readable through the independent held-position
+belief path for monitoring, uncertainty, and repair scheduling.  It no longer
+satisfies live entry/FSR coverage or the new-entry bundle reader.  Entry-grade
+authority now requires numeric `shape_lag_hours == 0`,
+no stale reuse, no translation, the current semantic revision, and the existing
+certified bootstrap bounds.  Missing lag provenance fails closed.
+
+SCOPE is only new-entry coverage for the affected family certificate; the 176
+fresh families remain eligible and held-position reads are unchanged.  DRAIN
+is the existing replacement fetch/materialization cycle, which replaces a
+stale certificate when the current target-specific ENS shape arrives.  RESET
+is exact same-cycle lag-zero shape provenance under the current semantics;
+another stale/missing/translated shape remains non-entry-grade.  Acceptance
+requires executable SQL antibodies for fresh, stale, and missing-lag rows,
+the full cycle-policy suite, live landing and loaded-SHA proof, current coverage
+counts, and forward auction receipts showing fresh families still compete.
+
 ## 2026-08-11 Confirmed taker SELL retains exact quote proceeds
 
 A forward Tokyo 28C NO exit sold 12.99 shares after current belief reversed.

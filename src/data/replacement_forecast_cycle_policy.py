@@ -151,6 +151,26 @@ def current_evidence_shape_semantics_mismatch(provenance: object) -> bool:
     return str(shape.get("semantics_revision") or "") != expected
 
 
+def current_evidence_shape_has_entry_authority(provenance: object) -> bool:
+    """Whether the certificate carries a fresh target-specific ENS shape."""
+
+    shape = _current_evidence_shape(provenance)
+    if shape is None:
+        return False
+    try:
+        shape_lag_hours = float(shape["shape_lag_hours"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return (
+        str(shape.get("semantics_revision") or "")
+        == CURRENT_EVIDENCE_SEMANTICS_REVISION
+        and shape_lag_hours == 0.0
+        and shape.get("stale_shape_reused") is not True
+        and shape.get("translation_applied") is False
+        and not current_evidence_shape_semantics_mismatch(provenance)
+    )
+
+
 def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
     """SQL fragment selecting ONLY tradeable-grade (certified-bootstrap-bounded) posteriors.
 
@@ -175,17 +195,24 @@ def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
         f"'{TRADEABLE_GRADE_QLCB_BASIS}'"
     )
     shape_path = "$.bayes_precision_fusion.current_evidence_shape"
-    fragments.append(
-        "AND (("
-        f"COALESCE(json_extract({alias}provenance_json, '{shape_path}.stale_shape_reused'), 0) = 0 "
-        "AND "
-        f"COALESCE(json_extract({alias}provenance_json, '{shape_path}.translation_applied'), 0) = 0 "
-        f"AND json_extract({alias}provenance_json, '{shape_path}.semantics_revision') = "
-        f"'{CURRENT_EVIDENCE_SEMANTICS_REVISION}') OR ("
-        f"json_extract({alias}provenance_json, '{shape_path}.stale_shape_reused') = 1 "
-        f"AND COALESCE(json_extract({alias}provenance_json, '{shape_path}.translation_applied'), 0) = 0 "
-        f"AND json_extract({alias}provenance_json, '{shape_path}.semantics_revision') = "
-        f"'{STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION}'))"
+    # A stale ENS shape remains readable for held-position uncertainty and
+    # rematerialization, but it cannot certify a new live entry. Entry authority
+    # requires a target-specific shape from the same source clock as the center.
+    # Missing lag provenance fails closed instead of being coerced to zero.
+    fragments.extend(
+        [
+            f"AND COALESCE(json_extract({alias}provenance_json, "
+            f"'{shape_path}.stale_shape_reused'), 0) = 0",
+            f"AND json_extract({alias}provenance_json, "
+            f"'{shape_path}.translation_applied') = 0",
+            f"AND json_type({alias}provenance_json, '{shape_path}.shape_lag_hours') "
+            "IN ('integer', 'real')",
+            f"AND CAST(json_extract({alias}provenance_json, "
+            f"'{shape_path}.shape_lag_hours') AS REAL) = 0.0",
+            f"AND json_extract({alias}provenance_json, "
+            f"'{shape_path}.semantics_revision') = "
+            f"'{CURRENT_EVIDENCE_SEMANTICS_REVISION}'",
+        ]
     )
     return "\n              ".join(fragments)
 

@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused/audited: 2026-07-25
+# Last reused/audited: 2026-08-12
 # Authority basis: docs/authority/replacement_final_form_2026_06_09.md
 """Relationship tests for readiness-bound replacement posterior selection.
 
@@ -329,7 +329,7 @@ def test_missing_current_evidence_shape_is_not_live_readable() -> None:
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
 
 
-def test_stale_absolute_disagreement_row_is_live_readable() -> None:
+def test_stale_absolute_disagreement_row_has_no_entry_authority() -> None:
     conn = _conn()
     posterior_id = _insert_posterior(
         conn,
@@ -353,9 +353,8 @@ def test_stale_absolute_disagreement_row_is_live_readable() -> None:
 
     result = _read(conn, readiness, decision_time=_dt(6, 12))
 
-    assert result.ok is True, result.reason_code
-    assert result.bundle is not None
-    assert result.bundle.posterior_id == posterior_id
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
 
 
 def _read(conn, readiness, *, decision_time):

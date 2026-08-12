@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-15
+# Last reused or audited: 2026-08-12
 # Authority basis: operator staleness/cycle-physics directive 2026-06-10 (bounded re-materialization
 #   staleness gate at materialization, fail-closed; cycle-phase provenance treats all standard
 #   00Z/06Z/12Z/18Z cycles as live-eligible synoptic).
@@ -20,6 +20,7 @@ Two cross-module invariants are pinned here (Fitz: relationship tests, not funct
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -36,6 +37,7 @@ from src.data.replacement_forecast_cycle_policy import (
     REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT,
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     classify_cycle_phase,
+    current_evidence_shape_has_entry_authority,
     current_evidence_shape_semantics_mismatch,
     tradeable_grade_coverage_sql,
 )
@@ -54,9 +56,13 @@ _STALE_REASON = "REPLACEMENT_MATERIALIZATION_SOURCE_CYCLE_TOO_STALE"
 
 def test_current_evidence_semantics_is_probability_identity_and_coverage() -> None:
     current = {
+        "q_lcb_basis": "fused_center_bootstrap_p05",
         "bayes_precision_fusion": {
             "current_evidence_shape": {
                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                "shape_lag_hours": 0.0,
+                "stale_shape_reused": False,
+                "translation_applied": False,
             }
         }
     }
@@ -108,6 +114,8 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
     assert current_evidence_shape_semantics_mismatch(ambiguous_v2_transport) is True
     assert current_evidence_shape_semantics_mismatch(stale) is True
     assert current_evidence_shape_semantics_mismatch({}) is False
+    assert current_evidence_shape_has_entry_authority(current) is True
+    assert current_evidence_shape_has_entry_authority(stale_reused) is False
 
     clause = tradeable_grade_coverage_sql(
         posterior_columns={"q_lcb_json", "q_ucb_json", "provenance_json"},
@@ -116,10 +124,35 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
     assert "current_evidence_shape.semantics_revision" in clause
     assert "current_evidence_shape.stale_shape_reused" in clause
     assert "current_evidence_shape.translation_applied" in clause
+    assert "current_evidence_shape.shape_lag_hours" in clause
     assert CURRENT_EVIDENCE_SEMANTICS_REVISION in clause
-    assert STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION in clause
+    assert STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION not in clause
     assert "ensemble_center_scenarios_v2" not in clause
     assert "ensemble_anomaly_transport_v2" not in clause
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE posterior (q_lcb_json TEXT, q_ucb_json TEXT, provenance_json TEXT)"
+    )
+
+    def is_tradeable(provenance: dict) -> bool:
+        conn.execute("DELETE FROM posterior")
+        conn.execute(
+            "INSERT INTO posterior VALUES (?, ?, ?)",
+            ("{}", "{}", json.dumps(provenance)),
+        )
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM posterior p WHERE 1 = 1 {clause}"
+        ).fetchone()
+        return bool(row[0])
+
+    stale_reused["q_lcb_basis"] = "fused_center_bootstrap_p05"
+    missing_lag = json.loads(json.dumps(current))
+    del missing_lag["bayes_precision_fusion"]["current_evidence_shape"]["shape_lag_hours"]
+    assert is_tradeable(current) is True
+    assert is_tradeable(stale_reused) is False
+    assert is_tradeable(missing_lag) is False
+    assert current_evidence_shape_has_entry_authority(missing_lag) is False
 
 
 @dataclass(frozen=True)
