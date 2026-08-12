@@ -999,6 +999,12 @@ def select_prepared_global_auction(
                     token_id=asset.token_id,
                     position_id=None,
                 )
+                current_token_shares = _candidate_portfolio_endowment(
+                    native,
+                    probability_witness=probability,
+                    holdings_snapshot=holdings_by_family[asset.family_key],
+                    wealth_witness=wealth_witness,
+                ).current_token_shares
                 candidates.extend(
                     global_candidates_from_native(
                         native,
@@ -1009,6 +1015,7 @@ def select_prepared_global_auction(
                         include_maker=maker_witness is not None,
                         maker_fill_witness=maker_witness,
                         asset_epoch_identity=book_epoch.witness_identity,
+                        current_token_shares=current_token_shares,
                         neg_risk=asset.neg_risk,
                     )
                 )

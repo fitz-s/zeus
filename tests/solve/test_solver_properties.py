@@ -2834,6 +2834,7 @@ def test_global_buy_generation_keeps_maker_when_taker_ask_depth_is_subminimum():
     )
     assert provisional_taker.execution_mode == "TAKER_LIMIT"
     assert provisional_maker.execution_mode == "MAKER_REST"
+    assert provisional_maker.eligibility_reason is None
     assert provisional_maker.proposal_cost_curve.levels == (
         BookLevel(price=Decimal("0.401"), size=Decimal("10")),
     )

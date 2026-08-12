@@ -3736,7 +3736,28 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy():
         neg_risk=False,
         hypothesis_id="hypothesis",
     )
-    candidates = global_candidates_from_native(
+    unseeded_candidates = global_candidates_from_native(
+        native,
+        probability_witness=probability,
+        ledger_snapshot_id="ledger",
+        book_captured_at_utc=at,
+        native_bid_levels=asset.bid_levels,
+        include_maker=True,
+        maker_fill_witness=maker_witness,
+        asset_epoch_identity=epoch.witness_identity,
+        current_token_shares=Decimal("0"),
+        neg_risk=False,
+    )
+    unseeded_maker = next(
+        candidate
+        for candidate in unseeded_candidates
+        if candidate.execution_mode == "MAKER_REST"
+    )
+    assert unseeded_maker.eligibility_reason == (
+        "MAKER_REST_EXITABILITY_SEED_REQUIRED"
+    )
+
+    unwitnessed_candidates = global_candidates_from_native(
         native,
         probability_witness=probability,
         ledger_snapshot_id="ledger",
@@ -3747,6 +3768,27 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy():
         asset_epoch_identity=epoch.witness_identity,
         neg_risk=False,
     )
+    unwitnessed_maker = next(
+        candidate
+        for candidate in unwitnessed_candidates
+        if candidate.execution_mode == "MAKER_REST"
+    )
+    assert unwitnessed_maker.eligibility_reason == (
+        "CURRENT_TOKEN_EXITABILITY_AUTHORITY_MISSING"
+    )
+
+    candidates = global_candidates_from_native(
+        native,
+        probability_witness=probability,
+        ledger_snapshot_id="ledger",
+        book_captured_at_utc=at,
+        native_bid_levels=asset.bid_levels,
+        include_maker=True,
+        maker_fill_witness=maker_witness,
+        asset_epoch_identity=epoch.witness_identity,
+        current_token_shares=curve.min_order_size,
+        neg_risk=False,
+    )
 
     assert {candidate.execution_mode for candidate in candidates} == {
         "TAKER_LIMIT",
@@ -3755,6 +3797,7 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy():
     maker = next(
         candidate for candidate in candidates if candidate.execution_mode == "MAKER_REST"
     )
+    assert maker.eligibility_reason is None
     assert maker.fill_probability == pytest.approx(0.05)
     assert maker.maker_fill_witness.expected_fill_fraction == pytest.approx(0.0375)
     authority = witnessed_epoch.execution_authority(maker, checked_at_utc=at)
@@ -19730,6 +19773,11 @@ def test_global_scope_identity_binds_settlement_timezone_horizon():
 
 
 def test_global_candidate_endowment_projects_correlated_family_holdings_exactly():
+    from src.engine.native_holdings import (
+        NativeHoldingsSnapshot,
+        NativePendingEndowment,
+    )
+
     at = _dt.datetime(2026, 7, 14, 8, 0, tzinfo=_dt.timezone.utc)
     wealth = _test_wealth_witness(
         ledger_snapshot_id="ledger-current",
@@ -19850,6 +19898,32 @@ def test_global_candidate_endowment_projects_correlated_family_holdings_exactly(
     assert sibling_endowment.loss_wealth_floor_usd == Decimal("105")
     assert sibling_endowment.win_wealth_floor_usd == Decimal("100")
     assert sibling_endowment.current_token_shares == Decimal("0")
+
+    pending_seed_endowment = _candidate_portfolio_endowment(
+        SimpleNamespace(
+            family_key="family",
+            bin_id="c",
+            side="NO",
+            token_id="no-c",
+        ),
+        probability_witness=SimpleNamespace(bin_ids=("a", "b", "c")),
+        holdings_snapshot=NativeHoldingsSnapshot(
+            family_key="family",
+            ledger_snapshot_id="ledger-current",
+            pending_endowments=(
+                NativePendingEndowment(
+                    obligation_id="fok-seed-pending",
+                    family_key="family",
+                    bin_id="c",
+                    side="NO",
+                    token_id="no-c",
+                    shares=Decimal("5"),
+                ),
+            ),
+        ),
+        wealth_witness=wealth,
+    )
+    assert pending_seed_endowment.current_token_shares == Decimal("5")
 
 
 def test_global_selection_endowment_uses_same_chain_balance_as_wealth_witness():

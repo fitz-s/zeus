@@ -222,6 +222,8 @@ GlobalEligibilityReason = Literal[
     "FRACTIONAL_KELLY_TARGET_REACHED",
     "LIVE_UNIT_PRICE_OUT_OF_BOUNDS",
     "CURRENT_PRECLIFF_LIQUIDATION_CAPACITY_MISSING",
+    "CURRENT_TOKEN_EXITABILITY_AUTHORITY_MISSING",
+    "MAKER_REST_EXITABILITY_SEED_REQUIRED",
     "NON_POSITIVE_ROBUST_OBJECTIVE",
 ]
 
@@ -2093,6 +2095,7 @@ def global_candidates_from_native(
     include_maker: bool = False,
     maker_fill_witness: CurrentMakerFillWitness | None = None,
     asset_epoch_identity: str | None = None,
+    current_token_shares: Decimal | None = None,
 ) -> tuple[GlobalSingleOrderCandidate, ...]:
     """Materialize current taker and, when fully witnessed, maker siblings."""
 
@@ -2176,6 +2179,22 @@ def global_candidates_from_native(
         )
         if maker_curve is None or maker_fill_witness is None or not asset_epoch_identity:
             return (taker,)
+        maker_eligibility_reason = eligibility_reason
+        if not settlement_locked_exact_payoff and maker_eligibility_reason is None:
+            try:
+                witnessed_token_shares = Decimal(current_token_shares)
+            except (TypeError, ValueError, ArithmeticError):
+                witnessed_token_shares = Decimal("NaN")
+            if not witnessed_token_shares.is_finite() or witnessed_token_shares < 0:
+                maker_eligibility_reason = (
+                    "CURRENT_TOKEN_EXITABILITY_AUTHORITY_MISSING"
+                )
+            elif witnessed_token_shares < Decimal(curve.min_order_size):
+                # A resting entry may fill any positive prefix.  Until one exact
+                # token already owns a venue-legal exit lot, that prefix can create
+                # exposure which no SELL command may submit.  The immediate-taker
+                # sibling remains eligible to establish the first lot atomically.
+                maker_eligibility_reason = "MAKER_REST_EXITABILITY_SEED_REQUIRED"
         maker = GlobalSingleOrderCandidate(
             candidate_id=_global_native_candidate_id(
                 probability_witness=probability_witness,
@@ -2193,7 +2212,7 @@ def global_candidates_from_native(
             rest_deadline_minutes=maker_fill_witness.rest_deadline_minutes,
             maker_fill_witness=maker_fill_witness,
             asset_epoch_identity=asset_epoch_identity,
-            eligibility_reason=eligibility_reason,
+            eligibility_reason=maker_eligibility_reason,
         )
         return (taker, maker)
     return (taker,)

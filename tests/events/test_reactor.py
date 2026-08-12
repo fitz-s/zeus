@@ -277,6 +277,7 @@ def test_global_builder_uses_sealed_book_and_one_final_provider_call(monkeypatch
         metric="high",
         decision_proof_bundle=None,
         day0_probability_authority=None,
+        qkernel_execution_economics={},
         event_id="evt-sealed",
     )
     event = SimpleNamespace(event_id="evt-sealed", event_type="FORECAST_DECISION")
@@ -327,8 +328,8 @@ def test_global_builder_uses_sealed_book_and_one_final_provider_call(monkeypatch
         "min_order_size": 1.0,
         "neg_risk": False,
         "order_mode": "TAKER",
-        "order_type": "FAK_LIMIT",
-        "time_in_force": "FAK",
+        "order_type": "FOK_LIMIT",
+        "time_in_force": "FOK",
     }
     base_certs = (forecast, executable, quote, cost)
     compile_result = SimpleNamespace(status="VERIFIED", certificates=base_certs, failures=())
@@ -362,8 +363,15 @@ def test_global_builder_uses_sealed_book_and_one_final_provider_call(monkeypatch
     monkeypatch.setattr(era, "_passive_maker_context_and_book", lambda **_k: (None, 0.49, 0.50))
     monkeypatch.setattr(era, "_executable_market_context_from_snapshot", lambda _s: {})
     monkeypatch.setattr(era, "_build_event_bound_taker_quality_proof", lambda **_k: {"passed": True})
-    monkeypatch.setattr(era, "qkernel_global_buy_fak_prefix_rejection_reason", lambda *_a, **_k: None)
-    monkeypatch.setattr(era, "build_final_intent_certificate_from_actionable", lambda **_k: SimpleNamespace(payload=dict(final_payload)))
+    final_intent_builds = []
+    monkeypatch.setattr(
+        era,
+        "build_final_intent_certificate_from_actionable",
+        lambda **kwargs: (
+            final_intent_builds.append(kwargs)
+            or SimpleNamespace(payload=dict(final_payload))
+        ),
+    )
     witness = PreSubmitAuthorityWitness(
         quote_seen_at=captured_at.isoformat(),
         book_hash=snapshot.raw_orderbook_hash,
@@ -431,6 +439,8 @@ def test_global_builder_uses_sealed_book_and_one_final_provider_call(monkeypatch
     assert final_intent_payload["limit_price"] == 0.51
     assert final_intent_payload["notional_usd"] == 1.02
     assert final_intent_payload["post_only"] is False
+    assert final_intent_builds[0]["order_type"] == "FOK_LIMIT"
+    assert final_intent_builds[0]["time_in_force"] == "FOK"
     assert sealed_override is not None
     assert sealed_override.snapshot_id == "snap-sealed"
     assert persisted_snapshot_bases == [snapshot]

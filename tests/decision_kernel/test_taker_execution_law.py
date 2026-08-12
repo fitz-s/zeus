@@ -310,13 +310,21 @@ def test_governor_taker_accepted_by_all_three_layers_and_submittable():
                             produces a submittable executor-native intent.
     """
     actionable, executable, final_intent, parents = _taker_chain(
-        order_mode="TAKER", return_parents=True
+        order_mode="TAKER",
+        order_type="FOK_LIMIT",
+        time_in_force="FOK",
+        available_crossable_shares=5.0,
+        sweep_expected_fill_price="0.45",
+        exact_taker_shares="5.00",
+        exact_taker_limit_price="0.45",
+        return_parents=True,
     )
 
     # (1) cert builder emitted a taker tuple
-    assert final_intent.payload["order_type"] in {"FOK_LIMIT", "FAK_LIMIT"}
-    assert final_intent.payload["time_in_force"] in {"FOK", "FAK"}
-    assert final_intent.payload["executor_order_type"] in {"FOK", "FAK"}
+    assert final_intent.payload["order_type"] == "FOK_LIMIT"
+    assert final_intent.payload["time_in_force"] == "FOK"
+    assert final_intent.payload["executor_order_type"] == "FOK"
+    assert final_intent.payload["global_exact_order"] is True
     assert final_intent.payload["post_only"] is False
     assert final_intent.payload["maker_intent"] is False
 

@@ -211,7 +211,6 @@ from src.decision_kernel.canonicalization import (
     qkernel_declares_current_state,
     qkernel_current_state_identity_hash,
     qkernel_current_state_rejection_reason,
-    qkernel_global_buy_fak_prefix_rejection_reason,
     qkernel_global_current_state_rejection_reason,
     stable_hash,
 )
@@ -20862,20 +20861,7 @@ def _build_live_execution_command_certificates(
                 f"incremental_profit={None if not isinstance(taker_quality_proof, dict) else taker_quality_proof.get('incremental_expected_profit_usd')}:"
                 f"confidence={None if not isinstance(taker_quality_proof, dict) else taker_quality_proof.get('model_confidence')}"
             )
-        if (
-            global_decision is not None
-            and str(order_mode).strip().upper() == "TAKER"
-        ):
-            prefix_reason = qkernel_global_buy_fak_prefix_rejection_reason(
-                actionable.payload.get("qkernel_execution_economics") or {},
-                direction=str(actionable.payload.get("direction") or ""),
-            )
-            if prefix_reason is not None:
-                raise ValueError(
-                    "GLOBAL_TAKER_PREFIX_CERTIFICATE_INVALID:"
-                    f"{prefix_reason}"
-                )
-        global_fak_authorized = bool(
+        global_fok_authorized = bool(
             global_decision is not None
             and str(order_mode).strip().upper() == "TAKER"
         )
@@ -20893,8 +20879,12 @@ def _build_live_execution_command_certificates(
             passive_maker_context=passive_maker_context,
             decision_time=decision_time,
             order_mode=order_mode,
-            order_type="FAK_LIMIT" if global_fak_authorized else None,
-            time_in_force="FAK" if global_fak_authorized else None,
+            # The global solve already certifies the exact target size against
+            # current depth.  Preserve the allocator's atomic taker semantics:
+            # FAK may confirm an arbitrary positive entry prefix below the venue
+            # minimum SELL lot and create exposure that cannot be exited.
+            order_type="FOK_LIMIT" if global_fok_authorized else None,
+            time_in_force="FOK" if global_fok_authorized else None,
             # BUG #92 structural fix (2026-06-02): the intent's tick_size MUST be the
             # min_tick_size of the SAME snapshot the executor re-hydrates at submit
             # time (intent.snapshot_id == proof.executable_snapshot_id ==

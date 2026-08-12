@@ -2409,7 +2409,9 @@ def test_global_live_command_builder_has_no_unconditional_taker_override():
     )
     assert f"exact_taker_shares=(\n                str(global_decision.shares)\n                if {taker_only}" in source
     assert f"exact_taker_limit_price=(\n                str(global_decision.limit_price)\n                if {taker_only}" in source
-    assert "GLOBAL_TAKER_PREFIX_CERTIFICATE_INVALID" in source
+    assert 'order_type="FOK_LIMIT" if global_fok_authorized else None' in source
+    assert 'time_in_force="FOK" if global_fok_authorized else None' in source
+    assert "GLOBAL_TAKER_PREFIX_CERTIFICATE_INVALID" not in source
 
 
 def test_global_current_state_proof_atomically_replaces_legacy_admission_reject(
