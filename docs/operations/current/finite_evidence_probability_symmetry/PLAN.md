@@ -352,6 +352,25 @@ reduce-only auctions retain full held-token coverage.  Acceptance requires an
 antibody with two open families proving the exact request fetches only its named
 held token, plus the existing global-auction and deadline suites.
 
+## 2026-08-12 Held Day0 bundles own the cut before the freshness cliff
+
+The strict Day0 consumer correctly rejects bundles older than three hours, but
+the producer mixed one discovery city into a three-city trading-lane cut even
+when held families were already inside the one-hour refresh headroom.  Under a
+six-second budget, one slow request could therefore leave only one held city on
+critical quota while the fairness cursor advanced over two offered held slots.
+Transport and quota failures exposed this contract gap; they did not create it.
+
+SCOPE is only a bounded Day0 producer cut while at least one current held family
+is refresh-due under the existing strict-bundle headroom proof.  DRAIN gives all
+offered held cities critical quota and rotates the existing held cursor across
+successive cuts; discovery resumes under the existing mixed-slot policy once no
+held family is refresh-due.  RESET is a complete fresh held bundle read back by
+the current probe, not a request attempt or cursor timestamp.  Acceptance uses
+more held cities than the microbatch plus discovery debt, forces a one-city
+budget exhaustion, and proves consecutive cuts contain only held cities with
+full critical quota while cursor fairness still advances.
+
 ## 2026-08-12 Fresh target-specific ENS shape is required for entry
 
 The current forecast database contained 190 latest family certificates: 176

@@ -5812,6 +5812,9 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
         max_cities = _day0_hourly_refresh_max_cities(
             priority_city_count=priority_city_count,
         )
+        held_refresh_due = bool(
+            set(held_families).intersection(priority_probe.refresh_due_families)
+        )
         quota_critical_cities = 0
         quota_priority_cities = 0
         if trading_lane_active:
@@ -5828,6 +5831,15 @@ def run_edli_day0_hourly_refresh_cycle(*, trading_lane_active: bool) -> None:
                 # but preserve the ordinary maintenance universe sweep.
                 ordered_cities = ordered_cities[:max_cities]
                 cursor_advance = min(max_cities, cursor_span)
+            elif held_refresh_due:
+                # Current capital is approaching the strict bundle cliff.
+                # Discovery cannot consume one of this bounded cut's slots
+                # until every offered held city retains critical-quota
+                # authority. Cursor rotation preserves fairness across a held
+                # segment larger than the microbatch.
+                ordered_cities = held[:max_cities]
+                quota_critical_cities = len(ordered_cities)
+                cursor_advance = len(ordered_cities)
             elif held and priority and max_cities >= 2:
                 # First protect one money-at-risk city, then make discovery
                 # progress before a slow held fetch can exhaust the whole

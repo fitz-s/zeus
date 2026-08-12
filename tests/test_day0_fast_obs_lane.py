@@ -3396,6 +3396,74 @@ class TestMutexNoHttpSplit:
         assert calls == [["A", "B", "C"], ["D", "E", "A"]]
         assert reactor_module._DAY0_HOURLY_REFRESH_CURSOR == 1
 
+    def test_hourly_refresh_due_held_bundle_owns_bounded_critical_cut(
+        self, monkeypatch
+    ):
+        """Discovery cannot displace held capital near its strict bundle cliff."""
+        import src.config as config_module
+        import src.main  # load settings consumers before replacing the config singleton
+        from src.events import reactor as reactor_module
+
+        cities = [
+            SimpleNamespace(name=name, timezone="UTC")
+            for name in ("A", "B", "C", "D", "E", "F", "G", "H")
+        ]
+        target_date = datetime.now(UTC).date().isoformat()
+        held = {(name, target_date, "high") for name in ("A", "B", "C", "D", "E")}
+        discovery = {
+            (name, target_date, "high") for name in ("F", "G", "H")
+        }
+        calls = []
+
+        monkeypatch.setattr(
+            config_module,
+            "settings",
+            SimpleNamespace(_data={"edli": {"enabled": True}}),
+        )
+        monkeypatch.setattr(config_module, "runtime_cities", lambda: cities)
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_current_held_position_family_keys",
+            lambda: held,
+        )
+        monkeypatch.setattr(
+            reactor_module,
+            "_edli_day0_hourly_refresh_due_families",
+            lambda **_kwargs: reactor_module._Day0HourlyPriorityProbe(
+                refresh_due_families=frozenset(held | discovery),
+                proved=True,
+            ),
+        )
+        monkeypatch.setattr(reactor_module, "_DAY0_HOURLY_REFRESH_CURSOR", 0)
+        monkeypatch.setenv("ZEUS_DAY0_HOURLY_REFRESH_MAX_CITIES", "3")
+        monkeypatch.setenv("ZEUS_DAY0_HOURLY_REFRESH_PRIORITY_CITY_CAP", "3")
+        monkeypatch.setattr(
+            "src.data.day0_hourly_vectors.maybe_refresh_day0_hourly_vectors",
+            lambda selected, **kwargs: calls.append(
+                {
+                    "selected": [city.name for city in selected],
+                    "critical": kwargs["quota_critical_cities"],
+                    "priority": kwargs["quota_priority_cities"],
+                }
+            )
+            or SimpleNamespace(
+                vectors_written=0,
+                cities_attempted=1,
+                cities_skipped_throttle=0,
+                cities_skipped_quota=0,
+                incomplete_expected_bundles=1,
+                budget_exhausted=True,
+            ),
+        )
+
+        reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+        reactor_module.run_edli_day0_hourly_refresh_cycle(trading_lane_active=True)
+
+        assert calls == [
+            {"selected": ["A", "B", "C"], "critical": 3, "priority": 0},
+            {"selected": ["D", "E", "A"], "critical": 3, "priority": 0},
+        ]
+
     def test_hourly_refresh_preserves_full_missing_authority_priority_prefix(
         self, monkeypatch
     ):
