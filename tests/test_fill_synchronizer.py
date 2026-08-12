@@ -5,10 +5,11 @@
 #   one-time replay is not enough). Packet I / wave-1.5 addition (2026-07-13,
 #   §KEEP-spine 完备性补遗 "归属图+歧义证据 — foreign/ambiguous 留 observation
 #   不丢"): durable wallet_fill_observations lane tests.
-# Lifecycle: created=2026-07-13; last_reviewed=2026-07-19; last_reused=2026-07-19
+# Lifecycle: created=2026-07-13; last_reviewed=2026-08-11; last_reused=2026-08-11
 # Purpose: unit tests for src.ingest.fill_synchronizer.sync_fills — watermark
 #   resume, idempotent re-append rejection, foreign-fill handling, the
-#   advance-after-persist rollback contract, and (packet I / wave-1.5) the
+#   advance-after-persist rollback contract, unified TRADE-writer admission
+#   with venue I/O outside the write transaction, and (packet I / wave-1.5) the
 #   durable wallet_fill_observations lane: every swept fill lands there
 #   regardless of attribution, disposition is correct, it is idempotent, and
 #   it is append-only at the DB level.
@@ -18,9 +19,11 @@
 """Tests for src.ingest.fill_synchronizer.sync_fills."""
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -349,6 +352,36 @@ class TestDurableCoverageWatermark:
         watermark_after = get_watermark(conn)
         assert watermark_after["watermark_ts"] == (NOW + timedelta(seconds=60)).isoformat()
 
+    def test_older_prepared_cycle_cannot_regress_newer_published_watermark(self, conn):
+        import src.ingest.fill_synchronizer as fill_synchronizer_mod
+
+        fill_synchronizer_mod.ensure_watermark_table(conn)
+        fill_synchronizer_mod.ensure_wallet_fill_observations_table(conn)
+        older = fill_synchronizer_mod._prepare_fill_sync(
+            conn,
+            FakeSyncAdapter([]),
+            source=DEFAULT_SOURCE,
+            observed_at=NOW,
+        )
+        newer_at = NOW + timedelta(seconds=60)
+        newer = fill_synchronizer_mod._prepare_fill_sync(
+            conn,
+            FakeSyncAdapter([]),
+            source=DEFAULT_SOURCE,
+            observed_at=newer_at,
+        )
+
+        conn.execute("BEGIN IMMEDIATE")
+        newer_result = fill_synchronizer_mod._persist_prepared_fill_sync(conn, newer)
+        conn.commit()
+        conn.execute("BEGIN IMMEDIATE")
+        older_result = fill_synchronizer_mod._persist_prepared_fill_sync(conn, older)
+        conn.commit()
+
+        assert newer_result["watermark_ts"] == newer_at.isoformat()
+        assert older_result["watermark_ts"] == newer_at.isoformat()
+        assert get_watermark(conn)["watermark_ts"] == newer_at.isoformat()
+
     def test_watermark_does_not_advance_and_no_partial_facts_persist_on_failure(
         self, conn, monkeypatch
     ):
@@ -513,9 +546,6 @@ def test_cycle_reports_failure_to_scheduler_health(monkeypatch):
     import src.data.polymarket_client as client_mod
     import src.ingest.fill_synchronizer as fill_synchronizer_mod
     import src.ingest.price_channel_ingest as price_channel_mod
-    import src.state.db as db_mod
-
-    conn = sqlite3.connect(":memory:")
 
     class FakeClient:
         def _ensure_v2_adapter(self):
@@ -526,11 +556,10 @@ def test_cycle_reports_failure_to_scheduler_health(monkeypatch):
         "_settings_section",
         lambda *_args, **_kwargs: {"fill_synchronizer_enabled": True},
     )
-    monkeypatch.setattr(db_mod, "get_trade_connection", lambda **_kwargs: conn)
     monkeypatch.setattr(client_mod, "PolymarketClient", FakeClient)
     monkeypatch.setattr(
         fill_synchronizer_mod,
-        "sync_fills",
+        "_sync_fills_coordinated",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             sqlite3.OperationalError("database is locked")
         ),
@@ -543,3 +572,217 @@ def test_cycle_reports_failure_to_scheduler_health(monkeypatch):
         "scheduler_failed": True,
         "scheduler_failure_reason": "fill_synchronizer_cycle_failed",
     }
+
+
+def test_live_sync_fetches_outside_unified_trade_transaction(tmp_path, monkeypatch):
+    import src.ingest.fill_synchronizer as fill_synchronizer_mod
+    import src.state.db as db_mod
+    import src.state.write_coordinator as coordinator_mod
+    from src.state.db import init_schema
+    from src.state.write_coordinator import DBIdentity, WritePriority
+
+    db_path = tmp_path / "trades.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    _seed_command(seed, command_id="cmd-coordinated", venue_order_id="ord-coordinated")
+    seed.close()
+
+    transaction_depth = 0
+    owners: list[str] = []
+
+    class Coordinator:
+        @contextlib.contextmanager
+        def transaction(
+            self,
+            dbs,
+            *,
+            owner,
+            write_class,
+            priority,
+            deadline_ms,
+            max_hold_ms,
+        ):
+            nonlocal transaction_depth
+            assert tuple(dbs) == (DBIdentity.TRADE,)
+            assert write_class == "live"
+            assert priority is WritePriority.BACKGROUND_RECOVERY
+            assert deadline_ms == fill_synchronizer_mod.FILL_SYNC_DB_WRITE_LEASE_DEADLINE_MS
+            assert max_hold_ms == fill_synchronizer_mod.FILL_SYNC_DB_WRITE_MAX_HOLD_MS
+            owners.append(owner)
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            transaction_depth += 1
+            try:
+                yield SimpleNamespace(connection=conn)
+            except BaseException:
+                conn.rollback()
+                raise
+            else:
+                conn.commit()
+            finally:
+                transaction_depth -= 1
+                conn.close()
+
+    class Adapter(FakeSyncAdapter):
+        def get_trades(self, since=None):
+            assert transaction_depth == 0
+            return super().get_trades(since=since)
+
+    def reader():
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        return conn
+
+    monkeypatch.setattr(
+        coordinator_mod,
+        "default_runtime_write_coordinator",
+        lambda: Coordinator(),
+    )
+    monkeypatch.setattr(db_mod, "get_trade_connection_read_only", reader)
+    adapter = Adapter(
+        [_trade(trade_id="trade-coordinated", order_id="ord-coordinated")]
+    )
+
+    result = fill_synchronizer_mod._sync_fills_coordinated(
+        adapter,
+        observed_at=NOW,
+    )
+
+    assert result["appended"] == 1
+    assert owners == ["fill_synchronizer_schema", "fill_synchronizer"]
+    assert adapter.since_calls == [None]
+    check = sqlite3.connect(db_path)
+    try:
+        assert check.execute(
+            "SELECT COUNT(*) FROM venue_trade_facts WHERE trade_id = ?",
+            ("trade-coordinated",),
+        ).fetchone()[0] == 1
+        assert get_watermark(check)["watermark_ts"] == NOW.isoformat()
+    finally:
+        check.close()
+
+
+def test_live_sync_real_coordinator_rolls_back_all_rows_after_append_failure(
+    tmp_path,
+    monkeypatch,
+):
+    import src.ingest.fill_synchronizer as fill_synchronizer_mod
+    import src.state.db as db_mod
+    import src.state.write_coordinator as coordinator_mod
+    from src.state.db import init_schema
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator
+
+    db_path = tmp_path / "trades.db"
+    seed = sqlite3.connect(db_path)
+    seed.row_factory = sqlite3.Row
+    init_schema(seed)
+    _seed_command(seed, command_id="cmd-real", venue_order_id="ord-real")
+    seed.commit()
+    assert seed.execute(
+        "SELECT COUNT(*) FROM sqlite_master "
+        "WHERE type = 'table' AND name IN "
+        "('fill_sync_watermarks', 'wallet_fill_observations')"
+    ).fetchone()[0] == 0
+    seed.close()
+
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+
+    def reader():
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only = ON")
+        return conn
+
+    monkeypatch.setattr(
+        coordinator_mod,
+        "default_runtime_write_coordinator",
+        lambda: coordinator,
+    )
+    monkeypatch.setattr(db_mod, "get_trade_connection_read_only", reader)
+    real_append = fill_synchronizer_mod.append_trade_fact
+
+    def fail_second(conn, *, trade_id, **kwargs):
+        if trade_id == "trade-bad":
+            raise RuntimeError("simulated coordinated append failure")
+        return real_append(conn, trade_id=trade_id, **kwargs)
+
+    monkeypatch.setattr(fill_synchronizer_mod, "append_trade_fact", fail_second)
+    adapter = FakeSyncAdapter(
+        [
+            _trade(trade_id="trade-good", order_id="ord-real"),
+            _trade(trade_id="trade-bad", order_id="ord-real"),
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="simulated coordinated append failure"):
+        fill_synchronizer_mod._sync_fills_coordinated(adapter, observed_at=NOW)
+
+    check = sqlite3.connect(db_path)
+    try:
+        assert check.execute("SELECT COUNT(*) FROM venue_trade_facts").fetchone()[0] == 0
+        assert check.execute("SELECT COUNT(*) FROM wallet_fill_observations").fetchone()[0] == 0
+        assert check.execute("SELECT COUNT(*) FROM fill_sync_watermarks").fetchone()[0] == 0
+    finally:
+        check.close()
+
+
+def test_live_cycle_real_background_writer_yields_to_monitor_and_reports_retry(
+    tmp_path,
+    monkeypatch,
+):
+    import src.data.polymarket_client as client_mod
+    import src.ingest.fill_synchronizer as fill_synchronizer_mod
+    import src.ingest.price_channel_daemon as price_channel_mod
+    import src.observability.scheduler_health as scheduler_health_mod
+    import src.state.write_coordinator as coordinator_mod
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WritePriority
+
+    db_path = tmp_path / "trades.db"
+    sqlite3.connect(db_path).close()
+    coordinator = WriteCoordinator({DBIdentity.TRADE: db_path})
+
+    class FakeClient:
+        def _ensure_v2_adapter(self):
+            return FakeSyncAdapter([])
+
+    monkeypatch.setattr(client_mod, "PolymarketClient", FakeClient)
+    monkeypatch.setattr(
+        coordinator_mod,
+        "default_runtime_write_coordinator",
+        lambda: coordinator,
+    )
+    health_calls = []
+    monkeypatch.setattr(
+        scheduler_health_mod,
+        "_write_scheduler_health",
+        lambda *args, **kwargs: health_calls.append((args, kwargs)),
+    )
+    scheduled_cycle = price_channel_mod._scheduler_job("fill_synchronizer")(
+        fill_synchronizer_mod.fill_synchronizer_cycle
+    )
+
+    with coordinator.lease(
+        (DBIdentity.TRADE,),
+        owner="test_monitor",
+        priority=WritePriority.MONITOR,
+    ):
+        result = scheduled_cycle()
+
+    assert result == {
+        "status": "failed",
+        "scheduler_failed": True,
+        "scheduler_failure_reason": "fill_synchronizer_cycle_failed",
+    }
+    assert health_calls == [
+        (
+            ("fill_synchronizer",),
+            {
+                "failed": True,
+                "reason": "fill_synchronizer_cycle_failed",
+                "extra": result,
+            },
+        )
+    ]

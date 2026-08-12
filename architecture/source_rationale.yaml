@@ -3240,6 +3240,13 @@ files:
     - src/ingest/price_channel_daemon.py
     - src/main.py
     - src/events/price_channel_redecision_router.py
+  src/ingest/fill_synchronizer.py:
+    zone: K2_runtime
+    authority_role: continuous_authenticated_fill_fact_producer
+    why: Continuously reads authenticated venue fills, freezes venue/parsing/read-side evidence outside every writer lease, then atomically appends observations and attributed facts, advances command projections, and publishes the coverage watermark inside one unified TRADE WriteCoordinator transaction. The scheduler reports contention as retryable failure; it never bypasses the writer turnstile or holds a canonical write transaction across venue I/O.
+    downstream:
+    - src/ingest/price_channel_daemon.py
+    - src/execution/command_recovery.py
   src/ingest/price_channel_daemon.py:
     zone: K2_runtime
     authority_role: price_channel_ingest_daemon

@@ -1618,3 +1618,37 @@ economic no-trade; release permits the next current cut to persist; every
 receipt site commits within the lease; preflight revocation remains
 side-effect-free; focused global-auction, coordinator-priority, compilation,
 planning-lock, and diff checks pass before exact-SHA hot-fix deployment.
+
+### 2026-08-11 Follow-up -- Put continuous fill persistence behind the unified TRADE writer
+
+The live lock reconstruction identified one proven long holder: the
+price-channel fill synchronizer opened `BEGIN IMMEDIATE` before replaying and
+projecting the authenticated wallet history, while never acquiring the unified
+TRADE writer lease. Quote projection and monitor/auction writers could therefore
+queue behind an invisible SQLite owner, delaying the fresh book/probability
+decision cycle even though their own coordinator priority was correct.
+
+The live scheduler path must split one cycle into immutable preparation and
+atomic publication. Schema readiness receives a short BACKGROUND_RECOVERY TRADE
+unit; watermark read, authenticated `get_trades`, raw parsing, command lookup,
+and idempotency snapshots run on a read-only connection with no writer lease;
+observation/fact append, command projection, and watermark advance then commit
+inside one short unified TRADE transaction. Contention fails the scheduler tick
+closed and retries on the existing cadence; it does not widen SQLite timeout or
+hold a lease across network I/O.
+
+SCOPE is only continuous authenticated fill persistence in the price-channel
+daemon. DRAIN is the bounded BACKGROUND_RECOVERY lease attempt and the existing
+next scheduler tick. RESET is commit/rollback plus coordinator release on every
+path. Monitor intent remains higher priority, while no fill fact or watermark is
+published partially.
+
+Authorized files are `src/ingest/fill_synchronizer.py`, its existing test and
+registry rows, and this plan. Forbidden: probability, entry/exit economics,
+lifecycle grammar, schema shape, monitor cadence, auction ordering, wider busy
+timeouts, or venue-side action. Acceptance: venue I/O executes at writer depth
+zero; every production fill DML transaction owns the unified TRADE coordinator;
+fact/projection/watermark atomicity and idempotency remain green; contention is
+typed scheduler failure; focused fill, coordinator, price-channel INV-37,
+compilation, planning-lock, and diff checks pass before exact-SHA hot-fix
+deployment.
