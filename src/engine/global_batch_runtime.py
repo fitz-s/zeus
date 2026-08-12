@@ -1642,13 +1642,18 @@ def _maker_fill_outcomes(
         (fraction, count) for fraction, count in sorted(counts.items()) if fraction > 0
     )
     positive_count = Decimal(sum(count for _, count in positive_rows))
-    outcomes = [
-        MakerFillOutcome(
-            probability=Decimal("1") - sample.fill_probability_lcb,
-            fill_fraction=Decimal("0"),
-            proceeds_per_share_usd=Decimal("0"),
-        )
-    ]
+    no_fill_probability = Decimal("1") - sample.fill_probability_lcb
+    outcomes = (
+        [
+            MakerFillOutcome(
+                probability=no_fill_probability,
+                fill_fraction=Decimal("0"),
+                proceeds_per_share_usd=Decimal("0"),
+            )
+        ]
+        if no_fill_probability > 0
+        else []
+    )
     remaining = sample.fill_probability_lcb
     for index, (fraction, count) in enumerate(positive_rows):
         probability = (
@@ -1665,6 +1670,19 @@ def _maker_fill_outcomes(
                     limit_price if sample.action == "SELL" else -limit_price
                 ),
             )
+        )
+    # Decimal division rounds each empirical mass independently.  Close the
+    # simplex with the final outcome under the same left-to-right sum order
+    # CurrentMakerFillWitness validates; an almost-one distribution is not a
+    # probability authority and must never disable every global auction.
+    if len(outcomes) > 1:
+        prefix_probability = sum(
+            (row.probability for row in outcomes[:-1]),
+            Decimal("0"),
+        )
+        outcomes[-1] = replace(
+            outcomes[-1],
+            probability=Decimal("1") - prefix_probability,
         )
     return tuple(outcomes)
 

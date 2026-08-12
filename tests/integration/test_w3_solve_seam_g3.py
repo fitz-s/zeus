@@ -3538,6 +3538,89 @@ def test_current_maker_fill_sample_is_point_in_time_and_action_specific():
     assert samples["BUY"].training_cutoff_at_utc == cut
 
 
+def test_current_maker_fill_outcomes_close_exact_decimal_simplex():
+    sample = global_batch_runtime._CurrentMakerFillSample(
+        action="BUY",
+        fill_fractions=(Decimal("0"),) * 394
+        + tuple(Decimal(index) / Decimal("100") for index in range(1, 66))
+        + (Decimal("0.65"),) * 35,
+        fill_probability_lcb=Decimal("0.1636118560532848047368421053"),
+        sample_identity="live-494-shape",
+        training_cutoff_at_utc=_dt.datetime(
+            2026, 8, 12, 3, 16, tzinfo=_dt.timezone.utc
+        ),
+        rest_deadline_minutes=20.0,
+    )
+
+    outcomes = global_batch_runtime._maker_fill_outcomes(
+        sample,
+        limit_price=Decimal("0.10"),
+    )
+
+    assert len(outcomes) == 66
+    assert sum(
+        (outcome.probability for outcome in outcomes),
+        Decimal("0"),
+    ) == Decimal("1")
+    assert all(outcome.probability >= 0 for outcome in outcomes)
+    assert any(outcome.fill_fraction > 0 for outcome in outcomes)
+    fill_probability = sum(
+        (
+            outcome.probability
+            for outcome in outcomes
+            if outcome.fill_fraction > 0
+        ),
+        Decimal("0"),
+    )
+    assert fill_probability <= sample.fill_probability_lcb
+    assert abs(fill_probability - sample.fill_probability_lcb) <= Decimal("1e-26")
+
+
+@pytest.mark.parametrize(
+    ("lcb", "positive_fractions"),
+    [
+        (Decimal("1"), (Decimal("1"),) * 30),
+        (Decimal("0.25"), (Decimal("0.5"),) * 10),
+    ],
+)
+def test_current_maker_fill_outcomes_close_simplex_edges(
+    lcb,
+    positive_fractions,
+):
+    sample = global_batch_runtime._CurrentMakerFillSample(
+        action="BUY",
+        fill_fractions=(Decimal("0"),) * (30 - len(positive_fractions))
+        + positive_fractions,
+        fill_probability_lcb=lcb,
+        sample_identity="edge-shape",
+        training_cutoff_at_utc=_dt.datetime(
+            2026, 8, 12, 3, 16, tzinfo=_dt.timezone.utc
+        ),
+        rest_deadline_minutes=20.0,
+    )
+
+    outcomes = global_batch_runtime._maker_fill_outcomes(
+        sample,
+        limit_price=Decimal("0.10"),
+    )
+
+    assert sum(
+        (outcome.probability for outcome in outcomes),
+        Decimal("0"),
+    ) == Decimal("1")
+    assert all(outcome.probability >= 0 for outcome in outcomes)
+    fill_probability = sum(
+        (
+            outcome.probability
+            for outcome in outcomes
+            if outcome.fill_fraction > 0
+        ),
+        Decimal("0"),
+    )
+    assert fill_probability <= sample.fill_probability_lcb
+    assert abs(fill_probability - sample.fill_probability_lcb) <= Decimal("1e-26")
+
+
 def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy():
     at = _dt.datetime(2026, 8, 11, 12, 0, tzinfo=_dt.timezone.utc)
     binding = OutcomeTokenBinding(

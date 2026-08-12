@@ -1766,3 +1766,24 @@ publication barrier.
   BUY-only canonical scan, typed YES/NO classifier, bounded rotation,
   lane-failure isolation, and durable C3 batch-journal antibodies. The retired
   fake path must not be revived merely to make those historical assertions run.
+
+### Slice B95 — Exact maker-fill probability simplex (2026-08-11)
+
+- Live defect: the 494-row current BUY maker sample materialized 66 Decimal
+  outcomes whose iterative sum was
+  `0.9999999999999999999999999996`. The strict witness constructor correctly
+  rejected the incomplete distribution, but the uncaught producer error then
+  failed every global auction before BUY/SELL comparison.
+- Structural invariant: empirical fill masses retain their current DKW law,
+  while the final outcome is the exact residual after summing all preceding
+  outcomes in validator order. Every materialized distribution is a finite,
+  non-negative simplex summing exactly to one; witness validation stays strict.
+- SCOPE: current maker-fill outcome materialization only. DRAIN: every auction
+  rebuilds its current candidate-bound witness from the corrected distribution.
+  RESET: a new sample cut recomputes all masses; no persisted gate or override
+  is introduced.
+- Forbidden: tolerance-based acceptance of almost-one probabilities, disabling
+  maker proposals, falling back to historical fill scalars, or bypassing exact
+  current book/candidate/wealth binding. Acceptance: the captured 494-row shape
+  closes exactly and constructs a valid witnessed maker candidate; live global
+  auctions no longer fail at `CurrentMakerFillWitness.__post_init__`.
