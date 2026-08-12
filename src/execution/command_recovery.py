@@ -6204,6 +6204,21 @@ def _append_live_entry_projection_repair(
     from src.state.projection import upsert_position_current
 
     candidate = _hydrate_command_execution_identity(conn, candidate)
+    existing_position = _existing_positive_position_for_entry_command(
+        conn,
+        command=candidate,
+    )
+    if existing_position is not None:
+        logger.info(
+            "recovery: live incremental entry preserved position %s "
+            "shares=%s chain_shares=%s command=%s order=%s",
+            existing_position.get("position_id"),
+            existing_position.get("shares"),
+            existing_position.get("chain_shares"),
+            candidate.get("command_id"),
+            candidate.get("venue_order_id"),
+        )
+        return False
     trade_case, decision_log_id = _decision_log_trade_case_for_command(conn, candidate, client=client)
     if not trade_case:
         logger.info(
@@ -10432,18 +10447,17 @@ def _position_current_for_terminal_order(
     return _dict_row(row)
 
 
-def _existing_position_for_incremental_terminal_no_fill(
+def _existing_positive_position_for_entry_command(
     conn: sqlite3.Connection,
     *,
     command: dict,
-    order_id: str,
 ) -> dict | None:
-    """Return the filled position targeted by a separate zero-fill entry order."""
+    """Return the exact positive aggregate targeted by an ENTRY command."""
 
     if not _table_exists(conn, "position_current"):
         return None
     position_id = str(command.get("position_id") or "").strip()
-    if not position_id or not order_id:
+    if not position_id:
         return None
     row = conn.execute(
         "SELECT * FROM position_current WHERE position_id = ? LIMIT 1",
@@ -10452,9 +10466,6 @@ def _existing_position_for_incremental_terminal_no_fill(
     if row is None:
         return None
     current = _dict_row(row)
-    current_order_id = str(current.get("order_id") or "").strip()
-    if current_order_id and current_order_id.lower() == order_id.lower():
-        return None
     if str(current.get("phase") or "") not in {"active", "day0_window", "pending_exit"}:
         return None
     if not (
@@ -10756,10 +10767,9 @@ def _append_entry_order_voided_projection(
     from src.state.ledger import append_many_and_project
 
     order_id = str(order_fact.get("order_fact_venue_order_id") or command.get("venue_order_id") or "")
-    existing_position = _existing_position_for_incremental_terminal_no_fill(
+    existing_position = _existing_positive_position_for_entry_command(
         conn,
         command=command,
-        order_id=order_id,
     )
     if existing_position is not None:
         logger.info(

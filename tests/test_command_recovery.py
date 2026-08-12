@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-08-10
+# Last reused/audited: 2026-08-12
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -11021,10 +11021,11 @@ class TestRecoveryResolutionTable:
                    chain_state = 'synced',
                    chain_shares = 13.8749,
                    chain_cost_basis_usd = 1.664999,
+                   order_id = ?,
                    order_status = 'filled'
              WHERE position_id = ?
             """,
-            (position_id,),
+            (terminal_order_id, position_id),
         )
         _append_order_fact(
             conn,
@@ -11067,7 +11068,7 @@ class TestRecoveryResolutionTable:
             "shares": 13.874991,
             "cost_basis_usd": 1.664999,
             "chain_shares": 13.8749,
-            "order_id": prior_order_id,
+            "order_id": terminal_order_id,
             "order_status": "filled",
         }
         latest_fact = conn.execute(
@@ -20859,6 +20860,100 @@ class TestRecoveryResolutionTable:
         assert [dict(row) for row in rows] == [
             {"position_id": "legacy-pos", "phase": "pending_entry", "shares": 0.0}
         ]
+
+    def test_live_incremental_entry_rechecks_positive_aggregate_before_projection_mutation(
+        self,
+        conn,
+        mock_client,
+    ):
+        _insert(conn, size=49.0, price=0.26)
+        _advance_to_acked(conn, venue_order_id="ord-maker-add")
+        _append_order_fact(
+            conn,
+            order_id="ord-maker-add",
+            state="LIVE",
+            matched_size="0",
+            remaining_size="49",
+            source="REST",
+        )
+        _insert_decision_log_trade_case_for_recovery(conn)
+
+        from src.execution.command_recovery import (
+            _append_live_entry_projection_repair,
+            _latest_unprojected_live_entry_candidates,
+        )
+
+        candidates = _latest_unprojected_live_entry_candidates(conn)
+        assert len(candidates) == 1
+
+        # Reproduce the production race: the seed fill becomes authoritative
+        # after candidate selection but before the recovery mutation.
+        _seed_pending_entry_projection(
+            conn,
+            command_id="cmd-seed-fill",
+            order_id="ord-seed-fill",
+        )
+        _append_test_filled_entry_projection(
+            conn,
+            position_id="pos-001",
+            command_id="cmd-seed-fill",
+            order_id="ord-seed-fill",
+            shares=5.0,
+            cost_basis_usd=1.45,
+            size_usd=1.45,
+            entry_price=0.29,
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET chain_state = 'synced',
+                   chain_shares = 5.0,
+                   chain_cost_basis_usd = 1.45,
+                   last_monitor_prob = 0.91,
+                   last_monitor_prob_is_fresh = 1,
+                   last_monitor_best_bid = 0.25,
+                   last_monitor_market_price_is_fresh = 1
+             WHERE position_id = 'pos-001'
+            """
+        )
+
+        assert not _append_live_entry_projection_repair(
+            conn,
+            candidate=candidates[0],
+            client=mock_client,
+        )
+
+        current = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd, entry_price, order_id,
+                   order_status, chain_shares, last_monitor_prob,
+                   last_monitor_prob_is_fresh, last_monitor_best_bid,
+                   last_monitor_market_price_is_fresh
+              FROM position_current
+             WHERE position_id = 'pos-001'
+            """
+        ).fetchone()
+        assert dict(current) == {
+            "phase": "active",
+            "shares": 5.0,
+            "cost_basis_usd": 1.45,
+            "entry_price": 0.29,
+            "order_id": "ord-seed-fill",
+            "order_status": "filled",
+            "chain_shares": 5.0,
+            "last_monitor_prob": 0.91,
+            "last_monitor_prob_is_fresh": 1,
+            "last_monitor_best_bid": 0.25,
+            "last_monitor_market_price_is_fresh": 1,
+        }
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = 'pos-001'
+               AND command_id = 'cmd-001'
+            """
+        ).fetchone()[0] == 0
 
     def test_ensure_live_entry_projection_for_command_projects_pending_order_immediately(
         self,

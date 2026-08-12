@@ -3957,3 +3957,36 @@ check/append race. A typed contradiction remains `REVIEW_REQUIRED` and lets the
 same-cycle matched-order reconciliation lane drain the positive fill; it is not
 counted as a generic recovery error. Acceptance adds generic-release bypass
 rejection and repository-boundary atomic contradiction antibodies.
+
+## Aggregate position authority over incremental entry-order lifecycle
+
+Live reconstruction on 2026-08-12 exposed a TOCTOU seam between an ACKED
+maker-add order and the already-filled position it targets. A recovery pass may
+select the maker-add while the aggregate projection is absent, then observe the
+earlier fill before mutation. Replaying the stale candidate as a new
+`pending_entry` projection silently replaces the active aggregate; when the
+maker-add later proves terminal zero-fill, `ENTRY_ORDER_VOIDED` can then void
+the real exposure and erase its monitor projection until chain reconciliation
+repairs it.
+
+The structural law is order/aggregate separation: an ENTRY command owns only
+its own order intent and fill delta. A LIVE zero-fill command cannot rebuild a
+same-identity positive aggregate as `pending_entry`, and a terminal zero-fill
+command cannot void that aggregate even when the aggregate's current
+`order_id` was rebound to the incremental order. Mutation-time authority must
+be rechecked by exact position id, held direction, selected token, condition,
+positive local-or-chain exposure, and monitorable lifecycle; candidate-time
+absence is not authority. Filled increments continue through the dedicated
+positive-fill projection path and are not suppressed by this guard.
+
+SCOPE is one exact ENTRY command and aggregate position identity. DRAIN is the
+ordinary order recovery pass, which terminalizes only the zero-fill command
+while leaving the aggregate under held-position monitoring. RESET is a real
+positive fill for that command, which routes through cumulative fill repair,
+or disappearance of the pre-existing positive aggregate. Acceptance requires
+a deterministic stale-candidate race antibody that preserves phase, economics,
+order identity, and monitor fields, plus a same-order-id terminal-zero-fill
+antibody that emits no aggregate `ENTRY_ORDER_VOIDED`.
+
+Allowed files for this hot-fix are `src/execution/command_recovery.py`,
+`tests/test_command_recovery.py`, and this plan.
