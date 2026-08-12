@@ -12801,14 +12801,30 @@ def expire_control_override(
     *,
     override_id: str,
     expired_at: str,
+    expected_issued_at: str | None = None,
+    expected_reason: str | None = None,
+    expected_issued_by: str | None = None,
 ) -> dict:
     """Append an 'expire' event to `control_overrides_history` that sets
     `effective_until = expired_at` on the latest row for this override_id.
-    No-op if no currently-active row exists. See B070."""
+    No-op if no currently-active matching row exists. The global entries pause
+    is a fixed identity shared by several writers, so expiring it requires an
+    exact generation witness rather than override_id alone. See B070."""
     if conn is None:
         return {"status": "skipped_no_connection", "table": "control_overrides", "expired_count": 0}
     if not _table_exists(conn, "control_overrides_history"):
         return {"status": "skipped_missing_table", "table": "control_overrides", "expired_count": 0}
+    protected_entries_pause = override_id == "control_plane:global:entries_paused"
+    if protected_entries_pause and not all(
+        str(value or "").strip()
+        for value in (expected_issued_at, expected_reason, expected_issued_by)
+    ):
+        return {
+            "status": "cas_required",
+            "table": "control_overrides",
+            "expired_count": 0,
+            "override_id": override_id,
+        }
     recorded_at = datetime.now(timezone.utc).isoformat()
     # Use history_id (AUTOINCREMENT) not recorded_at for the latest-row
     # lookup: strictly monotone, no clock/tie dependency.
@@ -12830,8 +12846,23 @@ def expire_control_override(
               WHERE h2.override_id = ?
           )
           AND (h.effective_until IS NULL OR h.effective_until > ?)
+          AND (? IS NULL OR h.issued_at = ?)
+          AND (? IS NULL OR h.reason = ?)
+          AND (? IS NULL OR h.issued_by = ?)
         """,
-        (expired_at, recorded_at, override_id, override_id, expired_at),
+        (
+            expired_at,
+            recorded_at,
+            override_id,
+            override_id,
+            expired_at,
+            expected_issued_at,
+            expected_issued_at,
+            expected_reason,
+            expected_reason,
+            expected_issued_by,
+            expected_issued_by,
+        ),
     )
     return {
         "status": "expired" if cur.rowcount else "noop",

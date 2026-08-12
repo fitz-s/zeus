@@ -227,6 +227,66 @@ class TestExpire:
         assert result["status"] == "noop"
         assert result["expired_count"] == 0
 
+    def test_entries_pause_expire_requires_exact_generation_witness(self):
+        conn = _memory_conn()
+        upsert_control_override(
+            conn,
+            override_id="control_plane:global:entries_paused",
+            target_type="global",
+            target_key="entries",
+            action_type="gate",
+            value="true",
+            issued_by="control_plane",
+            issued_at="2026-08-12T13:35:50.636990+00:00",
+            reason="forward_capital_proof_required",
+        )
+
+        missing = expire_control_override(
+            conn,
+            override_id="control_plane:global:entries_paused",
+            expired_at="2026-08-12T14:00:00+00:00",
+        )
+        assert missing["status"] == "cas_required"
+        assert missing["expired_count"] == 0
+
+        mismatches = (
+            {
+                "expected_issued_at": "2026-08-12T13:00:00+00:00",
+                "expected_reason": "forward_capital_proof_required",
+                "expected_issued_by": "control_plane",
+            },
+            {
+                "expected_issued_at": "2026-08-12T13:35:50.636990+00:00",
+                "expected_reason": "stale_restart_guard",
+                "expected_issued_by": "control_plane",
+            },
+            {
+                "expected_issued_at": "2026-08-12T13:35:50.636990+00:00",
+                "expected_reason": "forward_capital_proof_required",
+                "expected_issued_by": "stale_deployer",
+            },
+        )
+        for witness in mismatches:
+            mismatch = expire_control_override(
+                conn,
+                override_id="control_plane:global:entries_paused",
+                expired_at="2026-08-12T14:00:00+00:00",
+                **witness,
+            )
+            assert mismatch["status"] == "noop"
+            assert mismatch["expired_count"] == 0
+
+        matched = expire_control_override(
+            conn,
+            override_id="control_plane:global:entries_paused",
+            expired_at="2026-08-12T14:00:00+00:00",
+            expected_issued_at="2026-08-12T13:35:50.636990+00:00",
+            expected_reason="forward_capital_proof_required",
+            expected_issued_by="control_plane",
+        )
+        assert matched["status"] == "expired"
+        assert matched["expired_count"] == 1
+
     def test_view_hides_expired_row_via_existing_filter(self):
         """query_control_override_state filters WHERE effective_until IS NULL OR > now.
         After expire, the latest VIEW row has effective_until in the past."""

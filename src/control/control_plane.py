@@ -683,6 +683,9 @@ def reset_deploy_live_restart_guard(
             conn,
             override_id=witness.override_id,
             expired_at=retired,
+            expected_issued_at=witness.issued_at,
+            expected_reason=DEPLOY_LIVE_RESTART_GUARD_REASON,
+            expected_issued_by=DEPLOY_LIVE_RESTART_GUARD_ISSUER,
         )
         if int(result.get("expired_count") or 0) != 1:
             conn.rollback()
@@ -878,6 +881,7 @@ def resume_entries(
         current_issued_by = (
             str(current["issued_by"] or "") if current is not None else ""
         )
+        current_reason = str(current["reason"] or "") if current is not None else ""
         if not expected_issued_at:
             if current_issued_by != "system_auto_pause":
                 conn.rollback()
@@ -892,11 +896,19 @@ def resume_entries(
                 "resume_entries override changed: "
                 f"expected={expected_issued_at!r} current={current_issued_at!r}"
             )
-        expire_control_override(
+        pause_result = expire_control_override(
             conn,
             override_id=AUTO_PAUSE_OVERRIDE_ID,
             expired_at=now_iso,
+            expected_issued_at=current_issued_at,
+            expected_reason=current_reason,
+            expected_issued_by=current_issued_by,
         )
+        if int(pause_result.get("expired_count") or 0) != 1:
+            conn.rollback()
+            raise ValueError(
+                "resume_entries override changed during exact-generation expiry"
+            )
         expire_control_override(
             conn,
             override_id="control_plane:global:edge_threshold_multiplier",
@@ -943,14 +955,17 @@ def retire_entries_pause_for_reasons(
     expired = False
     try:
         conn.execute("BEGIN IMMEDIATE")
-        state = query_control_override_state(conn, now=now_iso)
-        if not state.get("entries_paused") or state.get("entries_pause_reason") not in retired:
+        row = _active_entries_pause_row(conn, now_iso=now_iso)
+        if row is None or str(row["reason"] or "") not in retired:
             conn.rollback()
             return False
         result = expire_control_override(
             conn,
             override_id=AUTO_PAUSE_OVERRIDE_ID,
             expired_at=now_iso,
+            expected_issued_at=str(row["issued_at"] or ""),
+            expected_reason=str(row["reason"] or ""),
+            expected_issued_by=str(row["issued_by"] or ""),
         )
         expired = int(result.get("expired_count") or 0) == 1
         conn.commit()
@@ -1218,9 +1233,12 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
             status = str(result.get("status") or "unknown")
             return status == "written", "" if status == "written" else status
         if name == "resume":
+            if conn is None:
+                return False, "skipped_no_connection"
+            conn.execute("BEGIN IMMEDIATE")
             precedence_reason = _lower_precedence_override_reason(
                 conn,
-                override_id="control_plane:global:entries_paused",
+                override_id=AUTO_PAUSE_OVERRIDE_ID,
                 requested_precedence=precedence,
                 now_iso=issued_at,
                 protect_equal=True,
@@ -1228,11 +1246,22 @@ def _apply_command(name: str, cmd: dict) -> tuple[bool, str]:
             )
             if precedence_reason:
                 return True, precedence_reason
-            pause_result = expire_control_override(
-                conn,
-                override_id="control_plane:global:entries_paused",
-                expired_at=issued_at,
-            )
+            pause_row = _active_entries_pause_row(conn, now_iso=issued_at)
+            if pause_row is None:
+                pause_result = {"status": "noop", "expired_count": 0}
+            else:
+                pause_result = expire_control_override(
+                    conn,
+                    override_id=AUTO_PAUSE_OVERRIDE_ID,
+                    expired_at=issued_at,
+                    expected_issued_at=str(cmd.get("expected_override_issued_at") or ""),
+                    expected_reason=str(pause_row["reason"] or ""),
+                    expected_issued_by=str(pause_row["issued_by"] or ""),
+                )
+                pause_status = str(pause_result.get("status") or "unknown")
+                if pause_status not in {"expired", "noop"}:
+                    conn.rollback()
+                    return False, pause_status
             edge_result = expire_control_override(
                 conn,
                 override_id="control_plane:global:edge_threshold_multiplier",
