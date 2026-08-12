@@ -853,7 +853,7 @@ def test_live_snapshot_refresh_paths_use_shared_trade_write_coordinator():
 
 
 def test_substrate_priority_snapshot_writer_yields_to_canonical_monitor(monkeypatch):
-    """Replayable exact snapshots cannot consume the monitor writer deadline."""
+    """Exact held snapshots may queue briefly but MONITOR still outranks them."""
     from src.state import write_coordinator
     from src.state.write_coordinator import WritePriority
 
@@ -880,8 +880,8 @@ def test_substrate_priority_snapshot_writer_yields_to_canonical_monitor(monkeypa
         {
             "owner": "substrate_pending_family_snapshot_refresh",
             "write_class": "live",
-            "priority": WritePriority.BACKGROUND_RECOVERY,
-            "deadline_ms": 100,
+            "priority": WritePriority.RECOVERY_CRITICAL,
+            "deadline_ms": 1_000,
             "max_hold_ms": 100,
         }
     ]
@@ -891,6 +891,45 @@ def test_substrate_priority_snapshot_writer_yields_to_canonical_monitor(monkeypa
     assert "SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS" in source
     assert market_scanner._cooperative_snapshot_busy_timeout_ms(8000, 100) == 100
     assert market_scanner._cooperative_snapshot_busy_timeout_ms(8000, None) == 8000
+
+
+def test_substrate_priority_snapshot_writer_waits_past_background_probe(
+    monkeypatch, tmp_path
+):
+    """A transient canonical writer cannot make every held snapshot fast-yield."""
+    from src.state import write_coordinator
+    from src.state.write_coordinator import DBIdentity, WriteCoordinator
+
+    coordinator = WriteCoordinator({DBIdentity.TRADE: tmp_path / "trade.db"})
+    acquired = threading.Event()
+    errors: list[BaseException] = []
+
+    def priority_writer() -> None:
+        try:
+            with substrate_observer._substrate_snapshot_trade_write_context_factory(
+                "substrate_pending_family_snapshot_refresh"
+            )():
+                acquired.set()
+        except BaseException as exc:  # noqa: BLE001 - asserted below.
+            errors.append(exc)
+
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: coordinator,
+    )
+
+    with coordinator.lease((DBIdentity.TRADE,), owner="canonical-writer"):
+        waiter = threading.Thread(target=priority_writer)
+        waiter.start()
+        time_module.sleep(0.15)
+        assert waiter.is_alive()
+        assert not acquired.is_set()
+
+    waiter.join(timeout=2.0)
+    assert not waiter.is_alive()
+    assert errors == []
+    assert acquired.is_set()
 
 
 def test_reactor_uses_targeted_decision_refresher_for_blocked_families():

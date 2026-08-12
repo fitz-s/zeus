@@ -95,6 +95,8 @@ _SUBSTRATE_CLOB_CLIENTS_LOCK = threading.Lock()
 # authority. Both are replayable and must yield to canonical lifecycle writes.
 SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 100
 SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_MAX_HOLD_MS = 100
+SUBSTRATE_PRIORITY_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 1_000
+SUBSTRATE_PRIORITY_SNAPSHOT_DB_WRITE_MAX_HOLD_MS = 100
 
 
 def _market_substrate_broad_turnstile():
@@ -115,9 +117,9 @@ def _substrate_snapshot_trade_write_context_factory(owner: str):
             (DBIdentity.TRADE,),
             owner=owner,
             write_class="live",
-            priority=WritePriority.BACKGROUND_RECOVERY,
-            deadline_ms=SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
-            max_hold_ms=SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
+            priority=WritePriority.RECOVERY_CRITICAL,
+            deadline_ms=SUBSTRATE_PRIORITY_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
+            max_hold_ms=SUBSTRATE_PRIORITY_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
         )
 
     return _factory

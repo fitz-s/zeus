@@ -3224,7 +3224,7 @@ files:
   src/data/substrate_observer.py:
     zone: K2_runtime
     authority_role: executable_substrate_producer_lane
-    why: P2 live substrate observer; owns market_discovery and pending-family executable snapshot refresh outside the order daemon so reactor backlog cannot gate price substrate production. Snapshot writes are routed through per-row trade write coordinator leases.
+    why: P2 live substrate observer; owns market_discovery and pending-family executable snapshot refresh outside the order daemon so reactor backlog cannot gate price substrate production. Broad snapshot writes fast-yield as background; exact held and FC-03 rows use bounded monitor-aware recovery admission, with all writes routed through per-row trade coordinator leases.
     downstream:
     - src/ingest/substrate_observer_daemon.py
     - src/engine/event_reactor_adapter.py

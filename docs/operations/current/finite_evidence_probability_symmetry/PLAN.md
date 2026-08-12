@@ -3663,24 +3663,28 @@ writer. That inverts the money path: a replayable market-data projection can
 consume the complete deadline of the lifecycle fact that authorizes a held
 position's next exit decision.
 
-All substrate snapshots, including exact held/FC-03 priority rows, therefore
-remain semantically priority data but become cooperative database writers.
-They acquire the existing `BACKGROUND_RECOVERY` writer class, use a short
-SQLite busy quantum, and retry from current venue truth on the next producer
-cycle. Network reads and probability authority are unchanged; only persistence
-ordering changes. Submit-time JIT recapture is outside this producer path and
-retains its own execution authority.
+Ordinary universe snapshots therefore remain cooperative
+`BACKGROUND_RECOVERY` writers and fast-yield. Exact held/FC-03 rows are also
+replayable, but they are required inputs to the next capital decision: treating
+them as one-shot background probes allowed 24 fetched outcome books to produce
+zero durable snapshots under transient writer occupancy. They now use the
+existing monitor-aware `RECOVERY_CRITICAL` admission with a bounded one-second
+queue and a 100ms per-row hold/SQLite quantum. A published MONITOR intent still
+overtakes this writer, while a transient non-monitor owner no longer makes every
+held row fail immediately. Network reads and probability authority are
+unchanged; only persistence admission changes. Submit-time JIT recapture is
+outside this producer path and retains its own execution authority.
 
 SCOPE is executable-substrate persistence in the recurring observer producer.
-DRAIN is one short per-row transaction whenever no canonical monitor is queued,
-with durable level-triggered scope retried on the existing 20-second cadence.
-RESET is a fresh persisted snapshot or expiry of its current priority request;
-a timeout never promotes stale data. Acceptance requires a behavioral antibody
-proving exact priority snapshots carry background writer priority and cannot
-hold the coordinator through the old multi-second SQLite floor, focused
-substrate/market-scanner tests, exact-SHA deployment, and forward evidence that
-all open positions regain bounded canonical monitor age while entry candidates
-continue to be reconsidered.
+DRAIN is a successful short per-row transaction; exact held scope remains
+level-triggered from canonical positions and retries on the existing 20-second
+cadence until durable, while broad scope fast-yields. RESET is a fresh persisted
+snapshot or expiry of its current priority request; a timeout never promotes
+stale data. Acceptance requires behavioral antibodies proving exact priority
+snapshots wait through a transient background probe yet yield to MONITOR, broad
+snapshots remain background, focused substrate/market-scanner tests, exact-SHA
+deployment, and forward evidence that all open positions regain bounded
+canonical monitor age while entry candidates continue to be reconsidered.
 
 ## 2026-08-12 Producer wakes must drain durable forecast decision debt
 
