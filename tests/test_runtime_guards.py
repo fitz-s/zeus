@@ -1,7 +1,7 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-08-06; last_reused=2026-08-06
+# Lifecycle: created=2026-04-28; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Created: 2026-04-28
-# Last reused/audited: 2026-08-06
+# Last reused/audited: 2026-08-12
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
@@ -649,6 +649,289 @@ def test_exact_zero_quote_allows_one_retry_after_failed_batch(monkeypatch):
     )
     assert quote is not None
     assert clob.orderbook_calls == 1
+
+
+def test_monitor_quote_uses_fresh_exact_canonical_book_after_failed_batch(tmp_path):
+    from src.engine import monitor_refresh
+    from src.state.snapshot_repo import init_snapshot_schema
+
+    conn = get_connection(tmp_path / "canonical-monitor-fallback.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    captured_at = datetime.now(timezone.utc) - timedelta(seconds=2)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="canonical-monitor-fallback",
+        selected_outcome_token_id="yes123",
+        yes_token_id="yes123",
+        no_token_id="no456",
+        condition_id="cond-canonical-monitor-fallback",
+        top_bid="0.999",
+        top_ask="1",
+        orderbook_depth={
+            "asset_id": "yes123",
+            "bids": [{"price": "0.999", "size": "20"}],
+            "asks": [],
+        },
+        captured_at=captured_at,
+    )
+    conn.commit()
+
+    class NoNetworkClob:
+        def get_orderbook(self, _token_id):
+            raise AssertionError("failed batch must read fresh canonical held truth")
+
+    clob = NoNetworkClob()
+    monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {},
+        attempted_token_ids=("yes123",),
+    )
+    pos = _position(
+        state="day0_window",
+        condition_id="cond-canonical-monitor-fallback",
+    )
+
+    quote = monitor_refresh.monitor_quote_refresh(conn, clob, pos)
+
+    assert quote is not None
+    assert quote.token_id == "yes123"
+    assert quote.best_bid == pytest.approx(0.999)
+    assert quote.best_ask is None
+    assert quote.mark_price == pytest.approx(0.999)
+    assert quote.source_timestamp == captured_at.isoformat()
+    assert monitor_refresh.prefetched_monitor_orderbook(clob, "yes123") is None
+
+    class ProgrammingFailureClob:
+        def get_orderbook(self, _token_id):
+            raise ValueError("malformed adapter response")
+
+    assert (
+        monitor_refresh.monitor_quote_refresh(conn, ProgrammingFailureClob(), pos)
+        is None
+    )
+    conn.close()
+
+
+def test_canonical_monitor_book_prefers_fresher_independent_commit(tmp_path):
+    from src.engine import monitor_refresh
+    from src.state.snapshot_repo import init_snapshot_schema
+
+    db_path = tmp_path / "canonical-monitor-independent-reader.db"
+    caller = get_connection(db_path)
+    init_schema(caller)
+    init_schema_trade_only(caller)
+    init_snapshot_schema(caller)
+    now_utc = datetime.now(timezone.utc)
+    old_at = now_utc - timedelta(seconds=10)
+    new_at = now_utc - timedelta(seconds=1)
+    _insert_executable_snapshot(
+        caller,
+        snapshot_id="canonical-monitor-old-reader",
+        selected_outcome_token_id="yes123",
+        yes_token_id="yes123",
+        no_token_id="no456",
+        condition_id="cond-canonical-monitor-reader",
+        top_bid="0.40",
+        top_ask="0.42",
+        captured_at=old_at,
+    )
+    caller.commit()
+    caller.execute("BEGIN")
+    caller.execute(
+        "SELECT snapshot_id FROM executable_market_snapshot_latest "
+        "WHERE condition_id = ? AND selected_outcome_token_id = ?",
+        ("cond-canonical-monitor-reader", "yes123"),
+    ).fetchone()
+
+    writer = get_connection(db_path)
+    _insert_executable_snapshot(
+        writer,
+        snapshot_id="canonical-monitor-new-reader",
+        selected_outcome_token_id="yes123",
+        yes_token_id="yes123",
+        no_token_id="no456",
+        condition_id="cond-canonical-monitor-reader",
+        top_bid="0.55",
+        top_ask="0.57",
+        captured_at=new_at,
+    )
+    writer.commit()
+    writer.close()
+
+    pos = _position(condition_id="cond-canonical-monitor-reader")
+    hit = monitor_refresh._fresh_canonical_monitor_orderbook(
+        caller,
+        pos,
+        "yes123",
+        now_utc=now_utc,
+    )
+
+    assert hit is not None
+    book, source_timestamp = hit
+    assert book["bids"][0]["price"] == "0.55"
+    assert source_timestamp == new_at.isoformat()
+    caller.rollback()
+    caller.close()
+
+
+def test_canonical_monitor_book_rejects_stale_invalidated_and_wrong_token(tmp_path):
+    from src.engine import monitor_refresh
+    from src.state.snapshot_repo import (
+        init_snapshot_schema,
+        record_snapshot_invalidation,
+    )
+
+    conn = get_connection(tmp_path / "canonical-monitor-rejections.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    now_utc = datetime.now(timezone.utc)
+    fresh_at = now_utc - timedelta(seconds=2)
+    stale_at = now_utc - timedelta(minutes=2)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="canonical-monitor-invalidated",
+        selected_outcome_token_id="yes123",
+        yes_token_id="yes123",
+        no_token_id="no456",
+        condition_id="cond-canonical-monitor-invalidated",
+        captured_at=fresh_at,
+    )
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="canonical-monitor-stale",
+        selected_outcome_token_id="stale-token",
+        yes_token_id="stale-token",
+        no_token_id="stale-no",
+        condition_id="cond-canonical-monitor-stale",
+        captured_at=stale_at,
+    )
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="canonical-monitor-not-accepting",
+        selected_outcome_token_id="closed-token",
+        yes_token_id="closed-token",
+        no_token_id="closed-no",
+        condition_id="cond-canonical-monitor-not-accepting",
+        captured_at=fresh_at,
+        accepting_orders=False,
+    )
+    conn.commit()
+    record_snapshot_invalidation(
+        conn,
+        condition_id="cond-canonical-monitor-invalidated",
+        token_id="yes123",
+        reason="test_market_channel_change",
+        invalidated_at=now_utc - timedelta(seconds=1),
+    )
+
+    invalidated_pos = _position(
+        condition_id="cond-canonical-monitor-invalidated",
+    )
+    stale_pos = _position(
+        condition_id="cond-canonical-monitor-stale",
+        token_id="stale-token",
+    )
+    wrong_token_pos = _position(
+        condition_id="cond-canonical-monitor-invalidated",
+        token_id="different-token",
+    )
+    not_accepting_pos = _position(
+        condition_id="cond-canonical-monitor-not-accepting",
+        token_id="closed-token",
+    )
+
+    assert conn.in_transaction
+
+    assert (
+        monitor_refresh._fresh_canonical_monitor_orderbook(
+            conn,
+            invalidated_pos,
+            "yes123",
+            now_utc=now_utc,
+        )
+        is None
+    )
+    assert (
+        monitor_refresh._fresh_canonical_monitor_orderbook(
+            conn,
+            stale_pos,
+            "stale-token",
+            now_utc=now_utc,
+        )
+        is None
+    )
+    assert (
+        monitor_refresh._fresh_canonical_monitor_orderbook(
+            conn,
+            wrong_token_pos,
+            "different-token",
+            now_utc=now_utc,
+        )
+        is None
+    )
+    assert (
+        monitor_refresh._fresh_canonical_monitor_orderbook(
+            conn,
+            not_accepting_pos,
+            "closed-token",
+            now_utc=now_utc,
+        )
+        is None
+    )
+    conn.close()
+
+
+def test_canonical_monitor_book_rejects_latest_append_identity_mismatch(tmp_path):
+    from src.engine import monitor_refresh
+    from src.state.snapshot_repo import init_snapshot_schema
+
+    conn = get_connection(tmp_path / "canonical-monitor-identity.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    captured_at = datetime.now(timezone.utc) - timedelta(seconds=2)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="canonical-monitor-identity-a",
+        selected_outcome_token_id="yes123",
+        yes_token_id="yes123",
+        no_token_id="no456",
+        condition_id="cond-canonical-monitor-identity-a",
+        captured_at=captured_at,
+    )
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="canonical-monitor-identity-b",
+        selected_outcome_token_id="other-token",
+        yes_token_id="other-token",
+        no_token_id="other-no",
+        condition_id="cond-canonical-monitor-identity-b",
+        captured_at=captured_at,
+    )
+    conn.execute(
+        "UPDATE executable_market_snapshot_latest SET snapshot_id = ? "
+        "WHERE condition_id = ? AND selected_outcome_token_id = ?",
+        (
+            "canonical-monitor-identity-b",
+            "cond-canonical-monitor-identity-a",
+            "yes123",
+        ),
+    )
+    conn.commit()
+
+    pos = _position(condition_id="cond-canonical-monitor-identity-a")
+    assert (
+        monitor_refresh._fresh_canonical_monitor_orderbook(
+            conn,
+            pos,
+            "yes123",
+        )
+        is None
+    )
+    conn.close()
 
 
 def test_held_monitor_uses_fresh_local_depth_before_network(monkeypatch, tmp_path):

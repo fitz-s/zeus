@@ -1,5 +1,5 @@
 # Created: prior
-# Last audited: 2026-07-27
+# Last audited: 2026-08-12
 # Authority basis: current replacement probability and held-position redecision law.
 """Monitor refresh: recompute fresh probability for held positions.
 
@@ -25,6 +25,7 @@ import time
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import numpy as np
@@ -568,6 +569,181 @@ def _book_min_order_size(book: dict | None) -> float | None:
     except (TypeError, ValueError):
         return None
     return value if np.isfinite(value) and value > 0.0 else None
+
+
+def _fresh_canonical_monitor_orderbook(
+    conn,
+    pos: Position,
+    token_id: str,
+    *,
+    now_utc: datetime | None = None,
+) -> tuple[dict, str] | None:
+    """Read exact fresh held-token selection evidence after venue-read failure.
+
+    This is not submit authority: every resulting SELL still crosses the existing
+    JIT executable-truth boundary.  The independent reader matters in production
+    because the cycle connection may already hold an older SQLite read snapshot
+    while the priority snapshot writer has committed a newer held-token book.
+    """
+
+    if not isinstance(conn, sqlite3.Connection):
+        return None
+    condition_id = str(getattr(pos, "condition_id", "") or "").strip()
+    token_id = str(token_id or "").strip()
+    if not condition_id or not token_id:
+        return None
+    checked_at = (now_utc or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    outer_deadline = getattr(pos, _HELD_MONITOR_DEADLINE_ATTR, None)
+    read_deadline = time.monotonic() + 0.25
+    if outer_deadline is not None:
+        read_deadline = min(read_deadline, float(outer_deadline))
+
+    readers = [conn]
+    owned_reader = None
+    caller_has_uncommitted_state = False
+    try:
+        db_path_row = conn.execute("PRAGMA database_list").fetchone()
+        db_path = str(db_path_row[2] or "").strip() if db_path_row else ""
+        caller_has_uncommitted_state = bool(db_path and conn.in_transaction)
+        if db_path:
+            from src.state.db import _connect_read_only
+
+            owned_reader = _connect_read_only(
+                Path(db_path),
+                deadline_monotonic=read_deadline,
+            )
+            readers.append(owned_reader)
+    except sqlite3.Error:
+        owned_reader = None
+
+    candidates: list[tuple[datetime, dict, str]] = []
+    invalidated_at_values: list[datetime] = []
+    try:
+        for reader in readers:
+            try:
+                with _day0_snapshot_sqlite_read_deadline(reader, read_deadline):
+                    invalidation_table = reader.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' "
+                        "AND name='executable_market_snapshot_invalidations' LIMIT 1"
+                    ).fetchone()
+                    if invalidation_table is None:
+                        continue
+                    row = reader.execute(
+                        """
+                        SELECT latest.captured_at,
+                               latest.freshness_deadline,
+                               latest.yes_token_id,
+                               latest.no_token_id,
+                               latest.active,
+                               latest.closed,
+                               latest.accepting_orders,
+                               snapshot.min_order_size,
+                               snapshot.orderbook_depth_json
+                          FROM executable_market_snapshot_latest AS latest
+                          JOIN executable_market_snapshots AS snapshot
+                            ON snapshot.snapshot_id = latest.snapshot_id
+                           AND snapshot.condition_id = latest.condition_id
+                           AND snapshot.selected_outcome_token_id =
+                               latest.selected_outcome_token_id
+                           AND snapshot.yes_token_id = latest.yes_token_id
+                           AND snapshot.no_token_id = latest.no_token_id
+                           AND snapshot.active = latest.active
+                           AND snapshot.closed = latest.closed
+                           AND snapshot.accepting_orders IS latest.accepting_orders
+                           AND snapshot.captured_at = latest.captured_at
+                           AND snapshot.freshness_deadline = latest.freshness_deadline
+                         WHERE latest.condition_id = ?
+                           AND latest.selected_outcome_token_id = ?
+                         LIMIT 1
+                        """,
+                        (condition_id, token_id),
+                    ).fetchone()
+                    if (
+                        row is None
+                        or int(row[4]) != 1
+                        or int(row[5]) != 0
+                        or int(row[6]) != 1
+                    ):
+                        continue
+                    captured_at = datetime.fromisoformat(
+                        str(row[0]).replace("Z", "+00:00")
+                    )
+                    freshness_deadline = datetime.fromisoformat(
+                        str(row[1]).replace("Z", "+00:00")
+                    )
+                    if captured_at.tzinfo is None or freshness_deadline.tzinfo is None:
+                        continue
+                    captured_at = captured_at.astimezone(timezone.utc)
+                    freshness_deadline = freshness_deadline.astimezone(timezone.utc)
+                    if captured_at > checked_at or freshness_deadline < checked_at:
+                        continue
+                    invalidation_rows = reader.execute(
+                        """
+                        SELECT invalidated_at
+                          FROM executable_market_snapshot_invalidations
+                         WHERE (
+                                condition_id = ?
+                                OR token_id IN (?, ?, ?)
+                           )
+                        """,
+                        (
+                            condition_id,
+                            token_id,
+                            str(row[2] or ""),
+                            str(row[3] or ""),
+                        ),
+                    ).fetchall()
+                for invalidation_row in invalidation_rows:
+                    try:
+                        invalidated_at = datetime.fromisoformat(
+                            str(invalidation_row[0]).replace("Z", "+00:00")
+                        )
+                        if invalidated_at.tzinfo is None:
+                            continue
+                        invalidated_at_values.append(
+                            invalidated_at.astimezone(timezone.utc)
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                book = json.loads(str(row[8]))
+                if not isinstance(book, dict):
+                    continue
+                asset_id = str(
+                    book.get("asset_id")
+                    or book.get("assetId")
+                    or book.get("token_id")
+                    or ""
+                ).strip()
+                if asset_id and asset_id != token_id:
+                    continue
+                book = dict(book)
+                book.setdefault("asset_id", token_id)
+                book.setdefault("min_order_size", row[7])
+                if reader is not conn or not caller_has_uncommitted_state:
+                    candidates.append((captured_at, book, captured_at.isoformat()))
+            except (
+                sqlite3.Error,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+                _Day0SnapshotReadDeadlineExceeded,
+            ):
+                continue
+    finally:
+        if owned_reader is not None:
+            owned_reader.close()
+    candidates = [
+        candidate
+        for candidate in candidates
+        if not any(
+            candidate[0] <= invalidated_at <= checked_at
+            for invalidated_at in invalidated_at_values
+        )
+    ]
+    if not candidates:
+        return None
+    _captured_at, book, source_timestamp = max(candidates, key=lambda item: item[0])
+    return book, source_timestamp
 
 
 def _compute_divergence_score(p_posterior: float, p_market: float, *, available: bool) -> float:
@@ -3060,8 +3236,9 @@ def _day0_one_sided_monitor_quote(
     token_id: str,
     *,
     book: dict | None = None,
+    source_timestamp: str | None = None,
 ) -> HeldTokenMonitorQuote | None:
-    if not hasattr(clob, "get_orderbook"):
+    if book is None and not hasattr(clob, "get_orderbook"):
         return None
     day0_eligible = _is_position_day0_quote_eligible(pos)
     try:
@@ -3098,7 +3275,7 @@ def _day0_one_sided_monitor_quote(
             return None
         if bid_f <= 0.0 and ask_f is None:
             return None
-        source_timestamp = datetime.now(timezone.utc).isoformat()
+        source_timestamp = source_timestamp or datetime.now(timezone.utc).isoformat()
         from src.data.market_scanner import _bid_ladder_from_book
 
         return HeldTokenMonitorQuote(
@@ -3131,12 +3308,16 @@ def monitor_quote_refresh(
         return None
 
     book = prefetched_monitor_orderbook(clob, tid)
+    source_timestamp: str | None = None
     if (
         book is None
         and monitor_orderbook_prefetch_attempted(clob, tid)
         and not retry_after_prefetch
     ):
-        return None
+        fallback = _fresh_canonical_monitor_orderbook(conn, pos, tid)
+        if fallback is None:
+            return None
+        book, source_timestamp = fallback
     get_orderbook = getattr(clob, "get_orderbook", None)
     try:
         if book is None:
@@ -3161,10 +3342,18 @@ def monitor_quote_refresh(
                     timeout_seconds=max(0.0, quote_deadline - time.monotonic()),
                 ).get(tid)
                 if book is None:
-                    return None
+                    fallback = _fresh_canonical_monitor_orderbook(conn, pos, tid)
+                    if fallback is None:
+                        return None
+                    book, source_timestamp = fallback
             else:
                 book = get_orderbook(tid) if callable(get_orderbook) else None
-            _remember_monitor_orderbook(clob, tid, book)
+                if book is None:
+                    fallback = _fresh_canonical_monitor_orderbook(conn, pos, tid)
+                    if fallback is not None:
+                        book, source_timestamp = fallback
+            if source_timestamp is None:
+                _remember_monitor_orderbook(clob, tid, book)
         if book is not None:
             from src.data.market_scanner import _top_book_level_decimal
 
@@ -3178,6 +3367,7 @@ def monitor_quote_refresh(
                     pos,
                     tid,
                     book=book,
+                    source_timestamp=source_timestamp,
                 )
                 if one_sided_quote is not None:
                     return one_sided_quote
@@ -3195,7 +3385,7 @@ def monitor_quote_refresh(
             if pos.state == "day0_window"
             else float(vwmp(bid_f, ask_f, bid_sz_f, ask_sz_f))
         )
-        source_timestamp = datetime.now(timezone.utc).isoformat()
+        source_timestamp = source_timestamp or datetime.now(timezone.utc).isoformat()
         from src.data.market_scanner import _bid_ladder_from_book
 
         return HeldTokenMonitorQuote(
@@ -3217,6 +3407,7 @@ def monitor_quote_refresh(
                 pos,
                 tid,
                 book=book,
+                source_timestamp=source_timestamp,
             )
             if one_sided_quote is not None:
                 return one_sided_quote
