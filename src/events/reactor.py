@@ -1296,6 +1296,7 @@ class OpportunityEventReactor:
         limit: int | None = 100,
         targeted_event_ids: frozenset[str] = frozenset(),
         targeted_only: bool = False,
+        bridge_stale_debt_slots: int = 0,
         cancelled: Callable[[], bool] | None = None,
     ) -> ReactorResult:
         result = ReactorResult()
@@ -1374,6 +1375,7 @@ class OpportunityEventReactor:
             fetch_limit = (
                 request_limit
                 if remaining is None
+                or (targeted_only and bridge_stale_debt_slots > 0)
                 else _lane_fairness_fetch_limit(request_limit)
             )
             fetch_kwargs = {
@@ -1384,6 +1386,8 @@ class OpportunityEventReactor:
                 fetch_kwargs["targeted_event_ids"] = targeted_event_ids
             if targeted_only:
                 fetch_kwargs["targeted_only"] = True
+            if bridge_stale_debt_slots > 0:
+                fetch_kwargs["bridge_stale_debt_slots"] = bridge_stale_debt_slots
             events = self._store.fetch_pending(**fetch_kwargs)
             if not events:
                 break
@@ -8533,12 +8537,15 @@ def run_edli_event_reactor_cycle(
         _construct_checkpoint("after_reactor")
         _log_stage("reactor_construct")
         _reactor_construct_complete = True
+        targeted_only_fast_path = producer_fast_path and (
+            forecast_posterior_wake or bool(targeted_event_ids)
+        )
         _rr = reactor.process_pending(
             decision_time=process_pending_decision_time,
             limit=proof_limit,
             targeted_event_ids=frozenset(targeted_event_ids),
-            targeted_only=producer_fast_path
-            and (forecast_posterior_wake or bool(targeted_event_ids)),
+            targeted_only=targeted_only_fast_path,
+            bridge_stale_debt_slots=1 if targeted_only_fast_path else 0,
             cancelled=_process_pending_cancelled(
                 committed_day0_wake=committed_day0_wake,
                 producer_fast_path=producer_fast_path,

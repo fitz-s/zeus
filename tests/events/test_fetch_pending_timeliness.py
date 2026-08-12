@@ -195,6 +195,64 @@ def test_committed_wake_targeted_only_does_not_fill_from_queue_debt():
     assert [event.event_id for event in returned] == [committed.event_id]
 
 
+def test_producer_bridge_reserves_tail_slot_for_oldest_forecast_debt():
+    conn = _world_conn()
+    store = EventStore(conn)
+    committed = _event(
+        "2026-06-07",
+        "snap-bridge-committed",
+        available_at="2026-06-05T11:00:00+00:00",
+        received_at="2026-06-05T11:01:00+00:00",
+    )
+    older_redecision = _event(
+        "2026-06-07",
+        "snap-bridge-oldest-redecision",
+        available_at="2026-06-05T09:00:00+00:00",
+        received_at="2026-06-05T09:01:00+00:00",
+        event_type="EDLI_REDECISION_PENDING",
+        payload={
+            "city": "Chicago",
+            "target_date": "2026-06-07",
+            "metric": "high",
+            "redecision_origin": "market_price",
+        },
+    )
+    newer_fsr = _event(
+        "2026-06-07",
+        "snap-bridge-newer-fsr",
+        available_at="2026-06-05T10:00:00+00:00",
+        received_at="2026-06-05T10:01:00+00:00",
+    )
+    for event in (committed, older_redecision, newer_fsr):
+        store.insert_or_ignore(event)
+    conn.execute(
+        "UPDATE opportunity_event_processing SET updated_at = ? WHERE event_id = ?",
+        ("2026-06-05T11:30:00+00:00", committed.event_id),
+    )
+    conn.execute(
+        "UPDATE opportunity_event_processing SET updated_at = ? WHERE event_id = ?",
+        ("2026-06-05T08:00:00+00:00", older_redecision.event_id),
+    )
+    conn.execute(
+        "UPDATE opportunity_event_processing SET updated_at = ? WHERE event_id = ?",
+        ("2026-06-05T09:00:00+00:00", newer_fsr.event_id),
+    )
+
+    returned = store.fetch_pending(
+        decision_time=_DECISION_TIME,
+        limit=2,
+        targeted_event_ids=frozenset({committed.event_id}),
+        targeted_only=True,
+        bridge_stale_debt_slots=1,
+    )
+
+    assert [event.event_id for event in returned] == [
+        committed.event_id,
+        older_redecision.event_id,
+    ]
+    assert newer_fsr.event_id not in {event.event_id for event in returned}
+
+
 def test_committed_wake_targeted_only_drains_durable_global_winner_first():
     conn = _world_conn()
     store = EventStore(conn)

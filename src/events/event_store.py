@@ -1003,6 +1003,7 @@ class EventStore:
         limit: int = 100,
         targeted_event_ids: frozenset[str] = frozenset(),
         targeted_only: bool = False,
+        bridge_stale_debt_slots: int = 0,
     ) -> list[OpportunityEvent]:
         """Fetch pending events in deterministic replay/inference order.
 
@@ -1037,6 +1038,12 @@ class EventStore:
         may select an unpaged winner from its complete current universe, so its
         persisted claim must remain reachable even while producer wakes are
         continuous.
+
+        ``bridge_stale_debt_slots`` is an invocation-local fairness reserve for
+        that producer bridge only. SCOPE is non-target FSR/redecision debt for
+        this consumer and page. DRAIN selects the oldest currently claimable
+        row into the reserved tail slot. RESET is automatic when that row is
+        processed, expires, or ceases to be claimable; no process latch exists.
         """
 
         self._require_world_event_tables()
@@ -1089,6 +1096,11 @@ class EventStore:
                 if (event_id := str(raw_event_id or "").strip())
             )
         )[:100]
+        debt_slot_count = (
+            max(0, min(int(bridge_stale_debt_slots), max(0, int(limit))))
+            if targeted_only and self.consumer_name == "edli_reactor_v1"
+            else 0
+        )
         if targeted_only and not clean_targeted_event_ids:
             return []
         rows: list[tuple[object, ...]] = []
@@ -1101,6 +1113,7 @@ class EventStore:
         winner_hint = self._discover_winner(parsed_decision_time)
         hinted_winner_id = winner_hint[0] if winner_hint is not None else ""
         event_cols = ", ".join(f"e.{key}" for key in _EVENT_ROW_KEYS)
+        bridge_debt_event_ids: list[str] = []
         if targeted_only:
             lookup_event_ids = tuple(
                 event_id
@@ -1170,6 +1183,87 @@ class EventStore:
                 ):
                     continue
                 rows.append(event_tuple + (attempt_by_event[event_id],))
+            if debt_slot_count:
+                excluded_ids = tuple(
+                    event_id
+                    for event_id in dict.fromkeys(
+                        (*clean_targeted_event_ids, hinted_winner_id)
+                    )
+                    if event_id
+                )
+                excluded_sql = ""
+                excluded_args: tuple[str, ...] = ()
+                if excluded_ids:
+                    excluded_sql = (
+                        "AND p.event_id NOT IN ("
+                        + ",".join("?" for _ in excluded_ids)
+                        + ")"
+                    )
+                    excluded_args = excluded_ids
+                debt_rows = self.conn.execute(
+                    f"""
+                    SELECT {event_cols},
+                           p.attempt_count,
+                           p.last_error,
+                           CASE WHEN p.processing_status = 'processing' THEN 1 ELSE 0 END
+                      FROM opportunity_event_processing p
+                      JOIN opportunity_events e ON e.event_id = p.event_id
+                     WHERE p.consumer_name = ?
+                       AND e.event_type IN (
+                            'FORECAST_SNAPSHOT_READY',
+                            'EDLI_REDECISION_PENDING'
+                       )
+                       {excluded_sql}
+                       AND COALESCE(p.last_error, '') <> ?
+                       AND (
+                            (
+                                p.processing_status = 'pending'
+                                AND (
+                                    p.claimed_at IS NULL
+                                    OR p.claimed_at <= ?
+                                )
+                            )
+                            OR (
+                                p.processing_status = 'processing'
+                                AND p.claimed_at IS NOT NULL
+                                AND p.claimed_at <= ?
+                            )
+                       )
+                       AND e.available_at <= ?
+                       AND e.received_at <= ?
+                       AND (e.expires_at IS NULL OR e.expires_at > ?)
+                     ORDER BY p.updated_at ASC, e.event_id ASC
+                     LIMIT ?
+                    """,
+                    (
+                        self.consumer_name,
+                        *excluded_args,
+                        GLOBAL_WINNER_TARGETED_CLAIM,
+                        parsed_decision_time.isoformat(),
+                        stale_processing_before,
+                        parsed_decision_time.isoformat(),
+                        parsed_decision_time.isoformat(),
+                        parsed_decision_time.isoformat(),
+                        debt_slot_count,
+                    ),
+                ).fetchall()
+                for row in debt_rows:
+                    event_tuple = tuple(row[:event_col_count])
+                    event_id = str(event_tuple[0] or "")
+                    attempt_by_event[event_id] = _safe_int(row[event_col_count])
+                    last_error_by_event[event_id] = str(
+                        row[event_col_count + 1] or ""
+                    )
+                    stale_reclaim_by_event[event_id] = _safe_int(
+                        row[event_col_count + 2]
+                    )
+                    if _selection_deadline_past(
+                        last_error_by_event[event_id],
+                        parsed_decision_time,
+                    ):
+                        continue
+                    bridge_debt_event_ids.append(event_id)
+                    rows.append(event_tuple + (attempt_by_event[event_id],))
         point_event_ids = tuple(
             event_id
             for event_id in dict.fromkeys(
@@ -1441,6 +1535,13 @@ class EventStore:
         )
         events = [event for event, _attempt_count in ranked]
         timely = [event for event in events if self._is_timely(event, parsed_decision_time)]
+        if targeted_only and debt_slot_count and bridge_debt_event_ids:
+            debt_ids = frozenset(bridge_debt_event_ids)
+            debt = [event for event in timely if event.event_id in debt_ids]
+            if debt:
+                reserved = min(debt_slot_count, int(limit), len(debt))
+                priority = [event for event in timely if event.event_id not in debt_ids]
+                return priority[: max(0, int(limit) - reserved)] + debt[:reserved]
         return timely[:limit]
 
     def archive_expired_candidates(

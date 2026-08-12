@@ -3681,3 +3681,28 @@ hold the coordinator through the old multi-second SQLite floor, focused
 substrate/market-scanner tests, exact-SHA deployment, and forward evidence that
 all open positions regain bounded canonical monitor age while entry candidates
 continue to be reconsidered.
+
+## 2026-08-12 Producer wakes must drain durable forecast decision debt
+
+Live evidence showed 152 `FORECAST_SNAPSHOT_READY` and 14
+`EDLI_REDECISION_PENDING` rows still pending while producer wakes repeatedly
+processed only their newly committed target IDs. `targeted_only` disabled the
+ordinary debt scan, and the bounded claim page reserved no place for prior
+causal facts, so continuous fresh production structurally starved the very
+redecision history needed to form new capital-growth proposals.
+
+Each producer bridge claim page now reserves its final slot for the oldest
+eligible non-target FSR/redecision debt. Target IDs and the durable global
+winner retain precedence in the other slots; ordinary targeted-only callers
+retain their old behavior. Claiming debt never accepts its old probability:
+the existing current-posterior identity and submit-time authority gates still
+recompute or reject it before any venue side effect.
+
+SCOPE is one `edli_reactor_v1` producer bridge invocation and at most one
+non-target FSR/redecision row. DRAIN is the existing producer wake cadence,
+which claims the oldest eligible debt in the reserved slot. RESET is
+invocation-local: terminalization, expiry, successful processing, or loss of
+timeliness removes the row and the next wake recalculates the oldest debt.
+Acceptance requires selector and real-reactor tests proving a K-sized page
+contains no more than K-1 targets when debt exists, no debt is claimed without
+the explicit reserve, and current posterior/pause/submit fences remain intact.

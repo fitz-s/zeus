@@ -8348,6 +8348,47 @@ def test_global_batch_targeted_wake_claims_only_committed_event():
     assert _processing_status(conn, ordinary.event_id) == "pending"
 
 
+def test_global_batch_producer_bridge_claims_target_and_one_oldest_debt():
+    import src.events.reactor as reactor_module
+
+    conn, store = _store()
+    oldest_debt = _forecast_event("global-oldest-debt", target_date="2026-05-25")
+    newer_debt = _forecast_event("global-newer-debt", target_date="2026-05-25")
+    committed = _forecast_event("global-bridge-target", target_date="2026-05-25")
+    for event in (oldest_debt, newer_debt, committed):
+        store.insert_or_ignore(event)
+    conn.execute(
+        "UPDATE opportunity_event_processing SET updated_at = ? WHERE event_id = ?",
+        ("2026-05-24T08:00:00+00:00", oldest_debt.event_id),
+    )
+    conn.execute(
+        "UPDATE opportunity_event_processing SET updated_at = ? WHERE event_id = ?",
+        ("2026-05-24T09:00:00+00:00", newer_debt.event_id),
+    )
+    conn.execute(
+        "UPDATE opportunity_event_processing SET updated_at = ? WHERE event_id = ?",
+        ("2026-05-24T10:00:00+00:00", committed.event_id),
+    )
+    observations = {}
+    reactor = _global_batch_probe_reactor(store, observations)
+
+    reactor.process_pending(
+        decision_time=_DT_VENUE_OPEN,
+        limit=2,
+        targeted_event_ids=frozenset({committed.event_id}),
+        targeted_only=True,
+        bridge_stale_debt_slots=1,
+    )
+
+    assert observations["batch_event_ids"] == (
+        committed.event_id,
+        oldest_debt.event_id,
+    )
+    assert _processing_status(conn, newer_debt.event_id) == "pending"
+    source = inspect.getsource(reactor_module.run_edli_event_reactor_cycle)
+    assert "bridge_stale_debt_slots=1 if targeted_only_fast_path else 0" in source
+
+
 @pytest.mark.parametrize("winner_finalized", (True, False))
 @pytest.mark.parametrize("batch_economic_cut_completed", (False, True))
 def test_global_batch_prioritizes_venue_side_effect_and_stops_repeated_waits(
