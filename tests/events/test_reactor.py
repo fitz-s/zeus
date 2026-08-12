@@ -4179,6 +4179,40 @@ def test_paused_forecast_carrier_priority_requires_pause_and_serviced_exposure(m
     assert main._paused_forecast_carrier_priority_allowed() is False
 
 
+def test_paused_forecast_yield_requires_successful_day0_monitor():
+    import src.main as main
+    from src.runtime.reactor_wake import ReactorWake
+
+    wake = ReactorWake(
+        "day0-monitor",
+        "2026-08-02T12:00:00+00:00",
+        "day0",
+        "day0_extreme_event_committed",
+    )
+    main._edli_initialize_reactor_wake_cursor()
+    try:
+        main._yield_incomplete_day0_after_monitor_once(
+            wake,
+            monitor_succeeded=False,
+        )
+        assert main._edli_paused_forecast_post_monitor_yield.wake_ids == frozenset()
+
+        # A generic queue yield can mean another monitor is merely in flight;
+        # it is not proof that exposure priority completed.
+        main._edli_day0_post_monitor_yield.arm(wake.wake_id)
+        assert main._edli_paused_forecast_post_monitor_yield.wake_ids == frozenset()
+
+        main._yield_incomplete_day0_after_monitor_once(
+            wake,
+            monitor_succeeded=True,
+        )
+        assert main._edli_paused_forecast_post_monitor_yield.wake_ids == {
+            wake.wake_id
+        }
+    finally:
+        main._edli_initialize_reactor_wake_cursor()
+
+
 def test_paused_empty_exposure_selects_forecast_carrier_without_day0_yield(
     monkeypatch,
 ):
@@ -4509,6 +4543,14 @@ def test_wake_poll_retains_day0_priority_without_paused_empty_exposure_proof(
     )
     main._edli_initialize_reactor_wake_cursor()
     try:
+        if not (
+            pause_state == {"status": "ok", "entries_paused": True}
+            and exposure == 1
+        ):
+            # A previously successful monitor certificate cannot alter wake
+            # priority after pause authority clears/degrades or exposure turns
+            # unknown.
+            main._edli_paused_forecast_post_monitor_yield.arm(day0.wake_id)
         assert main._edli_reactor_wake_poll_once() is True
         assert selections == [
             {

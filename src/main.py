@@ -149,6 +149,7 @@ class _OneTurnWakeExclusion:
 
 _edli_global_completion_yield = _OneTurnWakeExclusion()
 _edli_day0_post_monitor_yield = _OneTurnWakeExclusion()
+_edli_paused_forecast_post_monitor_yield = _OneTurnWakeExclusion()
 _edli_terminal_day0_cleanup_yield = threading.Event()
 _HELD_POSITION_MONITOR_DEFER_JOBS = frozenset(
     {
@@ -4536,6 +4537,7 @@ def _edli_initialize_reactor_wake_cursor() -> None:
     _edli_last_reactor_wake_id = None
     _edli_global_completion_yield.reset()
     _edli_day0_post_monitor_yield.reset()
+    _edli_paused_forecast_post_monitor_yield.reset()
     _edli_terminal_day0_cleanup_yield.clear()
     _edli_collateral_authority_wake_backoff_until.clear()
     _edli_last_collateral_authority_captured_at = None
@@ -6176,9 +6178,9 @@ def _yield_incomplete_day0_after_monitor_once(
         == "day0_extreme_event_committed"
         and monitor_succeeded
     ):
-        _edli_day0_post_monitor_yield.arm(
-            str(getattr(wake, "wake_id", "") or "")
-        )
+        wake_id = str(getattr(wake, "wake_id", "") or "")
+        _edli_day0_post_monitor_yield.arm(wake_id)
+        _edli_paused_forecast_post_monitor_yield.arm(wake_id)
 
 
 def _paused_forecast_carrier_priority_allowed(
@@ -6244,13 +6246,22 @@ def _edli_reactor_wake_poll_once() -> bool:
     )
     global_yield_ids = _edli_global_completion_yield.consume()
     day0_post_monitor_yield_ids = _edli_day0_post_monitor_yield.consume()
+    paused_forecast_post_monitor_yield_ids = (
+        _edli_paused_forecast_post_monitor_yield.consume()
+    )
     terminal_day0_cleanup_yield = _edli_terminal_day0_cleanup_yield.is_set()
     _edli_terminal_day0_cleanup_yield.clear()
     paused_forecast_carrier_priority_allowed = (
         _paused_forecast_carrier_priority_allowed(
-            exposure_priority_served=bool(day0_post_monitor_yield_ids),
+            exposure_priority_served=bool(
+                paused_forecast_post_monitor_yield_ids
+            ),
         )
     )
+    if paused_forecast_carrier_priority_allowed:
+        excluded_wake_ids = frozenset(
+            excluded_wake_ids | paused_forecast_post_monitor_yield_ids
+        )
     try:
         if day0_post_monitor_yield_ids:
             excluded_wake_ids = frozenset(
