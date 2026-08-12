@@ -4,6 +4,30 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-12 Held belief repairs keep independent RESET lanes
+
+Madrid and Tel Aviv remained under active monitoring but could not form a fresh
+exit belief after newer raw forecast inputs arrived.  The monitor correctly
+requested both same-carrier input-revision repair and newer-carrier cycle
+advance, but treated a durable `fusion_upgrade_enqueues` marker as proof that
+all repair work was pending and returned before invoking cycle advance.  Those
+markers survive seed consumption, so the independent cycle lane had no RESET
+and repeated monitor cycles could remain in `BELIEF_AUTHORITY_FAULT` while a
+newer materializable carrier existed.
+
+Only a newly published input-revision seed short-circuits the current worker.
+An already-enqueued revision now remains visible as pending while the same
+family also evaluates cycle advance.  The later monitor still accepts only a
+materialized causal posterior; no stale probability is relabeled fresh.
+
+SCOPE is one held `(city, target_date, metric)` belief repair.  DRAIN is the
+existing fusion queue and cycle-advance queue, independently.  RESET is a
+posterior consuming the relevant input revision/carrier followed by a fresh
+`MONITOR_REFRESHED`; a durable marker alone never resets freshness.  Acceptance
+requires an antibody where `already_enqueued=1` still invokes cycle advance,
+the existing new-revision/no-revision routing tests, and forward Madrid/Tel Aviv
+fresh-belief evidence after live deployment.
+
 ## 2026-08-12 Pre-SDK terminal rejection closes its entry exposure obligation
 
 An entry command can cross the durable reservation boundary and then fail before

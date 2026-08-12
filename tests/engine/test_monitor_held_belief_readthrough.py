@@ -1,6 +1,6 @@
 # Created: 2026-06-21
-# Last reused or audited: 2026-08-01
-# Lifecycle: created=2026-06-21; last_reviewed=2026-08-01; last_reused=2026-08-01
+# Last reused or audited: 2026-08-12
+# Lifecycle: created=2026-06-21; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Authority basis: docs/evidence/live_order_pathology/2026-06-21_forward_chain_diagnosis.md
 #   "CHOSEN FIX (consult-validated, two layers)" — LAYER 2 monitor read-through.
 """ANTIBODY: stale held belief must recover without blocking portfolio monitoring.
@@ -471,6 +471,73 @@ def test_reseed_falls_through_to_cycle_advance_without_input_revision(
     assert report["status"] == "CYCLE_ADVANCE_ENQUEUED"
     assert report["repair_lane"] == "cycle_advance"
     assert report["input_revision_status"] == "FUSION_UPGRADE_TRIGGER"
+
+
+def test_reseed_pending_input_revision_does_not_veto_cycle_advance(
+    monkeypatch,
+    tmp_path,
+):
+    """A durable same-cycle marker cannot strand a newer carrier-cycle repair."""
+    import src.data.replacement_forecast_production as production
+    import src.data.replacement_fusion_upgrade_trigger as fusion
+    import src.data.replacement_cycle_advance_trigger as cycle
+    import src.engine.monitor_refresh as mr
+
+    forecast_db = tmp_path / "forecasts.db"
+    forecast_db.touch()
+    cfg = {
+        "forecast_db": forecast_db,
+        "seed_dir": tmp_path / "seeds",
+        "raw_manifest_dir": tmp_path / "raw",
+    }
+    monkeypatch.setattr(
+        production,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: cfg,
+    )
+    monkeypatch.setattr(
+        fusion,
+        "enqueue_fusion_upgrade_reseeds",
+        lambda **_kwargs: {
+            "status": "FUSION_UPGRADE_TRIGGER",
+            "seeds_enqueued": 0,
+            "already_enqueued": 1,
+        },
+    )
+    cycle_calls = []
+
+    def enqueue_cycle(**kwargs):
+        cycle_calls.append(kwargs)
+        return {"status": "CYCLE_ADVANCE_ENQUEUED", "enqueued": True}
+
+    monkeypatch.setattr(
+        cycle,
+        "enqueue_single_family_cycle_advance_reseed",
+        enqueue_cycle,
+    )
+    monkeypatch.setattr(mr, "_day0_observed_extreme_reseed_payload", lambda **_kw: {})
+
+    report = mr._perform_single_family_belief_reseed_failsoft(
+        city="Madrid",
+        target_date="2026-08-14",
+        metric="high",
+    )
+
+    assert report is not None
+    assert report["status"] == "CYCLE_ADVANCE_ENQUEUED"
+    assert report["repair_lane"] == "cycle_advance"
+    assert report["input_revision_status"] == "BELIEF_INPUT_REVISION_RESEED_PENDING"
+    assert cycle_calls == [
+        {
+            "forecast_db": forecast_db,
+            "seed_dir": tmp_path / "seeds",
+            "raw_manifest_dir": tmp_path / "raw",
+            "city": "Madrid",
+            "target_date": "2026-08-14",
+            "metric": "high",
+            "held_position": True,
+        }
+    ]
 
 
 def test_day0_unobserved_prefix_forwards_portfolio_deadline(monkeypatch):

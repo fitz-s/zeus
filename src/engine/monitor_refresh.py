@@ -1333,14 +1333,14 @@ def _perform_single_family_belief_reseed_failsoft(
                 report["repair_lane"],
             )
             return report
+        input_revision_status = fusion_report.get("status")
         if int(fusion_report.get("already_enqueued", 0) or 0) > 0:
-            report = dict(fusion_report)
-            report.update(
-                status="BELIEF_INPUT_REVISION_RESEED_PENDING",
-                enqueued=False,
-                repair_lane="input_revision",
-            )
-            return report
+            # The input-revision marker is durable after its seed is consumed.
+            # It proves only that lane's request identity; it cannot veto the
+            # independent newer-carrier-cycle repair.  Falling through gives a
+            # later materializable cycle a real RESET instead of retaining the
+            # held family in BELIEF_AUTHORITY_FAULT forever.
+            input_revision_status = "BELIEF_INPUT_REVISION_RESEED_PENDING"
         report = enqueue_single_family_cycle_advance_reseed(
             forecast_db=Path(str(forecast_db)),
             seed_dir=Path(str(seed_dir)),
@@ -1354,7 +1354,7 @@ def _perform_single_family_belief_reseed_failsoft(
         if isinstance(report, dict):
             report = dict(report)
             report["repair_lane"] = "cycle_advance"
-            report["input_revision_status"] = fusion_report.get("status")
+            report["input_revision_status"] = input_revision_status
         logger.info(
             "monitor belief reseed enqueued city=%s target_date=%s metric=%s status=%s "
             "enqueued=%s repair_lane=%s day0_observed_extreme=%s",
