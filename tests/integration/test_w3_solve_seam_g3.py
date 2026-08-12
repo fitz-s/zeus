@@ -6572,6 +6572,9 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
         decision_time=decision_at + _dt.timedelta(milliseconds=1),
     )
     assert current.probability_witness is witness
+    assert reads[-1]["authority_purpose"] is (
+        bundle_reader.ReplacementForecastAuthorityPurpose.HELD_REDECISION
+    )
 
     bundle_result["value"] = SimpleNamespace(
         ok=True,
@@ -6628,7 +6631,6 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
         allow_unobserved_day0_replacement=True,
         probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
     )
-    assert reads[-1]["require_entry_shape_authority"] is False
     held_after_grace_bin_id = next(
         binding.bin_id
         for binding in held_after_grace.probability_witness.bindings
@@ -6641,6 +6643,9 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
     )
     assert held_after_grace_yes is not None
     assert held_after_grace_yes.tolist() == pytest.approx([0.3] * 400)
+    assert reads[-1]["authority_purpose"] is (
+        bundle_reader.ReplacementForecastAuthorityPurpose.HELD_REDECISION
+    )
     assert len(reads) == reads_before + 2
     with pytest.raises(
         ValueError, match="GLOBAL_DAY0_REPLACEMENT_CONDITIONING_MISSING"
@@ -6655,8 +6660,10 @@ def test_held_unobserved_day0_replacement_is_sell_only_and_jit_current(
             allow_unobserved_day0_replacement=True,
             probability_use=era._CurrentProbabilityUse.ENTRY,
         )
-    assert reads[-1]["require_entry_shape_authority"] is True
     assert len(reads) == reads_before + 3
+    assert reads[-1]["authority_purpose"] is (
+        bundle_reader.ReplacementForecastAuthorityPurpose.ENTRY
+    )
     bundle_result["value"] = SimpleNamespace(
         ok=False,
         bundle=None,

@@ -34226,6 +34226,7 @@ def _prepare_current_global_probability_family(
     """
 
     from src.data.replacement_forecast_bundle_reader import (
+        ReplacementForecastAuthorityPurpose,
         market_bin_topology_hash_from_rows,
         read_replacement_forecast_bundle,
     )
@@ -34263,6 +34264,11 @@ def _prepare_current_global_probability_family(
     if not isinstance(probability_use, _CurrentProbabilityUse):
         raise ValueError("GLOBAL_PROBABILITY_USE_INVALID")
     entry_authority = probability_use is _CurrentProbabilityUse.ENTRY
+    bundle_authority_purpose = (
+        ReplacementForecastAuthorityPurpose.ENTRY
+        if entry_authority
+        else ReplacementForecastAuthorityPurpose.HELD_REDECISION
+    )
     decision_time = decision_time.astimezone(UTC)
     payload = _payload(event)
     rows = _event_family_market_topology_rows(topology_conn, payload)
@@ -34498,7 +34504,7 @@ def _prepare_current_global_probability_family(
                 raw_input_hwm_conn=raw_input_hwm_conn,
                 raw_input_hwm_deadline_monotonic=_raw_input_hwm_deadline(),
                 raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
-                require_entry_shape_authority=entry_authority,
+                authority_purpose=bundle_authority_purpose,
             )
             if not result.ok or result.bundle is None:
                 raise ValueError(
@@ -34608,7 +34614,7 @@ def _prepare_current_global_probability_family(
             raw_input_hwm_conn=raw_input_hwm_conn,
             raw_input_hwm_deadline_monotonic=_raw_input_hwm_deadline(),
             raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
-            require_entry_shape_authority=entry_authority,
+            authority_purpose=bundle_authority_purpose,
         )
         if not result.ok or result.bundle is None:
             raise ValueError(
@@ -35252,7 +35258,7 @@ def _prepare_current_global_probability_family(
                     raw_input_hwm_conn=raw_input_hwm_conn,
                     raw_input_hwm_deadline_monotonic=_raw_input_hwm_deadline(),
                     raw_input_hwm_read_max_seconds=raw_input_hwm_read_max_seconds,
-                    require_entry_shape_authority=entry_authority,
+                    authority_purpose=bundle_authority_purpose,
                 )
                 if not bound_result.ok or bound_result.bundle is None:
                     raise ValueError(

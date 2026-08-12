@@ -23,6 +23,7 @@ from src.data.replacement_forecast_cycle_policy import (
 from src.data.replacement_forecast_bundle_reader import (
     HIGH_DATA_VERSION,
     PRODUCT_ID,
+    ReplacementForecastAuthorityPurpose,
     SOURCE_ID,
     read_replacement_forecast_bundle,
 )
@@ -357,7 +358,7 @@ def test_stale_absolute_disagreement_row_has_no_entry_authority() -> None:
     assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
 
 
-def test_stale_absolute_disagreement_row_retains_held_authority() -> None:
+def test_stale_absolute_disagreement_row_has_held_redecision_authority() -> None:
     conn = _conn()
     posterior_id = _insert_posterior(
         conn,
@@ -383,7 +384,7 @@ def test_stale_absolute_disagreement_row_retains_held_authority() -> None:
         conn,
         readiness,
         decision_time=_dt(6, 12),
-        require_entry_shape_authority=False,
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
     )
 
     assert result.ok is True
@@ -418,11 +419,76 @@ def test_nonfinite_shape_lag_has_no_held_authority() -> None:
             conn,
             readiness,
             decision_time=_dt(6, 12),
-            require_entry_shape_authority=False,
+            authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
         )
 
         assert result.ok is False
         assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
+
+
+def test_translated_stale_shape_has_no_held_redecision_authority() -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+        semantics_revision=(
+            STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        ),
+        shape_lag_hours=6.0,
+        stale_shape_reused=True,
+        translation_applied=True,
+    )
+    readiness = _readiness(
+        posterior_id=posterior_id,
+        computed_at=_dt(6, 7, 30),
+        expires_at=_dt(6, 23),
+        decision_time=_dt(6, 7, 30),
+    )
+
+    result = _read(
+        conn,
+        readiness,
+        decision_time=_dt(6, 12),
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    )
+
+    assert result.ok is False
+    assert result.reason_code == "REPLACEMENT_POSTERIOR_READINESS_NOT_LIVE_GRADE"
+
+
+def test_red_staleness_isolates_entry_without_blinding_held_redecision() -> None:
+    conn = _conn()
+    posterior_id = _insert_posterior(
+        conn,
+        source_cycle_time=_dt(6, 0),
+        source_available_at=_dt(6, 7),
+        computed_at=_dt(6, 7, 30),
+        q_mode=_FUSED_FULL,
+        with_bounds=True,
+    )
+    readiness = _readiness(
+        posterior_id=posterior_id,
+        computed_at=_dt(6, 7, 30),
+        expires_at=_dt(7, 2),
+        decision_time=_dt(6, 7, 30),
+    )
+
+    entry = _read(conn, readiness, decision_time=_dt(7, 1))
+    held = _read(
+        conn,
+        readiness,
+        decision_time=_dt(7, 1),
+        authority_purpose=ReplacementForecastAuthorityPurpose.HELD_REDECISION,
+    )
+
+    assert entry.ok is False
+    assert entry.reason_code == "REPLACEMENT_STALENESS_RED_ENTRY_ISOLATED"
+    assert held.ok is True
+    assert held.bundle is not None
 
 
 def _read(
@@ -430,7 +496,7 @@ def _read(
     readiness,
     *,
     decision_time,
-    require_entry_shape_authority=True,
+    authority_purpose=ReplacementForecastAuthorityPurpose.ENTRY,
 ):
     return read_replacement_forecast_bundle(
         conn,
@@ -441,7 +507,7 @@ def _read(
         temperature_metric="high",
         decision_time=decision_time,
         current_bin_topology_hash=_TOPO_HASH,
-        require_entry_shape_authority=require_entry_shape_authority,
+        authority_purpose=authority_purpose,
     )
 
 

@@ -192,6 +192,13 @@ def current_evidence_shape_has_held_authority(provenance: object) -> bool:
     revision and stale flag must agree with the numeric lag exactly.
     """
 
+    # FAIL-CLOSED GATE CONTRACT
+    # SCOPE: reduce-only redecision for this one held city/date/metric family.
+    # DRAIN: a bounded current or raw-member stale-absolute-disagreement shape
+    # is consumed on the next held refresh; malformed or translated shapes wait
+    # for ordinary rematerialization and never borrow entry-time probability.
+    # RESET: the next semantically exact, untranslated current/stale certificate
+    # restores held redecision for this family only.
     shape = _current_evidence_shape(provenance)
     if shape is None:
         return False
