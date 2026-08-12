@@ -1388,7 +1388,12 @@ def _row_get(row: Any, key: str, index: int) -> Any:
     return row[key] if hasattr(row, "keys") else row[index]
 
 
-def _resolve_order_bin_identity(conn: Any, token_id: str) -> Optional[dict]:
+def _resolve_order_bin_identity(
+    conn: Any,
+    token_id: str,
+    *,
+    market_conn: Any | None = None,
+) -> Optional[dict]:
     """Token -> (city, target_date, metric, range bounds, direction) using the
     PRODUCTION topology surfaces (PR#404 P1 fix — the prior single
     market_events.token_id lookup missed every NO token, because market_events
@@ -1438,19 +1443,29 @@ def _resolve_order_bin_identity(conn: Any, token_id: str) -> Optional[dict]:
         "city, target_date, range_low, range_high, temperature_metric, condition_id, token_id"
     )
     _ME_COLS_LEGACY = "city, target_date, range_low, range_high, condition_id, token_id"
-    for table_ref in ("market_events", "world.market_events", "forecasts.market_events"):
+    market_surfaces = []
+    if market_conn is not None:
+        market_surfaces.append((market_conn, "market_events"))
+    market_surfaces.extend(
+        (
+            (conn, "market_events"),
+            (conn, "world.market_events"),
+            (conn, "forecasts.market_events"),
+        )
+    )
+    for surface_conn, table_ref in market_surfaces:
         me_row = None
         has_metric_col = True
         for columns, with_metric in ((_ME_COLS_WITH_METRIC, True), (_ME_COLS_LEGACY, False)):
             try:
                 if condition_id:
-                    me_row = conn.execute(
+                    me_row = surface_conn.execute(
                         f"SELECT {columns} FROM {table_ref} "
                         "WHERE condition_id = ? OR token_id = ? LIMIT 1",
                         (condition_id, token_id),
                     ).fetchone()
                 else:
-                    me_row = conn.execute(
+                    me_row = surface_conn.execute(
                         f"SELECT {columns} FROM {table_ref} WHERE token_id = ? LIMIT 1",
                         (token_id,),
                     ).fetchone()
@@ -1509,6 +1524,120 @@ def _resolve_order_bin_identity(conn: Any, token_id: str) -> Optional[dict]:
         return None
     identity["direction"] = direction
     return identity
+
+
+def classify_day0_dead_bin_entry_cancels(
+    entries: Collection[dict[str, Any]],
+    *,
+    trade_conn: Any,
+    forecasts_conn: Any,
+    cities_by_name: dict[str, Any],
+    now: Optional[datetime] = None,
+    limit: int = 25,
+) -> list[dict[str, Any]]:
+    """Classify canonical open ENTRY commands; never call the venue."""
+
+    from src.data.day0_oracle_anomaly import is_day0_family_paused
+    from zoneinfo import ZoneInfo
+
+    moment = (now or datetime.now(UTC)).astimezone(UTC)
+    ordered = list(entries)
+    if not ordered:
+        return []
+    scan_limit = min(len(ordered), max(1, int(limit)))
+    with _RESTING_ENTRY_SCAN_CURSOR_LOCK:
+        global _RESTING_ENTRY_SCAN_CURSOR
+        start = _RESTING_ENTRY_SCAN_CURSOR % len(ordered)
+        _RESTING_ENTRY_SCAN_CURSOR = (start + scan_limit) % len(ordered)
+    scan_entries = [ordered[(start + offset) % len(ordered)] for offset in range(scan_limit)]
+
+    cancel_set: list[dict[str, Any]] = []
+    for entry in scan_entries:
+        try:
+            if str(entry.get("command_side") or entry.get("side") or "").upper() != "BUY":
+                continue
+            command_id = str(entry.get("command_id") or "").strip()
+            token_id = str(entry.get("token_id") or "").strip()
+            if not command_id or not token_id:
+                logger.warning(
+                    "Day0 cancel classification missing canonical identity: command=%s token=%s",
+                    command_id or "missing",
+                    token_id or "missing",
+                )
+                continue
+            identity = _resolve_order_bin_identity(
+                trade_conn,
+                token_id,
+                market_conn=forecasts_conn,
+            )
+            if identity is None:
+                logger.warning(
+                    "Day0 cancel classification unresolved token identity: command=%s token=%s",
+                    command_id,
+                    token_id,
+                )
+                continue
+            city_name = str(identity["city"])
+            target_date = str(identity["target_date"])
+            metric = str(identity["metric"])
+            city = cities_by_name.get(city_name)
+            if city is None:
+                continue
+            local_today = moment.astimezone(ZoneInfo(str(city.timezone))).date().isoformat()
+            if target_date[:10] != local_today:
+                continue
+
+            paused = is_day0_family_paused(city_name, target_date, now=moment)
+            verdict = None
+            if not paused:
+                evidence = _wu_hard_fact_evidence(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                    now=moment,
+                    world_conn=forecasts_conn,
+                    durable_only=False,
+                )
+                if evidence is not None:
+                    verdict = hard_fact_bin_verdict(
+                        metric=metric,
+                        direction=str(identity["direction"]),
+                        bin_low=(
+                            float(identity["range_low"])
+                            if identity["range_low"] is not None
+                            else None
+                        ),
+                        bin_high=(
+                            float(identity["range_high"])
+                            if identity["range_high"] is not None
+                            else None
+                        ),
+                        effective_extreme=evidence.rounded_extreme,
+                    )
+            if not paused and (verdict is None or verdict.action != "EXIT_DEAD_BIN"):
+                continue
+            reason = "ORACLE_ANOMALY_PAUSE" if paused else "HARD_FACT_BIN_DEAD"
+            cancel_set.append(
+                {
+                    **entry,
+                    "family": (city_name, target_date, metric),
+                    "cancel_reason": reason,
+                    "cancel_action": "CANCEL_REPLACE",
+                    "cancel_detail": {
+                        "trigger": "day0_dead_bin_cancel",
+                        "direction": str(identity["direction"]),
+                        "reason": reason,
+                        "verdict_reason": "" if paused else str(verdict.reason),
+                    },
+                }
+            )
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            logger.warning(
+                "Day0 cancel classification rejected command=%s: %s",
+                str(entry.get("command_id") or "unknown"),
+                exc,
+            )
+    return cancel_set
 
 
 _TARGET_CANCEL_COMMAND_STATES = (
@@ -1629,131 +1758,47 @@ def cancel_day0_dead_bin_resting_entries(
     limit: int = 25,
     target_families: Collection[tuple[str, str, str]] | None = None,
 ) -> int:
-    """Cancel our OPEN resting entry orders whose day0 bin is hard-fact dead
-    (for the order's side) or whose family is anomaly-paused.
+    """Compatibility seam routed through canonical classification and journal.
 
-    Token -> bin identity via _resolve_order_bin_identity (EMS yes/no tokens +
-    market_events bounds + TYPED metric — PR#404 P1). Fail-soft per order; a
-    cancel failure is loud but never raises. Returns cancels issued.
+    New production code calls the C3 owner directly. This seam remains only for
+    older callers; it never scans wallet orders and never invokes a raw venue
+    cancel method.
     """
-    moment = (now or datetime.now(UTC)).astimezone(UTC)
-    target_family_keys = (
-        {
+    from src.execution.batch_order_submission import cancel_commands_batch
+    from src.execution.staleness_cancel import find_open_entry_rests
+
+    entries = find_open_entry_rests(conn)
+    proposals = classify_day0_dead_bin_entry_cancels(
+        entries,
+        trade_conn=conn,
+        forecasts_conn=conn,
+        cities_by_name=cities_by_name,
+        now=now,
+        limit=limit,
+    )
+    if target_families is not None:
+        targets = {
             (
-                str(city or "").strip().casefold(),
-                str(target_date or "").strip()[:10],
-                str(metric or "").strip().lower(),
+                str(city).strip().casefold(),
+                str(target_date).strip()[:10],
+                str(metric).strip().lower(),
             )
             for city, target_date, metric in target_families
         }
-        if target_families is not None
-        else None
-    )
-    open_orders = (
-        _target_family_entry_orders(conn, target_family_keys)
-        if target_family_keys is not None
-        else None
-    )
-    if open_orders is None:
-        try:
-            open_orders = clob.get_open_orders() or []
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("day0 dead-bin cancel sweep: get_open_orders failed: %s", exc)
-            return 0
-    if not open_orders:
+        proposals = [
+            proposal
+            for proposal in proposals
+            if tuple(str(value).strip().casefold() for value in proposal["family"])
+            in targets
+        ]
+    if not proposals:
         return 0
-
-    from src.data.day0_oracle_anomaly import is_day0_family_paused
-    from zoneinfo import ZoneInfo
-
-    scan_limit = max(1, int(limit))
-    with _RESTING_ENTRY_SCAN_CURSOR_LOCK:
-        global _RESTING_ENTRY_SCAN_CURSOR
-        start = _RESTING_ENTRY_SCAN_CURSOR % len(open_orders)
-        scan_count = min(len(open_orders), scan_limit)
-        _RESTING_ENTRY_SCAN_CURSOR = (start + scan_count) % len(open_orders)
-    scan_orders = [
-        open_orders[(start + offset) % len(open_orders)]
-        for offset in range(scan_count)
-    ]
-
-    cancelled = 0
-    for order in scan_orders:
-        try:
-            side = _order_field(order, "side").upper()
-            if side and side != "BUY":
-                continue  # exit (SELL) orders belong to the exit lifecycle
-            order_id = _order_field(order, "orderID", "order_id", "id")
-            token_id = _order_field(order, "asset_id", "token_id", "tokenID", "market")
-            if not order_id or not token_id:
-                continue
-            identity = _resolve_order_bin_identity(conn, token_id)
-            if identity is None:
-                continue
-            city_name = identity["city"]
-            target_date = identity["target_date"]
-            range_low = identity["range_low"]
-            range_high = identity["range_high"]
-            metric = identity["metric"]
-            direction = identity["direction"]
-            if target_family_keys is not None and (
-                str(city_name or "").strip().casefold(),
-                str(target_date or "").strip()[:10],
-                str(metric or "").strip().lower(),
-            ) not in target_family_keys:
-                continue
-            city = cities_by_name.get(city_name)
-            if city is None:
-                continue
-            # day0 scope: the order's market settles TODAY in city-local time.
-            local_today = moment.astimezone(ZoneInfo(str(city.timezone))).date().isoformat()
-            if str(target_date)[:10] != local_today:
-                continue
-
-            paused = is_day0_family_paused(city_name, target_date, now=moment)
-            verdict = None
-            if not paused:
-                # H-1 (Day0 first-principles audit 2026-07-18): thread the caller's
-                # composite connection as world_conn — same durable truth the
-                # held-position exit lane consults (cycle_runtime world_conn=conn).
-                # Without it the durable observation_instants source is silently
-                # excluded and a cold-memo restart leaves dead-bin BUYs resting.
-                evidence = _wu_hard_fact_evidence(
-                    city=city,
-                    target_date=target_date,
-                    metric=metric,
-                    now=moment,
-                    world_conn=conn,
-                    durable_only=False,
-                )
-                if evidence is not None:
-                    verdict = hard_fact_bin_verdict(
-                        metric=metric, direction=direction,
-                        bin_low=float(range_low) if range_low is not None else None,
-                        bin_high=float(range_high) if range_high is not None else None,
-                        effective_extreme=evidence.rounded_extreme,
-                    )
-            if not paused and (verdict is None or verdict.action != "EXIT_DEAD_BIN"):
-                continue
-            reason = "ORACLE_ANOMALY_PAUSE" if paused else "HARD_FACT_BIN_DEAD"
-            try:
-                clob.cancel_order(order_id)
-                cancelled += 1
-                logger.warning(
-                    "DAY0_RESTING_ORDER_CANCELLED order=%s token=%s city=%s date=%s side=%s "
-                    "dir=%s reason=%s%s",
-                    order_id, token_id[:18], city_name, target_date, side or "BUY",
-                    direction, reason,
-                    "" if paused else f" ({verdict.reason})",
-                )
-            except Exception as exc:  # noqa: BLE001 — cancel fail loud, sweep continues
-                logger.error(
-                    "DAY0_RESTING_ORDER_CANCEL_FAILED order=%s reason=%s exc=%s: %s",
-                    order_id, reason, type(exc).__name__, exc,
-                )
-        except Exception as exc:  # noqa: BLE001 — one order must not kill the sweep
-            logger.debug("day0 dead-bin cancel sweep: order skipped: %s", exc)
-    return cancelled
+    outcomes = cancel_commands_batch(
+        conn,
+        clob,
+        [str(proposal["command_id"]) for proposal in proposals],
+    )
+    return sum(1 for outcome in outcomes if outcome.status == "acked")
 
 
 def _reset_wu_memo_for_tests() -> None:

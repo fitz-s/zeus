@@ -11320,7 +11320,6 @@ def run_exit_monitor_cycle(
     Called from the main daemon's ``exit_monitor`` scheduler job (2-minute
     cadence). Behavior-preserving relocation — was inline in src/main.py.
     """
-    from src.config import settings
     from src.engine.cycle_runner import (
         _execute_monitoring_phase,
         get_connection,
@@ -11335,8 +11334,6 @@ def run_exit_monitor_cycle(
     from src.state.decision_chain import CycleArtifact
     from src.state.decision_chain import store_artifact
 
-    _settings_source = settings._data if hasattr(settings, "_data") else settings
-    edli_cfg = _settings_source.get("edli", {}) if isinstance(_settings_source, dict) else {}
     if held_position_monitor_active.is_set() and not monitor_claimed:
         logger.warning("exit_monitor skipped: previous monitor cycle is still running")
         return False
@@ -11505,39 +11502,6 @@ def run_exit_monitor_cycle(
             mark_held_position_monitor_complete()
             monitor_completion_marked = True
 
-            # DAY0 resting-order cancel sweep (adversarial review
-            # 2026-06-10 fix 2 — finding 4 "standing free option"). Cancels OUR
-            # open resting ENTRY orders whose day0 bin is hard-fact dead for the
-            # order's side, or whose family is oracle-anomaly paused. Cancels
-            # only REDUCE standing risk. Fail-soft.
-            if (
-                not summary.get("held_monitor_preempted")
-                and bool(
-                    edli_cfg.get(
-                        "day0_dead_bin_order_cancel_enabled",
-                        True,
-                    )
-                )
-            ):
-                try:
-                    from src.config import runtime_cities_by_name
-                    from src.execution.day0_hard_fact_exit import (
-                        cancel_day0_dead_bin_resting_entries,
-                    )
-
-                    cancelled = cancel_day0_dead_bin_resting_entries(
-                        clob=clob,
-                        conn=conn,
-                        cities_by_name=runtime_cities_by_name(),
-                        target_families=target_families,
-                    )
-                    if cancelled:
-                        summary["day0_dead_bin_orders_cancelled"] = cancelled
-                except Exception as exc:  # noqa: BLE001 — sweep is additive
-                    logger.warning(
-                        "exit_monitor: day0 dead-bin cancel sweep failed (non-fatal): %s",
-                        exc,
-                    )
     except Exception as exc:
         logger.error(
             "exit_monitor: unexpected error: %s", exc, exc_info=True

@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused or audited: 2026-07-04
+# Last reused or audited: 2026-08-11
 # Authority basis: docs/rebuild/schema_packets/w1_2_order_state_extension_schema_packet_2026-07-02.md
 #   (SCH-W1.2-ORDER-STATE) §"C3 mark orders stale" (NO-WRITE; cancel-set goes out through the
 #   existing CANCEL intent) + docs/operations/current/plans/order_engine_rebuild_execution_plan_2026-07-02.md
@@ -193,13 +193,15 @@ def find_open_entry_rests(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         )
         SELECT vc.command_id, vc.venue_order_id, vc.token_id, vc.market_id,
                vc.created_at, {q_version_expr} AS q_version, lf.state AS fact_state, lf.matched_size,
-               {snapshot_id_select}, {snapshot_min_order_select}, {submit_payload_select}
+               {snapshot_id_select}, {snapshot_min_order_select}, {submit_payload_select},
+               vc.side AS command_side
         FROM venue_commands vc
         JOIN latest_facts lf
           ON lf.venue_order_id = vc.venue_order_id AND lf.rn = 1
         {snapshot_join}
         {submit_payload_join}
         WHERE vc.intent_kind = 'ENTRY'
+          AND upper(vc.side) = 'BUY'
           AND vc.venue_order_id IS NOT NULL
           AND vc.venue_order_id != ''
           AND vc.state IN ('ACKED', 'POST_ACKED', 'PARTIAL')
@@ -224,6 +226,7 @@ def find_open_entry_rests(conn: sqlite3.Connection) -> list[dict[str, Any]]:
                 "snapshot_id": row[8],
                 "min_order_size": row[9],
                 "submit_payload_json": row[10],
+                "command_side": row[11],
             }
         source_details = _decision_source_details_from_submit_payload(item.get("submit_payload_json"))
         q_authority = _decision_q_authority_from_details(source_details)
@@ -438,6 +441,41 @@ def classify_cancel_set(
     return cancel_set
 
 
+def _merge_cancel_proposals(
+    proposals_by_lane: Iterable[tuple[str, Iterable[dict[str, Any]]]],
+    families_by_command: dict[str, FamilyKey | None],
+) -> list[dict[str, Any]]:
+    """Deduplicate commands without discarding any lane's reason evidence."""
+
+    merged: dict[str, dict[str, Any]] = {}
+    for lane, proposals in proposals_by_lane:
+        for proposal in proposals:
+            command_id = str(proposal["command_id"])
+            family = proposal.get("family")
+            if family and families_by_command.get(command_id) is None:
+                families_by_command[command_id] = tuple(family)
+            current = merged.get(command_id)
+            if current is None:
+                current = dict(proposal)
+                current["cancel_detail_by_lane"] = {
+                    lane: proposal.get("cancel_detail")
+                }
+                merged[command_id] = current
+                continue
+            reasons = {
+                reason
+                for value in (
+                    current.get("cancel_reason"),
+                    proposal.get("cancel_reason"),
+                )
+                for reason in str(value or "").split("+")
+                if reason
+            }
+            current["cancel_reason"] = "+".join(sorted(reasons))
+            current["cancel_detail_by_lane"][lane] = proposal.get("cancel_detail")
+    return list(merged.values())
+
+
 def run_c3_staleness_cancel_cycle(
     trade_conn_ro: sqlite3.Connection,
     trade_conn_rw: sqlite3.Connection,
@@ -449,7 +487,7 @@ def run_c3_staleness_cancel_cycle(
     rate_budget: Any = None,
     deadline_minutes: float | None = None,
 ) -> dict[str, Any]:
-    """Two independent classification passes over one scan, merged before cancel.
+    """Three independent classification passes over one scan, merged before cancel.
 
     TTL pass (UNCONDITIONAL, every call): scans every open ENTRY rest with NO
     city filter and classifies with ``q_by_family={}`` — forcing
@@ -465,8 +503,10 @@ def run_c3_staleness_cancel_cycle(
     live q only for those families — a source-run event is what makes staleness
     classification meaningful; families outside it never had their q move.
 
-    The two cancel-sets are merged de-duplicated by command_id (TTL wins on
-    conflict, since it ran unconditionally) before the single
+    Day0 dead-bin/anomaly classification is unconditional and reads the same
+    canonical open ENTRY commands. It is pure: venue action remains below.
+
+    The three cancel-sets are merged de-duplicated by command_id before the single
     ``cancel_commands_batch`` call — so a command that is both past-deadline and
     q-stale in the same tick is cancelled once, not twice.
 
@@ -495,6 +535,10 @@ def run_c3_staleness_cancel_cycle(
     submit against.
     """
     from src.execution.batch_order_submission import cancel_commands_batch
+    from src.execution.day0_hard_fact_exit import (
+        classify_day0_dead_bin_entry_cancels,
+    )
+    from src.config import runtime_cities_by_name
     from src.state.venue_command_repo import get_command
 
     now = now or datetime.now(UTC)
@@ -532,16 +576,36 @@ def run_c3_staleness_cancel_cycle(
             scoped_entries, families_by_command, q_by_family, now=now, deadline_minutes=deadline_minutes
         )
 
-    cancel_by_command: dict[str, dict[str, Any]] = {
-        str(e["command_id"]): e for e in ttl_cancel_set
-    }
-    for e in q_cancel_set:
-        cancel_by_command.setdefault(str(e["command_id"]), e)
-    cancel_set = list(cancel_by_command.values())
+    # SCOPE: one canonically open ENTRY command whose typed local-Day0 bin is
+    # dead or anomaly-paused. DRAIN: this unconditional C3 pass recomputes every
+    # five minutes and batch-journals the cancel below; command recovery owns a
+    # post-journal venue ambiguity. RESET: the command leaves the canonical open
+    # set or the current qualified Day0 predicate no longer selects it.
+    try:
+        day0_cancel_set = classify_day0_dead_bin_entry_cancels(
+            entries,
+            trade_conn=trade_conn_ro,
+            forecasts_conn=forecasts_conn_ro,
+            cities_by_name=runtime_cities_by_name(),
+            now=now,
+        )
+    except Exception as exc:  # noqa: BLE001 - one lane cannot suppress TTL/q drain.
+        logger.warning("C3 Day0 cancel classification failed: %s", exc)
+        day0_cancel_set = []
+
+    cancel_set = _merge_cancel_proposals(
+        (
+            ("ttl", ttl_cancel_set),
+            ("q_version", q_cancel_set),
+            ("day0", day0_cancel_set),
+        ),
+        families_by_command,
+    )
 
     result: dict[str, Any] = {
         "scanned": len(entries),
         "cancel_set_size": len(cancel_set),
+        "day0_cancel_set_size": len(day0_cancel_set),
         "outcomes": [],
         "confirmed_families": set(),
     }

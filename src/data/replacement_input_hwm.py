@@ -531,12 +531,20 @@ def _artifact_cycles_from_rows(
         if metadata_type != "object":
             continue
         if "artifact_path" in columns:
-            if payload_path_type in {"", "null", "text"}:
-                metadata = (
-                    {"openmeteo_payload_json": payload_path}
-                    if payload_path_type == "text"
-                    else {}
-                )
+            if payload_path_type == "text":
+                if not _cached_artifact_payload_covers_target_local_day(
+                    artifact_path=artifact_path,
+                    payload_path=str(payload_path or ""),
+                    city_timezone=str(
+                        getattr(cities_by_name.get(artifact_city), "timezone", "")
+                        or ""
+                    ),
+                    target_date=target_date,
+                ):
+                    continue
+                metadata = {}
+            elif payload_path_type in {"", "null"}:
+                metadata = {}
             else:
                 try:
                     metadata = json.loads(str(metadata_raw or "{}"))
@@ -544,19 +552,85 @@ def _artifact_cycles_from_rows(
                     continue
                 if not isinstance(metadata, dict):
                     continue
-            city_cfg = cities_by_name.get(artifact_city)
-            city_timezone = str(getattr(city_cfg, "timezone", "") or "") or None
-            if not _openmeteo_payload_covers_target_local_day(
-                metadata,
-                artifact_path=artifact_path,
-                city_timezone=city_timezone,
-                target_date=target_date,
-            ):
-                continue
+            if payload_path_type != "text":
+                city_cfg = cities_by_name.get(artifact_city)
+                city_timezone = str(getattr(city_cfg, "timezone", "") or "") or None
+                if not _openmeteo_payload_covers_target_local_day(
+                    metadata,
+                    artifact_path=artifact_path,
+                    city_timezone=city_timezone,
+                    target_date=target_date,
+                ):
+                    continue
         cycle = _parse_source_cycle_utc(raw_cycle)
         if cycle is not None:
             cycles[key] = cycle
     return cycles
+
+
+@lru_cache(maxsize=4096)
+def _cached_artifact_payload_coverage(
+    *,
+    artifact_path: str,
+    payload_path: str,
+    city_timezone: str,
+    target_date: str,
+    payload_inode: int,
+    payload_ctime_ns: int,
+    payload_mtime_ns: int,
+    payload_size: int,
+) -> bool:
+    """Verify one immutable payload identity once per process."""
+
+    del payload_inode, payload_ctime_ns, payload_mtime_ns, payload_size
+    from src.data.replacement_forecast_current_target_plan import (
+        _openmeteo_payload_covers_target_local_day,
+    )
+
+    return _openmeteo_payload_covers_target_local_day(
+        {"openmeteo_payload_json": payload_path},
+        artifact_path=artifact_path,
+        city_timezone=city_timezone or None,
+        target_date=target_date,
+    )
+
+
+def _cached_artifact_payload_covers_target_local_day(
+    *,
+    artifact_path: str,
+    payload_path: str,
+    city_timezone: str,
+    target_date: str,
+) -> bool:
+    """Reuse coverage proof while the referenced payload bytes are unchanged."""
+
+    if not str(payload_path).strip():
+        return True
+    resolved = Path(payload_path)
+    if not resolved.is_absolute():
+        resolved = Path(artifact_path).parent / resolved
+    try:
+        stat = resolved.stat()
+    except (OSError, ValueError):
+        payload_inode = -1
+        payload_ctime_ns = -1
+        payload_mtime_ns = -1
+        payload_size = -1
+    else:
+        payload_inode = int(stat.st_ino)
+        payload_ctime_ns = int(stat.st_ctime_ns)
+        payload_mtime_ns = int(stat.st_mtime_ns)
+        payload_size = int(stat.st_size)
+    return _cached_artifact_payload_coverage(
+        artifact_path=artifact_path,
+        payload_path=str(resolved),
+        city_timezone=city_timezone,
+        target_date=target_date,
+        payload_inode=payload_inode,
+        payload_ctime_ns=payload_ctime_ns,
+        payload_mtime_ns=payload_mtime_ns,
+        payload_size=payload_size,
+    )
 
 
 def _batch_product_cycle_artifact_cycles(

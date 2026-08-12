@@ -8383,30 +8383,34 @@ def test_day0_resting_entry_sweep_bounds_and_rotates_scan_work(monkeypatch):
     monkeypatch.setattr(
         day0_hard_fact_exit,
         "_resolve_order_bin_identity",
-        lambda _conn, token_id: identity_calls.append(token_id) or None,
+        lambda _conn, token_id, **_kwargs: identity_calls.append(token_id) or None,
     )
-    orders = [
-        {"orderID": f"order-{index}", "asset_id": f"token-{index}", "side": "BUY"}
+    entries = [
+        {
+            "command_id": f"command-{index}",
+            "token_id": f"token-{index}",
+            "command_side": "BUY",
+        }
         for index in range(5)
     ]
-    clob = SimpleNamespace(get_open_orders=lambda: orders)
 
     for _ in range(2):
         assert (
-            day0_hard_fact_exit.cancel_day0_dead_bin_resting_entries(
-                clob=clob,
-                conn=object(),
+            day0_hard_fact_exit.classify_day0_dead_bin_entry_cancels(
+                entries,
+                trade_conn=object(),
+                forecasts_conn=object(),
                 cities_by_name={},
                 limit=2,
             )
-            == 0
+            == []
         )
 
     assert identity_calls == ["token-0", "token-1", "token-2", "token-3"]
 
 
-def test_exit_monitor_commits_and_releases_before_entry_cleanup():
-    """Resting ENTRY cleanup cannot own the held-monitor completion signal."""
+def test_exit_monitor_has_no_entry_cancel_side_effect():
+    """The monitor invocation ends without owning ENTRY venue cleanup."""
     import inspect
 
     from src.execution.exit_lifecycle import run_exit_monitor_cycle
@@ -8414,9 +8418,16 @@ def test_exit_monitor_commits_and_releases_before_entry_cleanup():
     source = inspect.getsource(run_exit_monitor_cycle)
     commit_at = source.index("commit_then_export(", source.index("with nullcontext"))
     release_at = source.index("mark_held_position_monitor_complete()", commit_at)
-    cleanup_at = source.index("cancel_day0_dead_bin_resting_entries(", release_at)
 
-    assert commit_at < release_at < cleanup_at
+    assert commit_at < release_at
+    assert "cancel_day0_dead_bin_resting_entries" not in source
+    day0_source = inspect.getsource(
+        __import__(
+            "src.execution.day0_hard_fact_exit",
+            fromlist=["cancel_day0_dead_bin_resting_entries"],
+        )
+    )
+    assert ".cancel_order(" not in day0_source
 
 
 def test_global_holding_coverage_materializes_typed_q_missing_obligation():

@@ -1716,3 +1716,53 @@ publication barrier.
 - Forbidden: widening the 150-second threshold, weakening BUY admission,
   suppressing Day0 wakes, adding a second writer, or treating a timestamp
   without fresh q/book evidence as coverage.
+
+### Slice B93 — Cache immutable raw-payload coverage proof (2026-08-11)
+
+- Live defect: the held-monitor HWM batch reopened and reparsed the same
+  immutable Open-Meteo payload on every pass. Python file I/O consumed the
+  shared five-second read deadline; the next SQLite progress callback then
+  interrupted the batch and made fresh probability authority unavailable.
+- Structural invariant: payload local-day coverage is verified once per exact
+  file identity `(resolved path, inode, ctime_ns, mtime_ns, size, city timezone,
+  target date)`. `ctime_ns` makes an in-place rewrite invalidate the proof even
+  when a writer preserves both size and mtime.
+  An identity change or a previously missing file appearing forces a fresh
+  content read; no missing, partial, or changed payload is cached as fresh.
+- SCOPE: HWM payload-coverage verification only. DRAIN: the first monitor for
+  each new payload identity performs the existing exact validation; later
+  passes reuse that proof. RESET: file identity change, cache eviction, or
+  process restart. Probability, source-cycle, freshness, and lag law are
+  unchanged.
+
+### Slice B94 — Move Day0 ENTRY cancellation out of the monitor invocation (2026-08-11)
+
+- Live defect: `run_exit_monitor_cycle` released its process-local monitor
+  claim after canonical commit but then performed raw CLOB Day0 ENTRY cleanup
+  before returning. APScheduler still counted the invocation against
+  `max_instances=1`, so later monitor/recovery ticks were skipped. The inline
+  path also called venue cancel before writing durable `CANCEL_REQUESTED`.
+- Structural invariant: held-position monitoring ends after its canonical
+  decision commit and health/status closeout. Day0 dead-bin/anomaly cleanup is
+  a pure per-command classification merged into the existing recurring C3
+  cancel-set; all venue side effects use the existing batch journal and command
+  recovery contract.
+- SCOPE: one canonically open ENTRY `command_id` whose typed token identity is
+  local-Day0 and whose qualified evidence proves `HARD_FACT_BIN_DEAD` or
+  `ORACLE_ANOMALY_PAUSE`. SELL/held-position actions and unrelated entries are
+  excluded. DRAIN: C3 recomputes on its five-minute cadence; after
+  `CANCEL_REQUESTED` commit, the existing 60-second command recovery owns any
+  venue ambiguity. RESET: the command is no longer canonically open, the
+  qualified Day0 predicate no longer selects it, or durable cancel convergence
+  reaches `CANCELLED`.
+- Forbidden: background fire-and-forget threads, direct `cancel_order`, stale
+  flags, family/global entry gates, weakening Day0 evidence, or extending the
+  held-monitor deadline. Acceptance: monitor source contains no ENTRY cleanup
+  call; dead YES/NO-side semantics remain typed; C3 merges Day0 with TTL/q
+  proposals once per command; batch journal/recovery tests and monitor cadence
+  antibodies pass.
+- Test sunset: wallet-only fakes that assert the retired raw `cancel_order`
+  behavior are explicitly skipped. Their production invariants are replaced by
+  BUY-only canonical scan, typed YES/NO classifier, bounded rotation,
+  lane-failure isolation, and durable C3 batch-journal antibodies. The retired
+  fake path must not be revived merely to make those historical assertions run.

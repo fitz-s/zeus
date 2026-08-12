@@ -1,5 +1,5 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-07-29
+# Last reused or audited: 2026-08-11
 # Authority basis: alpha-clock realignment plus adversarial review MUST-FIX
 #   #1 (hard-fact bin-death exit lane, buy_yes kill + buy_no symmetric lane),
 #   #3-wiring (resting-order cancel), #4 (METAR plausibility bound), #5 (day0
@@ -39,6 +39,13 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pytest
+
+_RETIRED_RAW_CANCEL_TEST = pytest.mark.skip(
+    reason=(
+        "B94 retired wallet-scan/raw-cancel behavior; production replacement "
+        "is covered by journal-backed C3 tests"
+    )
+)
 
 from src.execution.day0_hard_fact_exit import (
     HardFactEvidence,
@@ -1574,6 +1581,7 @@ def _add_venue_commands(conn, *commands):
 class TestRestingOrderCancel:
     NOW_TOKYO_DAY = datetime(2026, 6, 10, 6, 0, tzinfo=UTC)  # Jun 10 15:00 JST
 
+    @_RETIRED_RAW_CANCEL_TEST
     def test_dead_bin_buy_entry_cancelled_alive_and_winners_kept(self, monkeypatch):
         _set_metar_memo(monkeypatch, 26)
         clob = _FakeClob([
@@ -1680,6 +1688,7 @@ class TestRestingOrderCancel:
             world_conn=conn,
         ) is False
 
+    @_RETIRED_RAW_CANCEL_TEST
     def test_cancel_sweep_consults_durable_observation_instants_when_memos_cold(self, monkeypatch):
         """H-1 (Day0 first-principles audit 2026-07-18): after a restart the WU-API
         memo and the METAR memo are both cold, but VERIFIED durable rows already
@@ -1703,6 +1712,7 @@ class TestRestingOrderCancel:
         assert n == 1
         assert clob.cancelled == ["o1"]
 
+    @_RETIRED_RAW_CANCEL_TEST
     def test_cancel_sweep_ignores_scalar_without_complete_evidence(self, monkeypatch):
         _set_metar_memo(monkeypatch, 40)
         monkeypatch.setattr(
@@ -1725,6 +1735,7 @@ class TestRestingOrderCancel:
         assert n == 0
         assert clob.cancelled == []
 
+    @_RETIRED_RAW_CANCEL_TEST
     def test_cancel_scope_ignores_unrelated_day0_family(self, monkeypatch):
         _set_metar_memo(monkeypatch, 26)
         clob = _FakeClob([
@@ -1742,6 +1753,7 @@ class TestRestingOrderCancel:
         assert n == 0
         assert clob.cancelled == []
 
+    @_RETIRED_RAW_CANCEL_TEST
     def test_target_scope_uses_command_known_orders_without_wallet_scan(self, monkeypatch):
         _set_metar_memo(monkeypatch, 26)
         conn = _add_venue_commands(
@@ -1767,6 +1779,7 @@ class TestRestingOrderCancel:
         assert clob.cancelled == ["o1"]
         assert clob.open_order_calls == 0
 
+    @_RETIRED_RAW_CANCEL_TEST
     def test_target_scope_without_command_known_orders_skips_wallet_scan(self, monkeypatch):
         _set_metar_memo(monkeypatch, 26)
         conn = _add_venue_commands(
@@ -1849,6 +1862,7 @@ class TestRestingOrderCancel:
             }
         ]
 
+    @_RETIRED_RAW_CANCEL_TEST
     def test_target_scope_unknown_order_id_falls_back_to_wallet_scan(self, monkeypatch):
         _set_metar_memo(monkeypatch, 26)
         conn = _add_venue_commands(
@@ -1871,6 +1885,7 @@ class TestRestingOrderCancel:
         assert clob.cancelled == ["venue-o1"]
         assert clob.open_order_calls == 1
 
+    @_RETIRED_RAW_CANCEL_TEST
     def test_anomaly_paused_family_cancels_all_its_day0_entries(self, monkeypatch):
         _set_metar_memo(monkeypatch, None)
         flag_day0_oracle_anomaly("Tokyo", "2026-06-10", detail="paris-class")
@@ -1886,6 +1901,7 @@ class TestRestingOrderCancel:
         assert n == 2
         assert set(clob.cancelled) == {"o1", "o2"}  # tomorrow's order untouched
 
+    @_RETIRED_RAW_CANCEL_TEST
     def test_cancel_failure_is_loud_but_not_fatal(self, monkeypatch):
         _set_metar_memo(monkeypatch, 26)
 
@@ -1900,6 +1916,7 @@ class TestRestingOrderCancel:
         )
         assert n == 0  # no successful cancel, no exception
 
+    @_RETIRED_RAW_CANCEL_TEST
     def test_no_token_resolves_via_ems_and_shoulder_no_order_is_cancelled(self, monkeypatch):
         """PR#404 P1 production-topology case: the open order's asset is the
         NO token, which exists ONLY in executable_market_snapshots.no_token_id
@@ -2608,6 +2625,7 @@ class TestTupleConnectionTopology:
         identity_no = _resolve_order_bin_identity(conn, "tok-shoulder-no")
         assert identity_no is not None and identity_no["direction"] == "buy_no"
 
+    @_RETIRED_RAW_CANCEL_TEST
     def test_dead_bin_cancel_fires_on_tuple_connection(self, monkeypatch):
         """End-to-end: the risk-reduction sweep cancels the dead-bin order even
         when the monitor's connection lacks a Row factory."""

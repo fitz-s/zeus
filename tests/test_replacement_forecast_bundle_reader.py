@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-05
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-05; last_reused=2026-08-05
+# Last reused/audited: 2026-08-11
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-11; last_reused=2026-08-11
 # Purpose: Protect replacement posterior bundle reader no-bypass semantics.
 # Reuse: Run before wiring replacement posterior into executable forecast reader or event reactor.
 # Authority basis: Operator-directed live replacement forecast bundle reader semantics.
@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 import src.data.replacement_forecast_bundle_reader as reader
+import src.data.replacement_input_hwm as input_hwm
 from src.data.replacement_forecast_bundle_reader import (
     HIGH_DATA_VERSION,
     PRODUCT_ID,
@@ -138,6 +140,150 @@ def test_cycle_frozen_artifact_hwm_is_reused_across_connections(tmp_path) -> Non
     assert all(cycle is not None for cycle in cycles.values())
     assert not any(
         "FROM RAW_FORECAST_ARTIFACTS" in statement.upper() for statement in traced
+    )
+
+
+def test_cycle_hwm_reuses_unchanged_payload_coverage_and_rechecks_rewrite(
+    tmp_path, monkeypatch
+) -> None:
+    db_path = tmp_path / "forecast.db"
+    payload_path = tmp_path / "openmeteo.json"
+    artifact_path = tmp_path / "manifest.json"
+    payload = {
+        "timezone": "UTC",
+        "utc_offset_seconds": 0,
+        "hourly": {
+            "time": ["2026-08-12T12:00"],
+            "temperature_2m": [25.0],
+        },
+    }
+    artifact_path.write_text("{}", encoding="utf-8")
+
+    writer = sqlite3.connect(db_path)
+    writer.execute(
+        """
+        CREATE TABLE raw_forecast_artifacts (
+            source_id TEXT,
+            product_id TEXT,
+            source_cycle_time TEXT,
+            captured_at TEXT,
+            source_available_at TEXT,
+            artifact_path TEXT,
+            artifact_metadata_json TEXT
+        )
+        """
+    )
+    request = ("Shanghai", "2026-08-12", "high")
+    writer.execute(
+        "INSERT INTO raw_forecast_artifacts VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            OPENMETEO_ANCHOR_SOURCE_ID,
+            OPENMETEO_ANCHOR_PRODUCT_ID,
+            "2026-08-11T12:00:00+00:00",
+            "2026-08-11T12:05:00+00:00",
+            "2026-08-11T12:05:00+00:00",
+            str(artifact_path),
+            json.dumps(
+                {
+                    "city": request[0],
+                    "target_date": request[1],
+                    "metric": request[2],
+                    "openmeteo_payload_json": payload_path.name,
+                }
+            ),
+        ),
+    )
+    writer.commit()
+    writer.close()
+
+    original_read_text = type(payload_path).read_text
+    payload_reads = 0
+
+    def counted_read_text(path, *args, **kwargs):
+        nonlocal payload_reads
+        if path == payload_path:
+            payload_reads += 1
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(payload_path), "read_text", counted_read_text)
+    input_hwm._cached_artifact_payload_coverage.cache_clear()
+
+    def freeze_once():
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN")
+        try:
+            return freeze_replacement_artifact_hwm(
+                conn,
+                requests=(request,),
+                decision_time=datetime(2026, 8, 11, 13, tzinfo=UTC),
+            )
+        finally:
+            conn.rollback()
+            conn.close()
+
+    assert freeze_once().artifact_cycles == {}
+    payload_path.write_text(json.dumps(payload), encoding="utf-8")
+    assert freeze_once().artifact_cycles[request] == datetime(
+        2026, 8, 11, 12, tzinfo=UTC
+    )
+    assert freeze_once().artifact_cycles[request] == datetime(
+        2026, 8, 11, 12, tzinfo=UTC
+    )
+    assert payload_reads == 1
+
+    unchanged_stat = payload_path.stat()
+    same_size_payload = json.dumps(payload).replace("25.0", "26.0")
+    assert len(same_size_payload) == len(json.dumps(payload))
+    payload_path.write_text(same_size_payload, encoding="utf-8")
+    os.utime(
+        payload_path,
+        ns=(unchanged_stat.st_atime_ns, unchanged_stat.st_mtime_ns),
+    )
+    assert freeze_once().artifact_cycles[request] == datetime(
+        2026, 8, 11, 12, tzinfo=UTC
+    )
+    assert payload_reads == 2
+
+    stat = payload_path.stat()
+    os.utime(
+        payload_path,
+        ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000),
+    )
+    assert freeze_once().artifact_cycles[request] == datetime(
+        2026, 8, 11, 12, tzinfo=UTC
+    )
+    assert payload_reads == 3
+
+    payload_path.write_text(
+        json.dumps({**payload, "generationtime_ms": 1.0}),
+        encoding="utf-8",
+    )
+    assert freeze_once().artifact_cycles[request] == datetime(
+        2026, 8, 11, 12, tzinfo=UTC
+    )
+    assert payload_reads == 4
+
+
+def test_cycle_hwm_payload_cache_preserves_absent_path_semantics(tmp_path) -> None:
+    artifact_path = tmp_path / "manifest.json"
+    common = {
+        "artifact_path": str(artifact_path),
+        "city_timezone": "UTC",
+        "target_date": "2026-08-12",
+    }
+
+    assert input_hwm._cached_artifact_payload_covers_target_local_day(
+        payload_path="",
+        **common,
+    )
+    assert input_hwm._cached_artifact_payload_covers_target_local_day(
+        payload_path="   ",
+        **common,
+    )
+    assert not input_hwm._cached_artifact_payload_covers_target_local_day(
+        payload_path="bad\x00path",
+        **common,
     )
 
 
