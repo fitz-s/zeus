@@ -19472,8 +19472,75 @@ def test_global_sell_debt_deferral_preserves_primary_monitor_refresh(monkeypatch
 
     assert refreshes == [position.trade_id]
     assert summary["global_sell_snapshot_reauction_classification_deferred"] == 1
+    assert "global_sell_snapshot_reauction_debts_pending" not in summary
     assert summary["held_monitor_primary_belief_read_completed"] == 1
     assert summary["monitors"] == 1
+
+
+def test_sub_precision_positive_sell_is_exact_non_executable_coverage():
+    """A venue-inexpressible residual must terminalize exact SELL debt."""
+    from src.events import reactor
+    from src.engine.global_single_order_auction import (
+        _non_executable_sell_coverage,
+    )
+    from src.runtime import reactor_wake
+
+    curve = SimpleNamespace(
+        token_id="tiny-residual-token",
+        side="NO",
+        book_hash="tiny-residual-book",
+        fee_model=SimpleNamespace(fee_rate=Decimal("0.05")),
+        min_tick=Decimal("0.001"),
+        min_order_size=Decimal("5"),
+        levels=(SimpleNamespace(price=Decimal("0.94"), size=Decimal("100")),),
+    )
+
+    reason, book_state, witness = _non_executable_sell_coverage(
+        Decimal("0.002684"),
+        curve,
+    )
+
+    assert reason == "SELLABLE_SHARES_BELOW_PRECISION"
+    assert book_state == "NO_EXECUTABLE_BOOK"
+    assert len(witness) == 64
+
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="tiny-residual-position",
+        family=("Singapore", "2026-08-12", "high"),
+        probability_content_identity="tiny-residual-old-q",
+        probability_observed_at="2026-08-12T01:24:00+00:00",
+        held_token_id=curve.token_id,
+        held_best_bid=0.66,
+        bid_observed_at="2026-08-12T01:24:00+00:00",
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
+    coverage = SimpleNamespace(
+        position_id=request.position_id,
+        token_id=request.held_token_id,
+        status="EXCLUDED",
+        book_state=book_state,
+        probability_content_identity="tiny-residual-current-q",
+        selection_epoch_identity="tiny-residual-current-epoch",
+        sell_book_witness_identity=witness,
+    )
+
+    receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,),
+        result=reactor.ReactorResult(
+            global_held_sell_completion_cuts=[
+                reactor.GlobalHeldSellCompletionCut(
+                    holding_coverage=(coverage,),
+                    economic_cut_completed=False,
+                    outcome="INCOMPLETE",
+                )
+            ]
+        ),
+    )
+
+    assert len(receipts) == 1
+    assert receipts[0].status == "NO_EXECUTABLE_BOOK"
+    assert receipts[0].attempt_identity == request.attempt_identity
 
 
 def test_held_sell_recovery_read_hard_deadline_kills_blocked_lineage(tmp_path):
@@ -19645,6 +19712,7 @@ def test_blocked_global_debt_lineage_preserves_eight_primary_refreshes(
     assert refreshes == [position.trade_id for position in positions]
     assert canonical_refreshes == refreshes
     assert summary["global_sell_snapshot_reauction_classification_deferred"] == 8
+    assert "global_sell_snapshot_reauction_debts_pending" not in summary
     assert summary["held_monitor_primary_belief_read_completed"] == 8
     assert summary["monitors"] == 8
     conn.close()

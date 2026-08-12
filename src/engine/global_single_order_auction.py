@@ -184,6 +184,24 @@ def global_sell_book_witness_identity(curve: object) -> str:
     return digest.hexdigest()
 
 
+def _non_executable_sell_coverage(
+    held_shares: object,
+    curve: object,
+) -> tuple[str, str, str]:
+    """Classify a positive holding after both SELL modes fail materialization."""
+
+    sellable_shares = Decimal(held_shares).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_FLOOR,
+    )
+    reason = (
+        "SELL_BOOK_NO_EXECUTABLE_UNIT_PRICE"
+        if sellable_shares > 0
+        else "SELLABLE_SHARES_BELOW_PRECISION"
+    )
+    return reason, "NO_EXECUTABLE_BOOK", global_sell_book_witness_identity(curve)
+
+
 def global_sell_book_unavailability_witness_identity(
     *,
     asset_state: tuple[str, ...],
@@ -1183,31 +1201,28 @@ def select_prepared_global_auction(
                             )
                         )
                     else:
-                        sellable_shares = Decimal(holding.shares).quantize(
-                            Decimal("0.01"),
-                            rounding=ROUND_FLOOR,
+                        (
+                            exclusion_reason,
+                            exclusion_book_state,
+                            exclusion_book_witness,
+                        ) = _non_executable_sell_coverage(
+                            holding.shares,
+                            asset.curve,
                         )
-                        no_executable_book = sellable_shares > 0
                         holding_coverage.append(
                             coverage_row(
                                 holding,
                                 probability,
                                 status="EXCLUDED",
-                                reason=(
-                                    "SELL_BOOK_NO_EXECUTABLE_UNIT_PRICE"
-                                    if no_executable_book
-                                    else "SELLABLE_SHARES_BELOW_PRECISION"
-                                ),
-                                book_state=(
-                                    "NO_EXECUTABLE_BOOK"
-                                    if no_executable_book
-                                    else "UNKNOWN"
-                                ),
-                                sell_book_witness_identity=(
-                                    global_sell_book_witness_identity(asset.curve)
-                                    if no_executable_book
-                                    else None
-                                ),
+                                reason=exclusion_reason,
+                                # A positive holding that cannot materialize
+                                # any venue-legal SELL is current exact
+                                # non-executability, including a residual below
+                                # the venue amount precision.  UNKNOWN would
+                                # leave its durable completion debt immortal
+                                # despite a complete q/book/holding cut.
+                                book_state=exclusion_book_state,
+                                sell_book_witness_identity=exclusion_book_witness,
                             )
                         )
                 except Exception as exc:  # noqa: BLE001 - malformed holding invalidates globality

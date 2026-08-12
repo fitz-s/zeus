@@ -6735,10 +6735,6 @@ def execute_monitoring_phase(
                 summary.get("global_sell_snapshot_reauction_classification_deferred", 0)
                 + deferred
             )
-            summary["global_sell_snapshot_reauction_debts_pending"] = (
-                summary.get("global_sell_snapshot_reauction_debts_pending", 0)
-                + deferred
-            )
             break
         if debt_status is GlobalSellSnapshotReauctionDebtStatus.DEBT:
             committed_debt_candidates.append(position)
