@@ -545,11 +545,11 @@ def test_background_substrate_factory_uses_monitor_aware_priority(monkeypatch):
     assert observed == [WritePriority.BACKGROUND_RECOVERY]
 
 
-def test_priority_capture_keeps_foreground_budget_and_context_when_background_enabled(
+def test_priority_capture_keeps_exact_context_but_cooperates_with_monitor(
     tmp_path,
     monkeypatch,
 ):
-    """A broad refresh flag cannot downgrade a priority confirmation capture."""
+    """Exact replayable capture keeps its tier while yielding the DB writer."""
     db_path = tmp_path / "trade.db"
     _create_trade_db(db_path)
     conn = sqlite3.connect(str(db_path))
@@ -567,7 +567,7 @@ def test_priority_capture_keeps_foreground_budget_and_context_when_background_en
                 kwargs["persist_context_factory"],
             )
         )
-        return {"persisted": True}
+        return {"persisted": True, "snapshot_persistence_tier": "full"}
 
     monkeypatch.setattr(ms, "capture_executable_market_snapshot", _capture)
     try:
@@ -583,13 +583,14 @@ def test_priority_capture_keeps_foreground_budget_and_context_when_background_en
             snapshot_write_context_factory=foreground_context,
             background_snapshot_write_context_factory=background_context,
             background_fast_yield=True,
+            cooperative_write_busy_timeout_ms=100,
         )
     finally:
         conn.close()
 
     assert summary["inserted"] > 0
     assert observed
-    assert {budget for budget, _context in observed} == {8000}
+    assert {budget for budget, _context in observed} == {100}
     assert {context for _budget, context in observed} == {foreground_context}
 
 

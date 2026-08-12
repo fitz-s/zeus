@@ -3652,3 +3652,32 @@ command conflict survived every successful scheduler tick. Held-capital I/O
 keeps priority only while both status cuts remain inside half their freshness
 budget; after that backstop, the read-only pulse and composite refresh run so
 operator health cannot ratchet stale. This changes no trading authority.
+
+## 2026-08-12 Replayable substrate writes cannot outrank capital monitoring
+
+Forward runtime evidence showed canonical `MONITOR_REFRESHED` persistence
+missing both its initial and five-second retry while the substrate observer was
+capturing priority snapshots. The snapshot writer was allowed to hold the
+unified trade writer while SQLite waited four to eight seconds on a legacy/raw
+writer. That inverts the money path: a replayable market-data projection can
+consume the complete deadline of the lifecycle fact that authorizes a held
+position's next exit decision.
+
+All substrate snapshots, including exact held/FC-03 priority rows, therefore
+remain semantically priority data but become cooperative database writers.
+They acquire the existing `BACKGROUND_RECOVERY` writer class, use a short
+SQLite busy quantum, and retry from current venue truth on the next producer
+cycle. Network reads and probability authority are unchanged; only persistence
+ordering changes. Submit-time JIT recapture is outside this producer path and
+retains its own execution authority.
+
+SCOPE is executable-substrate persistence in the recurring observer producer.
+DRAIN is one short per-row transaction whenever no canonical monitor is queued,
+with durable level-triggered scope retried on the existing 20-second cadence.
+RESET is a fresh persisted snapshot or expiry of its current priority request;
+a timeout never promotes stale data. Acceptance requires a behavioral antibody
+proving exact priority snapshots carry background writer priority and cannot
+hold the coordinator through the old multi-second SQLite floor, focused
+substrate/market-scanner tests, exact-SHA deployment, and forward evidence that
+all open positions regain bounded canonical monitor age while entry candidates
+continue to be reconsidered.

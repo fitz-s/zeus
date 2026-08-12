@@ -245,6 +245,18 @@ def _background_snapshot_capture_busy_timeout_ms() -> int:
     return 25
 
 
+def _cooperative_snapshot_busy_timeout_ms(
+    planned_timeout_ms: int,
+    cooperative_limit_ms: int | None,
+) -> int:
+    """Cap replayable writer waiting without changing foreground JIT behavior."""
+
+    planned = max(1, int(planned_timeout_ms))
+    if cooperative_limit_ms is None:
+        return planned
+    return min(planned, max(1, int(cooperative_limit_ms)))
+
+
 def _snapshot_capture_sqlite_lock_retries() -> int:
     try:
         return max(0, int(os.environ.get("ZEUS_SNAPSHOT_CAPTURE_SQLITE_LOCK_RETRIES", "2")))
@@ -4909,6 +4921,7 @@ def refresh_executable_market_substrate_snapshots(
     snapshot_write_context_factory: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
     background_snapshot_write_context_factory: Callable[[], contextlib.AbstractContextManager[object]] | None = None,
     background_fast_yield: bool = False,
+    cooperative_write_busy_timeout_ms: int | None = None,
 ) -> dict[str, Any]:
     """Capture fresh executable snapshots for the live reader substrate.
 
@@ -5473,24 +5486,33 @@ def refresh_executable_market_substrate_snapshots(
                     batch_orderbook_supported=batch_orderbook_supported,
                     prefetched_books=prefetched_books,
                 )
+                cooperative_busy_ms = (
+                    None
+                    if cooperative_write_busy_timeout_ms is None
+                    else max(1, int(cooperative_write_busy_timeout_ms))
+                )
                 effective_lock_retry_count = (
                     0
-                    if background_capture
+                    if background_capture or cooperative_busy_ms is not None
                     else _snapshot_capture_effective_lock_retries(
                         configured_retries=lock_retry_count,
                         remaining_candidates=remaining_candidates,
                     )
                 )
+                busy_timeout_ms = (
+                    _background_snapshot_capture_busy_timeout_ms()
+                    if background_capture
+                    else _snapshot_capture_busy_timeout_ms(
+                        remaining_seconds,
+                        remaining_candidates=remaining_candidates,
+                        priority_candidate=priority_candidate,
+                    )
+                )
                 _set_busy_timeout_ms(
                     conn,
-                    (
-                        _background_snapshot_capture_busy_timeout_ms()
-                        if background_capture
-                        else _snapshot_capture_busy_timeout_ms(
-                            remaining_seconds,
-                            remaining_candidates=remaining_candidates,
-                            priority_candidate=priority_candidate,
-                        )
+                    _cooperative_snapshot_busy_timeout_ms(
+                        busy_timeout_ms,
+                        cooperative_busy_ms,
                     ),
                 )
                 try:

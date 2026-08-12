@@ -852,37 +852,45 @@ def test_live_snapshot_refresh_paths_use_shared_trade_write_coordinator():
     )
 
 
-def test_substrate_snapshot_write_lease_covers_sqlite_busy_floor(monkeypatch):
-    """The outer writer lease must not expire before row-level SQLite lock waiting."""
+def test_substrate_priority_snapshot_writer_yields_to_canonical_monitor(monkeypatch):
+    """Replayable exact snapshots cannot consume the monitor writer deadline."""
+    from src.state import write_coordinator
+    from src.state.write_coordinator import WritePriority
 
-    monkeypatch.delenv("ZEUS_SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS", raising=False)
-    monkeypatch.delenv("ZEUS_SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS", raising=False)
-    monkeypatch.setenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", "4000")
+    observed: list[dict] = []
 
-    busy_floor = substrate_observer._substrate_snapshot_sqlite_busy_floor_ms()
-    assert busy_floor == 4000
-    assert substrate_observer._substrate_snapshot_write_lease_deadline_default_ms() == 8000
+    class _Coordinator:
+        @contextlib.contextmanager
+        def lease(self, _dbs, **kwargs):
+            observed.append(kwargs)
+            yield
 
-    monkeypatch.setenv("ZEUS_SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS", "1000")
-    lease_deadline = substrate_observer._substrate_snapshot_write_lease_ms(
-        "substrate_snapshot_db_write_lease_deadline_ms",
-        substrate_observer._substrate_snapshot_write_lease_deadline_default_ms(),
-        minimum=busy_floor,
-        maximum=30000,
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: _Coordinator(),
     )
-    assert lease_deadline >= busy_floor
 
-    monkeypatch.setenv("ZEUS_SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS", "1000")
-    max_hold = substrate_observer._substrate_snapshot_write_lease_ms(
-        "substrate_snapshot_db_write_max_hold_ms",
-        substrate_observer.SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
-        minimum=busy_floor,
-        maximum=10000,
-    )
-    assert max_hold >= busy_floor
+    with substrate_observer._substrate_snapshot_trade_write_context_factory(
+        "substrate_pending_family_snapshot_refresh"
+    )():
+        pass
 
-    monkeypatch.setenv("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS", "7000")
-    assert substrate_observer._substrate_snapshot_write_lease_deadline_default_ms() == 8000
+    assert observed == [
+        {
+            "owner": "substrate_pending_family_snapshot_refresh",
+            "write_class": "live",
+            "priority": WritePriority.BACKGROUND_RECOVERY,
+            "deadline_ms": 100,
+            "max_hold_ms": 100,
+        }
+    ]
+
+    source = inspect.getsource(substrate_observer._refresh_pending_family_snapshots)
+    assert "cooperative_write_busy_timeout_ms=(" in source
+    assert "SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS" in source
+    assert market_scanner._cooperative_snapshot_busy_timeout_ms(8000, 100) == 100
+    assert market_scanner._cooperative_snapshot_busy_timeout_ms(8000, None) == 8000
 
 
 def test_reactor_uses_targeted_decision_refresher_for_blocked_families():

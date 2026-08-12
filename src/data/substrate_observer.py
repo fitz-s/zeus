@@ -91,11 +91,8 @@ _GAMMA_EMPTY_BACKOFF_UNTIL: dict[tuple[str, str, str], float] = {}
 _NEW_FAMILY_CONDITION_IDS: set[str] = set()
 _SUBSTRATE_CLOB_CLIENTS: dict[tuple[int, float], object] = {}
 _SUBSTRATE_CLOB_CLIENTS_LOCK = threading.Lock()
-# Priority confirmation/entry/exit capture retains its established foreground
-# envelope. Broad discovery capture explicitly opts into the separate fast-yield
-# context below.
-SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 8000
-SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS = 8000
+# Exact and broad substrate facts differ in capture scope, not in database
+# authority. Both are replayable and must yield to canonical lifecycle writes.
 SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS = 100
 SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_MAX_HOLD_MS = 100
 
@@ -106,57 +103,21 @@ def _market_substrate_broad_turnstile():
     return acquire_market_substrate_turnstile(priority=False)
 
 
-def _substrate_snapshot_sqlite_busy_floor_ms() -> int:
-    raw = os.environ.get("ZEUS_SNAPSHOT_CAPTURE_BUSY_TIMEOUT_FLOOR_MS")
-    try:
-        value = int(raw) if raw is not None else 4000
-    except (TypeError, ValueError):
-        value = 4000
-    return max(1000, min(value, 30000))
-
-
-def _substrate_snapshot_write_lease_deadline_default_ms() -> int:
-    return max(
-        SUBSTRATE_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
-        _substrate_snapshot_sqlite_busy_floor_ms() + 1000,
-    )
-
-
-def _substrate_snapshot_write_lease_ms(
-    name: str,
-    default: int,
-    *,
-    minimum: int,
-    maximum: int,
-) -> int:
-    raw = os.environ.get(f"ZEUS_{name.upper()}")
-    try:
-        value = int(raw) if raw is not None else default
-    except (TypeError, ValueError):
-        value = default
-    return max(minimum, min(value, maximum))
-
-
 def _substrate_snapshot_trade_write_context_factory(owner: str):
     def _factory():
-        from src.state.write_coordinator import DBIdentity, default_runtime_write_coordinator
+        from src.state.write_coordinator import (
+            DBIdentity,
+            WritePriority,
+            default_runtime_write_coordinator,
+        )
 
         return default_runtime_write_coordinator().lease(
             (DBIdentity.TRADE,),
             owner=owner,
             write_class="live",
-            deadline_ms=_substrate_snapshot_write_lease_ms(
-                "substrate_snapshot_db_write_lease_deadline_ms",
-                _substrate_snapshot_write_lease_deadline_default_ms(),
-                minimum=_substrate_snapshot_sqlite_busy_floor_ms(),
-                maximum=30000,
-            ),
-            max_hold_ms=_substrate_snapshot_write_lease_ms(
-                "substrate_snapshot_db_write_max_hold_ms",
-                SUBSTRATE_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
-                minimum=_substrate_snapshot_sqlite_busy_floor_ms(),
-                maximum=10000,
-            ),
+            priority=WritePriority.BACKGROUND_RECOVERY,
+            deadline_ms=SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS,
+            max_hold_ms=SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_MAX_HOLD_MS,
         )
 
     return _factory
@@ -2695,6 +2656,9 @@ def _refresh_pending_family_snapshots(
                     )
                 ),
                 background_fast_yield=True,
+                cooperative_write_busy_timeout_ms=(
+                    SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS
+                ),
             )
         finally:
             write_conn.close()
@@ -2967,6 +2931,9 @@ def _market_discovery_cycle() -> None:
                             )
                         ),
                         background_fast_yield=True,
+                        cooperative_write_busy_timeout_ms=(
+                            SUBSTRATE_BACKGROUND_SNAPSHOT_DB_WRITE_LEASE_DEADLINE_MS
+                        ),
                     )
                     conn.commit()
                 finally:
