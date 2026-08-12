@@ -1200,70 +1200,109 @@ class EventStore:
                         + ")"
                     )
                     excluded_args = excluded_ids
-                debt_rows = self.conn.execute(
-                    f"""
-                    SELECT {event_cols},
-                           p.attempt_count,
-                           p.last_error,
-                           CASE WHEN p.processing_status = 'processing' THEN 1 ELSE 0 END
-                      FROM opportunity_event_processing p
-                      JOIN opportunity_events e ON e.event_id = p.event_id
-                     WHERE p.consumer_name = ?
-                       AND e.event_type IN (
-                            'FORECAST_SNAPSHOT_READY',
-                            'EDLI_REDECISION_PENDING'
-                       )
-                       {excluded_sql}
-                       AND COALESCE(p.last_error, '') <> ?
-                       AND (
-                            (
-                                p.processing_status = 'pending'
-                                AND (
-                                    p.claimed_at IS NULL
-                                    OR p.claimed_at <= ?
-                                )
-                            )
-                            OR (
-                                p.processing_status = 'processing'
-                                AND p.claimed_at IS NOT NULL
-                                AND p.claimed_at <= ?
-                            )
-                       )
-                       AND e.available_at <= ?
-                       AND e.received_at <= ?
-                       AND (e.expires_at IS NULL OR e.expires_at > ?)
-                     ORDER BY p.updated_at ASC, e.event_id ASC
-                     LIMIT ?
-                    """,
+                probe_limit = max(32, debt_slot_count * 8)
+                debt_candidates: list[tuple[str, int, str, int, str]] = []
+                lane_specs = (
                     (
-                        self.consumer_name,
-                        *excluded_args,
-                        GLOBAL_WINNER_TARGETED_CLAIM,
-                        parsed_decision_time.isoformat(),
-                        stale_processing_before,
-                        parsed_decision_time.isoformat(),
-                        parsed_decision_time.isoformat(),
-                        parsed_decision_time.isoformat(),
-                        debt_slot_count,
+                        "idx_opportunity_event_processing_pending_retry_floor",
+                        "p.processing_status = 'pending' AND p.claimed_at IS NULL",
+                        (),
+                        0,
                     ),
-                ).fetchall()
-                for row in debt_rows:
-                    event_tuple = tuple(row[:event_col_count])
-                    event_id = str(event_tuple[0] or "")
-                    attempt_by_event[event_id] = _safe_int(row[event_col_count])
-                    last_error_by_event[event_id] = str(
-                        row[event_col_count + 1] or ""
+                    (
+                        "idx_opportunity_event_processing_pending_retry_floor",
+                        "p.processing_status = 'pending' "
+                        "AND p.claimed_at IS NOT NULL AND p.claimed_at <= ?",
+                        (parsed_decision_time.isoformat(),),
+                        0,
+                    ),
+                    (
+                        "idx_opportunity_event_processing_stale_claim",
+                        "p.processing_status = 'processing' "
+                        "AND p.claimed_at IS NOT NULL AND p.claimed_at <= ?",
+                        (stale_processing_before,),
+                        1,
+                    ),
+                )
+                for index_name, lane_sql, lane_args, stale_reclaim in lane_specs:
+                    lane_rows = self.conn.execute(
+                        f"""
+                        SELECT p.event_id,
+                               p.attempt_count,
+                               p.last_error,
+                               p.updated_at
+                          FROM opportunity_event_processing p
+                               INDEXED BY {index_name}
+                         WHERE p.consumer_name = ?
+                           AND {lane_sql}
+                           {excluded_sql}
+                           AND COALESCE(p.last_error, '') <> ?
+                           AND EXISTS (
+                                SELECT 1
+                                  FROM opportunity_events e
+                                 WHERE e.event_id = p.event_id
+                                   AND e.event_type IN (
+                                        'FORECAST_SNAPSHOT_READY',
+                                        'EDLI_REDECISION_PENDING'
+                                   )
+                                   AND e.available_at <= ?
+                                   AND e.received_at <= ?
+                                   AND (e.expires_at IS NULL OR e.expires_at > ?)
+                           )
+                         ORDER BY p.updated_at ASC, p.event_id ASC
+                         LIMIT ?
+                        """,
+                        (
+                            self.consumer_name,
+                            *lane_args,
+                            *excluded_args,
+                            GLOBAL_WINNER_TARGETED_CLAIM,
+                            parsed_decision_time.isoformat(),
+                            parsed_decision_time.isoformat(),
+                            parsed_decision_time.isoformat(),
+                            probe_limit,
+                        ),
+                    ).fetchall()
+                    debt_candidates.extend(
+                        (
+                            str(row[0] or ""),
+                            _safe_int(row[1]),
+                            str(row[2] or ""),
+                            stale_reclaim,
+                            str(row[3] or ""),
+                        )
+                        for row in lane_rows
                     )
-                    stale_reclaim_by_event[event_id] = _safe_int(
-                        row[event_col_count + 2]
-                    )
+                seen_debt_ids: set[str] = set()
+                for event_id, attempt_count, last_error, stale_reclaim, _updated_at in sorted(
+                    debt_candidates,
+                    key=lambda item: (item[4], item[0]),
+                ):
+                    if not event_id or event_id in seen_debt_ids:
+                        continue
+                    seen_debt_ids.add(event_id)
+                    event_row = self.conn.execute(
+                        f"SELECT {event_cols} FROM opportunity_events e WHERE e.event_id = ?",
+                        (event_id,),
+                    ).fetchone()
+                    if event_row is None:
+                        continue
+                    event_tuple = tuple(event_row[:event_col_count])
                     if _selection_deadline_past(
-                        last_error_by_event[event_id],
+                        last_error,
                         parsed_decision_time,
                     ):
                         continue
+                    event = _event_from_row(event_tuple)
+                    if not self._is_timely(event, parsed_decision_time):
+                        continue
+                    attempt_by_event[event_id] = attempt_count
+                    last_error_by_event[event_id] = last_error
+                    stale_reclaim_by_event[event_id] = stale_reclaim
                     bridge_debt_event_ids.append(event_id)
-                    rows.append(event_tuple + (attempt_by_event[event_id],))
+                    rows.append(event_tuple + (attempt_count,))
+                    if len(bridge_debt_event_ids) >= debt_slot_count:
+                        break
         point_event_ids = tuple(
             event_id
             for event_id in dict.fromkeys(

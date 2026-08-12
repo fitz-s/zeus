@@ -1389,6 +1389,11 @@ class OpportunityEventReactor:
             if bridge_stale_debt_slots > 0:
                 fetch_kwargs["bridge_stale_debt_slots"] = bridge_stale_debt_slots
             events = self._store.fetch_pending(**fetch_kwargs)
+            if bridge_stale_debt_slots > 0:
+                # The reserve is per producer bridge invocation, not per
+                # multi-winner epoch or pagination fetch. Subsequent re-fetches
+                # retain target/winner continuity without claiming more debt.
+                fetch_kwargs["bridge_stale_debt_slots"] = 0
             if not events:
                 break
             # FAIR LANE INTERLEAVE (2026-06-15). The per-cycle wall-clock budget completes

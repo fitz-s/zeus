@@ -223,8 +223,18 @@ def test_producer_bridge_reserves_tail_slot_for_oldest_forecast_debt():
         available_at="2026-06-05T10:00:00+00:00",
         received_at="2026-06-05T10:01:00+00:00",
     )
-    for event in (committed, older_redecision, newer_fsr):
+    untimely_oldest = _event(
+        "2026-06-04",
+        "snap-bridge-untimely-oldest",
+        available_at="2026-06-04T07:00:00+00:00",
+        received_at="2026-06-04T07:01:00+00:00",
+    )
+    for event in (committed, untimely_oldest, older_redecision, newer_fsr):
         store.insert_or_ignore(event)
+    conn.execute(
+        "UPDATE opportunity_event_processing SET updated_at = ? WHERE event_id = ?",
+        ("2026-06-05T07:00:00+00:00", untimely_oldest.event_id),
+    )
     conn.execute(
         "UPDATE opportunity_event_processing SET updated_at = ? WHERE event_id = ?",
         ("2026-06-05T11:30:00+00:00", committed.event_id),

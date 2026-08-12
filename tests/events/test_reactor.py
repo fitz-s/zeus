@@ -8387,6 +8387,8 @@ def test_global_batch_producer_bridge_claims_target_and_one_oldest_debt():
     assert _processing_status(conn, newer_debt.event_id) == "pending"
     source = inspect.getsource(reactor_module.run_edli_event_reactor_cycle)
     assert "bridge_stale_debt_slots=1 if targeted_only_fast_path else 0" in source
+    process_source = inspect.getsource(OpportunityEventReactor.process_pending)
+    assert 'fetch_kwargs["bridge_stale_debt_slots"] = 0' in process_source
 
 
 @pytest.mark.parametrize("winner_finalized", (True, False))
