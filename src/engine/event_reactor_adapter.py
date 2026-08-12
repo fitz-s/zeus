@@ -8662,8 +8662,9 @@ def event_bound_live_adapter_from_trade_conn(
                         "book_held_token_projection",
                         lambda read_conn: read_conn.execute(
                             """
-                            SELECT city, target_date, temperature_metric,
-                                   direction, token_id, no_token_id
+                            SELECT position_id, city, target_date,
+                                   temperature_metric, direction, token_id,
+                                   no_token_id
                               FROM position_current
                              WHERE phase IN ('active', 'day0_window', 'pending_exit')
                                AND COALESCE(chain_shares, shares, 0) > 0
@@ -8675,6 +8676,7 @@ def event_bound_live_adapter_from_trade_conn(
                         raise
                     held_token_rows = ()
                 for (
+                    position_id,
                     city,
                     target_date,
                     metric,
@@ -8689,6 +8691,11 @@ def event_bound_live_adapter_from_trade_conn(
                     ).strip()
                     if not held_token:
                         continue
+                    if exact_completion_sell_keys and (
+                        str(position_id or "").strip(),
+                        held_token,
+                    ) not in exact_completion_sell_keys:
+                        continue
                     family_key = weather_family_id(
                         city=str(city or ""),
                         target_date=str(target_date or ""),
@@ -8697,11 +8704,20 @@ def event_bound_live_adapter_from_trade_conn(
                     held_tokens_by_family.setdefault(family_key, set()).add(
                         held_token
                     )
-                reduce_only_book_tokens = frozenset(
+                held_book_tokens = frozenset(
                     token
                     for family_tokens in held_tokens_by_family.values()
                     for token in family_tokens
-                ) or None
+                )
+                # An exact held-SELL completion cannot authorize another
+                # position, so its quote/binding I/O has the same scope.  Keep
+                # an empty exact scope empty (fail closed) instead of widening
+                # it back to every held token through the None sentinel.
+                reduce_only_book_tokens = (
+                    held_book_tokens
+                    if exact_completion_sell_keys
+                    else held_book_tokens or None
+                )
             _book_started = _time.monotonic()
             timeout = max(
                 1.0,

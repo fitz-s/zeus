@@ -332,6 +332,26 @@ post-load unresolved Day0 ENTRY command. The broader goal remains active until
 forward chain fills, settlements, and capital-curve evidence establish robust
 capital gain rather than a single favorable trade.
 
+## 2026-08-12 Exact held-SELL completion owns an exact quote scope
+
+The durable completion request already names the only `(position_id, token_id)`
+whose SELL may be selected, but the book epoch still projected every open held
+token before applying that policy.  A one-position recovery therefore paid the
+Gamma binding and CLOB I/O latency of unrelated positions even though none could
+win that auction.  This is a scope mismatch, not an argument to compare capital
+locally: the global posterior/wealth comparison remains intact while quote I/O
+is limited to actions that the exact completion policy can authorize.
+
+SCOPE is quote, binding, and executable-book capture for an exact reserved
+held-SELL completion request.  DRAIN is one current quote epoch for the exact
+open `(position_id, held_token_id)` pair followed by its existing terminal
+receipt path.  RESET is that terminal receipt or disappearance of the exact
+positive chain exposure.  A missing/mismatched pair produces an empty quote
+scope and fails closed; it never widens to all held positions.  Non-exact
+reduce-only auctions retain full held-token coverage.  Acceptance requires an
+antibody with two open families proving the exact request fetches only its named
+held token, plus the existing global-auction and deadline suites.
+
 ## 2026-08-12 Fresh target-specific ENS shape is required for entry
 
 The current forecast database contained 190 latest family certificates: 176

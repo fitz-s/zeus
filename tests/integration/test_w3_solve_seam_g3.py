@@ -8879,6 +8879,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     trade.execute(
         """
         CREATE TABLE position_current (
+            position_id TEXT,
             city TEXT,
             target_date TEXT,
             temperature_metric TEXT,
@@ -8897,8 +8898,9 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         lambda *, city, target_date, metric: city,
     )
     trade.execute(
-        "INSERT INTO position_current VALUES (?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO position_current VALUES (?,?,?,?,?,?,?,?,?,?)",
         (
+            "position-family",
             "family",
             "2026-07-11",
             "high",
@@ -8945,8 +8947,9 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert capture_required_tokens[-1] == frozenset({"no-token"})
 
     trade.execute(
-        "INSERT INTO position_current VALUES (?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO position_current VALUES (?,?,?,?,?,?,?,?,?,?)",
         (
+            "position-failed-family",
             "failed-family",
             "2026-07-11",
             "high",
@@ -8978,6 +8981,60 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     )
     assert set(returned_probabilities) == {"family"}
     assert capture_required_tokens[-1] == frozenset({"no-token"})
+
+    omitted_bind_families.clear()
+    exact_adapter = make_adapter(
+        completion_reserved=True,
+        completion_sell_keys=frozenset({("position-family", "no-token")}),
+    )
+    exact_adapter.process_global_batch(
+        (event,),
+        _dt.datetime(2026, 7, 10, 8, 11, tzinfo=_dt.timezone.utc),
+    )
+    exact_book_fetch_start = len(FakeClient.book_fetches)
+    captured["current_book_epoch_provider"](
+        {
+            **probabilities,
+            "failed-family": SimpleNamespace(
+                family_key="failed-family",
+                bindings=(
+                    SimpleNamespace(
+                        bin_id="failed-bin",
+                        condition_id="failed-condition",
+                        yes_token_id="failed-yes-token",
+                        no_token_id="failed-no-token",
+                    ),
+                ),
+            ),
+        },
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+    assert capture_required_tokens[-1] == frozenset({"no-token"})
+    assert "failed-no-token" not in capture_required_tokens[-1]
+    assert FakeClient.book_fetches[exact_book_fetch_start:]
+    assert all(
+        set(tokens).issubset({"no-token"})
+        for tokens in FakeClient.book_fetches[exact_book_fetch_start:]
+    )
+
+    missing_exact_adapter = make_adapter(
+        completion_reserved=True,
+        completion_sell_keys=frozenset({("position-missing", "missing-token")}),
+    )
+    missing_exact_adapter.process_global_batch(
+        (event,),
+        _dt.datetime(2026, 7, 10, 8, 11, tzinfo=_dt.timezone.utc),
+    )
+    capture_count = len(capture_required_tokens)
+    returned_probabilities, returned_epoch = captured[
+        "current_book_epoch_provider"
+    ](
+        probabilities,
+        _dt.datetime.now(_dt.timezone.utc),
+    )
+    assert returned_probabilities == {}
+    assert returned_epoch is None
+    assert len(capture_required_tokens) == capture_count
 
     capture_count = len(capture_required_tokens)
     omitted_bind_families.add("family")
