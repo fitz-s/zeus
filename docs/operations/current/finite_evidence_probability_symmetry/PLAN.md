@@ -3408,3 +3408,33 @@ weather market slug plus all existing identity predicates. Acceptance requires
 the bin-suffixed Singapore fill test to materialize the exact canonical market
 identity, malformed slugs to remain fail-closed, focused recovery/fill tests to
 pass, then exact-SHA deployment and live projection of both current fills.
+
+## 2026-08-12 Fill repair cannot monopolize canonical redecision
+
+Live evidence showed the price-channel fill-repair job continuously holding the
+trade writer while it rediscovered every confirmed aggregate, loaded every
+position, and reconstructed every command link. During that interval canonical
+`MONITOR_REFRESHED`, quote projection, and exit redecision writes timed out. The
+configured writer `max_hold_ms` was telemetry, not a transaction deadline, so a
+bounded materialization count did not bound lock ownership.
+
+The repair moves aggregate discovery entirely onto a read-only connection and
+passes one exact aggregate at a time through a fresh attached writer
+transaction. The writer-side scan revalidates only that aggregate and commits
+before the next aggregate may acquire the lease. Discovery uncertainty records
+repair debt and retries next cycle; it never falls back to an unbounded writer
+scan. Boot recovery retains its exhaustive one-shot semantics.
+
+SCOPE is one persisted confirmed fill lacking canonical materialization. DRAIN
+is the bounded read-only discovery plus one-fill writer tranches on the existing
+repair cadence. RESET is an exact canonical position or terminal disposition
+for that aggregate. Probability, sizing, order admission, exit economics,
+settlement semantics, and lifecycle grammar are unchanged.
+
+Allowed files are `src/ingest/price_channel_ingest.py`,
+`tests/test_b5_price_channel_inv37_single_writer.py`, and this plan. Acceptance
+requires that scheduled repair performs no full discovery under a writer lease,
+releases the lease between candidates, preserves durable retry on uncertainty,
+passes focused and fill-bridge regression tests, then proves after exact-SHA
+deployment that monitor ages stay inside their watchdog and the repair job no
+longer holds the canonical writer continuously.

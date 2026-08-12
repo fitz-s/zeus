@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-28
+# Last reused or audited: 2026-08-12
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.2 (Price-Channel / CLOB-Fact Ingest), §6 (P3 row), §7 (I2 no-back-coupling:
 #   durable fill bridge + execution_feasibility_evidence), §8 Step 3 (lift the
@@ -184,6 +184,7 @@ FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED = (
     "fill_bridge_position_materialization_failed"
 )
 FILL_BRIDGE_DRAIN_LIMIT_PER_TICK = 500
+FILL_BRIDGE_WRITE_TRANCHES_PER_TICK = 8
 
 
 def _bound_price_channel_sqlite_wait(
@@ -1266,13 +1267,12 @@ def _edli_pending_reconcile_aggregates(conn, *, limit: int) -> list:
     )
 
 
-def _edli_durable_fill_bridge_work_exists(conn) -> bool:
-    """Return whether a confirmed EDLI fill still lacks a canonical position.
+def _edli_durable_fill_bridge_candidate_ids(conn, *, limit: int) -> tuple[str, ...]:
+    """Return bounded confirmed-fill aggregates lacking a canonical position.
 
-    This is the read-only admission check for the expensive cross-DB writer
-    below.  A healthy steady state has no orphaned fills, so it must not open a
-    write-capable three-DB connection and monopolise the trade writer merely to
-    rediscover that fact every minute.
+    Discovery is deliberately read-only. The scheduled repair passes these
+    exact identities into one writer tranche each, so canonical redecision is
+    never blocked behind the historical aggregate/position/command scan.
     """
     from src.events.edli_position_bridge import (
         _edli_events_table,
@@ -1338,16 +1338,25 @@ def _edli_durable_fill_bridge_work_exists(conn) -> bool:
         if str(_row_get(row, "aggregate_id") or "")
         and str(_row_get(row, "position_id") or "")
     }
-    return any(
-        edli_bridge_position_id(aggregate_id) not in position_ids
+    orphan_ids = (
+        aggregate_id
+        for aggregate_id in aggregate_ids
+        if edli_bridge_position_id(aggregate_id) not in position_ids
         and edli_bridge_position_id_legacy(aggregate_id) not in position_ids
         and command_position_by_aggregate.get(aggregate_id) not in position_ids
-        for aggregate_id in aggregate_ids
     )
+    return tuple(list(orphan_ids)[: max(0, limit)])
 
 
-def _edli_durable_fill_bridge_work_exists_read_only() -> bool:
-    """Probe bridge work without acquiring either canonical DB writer."""
+def _edli_durable_fill_bridge_work_exists(conn) -> bool:
+    """Return whether a confirmed EDLI fill still lacks a canonical position."""
+    return bool(_edli_durable_fill_bridge_candidate_ids(conn, limit=1))
+
+
+def _edli_durable_fill_bridge_candidate_ids_read_only(
+    *, limit: int
+) -> tuple[str, ...]:
+    """Discover bounded bridge work without acquiring canonical DB writers."""
     from src.state.db import (
         ZEUS_WORLD_DB_PATH,
         get_trade_connection_read_only,
@@ -1362,9 +1371,14 @@ def _edli_durable_fill_bridge_work_exists_read_only() -> bool:
         if "world" not in attached:
             world_uri = f"{ZEUS_WORLD_DB_PATH.resolve().as_uri()}?mode=ro"
             conn.execute("ATTACH DATABASE ? AS world", (world_uri,))
-        return _edli_durable_fill_bridge_work_exists(conn)
+        return _edli_durable_fill_bridge_candidate_ids(conn, limit=limit)
     finally:
         conn.close()
+
+
+def _edli_durable_fill_bridge_work_exists_read_only() -> bool:
+    """Probe bridge work without acquiring either canonical DB writer."""
+    return bool(_edli_durable_fill_bridge_candidate_ids_read_only(limit=1))
 
 
 def _edli_trade_fact_bridge_candidates_read_only():
@@ -1424,6 +1438,7 @@ def _edli_durable_fill_bridge_scan(
     limit: int = 500,
     already_bridged_repair_limit: int = 0,
     failure_reasons: list[str] | None = None,
+    candidate_aggregate_ids: tuple[str, ...] | None = None,
 ) -> int:
     """MF-1: durable, idempotent, self-healing EDLI fill -> position_current scan.
 
@@ -1494,7 +1509,23 @@ def _edli_durable_fill_bridge_scan(
 
     table = _edli_events_table(conn)
     try:
-        if table == "world.edli_live_order_events":
+        exact_candidate_ids = (
+            tuple(
+                dict.fromkeys(
+                    str(value) for value in candidate_aggregate_ids if value
+                )
+            )
+            if candidate_aggregate_ids is not None
+            else None
+        )
+        if exact_candidate_ids == ():
+            return 0
+        if exact_candidate_ids is not None:
+            candidate_rows = [
+                {"aggregate_id": aggregate_id}
+                for aggregate_id in exact_candidate_ids
+            ]
+        elif table == "world.edli_live_order_events":
             sql = """
             SELECT DISTINCT aggregate_id
             FROM world.edli_live_order_events
@@ -1513,17 +1544,37 @@ def _edli_durable_fill_bridge_scan(
         else:
             raise ValueError(f"unexpected EDLI events table: {table!r}")
 
-        candidate_rows = conn.execute(sql).fetchall()
+        if exact_candidate_ids is None:
+            candidate_rows = conn.execute(sql).fetchall()
         incomplete_open_position_ids: set[str] = set()
         positions_by_id: dict[str, object] = {}
         command_position_by_aggregate: dict[str, str] = {}
         try:
-            position_rows = conn.execute(
-                """
-                SELECT position_id, p_posterior, entry_method, phase
-                  FROM position_current
-                """
-            ).fetchall()
+            if exact_candidate_ids is None:
+                position_rows = conn.execute(
+                    """
+                    SELECT position_id, p_posterior, entry_method, phase
+                      FROM position_current
+                    """
+                ).fetchall()
+            else:
+                exact_position_ids = tuple(
+                    position_id
+                    for aggregate_id in exact_candidate_ids
+                    for position_id in (
+                        edli_bridge_position_id(aggregate_id),
+                        edli_bridge_position_id_legacy(aggregate_id),
+                    )
+                )
+                placeholders = ",".join("?" for _ in exact_position_ids)
+                position_rows = conn.execute(
+                    f"""
+                    SELECT position_id, p_posterior, entry_method, phase
+                      FROM position_current
+                     WHERE position_id IN ({placeholders})
+                    """,
+                    exact_position_ids,
+                ).fetchall()
             positions_by_id = {
                 str(_row_get(r, "position_id")): r
                 for r in position_rows
@@ -1550,6 +1601,13 @@ def _edli_durable_fill_bridge_scan(
                 exc,
             )
         try:
+            exact_filter = ""
+            exact_params: tuple[str, ...] = ()
+            if exact_candidate_ids is not None:
+                exact_filter = " AND aggregate_id IN ({})".format(
+                    ",".join("?" for _ in exact_candidate_ids)
+                )
+                exact_params = exact_candidate_ids
             command_rows = conn.execute(
                 f"""
                 WITH command_events AS (
@@ -1558,8 +1616,10 @@ def _edli_durable_fill_bridge_scan(
                       FROM {table}
                      WHERE event_type = 'ExecutionCommandCreated'
                        AND json_extract(payload_json, '$.execution_command_id') IS NOT NULL
+                       {exact_filter}
                 )
-                SELECT ce.aggregate_id, vc.position_id
+                SELECT ce.aggregate_id, pc.position_id, pc.p_posterior,
+                       pc.entry_method, pc.phase
                   FROM command_events ce
                   JOIN venue_commands vc
                     ON vc.command_id = ce.execution_command_id
@@ -1568,20 +1628,28 @@ def _edli_durable_fill_bridge_scan(
                     ON pc.position_id = vc.position_id
                  WHERE vc.position_id IS NOT NULL
                    AND vc.position_id != ''
-                """
+                """,
+                exact_params,
             ).fetchall()
             command_position_by_aggregate = {
                 str(_row_get(r, "aggregate_id")): str(_row_get(r, "position_id"))
                 for r in command_rows
                 if _row_get(r, "aggregate_id") and _row_get(r, "position_id")
             }
+            positions_by_id.update(
+                {
+                    str(_row_get(r, "position_id")): r
+                    for r in command_rows
+                    if _row_get(r, "position_id")
+                }
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "EDLI durable fill-bridge scan: command-linked position query failed "
                 "(non-fatal; hash/legacy scan continues): %s",
                 exc,
             )
-        if incomplete_open_position_ids:
+        if exact_candidate_ids is None and incomplete_open_position_ids:
             candidate_rows.sort(
                 key=lambda r: (
                     0
@@ -2181,60 +2249,70 @@ def _edli_fill_bridge_repair_cycle() -> dict[str, object]:
 
     bridged_positions = 0
     try:
-        durable_bridge_work_exists = _edli_durable_fill_bridge_work_exists_read_only()
-    except Exception as exc:  # noqa: BLE001 - uncertainty must preserve repair
-        durable_bridge_work_exists = True
-        logger.warning(
-            "EDLI durable fill-bridge read-only admission failed; "
-            "falling back to the canonical writer scan: %s",
+        durable_bridge_candidate_ids = (
+            _edli_durable_fill_bridge_candidate_ids_read_only(
+                limit=FILL_BRIDGE_WRITE_TRANCHES_PER_TICK
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - durable facts retry next repair cycle
+        durable_bridge_candidate_ids = ()
+        canonical_failure_reasons.append(
+            FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED
+        )
+        logger.error(
+            "EDLI durable fill-bridge read-only discovery failed; writer scan "
+            "suppressed so canonical redecision cannot be monopolized: %s",
             exc,
             exc_info=True,
         )
-    if durable_bridge_work_exists:
+    if durable_bridge_candidate_ids:
         from src.state.db import get_trade_connection_with_world_required
 
-        bridge_conn = None
-        try:
-            with _PriceChannelWriteGate(
-                owner="price_channel_fill_bridge",
-                scope="world_trade",
-                deadline_ms=PRICE_CHANNEL_FILL_BRIDGE_DB_WRITE_LEASE_DEADLINE_MS,
-                max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
-            ):
-                # The scan may write WORLD disposition and TRADE position rows
-                # through one attached connection. Hold both canonical writer
-                # leases in coordinator path order before connection bootstrap.
-                bridge_conn = get_trade_connection_with_world_required(
-                    write_class="live"
+        for aggregate_id in durable_bridge_candidate_ids:
+            bridge_conn = None
+            try:
+                with _PriceChannelWriteGate(
+                    owner="price_channel_fill_bridge",
+                    scope="world_trade",
+                    deadline_ms=PRICE_CHANNEL_FILL_BRIDGE_DB_WRITE_LEASE_DEADLINE_MS,
+                    max_hold_ms=PRICE_CHANNEL_DB_WRITE_MAX_HOLD_MS,
+                ):
+                    # One exact aggregate per transaction guarantees a lease
+                    # release point before any later repair tranche.
+                    bridge_conn = get_trade_connection_with_world_required(
+                        write_class="live"
+                    )
+                    _bound_price_channel_sqlite_wait(
+                        bridge_conn,
+                        timeout_ms=PRICE_CHANNEL_FILL_BRIDGE_DB_WRITE_LEASE_DEADLINE_MS,
+                    )
+                    bridged_positions += _edli_durable_fill_bridge_scan(
+                        bridge_conn,
+                        now=now,
+                        limit=1,
+                        failure_reasons=canonical_failure_reasons,
+                        candidate_aggregate_ids=(aggregate_id,),
+                    )
+                    bridge_conn.commit()
+            except Exception as exc:  # noqa: BLE001
+                if bridge_conn is not None:
+                    bridge_conn.rollback()
+                canonical_failure_reasons.append(
+                    FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED
                 )
-                _bound_price_channel_sqlite_wait(
-                    bridge_conn,
-                    timeout_ms=PRICE_CHANNEL_FILL_BRIDGE_DB_WRITE_LEASE_DEADLINE_MS,
+                logger.error(
+                    "EDLI position bridge tranche failed aggregate=%s "
+                    "(non-fatal): %s",
+                    aggregate_id,
+                    exc,
+                    exc_info=True,
                 )
-                # Authoritative durable scan: heal ANY orphaned confirmed fill,
-                # including ones stranded by a prior restart / swallowed exception.
-                bridged_positions += _edli_durable_fill_bridge_scan(
-                    bridge_conn,
-                    now=now,
-                    limit=FILL_BRIDGE_DRAIN_LIMIT_PER_TICK,
-                    failure_reasons=canonical_failure_reasons,
-                )
-                bridge_conn.commit()
-        except Exception as exc:  # noqa: BLE001
-            if bridge_conn is not None:
-                bridge_conn.rollback()
-            canonical_failure_reasons.append(
-                FILL_BRIDGE_POSITION_MATERIALIZATION_FAILED
-            )
-            logger.error(
-                "EDLI position bridge pass failed (non-fatal): %s", exc, exc_info=True
-            )
-        finally:
-            if bridge_conn is not None:
-                try:
-                    bridge_conn.close()
-                except Exception:  # noqa: BLE001
-                    pass
+            finally:
+                if bridge_conn is not None:
+                    try:
+                        bridge_conn.close()
+                    except Exception:  # noqa: BLE001
+                        pass
 
     fill_redecision_events = 0
     fill_redecision_error = ""

@@ -1,6 +1,6 @@
 # Created: 2026-06-20
 # Last audited: 2026-07-30
-# Last reused/audited: 2026-08-08
+# Last reused/audited: 2026-08-12
 # Authority basis: PR415 ChatGPT deep-review blocker B5 (INV-37). Quote projection
 #   writes TRADE only; derived redecision and NEW_MARKET_DISCOVERED facts write WORLD
 #   through independently coordinated lanes. TRADE quote refresh must never acquire
@@ -332,7 +332,11 @@ def test_m5_progresses_while_fill_bridge_candidate_discovery_is_read_only(
         "_edli_trade_fact_bridge_candidates_read_only",
         _blocking_candidate_discovery,
     )
-    monkeypatch.setattr(lane, "_edli_durable_fill_bridge_work_exists_read_only", lambda: False)
+    monkeypatch.setattr(
+        lane,
+        "_edli_durable_fill_bridge_candidate_ids_read_only",
+        lambda *, limit: (),
+    )
     monkeypatch.setattr(
         price_channel_redecision_router,
         "_edli_position_fill_redecision_cycle",
@@ -372,7 +376,11 @@ def test_empty_trade_fact_candidate_set_skips_world_writer(monkeypatch):
         "_edli_trade_fact_bridge_candidates_read_only",
         lambda: ((), (), ()),
     )
-    monkeypatch.setattr(lane, "_edli_durable_fill_bridge_work_exists_read_only", lambda: False)
+    monkeypatch.setattr(
+        lane,
+        "_edli_durable_fill_bridge_candidate_ids_read_only",
+        lambda *, limit: (),
+    )
     monkeypatch.setattr(state_db, "get_world_connection_with_trades_required", _writer_opened)
     monkeypatch.setattr(
         price_channel_redecision_router,
@@ -847,7 +855,7 @@ def test_background_fast_yield_releases_trade_gate_for_monitor_append(
         check.close()
 
 
-def test_fill_bridge_drains_a_bounded_backlog_per_tick():
+def test_fill_bridge_boot_scan_keeps_bounded_backlog_default():
     node = _func_node("_edli_durable_fill_bridge_scan")
     limit = next(arg for arg in node.args.kwonlyargs if arg.arg == "limit")
     index = node.args.kwonlyargs.index(limit)
@@ -855,18 +863,83 @@ def test_fill_bridge_drains_a_bounded_backlog_per_tick():
     assert isinstance(default, ast.Constant)
     assert default.value == 500
 
-    repair = _func_node("_edli_fill_bridge_repair_cycle")
-    calls = [
-        call
-        for call in ast.walk(repair)
-        if isinstance(call, ast.Call)
-        and isinstance(call.func, ast.Name)
-        and call.func.id == "_edli_durable_fill_bridge_scan"
+
+
+def test_fill_bridge_repair_releases_writer_between_exact_candidates(monkeypatch):
+    from src.events import price_channel_redecision_router
+    from src.ingest import price_channel_ingest as lane
+    from src.state import db as state_db
+
+    lease_events: list[str] = []
+    scan_candidates: list[tuple[str, ...]] = []
+
+    class _Conn:
+        def commit(self):
+            lease_events.append("commit")
+
+        def rollback(self):
+            lease_events.append("rollback")
+
+        def close(self):
+            lease_events.append("close")
+
+    @contextlib.contextmanager
+    def _gate(**_kwargs):
+        lease_events.append("enter")
+        try:
+            yield
+        finally:
+            lease_events.append("exit")
+
+    monkeypatch.setattr(
+        lane,
+        "_edli_trade_fact_bridge_candidates_read_only",
+        lambda: ((), (), ()),
+    )
+    monkeypatch.setattr(
+        lane,
+        "_edli_durable_fill_bridge_candidate_ids_read_only",
+        lambda *, limit: ("aggregate-a", "aggregate-b")[:limit],
+    )
+    monkeypatch.setattr(lane, "_PriceChannelWriteGate", _gate)
+    monkeypatch.setattr(
+        state_db,
+        "get_trade_connection_with_world_required",
+        lambda *, write_class: _Conn(),
+    )
+    monkeypatch.setattr(lane, "_bound_price_channel_sqlite_wait", lambda *a, **k: None)
+
+    def _scan(_conn, **kwargs):
+        assert kwargs["limit"] == 1
+        scan_candidates.append(kwargs["candidate_aggregate_ids"])
+        return 1
+
+    monkeypatch.setattr(lane, "_edli_durable_fill_bridge_scan", _scan)
+    monkeypatch.setattr(
+        price_channel_redecision_router,
+        "_edli_position_fill_redecision_cycle",
+        lambda: 0,
+    )
+
+    result = lane._edli_fill_bridge_repair_cycle()
+
+    assert result["scheduler_failed"] is False
+    assert result["edli_positions_bridged"] == 2
+    assert scan_candidates == [("aggregate-a",), ("aggregate-b",)]
+    assert lease_events == [
+        "enter", "commit", "exit", "close",
+        "enter", "commit", "exit", "close",
     ]
-    assert len(calls) == 1
-    limit_keyword = next(keyword.value for keyword in calls[0].keywords if keyword.arg == "limit")
-    assert isinstance(limit_keyword, ast.Name)
-    assert limit_keyword.id == "FILL_BRIDGE_DRAIN_LIMIT_PER_TICK"
+
+
+def test_fill_bridge_repair_discovers_before_writer_lease():
+    repair = _func_node("_edli_fill_bridge_repair_cycle")
+    source = ast.unparse(repair)
+    discovery_at = source.index("_edli_durable_fill_bridge_candidate_ids_read_only")
+    writer_at = source.index("_PriceChannelWriteGate")
+    assert discovery_at < writer_at
+    assert "candidate_aggregate_ids=(aggregate_id,)" in source
+    assert "limit=1" in source
 
 
 def test_price_channel_passes_background_quote_batch_to_its_service_instance():
