@@ -4,6 +4,34 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-12 Paused probability carriers still redecide held capital
+
+The post-hot-fix restart correctly kept new ENTRY commands at zero, but its
+post-start proof could not form a complete held-coverage global-auction receipt.
+Runtime logs showed the contradiction: the paused forecast wake materialized
+its current carrier and then returned "without auction", while the next generic
+reactor cycle was rejected before runtime setup because entries were globally
+blocked. The carrier path therefore refreshed probability evidence but could
+never compare current SELL/HOLD/CASH for capital already at risk.
+
+A materialized paused forecast carrier now reads current held-family exposure.
+An exact empty read retains the cheap no-auction completion. Non-empty or
+unreadable exposure continues into the existing global completion cut, which
+sets `selection_completion_reserved`, disables every BUY proposal, restricts
+known scope to held families, and compares SELL/HOLD/CASH on the existing
+posterior-mean expected-log-growth axis. It creates no authority to sell at a
+loss: SELL must still beat HOLD and CASH under current executable truth.
+
+SCOPE is one materialized forecast carrier while entries are paused and current
+held exposure exists or cannot be read exactly. DRAIN is the existing bounded
+reduce-only global auction and its canonical receipt. RESET is an exact empty
+held-family read, or clearing the pause so the ordinary full feasible set runs;
+a failed exposure read never resets money-at-risk redecision. Acceptance
+requires helper failure/empty/non-empty antibodies, source-order wiring through
+the reduce-only completion mode, the adapter's existing BUY-disabled held-scope
+antibody, hot-fix landing, exact loaded SHA, zero new ENTRY commands while
+paused, and one post-load complete held-coverage global-auction receipt.
+
 ## 2026-08-12 Current hold value cannot depend on sunk entry provenance
 
 A venue-confirmed fill can outrun its original position projection.  The

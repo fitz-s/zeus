@@ -550,6 +550,58 @@ def test_exact_completion_exposure_read_failure_stays_reduce_only(caplog):
     assert "retaining reduce-only scope" in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    (
+        (lambda: frozenset(), False),
+        (lambda: frozenset({("Dallas", "2026-08-12", "high")}), True),
+        (lambda: None, True),
+        (None, True),
+    ),
+)
+def test_paused_forecast_carrier_runs_held_auction_only_when_exposure_exists_or_unknown(
+    provider,
+    expected,
+):
+    from src.events.reactor import (
+        _paused_forecast_carrier_requires_held_auction,
+    )
+
+    assert _paused_forecast_carrier_requires_held_auction(provider) is expected
+
+
+def test_paused_forecast_carrier_held_read_failure_retains_reduce_only_auction(caplog):
+    from src.events.reactor import (
+        _paused_forecast_carrier_requires_held_auction,
+    )
+
+    def unreadable():
+        raise sqlite3.OperationalError("database is busy")
+
+    with caplog.at_level(logging.WARNING):
+        assert _paused_forecast_carrier_requires_held_auction(unreadable) is True
+
+    assert "retaining reduce-only auction" in caplog.text
+
+
+def test_paused_forecast_held_auction_is_wired_through_reduce_only_completion_cut():
+    from src.events.reactor import run_edli_event_reactor_cycle
+
+    source = inspect.getsource(run_edli_event_reactor_cycle)
+    materialized = source.index(
+        "_paused_forecast_carrier_requires_held_auction("
+    )
+    completion_mode = source.index("_global_auction_completion_mode(", materialized)
+    process_pending = source.index("reactor.process_pending(", completion_mode)
+
+    assert "or paused_forecast_held_auction" in source[materialized:process_pending]
+    assert (
+        "selection_completion_reserved=(\n"
+        "                _monitor_completion_mode.reduce_only"
+    ) in source[completion_mode:process_pending]
+    assert materialized < completion_mode < process_pending
+
+
 def test_durable_exact_completion_debt_gets_one_bounded_fairness_turn(monkeypatch):
     from src.events import reactor
     from src.runtime import reactor_wake

@@ -777,6 +777,41 @@ def _paused_entry_wake_should_park(
     return True
 
 
+def _paused_forecast_carrier_requires_held_auction(
+    held_family_provider: Callable[[], object] | None,
+) -> bool:
+    """Keep a paused carrier alive when current held capital needs redecision."""
+
+    # SCOPE: one materialized forecast carrier while new entries are paused.
+    # DRAIN: current held exposure enters the existing reduce-only global cut;
+    # BUY remains disabled and SELL/HOLD/CASH receive one common-axis receipt.
+    # RESET: an exact empty held-family read completes the carrier without an
+    # auction; clearing the entry pause restores the ordinary global cut. An
+    # unavailable read is exposure-unknown, so it must not erase the exit lane.
+    if held_family_provider is None:
+        logging.getLogger("zeus.events.reactor").warning(
+            "paused forecast carrier held-family read unavailable; retaining "
+            "reduce-only auction"
+        )
+        return True
+    try:
+        held_families = held_family_provider()
+    except Exception:  # noqa: BLE001 - unknown exposure must keep exit redecision alive
+        logging.getLogger("zeus.events.reactor").warning(
+            "paused forecast carrier held-family read failed; retaining "
+            "reduce-only auction",
+            exc_info=True,
+        )
+        return True
+    if held_families is None:
+        logging.getLogger("zeus.events.reactor").warning(
+            "paused forecast carrier held-family read unavailable; retaining "
+            "reduce-only auction"
+        )
+        return True
+    return bool(held_families)
+
+
 def _entry_reactor_park_reason(conn: sqlite3.Connection | None) -> str | None:
     """Return the current runtime block that should park ordinary BUY work."""
 
@@ -7638,9 +7673,14 @@ def run_edli_event_reactor_cycle(
         (completion_wake and producer_held_sell_reauction_requests)
         or durable_exact_held_completion_pending
     )
+    paused_forecast_held_auction = False
 
     def _yield_for_held_position_monitor(stage: str) -> bool:
-        if held_sell_completion_cycle or committed_day0_wake:
+        if (
+            held_sell_completion_cycle
+            or paused_forecast_held_auction
+            or committed_day0_wake
+        ):
             return False
         if not _held_position_monitor_preemption_pending(
             held_position_monitor_pending,
@@ -7657,12 +7697,20 @@ def run_edli_event_reactor_cycle(
         return _urgent_wake_pending() or _held_position_monitor_preemption_pending(
             (
                 None
-                if held_sell_completion_cycle or committed_day0_wake
+                if (
+                    held_sell_completion_cycle
+                    or paused_forecast_held_auction
+                    or committed_day0_wake
+                )
                 else held_position_monitor_pending
             ),
             (
                 None
-                if held_sell_completion_cycle or committed_day0_wake
+                if (
+                    held_sell_completion_cycle
+                    or paused_forecast_held_auction
+                    or committed_day0_wake
+                )
                 else held_position_monitor_debt_pending
             ),
         )
@@ -8158,18 +8206,25 @@ def run_edli_event_reactor_cycle(
             and not durable_exact_held_completion_requests
         )
         if paused_forecast_carrier_completion:
-            # SCOPE: only no-held paused forecast-carrier completion. DRAIN:
-            # normal reactor redecision after the entry pause resets. RESET:
-            # entry pause false or exact held work/event IDs.
             if not paused_forecast_carrier_materialized:
                 _log.info(
                     "EDLI paused forecast wake retained: carrier materialization incomplete"
                 )
                 return False
-            _log.info(
-                "EDLI paused forecast wake materialized carriers without auction"
+            paused_forecast_held_auction = (
+                _paused_forecast_carrier_requires_held_auction(
+                    held_family_provider
+                )
             )
-            return True
+            if not paused_forecast_held_auction:
+                _log.info(
+                    "EDLI paused forecast wake materialized carriers without auction: "
+                    "no current held families"
+                )
+                return True
+            _log.info(
+                "EDLI paused forecast wake continuing into reduce-only held auction"
+            )
         if forecast_posterior_wake and not targeted_event_ids:
             # SCOPE: this exact forecast-posterior publisher wake. DRAIN: a
             # successful builder no-op is complete for this immutable posterior;
@@ -8204,6 +8259,7 @@ def run_edli_event_reactor_cycle(
             construct_cut_seconds = DEFAULT_REACTOR_CONSTRUCT_WORK_CUT_SECONDS
         if (
             held_sell_completion_cycle
+            or paused_forecast_held_auction
             or committed_day0_wake
             or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
         ):
@@ -8409,6 +8465,7 @@ def run_edli_event_reactor_cycle(
         active_held_sell_completion_cycle = bool(
             held_sell_completion_cut_requests
             or durable_exact_held_completion
+            or paused_forecast_held_auction
         )
         (
             _monitor_completion_due_at_start,
@@ -8419,6 +8476,7 @@ def run_edli_event_reactor_cycle(
             completion_due=(
                 completion_wake
                 or durable_exact_held_completion
+                or paused_forecast_held_auction
             ),
             exact_held_completion=active_held_sell_completion_cycle,
         )
