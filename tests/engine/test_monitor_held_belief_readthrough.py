@@ -839,6 +839,81 @@ def _day0_event_connection() -> sqlite3.Connection:
     return conn
 
 
+def test_day0_monitor_selects_latest_event_as_of_frozen_decision_time(monkeypatch):
+    """A newer committed event cannot hide the latest causal monitor event."""
+    import src.engine.event_reactor_adapter as era
+    import src.engine.monitor_refresh as mr
+    import src.state.db as db
+
+    world = _day0_event_connection()
+    future = "2026-06-12T12:00:10+00:00"
+    world.execute(
+        "INSERT INTO opportunity_events VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "event-2",
+            "DAY0_EXTREME_UPDATED",
+            "Karachi|2026-06-12|high",
+            "test",
+            future,
+            future,
+            future,
+            "snapshot-2",
+            "payload-hash-2",
+            "idem-2",
+            1,
+            "2026-06-12T13:00:00+00:00",
+            json.dumps(
+                {
+                    "city": "Karachi",
+                    "target_date": "2026-06-12",
+                    "metric": "high",
+                }
+            ),
+            1,
+            future,
+        ),
+    )
+    forecasts = sqlite3.connect(":memory:")
+    hwm = sqlite3.connect(":memory:")
+    selected = {}
+
+    class EventSelected(RuntimeError):
+        pass
+
+    def prepare(event, **_kwargs):
+        selected["event_id"] = event.event_id
+        raise EventSelected
+
+    monkeypatch.setattr(mr, "_canonical_condition_id", lambda _position: "condition-1")
+    monkeypatch.setattr(
+        mr,
+        "_target_day_has_canonical_observation",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(db, "get_world_connection_read_only", lambda: world)
+    connections = iter((forecasts, hwm))
+    monkeypatch.setattr(
+        db,
+        "get_forecasts_connection_read_only",
+        lambda: next(connections),
+    )
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", prepare)
+
+    with pytest.raises(EventSelected):
+        mr._build_current_global_day0_family_snapshot(
+            _pos(),
+            trade_conn=sqlite3.connect(":memory:"),
+            decision_time=datetime(
+                2026, 6, 12, 12, 0, 5, tzinfo=timezone.utc
+            ),
+            cached_snapshots=(),
+            deadline_monotonic=time.monotonic() + 2.5,
+            hwm_deadline_monotonic=time.monotonic() + 2.5,
+        )
+
+    assert selected["event_id"] == "event-1"
+
+
 def test_day0_hwm_budget_starts_at_actual_prepare_handoff(monkeypatch):
     import src.engine.event_reactor_adapter as era
     import src.engine.monitor_refresh as mr

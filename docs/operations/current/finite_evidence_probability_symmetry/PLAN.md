@@ -4,6 +4,30 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-12 Held monitor reads the latest causal Day0 event
+
+The held monitor freezes one cycle decision cut before its bounded probability
+reads.  The Day0 event reader nevertheless selected the database's absolute
+latest family event.  When the source materializer committed a new event after
+that cut but before the reader ran, the probability builder correctly rejected
+the event as future evidence.  The reader did not fall back to the immediately
+preceding causal event, so a healthy source update produced
+`INCOMPLETE_EXIT_CONTEXT`, an incomplete monitor cycle, and overdue monitor
+debt that also retained the entry lane in reduce-only mode.
+
+The reader now selects the latest family event whose available, received, and
+created clocks are all at or before the frozen decision time.  This preserves
+the coherent cycle cut and the no-look-ahead rule; it does not accept stale
+evidence as current, and later execution still rebinds to submit-time truth.
+
+SCOPE is one held city/date/metric probability read.  DRAIN is the same bounded
+monitor pass using the newest event causally visible at its decision cut.  RESET
+is a later monitor cut that makes a newly committed event eligible; an event
+still newer than the cut remains excluded.  Acceptance requires an antibody
+with both a causal event and a later committed event, the focused held-belief
+suite, the monitor/exit suites, live hot-fix landing, and forward full-book
+`MONITOR_REFRESHED` evidence without a future-event rejection loop.
+
 ## 2026-08-12 FAK no-fill retains an exact deadline-bound SELL handoff
 
 The Seoul 32C NO timeline exposed a stronger acceptance requirement than wake

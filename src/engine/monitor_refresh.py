@@ -5100,15 +5100,26 @@ def _build_current_global_day0_family_snapshot(
                    available_at, received_at, causal_snapshot_id, payload_hash,
                    idempotency_key, priority, expires_at, payload_json,
                    schema_version, created_at
-              FROM opportunity_events INDEXED BY idx_opportunity_events_day0_family_extreme
+              FROM opportunity_events
+                   INDEXED BY idx_opportunity_events_day0_family_extreme
              WHERE event_type = 'DAY0_EXTREME_UPDATED'
                AND json_extract(payload_json, '$.city') = ?
                AND json_extract(payload_json, '$.target_date') = ?
                AND json_extract(payload_json, '$.metric') = ?
-             ORDER BY available_at DESC
+               AND available_at <= ?
+               AND received_at <= ?
+               AND created_at <= ?
+             ORDER BY available_at DESC, received_at DESC, event_id DESC
              LIMIT 1
             """,
-                (str(position.city), str(position.target_date), metric),
+                (
+                    str(position.city),
+                    str(position.target_date),
+                    metric,
+                    now.isoformat(),
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
             ).fetchone()
             _raise_if_day0_snapshot_read_deadline_elapsed(deadline_monotonic)
             if row is None:
