@@ -5,6 +5,12 @@
 
 ## 现状(forward)
 
+### 2026-08-12 11:58 CDT tick — bid-only held depth 进入所有阶段的 reauction trigger
+- **最新 live chain:** 并发 money-path commits 已把 above-submit-band current bid 与合法 SELL floor 区分：solver 以当前 0.999 depth 比较经济性，executor 提交不高于 0.95 的 FAK floor，并把实际改善成交单独记账；loaded SHA `f947180e5`。这恢复了 Shanghai 的潜在正 EV 出场，但尚无新 command/fill，所以 forward realized PnL 仍为 `-$8.526401`。
+- **剩余断链:** post-start monitor 已达到 `open=11 / fresh executable=7 / quote-only=4 / blocking stale=0`，却没有新的 held-SELL reauction request。根因是 `monitor_quote_refresh` 只允许 Day0 位置消费 one-sided book；Shanghai 已过本地目标日，虽然 0.999 bid 可立即承接 SELL，monitor 仍把它记为 quote stale，reactor 因 `no exact canonical held-SELL request` 停止在 full auction 之前。
+- **第一性修复:** held SELL 只需要 bid，不需要 ask；任何生命周期中的 current bid-only depth 都是可执行 counterparty evidence。ask-only/no-bid 被解释为零立即清算价值的特殊路径仍限 Day0，防止非 Day0 凭 ask 虚构 bid。global auction、JIT、legal submit floor、actual fill receipt 与 settlement law 不改变。
+- **验证:** post-target active bid-only 新抗体通过，post-target ask-only 继续返回无 quote；连同既有 Day0/target-local bid-only 关系共 `6 passed`。source Ruff（仅忽略文件既有 E402/F401）、`py_compile` 与 diff check 通过。热修复尚未部署；当前 official deploy 仍在等待 post-start full-auction receipt，入场 pause 保持。
+
 ### 2026-08-12 11:44 CDT tick — full-auction held proof 接入 deploy cadence；不再把不可执行 quote 冒充未重决策
 - **运行态已生效:** live loaded SHA `e7661feeb`。post-start receipt `415191` 在 boot 后 21 秒完成：11 / 11 families、20 candidates、`candidate_coverage_complete=true`、`scope_family_coverage_complete=true`、`held_position_coverage_complete=true`，winner 为 CASH，reason `NO_CURRENT_EXECUTABLE_POSITIVE_ORDER`。
 - **Shanghai 结果:** position `288de757-908` 在同一 frozen cut 中为 `EXCLUDED / SELL_BOOK_NO_EXECUTABLE_UNIT_PRICE / NO_EXECUTABLE_BOOK`；0.999 不再进入 taker proposal。boot 后 canonical `venue_commands=0`、`venue_command_events=0`、`settlements=0`，因此没有低价退出，也没有新的 realized PnL。

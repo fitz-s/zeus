@@ -3061,8 +3061,9 @@ def _day0_one_sided_monitor_quote(
     *,
     book: dict | None = None,
 ) -> HeldTokenMonitorQuote | None:
-    if not _is_position_day0_quote_eligible(pos) or not hasattr(clob, "get_orderbook"):
+    if not hasattr(clob, "get_orderbook"):
         return None
+    day0_eligible = _is_position_day0_quote_eligible(pos)
     try:
         from src.data.market_scanner import _top_book_level_decimal
 
@@ -3080,6 +3081,11 @@ def _day0_one_sided_monitor_quote(
             pass
 
         if best_bid is None and best_ask is None:
+            return None
+        # Any current bid is executable SELL evidence for a held token; an ask
+        # is unnecessary.  The ask-only zero-bid fallback remains Day0-only,
+        # where it is explicit evidence that immediate liquidation value is 0.
+        if best_bid is None and not day0_eligible:
             return None
         bid_f = float(best_bid) if best_bid is not None else 0.0
         bid_sz_f = float(bid_size) if bid_size is not None else 0.0

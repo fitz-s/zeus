@@ -766,6 +766,31 @@ def test_target_local_day_active_position_uses_bid_only_quote_when_asks_absent(m
     assert quote.mark_price == pytest.approx(0.998)
 
 
+def test_post_target_active_position_uses_bid_only_quote_when_asks_absent(monkeypatch):
+    from src.engine import monitor_refresh
+
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
+    pos = _position(target_date="2020-01-01")
+    pos.state = "active"
+
+    quote = monitor_refresh.monitor_quote_refresh(None, _BidOnlyDay0Clob(), pos)
+
+    assert quote is not None
+    assert quote.best_bid == pytest.approx(0.998)
+    assert quote.best_ask is None
+    assert quote.mark_price == pytest.approx(0.998)
+
+
+def test_post_target_active_position_does_not_invent_bid_from_ask_only_book(monkeypatch):
+    from src.engine import monitor_refresh
+
+    monkeypatch.setattr("src.state.db.log_microstructure", lambda *args, **kwargs: None)
+    pos = _position(target_date="2020-01-01")
+    pos.state = "active"
+
+    assert monitor_refresh.monitor_quote_refresh(None, _AskOnlyDay0Clob(), pos) is None
+
+
 def test_day0_refresh_keeps_current_market_fresh_with_bid_only_book(monkeypatch):
     from src.engine import monitor_refresh
 
