@@ -41,6 +41,164 @@ from src.state.portfolio import (
 )
 
 
+class TestForwardCapitalAudit:
+    def test_activity_excludes_preboundary_entry_decisions(self):
+        from scripts.audit_realtime_pnl import _cohort_activity
+
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(
+            "CREATE TABLE venue_commands (command_id TEXT, intent_kind TEXT, "
+            "state TEXT, created_at TEXT);"
+            "CREATE TABLE execution_fact (command_id TEXT, position_id TEXT, "
+            "order_role TEXT, filled_at TEXT, terminal_exec_status TEXT);"
+            "CREATE TABLE venue_order_facts (command_id TEXT, state TEXT);"
+            "CREATE TABLE position_current (position_id TEXT, strategy_key TEXT, "
+            "decision_law_id TEXT);"
+        )
+        conn.executemany(
+            "INSERT INTO venue_commands VALUES (?,?,?,?)",
+            (
+                ("new", "ENTRY", "FILLED", "2026-08-11T23:10:00+00:00"),
+                ("old", "ENTRY", "FILLED", "2026-08-11T22:59:00+00:00"),
+            ),
+        )
+        conn.executemany(
+            "INSERT INTO execution_fact VALUES (?,?,?,?,?)",
+            (
+                (
+                    "new",
+                    "new-position",
+                    "entry",
+                    "2026-08-11T23:11:00+00:00",
+                    "filled",
+                ),
+                (
+                    "old",
+                    "old-position",
+                    "entry",
+                    "2026-08-11T23:12:00+00:00",
+                    "filled",
+                ),
+            ),
+        )
+        conn.executemany(
+            "INSERT INTO venue_order_facts VALUES (?,?)",
+            (("new", "MATCHED"), ("old", "MATCHED")),
+        )
+        conn.executemany(
+            "INSERT INTO position_current VALUES (?,?,?)",
+            (
+                ("new-position", "day0_nowcast_entry", "predicted_bin_ev_v1"),
+                ("old-position", "day0_nowcast_entry", "predicted_bin_ev_v1"),
+            ),
+        )
+
+        activity = _cohort_activity(
+            conn,
+            since=datetime(2026, 8, 11, 23, tzinfo=timezone.utc),
+            as_of=datetime(2026, 8, 12, 0, tzinfo=timezone.utc),
+        )
+
+        assert activity["entry_filled_position_count"] == 1
+        assert activity["filled_command_count"] == 1
+        assert activity["chain_matched_fact_count"] == 1
+        assert activity["chain_fact_coverage_complete"] is True
+        assert activity["preboundary_entry_fill_count"] == 1
+        conn.close()
+
+    def test_zero_realized_positions_never_prove_capital_gain(self):
+        from scripts.audit_realtime_pnl import _forward_capital_summary
+
+        activity = {
+            "chain_fact_coverage_complete": True,
+            "entry_filled_position_count": 0,
+            "unclassified_filled_position_count": 0,
+        }
+        curves = (
+            {
+                "status": "awaiting_current_law_fills",
+                "filled_position_count": 0,
+                "open_position_count": 0,
+                "curve": [],
+            },
+            {
+                "status": "awaiting_current_law_fills",
+                "filled_position_count": 0,
+                "open_position_count": 0,
+                "curve": [],
+            },
+        )
+
+        result = _forward_capital_summary(activity=activity, curves=curves)
+
+        assert result["status"] == "awaiting_current_law_fills"
+        assert result["capital_gain_proven"] is False
+        assert result["robust_capital_gain_proven"] is False
+        assert result["net_realized_pnl_usd"] == 0.0
+
+    def test_positive_realized_gain_requires_complete_chain_and_attribution_truth(self):
+        from scripts.audit_realtime_pnl import _forward_capital_summary
+
+        row = {
+            "position_id": "p1",
+            "close_type": "SETTLED",
+            "realized_at": "2026-08-11T23:00:00+00:00",
+            "capital_committed_usd": 2.0,
+            "gross_realized_pnl_usd": 1.0,
+            "fee_bound_usd": 0.1,
+            "net_realized_pnl_usd": 0.9,
+        }
+        curves = (
+            {
+                "status": "positive",
+                "filled_position_count": 1,
+                "open_position_count": 0,
+                "curve": [row],
+            },
+            {
+                "status": "awaiting_current_law_fills",
+                "filled_position_count": 0,
+                "open_position_count": 0,
+                "curve": [],
+            },
+        )
+        complete = {
+            "chain_fact_coverage_complete": True,
+            "entry_filled_position_count": 1,
+            "unclassified_filled_position_count": 0,
+        }
+
+        proven = _forward_capital_summary(activity=complete, curves=curves)
+        degraded = _forward_capital_summary(
+            activity={**complete, "chain_fact_coverage_complete": False},
+            curves=curves,
+        )
+
+        assert proven["status"] == "positive_observed"
+        assert proven["capital_gain_proven"] is True
+        assert proven["robust_capital_gain_proven"] is False
+        assert proven["settled_position_count"] == 1
+        assert proven["win_count"] == 1
+        assert proven["net_realized_pnl_usd"] == pytest.approx(0.9)
+        assert degraded["status"] == "capital_truth_degraded"
+        assert degraded["capital_gain_proven"] is False
+
+    def test_audit_requires_explicit_utc_boundary_and_read_only_connection(self):
+        import inspect
+
+        import scripts.audit_realtime_pnl as audit
+
+        assert audit._parse_utc("2026-08-11T23:00:00Z") == datetime(
+            2026, 8, 11, 23, tzinfo=timezone.utc
+        )
+        with pytest.raises(Exception, match="explicit UTC offset"):
+            audit._parse_utc("2026-08-11T23:00:00")
+        source = inspect.getsource(audit)
+        assert "get_trade_connection_read_only" in source
+        assert "load_portfolio" not in source
+        assert "get_trade_connection(" not in source
+
+
 def _recent_iso(*, minutes: int) -> str:
     """occurred_at inside _ENTRY_EXECUTION_LOOKBACK (execution summary is time-bounded)."""
     return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).strftime(
