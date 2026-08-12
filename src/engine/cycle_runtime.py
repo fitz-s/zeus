@@ -5789,6 +5789,7 @@ def _prefetch_held_replacement_artifact_hwm(
     *,
     decision_time: datetime,
     deadline_monotonic: float,
+    sql_timeout_seconds: float,
     clob,
     summary: dict,
     deps,
@@ -5838,18 +5839,13 @@ def _prefetch_held_replacement_artifact_hwm(
                 basis="held_monitor_hwm_prefetch_deadline",
             )
         forecasts = get_forecasts_connection_read_only()
-        remaining = max(0.001, deadline_monotonic - time.monotonic())
-        forecasts.execute(f"PRAGMA busy_timeout = {max(1, min(1000, int(remaining * 1000)))}")
-
-        def _deadline_expired() -> int:
-            return int(time.monotonic() >= deadline_monotonic)
-
-        forecasts.set_progress_handler(_deadline_expired, 1_000)
         forecasts.execute("BEGIN")
         snapshot = freeze_replacement_artifact_hwm(
             forecasts,
             requests=requests,
             decision_time=decision_time,
+            deadline_monotonic=deadline_monotonic,
+            sql_timeout_seconds=sql_timeout_seconds,
         )
     except ReplacementInputHwmReadUnavailable as exc:
         blocker_reason = exc.blocker_reason()
@@ -5869,7 +5865,6 @@ def _prefetch_held_replacement_artifact_hwm(
     finally:
         if forecasts is not None:
             try:
-                forecasts.set_progress_handler(None, 0)
                 forecasts.rollback()
             except sqlite3.Error:
                 pass
@@ -6602,10 +6597,8 @@ def execute_monitoring_phase(
     _prefetch_held_replacement_artifact_hwm(
         monitor_positions,
         decision_time=monitor_now_utc,
-        deadline_monotonic=min(
-            monitor_deadline,
-            time.monotonic() + primary_reserve_seconds,
-        ),
+        deadline_monotonic=monitor_deadline - primary_reserve_seconds,
+        sql_timeout_seconds=primary_reserve_seconds,
         clob=clob,
         summary=summary,
         deps=deps,

@@ -25,7 +25,9 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import time
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -114,6 +116,72 @@ def _raise_hwm_read_unavailable(
             basis=basis,
         ) from exc
     raise exc
+
+
+def _raise_hwm_deadline_elapsed(*, basis: str) -> None:
+    raise ReplacementInputHwmReadUnavailable(
+        "replacement input HWM read deadline elapsed",
+        basis=basis,
+    )
+
+
+@contextmanager
+def _bounded_hwm_sql(
+    conn: sqlite3.Connection,
+    deadline_monotonic: float | None,
+    sql_timeout_seconds: float | None,
+):
+    """Apply an absolute deadline only while SQLite is executing."""
+
+    if deadline_monotonic is None:
+        yield
+        return
+    started = time.monotonic()
+    sql_deadline = float(deadline_monotonic)
+    if sql_timeout_seconds is not None:
+        sql_deadline = min(
+            sql_deadline,
+            started + max(0.0, float(sql_timeout_seconds)),
+        )
+    remaining = sql_deadline - started
+    if remaining <= 0.0:
+        _raise_hwm_deadline_elapsed(
+            basis="raw_artifact_input_hwm_sql_deadline",
+        )
+    conn.execute(
+        f"PRAGMA busy_timeout = {max(1, min(1000, int(remaining * 1000)))}"
+    )
+    conn.set_progress_handler(
+        lambda: int(time.monotonic() >= sql_deadline),
+        1_000,
+    )
+    try:
+        yield
+        if time.monotonic() >= sql_deadline:
+            _raise_hwm_deadline_elapsed(
+                basis="raw_artifact_input_hwm_sql_deadline",
+            )
+    except ReplacementInputHwmReadUnavailable:
+        raise
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="raw_artifact_input_hwm_read_unavailable",
+        )
+    finally:
+        conn.set_progress_handler(None, 0)
+
+
+def _require_hwm_deadline(
+    deadline_monotonic: float | None,
+    *,
+    basis: str,
+) -> None:
+    if (
+        deadline_monotonic is not None
+        and time.monotonic() >= float(deadline_monotonic)
+    ):
+        _raise_hwm_deadline_elapsed(basis=basis)
 
 
 def _hwm_table_ref_columns(
@@ -640,23 +708,26 @@ def _batch_product_cycle_artifact_cycles(
     columns: frozenset[str],
     requests: frozenset[tuple[str, str, str]],
     decision_iso: str,
+    deadline_monotonic: float | None = None,
+    sql_timeout_seconds: float | None = None,
 ) -> dict[tuple[str, str, str], datetime]:
     """Resolve requested HWMs from newest product-cycle partitions first."""
 
-    cycle_rows = conn.execute(
-        f"""
-        SELECT source_cycle_time
-          FROM {table_ref}
-         WHERE source_id = ?
-           AND product_id = ?
-         GROUP BY source_cycle_time
-         ORDER BY source_cycle_time DESC
-        """,
-        (
-            OPENMETEO_ANCHOR_SOURCE_ID,
-            OPENMETEO_ANCHOR_PRODUCT_ID,
-        ),
-    ).fetchall()
+    with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
+        cycle_rows = conn.execute(
+            f"""
+            SELECT source_cycle_time
+              FROM {table_ref}
+             WHERE source_id = ?
+               AND product_id = ?
+             GROUP BY source_cycle_time
+             ORDER BY source_cycle_time DESC
+            """,
+            (
+                OPENMETEO_ANCHOR_SOURCE_ID,
+                OPENMETEO_ANCHOR_PRODUCT_ID,
+            ),
+        ).fetchall()
     select_path = "artifact_path" if "artifact_path" in columns else "NULL"
     cycles: dict[tuple[str, str, str], datetime] = {}
     for cycle_row in cycle_rows:
@@ -667,9 +738,10 @@ def _batch_product_cycle_artifact_cycles(
         remaining = requests.difference(cycles)
         if not remaining:
             break
-        rows = conn.execute(
-            f"""
-            SELECT CASE WHEN json_valid(artifact_metadata_json)
+        with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
+            rows = conn.execute(
+                f"""
+                SELECT CASE WHEN json_valid(artifact_metadata_json)
                         THEN json_extract(artifact_metadata_json, '$.city')
                    END AS artifact_city,
                    CASE WHEN json_valid(artifact_metadata_json)
@@ -703,24 +775,28 @@ def _batch_product_cycle_artifact_cycles(
                AND datetime(source_cycle_time) <= datetime(?)
                AND datetime(captured_at) <= datetime(?)
                AND datetime(source_available_at) <= datetime(?)
-             ORDER BY datetime(captured_at) DESC,
-                      datetime(source_available_at) DESC
-            """,
-            (
-                OPENMETEO_ANCHOR_SOURCE_ID,
-                OPENMETEO_ANCHOR_PRODUCT_ID,
-                source_cycle,
-                decision_iso,
-                decision_iso,
-                decision_iso,
-            ),
-        ).fetchall()
+                 ORDER BY datetime(captured_at) DESC,
+                          datetime(source_available_at) DESC
+                """,
+                (
+                    OPENMETEO_ANCHOR_SOURCE_ID,
+                    OPENMETEO_ANCHOR_PRODUCT_ID,
+                    source_cycle,
+                    decision_iso,
+                    decision_iso,
+                    decision_iso,
+                ),
+            ).fetchall()
         cycles.update(
             _artifact_cycles_from_rows(
                 rows,
                 columns=columns,
                 requested_keys=frozenset(remaining),
             )
+        )
+        _require_hwm_deadline(
+            deadline_monotonic,
+            basis="raw_artifact_input_hwm_payload_validation_deadline",
         )
     return cycles
 
@@ -752,11 +828,15 @@ def _batch_artifact_cycles(
     *,
     requests: frozenset[tuple[str, str, str]],
     decision_iso: str,
+    deadline_monotonic: float | None = None,
+    sql_timeout_seconds: float | None = None,
 ) -> tuple[bool, dict[tuple[str, str, str], datetime]]:
-    table_ref = _authority_table_ref(conn, "raw_forecast_artifacts")
+    with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
+        table_ref = _authority_table_ref(conn, "raw_forecast_artifacts")
     if table_ref is None:
         return True, {}
-    columns = _hwm_table_ref_columns(conn, table_ref)
+    with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
+        columns = _hwm_table_ref_columns(conn, table_ref)
     required = {
         "source_cycle_time",
         "captured_at",
@@ -772,6 +852,8 @@ def _batch_artifact_cycles(
             columns=columns,
             requests=requests,
             decision_iso=decision_iso,
+            deadline_monotonic=deadline_monotonic,
+            sql_timeout_seconds=sql_timeout_seconds,
         )
     select_path = "artifact.artifact_path" if "artifact_path" in columns else "NULL"
     source_predicate = (
@@ -786,9 +868,10 @@ def _batch_artifact_cycles(
     for offset in range(0, len(ordered), chunk_size):
         chunk = ordered[offset : offset + chunk_size]
         values_sql = ",".join("(?,?,?)" for _ in chunk)
-        rows = conn.execute(
-            f"""
-            WITH requested(city, target_date, metric) AS (VALUES {values_sql})
+        with _bounded_hwm_sql(conn, deadline_monotonic, sql_timeout_seconds):
+            rows = conn.execute(
+                f"""
+                WITH requested(city, target_date, metric) AS (VALUES {values_sql})
             SELECT requested.city AS artifact_city,
                    requested.target_date AS artifact_target_date,
                    requested.metric AS artifact_metric,
@@ -827,12 +910,21 @@ def _batch_artifact_cycles(
                AND datetime(artifact.source_cycle_time) <= datetime(?)
              GROUP BY requested.city, requested.target_date, requested.metric,
                       artifact.source_cycle_time
-             ORDER BY requested.city, requested.target_date, requested.metric,
-                      datetime(artifact.source_cycle_time) DESC
-            """,
-            (*[value for key in chunk for value in key], decision_iso, decision_iso, decision_iso),
-        ).fetchall()
+                 ORDER BY requested.city, requested.target_date, requested.metric,
+                          datetime(artifact.source_cycle_time) DESC
+                """,
+                (
+                    *[value for key in chunk for value in key],
+                    decision_iso,
+                    decision_iso,
+                    decision_iso,
+                ),
+            ).fetchall()
         cycles.update(_artifact_cycles_from_rows(rows, columns=columns))
+        _require_hwm_deadline(
+            deadline_monotonic,
+            basis="raw_artifact_input_hwm_payload_validation_deadline",
+        )
     return True, cycles
 
 
@@ -841,6 +933,8 @@ def freeze_replacement_artifact_hwm(
     *,
     requests: Iterable[tuple[str, str, str]],
     decision_time: datetime,
+    deadline_monotonic: float | None = None,
+    sql_timeout_seconds: float | None = None,
 ) -> _FrozenInputHwm | None:
     """Read one immutable artifact-HWM cut for a set of held families."""
 
@@ -861,6 +955,12 @@ def freeze_replacement_artifact_hwm(
             conn,
             requests=normalized,
             decision_iso=decision_iso,
+            deadline_monotonic=deadline_monotonic,
+            sql_timeout_seconds=sql_timeout_seconds,
+        )
+        _require_hwm_deadline(
+            deadline_monotonic,
+            basis="raw_artifact_input_hwm_payload_validation_deadline",
         )
     except ReplacementInputHwmReadUnavailable:
         raise

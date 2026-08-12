@@ -1787,3 +1787,30 @@ publication barrier.
   current book/candidate/wealth binding. Acceptance: the captured 494-row shape
   closes exactly and constructs a valid witnessed maker candidate; live global
   auctions no longer fail at `CurrentMakerFillWitness.__post_init__`.
+
+### Slice B96 — Isolate HWM SQL time from payload validation (2026-08-11)
+
+- Live defect: the held-monitor HWM prefetch installs one absolute SQLite
+  progress deadline across both SQL selection and Python validation of the
+  selected immutable payload files. A cold payload proof can consume that wall
+  time; the next otherwise-small SQL statement is then interrupted, so every
+  held family receives one shared unavailable probability snapshot.
+- Structural invariant: the SQLite progress handler is installed only while an
+  HWM SQL statement is executing and is removed immediately after its rows are
+  materialized. Payload identity/stat/content validation runs outside the SQL
+  cancellation domain while remaining inside the caller's bounded monitor
+  deadline. A deadline crossed by either phase fails closed with typed evidence;
+  it never returns a partial or stale snapshot.
+- SCOPE: the dedicated read-only connection used by held-position replacement
+  HWM prefetch. DRAIN: each bounded SQL statement materializes its causal rows,
+  then exact immutable payload validation completes before the monitor consumes
+  the snapshot. RESET: the progress handler is removed after every statement,
+  the read transaction is rolled back/closed after the frozen cut, and the next
+  monitor pass starts from a new decision time.
+- Forbidden: widening the five-second primary-belief budget, accepting stale
+  cycles, tolerating an interrupted/partial HWM, or keeping a progress handler
+  active across file I/O. Acceptance: a deliberately slow payload proof cannot
+  interrupt a later SQL statement; an actually slow SQL statement still fails
+  closed; caller-owned handlers on non-monitor paths remain unchanged; focused
+  HWM/monitor tests, compilation, planning-lock, and diff checks pass before
+  exact-SHA hot-fix deployment.

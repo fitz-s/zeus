@@ -265,6 +265,245 @@ def test_cycle_hwm_reuses_unchanged_payload_coverage_and_rechecks_rewrite(
     assert payload_reads == 4
 
 
+def test_cycle_hwm_sql_deadline_is_not_installed_during_payload_validation(
+    tmp_path, monkeypatch
+) -> None:
+    class TrackingConnection(sqlite3.Connection):
+        progress_active = False
+        progress_transitions: list[bool]
+
+        def set_progress_handler(self, progress_handler, n):
+            self.progress_active = progress_handler is not None
+            self.progress_transitions.append(self.progress_active)
+            return super().set_progress_handler(progress_handler, n)
+
+    db_path = tmp_path / "forecast.db"
+    artifact_path = tmp_path / "manifest.json"
+    payload_path = tmp_path / "payload.json"
+    artifact_path.write_text("{}", encoding="utf-8")
+    payload_path.write_text("{}", encoding="utf-8")
+    writer = sqlite3.connect(db_path)
+    writer.execute(
+        """
+        CREATE TABLE raw_forecast_artifacts (
+            source_id TEXT,
+            product_id TEXT,
+            source_cycle_time TEXT,
+            captured_at TEXT,
+            source_available_at TEXT,
+            artifact_path TEXT,
+            artifact_metadata_json TEXT
+        )
+        """
+    )
+    request = ("Shanghai", "2026-08-12", "high")
+    writer.execute(
+        "INSERT INTO raw_forecast_artifacts VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            OPENMETEO_ANCHOR_SOURCE_ID,
+            OPENMETEO_ANCHOR_PRODUCT_ID,
+            "2026-08-11T12:00:00+00:00",
+            "2026-08-11T12:05:00+00:00",
+            "2026-08-11T12:05:00+00:00",
+            str(artifact_path),
+            json.dumps(
+                {
+                    "city": request[0],
+                    "target_date": request[1],
+                    "metric": request[2],
+                    "openmeteo_payload_json": payload_path.name,
+                }
+            ),
+        ),
+    )
+    writer.execute(
+        "INSERT INTO raw_forecast_artifacts VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            OPENMETEO_ANCHOR_SOURCE_ID,
+            OPENMETEO_ANCHOR_PRODUCT_ID,
+            "2026-08-11T06:00:00+00:00",
+            "2026-08-11T06:05:00+00:00",
+            "2026-08-11T06:05:00+00:00",
+            str(artifact_path),
+            json.dumps(
+                {
+                    "city": request[0],
+                    "target_date": request[1],
+                    "metric": request[2],
+                    "openmeteo_payload_json": payload_path.name,
+                }
+            ),
+        ),
+    )
+    writer.commit()
+    writer.close()
+
+    conn = sqlite3.connect(
+        f"file:{db_path}?mode=ro",
+        uri=True,
+        factory=TrackingConnection,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.progress_transitions = []
+    validation_calls = 0
+    validation_transition_counts: list[int] = []
+    clock = [0.0]
+    monkeypatch.setattr(input_hwm.time, "monotonic", lambda: clock[0])
+
+    def validate_payload(**_kwargs):
+        nonlocal validation_calls
+        validation_calls += 1
+        assert conn.progress_active is False
+        validation_transition_counts.append(len(conn.progress_transitions))
+        if validation_calls == 1:
+            clock[0] = 0.11
+        return validation_calls == 2
+
+    monkeypatch.setattr(
+        input_hwm,
+        "_cached_artifact_payload_covers_target_local_day",
+        validate_payload,
+    )
+    conn.execute("BEGIN")
+    try:
+        snapshot = freeze_replacement_artifact_hwm(
+            conn,
+            requests=(request,),
+            decision_time=datetime(2026, 8, 11, 13, tzinfo=UTC),
+            deadline_monotonic=1.0,
+            sql_timeout_seconds=0.1,
+        )
+    finally:
+        conn.rollback()
+        conn.close()
+
+    assert snapshot.artifact_cycles[request] == datetime(
+        2026, 8, 11, 6, tzinfo=UTC
+    )
+    assert validation_calls == 2
+    assert validation_transition_counts[1] > validation_transition_counts[0]
+    assert True in conn.progress_transitions
+    assert conn.progress_transitions[-1] is False
+
+    clock[0] = 0.0
+
+    def validation_exhausts_outer_deadline(**_kwargs):
+        assert conn.progress_active is False
+        clock[0] = 1.0
+        return True
+
+    monkeypatch.setattr(
+        input_hwm,
+        "_cached_artifact_payload_covers_target_local_day",
+        validation_exhausts_outer_deadline,
+    )
+    conn = sqlite3.connect(
+        f"file:{db_path}?mode=ro",
+        uri=True,
+        factory=TrackingConnection,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.progress_transitions = []
+    conn.execute("BEGIN")
+    try:
+        with pytest.raises(ReplacementInputHwmReadUnavailable) as exc_info:
+            freeze_replacement_artifact_hwm(
+                conn,
+                requests=(request,),
+                decision_time=datetime(2026, 8, 11, 13, tzinfo=UTC),
+                deadline_monotonic=1.0,
+                sql_timeout_seconds=0.1,
+            )
+    finally:
+        conn.rollback()
+        conn.close()
+
+    assert exc_info.value.basis == (
+        "raw_artifact_input_hwm_payload_validation_deadline"
+    )
+    assert conn.progress_active is False
+
+
+def test_cycle_hwm_interrupted_sql_fails_closed_and_removes_handler(
+    tmp_path,
+) -> None:
+    class InterruptingConnection(sqlite3.Connection):
+        progress_active = False
+
+        def set_progress_handler(self, progress_handler, n):
+            self.progress_active = progress_handler is not None
+            return super().set_progress_handler(progress_handler, n)
+
+        def execute(self, sql, parameters=(), /):
+            if self.progress_active and "SELECT source_cycle_time" in sql:
+                raise sqlite3.OperationalError("interrupted")
+            return super().execute(sql, parameters)
+
+    db_path = tmp_path / "forecast.db"
+    writer = sqlite3.connect(db_path)
+    writer.execute(
+        """
+        CREATE TABLE raw_forecast_artifacts (
+            source_id TEXT,
+            product_id TEXT,
+            source_cycle_time TEXT,
+            captured_at TEXT,
+            source_available_at TEXT,
+            artifact_path TEXT,
+            artifact_metadata_json TEXT
+        )
+        """
+    )
+    writer.commit()
+    writer.close()
+
+    conn = sqlite3.connect(
+        f"file:{db_path}?mode=ro",
+        uri=True,
+        factory=InterruptingConnection,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("BEGIN")
+    try:
+        with pytest.raises(ReplacementInputHwmReadUnavailable) as exc_info:
+            freeze_replacement_artifact_hwm(
+                conn,
+                requests=(("Shanghai", "2026-08-12", "high"),),
+                decision_time=datetime(2026, 8, 11, 13, tzinfo=UTC),
+                deadline_monotonic=time.monotonic() + 1.0,
+                sql_timeout_seconds=0.1,
+            )
+    finally:
+        conn.rollback()
+        conn.close()
+
+    assert exc_info.value.basis == "raw_artifact_input_hwm_read_unavailable"
+    assert conn.progress_active is False
+
+
+def test_cycle_hwm_expired_sql_deadline_fails_closed(tmp_path) -> None:
+    db_path = tmp_path / "forecast.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE raw_forecast_artifacts (source_cycle_time TEXT)")
+    conn.commit()
+    conn.execute("BEGIN")
+    try:
+        with pytest.raises(ReplacementInputHwmReadUnavailable) as exc_info:
+            freeze_replacement_artifact_hwm(
+                conn,
+                requests=(("Shanghai", "2026-08-12", "high"),),
+                decision_time=datetime(2026, 8, 11, 13, tzinfo=UTC),
+                deadline_monotonic=time.monotonic() - 0.001,
+            )
+    finally:
+        conn.rollback()
+        conn.close()
+
+    assert exc_info.value.blocker_reason().startswith(
+        "basis=raw_artifact_input_hwm_sql_deadline:sqlite_error="
+    )
+
+
 def test_cycle_hwm_payload_cache_preserves_absent_path_semantics(tmp_path) -> None:
     artifact_path = tmp_path / "manifest.json"
     common = {
@@ -353,8 +592,17 @@ def test_held_hwm_prefetch_batches_unique_families(monkeypatch) -> None:
     def forecasts_connection() -> sqlite3.Connection:
         return sqlite3.connect(":memory:")
 
-    def freeze(_conn, *, requests, decision_time):
+    def freeze(
+        _conn,
+        *,
+        requests,
+        decision_time,
+        deadline_monotonic,
+        sql_timeout_seconds,
+    ):
         assert decision_time == datetime(2026, 8, 11, 13, tzinfo=UTC)
+        assert deadline_monotonic > time.monotonic()
+        assert sql_timeout_seconds > 0.0
         captured_requests.append(frozenset(requests))
         return snapshot
 
@@ -371,6 +619,7 @@ def test_held_hwm_prefetch_batches_unique_families(monkeypatch) -> None:
         positions,
         decision_time=datetime(2026, 8, 11, 13, tzinfo=UTC),
         deadline_monotonic=time.monotonic() + 1.0,
+        sql_timeout_seconds=0.25,
         clob=object(),
         summary=summary,
         deps=SimpleNamespace(logger=logging.getLogger(__name__)),
