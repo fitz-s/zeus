@@ -1713,8 +1713,10 @@ files:
       BUY candidate also carries the same captured native bid levels as its executable ask curve;
       bids are execution-policy provenance, never a second probability or objective authority.
       SELL scoring rejects any maker proposal whose exact unit price is outside the absolute live
-      price band; command persistence, submit envelope, SDK boundary, and fill journal remain
-      independent cumulative checks and may not be waived by the economic scorer.
+      price band. An immediate SELL may consume counterparty depth up to probability-domain one
+      through an independently in-band submitted floor; quote economics never become permission
+      to persist or submit an above-band limit. Command persistence, submit envelope, SDK boundary,
+      and fill journal remain independent cumulative checks and may not be waived by the scorer.
     downstream:
     - src/engine/qkernel_spine_bridge.py
   src/solve/exits.py:

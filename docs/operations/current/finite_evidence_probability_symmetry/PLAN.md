@@ -3848,4 +3848,8 @@ evidence.
 
 Allowed files are `src/execution/executor.py`, `tests/test_executor.py`,
 `architecture/test_topology.yaml`, `architecture/source_rationale.yaml`, and
-this plan.
+this plan. A concurrent inverse change at `e7661feeb` reintroduced the same
+type collapse in `src/solve/solver.py`; this hot-fix therefore also owns
+`tests/solve/test_solver_properties.py` and
+`tests/integration/test_w3_solve_seam_g3.py` so solver, JIT, certificate, and
+final executor boundaries enforce one coherent relationship.
