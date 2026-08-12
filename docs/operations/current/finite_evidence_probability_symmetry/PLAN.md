@@ -4,6 +4,30 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-12 FAK no-fill retains an exact deadline-bound SELL handoff
+
+The Seoul 32C NO timeline exposed a stronger acceptance requirement than wake
+priority alone.  Its first current negative-edge SELL was submitted at 0.06 and
+received a deterministic FAK no-fill, but the historical runtime produced no
+second SELL command before the bid fell below the live order floor.  A selector
+test proves only that an already-queued expired request wins scheduling; it does
+not prove the rejected command leaves a new actionable request behind.
+
+The composed antibody now begins with the authenticated FAK no-fill command,
+requires canonical retry release, recovers a new exact V4 request bound to a
+new current probability/book witness, proves the request remains incomplete,
+and proves its expired actuation deadline preempts a competing Day0 wake.  This
+closes the producer-to-selector proof gap without replaying the rejected
+command's historical quote.  Existing global-cut tests continue to own JIT
+candidate/receipt actuation and typed no-book completion.
+
+SCOPE is one rejected exact held SELL attempt.  DRAIN is one current global
+auction cut producing a new command or typed terminal current-book receipt.
+RESET is that request's immutable matching receipt; absent receipt retains the
+debt, while bid below the absolute floor is current no-book evidence rather
+than a promised fill.  Acceptance is both holding/day0 runtime states passing
+the composed antibody plus the deadline-selector and current-cut receipt tests.
+
 ## 2026-08-12 Deploy monitor gate and restart reset share one proof
 
 Production loaded the intended SHA and began held-position monitoring, but the

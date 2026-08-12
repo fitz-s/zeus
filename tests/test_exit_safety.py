@@ -10938,11 +10938,14 @@ def test_restart_republishes_unbound_v4_residual_with_same_generation_until_term
 def test_global_fak_zero_fill_reauctions_immediately_with_durable_proof(
     conn,
     monkeypatch,
+    tmp_path,
     pre_exit_state,
     day0_entered_at,
 ):
+    from src.events import reactor
     from src.execution import exit_lifecycle
     from src.execution.executor import OrderResult
+    from src.runtime import reactor_wake
     from src.state.portfolio import Position
     from src.state.venue_command_repo import append_event
 
@@ -11069,6 +11072,75 @@ def test_global_fak_zero_fill_reauctions_immediately_with_durable_proof(
     assert position.next_exit_retry_at == now.isoformat()
     assert exit_lifecycle.has_global_sell_snapshot_reauction_retry(position, conn)
     assert exit_lifecycle._relinquished_global_sell_command_id(conn, position) == command_id
+
+    # The no-fill marker is not the recovery itself.  Prove the complete
+    # handoff that failed in the Seoul incident: canonical retry release, a new
+    # exact durable request bound to current q/book, and deadline-priority over
+    # an ordinary Day0 wake.  A selector-only test cannot prove this producer
+    # seam leaves an actionable request behind after the rejected command.
+    conn.commit()
+    assert exit_lifecycle.check_pending_retries(
+        position,
+        conn=conn,
+        global_sell_reauction_requester=lambda _position, _force: False,
+    ) is True
+    conn.commit()
+
+    wake_path = tmp_path / f"{position_id}-wake.json"
+    requests = []
+
+    def publish_current_reauction(released, force_new_generation):
+        obligation = exit_lifecycle.latest_held_sell_reauction_obligation(
+            conn,
+            released,
+        )
+        assert obligation is not None
+        result = reactor.request_global_auction_completion(
+            reason="GLOBAL_SELL_SNAPSHOT_REAUCTION_REQUIRED",
+            position_id=released.trade_id,
+            family=(released.city, released.target_date, released.temperature_metric),
+            probability_content_identity="q-after-fak-no-fill",
+            held_token_id=token_id,
+            held_best_bid=0.06,
+            bid_observed_at=(now + timedelta(seconds=1)).isoformat(),
+            probability_observed_at=(now + timedelta(seconds=1)).isoformat(),
+            completion_deadline_at=(now - timedelta(seconds=1)).isoformat(),
+            book_state="EXECUTABLE",
+            generation=str(obligation["generation"]),
+            scope_identity=str(obligation["scope_identity"]),
+            wake_path=wake_path,
+            force_new_generation=force_new_generation,
+            return_request=True,
+        )
+        accepted, request = result
+        if request is not None:
+            requests.append(request)
+        return bool(accepted)
+
+    assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+        position,
+        conn=conn,
+        requester=publish_current_reauction,
+    ) is True
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.probability_content_identity == "q-after-fak-no-fill"
+    assert request.book_state == "EXECUTABLE"
+    assert not reactor_wake.held_sell_reauction_requests_completed(
+        (request,),
+        path=wake_path,
+    )
+
+    day0 = reactor_wake.publish_reactor_wake(
+        source="day0",
+        reason="day0_extreme_event_committed",
+        path=wake_path,
+        wake_id=f"day0-after-{position_id}",
+    )
+    selected = reactor_wake.read_reactor_wake(path=wake_path)
+    assert selected is not None
+    assert selected != day0
+    assert selected.held_sell_reauction_requests == (request,)
 
 def test_persisted_exit_envelope_rejects_non_maker_non_fak_mode(conn):
     from src.state.venue_command_repo import insert_command
