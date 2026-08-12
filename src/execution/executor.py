@@ -1282,12 +1282,15 @@ def _entry_economics_component(
         if isinstance(actionable_payload, Mapping)
         else None
     )
+    direction = _direction_value(
+        getattr(intent, "direction", "")
+    ).strip().lower()
     current_state_solve = (
         str(getattr(intent, "selection_authority_applied", "") or "").strip()
         == "qkernel_spine"
         and qkernel_global_current_state_rejection_reason(
             economics,
-            direction=str(getattr(intent, "direction", "") or ""),
+            direction=direction,
         )
         is None
         and isinstance(durable_economics, Mapping)
@@ -1371,7 +1374,7 @@ def _entry_economics_component(
     if not strategy_key:
         strategy_key = str(getattr(intent, "strategy_key", "") or "").strip()
     if not direction_for_floor:
-        direction_for_floor = str(getattr(intent, "direction", "") or "").strip().lower()
+        direction_for_floor = direction
     floor_decision = entry_price_floor_decision(
         strategy_key=strategy_key,
         direction=direction_for_floor,
@@ -1480,7 +1483,6 @@ def _entry_economics_component(
                 reason="day0_probability_authority_missing",
                 error=str(exc),
             )
-    direction = str(getattr(intent, "direction", "") or "")
     expected_side = "YES" if direction == "buy_yes" else "NO" if direction == "buy_no" else ""
     econ_side = str(economics.get("side") or "").upper()
     econ_source = str(economics.get("source") or "").strip()

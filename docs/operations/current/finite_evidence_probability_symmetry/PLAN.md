@@ -4,6 +4,33 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-11 Typed direction must retain global maker authority
+
+Forward live submission reached a verified global `MAKER_REST` winner with
+positive posterior-mean expected log growth and positive conservative submit
+edge, but the executor rejected it as
+`min_expected_profit_below_live_floor`.  The durable actionable certificate
+and its qkernel economics both pass the global current-state verifier when the
+direction is the canonical `buy_no`.  The executor instead passed
+`str(Direction.NO)` (`Direction.NO`) into the maker-witness validator, which
+cannot bind that text to the sealed `NO` action and therefore incorrectly
+downgrades the proposal into the legacy fixed-floor lane.
+
+The repair normalizes the typed `ExecutionIntent.direction` once through its
+enum value and uses that canonical value for the global verifier, entry-price
+policy, and side binding.  It does not change q, q_lcb, fill probability,
+expected-log/EV ranking, sizing, price, book, risk, or submit-time freshness.
+
+SCOPE is executor validation of one already-verified global entry intent.
+DRAIN is the next submit attempt compiled from a fresh global cut.  RESET is a
+canonical `buy_yes` or `buy_no` value whose side and current maker witness both
+verify; malformed or mismatched directions remain fail-closed.  Acceptance
+requires a typed-direction regression antibody, the focused execution suite,
+diff/compile checks, standard hot-fix landing, loaded-SHA proof, and a forward
+live receipt that either reaches command/venue submission or names the next
+independent current blocker.  A fill alone is not capital-gain proof; later
+exit/settlement and forward PnL must still be observed.
+
 ## 2026-08-11 Maker JIT price drift must reauction current market truth
 
 Forward live receipts now reach globally selected, positive posterior-mean

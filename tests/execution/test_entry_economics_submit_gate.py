@@ -7,6 +7,7 @@ import math
 
 import pytest
 
+import src.execution.executor as executor_module
 from src.contracts import Direction, ExecutionIntent
 from src.contracts.global_auction_receipt import GlobalAuctionReceiptRef
 from src.contracts.slippage_bps import SlippageBps
@@ -1140,6 +1141,51 @@ def test_entry_economics_current_state_winner_ignores_legacy_profit_density_floo
         actionable_payload={"qkernel_execution_economics": economics},
     )
 
+    assert verdict["allowed"] is True
+
+
+def test_entry_economics_passes_canonical_typed_no_direction_to_global_validator(
+    monkeypatch,
+):
+    economics = _current_state_mean_buy_econ(
+        side="NO",
+        payoff_q_point=0.80,
+        payoff_q_lcb=0.60,
+        payoff_q_action=0.80,
+        cost=0.45,
+        edge_lcb=0.15,
+        edge_expected=0.35,
+    )
+    seen_directions: list[str | None] = []
+
+    def _global_reason(_economics, *, direction=None, **_kwargs):
+        seen_directions.append(direction)
+        if direction == "buy_no":
+            return None
+        return "CURRENT_MAKER_FILL_WITNESS_ACTION_INVALID"
+
+    monkeypatch.setattr(
+        executor_module,
+        "qkernel_global_current_state_rejection_reason",
+        _global_reason,
+    )
+    verdict = _entry_economics_component(
+        _intent(
+            direction=Direction("buy_no"),
+            limit_price=0.45,
+            q_live=0.80,
+            q_lcb_5pct=0.60,
+            expected_edge=0.35,
+            min_entry_price=0.05,
+            min_expected_profit_usd=0.0,
+            min_submit_edge_density=0.0,
+            qkernel_execution_economics=economics,
+        ),
+        shares=5.0,
+        actionable_payload={"qkernel_execution_economics": economics},
+    )
+
+    assert seen_directions == ["buy_no"]
     assert verdict["allowed"] is True
 
 
