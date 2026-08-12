@@ -77,6 +77,7 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
             "current_evidence_shape": {
                 "semantics_revision": STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
                 "shape_lag_hours": 6.0,
+                "source_cycle_time": "2026-06-07T06:00:00+00:00",
                 "stale_shape_reused": True,
                 "translation_applied": False,
             }
@@ -120,6 +121,7 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
 
     clause = tradeable_grade_coverage_sql(
         posterior_columns={"q_lcb_json", "q_ucb_json", "provenance_json"},
+        decision_time=datetime(2026, 6, 7, 12, tzinfo=UTC),
         alias="p.",
     )
     assert "current_evidence_shape.semantics_revision" in clause
@@ -168,10 +170,16 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
     stale_at_bound["bayes_precision_fusion"]["current_evidence_shape"][
         "shape_lag_hours"
     ] = REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT
+    stale_at_bound["bayes_precision_fusion"]["current_evidence_shape"][
+        "source_cycle_time"
+    ] = "2026-06-06T06:00:00+00:00"
     stale_over_bound = json.loads(json.dumps(stale_reused))
     stale_over_bound["bayes_precision_fusion"]["current_evidence_shape"][
         "shape_lag_hours"
     ] = REPLACEMENT_SOURCE_CYCLE_MAX_AGE_HOURS_DEFAULT + 0.001
+    stale_over_bound["bayes_precision_fusion"]["current_evidence_shape"][
+        "source_cycle_time"
+    ] = "2026-06-06T05:59:56+00:00"
     negative_lag = json.loads(json.dumps(stale_reused))
     negative_lag["bayes_precision_fusion"]["current_evidence_shape"][
         "shape_lag_hours"
@@ -228,6 +236,7 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
 
     missing_provenance_clause = tradeable_grade_coverage_sql(
         posterior_columns={"q_lcb_json", "q_ucb_json"},
+        decision_time=datetime(2026, 6, 7, 12, tzinfo=UTC),
         alias="p.",
     )
     assert "AND 0 = 1" in missing_provenance_clause

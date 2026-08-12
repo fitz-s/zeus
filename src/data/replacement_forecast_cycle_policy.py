@@ -217,7 +217,12 @@ def current_evidence_shape_has_held_authority(provenance: object) -> bool:
     return _current_evidence_shape_has_probability_authority(provenance)
 
 
-def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
+def tradeable_grade_coverage_sql(
+    *,
+    posterior_columns,
+    decision_time: datetime,
+    alias: str = "",
+) -> str:
     """SQL fragment selecting ONLY tradeable-grade (certified-bootstrap-bounded) posteriors.
 
     Replaces the broken ``AND <alias>q_lcb_json IS NOT NULL`` proxy at the mask-and-starve
@@ -253,6 +258,9 @@ def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
         f"'{TRADEABLE_GRADE_QLCB_BASIS}'"
     )
     shape_path = "$.bayes_precision_fusion.current_evidence_shape"
+    if decision_time.tzinfo is None or decision_time.utcoffset() is None:
+        raise ValueError("coverage decision_time must be timezone-aware")
+    decision_iso = decision_time.astimezone(UTC).isoformat().replace("'", "''")
     lag_type = f"json_type({provenance_expr}, '{shape_path}.shape_lag_hours')"
     lag_value = (
         f"CAST(json_extract({provenance_expr}, "
@@ -266,6 +274,9 @@ def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
     )
     revision_value = (
         f"json_extract({provenance_expr}, '{shape_path}.semantics_revision')"
+    )
+    ens_cycle_value = (
+        f"json_extract({provenance_expr}, '{shape_path}.source_cycle_time')"
     )
     max_lag = replacement_source_cycle_max_age_hours()
     # Same-cycle and bounded latest-causal raw ENS members are both current
@@ -282,6 +293,9 @@ def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
         f"'{CURRENT_EVIDENCE_SEMANTICS_REVISION}') OR ("
         f"{lag_value} > 0.0 AND "
         f"{stale_type} = 'true' AND "
+        f"julianday({ens_cycle_value}) IS NOT NULL AND "
+        f"(julianday('{decision_iso}') - julianday({ens_cycle_value})) * 24.0 "
+        f"BETWEEN 0.0 AND {max_lag!r} AND "
         f"{revision_value} = "
         f"'{STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION}')))"
     )

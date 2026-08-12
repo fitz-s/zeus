@@ -2234,7 +2234,9 @@ def build_replacement_forecast_current_target_plan(
         # predicate now keys on the certified bootstrap basis (single authority:
         # cycle_policy). Schema-conditional like the queue clause.
         posterior_tradeable_grade_clause = tradeable_grade_coverage_sql(
-            posterior_columns=posterior_columns, alias="p."
+            posterior_columns=posterior_columns,
+            decision_time=_ref_clock,
+            alias="p.",
         )
         if source_run_targets and "dependency_source_run_ids_json" not in posterior_columns:
             return _blocked_plan("REPLACEMENT_CURRENT_TARGET_PLAN_SOURCE_RUN_DEPENDENCY_SCHEMA_MISSING")

@@ -679,6 +679,33 @@ def read_replacement_forecast_bundle(
             "BLOCKED",
             "REPLACEMENT_LIVE_CYCLE_AGE_EXCEEDS_BOUND",
         )
+    fusion = provenance.get("bayes_precision_fusion")
+    shape = (
+        fusion.get("current_evidence_shape")
+        if isinstance(fusion, Mapping)
+        else None
+    )
+    shape_lag_hours = (
+        float(shape.get("shape_lag_hours"))
+        if isinstance(shape, Mapping)
+        else 0.0
+    )
+    if shape_lag_hours > 0.0:
+        raw_ensemble_cycle = shape.get("source_cycle_time")
+        if not isinstance(raw_ensemble_cycle, str) or not raw_ensemble_cycle:
+            return ReplacementForecastBundleReadResult(
+                "BLOCKED",
+                "REPLACEMENT_ENSEMBLE_CYCLE_TIME_MISSING",
+            )
+        ensemble_cycle_utc = _parse_utc(
+            raw_ensemble_cycle,
+            field_name="current_evidence_shape.source_cycle_time",
+        )
+        if cycle_age_exceeds_bound(decision_utc, ensemble_cycle_utc):
+            return ReplacementForecastBundleReadResult(
+                "BLOCKED",
+                "REPLACEMENT_ENSEMBLE_CYCLE_AGE_EXCEEDS_BOUND",
+            )
     # §4a staleness DEGRADE LADDER (authority doc, 2026-07-17): between the fresh band
     # and the EXPIRED wall handled just above, an aged carrier is GRADED. RED (age > 24h,
     # derived boundary) isolates ENTRY ONLY. HELD_REDECISION is explicitly reduce-only

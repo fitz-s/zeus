@@ -675,7 +675,11 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
         # A covering posterior must be certified-bootstrap tradeable-grade. A non-live or
         # degraded posterior must not count as "done forever" and block its own repair.
         # Single authority: cycle_policy.tradeable_grade_coverage_sql.
-        tradeable_grade_clause = tradeable_grade_coverage_sql(posterior_columns=posterior_columns)
+        decision_time = _parse_utc_iso(seed.get("computed_at")) or datetime.now(timezone.utc)
+        tradeable_grade_clause = tradeable_grade_coverage_sql(
+            posterior_columns=posterior_columns,
+            decision_time=decision_time,
+        )
         runtime_layer_clause = "AND runtime_layer = 'live'" if "runtime_layer" in posterior_columns else ""
         posterior = conn.execute(
             f"""
@@ -696,7 +700,6 @@ def _seed_already_covered(*, forecast_db: Path | str | None, seed: dict[str, obj
         ).fetchone()
         if posterior is None:
             return False
-        decision_time = _parse_utc_iso(seed.get("computed_at")) or datetime.now(timezone.utc)
         if replacement_live_input_lag_reason(
             conn,
             city=city,
