@@ -5470,6 +5470,77 @@ def _monitor_probability_content_identity(receipt: object) -> str:
     return str(receipt.get("probability_content_identity") or "").strip()
 
 
+def _monitor_global_sell_request_context(position, exit_context) -> dict[str, object]:
+    """Bind a monitor SELL to exact q/book evidence or request reactor refresh.
+
+    A replacement-posterior monitor receipt may carry only one held-bin scalar;
+    it cannot mint the full-family probability-content identity owned by the
+    global auction.  Preserve that distinction with a V4 ``UNKNOWN`` attempt so
+    the reactor durably rebuilds the MECE family witness before acting.
+    """
+
+    receipt = getattr(position, "_day0_monitor_probability_receipt", None)
+    if not isinstance(receipt, dict):
+        receipt = getattr(position, "_monitor_probability_receipt", None)
+    probability_content_identity = _monitor_probability_content_identity(receipt)
+    if not probability_content_identity:
+        return {
+            "probability_content_identity": "",
+            "probability_observed_at": "",
+            "held_best_bid": None,
+            "bid_observed_at": "",
+            "book_state": "UNKNOWN",
+        }
+    observation = receipt.get("observation") if isinstance(receipt, dict) else None
+    physical_clock = (
+        observation.get("physical_frontier_clock")
+        if isinstance(observation, dict)
+        else None
+    )
+    probability_observed_at = str(
+        receipt.get("probability_observed_at")
+        or receipt.get("computed_at")
+        or (
+            physical_clock.get("observation_available_at")
+            if isinstance(physical_clock, dict)
+            else ""
+        )
+        or (
+            observation.get("observation_available_at")
+            if isinstance(observation, dict)
+            else ""
+        )
+        or ""
+    ).strip()
+    held_best_bid = exit_context.best_bid
+    bid_observed_at = str(getattr(position, "last_monitor_at", "") or "")
+    if held_best_bid is None:
+        book_state = "UNKNOWN"
+    else:
+        try:
+            held_best_bid = float(held_best_bid)
+        except (TypeError, ValueError):
+            held_best_bid = None
+            book_state = "UNKNOWN"
+        else:
+            if not math.isfinite(held_best_bid) or not 0.0 <= held_best_bid <= 1.0:
+                held_best_bid = None
+                book_state = "UNKNOWN"
+            elif held_best_bid < 0.05:
+                book_state = "NO_EXECUTABLE_BOOK"
+            elif not bid_observed_at:
+                book_state = "STALE"
+            else:
+                book_state = "EXECUTABLE"
+    return {
+        "probability_content_identity": probability_content_identity,
+        "probability_observed_at": probability_observed_at,
+        "held_best_bid": held_best_bid,
+        "bid_observed_at": bid_observed_at,
+        "book_state": book_state,
+    }
+
+
 def _current_monitor_global_holding_coverage(
     *,
     conn,
@@ -8139,13 +8210,12 @@ def execute_monitoring_phase(
                         )
                         + 1
                     )
-            probability_receipt = getattr(
+            global_sell_request_context = _monitor_global_sell_request_context(
                 pos,
-                "_day0_monitor_probability_receipt",
-                None,
+                exit_context,
             )
-            probability_content_identity = _monitor_probability_content_identity(
-                probability_receipt
+            probability_content_identity = str(
+                global_sell_request_context["probability_content_identity"] or ""
             )
             held_token_id = _position_held_token_id(pos).strip()
             # A canonical SELL debt survives monitor refreshes. Only an exact
@@ -8262,8 +8332,14 @@ def execute_monitoring_phase(
                     ),
                     probability_content_identity=probability_content_identity,
                     held_token_id=held_token_id,
-                    held_best_bid=exit_context.best_bid,
-                    bid_observed_at=str(getattr(pos, "last_monitor_at", "") or ""),
+                    held_best_bid=global_sell_request_context["held_best_bid"],
+                    bid_observed_at=str(
+                        global_sell_request_context["bid_observed_at"] or ""
+                    ),
+                    book_state=str(global_sell_request_context["book_state"]),
+                    probability_observed_at=str(
+                        global_sell_request_context["probability_observed_at"] or ""
+                    ),
                     return_request=True,
                     prepare_only=True,
                 )

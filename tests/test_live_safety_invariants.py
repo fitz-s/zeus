@@ -6414,7 +6414,19 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
                 else np.array([0.05, 0.15])
             ),
         )
-        setattr(
+        if trigger == "UNREGISTERED_STATISTICAL_SELL":
+            setattr(
+                position,
+                "_monitor_probability_receipt",
+                {
+                    "posterior_id": "213173",
+                    "computed_at": "2026-07-14T17:55:00+00:00",
+                    "held_side_probability": 0.10,
+                    "evidence_content_hash": "scalar-monitor-evidence",
+                },
+            )
+        else:
+            setattr(
                 position,
                 "_day0_monitor_probability_receipt",
                 {
@@ -6582,11 +6594,11 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             position_id=pos.trade_id,
             family=(pos.city, pos.target_date, pos.temperature_metric),
             held_token_id="paris-no",
-            probability_content_identity="probability-content-current",
-            probability_observed_at="2026-07-14T18:00:00+00:00",
-            held_best_bid=0.49,
-            bid_observed_at="2026-07-14T18:00:00+00:00",
-            book_state="EXECUTABLE",
+            probability_content_identity=kwargs["probability_content_identity"],
+            probability_observed_at=kwargs["probability_observed_at"],
+            held_best_bid=kwargs["held_best_bid"],
+            bid_observed_at=kwargs["bid_observed_at"],
+            book_state=kwargs["book_state"],
         )
 
     monkeypatch.setattr(
@@ -6679,8 +6691,13 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             else "global_auction_completion_request_failed"
         )
         assert request_status in pos.applied_validations
+        expected_authority_outcome = (
+            "PROBABILITY_CONTENT"
+            if trigger == "UNREGISTERED_STATISTICAL_SELL"
+            else "COVERAGE_NOT_PUBLISHED"
+        )
         assert (
-            "global_auction_authority_outcome:COVERAGE_NOT_PUBLISHED"
+            f"global_auction_authority_outcome:{expected_authority_outcome}"
             in pos.applied_validations
         )
         assert (
@@ -6788,6 +6805,23 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             else "monitor_statistical_sell_auction_completion_request_failed"
         )
         assert summary[request_summary_key] == 1
+        expected_request_context = (
+            {
+                "probability_content_identity": "",
+                "held_best_bid": None,
+                "bid_observed_at": "",
+                "book_state": "UNKNOWN",
+                "probability_observed_at": "",
+            }
+            if trigger == "UNREGISTERED_STATISTICAL_SELL"
+            else {
+                "probability_content_identity": "probability-content-current",
+                "held_best_bid": 0.49,
+                "bid_observed_at": "2026-07-14T18:00:00+00:00",
+                "book_state": "EXECUTABLE",
+                "probability_observed_at": "",
+            }
+        )
         assert auction_completion_requests == [
             {
                 "reason": (
@@ -6799,12 +6833,10 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
                     pos.target_date,
                     pos.temperature_metric,
                 ),
-                "probability_content_identity": "probability-content-current",
                 "held_token_id": "paris-no",
-                "held_best_bid": 0.49,
-                "bid_observed_at": "2026-07-14T18:00:00+00:00",
                 "return_request": True,
                 "prepare_only": True,
+                **expected_request_context,
             }
         ]
         assert execute_calls == []
@@ -6830,6 +6862,105 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         assert auction_completion_requests == []
     assert invalidations == ([] if outcome != "direct" else ["venue_side_effect"])
     conn.close()
+
+
+def test_non_day0_scalar_monitor_requests_full_family_reauction_without_fake_q_identity():
+    """A scalar held-bin q may trigger redecision but cannot impersonate MECE q."""
+    from src.engine import cycle_runtime
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
+
+    position = SimpleNamespace(
+        position_id="non-day0-scalar-sell",
+        trade_id="non-day0-scalar-sell",
+        city="Shanghai",
+        target_date="2026-08-13",
+        temperature_metric="high",
+        direction="buy_yes",
+        token_id="shanghai-yes",
+        no_token_id="shanghai-no",
+        last_monitor_at="2026-08-12T05:53:52+00:00",
+        _monitor_probability_receipt={
+            "posterior_id": "213173",
+            "computed_at": "2026-08-12T01:39:11.037562+00:00",
+            "held_side_probability": 0.3055789346340416,
+            "evidence_content_hash": "monitor-evidence-is-not-full-family-q",
+        },
+    )
+    context = cycle_runtime._monitor_global_sell_request_context(
+        position,
+        SimpleNamespace(best_bid=0.31),
+    )
+
+    assert context == {
+        "probability_content_identity": "",
+        "probability_observed_at": "",
+        "held_best_bid": None,
+        "bid_observed_at": "",
+        "book_state": "UNKNOWN",
+    }
+    request = make_held_sell_reauction_request(
+        position_id=position.position_id,
+        family=(position.city, position.target_date, position.temperature_metric),
+        held_token_id=position.token_id,
+        schema_version=4,
+        **context,
+    )
+    assert request.book_state == "UNKNOWN"
+    assert request.probability_content_identity == ""
+    assert request.held_best_bid is None
+    assert request.bid_observed_at == ""
+    assert request.probability_observed_at == ""
+
+
+@pytest.mark.parametrize(
+    ("best_bid", "last_monitor_at", "expected_bid", "expected_book_state"),
+    (
+        (None, "2026-08-12T05:53:52+00:00", None, "UNKNOWN"),
+        ("invalid", "2026-08-12T05:53:52+00:00", None, "UNKNOWN"),
+        (float("nan"), "2026-08-12T05:53:52+00:00", None, "UNKNOWN"),
+        (0.03, "2026-08-12T05:53:52+00:00", 0.03, "NO_EXECUTABLE_BOOK"),
+        (0.31, "", 0.31, "STALE"),
+        (0.31, "2026-08-12T05:53:52+00:00", 0.31, "EXECUTABLE"),
+    ),
+)
+def test_exact_monitor_q_classifies_book_before_v4_reauction(
+    best_bid,
+    last_monitor_at,
+    expected_bid,
+    expected_book_state,
+):
+    from src.engine import cycle_runtime
+    from src.runtime.reactor_wake import make_held_sell_reauction_request
+
+    position = SimpleNamespace(
+        position_id="exact-q-sell",
+        city="Shanghai",
+        target_date="2026-08-13",
+        temperature_metric="high",
+        token_id="shanghai-yes",
+        last_monitor_at=last_monitor_at,
+        _day0_monitor_probability_receipt={
+            "probability_content_identity": "full-family-q-content",
+            "computed_at": "2026-08-12T05:53:00+00:00",
+        },
+    )
+
+    context = cycle_runtime._monitor_global_sell_request_context(
+        position,
+        SimpleNamespace(best_bid=best_bid),
+    )
+
+    assert context["held_best_bid"] == expected_bid
+    assert context["book_state"] == expected_book_state
+    request = make_held_sell_reauction_request(
+        position_id=position.position_id,
+        family=(position.city, position.target_date, position.temperature_metric),
+        held_token_id=position.token_id,
+        schema_version=4,
+        **context,
+    )
+    assert request.book_state == expected_book_state
+    assert request.held_best_bid == expected_bid
 
 
 @pytest.mark.parametrize(
