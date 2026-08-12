@@ -1796,16 +1796,41 @@ def reconcile(portfolio: PortfolioState, chain_positions: list[ChainPosition], c
         return str(getattr(position, "token_id", "") or "")
 
     def _chain_observed_cost(chain: ChainPosition) -> float:
-        try:
-            cost = float(getattr(chain, "cost", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            cost = 0.0
-        if cost > 0.0:
-            return cost
-        try:
-            return float(chain.size) * float(chain.avg_price or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
+        def _finite_decimal(value: object) -> Decimal | None:
+            try:
+                parsed = Decimal(str(value or 0))
+            except (InvalidOperation, ValueError):
+                return None
+            return parsed if parsed.is_finite() else None
+
+        size = _finite_decimal(getattr(chain, "size", 0))
+        avg_price = _finite_decimal(getattr(chain, "avg_price", 0))
+        cost = _finite_decimal(getattr(chain, "cost", 0))
+        derived_cost = (
+            size * avg_price
+            if size is not None
+            and size > 0
+            and avg_price is not None
+            and Decimal("0") < avg_price <= Decimal("1")
+            else None
+        )
+
+        # The Data API's initialValue can lag a just-executed reduction while
+        # the targeted CTF balance already carries the exact residual shares.
+        # A binary outcome token cannot have current acquisition cost above
+        # one collateral unit per currently-held share.  Reject only that
+        # impossible mixed-clock shape and retain the same snapshot's average
+        # price for the residual; coherent positive reported cost keeps its
+        # existing priority (including legitimate rounding/fee differences).
+        if cost is not None and cost > 0:
+            if (
+                derived_cost is not None
+                and size is not None
+                and cost > size + Decimal("0.000001")
+            ):
+                return float(derived_cost)
+            return float(cost)
+        return float(derived_cost) if derived_cost is not None else 0.0
 
     def _confirmed_net_shares_by_position(token_id: str) -> dict[str, Decimal] | None:
         """Fold exactly-once authenticated token fills by their position owner.

@@ -23,6 +23,13 @@ was already booked, a zero-share signed-notional correction atom.  The fold
 accepts that atom only after a prior identity and requires exact cumulative
 quantity/notional deltas; exposure and allocated basis remain unchanged.
 
+The targeted CTF read can advance residual shares ahead of the Data API's
+position economics.  Reconciliation therefore rejects a mixed-clock reported
+cost only when it is impossible for a binary token (more than one collateral
+unit per current share), deriving residual cost from the same observation's
+current shares and valid average price.  This repairs the chain-cost side of
+the partial-exit convergence gate without changing fill-owned acquisition cost.
+
 SCOPE is one authenticated EXIT/SELL command and one stable economic fill
 identity.  DRAIN is the normal recorded-fill economics recovery pass after a
 complete CONFIRMED trade arrives; an already-booked partial fill drains through
@@ -33,7 +40,8 @@ maker legs, quantity disagreement, absent prior identity, or divergent residual
 basis remain fail-closed.  Acceptance requires positive and already-booked
 partial correction antibodies, exchange/exit/fill-sync/recovery suites, live
 deployment, authenticated order/trade proof, exact CTF dust balance, corrected
-canonical PnL, and preservation of the global entry pause.
+canonical PnL, one-time stale-full-lot chain-cost repair, and preservation of
+the global entry pause.
 
 ## 2026-08-11 Zero-price balance snapshots retain authenticated fill cost
 

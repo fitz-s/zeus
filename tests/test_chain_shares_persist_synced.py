@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-05-31; last_reviewed=2026-07-24; last_reused=2026-07-24
+# Lifecycle: created=2026-05-31; last_reviewed=2026-08-11; last_reused=2026-08-11
 # Purpose: Relationship test — chain economics (chain_shares, chain_seen_at) persist
 #   to position_current for SYNCED positions and survive a fresh DB read (task #56).
 # Reuse: inspect chain_reconciliation.reconcile() else-branch + _append_canonical_chain_observation_if_available
@@ -1124,6 +1124,103 @@ def test_fresh_synced_projection_repairs_missing_derived_chain_cost_once() -> No
 
     assert first_stats.get("chain_observation_persisted", 0) == 1
     assert first["chain_cost_basis_usd"] == pytest.approx(expected_cost)
+    assert first_count == 1
+    assert second_stats.get("chain_observation_persisted", 0) == 0
+    assert second_count == 1
+
+
+def test_exact_ctf_dust_rejects_stale_full_lot_chain_cost_once() -> None:
+    """A fresh exact balance must not inherit a stale pre-exit initialValue."""
+    trade_id = "synced-exact-dust-stale-full-cost"
+    chain_size = 0.000168
+    avg_price = 0.41
+    expected_cost = chain_size * avg_price
+    stale_full_lot_cost = 5.3259
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "world.db")
+        conn = _setup_db_on_disk(db_path)
+        pos = _make_position(
+            trade_id=trade_id,
+            token_id="tok-exact-dust",
+            shares=chain_size,
+        )
+        pos.size_usd = expected_cost
+        pos.cost_basis_usd = expected_cost
+        pos.chain_shares = chain_size
+        pos.chain_avg_price = avg_price
+        pos.chain_cost_basis_usd = stale_full_lot_cost
+        _seed_position_current(conn, pos, chain_shares=chain_size)
+        conn.execute(
+            """
+            UPDATE position_current
+               SET chain_state = 'synced',
+                   chain_avg_price = ?,
+                   chain_cost_basis_usd = ?,
+                   chain_seen_at = ?
+             WHERE position_id = ?
+            """,
+            (
+                avg_price,
+                stale_full_lot_cost,
+                datetime.now(timezone.utc).isoformat(),
+                trade_id,
+            ),
+        )
+        conn.commit()
+        chain = ChainPosition(
+            token_id=pos.token_id,
+            size=chain_size,
+            avg_price=avg_price,
+            cost=stale_full_lot_cost,
+            condition_id=pos.condition_id,
+            balance_authority="CHAIN",
+            balance_source="targeted_ctf_balance_allowance",
+        )
+
+        first_stats = reconcile(PortfolioState(positions=[pos]), [chain], conn=conn)
+        first = conn.execute(
+            """
+            SELECT shares, cost_basis_usd, chain_shares, chain_avg_price,
+                   chain_cost_basis_usd
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (trade_id,),
+        ).fetchone()
+        first_count = conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'CHAIN_SIZE_CORRECTED'
+               AND json_extract(payload_json, '$.reason') = 'chain_economics_observed'
+            """,
+            (trade_id,),
+        ).fetchone()[0]
+
+        second_stats = reconcile(PortfolioState(positions=[pos]), [chain], conn=conn)
+        second_count = conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND event_type = 'CHAIN_SIZE_CORRECTED'
+               AND json_extract(payload_json, '$.reason') = 'chain_economics_observed'
+            """,
+            (trade_id,),
+        ).fetchone()[0]
+        conn.close()
+
+    assert first_stats.get("chain_observation_persisted", 0) == 1
+    assert dict(first) == pytest.approx(
+        {
+            "shares": chain_size,
+            "cost_basis_usd": expected_cost,
+            "chain_shares": chain_size,
+            "chain_avg_price": avg_price,
+            "chain_cost_basis_usd": expected_cost,
+        }
+    )
     assert first_count == 1
     assert second_stats.get("chain_observation_persisted", 0) == 0
     assert second_count == 1
