@@ -5588,6 +5588,7 @@ def process_current_global_batch(
         tuple[Mapping[str, object], CurrentGlobalBookEpoch],
     ]
     | None = None,
+    market_authority_refresh: Callable[[frozenset[str]], None] | None = None,
     work_context: WorkContext | None = None,
     selection_snapshot_connections: Sequence[sqlite3.Connection] = (),
     preflight_sqlite_connections: Sequence[sqlite3.Connection] = (),
@@ -7599,6 +7600,24 @@ def process_current_global_batch(
                         return reject(
                             f"{unstable_prefix}{preflight.reason or preflight.status}"
                         )
+                    if market_authority_superseded and market_authority_refresh is not None:
+                        selected_candidate = getattr(selected.decision, "candidate", None)
+                        refresh_family_key = str(
+                            getattr(selected_candidate, "family_key", "") or ""
+                        ).strip()
+                        if not refresh_family_key:
+                            return reject(
+                                "GLOBAL_REAUCTION_MARKET_AUTHORITY_SCOPE_MISSING"
+                            )
+                        try:
+                            market_authority_refresh(
+                                frozenset({refresh_family_key})
+                            )
+                        except Exception as exc:  # noqa: BLE001 - refresh failure is fail closed
+                            return reject(
+                                "GLOBAL_REAUCTION_MARKET_AUTHORITY_REFRESH_FAILED:"
+                                f"{type(exc).__name__}:{exc}"
+                            )
                     # SCOPE: either the winner's q proof or its Gamma/CLOB/raw
                     # book market authority changed. Both invalidate
                     # comparability of the frozen global objective. DRAIN: one
@@ -7636,6 +7655,7 @@ def process_current_global_batch(
                         current_time_provider=current_time_provider,
                         portfolio_state_provider=portfolio_state_provider,
                         current_book_epoch_provider=current_book_epoch_provider,
+                        market_authority_refresh=market_authority_refresh,
                         selection_snapshot_connections=selection_snapshot_connections,
                         preflight_sqlite_connections=preflight_sqlite_connections,
                         current_capital_limit_resolver=current_capital_limit_resolver,

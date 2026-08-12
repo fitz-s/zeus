@@ -6912,6 +6912,24 @@ def test_non_day0_scalar_monitor_requests_full_family_reauction_without_fake_q_i
     assert request.probability_observed_at == ""
 
 
+def test_market_authority_refresh_extends_delta_scope_but_preserves_full_refresh():
+    from src.engine import event_reactor_adapter
+
+    assert event_reactor_adapter._effective_global_book_refresh_family_keys(
+        frozenset(),
+        frozenset(),
+        {"family-jit-fee"},
+    ) == frozenset({"family-jit-fee"})
+    assert (
+        event_reactor_adapter._effective_global_book_refresh_family_keys(
+            None,
+            frozenset({"family-metadata"}),
+            {"family-jit-fee"},
+        )
+        is None
+    )
+
+
 @pytest.mark.parametrize(
     ("best_bid", "last_monitor_at", "expected_bid", "expected_book_state"),
     (

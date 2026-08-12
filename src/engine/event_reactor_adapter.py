@@ -2030,6 +2030,21 @@ def _global_book_refresh_family_keys(
     )
 
 
+def _effective_global_book_refresh_family_keys(
+    event_family_keys: frozenset[str] | None,
+    metadata_family_keys: frozenset[str],
+    market_authority_family_keys: set[str],
+) -> frozenset[str] | None:
+    """Merge refresh causes without narrowing a malformed-event full refresh."""
+
+    if event_family_keys is None:
+        return None
+    return event_family_keys.union(
+        metadata_family_keys,
+        market_authority_family_keys,
+    )
+
+
 def _global_batch_wakes_supersede(
     wakes: Iterable[object],
     *,
@@ -8513,8 +8528,21 @@ def event_bound_live_adapter_from_trade_conn(
         speculative_book_metadata_by_key: dict[
             tuple[str, str], Mapping[str, object]
         ] = {}
+        market_authority_refresh_family_keys: set[str] = set()
         reduce_only_book_tokens: frozenset[str] | None = None
         held_tokens_by_family: dict[str, set[str]] = {}
+
+        def _require_market_authority_refresh(
+            family_keys: frozenset[str],
+        ) -> None:
+            clean = {
+                str(family_key or "").strip()
+                for family_key in family_keys
+                if str(family_key or "").strip()
+            }
+            if clean != set(family_keys):
+                raise ValueError("GLOBAL_MARKET_AUTHORITY_REFRESH_SCOPE_INVALID")
+            market_authority_refresh_family_keys.update(clean)
 
         def _current_book_epoch_with_context(probabilities, _at, work_context):
             nonlocal reduce_only_book_tokens
@@ -8642,6 +8670,9 @@ def event_bound_live_adapter_from_trade_conn(
 
             def _publish_book_epoch(probability_slice, epoch, *, stage):
                 work_context.checkpoint(f"book_epoch:{stage}:before_publish")
+                market_authority_refresh_family_keys.difference_update(
+                    probability_slice
+                )
                 return probability_slice, epoch
 
             if _urgent_book_preemption("start"):
@@ -9338,12 +9369,15 @@ def event_bound_live_adapter_from_trade_conn(
                 ),
             )
             metadata_refresh_family_keys = metadata_refresh_family_keys.union(
-                held_binding_refresh_family_keys
+                held_binding_refresh_family_keys,
+                market_authority_refresh_family_keys,
             )
             effective_book_refresh_family_keys = (
-                None
-                if book_refresh_family_keys is None
-                else book_refresh_family_keys.union(metadata_refresh_family_keys)
+                _effective_global_book_refresh_family_keys(
+                    book_refresh_family_keys,
+                    metadata_refresh_family_keys,
+                    market_authority_refresh_family_keys,
+                )
             )
             if metadata_refresh_family_keys:
                 logging.getLogger(__name__).info(
@@ -9514,6 +9548,9 @@ def event_bound_live_adapter_from_trade_conn(
                 exact_refresh_allowed = (
                     cached_probabilities is not None
                     and not held_binding_refresh_family_keys.intersection(
+                        eligible_refresh_family_keys
+                    )
+                    and not metadata_refresh_family_keys.intersection(
                         eligible_refresh_family_keys
                     )
                 )
@@ -10218,6 +10255,7 @@ def event_bound_live_adapter_from_trade_conn(
                 # positions from this same canonical trade connection at selection.
                 portfolio_state_provider=None,
                 current_book_epoch_provider=_current_book_epoch,
+                market_authority_refresh=_require_market_authority_refresh,
                 work_context=global_work_context,
                 current_capital_limit_resolver=_current_entry_capital_limit,
                 # Apply the same configured submit authority before expensive

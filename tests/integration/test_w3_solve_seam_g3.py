@@ -8781,6 +8781,8 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         )
     }
     provider(probabilities, _dt.datetime.now(_dt.timezone.utc))
+    captured["market_authority_refresh"](frozenset({"family"}))
+    provider(probabilities, _dt.datetime.now(_dt.timezone.utc))
     rebuilt_adapter = make_adapter()
     rebuilt_adapter.process_global_batch(
         (event,),
@@ -8794,14 +8796,17 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
     assert metadata_calls == [
         {metadata_key: metadata for metadata_key in metadata_keys},
         {metadata_key: metadata for metadata_key in metadata_keys},
+        {metadata_key: metadata for metadata_key in metadata_keys},
     ]
-    assert bind_calls == [True, True]
+    assert bind_calls == [True, True, True]
     assert refresh_hwm_calls[0] == {}
     assert set(refresh_hwm_calls[1]) == {"family"}
     assert refresh_hwm_calls[1]["family"].tzinfo is not None
-    assert bind_required_tokens == [None, None]
-    assert capture_required_tokens == [None, None]
+    assert bind_required_tokens == [None, None, None]
+    assert capture_required_tokens == [None, None, None]
     assert FakeClient.book_fetches == [
+        ("yes-token", "no-token"),
+        ("yes-token", "no-token"),
         ("yes-token", "no-token"),
         ("yes-token", "no-token"),
         ("yes-token", "no-token"),
@@ -26451,8 +26456,13 @@ def test_global_batch_reauctions_with_tightened_candidate_q(monkeypatch):
     (False, True),
     ids=("fresh-buy-submits", "second-drift-fails-closed"),
 )
-def test_global_batch_rebuilds_full_cut_after_stale_sell_probability(
-    monkeypatch, tmp_path, second_probability_drift
+@pytest.mark.parametrize(
+    "supersession_status",
+    ("PROBABILITY_SUPERSEDED", "MARKET_AUTHORITY_SUPERSEDED"),
+    ids=("probability", "market-authority"),
+)
+def test_global_batch_rebuilds_full_cut_after_stale_sell_authority(
+    monkeypatch, tmp_path, second_probability_drift, supersession_status
 ):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     sell_event = _global_scope_event(city="Alpha", source_run_id="run-sell")
@@ -26520,6 +26530,7 @@ def test_global_batch_rebuilds_full_cut_after_stale_sell_probability(
         "venue": [],
         "snapshot_release": [],
         "scope_scan": 0,
+        "market_refresh": [],
     }
     world_conn = sqlite3.connect(tmp_path / "world.db")
     forecast_conn = sqlite3.connect(tmp_path / "forecasts.db")
@@ -26612,19 +26623,25 @@ def test_global_batch_rebuilds_full_cut_after_stale_sell_probability(
         calls["preflight"].append(candidate.candidate_id)
         if candidate is stale_sell:
             return global_batch_runtime.GlobalWinnerPreflight(
-                status="PROBABILITY_SUPERSEDED",
+                status=supersession_status,
                 reason=(
                     "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:"
                     "ValueError:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"
+                    if supersession_status == "PROBABILITY_SUPERSEDED"
+                    else "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:"
+                    "curve_economics:fields=fee"
                 ),
             )
         assert candidate is current_buy
         if second_probability_drift:
             return global_batch_runtime.GlobalWinnerPreflight(
-                status="PROBABILITY_SUPERSEDED",
+                status=supersession_status,
                 reason=(
                     "GLOBAL_ACTUATION_PROBABILITY_REVALIDATION_FAILED:"
                     "ValueError:GLOBAL_ACTUATION_PROBABILITY_SUPERSEDED"
+                    if supersession_status == "PROBABILITY_SUPERSEDED"
+                    else "GLOBAL_ACTUATION_EXECUTION_BINDING_SUPERSEDED:"
+                    "curve_economics:fields=fee"
                 ),
             )
         return global_batch_runtime.GlobalWinnerPreflight(
@@ -26667,6 +26684,9 @@ def test_global_batch_rebuilds_full_cut_after_stale_sell_probability(
             current_execution=lambda *_: object(),
             current_time_provider=lambda: decision_at,
             current_book_epoch_provider=current_book,
+            market_authority_refresh=lambda family_keys: calls[
+                "market_refresh"
+            ].append(family_keys),
             selection_snapshot_connections=(forecast_conn, trade_conn),
         )
     finally:
@@ -26679,12 +26699,21 @@ def test_global_batch_rebuilds_full_cut_after_stale_sell_probability(
     assert calls["preflight"] == ["stale-sell", "current-positive-buy"]
     assert calls["snapshot_release"] == [1, 1]
     assert calls["scope_scan"] == 2
+    assert calls["market_refresh"] == (
+        [frozenset({sell_family})]
+        if supersession_status == "MARKET_AUTHORITY_SUPERSEDED"
+        else []
+    )
     if second_probability_drift:
         assert calls["venue"] == []
         assert result.winner_event_id is None
         assert result.venue_submit_count == 0
         assert all(
-            receipt.reason.startswith("GLOBAL_REAUCTION_PROBABILITY_UNSTABLE:")
+            receipt.reason.startswith(
+                "GLOBAL_REAUCTION_MARKET_AUTHORITY_UNSTABLE:"
+                if supersession_status == "MARKET_AUTHORITY_SUPERSEDED"
+                else "GLOBAL_REAUCTION_PROBABILITY_UNSTABLE:"
+            )
             for receipt in result.receipts.values()
         )
     else:
