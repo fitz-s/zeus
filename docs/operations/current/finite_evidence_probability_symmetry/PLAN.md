@@ -4,6 +4,30 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-12 Recovered fills cannot depend on a dead cross-DB FK
+
+The confirmed-fill projection can recover a real venue acquisition before its
+legacy `trade_decisions` bridge exists.  Lifecycle compatibility then invokes
+the existing bridge synthesizer, but the physical trades DB still declares
+`forecast_snapshot_id -> main.ensemble_snapshots`.  The K1 split moved that
+parent to the forecasts DB, and SQLite foreign keys cannot cross attached
+schemas.  With foreign-key enforcement enabled, every bridge INSERT or UPDATE
+therefore fails at statement preparation even when the soft reference is NULL.
+
+The already-reviewed crash-atomic W0-a rebuild removes only that unreachable
+FK.  Its schema pin is advanced to the current physical shape so the later
+`decision_law_id` column is copied and typed-digest checked rather than rejected
+as drift or lost.  No canonical event, position, fill, probability, or execution
+fact is rewritten.
+
+SCOPE is the single `trade_decisions` table in the canonical trades DB.  DRAIN
+is a short all-writer fence, one WAL transaction, and reopening every writer.
+RESET is a fresh-connection schema proof with no dangling FK followed by a
+genuine recovered-fill bridge write.  Acceptance requires the existing crash,
+schema-drift, sequence, and row-digest matrix plus an antibody that preserves a
+non-NULL `decision_law_id`, a fenced dry run, apply receipt, and forward Dallas
+held-monitor evidence.
+
 ## 2026-08-12 Held freshness uses the provider vector clock
 
 The replacement posterior has two different clocks: one causal ENS/anchor

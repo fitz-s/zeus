@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-07-20; last_reviewed=2026-07-22; last_reused=never
+# Lifecycle: created=2026-07-20; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: green-gate the W0-a trade_decisions dangling-FK rebuild migration (fixture DB, 6-kill-point crash-atomicity).
 # Reuse: run before/after scripts/migrations/202607_trade_decisions_drop_dangling_fk.py.
 """Antibody suite for W0-a: trade_decisions dangling-FK removal rebuild.
@@ -80,7 +80,7 @@ LIVE_CREATE_SQL = """CREATE TABLE trade_decisions (
             exit_timing_usd REAL DEFAULT 0.0,
             risk_throttling_usd REAL DEFAULT 0.0,
             settlement_edge_usd REAL DEFAULT 0.0
-        , env TEXT NOT NULL DEFAULT 'live')"""
+        , env TEXT NOT NULL DEFAULT 'live', decision_law_id TEXT)"""
 
 _MIN_COLS = ("market_id", "bin_label", "direction", "size_usd", "price", "timestamp",
              "p_raw", "p_posterior", "edge", "ci_lower", "ci_upper", "kelly_fraction",
@@ -89,7 +89,7 @@ _MIN_COLS = ("market_id", "bin_label", "direction", "size_usd", "price", "timest
 
 def _pinned_sha_matches() -> bool:
     return hashlib.sha256(LIVE_CREATE_SQL.encode()).hexdigest() == \
-        "6a637b7e6ef3f690276c899c96a5deb89d7931aa07bfd3ec5f48a39fd6621c55"
+        "260d1f8918f542be4e073b9806695b192ea1ec4879b9af192a7b2ffe3c042b2f"
 
 
 # The whole suite is meaningless if the fixture schema has drifted from the pin.
@@ -168,6 +168,34 @@ def test_happy_path_removes_fk_preserves_rows_and_unfreezes(tmp_path):
         c.execute(f"INSERT INTO trade_decisions ({cols}) VALUES ({ph})",
                   ("m", "b", "buy_yes", 1.0, 0.5, "t", 0.5, 0.5, 0.1, 0.0, 1.0, 0.1, "s", "live"))
         assert c.execute("SELECT max(trade_id) FROM trade_decisions").fetchone()[0] == 6
+    finally:
+        c.close()
+
+
+def test_current_decision_law_column_survives_rebuild(tmp_path):
+    """The live schema gained decision_law_id after W0-a was authored.
+
+    Re-pinning must preserve that current money-law identity while removing only
+    the unreachable cross-database FK clause.
+    """
+    db = _build_fixture(tmp_path, rows=3, delete_top=False)
+    c = sqlite3.connect(str(db))
+    try:
+        c.execute(
+            "UPDATE trade_decisions SET decision_law_id=? WHERE trade_id=2",
+            ("predicted_bin_ev_v1",),
+        )
+        c.commit()
+    finally:
+        c.close()
+
+    r = _run(tmp_path)
+    assert r.returncode == 0, r.stderr
+    c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        assert c.execute(
+            "SELECT decision_law_id FROM trade_decisions WHERE trade_id=2"
+        ).fetchone()[0] == "predicted_bin_ev_v1"
     finally:
         c.close()
 
