@@ -178,6 +178,9 @@ def _forward_capital_summary(
     realized_capital = sum(
         float(row["capital_committed_usd"]) for row in combined_curve
     )
+    capital_committed = sum(
+        float(curve.get("capital_committed_usd") or 0.0) for curve in curves
+    )
     win_count = sum(float(row["net_realized_pnl_usd"]) > 0.0 for row in combined_curve)
     loss_count = sum(float(row["net_realized_pnl_usd"]) < 0.0 for row in combined_curve)
     flat_count = realized_count - win_count - loss_count
@@ -225,6 +228,11 @@ def _forward_capital_summary(
         "loss_count": loss_count,
         "flat_count": flat_count,
         "win_rate": round(win_count / realized_count, 6) if realized_count else None,
+        "capital_committed_usd": round(capital_committed, 6),
+        "open_capital_committed_usd": round(
+            max(0.0, capital_committed - realized_capital),
+            6,
+        ),
         "realized_capital_committed_usd": round(realized_capital, 6),
         "gross_realized_pnl_usd": round(gross_pnl, 6),
         "fee_bound_usd": round(fee_bound, 6),

@@ -119,12 +119,14 @@ class TestForwardCapitalAudit:
                 "status": "awaiting_current_law_fills",
                 "filled_position_count": 0,
                 "open_position_count": 0,
+                "capital_committed_usd": 0.0,
                 "curve": [],
             },
             {
                 "status": "awaiting_current_law_fills",
                 "filled_position_count": 0,
                 "open_position_count": 0,
+                "capital_committed_usd": 0.0,
                 "curve": [],
             },
         )
@@ -134,6 +136,7 @@ class TestForwardCapitalAudit:
         assert result["status"] == "awaiting_current_law_fills"
         assert result["capital_gain_proven"] is False
         assert result["robust_capital_gain_proven"] is False
+        assert result["capital_committed_usd"] == 0.0
         assert result["net_realized_pnl_usd"] == 0.0
 
     def test_positive_realized_gain_requires_complete_chain_and_attribution_truth(self):
@@ -153,12 +156,14 @@ class TestForwardCapitalAudit:
                 "status": "positive",
                 "filled_position_count": 1,
                 "open_position_count": 0,
+                "capital_committed_usd": 2.0,
                 "curve": [row],
             },
             {
                 "status": "awaiting_current_law_fills",
                 "filled_position_count": 0,
                 "open_position_count": 0,
+                "capital_committed_usd": 0.0,
                 "curve": [],
             },
         )
@@ -179,6 +184,8 @@ class TestForwardCapitalAudit:
         assert proven["robust_capital_gain_proven"] is False
         assert proven["settled_position_count"] == 1
         assert proven["win_count"] == 1
+        assert proven["capital_committed_usd"] == pytest.approx(2.0)
+        assert proven["open_capital_committed_usd"] == 0.0
         assert proven["net_realized_pnl_usd"] == pytest.approx(0.9)
         assert degraded["status"] == "capital_truth_degraded"
         assert degraded["capital_gain_proven"] is False
