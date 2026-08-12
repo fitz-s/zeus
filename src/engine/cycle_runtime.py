@@ -7068,14 +7068,14 @@ def execute_monitoring_phase(
         summary["held_monitor_partial_orderbook_gaps_scheduled_after_local"] = len(
             network_book_tokens
         )
-    network_positions = [
+    all_network_positions = [
         pos
         for pos in quote_positions
         if _position_held_token_id(pos) in network_book_tokens
     ]
     ordinary_active_network_positions = [
         pos
-        for pos in network_positions
+        for pos in all_network_positions
         if id(pos) not in dead_bin_position_ids
         and _held_monitor_urgency_rank(pos) == 2
     ]
@@ -7141,6 +7141,35 @@ def execute_monitoring_phase(
         selected_coverage_position_ids = frozenset(
             id(pos) for pos in selected_coverage_positions
         )
+    network_prefetch_position_ids = set(selected_coverage_position_ids)
+    network_prefetch_position_ids.update(selected_urgent_position_ids)
+    if reserved_network_position_id is not None:
+        network_prefetch_position_ids.add(reserved_network_position_id)
+    # The oldest durable debt owns a bounded singular quote attempt before
+    # optional batch work.  Keep its token in the network-gap set, but never
+    # duplicate it inside the shared batch.
+    network_positions = [
+        pos
+        for pos in all_network_positions
+        if id(pos) in network_prefetch_position_ids
+        and id(pos) != durable_debt_position_id
+    ]
+    network_book_tokens = frozenset(
+        {
+            _position_held_token_id(pos)
+            for pos in network_positions
+        }
+        | (
+            {_position_held_token_id(durable_debt_position[0])}
+            if durable_debt_position
+            and _position_held_token_id(durable_debt_position[0])
+            in network_book_tokens
+            else set()
+        )
+    )
+    summary["held_monitor_network_prefetch_scope_positions"] = [
+        str(getattr(pos, "trade_id", "") or "") for pos in network_positions
+    ]
     ordinary_active_local_positions = [
         pos
         for pos in monitor_positions

@@ -399,6 +399,26 @@ more held cities than the microbatch plus discovery debt, forces a one-city
 budget exhaustion, and proves consecutive cuts contain only held cities with
 full critical quota while cursor fairness still advances.
 
+## 2026-08-12 Shared held-book I/O follows monitor admission
+
+Recent forward evidence showed that only 45 of 159 monitor refreshes had both a
+fresh q and fresh book while a shared order-book batch exceeded its child-read
+budget.  The batch was derived from every locally missing held token before the
+cycle selected its bounded coverage, urgency, and oldest-debt lanes.  One bulk
+transport failure could therefore consume the auxiliary deadline and defer the
+unrelated tail that the batch had no authority to prioritize.
+
+SCOPE is optional shared network prefetch for the positions already admitted by
+this cycle's coverage and urgent lanes plus its one active-network progress
+reservation.  The oldest durable debt keeps its earlier bounded singular read;
+unselected positions keep their normal per-position bounded refresh and are not
+members of the shared failure domain.  DRAIN is a successful scoped batch or
+each position's own finite quote attempt followed by canonical
+`MONITOR_REFRESHED`.  RESET is a fresh canonical q/book event, never batch start
+or scheduler success.  Acceptance proves a large held book produces a strict
+batch subset equal to the admitted position IDs, excludes the singular oldest
+debt, and retains the existing local-first, deadline, and fail-closed tests.
+
 ## 2026-08-12 Fresh target-specific ENS shape is required for entry
 
 The current forecast database contained 190 latest family certificates: 176

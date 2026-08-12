@@ -1409,8 +1409,17 @@ def test_monitoring_phase_serves_durable_debt_before_bulk_prefetch(monkeypatch):
         if isinstance(payload, tuple) and payload[0] == "bulk"
     )
     assert refresh_index < bulk_index
-    assert len(bulk_tokens) == 15
+    assert set(bulk_tokens) == {
+        position.token_id
+        for position in positions
+        if position.trade_id
+        in summary["held_monitor_network_prefetch_scope_positions"]
+    }
+    assert len(bulk_tokens) < 15
     assert "fairness-token-0" not in bulk_tokens
+    assert set(summary["held_monitor_network_prefetch_scope_positions"]).issubset(
+        set(summary["held_monitor_budget_coverage_positions"])
+    )
     from src.engine.monitor_refresh import prefetched_monitor_orderbook
 
     assert [event[:2] for event in events if event[0] == "bounded"] == [
