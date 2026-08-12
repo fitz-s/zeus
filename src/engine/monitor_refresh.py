@@ -1341,6 +1341,11 @@ def _perform_single_family_belief_reseed_failsoft(
             # later materializable cycle a real RESET instead of retaining the
             # held family in BELIEF_AUTHORITY_FAULT forever.
             input_revision_status = "BELIEF_INPUT_REVISION_RESEED_PENDING"
+        from src.engine.position_belief import monitor_belief_max_age_hours
+
+        minimum_posterior_computed_at = datetime.now(timezone.utc) - timedelta(
+            hours=monitor_belief_max_age_hours()
+        )
         report = enqueue_single_family_cycle_advance_reseed(
             forecast_db=Path(str(forecast_db)),
             seed_dir=Path(str(seed_dir)),
@@ -1349,6 +1354,7 @@ def _perform_single_family_belief_reseed_failsoft(
             target_date=target_date,
             metric=metric,
             held_position=True,
+            minimum_posterior_computed_at=minimum_posterior_computed_at,
             **day0_payload,
         )
         if isinstance(report, dict):

@@ -1005,6 +1005,135 @@ def test_single_family_reseed_materializes_missing_posterior(tmp_path, monkeypat
     assert row["reason"] == "MISSING_LIVE_POSTERIOR"
 
 
+def test_single_family_monitor_recomputes_expired_posterior_on_same_cycle(
+    tmp_path, monkeypatch
+) -> None:
+    """A held posterior's expired computation clock must not wait for a new source cycle."""
+    db_path = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    cycle = datetime(2026, 8, 12, 6, tzinfo=UTC)
+    _insert_artifact(
+        conn,
+        source_id="openmeteo_ecmwf_ifs_9km",
+        cycle_iso=cycle.isoformat(),
+    )
+    _insert_posterior(
+        conn,
+        city="Tel Aviv",
+        target_date="2026-08-13",
+        metric="high",
+        cycle_iso=cycle.isoformat(),
+        computed_at="2026-08-12T09:00:00+00:00",
+    )
+    conn.close()
+
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (cycle, ()),
+    )
+
+    def _fake_build_seed(_conn_arg, **kwargs):
+        path = Path(kwargs["output_path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"upgrade_trigger": kwargs.get("upgrade_trigger")}),
+            encoding="utf-8",
+        )
+        return path
+
+    monkeypatch.setattr(cycle_advance, "_build_and_write_advance_seed", _fake_build_seed)
+
+    report = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        city="Tel Aviv",
+        target_date="2026-08-13",
+        metric="high",
+        computed_at=datetime(2026, 8, 12, 13, tzinfo=UTC),
+        held_position=True,
+        minimum_posterior_computed_at=datetime(2026, 8, 12, 10, tzinfo=UTC),
+    )
+
+    assert report["status"] == "SAME_CYCLE_RECOMPUTE_ENQUEUED"
+    assert report["enqueued"] is True
+    seed_file = Path(str(report["seed_file"]))
+    assert json.loads(seed_file.read_text(encoding="utf-8")) == {
+        "upgrade_trigger": "held_belief_computed_age_expired",
+    }
+    check = sqlite3.connect(db_path)
+    check.row_factory = sqlite3.Row
+    row = check.execute(
+        """
+        SELECT consumed_cycle_time, target_cycle_time, held_position, reason
+        FROM cycle_advance_enqueues
+        WHERE city = 'Tel Aviv' AND target_date = '2026-08-13' AND metric = 'high'
+        """
+    ).fetchone()
+    check.close()
+    assert row is not None
+    assert row["consumed_cycle_time"] == cycle.isoformat()
+    assert row["target_cycle_time"] == cycle.isoformat()
+    assert row["held_position"] == 1
+    assert row["reason"] == "HELD_BELIEF_COMPUTED_AGE_EXPIRED"
+
+
+def test_single_family_monitor_does_not_recompute_fresh_same_cycle_posterior(
+    tmp_path, monkeypatch
+) -> None:
+    """A same-cycle posterior newer than the monitor cutoff remains completion proof."""
+    db_path = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    ensure_replacement_forecast_live_schema(conn)
+    cycle = datetime(2026, 8, 12, 6, tzinfo=UTC)
+    _insert_artifact(
+        conn,
+        source_id="openmeteo_ecmwf_ifs_9km",
+        cycle_iso=cycle.isoformat(),
+    )
+    _insert_posterior(
+        conn,
+        city="Tel Aviv",
+        target_date="2026-08-13",
+        metric="high",
+        cycle_iso=cycle.isoformat(),
+        computed_at="2026-08-12T12:00:00+00:00",
+    )
+    conn.close()
+
+    monkeypatch.setattr(
+        cycle_advance,
+        "family_materializable_cycle",
+        lambda *args, **kwargs: (cycle, ()),
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "_build_and_write_advance_seed",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("fresh posterior must not enqueue same-cycle work")
+        ),
+    )
+
+    report = cycle_advance.enqueue_single_family_cycle_advance_reseed(
+        forecast_db=db_path,
+        seed_dir=tmp_path / "seeds",
+        raw_manifest_dir=tmp_path / "raw",
+        city="Tel Aviv",
+        target_date="2026-08-13",
+        metric="high",
+        computed_at=datetime(2026, 8, 12, 13, tzinfo=UTC),
+        held_position=True,
+        minimum_posterior_computed_at=datetime(2026, 8, 12, 10, tzinfo=UTC),
+    )
+
+    assert report["status"] == "CYCLE_ADVANCE_NOT_NEEDED"
+    assert report["enqueued"] is False
+
+
 def test_single_family_monitor_reseed_promotes_existing_enqueue_to_held_priority(
     tmp_path, monkeypatch
 ) -> None:

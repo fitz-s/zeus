@@ -451,13 +451,19 @@ def test_reseed_falls_through_to_cycle_advance_without_input_revision(
             "already_enqueued": 0,
         },
     )
+    captured = {}
+
+    def enqueue_cycle(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "CYCLE_ADVANCE_ENQUEUED",
+            "enqueued": True,
+        }
+
     monkeypatch.setattr(
         cycle,
         "enqueue_single_family_cycle_advance_reseed",
-        lambda **_kwargs: {
-            "status": "CYCLE_ADVANCE_ENQUEUED",
-            "enqueued": True,
-        },
+        enqueue_cycle,
     )
     monkeypatch.setattr(mr, "_day0_observed_extreme_reseed_payload", lambda **_kw: {})
 
@@ -471,6 +477,14 @@ def test_reseed_falls_through_to_cycle_advance_without_input_revision(
     assert report["status"] == "CYCLE_ADVANCE_ENQUEUED"
     assert report["repair_lane"] == "cycle_advance"
     assert report["input_revision_status"] == "FUSION_UPGRADE_TRIGGER"
+    assert captured["held_position"] is True
+    cutoff = captured["minimum_posterior_computed_at"]
+    assert cutoff.tzinfo is not None and cutoff.utcoffset() is not None
+    from src.engine.position_belief import monitor_belief_max_age_hours
+
+    expected_age = timedelta(hours=monitor_belief_max_age_hours())
+    assert expected_age - timedelta(seconds=2) <= datetime.now(timezone.utc) - cutoff
+    assert datetime.now(timezone.utc) - cutoff <= expected_age + timedelta(seconds=2)
 
 
 def test_reseed_pending_input_revision_does_not_veto_cycle_advance(
@@ -527,6 +541,8 @@ def test_reseed_pending_input_revision_does_not_veto_cycle_advance(
     assert report["status"] == "CYCLE_ADVANCE_ENQUEUED"
     assert report["repair_lane"] == "cycle_advance"
     assert report["input_revision_status"] == "BELIEF_INPUT_REVISION_RESEED_PENDING"
+    cutoff = cycle_calls[0].pop("minimum_posterior_computed_at")
+    assert cutoff.tzinfo is not None and cutoff.utcoffset() is not None
     assert cycle_calls == [
         {
             "forecast_db": forecast_db,

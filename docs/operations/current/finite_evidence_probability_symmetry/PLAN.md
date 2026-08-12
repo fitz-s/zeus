@@ -4,6 +4,32 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-12 Expired held belief can rematerialize its same causal cycle
+
+The held monitor expires a replacement posterior on its computation clock even
+while the consumed source cycle remains inside the shared causal age bound.  Its
+repair worker previously treated that old posterior as permanent proof that the
+cycle was already covered.  With no newer provider revision or carrier cycle,
+the worker returned `CYCLE_ADVANCE_NOT_NEEDED`; the stale certificate therefore
+had no reset path and both statistical exit authority and complete global
+auction coverage remained unavailable.
+
+The single-family producer now receives the monitor's minimum acceptable
+`computed_at`.  A posterior older than that cutoff can enqueue one same-cycle
+canonical materialization while the source cycle remains legal.  A fresh
+posterior, a visible seed, or the exact active queue request suppresses duplicate
+work; an expired source cycle still fails closed.  Only the newly committed
+posterior clears freshness—no stale row or marker is relabeled current.
+
+SCOPE is one held `(city, target_date, metric)` family.  DRAIN is the existing
+replacement materialization queue using the exact latest causal family cycle.
+RESET is a canonical posterior on that cycle whose `computed_at` meets the
+monitor cutoff; an active exact request only defers duplication, and an expired
+source cycle requires normal cycle advance.  Acceptance requires same-cycle
+expired/fresh antibodies, held reseed cutoff wiring, focused materialization and
+monitor suites, live landing, and a subsequent complete current held-coverage
+auction receipt.
+
 ## 2026-08-12 Held belief repairs keep independent RESET lanes
 
 Madrid and Tel Aviv remained under active monitoring but could not form a fresh

@@ -31,6 +31,7 @@ in_scope:
 - src/contracts/AGENTS.md
 - src/contracts/snapshot_ingest_contract.py
 - src/data/replacement_forecast_cycle_policy.py
+- src/data/replacement_cycle_advance_trigger.py
 - src/data/replacement_forecast_bundle_reader.py
 - src/data/replacement_input_hwm.py
 - src/data/day0_observation_reader.py
@@ -116,6 +117,7 @@ in_scope:
 - tests/test_replacement_forecast_materialization_request_builder.py
 - tests/test_replacement_pipeline_files_contracts.py
 - tests/engine/test_monitor_held_belief_readthrough.py
+- tests/test_cycle_monotone_materialization.py
 - tests/test_replacement_forecast_bundle_reader_tradeable_latest.py
 - tests/test_replacement_forecast_bundle_reader_staleness.py
 - tests/test_replacement_seed_coverage_gate.py
