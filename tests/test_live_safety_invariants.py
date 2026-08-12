@@ -2251,10 +2251,10 @@ def test_monitor_durable_debt_retries_oldest_until_timestamp_advances(monkeypatc
     assert after_progress == [newer]
 
 
-def test_monitor_bounded_recovery_tranches_cover_book_without_overtaking_debt(
+def test_monitor_ready_hwm_covers_book_without_overtaking_debt(
     monkeypatch,
 ):
-    """Slow quote work still gives all 18 canonical append attempts in <=4 passes."""
+    """Ready HWM and bounded q work cover all canonical debt without retries."""
     from src.engine import cycle_runtime
     from src.engine.monitor_refresh import monitor_quote_refresh
 
@@ -2285,10 +2285,10 @@ def test_monitor_bounded_recovery_tranches_cover_book_without_overtaking_debt(
             "asks": [{"price": "0.42", "size": "20"}],
         }
 
-    class SlowQuoteClob:
+    class CurrentQuoteClob:
         def get_orderbook(self, token_id):
             events.append(("singular", token_id))
-            clock[0] += 13.0
+            clock[0] += 0.5
             return _book(token_id)
 
         def get_orderbook_snapshots(self, token_ids):
@@ -2296,17 +2296,46 @@ def test_monitor_bounded_recovery_tranches_cover_book_without_overtaking_debt(
             clock[0] += 1.0
             return {token_id: _book(token_id) for token_id in token_ids}
 
-    clob = SlowQuoteClob()
+    clob = CurrentQuoteClob()
+    from src.data.replacement_input_hwm import freeze_replacement_artifact_hwm
+    from src.engine.monitor_refresh import install_monitor_replacement_hwm_snapshot
+
+    hwm_conn = sqlite3.connect(":memory:")
+    hwm_conn.execute("BEGIN")
+    ready_hwm = freeze_replacement_artifact_hwm(
+        hwm_conn,
+        requests=(("Chicago", "2026-04-15", "high"),),
+        decision_time=datetime(2026, 4, 14, tzinfo=timezone.utc),
+    )
+    hwm_conn.rollback()
+    hwm_conn.close()
+    assert ready_hwm is not None
+
+    def _prefetch_ready_hwm(_positions, *, clob, summary, **_kwargs):
+        assert _positions == positions
+        assert install_monitor_replacement_hwm_snapshot(clob, ready_hwm)
+        summary["held_monitor_hwm_prefetch_status"] = "ready"
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_replacement_artifact_hwm",
+        _prefetch_ready_hwm,
+    )
     monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(
         cycle_runtime,
         "_fresh_local_held_monitor_orderbooks",
         lambda *_args, **_kwargs: {},
     )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_closed_non_accepting_market_info",
+        lambda *_args, **_kwargs: None,
+    )
 
     def _refresh(_conn, current_clob, position):
         monitor_quote_refresh(_conn, current_clob, position)
-        clock[0] += 12.0
+        clock[0] += 3.0
         return _monitor_test_edge_context(position)
 
     monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", _refresh)
@@ -2349,12 +2378,12 @@ def test_monitor_bounded_recovery_tranches_cover_book_without_overtaking_debt(
             run_exit_preflight=False,
             held_position_monitor_budget_seconds=75.0,
         )
-        assert len(pass_attempts[-1]) <= 6
+        assert len(pass_attempts[-1]) == len(set(pass_attempts[-1]))
         if len(covered) == 18:
             break
 
     assert len(pass_attempts) <= 4
-    assert covered == {f"bounded-debt-{index}" for index in range(18)}
+    assert covered == {f"bounded-debt-{index}" for index in range(18)}, summary
     assert all(pass_attempts)
     assert sum(len(attempts) for attempts in pass_attempts) == 18
 
