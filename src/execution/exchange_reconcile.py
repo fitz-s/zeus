@@ -5234,7 +5234,7 @@ def _ensure_entry_fill_position_event(
         order_status = "partial"
     existing = conn.execute(
         """
-        SELECT 1
+        SELECT sequence_no
           FROM position_events
          WHERE position_id = ?
            AND event_type = 'ENTRY_ORDER_FILLED'
@@ -5243,6 +5243,38 @@ def _ensure_entry_fill_position_event(
         """,
         (position_id, venue_order_id),
     ).fetchone()
+    if existing is not None:
+        later_reduction = conn.execute(
+            """
+            SELECT 1
+              FROM position_events
+             WHERE position_id = ?
+               AND sequence_no > ?
+               AND (
+                    event_type = 'EXIT_ORDER_FILLED'
+                    OR (
+                        json_valid(payload_json)
+                        AND json_extract(payload_json, '$.semantic_event')
+                            = 'CAPITAL_REDUCTION_FILLED'
+                    )
+               )
+             LIMIT 1
+            """,
+            (position_id, int(existing["sequence_no"])),
+        ).fetchone()
+        if later_reduction is not None:
+            # An entry fact is immutable acquisition provenance, not current
+            # exposure authority after capital has been released.  Replaying
+            # its cumulative fill here would resurrect already-sold shares;
+            # any late economics revision needs a reduction-aware correction
+            # atom instead of an entry projection rewrite.
+            logger.info(
+                "exchange_reconcile: preserve post-reduction exposure on "
+                "entry reobservation position_id=%s order_id=%s",
+                position_id,
+                venue_order_id,
+            )
+            return
     current_shares = _positive_decimal_or_none(current.get("shares"))
     current_cost = _positive_decimal_or_none(current.get("cost_basis_usd"))
     incremental_fill = bool(

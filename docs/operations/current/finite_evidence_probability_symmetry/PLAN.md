@@ -30,6 +30,12 @@ unit per current share), deriving residual cost from the same observation's
 current shares and valid average price.  This repairs the chain-cost side of
 the partial-exit convergence gate without changing fill-owned acquisition cost.
 
+An existing full reconcile path also replayed cumulative ENTRY facts after the
+capital-reduction event and could resurrect the sold quantity.  ENTRY facts
+remain immutable acquisition provenance, but once a later canonical
+`CAPITAL_REDUCTION_FILLED` or `EXIT_ORDER_FILLED` exists they no longer have
+current-exposure authority; reobservation must preserve the reduced projection.
+
 SCOPE is one authenticated EXIT/SELL command and one stable economic fill
 identity.  DRAIN is the normal recorded-fill economics recovery pass after a
 complete CONFIRMED trade arrives; an already-booked partial fill drains through
@@ -41,7 +47,8 @@ basis remain fail-closed.  Acceptance requires positive and already-booked
 partial correction antibodies, exchange/exit/fill-sync/recovery suites, live
 deployment, authenticated order/trade proof, exact CTF dust balance, corrected
 canonical PnL, one-time stale-full-lot chain-cost repair, and preservation of
-the global entry pause.
+the reduced exposure under later ENTRY reobservation, and preservation of the
+global entry pause.
 
 ## 2026-08-11 Zero-price balance snapshots retain authenticated fill cost
 

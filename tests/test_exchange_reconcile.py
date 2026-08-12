@@ -8863,6 +8863,118 @@ def test_recorded_maker_fill_reprojection_does_not_regress_pending_exit_phase(co
     }
 
 
+def test_entry_reobservation_cannot_resurrect_post_reduction_exposure(conn):
+    from src.execution.exchange_reconcile import (
+        reconcile_recorded_maker_fill_economics,
+        run_reconcile_sweep,
+    )
+
+    seed_command(conn, state="FILLED", size=23.7, price=0.07)
+    seed_position_baseline(conn)
+    seed_trade_decision_runtime_alias(conn)
+    maker_trade = TradeFact(
+        raw={
+            "id": "trade-entry-before-reduction",
+            "taker_order_id": "ord-other-taker",
+            "status": "CONFIRMED",
+            "size": "23.7",
+            "price": "0.93",
+            "transaction_hash": "0xentrybeforereduction",
+            "maker_orders": [
+                {
+                    "order_id": "ord-m5",
+                    "matched_amount": "23.7",
+                    "price": "0.07",
+                    "asset_id": YES_TOKEN,
+                    "side": "BUY",
+                }
+            ],
+        }
+    )
+    run_reconcile_sweep(
+        FakeM5Adapter(
+            positions=[position(token_id=YES_TOKEN, size="23.7")],
+            trades=[maker_trade],
+        ),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    )
+    entry_sequence = conn.execute(
+        """
+        SELECT sequence_no
+          FROM position_events
+         WHERE position_id = 'pos-m5'
+           AND event_type = 'ENTRY_ORDER_FILLED'
+           AND order_id = 'ord-m5'
+        """
+    ).fetchone()[0]
+    reduction_sequence = int(entry_sequence) + 1
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, order_id,
+            command_id, caused_by, source_module, payload_json, env
+        ) VALUES (?, 'pos-m5', 1, ?, 'MONITOR_REFRESHED', ?, 'day0_window',
+                  'day0_window', 'opening_inertia', 'ord-exit-reduction',
+                  'cmd-exit-reduction', 'partial_exit_fill',
+                  'tests.test_exchange_reconcile', ?, 'live')
+        """,
+        (
+            f"pos-m5:partial-exit:{reduction_sequence}",
+            reduction_sequence,
+            (NOW + timedelta(minutes=1)).isoformat(),
+            json.dumps(
+                {
+                    "semantic_event": "CAPITAL_REDUCTION_FILLED",
+                    "filled_shares": "20",
+                    "remaining_shares": "3.7",
+                    "remaining_cost_basis_usd": "0.259",
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'day0_window',
+               shares = 3.7,
+               cost_basis_usd = 0.259,
+               chain_shares = 3.7,
+               chain_cost_basis_usd = 0.259,
+               updated_at = ?
+         WHERE position_id = 'pos-m5'
+        """,
+        ((NOW + timedelta(minutes=1)).isoformat(),),
+    )
+
+    summary = reconcile_recorded_maker_fill_economics(
+        conn,
+        observed_at=NOW + timedelta(minutes=2),
+    )
+
+    assert summary["errors"] == 0
+    current = conn.execute(
+        """
+        SELECT phase, shares, cost_basis_usd, chain_shares,
+               chain_cost_basis_usd
+          FROM position_current
+         WHERE position_id = 'pos-m5'
+        """
+    ).fetchone()
+    assert dict(current) == pytest.approx(
+        {
+            "phase": "day0_window",
+            "shares": 3.7,
+            "cost_basis_usd": 0.259,
+            "chain_shares": 3.7,
+            "chain_cost_basis_usd": 0.259,
+        }
+    )
+
+
 def test_late_entry_fill_does_not_resurrect_terminal_order_remainder(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
     from src.state.venue_command_repo import append_order_fact
