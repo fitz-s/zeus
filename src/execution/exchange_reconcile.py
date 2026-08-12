@@ -1,5 +1,5 @@
 # Created: 2026-05 (R3 M5)
-# Last reused/audited: 2026-07-31
+# Last reused/audited: 2026-08-11
 # Authority basis (operator external-close incident chain 2026-06-10): the operator
 #   manually SOLD Zeus's position on the SHARED proxy wallet. When the order FILLED the
 #   void-misbooking double-counted the same 66.25 economic claim (journal buy-claim +
@@ -1859,10 +1859,11 @@ def reconcile_recorded_maker_fill_economics(
 
     The venue user stream emits a rounded trade-level top-line.  When Zeus is
     maker, its exact command leg is nested in ``maker_orders``.  When Zeus is a
-    taker BUY, every nested maker leg supplies either the selected token or its
-    binary complement and therefore proves the exact selected-token quote cost.
-    This repair appends a corrected fact instead of rewriting the old row, then
-    replays the entry-fill projection from the latest fact chain.
+    taker, every nested maker leg supplies either the selected token or its
+    binary complement and therefore proves exact selected-token quote cost for
+    BUY or quote proceeds for SELL.  This repair appends a corrected fact
+    instead of rewriting the old row, then replays the canonical projection
+    from the latest fact chain.
 
     ``live_tick_scope`` keeps the high-cadence command-recovery tick on current
     money-path rows. Historical terminal entry positions are still repaired by
@@ -2013,7 +2014,7 @@ def reconcile_recorded_maker_fill_economics(
             order_id = str(command.get("venue_order_id") or fact.get("venue_order_id") or "")
             selected_maker = _selected_maker_order(raw, order_id)
             phase = str(fact.get("cmd_position_phase") or "").strip()
-            taker_economics = (
+            taker_buy_economics = (
                 _taker_buy_trade_economics(
                     raw,
                     venue_order_id=order_id,
@@ -2028,6 +2029,18 @@ def reconcile_recorded_maker_fill_economics(
                 if not phase or phase in _ENTRY_FILL_PROJECTION_PHASES
                 else None
             )
+            taker_sell_economics = _taker_sell_trade_economics(
+                raw,
+                venue_order_id=order_id,
+                selected_token_id=str(
+                    fact.get("envelope_selected_token_id")
+                    or command.get("token_id")
+                    or ""
+                ),
+                yes_token_id=str(fact.get("envelope_yes_token_id") or ""),
+                no_token_id=str(fact.get("envelope_no_token_id") or ""),
+            )
+            taker_economics = taker_buy_economics or taker_sell_economics
             if selected_maker is None and taker_economics is None:
                 summary["stayed"] += 1
                 continue
@@ -2065,12 +2078,65 @@ def reconcile_recorded_maker_fill_economics(
                     fill_price=corrected_price,
                     reason=(
                         "taker_maker_legs_selected_token_quote_cost"
-                        if taker_economics is not None
+                        if taker_buy_economics is not None
+                        else "taker_maker_legs_selected_token_quote_proceeds"
+                        if taker_sell_economics is not None
                         else "maker_leg_economics_selected_for_command_order"
                     ),
                     observed_at=observed,
                 )
                 summary["corrected"] += 1
+            if taker_sell_economics is not None:
+                from src.state.fill_dedup import recorded_partial_exit_fill_cursors
+
+                position_id = str(command.get("position_id") or "").strip()
+                economic_identity = (
+                    f"economic-fill:v2:{command.get('command_id')}:"
+                    f"{order_id.lower()}:{str(fact.get('trade_id') or '').lower()}"
+                )
+                current = conn.execute(
+                    "SELECT * FROM position_current WHERE position_id = ?",
+                    (position_id,),
+                ).fetchone()
+                cursors = recorded_partial_exit_fill_cursors(conn, position_id)
+                if current is not None and economic_identity in cursors:
+                    current_map = dict(current)
+                    residual = _positive_decimal_or_none(current_map.get("shares"))
+                    chain_residual = _positive_decimal_or_none(
+                        current_map.get("chain_shares")
+                    )
+                    residual_cost = _positive_decimal_or_none(
+                        current_map.get("cost_basis_usd")
+                    )
+                    chain_residual_cost = _positive_decimal_or_none(
+                        current_map.get("chain_cost_basis_usd")
+                    )
+                    if (
+                        residual is not None
+                        and chain_residual is not None
+                        and residual_cost is not None
+                        and chain_residual_cost is not None
+                        and abs(residual - chain_residual) <= Decimal("0.000001")
+                        and abs(residual_cost - chain_residual_cost)
+                        <= Decimal("0.000001")
+                    ):
+                        from src.execution.command_recovery import (
+                            _append_unrecorded_partial_exit_economics,
+                        )
+
+                        repaired = _append_unrecorded_partial_exit_economics(
+                            conn,
+                            current=current_map,
+                            command_id=str(command.get("command_id") or ""),
+                            venue_order_id=order_id,
+                            expected_filled_size=corrected_shares,
+                            observed_at=observed.isoformat(),
+                        )
+                        if repaired:
+                            summary["exit_partial_economics_corrected"] = (
+                                summary.get("exit_partial_economics_corrected", 0)
+                                + repaired
+                            )
             _ensure_entry_fill_position_event(
                 conn,
                 command=command,
@@ -2208,6 +2274,99 @@ def _taker_buy_trade_economics(
     ):
         return None
     return shares, cost
+
+
+def _taker_sell_trade_economics(
+    raw: Mapping[str, Any],
+    *,
+    venue_order_id: str,
+    selected_token_id: str,
+    yes_token_id: str,
+    no_token_id: str,
+) -> tuple[Decimal, Decimal] | None:
+    """Return exact selected-token shares and quote proceeds for a taker SELL.
+
+    A binary CLOB taker SELL can match a BUY of the selected token at ``p`` or
+    a SELL of the complementary token at ``1-p``.  The confirmed REST trade's
+    top-line price is tick-rounded, so the complete maker legs are the exact
+    proceeds authority when they cover the taker order.
+    """
+
+    order_id = str(venue_order_id or "").strip()
+    selected = str(selected_token_id or "").strip()
+    yes_token = str(yes_token_id or "").strip()
+    no_token = str(no_token_id or "").strip()
+    token_pair = {yes_token, no_token}
+    if (
+        not order_id
+        or not selected
+        or len(token_pair) != 2
+        or "" in token_pair
+        or selected not in token_pair
+        or str(raw.get("trader_side") or "").upper() != "TAKER"
+        or str(raw.get("side") or "").upper() != "SELL"
+        or str(raw.get("taker_order_id") or "").strip() != order_id
+        or str(raw.get("asset_id") or "").strip() != selected
+    ):
+        return None
+    complement = next(token for token in token_pair if token != selected)
+    maker_orders = raw.get("maker_orders")
+    if not isinstance(maker_orders, list) or not maker_orders:
+        return None
+
+    shares = Decimal("0")
+    proceeds = Decimal("0")
+    for maker in maker_orders:
+        if not isinstance(maker, Mapping):
+            return None
+        amount = _positive_decimal_or_none(
+            _first_present(
+                maker,
+                "matched_amount",
+                "matchedAmount",
+                "filled_size",
+                "size",
+                "amount",
+                default=None,
+            )
+        )
+        price = _positive_decimal_or_none(
+            _first_present(
+                maker,
+                "avgPrice",
+                "avg_price",
+                "fillPrice",
+                "fill_price",
+                "price",
+                default=None,
+            )
+        )
+        asset = str(maker.get("asset_id") or "").strip()
+        side = str(maker.get("side") or "").upper()
+        if amount is None or price is None or price >= Decimal("1"):
+            return None
+        if asset == selected and side == "BUY":
+            selected_price = price
+        elif asset == complement and side == "SELL":
+            selected_price = Decimal("1") - price
+        else:
+            return None
+        if selected_price <= Decimal("0") or selected_price >= Decimal("1"):
+            return None
+        shares += amount
+        proceeds += amount * selected_price
+
+    root_size = _positive_decimal_or_none(
+        _first_present(raw, "filled_size", "size", "amount", default=None)
+    )
+    if (
+        shares <= Decimal("0")
+        or proceeds <= Decimal("0")
+        or root_size is None
+        or abs(root_size - shares) > Decimal("0.000001")
+    ):
+        return None
+    return shares, proceeds
 
 
 def _reconcile_recorded_nonfinal_exit_command_fill_state(

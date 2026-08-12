@@ -1,5 +1,5 @@
 # Created: 2026-07-06
-# Last reused or audited: 2026-07-13
+# Last reused or audited: 2026-08-11
 # Authority basis: money-path fill-aggregation correctness fix — venue_trade_facts
 #   is an append-only WebSocket observation log; the SAME real fill appears as
 #   MULTIPLE rows sharing trade_id (state progressing MATCHED->MINED->CONFIRMED,
@@ -475,12 +475,22 @@ def recorded_partial_exit_fill_cursors(
             prior_quantity, prior_notional = prior
             delta_quantity = _decimal(payload.get("filled_shares"))
             delta_notional = _decimal(payload.get("filled_notional_usd"))
-            if (
-                quantity <= prior_quantity
-                or notional <= prior_notional
-                or delta_quantity != quantity - prior_quantity
-                or delta_notional != notional - prior_notional
-            ):
+            correction_only = payload.get("economic_correction_only") is True
+            valid_correction = (
+                correction_only
+                and quantity == prior_quantity
+                and notional != prior_notional
+                and delta_quantity == Decimal("0")
+                and delta_notional == notional - prior_notional
+            )
+            valid_growth = (
+                not correction_only
+                and quantity > prior_quantity
+                and notional > prior_notional
+                and delta_quantity == quantity - prior_quantity
+                and delta_notional == notional - prior_notional
+            )
+            if not (valid_correction or valid_growth):
                 raise PartialExitEconomicDebtError(
                     "partial EXIT stable identity did not advance by its exact "
                     f"cumulative delta: position_id={position_id} identity={identity}"
@@ -570,21 +580,41 @@ def partial_exit_realized_pnl_fold(
         cumulative_notional = _decimal(
             payload.get("economic_fill_cumulative_notional_usd", notional)
         )
+        correction_only = payload.get("economic_correction_only") is True
+        values_present = all(
+            value is not None
+            for value in (
+                delta,
+                quantity,
+                notional,
+                cost,
+                cumulative_quantity,
+                cumulative_notional,
+            )
+        )
+        valid_atom = False
+        if values_present:
+            if correction_only:
+                valid_atom = (
+                    quantity == 0
+                    and notional != 0
+                    and cost == 0
+                    and delta == notional
+                )
+            else:
+                valid_atom = (
+                    quantity > 0
+                    and notional > 0
+                    and cost >= 0
+                    and cumulative_quantity >= quantity
+                    and cumulative_notional >= notional
+                    and delta == notional - cost
+                )
         if (
-            delta is None
-            or quantity is None
-            or notional is None
-            or cost is None
-            or cumulative_quantity is None
-            or cumulative_notional is None
-            or quantity <= 0
-            or notional <= 0
-            or cost < 0
+            not values_present
             or cumulative_quantity <= 0
             or cumulative_notional <= 0
-            or cumulative_quantity < quantity
-            or cumulative_notional < notional
-            or delta != notional - cost
+            or not valid_atom
         ):
             raise PartialExitEconomicDebtError(
                 f"partial EXIT event economics invalid: position_id={position_id} identity={identity}"
@@ -592,16 +622,30 @@ def partial_exit_realized_pnl_fold(
         prior = cursors.get(identity)
         if prior is not None:
             prior_quantity, prior_notional = prior
-            if (
-                cumulative_quantity <= prior_quantity
-                or cumulative_notional <= prior_notional
-                or quantity != cumulative_quantity - prior_quantity
-                or notional != cumulative_notional - prior_notional
-            ):
+            valid_correction = (
+                correction_only
+                and cumulative_quantity == prior_quantity
+                and cumulative_notional != prior_notional
+                and quantity == Decimal("0")
+                and notional == cumulative_notional - prior_notional
+            )
+            valid_growth = (
+                not correction_only
+                and cumulative_quantity > prior_quantity
+                and cumulative_notional > prior_notional
+                and quantity == cumulative_quantity - prior_quantity
+                and notional == cumulative_notional - prior_notional
+            )
+            if not (valid_correction or valid_growth):
                 raise PartialExitEconomicDebtError(
                     "partial EXIT stable identity did not advance by its exact "
                     f"cumulative delta: position_id={position_id} identity={identity}"
                 )
+        elif correction_only:
+            raise PartialExitEconomicDebtError(
+                "partial EXIT economics correction lacks a prior stable identity: "
+                f"position_id={position_id} identity={identity}"
+            )
         cursors[identity] = (cumulative_quantity, cumulative_notional)
         total += delta
     return total

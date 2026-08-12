@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-10
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Last reused/audited: 2026-08-11
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-11; last_reused=2026-08-11
 # Authority basis: first-principles same-position incremental fill aggregation
 # Purpose: R3 M5 exchange reconciliation sweep antibodies.
 # Reuse: Run when exchange_reconcile, venue facts, findings, heartbeat/cutover reconciliation, or operator finding resolution changes.
@@ -5303,6 +5303,331 @@ def test_recorded_confirmed_exit_trade_repair_hook_economically_closes_projectio
 
     assert repeat == {"scanned": 1, "projected": 0, "stayed": 1, "errors": 0}
     assert conn.total_changes == changes_before_repeat
+
+
+def test_confirmed_taker_sell_uses_exact_complementary_maker_leg_proceeds(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+    from src.state.venue_command_repo import append_trade_fact as append
+
+    yes_token = "taker-sell-yes"
+    no_token = "taker-sell-no"
+    position_id = "pos-taker-sell-exact"
+    command_id = "cmd-taker-sell-exact"
+    order_id = "ord-taker-sell-exact"
+    seed_position_baseline(conn, position_id=position_id, order_id="ord-entry-taker-sell")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               token_id = ?,
+               no_token_id = ?,
+               direction = 'buy_no',
+               order_status = 'sell_pending_confirmation',
+               shares = 12.99,
+               chain_shares = 12.99,
+               cost_basis_usd = 5.3259,
+               chain_cost_basis_usd = 5.3259,
+               entry_price = 0.41,
+               updated_at = ?
+         WHERE position_id = ?
+        """,
+        (yes_token, no_token, NOW.isoformat(), position_id),
+    )
+    seed_command(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        token_id=no_token,
+        side="SELL",
+        size=12.99,
+        price=0.69,
+        state="FILLED",
+        snapshot_token_id=yes_token,
+        snapshot_no_token_id=no_token,
+        snapshot_selected_token_id=no_token,
+        snapshot_outcome_label="NO",
+        envelope_yes_token_id=yes_token,
+        envelope_no_token_id=no_token,
+        order_type="FAK",
+        post_only=False,
+        exit_close_position=True,
+    )
+    raw = {
+        "id": "trade-taker-sell-exact",
+        "taker_order_id": order_id,
+        "asset_id": no_token,
+        "side": "SELL",
+        "size": "12.99",
+        "price": "0.92",
+        "status": "CONFIRMED",
+        "trader_side": "TAKER",
+        "maker_orders": [
+            {
+                "order_id": "maker-yes-1",
+                "matched_amount": "7.27",
+                "price": "0.06",
+                "asset_id": yes_token,
+                "side": "SELL",
+            },
+            {
+                "order_id": "maker-yes-2",
+                "matched_amount": "5",
+                "price": "0.07",
+                "asset_id": yes_token,
+                "side": "SELL",
+            },
+            {
+                "order_id": "maker-no",
+                "matched_amount": "0.72",
+                "price": "0.73",
+                "asset_id": no_token,
+                "side": "BUY",
+            },
+        ],
+    }
+    append(
+        conn,
+        trade_id=raw["id"],
+        venue_order_id=order_id,
+        command_id=command_id,
+        state="CONFIRMED",
+        filled_size="12.99",
+        fill_price="0.92",
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash=hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest(),
+        raw_payload_json=raw,
+    )
+
+    summary = reconcile_recorded_maker_fill_economics(
+        conn, observed_at=NOW + timedelta(seconds=1)
+    )
+
+    exact_price = Decimal("12.0094") / Decimal("12.99")
+    assert summary["corrected"] == 1
+    assert summary["exit_projected"] == 1
+    correction = conn.execute(
+        """
+        SELECT fill_price, json_extract(raw_payload_json, '$.zeus_repair.reason') AS reason
+          FROM venue_trade_facts
+         WHERE command_id = ?
+         ORDER BY trade_fact_id DESC
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    assert Decimal(correction["fill_price"]) == exact_price
+    assert correction["reason"] == "taker_maker_legs_selected_token_quote_proceeds"
+    current = conn.execute(
+        """
+        SELECT phase, shares, chain_shares, realized_pnl_usd
+          FROM position_current
+         WHERE position_id = ?
+        """,
+        (position_id,),
+    ).fetchone()
+    assert current["phase"] == "economically_closed"
+    assert current["shares"] == 12.99
+    assert current["chain_shares"] == 0.0
+    assert float(current["realized_pnl_usd"]) == pytest.approx(6.68)
+
+
+def test_confirmed_taker_sell_corrects_already_booked_partial_exit_notional(conn):
+    from src.execution.exchange_reconcile import reconcile_recorded_maker_fill_economics
+    from src.state.fill_dedup import partial_exit_realized_pnl_fold
+    from src.state.venue_command_repo import append_trade_fact as append
+
+    yes_token = "partial-correction-yes"
+    no_token = "partial-correction-no"
+    position_id = "pos-partial-correction"
+    command_id = "cmd-partial-correction"
+    order_id = "ord-partial-correction"
+    trade_id = "trade-partial-correction"
+    economic_identity = (
+        f"economic-fill:v2:{command_id}:{order_id}:{trade_id}"
+    )
+    seed_position_baseline(conn, position_id=position_id, order_id="ord-entry-partial-correction")
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit',
+               token_id = ?,
+               no_token_id = ?,
+               direction = 'buy_no',
+               order_status = 'backoff_exhausted',
+               shares = 0.000168,
+               chain_shares = 0.000168,
+               cost_basis_usd = 0.00006888,
+               chain_cost_basis_usd = 0.00006888,
+               entry_price = 0.41,
+               realized_pnl_usd = 6.62489988,
+               updated_at = ?
+         WHERE position_id = ?
+        """,
+        (yes_token, no_token, NOW.isoformat(), position_id),
+    )
+    seed_command(
+        conn,
+        command_id=command_id,
+        venue_order_id=order_id,
+        position_id=position_id,
+        token_id=no_token,
+        side="SELL",
+        size=12.99,
+        price=0.69,
+        state="FILLED",
+        snapshot_token_id=yes_token,
+        snapshot_no_token_id=no_token,
+        snapshot_selected_token_id=no_token,
+        snapshot_outcome_label="NO",
+        envelope_yes_token_id=yes_token,
+        envelope_no_token_id=no_token,
+        order_type="FAK",
+        post_only=False,
+        exit_close_position=False,
+    )
+    sequence_no = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, order_id,
+            command_id, caused_by, source_module, payload_json, env
+        ) VALUES (?, ?, 1, ?, 'MONITOR_REFRESHED', ?, 'pending_exit',
+                  'pending_exit', 'opening_inertia', ?, ?, 'partial_exit_fill',
+                  'tests.test_exchange_reconcile', ?, 'live')
+        """,
+        (
+            f"{position_id}:partial-exit:{sequence_no}",
+            position_id,
+            sequence_no,
+            NOW.isoformat(),
+            order_id,
+            command_id,
+            json.dumps(
+                {
+                    "semantic_event": "CAPITAL_REDUCTION_FILLED",
+                    "economic_fill_identity": economic_identity,
+                    "economic_fill_cumulative_shares": "12.99",
+                    "economic_fill_cumulative_notional_usd": "11.9508",
+                    "filled_shares": "12.99",
+                    "filled_notional_usd": "11.9508",
+                    "allocated_cost_basis_usd": "5.32590012",
+                    "realized_pnl_delta_usd": "6.62489988",
+                    "cumulative_realized_pnl_usd": "6.62489988",
+                    "fill_price": "0.92",
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
+    raw = {
+        "id": trade_id,
+        "taker_order_id": order_id,
+        "asset_id": no_token,
+        "side": "SELL",
+        "size": "12.99",
+        "price": "0.92",
+        "status": "CONFIRMED",
+        "trader_side": "TAKER",
+        "maker_orders": [
+            {"order_id": "m1", "matched_amount": "7.27", "price": "0.06", "asset_id": yes_token, "side": "SELL"},
+            {"order_id": "m2", "matched_amount": "5", "price": "0.07", "asset_id": yes_token, "side": "SELL"},
+            {"order_id": "m3", "matched_amount": "0.72", "price": "0.73", "asset_id": no_token, "side": "BUY"},
+        ],
+    }
+    append(
+        conn,
+        trade_id=trade_id,
+        venue_order_id=order_id,
+        command_id=command_id,
+        state="CONFIRMED",
+        filled_size="12.99",
+        fill_price="0.92",
+        source="REST",
+        observed_at=NOW,
+        raw_payload_hash=hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest(),
+        raw_payload_json=raw,
+    )
+
+    summary = reconcile_recorded_maker_fill_economics(
+        conn, observed_at=NOW + timedelta(seconds=1)
+    )
+
+    assert summary["corrected"] == 1
+    assert summary["exit_partial_economics_corrected"] == 1
+    correction = conn.execute(
+        """
+        SELECT payload_json
+          FROM position_events
+         WHERE position_id = ? AND caused_by = 'partial_exit_economics_repair'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    payload = json.loads(correction["payload_json"])
+    assert payload["economic_correction_only"] is True
+    assert payload["filled_shares"] == "0"
+    assert payload["filled_notional_usd"] == "0.0586"
+    assert payload["realized_pnl_delta_usd"] == "0.0586"
+    current = conn.execute(
+        "SELECT phase, shares, chain_shares, realized_pnl_usd FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    assert current["phase"] == "pending_exit"
+    assert current["shares"] == pytest.approx(0.000168)
+    assert current["chain_shares"] == pytest.approx(0.000168)
+    assert Decimal(str(current["realized_pnl_usd"])) == Decimal("6.68349988")
+    assert partial_exit_realized_pnl_fold(conn, position_id) == Decimal("6.68349988")
+
+    lower_raw = {
+        **raw,
+        "maker_orders": [
+            {"order_id": "m1", "matched_amount": "7.27", "price": "0.08", "asset_id": yes_token, "side": "SELL"},
+            {"order_id": "m2", "matched_amount": "5", "price": "0.09", "asset_id": yes_token, "side": "SELL"},
+            {"order_id": "m3", "matched_amount": "0.72", "price": "0.70", "asset_id": no_token, "side": "BUY"},
+        ],
+    }
+    append(
+        conn,
+        trade_id=trade_id,
+        venue_order_id=order_id,
+        command_id=command_id,
+        state="CONFIRMED",
+        filled_size="12.99",
+        fill_price="0.90",
+        source="REST",
+        observed_at=NOW + timedelta(seconds=2),
+        raw_payload_hash=hashlib.sha256(
+            json.dumps(lower_raw, sort_keys=True).encode()
+        ).hexdigest(),
+        raw_payload_json=lower_raw,
+    )
+    lower_summary = reconcile_recorded_maker_fill_economics(
+        conn, observed_at=NOW + timedelta(seconds=3)
+    )
+
+    assert lower_summary["corrected"] == 1
+    assert lower_summary["exit_partial_economics_corrected"] == 1
+    lower_payload = json.loads(
+        conn.execute(
+            """
+            SELECT payload_json
+              FROM position_events
+             WHERE position_id = ? AND caused_by = 'partial_exit_economics_repair'
+             ORDER BY sequence_no DESC LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()["payload_json"]
+    )
+    assert lower_payload["filled_notional_usd"] == "-0.267"
+    assert lower_payload["realized_pnl_delta_usd"] == "-0.267"
+    assert partial_exit_realized_pnl_fold(conn, position_id) == Decimal("6.41649988")
 
 
 def test_recorded_confirmed_exit_trade_economically_closes_disputed_chain_state_projection(conn):

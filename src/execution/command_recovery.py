@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-11; last_reused=2026-08-11
 # Purpose: Command recovery loop for unresolved venue command side effects.
 # Reuse: Run when command recovery, venue order payload normalization, or unknown side-effect resolution changes.
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md §P1.S4
@@ -15983,13 +15983,15 @@ def _append_unrecorded_partial_exit_economics(
             "partial EXIT canonical economics do not reconcile status receipt: "
             f"position_id={position_id} order_id={venue_order_id}"
         )
-    slices: list[tuple[object, Decimal, Decimal]] = []
+    slices: list[tuple[object, Decimal, Decimal, bool]] = []
     for fill in fills:
         prior_qty, prior_notional = cursors.get(
             fill.identity,
             (Decimal("0"), Decimal("0")),
         )
-        if fill.quantity < prior_qty or fill.notional < prior_notional:
+        if fill.quantity < prior_qty or (
+            fill.quantity > prior_qty and fill.notional <= prior_notional
+        ):
             raise PartialExitEconomicDebtError(
                 "partial EXIT canonical fill regressed: "
                 f"position_id={position_id} identity={fill.identity}"
@@ -16022,17 +16024,14 @@ def _append_unrecorded_partial_exit_economics(
         delta_notional = fill.notional - accounted_notional
         if delta_qty == 0:
             if delta_notional != 0:
-                raise PartialExitEconomicDebtError(
-                    "partial EXIT canonical fill revised price without quantity: "
-                    f"position_id={position_id} identity={fill.identity}"
-                )
+                slices.append((fill, delta_qty, delta_notional, True))
             continue
         if delta_notional <= 0:
             raise PartialExitEconomicDebtError(
                 "partial EXIT canonical fill has nonpositive economics: "
                 f"position_id={position_id} identity={fill.identity}"
             )
-        slices.append((fill, delta_qty, delta_notional))
+        slices.append((fill, delta_qty, delta_notional, False))
     if status_remaining_qty != 0 or status_remaining_notional != 0:
         raise PartialExitEconomicDebtError(
             "partial EXIT status receipt remains unmatched: "
@@ -16118,8 +16117,8 @@ def _append_unrecorded_partial_exit_economics(
     prior_sold_for_recovered = (
         canonical_total - unrecorded_quantity if baseline_shares is not None else Decimal("0")
     )
-    for offset, (fill, delta_qty, delta_notional) in enumerate(slices):
-        allocated_cost = delta_qty * unit_cost
+    for offset, (fill, delta_qty, delta_notional, correction_only) in enumerate(slices):
+        allocated_cost = Decimal("0") if correction_only else delta_qty * unit_cost
         pnl_delta = delta_notional - allocated_cost
         cumulative_realized += pnl_delta
         remaining_quantity -= delta_qty
@@ -16147,7 +16146,11 @@ def _append_unrecorded_partial_exit_economics(
         )
         payload.update(
             {
-                "semantic_event": "PARTIAL_EXIT_ECONOMICS_REPAIRED",
+                "semantic_event": (
+                    "PARTIAL_EXIT_ECONOMICS_CORRECTED"
+                    if correction_only
+                    else "PARTIAL_EXIT_ECONOMICS_REPAIRED"
+                ),
                 "proof_class": "authenticated_partial_exit_canonical_trade_fact",
                 "command_id": command_id,
                 "venue_order_id": venue_order_id,
@@ -16160,7 +16163,11 @@ def _append_unrecorded_partial_exit_economics(
                 ),
                 "filled_shares": canonical_decimal_text(delta_qty),
                 "filled_notional_usd": canonical_decimal_text(delta_notional),
-                "fill_price": canonical_decimal_text(delta_notional / delta_qty),
+                "fill_price": canonical_decimal_text(
+                    fill.unit_price
+                    if correction_only
+                    else delta_notional / delta_qty
+                ),
                 "allocated_cost_basis_usd": canonical_decimal_text(allocated_cost),
                 "realized_pnl_delta_usd": canonical_decimal_text(pnl_delta),
                 "cumulative_realized_pnl_usd": canonical_decimal_text(
@@ -16169,10 +16176,14 @@ def _append_unrecorded_partial_exit_economics(
                 "remaining_shares": canonical_decimal_text(remaining_shares_value),
                 "remaining_cost_basis_usd": canonical_decimal_text(remaining_cost_value),
                 "position_lifecycle_unchanged": True,
+                "economic_correction_only": correction_only,
             }
         )
         event["event_id"] = (
-            f"{position_id}:partial_exit_economics_repair:{fill.identity}"
+            f"{position_id}:partial_exit_economics_repair:{fill.identity}:"
+            f"{hashlib.sha256(canonical_decimal_text(fill.notional).encode()).hexdigest()[:16]}"
+            if correction_only
+            else f"{position_id}:partial_exit_economics_repair:{fill.identity}"
         )
         event["caused_by"] = "partial_exit_economics_repair"
         event["command_id"] = command_id

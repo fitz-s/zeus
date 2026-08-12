@@ -4,6 +4,37 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-11 Confirmed taker SELL retains exact quote proceeds
+
+A forward Tokyo 28C NO exit sold 12.99 shares after current belief reversed.
+The synchronous authenticated submit receipt proved 12.0094 USDC of proceeds
+(weighted fill 0.9245111624), while the later CONFIRMED account trade exposed a
+tick-rounded top-line price of 0.92 plus the complete maker-leg decomposition.
+The fill synchronizer correctly preferred CONFIRMED finality but the capital
+projection then used the rounded top line, understating realized PnL by 0.0586
+USDC.  The position had already reduced to 0.000168 non-executable dust, so an
+append-only correction must revise notional without selling shares twice.
+
+The repair reconstructs taker-SELL proceeds only when every maker leg has a
+valid selected-token BUY or complementary-token SELL shape, all legs sum to the
+root filled size, and the command/envelope/token identities agree.  It appends
+a corrected CONFIRMED trade fact and, when the same stable partial-fill identity
+was already booked, a zero-share signed-notional correction atom.  The fold
+accepts that atom only after a prior identity and requires exact cumulative
+quantity/notional deltas; exposure and allocated basis remain unchanged.
+
+SCOPE is one authenticated EXIT/SELL command and one stable economic fill
+identity.  DRAIN is the normal recorded-fill economics recovery pass after a
+complete CONFIRMED trade arrives; an already-booked partial fill drains through
+one append-only correction event after local and chain residuals agree.  RESET
+is exact equality between the canonical maker-leg notional and the persisted
+cursor; replay then appends nothing.  Missing token pairs, incomplete or mixed
+maker legs, quantity disagreement, absent prior identity, or divergent residual
+basis remain fail-closed.  Acceptance requires positive and already-booked
+partial correction antibodies, exchange/exit/fill-sync/recovery suites, live
+deployment, authenticated order/trade proof, exact CTF dust balance, corrected
+canonical PnL, and preservation of the global entry pause.
+
 ## 2026-08-11 Zero-price balance snapshots retain authenticated fill cost
 
 A forward partial fill exposed a transient canonical tear: the chain mirror
