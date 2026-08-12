@@ -1416,7 +1416,12 @@ def _create_db(path) -> None:
                 dependency_source_run_ids_json TEXT,
                 trade_authority_status TEXT NOT NULL,
                 training_allowed INTEGER NOT NULL,
-                runtime_layer TEXT NOT NULL DEFAULT 'live'
+                runtime_layer TEXT NOT NULL DEFAULT 'live',
+                q_lcb_json TEXT,
+                q_ucb_json TEXT,
+                provenance_json TEXT,
+                source_cycle_time TEXT,
+                computed_at TEXT
             )
             """
         )
@@ -1528,14 +1533,17 @@ def _create_db(path) -> None:
             INSERT INTO forecast_posteriors (
                 source_id, product_id, data_version, city, target_date,
                 temperature_metric, dependency_source_run_ids_json,
-                trade_authority_status, training_allowed
+                trade_authority_status, training_allowed, q_lcb_json,
+                q_ucb_json, provenance_json, source_cycle_time, computed_at
             ) VALUES (
                 'openmeteo_ecmwf_ifs9_bayes_fusion',
                 'openmeteo_ecmwf_ifs9_bayes_fusion_v1',
                 'openmeteo_ecmwf_ifs9_bayes_fusion_high_v1',
                 'Paris', '2026-06-09', 'high',
                 '{"baseline_b0":"baseline-current-Paris","openmeteo_ifs9_anchor":"openmeteo-current-Paris"}',
-                'live', 0
+                'live', 0, '{}', '{}',
+                '{"q_lcb_basis":"fused_center_bootstrap_p05","bayes_precision_fusion":{"current_evidence_shape":{"semantics_revision":"ensemble_center_scenarios_v4","shape_lag_hours":0.0,"translation_applied":false}}}',
+                '2026-06-07T06:00:00+00:00', '2026-06-07T10:00:00+00:00'
             )
             """
         )
@@ -1544,14 +1552,17 @@ def _create_db(path) -> None:
             INSERT INTO forecast_posteriors (
                 source_id, product_id, data_version, city, target_date,
                 temperature_metric, dependency_source_run_ids_json,
-                trade_authority_status, training_allowed
+                trade_authority_status, training_allowed, q_lcb_json,
+                q_ucb_json, provenance_json, source_cycle_time, computed_at
             ) VALUES (
                 'openmeteo_ecmwf_ifs9_bayes_fusion',
                 'openmeteo_ecmwf_ifs9_bayes_fusion_v1',
                 'openmeteo_ecmwf_ifs9_bayes_fusion_high_v1',
                 'Madrid', '2026-06-09', 'high',
                 '{"baseline_b0":"baseline-stale-Madrid","openmeteo_ifs9_anchor":"openmeteo-current-Madrid"}',
-                'live', 0
+                'live', 0, '{}', '{}',
+                '{"q_lcb_basis":"fused_center_bootstrap_p05","bayes_precision_fusion":{"current_evidence_shape":{"semantics_revision":"ensemble_center_scenarios_v4","shape_lag_hours":0.0,"translation_applied":false}}}',
+                '2026-06-07T06:00:00+00:00', '2026-06-07T10:00:00+00:00'
             )
             """
         )
@@ -1838,14 +1849,6 @@ def test_current_target_plan_reseeds_old_probability_semantics(tmp_path) -> None
     _create_db(db)
     conn = sqlite3.connect(db)
     try:
-        for ddl in (
-            "ALTER TABLE forecast_posteriors ADD COLUMN q_lcb_json TEXT",
-            "ALTER TABLE forecast_posteriors ADD COLUMN q_ucb_json TEXT",
-            "ALTER TABLE forecast_posteriors ADD COLUMN provenance_json TEXT",
-            "ALTER TABLE forecast_posteriors ADD COLUMN source_cycle_time TEXT",
-            "ALTER TABLE forecast_posteriors ADD COLUMN computed_at TEXT",
-        ):
-            conn.execute(ddl)
         conn.execute(
             """
             UPDATE forecast_posteriors
@@ -1915,9 +1918,6 @@ def test_current_target_plan_reseeds_same_cycle_late_used_model_input(tmp_path) 
     _create_db(db)
     conn = sqlite3.connect(db)
     try:
-        conn.execute("ALTER TABLE forecast_posteriors ADD COLUMN source_cycle_time TEXT")
-        conn.execute("ALTER TABLE forecast_posteriors ADD COLUMN computed_at TEXT")
-        conn.execute("ALTER TABLE forecast_posteriors ADD COLUMN provenance_json TEXT")
         conn.execute(
             "UPDATE forecast_posteriors SET source_cycle_time=?, computed_at=?, "
             "provenance_json=? WHERE city='Paris'",

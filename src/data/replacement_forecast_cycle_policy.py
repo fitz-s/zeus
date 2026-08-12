@@ -154,18 +154,28 @@ def current_evidence_shape_semantics_mismatch(provenance: object) -> bool:
 def current_evidence_shape_has_entry_authority(provenance: object) -> bool:
     """Whether the certificate carries a fresh target-specific ENS shape."""
 
+    # FAIL-CLOSED GATE CONTRACT
+    # SCOPE: new-entry authority for this one city/date/metric family.
+    # DRAIN: the normal target-specific materializer replaces stale/malformed
+    # shape provenance without disturbing held-position belief reads.
+    # RESET: a current-semantics, numeric lag-zero, untranslated shape whose
+    # stale flag is canonically absent or boolean false restores eligibility.
     shape = _current_evidence_shape(provenance)
     if shape is None:
         return False
-    try:
-        shape_lag_hours = float(shape["shape_lag_hours"])
-    except (KeyError, TypeError, ValueError):
+    shape_lag_hours = shape.get("shape_lag_hours")
+    if (
+        isinstance(shape_lag_hours, bool)
+        or not isinstance(shape_lag_hours, (int, float))
+    ):
+        return False
+    stale_shape_reused = shape.get("stale_shape_reused")
+    if stale_shape_reused is not None and stale_shape_reused is not False:
         return False
     return (
         str(shape.get("semantics_revision") or "")
         == CURRENT_EVIDENCE_SEMANTICS_REVISION
         and shape_lag_hours == 0.0
-        and shape.get("stale_shape_reused") is not True
         and shape.get("translation_applied") is False
         and not current_evidence_shape_semantics_mismatch(provenance)
     )
@@ -189,6 +199,7 @@ def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
     if "q_ucb_json" in cols:
         fragments.append(f"AND {alias}q_ucb_json IS NOT NULL")
     if "provenance_json" not in cols:
+        fragments.append("AND 0 = 1")
         return "\n              ".join(fragments)
     fragments.append(
         f"AND json_extract({alias}provenance_json, '$.q_lcb_basis') = "
@@ -201,10 +212,12 @@ def tradeable_grade_coverage_sql(*, posterior_columns, alias: str = "") -> str:
     # Missing lag provenance fails closed instead of being coerced to zero.
     fragments.extend(
         [
-            f"AND COALESCE(json_extract({alias}provenance_json, "
-            f"'{shape_path}.stale_shape_reused'), 0) = 0",
-            f"AND json_extract({alias}provenance_json, "
-            f"'{shape_path}.translation_applied') = 0",
+            "AND ("
+            f"json_type({alias}provenance_json, '{shape_path}.stale_shape_reused') IS NULL "
+            "OR "
+            f"json_type({alias}provenance_json, '{shape_path}.stale_shape_reused') = 'false')",
+            f"AND json_type({alias}provenance_json, "
+            f"'{shape_path}.translation_applied') = 'false'",
             f"AND json_type({alias}provenance_json, '{shape_path}.shape_lag_hours') "
             "IN ('integer', 'real')",
             f"AND CAST(json_extract({alias}provenance_json, "

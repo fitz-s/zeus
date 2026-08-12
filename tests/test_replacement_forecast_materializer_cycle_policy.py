@@ -149,10 +149,32 @@ def test_current_evidence_semantics_is_probability_identity_and_coverage() -> No
     stale_reused["q_lcb_basis"] = "fused_center_bootstrap_p05"
     missing_lag = json.loads(json.dumps(current))
     del missing_lag["bayes_precision_fusion"]["current_evidence_shape"]["shape_lag_hours"]
+    omitted_stale = json.loads(json.dumps(current))
+    del omitted_stale["bayes_precision_fusion"]["current_evidence_shape"]["stale_shape_reused"]
+    malformed_shapes = []
+    for field, value in (
+        ("shape_lag_hours", False),
+        ("shape_lag_hours", "0"),
+        ("stale_shape_reused", 0),
+        ("stale_shape_reused", "false"),
+    ):
+        malformed = json.loads(json.dumps(current))
+        malformed["bayes_precision_fusion"]["current_evidence_shape"][field] = value
+        malformed_shapes.append(malformed)
     assert is_tradeable(current) is True
+    assert is_tradeable(omitted_stale) is True
     assert is_tradeable(stale_reused) is False
     assert is_tradeable(missing_lag) is False
     assert current_evidence_shape_has_entry_authority(missing_lag) is False
+    for malformed in malformed_shapes:
+        assert is_tradeable(malformed) is False
+        assert current_evidence_shape_has_entry_authority(malformed) is False
+
+    missing_provenance_clause = tradeable_grade_coverage_sql(
+        posterior_columns={"q_lcb_json", "q_ucb_json"},
+        alias="p.",
+    )
+    assert "AND 0 = 1" in missing_provenance_clause
 
 
 @dataclass(frozen=True)
