@@ -278,12 +278,13 @@ class ExitContext:
     # 2026-05-31 severance deadlocked because the belief read opened a SECOND world connection
     # inside the reactor SAVEPOINT; threading the bounds through this frozen context means the
     # live CI-separation gate performs ZERO DB I/O, so that deadlock category is impossible.
-    #   entry_posterior : held-side belief point at entry (Position.p_posterior, frozen).
-    #   entry_ci        : (lo, hi) entry belief CI (entry_posterior ± entry_ci_width/2).
+    #   entry_posterior : optional held-side belief point at entry (attribution only).
+    #   entry_ci        : optional entry belief CI (attribution only).
     #   current_ci      : (lo, hi) CURRENT belief CI (fresh bootstrap from this cycle).
     #   belief_available: False when current belief math is degraded (day0 absorbing-mask /
     #                     obs gap) — the EVIDENCE_UNAVAILABLE third state (distinct from
-    #                     belief-reversed). Missing current_ci cannot authorize a local SELL.
+    #                     belief-reversed). Missing current_ci cannot authorize a local SELL;
+    #                     missing historical entry belief cannot suppress a complete current CI.
     entry_posterior: Optional[float] = None
     entry_ci: Optional[tuple] = None
     current_ci: Optional[tuple] = None

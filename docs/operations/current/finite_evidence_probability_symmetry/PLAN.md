@@ -4,6 +4,26 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-12 Current hold value cannot depend on sunk entry provenance
+
+A venue-confirmed fill can outrun its original position projection.  The
+recovery path preserved the real exposure but historically used zero as the
+missing entry posterior.  The held exit-context builder then coupled the fresh
+current confidence interval to that historical field: even with a fresh Day0
+q and fresh executable book, it omitted `current_ci` and forced
+`EVIDENCE_UNAVAILABLE`.  This is a category error.  The unified exit law
+compares current liquidation proceeds with current hold value; entry belief and
+entry price are sunk attribution facts, not inputs to that comparison.
+
+Current belief bounds are now built whenever the current q/edge band and book
+price are finite, independently of the optional entry witness.  Entry posterior
+and entry CI remain available when valid and remain absent when not proven; no
+historical probability is fabricated.  SCOPE is one held-position exit context.
+DRAIN is the next normal monitor refresh with fresh q and book.  RESET is a
+finite current held-side CI; stale/missing current evidence still fails closed.
+Acceptance requires an antibody with `p_posterior=0` plus fresh current q/book
+that reaches the same predicted-bin SELL law as every other position.
+
 ## 2026-08-12 Recovered fills cannot depend on a dead cross-DB FK
 
 The confirmed-fill projection can recover a real venue acquisition before its

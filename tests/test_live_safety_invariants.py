@@ -16072,6 +16072,105 @@ def test_exit_context_projects_boundary_probability_intervals_onto_unit_support(
     assert "entry_held_ci_invalid" not in decision.applied_validations
 
 
+@pytest.mark.parametrize("direction", ["buy_yes", "buy_no"])
+def test_recovered_fill_without_entry_belief_still_uses_fresh_current_hold_value(direction):
+    """A sunk entry witness gap cannot trap fresh negative-edge exposure."""
+    from types import SimpleNamespace
+
+    from src.engine.cycle_runtime import _build_exit_context
+
+    pos = _make_position(
+        direction=direction,
+        size_usd=9.0,
+        entry_price=0.45,
+        entry_ci_width=0.0,
+        p_posterior=0.0,
+    )
+    pos.last_monitor_prob = 0.02
+    pos.last_monitor_prob_is_fresh = True
+    pos.last_monitor_market_price = 0.18
+    pos.last_monitor_market_price_is_fresh = True
+    pos.last_monitor_best_bid = 0.18
+    pos.chain_state = "synced"
+    edge_ctx = SimpleNamespace(
+        p_posterior=0.02,
+        p_market=[0.18],
+        confidence_band_lower=0.01 - 0.18,
+        confidence_band_upper=0.03 - 0.18,
+        divergence_score=0.0,
+        market_velocity_1h=0.0,
+    )
+
+    context = _build_exit_context(
+        pos,
+        edge_ctx,
+        hours_to_settlement=2.0,
+        ExitContext=ExitContext,
+    )
+    decision = pos.evaluate_exit(context)
+
+    assert context.entry_posterior is None
+    assert context.entry_ci is None
+    assert context.current_ci == pytest.approx((0.01, 0.03))
+    assert pos._monitor_current_held_ci == pytest.approx((0.01, 0.03))
+    assert decision.should_exit is True
+    assert decision.reason == "SELL_REVERSAL"
+
+
+@pytest.mark.parametrize(
+    ("fresh_prob", "prob_fresh", "market_fresh"),
+    [
+        (0.02, False, True),
+        (0.02, True, False),
+        ("not-a-number", True, True),
+    ],
+)
+def test_recovered_fill_current_hold_value_fails_closed_without_cofresh_q_book(
+    fresh_prob,
+    prob_fresh,
+    market_fresh,
+):
+    """Missing entry provenance never relaxes current q/book freshness."""
+    from types import SimpleNamespace
+
+    from src.engine.cycle_runtime import _build_exit_context
+
+    pos = _make_position(
+        direction="buy_no",
+        size_usd=9.0,
+        entry_price=0.45,
+        entry_ci_width=0.0,
+        p_posterior=0.0,
+    )
+    pos.last_monitor_prob = 0.02
+    pos.last_monitor_prob_is_fresh = prob_fresh
+    pos.last_monitor_market_price = 0.18
+    pos.last_monitor_market_price_is_fresh = market_fresh
+    pos.last_monitor_best_bid = 0.18
+    pos.chain_state = "synced"
+    edge_ctx = SimpleNamespace(
+        p_posterior=fresh_prob,
+        p_market=[0.18],
+        confidence_band_lower=0.01 - 0.18,
+        confidence_band_upper=0.03 - 0.18,
+        divergence_score=0.0,
+        market_velocity_1h=0.0,
+    )
+
+    context = _build_exit_context(
+        pos,
+        edge_ctx,
+        hours_to_settlement=2.0,
+        ExitContext=ExitContext,
+    )
+    decision = pos.evaluate_exit(context)
+
+    assert context.current_ci is None
+    assert pos._monitor_current_held_ci is None
+    assert decision.should_exit is False
+    assert decision.reason == "EVIDENCE_UNAVAILABLE"
+
+
 def test_day0_stale_probability_bypass_tokens_are_not_produced_by_source():
     """Legacy Day0 authority-waiver labels must not reappear in runtime source."""
     forbidden = {

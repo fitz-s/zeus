@@ -5298,26 +5298,38 @@ def _build_exit_context(
         _pos_entry_posterior = float(pos.p_posterior)
     except (TypeError, ValueError):
         _pos_entry_posterior = None
+    _fresh_post_finite = _finite_float_or_none(_fresh_post)
+    _cb_lo_finite = _finite_float_or_none(_cb_lo)
+    _cb_hi_finite = _finite_float_or_none(_cb_hi)
+    _held_price_finite = _finite_float_or_none(_held_price)
+    current_belief_finite = (
+        bool(getattr(pos, "last_monitor_prob_is_fresh", False))
+        and bool(getattr(pos, "last_monitor_market_price_is_fresh", False))
+        and _fresh_post_finite is not None
+        and _cb_lo_finite is not None
+        and _cb_hi_finite is not None
+        and _held_price_finite is not None
+    )
+    if current_belief_finite:
+        # Current hold value is independent of the sunk entry certificate.  A
+        # recovered fill may temporarily lack its historical entry witness, but
+        # that must not suppress a complete fresh q/book comparison and trap
+        # real exposure in EVIDENCE_UNAVAILABLE.
+        _current_ci = (
+            max(0.0, _cb_lo_finite + _held_price_finite),
+            min(1.0, _cb_hi_finite + _held_price_finite),
+        )
     if (
         _pos_entry_posterior is not None
         and math.isfinite(_pos_entry_posterior)
         and 0.0 < _pos_entry_posterior < 1.0
-        and _fresh_post is not None and math.isfinite(float(_fresh_post))
-        and _cb_lo is not None and _cb_hi is not None and _held_price is not None
-        and math.isfinite(float(_cb_lo)) and math.isfinite(float(_cb_hi))
-        and math.isfinite(float(_held_price))
     ):
-        # Both entry and a finite CURRENT belief CI are available → arm the CI-separation gate.
+        # Historical entry belief remains an independent attribution surface.
         _entry_posterior = _pos_entry_posterior
         _ci_half = max(0.0, float(getattr(pos, "entry_ci_width", 0.0) or 0.0)) / 2.0
         _entry_ci = (
             max(0.0, _entry_posterior - _ci_half),
             min(1.0, _entry_posterior + _ci_half),
-        )
-        # Shift edge-space band → belief space by adding the held-side price back.
-        _current_ci = (
-            max(0.0, float(_cb_lo) + float(_held_price)),
-            min(1.0, float(_cb_hi) + float(_held_price)),
         )
 
     # Receipt-only evidence for the later family telemetry. Always overwrite
