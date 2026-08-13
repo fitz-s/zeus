@@ -1,6 +1,6 @@
 # Created: 2026-07-25
-# Last reused or audited: 2026-08-02
-# Lifecycle: created=2026-07-25; last_reviewed=2026-08-02; last_reused=2026-08-02
+# Last reused or audited: 2026-08-12
+# Lifecycle: created=2026-07-25; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Authority basis: 7-day production block-event audit -- one stuck EDLI order
 #   was blocking new-entry BUY admission for every family (32,763 blocking
 #   instances, 20.97h/7d). This narrows the adapter-level gate
@@ -192,6 +192,39 @@ def test_day0_entry_containment_preserves_hard_facts_and_non_day0_candidates():
     assert era._day0_unresolved_entry_probability_rejection_reason(
         day0_payoff_truth="locked",
     ) is None
+
+
+def test_statistical_entry_requires_current_regime_settlement_advantage():
+    reason = era._unproven_statistical_entry_advantage_rejection_reason(
+        day0_payoff_truth=None,
+    )
+
+    assert reason == (
+        "GLOBAL_CURRENT_REGIME_SETTLEMENT_GRADED_CAPITAL_ADVANTAGE_UNPROVEN"
+    )
+
+
+@pytest.mark.parametrize("truth", ("locked", "refuted"))
+def test_current_day0_hard_fact_does_not_need_statistical_advantage(truth):
+    assert era._unproven_statistical_entry_advantage_rejection_reason(
+        day0_payoff_truth=truth,
+    ) is None
+
+
+def test_settlement_advantage_gate_precedes_strategy_and_capital_checks():
+    import inspect
+
+    source = inspect.getsource(era.event_bound_live_adapter_from_trade_conn)
+    advantage_at = source.index(
+        "_unproven_statistical_entry_advantage_rejection_reason("
+    )
+    strategy_at = source.index("_event_bound_strategy_key(", advantage_at)
+    capital_at = source.index(
+        "_global_current_entry_feasibility_rejection_reason(",
+        advantage_at,
+    )
+
+    assert advantage_at < strategy_at < capital_at
     assert era._day0_unresolved_entry_probability_rejection_reason(
         day0_payoff_truth="refuted",
     ) is None

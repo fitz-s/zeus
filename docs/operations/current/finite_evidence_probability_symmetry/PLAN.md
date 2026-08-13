@@ -4,6 +4,33 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-12 Current truth is not current-regime capital advantage
+
+The full global solver used current q, book, and wealth but let its
+`current_state_solve` path bypass settlement-graded OOF reliability.  Freshness
+prevents time travel; it does not prove that the model is more accurate than
+the executable market after costs.  The current artifact predates both the
+active probability semantics and the current global selection/execution rule,
+while recent live fills include selected beliefs near 0.90 that later collapsed
+to approximately zero.  It cannot license fresh risk.
+
+All risk-increasing statistical BUYs are now excluded before strategy, Kelly,
+or capital ranking.  Current Day0 LOCKED/REFUTED hard facts remain eligible
+because their payoff is fixed by monotone source truth rather than estimated
+model advantage.  SELL/HOLD/CASH remain continuously comparable, and this gate
+does not force liquidation.  The no-order outcome is a valid global optimum in
+a zero-sum market when no positive executable advantage is proven.
+
+SCOPE is every statistical BUY under forecast or unresolved/unknown Day0
+authority.  DRAIN is a strict causal walk-forward artifact that grades the exact
+current probability semantics, current selection rule, executable cost/fill
+regime, and settlement outcome.  RESET is successful validation consumed by
+the same candidate-policy seam; process health, fresh q, config, or restart
+cannot clear it.  Acceptance requires direct helper tests for statistical and
+hard-fact cases, source-order proof before strategy/Kelly/capital, focused
+global-entry tests, zero post-load ENTRY commands, and a complete held-capital
+auction receipt.
+
 ## 2026-08-12 Marginal peak time is not today's conditional peak state
 
 The Day0 HIGH generator mixed a historical `diurnal_peak_prob` atom into the
