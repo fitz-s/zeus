@@ -277,7 +277,12 @@ def _install_riskguard_collateral_ledger() -> bool:
     if get_global_ledger() is not None:
         return True
     try:
-        configure_global_ledger(CollateralLedger(db_path=_zeus_trade_db_path()))
+        configure_global_ledger(
+            CollateralLedger(
+                db_path=_zeus_trade_db_path(),
+                initialize_schema=False,
+            )
+        )
         logger.info(
             "RiskGuard CollateralLedger reader installed (db=%s)",
             _zeus_trade_db_path(),

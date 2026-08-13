@@ -59,6 +59,11 @@ from src.state import collateral_ledger
 @pytest.fixture(autouse=True)
 def _reset_ledger_global():
     collateral_ledger.configure_global_ledger(None)
+    from src.state import db as state_db
+
+    collateral_ledger.CollateralLedger(
+        db_path=state_db._zeus_trade_db_path()
+    ).close()
     yield
     collateral_ledger.configure_global_ledger(None)
 

@@ -3951,12 +3951,9 @@ def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
                 balance, rec.source, rec.cached,
             )
 
-    # Install the process-wide collateral ledger singleton with a ledger-owned
-    # persistent conn so downstream executor / riskguard preflight callers do
-    # not race against transient conn close. Failures here are non-fatal at
-    # boot — preflight will surface `collateral_ledger_unconfigured` if the
-    # singleton is missing, which is already the existing fail-closed code
-    # path for any operator misconfiguration.
+    # Install a path-backed reader of the schema initialized by daemon
+    # pre-flight/migrations. This boot path consumes sidecar snapshots; it must
+    # not acquire the canonical writer merely to repeat idempotent DDL.
     try:
         from src.state.collateral_ledger import (
             CollateralLedger,
@@ -3964,7 +3961,10 @@ def _startup_wallet_check(clob=None, bankroll_record=_WALLET_RECORD_UNSET):
         )
         from src.state.db import _zeus_trade_db_path
 
-        ledger = CollateralLedger(db_path=_zeus_trade_db_path())
+        ledger = CollateralLedger(
+            db_path=_zeus_trade_db_path(),
+            initialize_schema=False,
+        )
         configure_global_ledger(ledger)
         logger.info(
             "CollateralLedger global singleton installed (db=%s)",

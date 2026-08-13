@@ -311,7 +311,7 @@ files:
   src/main.py:
     zone: K2_runtime
     authority_role: live_daemon_entry
-    why: Live-only daemon entry point. Its targeted executable snapshot refresh now passes per-row trade write coordinator leases into market_scanner instead of holding the legacy trade writer lock around CLOB refresh; runtime snapshot freshness checks use executable_market_snapshot_latest before falling back to the append log. The 10-minute chain-mirror backstop is non-deferrable because it refreshes upstream holdings authority before a short serialized trade-DB transaction; active entry, redecision, or monitor consumers cannot starve chain_seen_at past its fail-closed bound. Incomplete exact held-SELL completion debt snapshots all currently queued exact wake IDs for one fair non-held selection turn without acknowledging or weakening the durable debt. Capital-blocking cancel recovery keeps the shared reactor admission fence through its exact venue snapshot and DB apply, so a newly admitted auction cannot repeatedly defeat the debt's RESET after the scheduler already reserved the handoff.
+    why: Live-only daemon entry point. Its targeted executable snapshot refresh now passes per-row trade write coordinator leases into market_scanner instead of holding the legacy trade writer lock around CLOB refresh; runtime snapshot freshness checks use executable_market_snapshot_latest before falling back to the append log. The 10-minute chain-mirror backstop is non-deferrable because it refreshes upstream holdings authority before a short serialized trade-DB transaction; active entry, redecision, or monitor consumers cannot starve chain_seen_at past its fail-closed bound. Incomplete exact held-SELL completion debt snapshots all currently queued exact wake IDs for one fair non-held selection turn without acknowledging or weakening the durable debt. Capital-blocking cancel recovery keeps the shared reactor admission fence through its exact venue snapshot and DB apply, so a newly admitted auction cannot repeatedly defeat the debt's RESET after the scheduler already reserved the handoff. At boot it installs the process-local collateral singleton as a read-only validated consumer of the sidecar's pre-migrated snapshots, never as a schema writer.
   src/ingest_main.py:
     zone: K2_runtime
     authority_role: ingest_daemon_entry
@@ -1016,7 +1016,7 @@ files:
   src/riskguard/riskguard.py:
     zone: K1_governance
     authority_role: risk_runtime
-    why: Independent risk process; risk output must change trading behavior, and every persisted full or degraded row keeps one risk-details contract shape for health readers. Its canonical risk DB schema includes the transaction-bound cutover generation receipt used for crash-safe migration resume.
+    why: Independent risk process; risk output must change trading behavior, and every persisted full or degraded row keeps one risk-details contract shape for health readers. Its canonical risk DB schema includes the transaction-bound cutover generation receipt used for crash-safe migration resume. Its collateral singleton is a read-only validated consumer of sidecar-produced current snapshots, so the protective process cannot contend for the trade-DB writer through repeated collateral DDL.
     downstream:
     - src/engine/cycle_runner.py
     - src/observability/status_summary.py

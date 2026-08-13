@@ -54,6 +54,11 @@ def _reset_ledger_global():
     """
     bankroll_provider.reset_cache_for_tests()
     collateral_ledger.configure_global_ledger(None)
+    from src.state import db as state_db
+
+    collateral_ledger.CollateralLedger(
+        db_path=state_db._zeus_trade_db_path()
+    ).close()
     yield
     collateral_ledger.configure_global_ledger(None)
     bankroll_provider.reset_cache_for_tests()
@@ -139,6 +144,26 @@ def test_site_b_routes_through_current_no_second_fetch(monkeypatch):
     assert collateral_ledger.get_global_ledger() is not None, (
         "CollateralLedger global singleton was not installed by _startup_wallet_check"
     )
+
+
+def test_startup_snapshot_reader_does_not_repeat_schema_ddl(monkeypatch):
+    """The live daemon consumes the pre-migrated sidecar ledger read-only."""
+    _install_trade_db_snapshot(value_usd=1098.62)
+    monkeypatch.setattr(bankroll_provider, "current", _CurrentCounter(returns_none=True))
+    monkeypatch.setattr(
+        collateral_ledger,
+        "init_collateral_schema",
+        lambda _conn: (_ for _ in ()).throw(
+            AssertionError("startup snapshot reader must not run schema DDL")
+        ),
+    )
+
+    main_mod._startup_wallet_check(clob=None)
+
+    assert collateral_ledger.get_global_ledger() is not None
+    record = bankroll_provider.cached()
+    assert record is not None
+    assert record.value_usd == 1098.62
 
 
 def test_submit_fail_closed_but_daemon_continues_when_current_returns_none(monkeypatch):

@@ -635,7 +635,7 @@ test_trust_policy:
     tests/test_promote_platt.py: {created: "2026-05-12", last_used: "2026-05-12"}
     tests/test_rejection_stage_contract.py: {created: "2026-05-02", last_used: "2026-05-02"}
     tests/test_replay_correctness_gate.py: {created: "2026-05-06", last_used: "2026-05-06"}
-    tests/test_riskguard_onchain_bankroll.py: {created: "2026-05-01", last_used: "2026-05-01"}
+    tests/test_riskguard_onchain_bankroll.py: {created: "2026-05-01", last_used: "2026-08-12", note: "RiskGuard consumes current on-chain bankroll and installs the sidecar-produced collateral snapshot reader through read-only schema validation without repeated DDL."}
     tests/test_ritual_signal_aggregate.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_ritual_signal_emission.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_route_card_token_budget.py: {created: "2026-05-06", last_used: "2026-05-06"}
@@ -775,8 +775,8 @@ test_trust_policy:
     tests/test_t4_selection_rule_invariants.py: {created: "2026-05-28", last_used: "2026-05-29"}
     # PR #391 fix/remove-live-caps — no-caps + boot efficiency + over-size guard antibodies (2026-06-05)
     tests/test_boot_guard_kelly_ceiling.py: {created: "2026-06-05", last_used: "2026-08-02", note: "Exact 1/32 governed Kelly plus correlated-ceiling boot guards; drift, non-finite values, and over-size relationships are FATAL before live entry."}
-    tests/test_startup_wallet_dedup.py: {created: "2026-06-05", last_used: "2026-06-19", note: "efficiency #1 RT: production wallet gate routes through bankroll_provider.current() warm cache; wallet unavailable leaves submit fail-closed without killing monitor"}
-    tests/test_startup_wallet_warm_overlap.py: {created: "2026-06-05", last_used: "2026-06-19", note: "efficiency #3 RT: boot warms current() on a background thread, joins, then the gate consumes the joined record (warm+gate = ONE fetch; None -> submit fail-closed without killing monitor)"}
+    tests/test_startup_wallet_dedup.py: {created: "2026-06-05", last_used: "2026-08-12", note: "Efficiency #1 RT: production wallet gate routes through bankroll_provider.current() warm cache; wallet unavailable leaves submit fail-closed without killing monitor; the boot singleton consumes a pre-migrated sidecar snapshot without schema DDL."}
+    tests/test_startup_wallet_warm_overlap.py: {created: "2026-06-05", last_used: "2026-08-12", note: "Efficiency #3 RT: boot warms current() on a background thread, joins, then the gate consumes the joined record (warm+gate = ONE fetch; None -> submit fail-closed without killing monitor) from a daemon-preinitialized collateral schema."}
     tests/test_wallet_source.py: {created: "2026-05-04", last_used: "2026-06-19", note: "P7 wallet bankroll source: wallet is sole live bankroll truth; wallet errors block submit without synthesizing bankroll or killing monitor/redecision"}
     tests/data/test_keychain_cred_memo.py: {created: "2026-06-05", last_used: "2026-06-05", note: "efficiency #2 RT: _resolve_credentials memoizes the keychain read-pair across the double client build; no cross-caller corruption; no failure-memoization"}
     tests/events/test_live_cap_no_caps_directive.py: {created: "2026-06-05", last_used: "2026-07-03", note: "no-caps directive RT: $250 ceiling + rate-window flag-gated — disabled ⇒ no cap; ON ⇒ caps unchanged. test_historical_cap_audits_are_superseded_by_no_cap_authority retired 2026-07-03 (evidence-doc cluster it reads was deleted by 2b158c02a, not archived as assumed)"}

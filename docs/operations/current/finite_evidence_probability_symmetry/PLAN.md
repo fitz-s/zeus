@@ -4487,9 +4487,13 @@ statistical-BUY proof gate remains closed.
 
 The additional allowed files are `src/state/collateral_ledger.py`,
 `src/execution/post_trade_capital.py`,
+`src/main.py`, `src/riskguard/riskguard.py`,
 `tests/test_collateral_ledger_global_path_backed.py`,
 `tests/test_post_trade_capital_collateral.py`,
 `tests/test_p4_post_trade_capital_lift.py`,
+`tests/test_startup_wallet_dedup.py`,
+`tests/test_startup_wallet_warm_overlap.py`,
+`tests/test_riskguard_onchain_bankroll.py`,
 `architecture/source_rationale.yaml`, `architecture/test_topology.yaml`, and
 this plan. Acceptance requires construction-without-DDL and missing-schema
 antibodies, the focused collateral suites, live sidecar restart on the exact
