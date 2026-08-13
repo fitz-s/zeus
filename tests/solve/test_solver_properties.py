@@ -2479,13 +2479,11 @@ def test_global_buy_generation_omits_untyped_maker_sibling():
 
     assert len(proposals) == 1
     assert proposals[0].execution_mode == "TAKER_LIMIT"
-    assert proposals[0].eligibility_reason == (
-        "CURRENT_PRECLIFF_LIQUIDATION_CAPACITY_MISSING"
-    )
+    assert proposals[0].eligibility_reason is None
 
 
 @pytest.mark.parametrize("bid_price", ("0.04", "0.05"))
-def test_global_taker_buy_requires_current_precliff_liquidation_depth(bid_price):
+def test_settlement_locked_taker_buy_does_not_require_current_exit_depth(bid_price):
     candidate = _global_candidate(
         candidate_id="taker-born-unexitable",
         family="taker-born-unexitable-family",
@@ -2503,11 +2501,11 @@ def test_global_taker_buy_requires_current_precliff_liquidation_depth(bid_price)
 
     decision = _global_select((candidate,), cap="5")
 
-    assert decision.candidate is None
-    assert decision.rejection_reasons[candidate.candidate_id] == "DEPTH_INFEASIBLE"
+    assert decision.candidate is candidate
+    assert decision.shares > 0
 
 
-def test_global_taker_buy_size_does_not_exceed_current_precliff_liquidation_depth():
+def test_settlement_locked_taker_buy_size_uses_ask_not_current_bid_depth():
     candidate = _global_candidate(
         candidate_id="taker-repairable-prefix",
         family="taker-repairable-prefix-family",
@@ -2527,11 +2525,11 @@ def test_global_taker_buy_size_does_not_exceed_current_precliff_liquidation_dept
     decision = _global_select((candidate,), cap="5")
 
     assert decision.candidate is candidate
-    assert Decimal("20") <= decision.shares <= Decimal("25")
+    assert Decimal("25") < decision.shares <= Decimal("100")
 
 
-def test_statistical_candidate_cannot_forge_exact_payoff_settlement_lock():
-    candidate = _global_candidate(
+def test_statistical_candidate_forged_exact_payoff_flag_cannot_change_taker_size():
+    baseline = _global_candidate(
         candidate_id="forged-exact-lock",
         family="forged-exact-lock-family",
         side="YES",
@@ -2539,18 +2537,24 @@ def test_statistical_candidate_cannot_forge_exact_payoff_settlement_lock():
         levels=(("0.50", "100"),),
         min_order="5",
     )
-    candidate = replace(
-        candidate,
+    baseline = replace(
+        baseline,
         native_bid_levels=(
             BookLevel(price=Decimal("0.05"), size=Decimal("100")),
         ),
+    )
+    forged = replace(
+        baseline,
         settlement_locked_exact_payoff=True,
     )
 
-    decision = _global_select((candidate,), cap="5")
+    baseline_decision = _global_select((baseline,), cap="5")
+    forged_decision = _global_select((forged,), cap="5")
 
-    assert decision.candidate is None
-    assert decision.rejection_reasons[candidate.candidate_id] == "DEPTH_INFEASIBLE"
+    assert baseline_decision.candidate is baseline
+    assert forged_decision.candidate is forged
+    assert forged_decision.shares == baseline_decision.shares
+    assert forged_decision.cost_usd == baseline_decision.cost_usd
 
 
 @pytest.mark.parametrize(

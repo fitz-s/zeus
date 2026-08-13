@@ -14888,7 +14888,7 @@ def test_global_preflight_jit_worse_curve_replaces_and_reauctions(monkeypatch):
 
 @pytest.mark.parametrize("execution_mode", ("TAKER_LIMIT", "MAKER_REST"))
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_preflight_jit_rejects_buy_that_lost_precliff_liquidation_depth(
+def test_global_preflight_jit_requires_exit_depth_only_for_maker_buy(
     monkeypatch,
     execution_mode,
     side,
@@ -14988,16 +14988,19 @@ def test_global_preflight_jit_rejects_buy_that_lost_precliff_liquidation_depth(
         },
     )
 
-    assert rejected.proof_accepted is False
-    assert rejected.reason.startswith(
-        "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
-        "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
-    )
+    assert rejected.proof_accepted is (execution_mode == "TAKER_LIMIT")
+    if execution_mode == "TAKER_LIMIT":
+        assert isinstance(rejected.global_jit_candidate, era._GlobalJitHandoff)
+    else:
+        assert rejected.reason.startswith(
+            "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+            "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
+        )
 
 
 @pytest.mark.parametrize("win_q", (1.0, 0.9))
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_preflight_jit_requires_exact_payoff_to_bypass_exit_depth(
+def test_global_preflight_jit_taker_hold_does_not_forge_early_exit_requirement(
     monkeypatch,
     side,
     win_q,
@@ -15076,14 +15079,8 @@ def test_global_preflight_jit_requires_exact_payoff_to_bypass_exit_depth(
         },
     )
 
-    assert accepted.proof_accepted is (win_q == 1.0)
-    if win_q == 1.0:
-        assert isinstance(accepted.global_jit_candidate, era._GlobalJitHandoff)
-    else:
-        assert accepted.reason.startswith(
-            "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
-            "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
-        )
+    assert accepted.proof_accepted is True
+    assert isinstance(accepted.global_jit_candidate, era._GlobalJitHandoff)
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))

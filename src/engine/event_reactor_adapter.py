@@ -14137,9 +14137,9 @@ def _global_preflight_entry_jit_receipt(
             current_candidate.native_bid_levels
         )
         if (
-            not (
-                execution_mode == "TAKER_LIMIT"
-                and settlement_locked_exact_payoff
+            execution_mode == "MAKER_REST"
+            and not (
+                settlement_locked_exact_payoff
                 and exact_payoff_decision
             )
             and liquidation_capacity + Decimal("1e-9") < shares
