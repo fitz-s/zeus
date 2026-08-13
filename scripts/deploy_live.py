@@ -1463,6 +1463,7 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
     code = textwrap.dedent(
         """
         import json
+        import sqlite3
         import time
         from scripts.migrations import apply_migrations
         from scripts.deploy_live import (
@@ -1554,20 +1555,39 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
             append_rest_filled_orphan_trade_facts_to_edli,
         )
 
-        recovery_deadline_monotonic = time.monotonic() + 90.0
+        recovery_deadline_monotonic = time.monotonic() + 60.0
         summary = reconcile_unresolved_commands(
             scope='restart_preflight',
             deadline_monotonic=recovery_deadline_monotonic,
         )
         bridge_conn = get_world_connection_with_trades_required(write_class='live')
         try:
-            summary['confirmed_fill_bridge_appended'] = append_confirmed_trade_facts_to_edli(
-                bridge_conn
+            bridge_deadline_monotonic = time.monotonic() + 15.0
+            bridge_conn.execute('PRAGMA busy_timeout = 0')
+            bridge_conn.set_progress_handler(
+                lambda: int(time.monotonic() >= bridge_deadline_monotonic),
+                1000,
             )
-            summary['rest_fill_orphan_bridge_appended'] = (
-                append_rest_filled_orphan_trade_facts_to_edli(bridge_conn)
-            )
-            bridge_conn.commit()
+            try:
+                summary['confirmed_fill_bridge_appended'] = append_confirmed_trade_facts_to_edli(
+                    bridge_conn
+                )
+                summary['rest_fill_orphan_bridge_appended'] = (
+                    append_rest_filled_orphan_trade_facts_to_edli(bridge_conn)
+                )
+                bridge_conn.commit()
+            except sqlite3.OperationalError as exc:
+                message = str(exc).lower()
+                if not (
+                    time.monotonic() >= bridge_deadline_monotonic
+                    or 'locked' in message
+                    or 'busy' in message
+                    or 'interrupted' in message
+                ):
+                    raise
+                bridge_conn.rollback()
+                summary['edli_trade_fact_bridge_deferred'] = True
+                summary['edli_trade_fact_bridge_deferred_reason'] = 'db_budget_or_contention'
         finally:
             bridge_conn.close()
         summary['schema_migrations_applied'] = applied

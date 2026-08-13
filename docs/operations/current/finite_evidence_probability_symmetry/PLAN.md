@@ -17,7 +17,9 @@ owns.
 
 Restart recovery now receives an absolute deadline shorter than the deploy
 subprocess timeout and treats `restart_preflight` as a bounded scope throughout
-its read/apply topology.  Deadline exhaustion records a typed deferral; the
+its read/apply topology.  The trailing EDLI trade-fact bridge has its own shorter
+SQLite deadline and typed contention deferral, so neither lane can consume the
+other's budget. Deadline exhaustion records a typed deferral; the
 subsequent read-only preflight remains responsible for refusing startup if any
 current submit/cancel/exit ambiguity is still dangerous.  No historical row is
 deleted, relabeled, or used to authorize a trade.
