@@ -14180,6 +14180,8 @@ def _global_preflight_entry_jit_receipt(
             == binding.bin_id
             and str(getattr(current_candidate, "condition_id", "") or "")
             == binding.condition_id
+            and str(getattr(current_candidate, "resolution_identity", "") or "")
+            == witness.resolution_identity
             and str(getattr(current_candidate, "token_id", "") or "")
             == expected_token
             and str(getattr(current_candidate, "side", "") or "").upper() == side
