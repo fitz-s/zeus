@@ -502,20 +502,31 @@ def _coerce_restart_guard_witness(value) -> DeployLiveRestartGuardWitness:
     return witness
 
 
-def _read_loaded_sha() -> str:
+def _read_loaded_identity() -> tuple[str, datetime | None]:
     try:
         with open(state_path("loaded_sha.json"), encoding="utf-8") as handle:
             payload = json.load(handle)
     except Exception:
-        return ""
+        return "", None
     if not isinstance(payload, dict):
-        return ""
-    return str(
+        return "", None
+    loaded_sha = str(
         payload.get("loaded_sha")
         or payload.get("boot_sha")
         or payload.get("current_sha")
         or ""
     ).strip().lower()
+    try:
+        loaded_at = datetime.fromisoformat(
+            str(payload.get("generated_at") or "").replace("Z", "+00:00")
+        ).astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        loaded_at = None
+    return loaded_sha, loaded_at
+
+
+def _read_loaded_sha() -> str:
+    return _read_loaded_identity()[0]
 
 
 def _restart_guard_queue_evidence(conn, *, issued_at: str, now: datetime) -> dict[str, bool]:
@@ -605,8 +616,9 @@ def prove_deploy_live_restart_guard(
     now_utc = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     try:
         issued_dt = datetime.fromisoformat(witness.issued_at).astimezone(timezone.utc)
-        loaded_sha = _read_loaded_sha()
-        runtime_green = loaded_sha == witness.expected_sha
+        loaded_sha, loaded_at = _read_loaded_identity()
+        runtime_green = loaded_sha == witness.expected_sha and loaded_at is not None
+        proof_floor = max(issued_dt, loaded_at) if loaded_at is not None else issued_dt
 
         from src.ops.monitor_cadence import (
             collect_monitor_restart_proof,
@@ -617,7 +629,7 @@ def prove_deploy_live_restart_guard(
             monitor = collect_monitor_restart_proof(
                 trade_conn,
                 now=now_utc,
-                completed_not_before=issued_dt,
+                completed_not_before=proof_floor,
                 max_age_seconds=_DEPLOY_LIVE_RESTART_GUARD_MAX_MONITOR_AGE_SECONDS,
                 sample_limit=5,
             )
@@ -643,7 +655,13 @@ def prove_deploy_live_restart_guard(
         return {
             "green": green,
             "witness": witness.as_dict(),
-            "runtime": {"loaded_sha": loaded_sha, "expected_sha": witness.expected_sha, "green": runtime_green},
+            "runtime": {
+                "loaded_sha": loaded_sha,
+                "loaded_at": loaded_at.isoformat() if loaded_at is not None else None,
+                "expected_sha": witness.expected_sha,
+                "proof_floor": proof_floor.isoformat(),
+                "green": runtime_green,
+            },
             "monitor": {
                 **monitor,
                 "green": monitor_green,

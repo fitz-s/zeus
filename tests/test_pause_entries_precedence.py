@@ -718,7 +718,11 @@ def _mock_restart_guard_proof_inputs(monkeypatch, *, loaded_sha: str):
         def close(self):
             return None
 
-    monkeypatch.setattr(cp, "_read_loaded_sha", lambda: loaded_sha)
+    monkeypatch.setattr(
+        cp,
+        "_read_loaded_identity",
+        lambda: (loaded_sha, datetime(2026, 8, 8, tzinfo=timezone.utc)),
+    )
     monkeypatch.setattr(cp, "get_trade_connection_read_only", ReadOnlyConnection)
     monkeypatch.setattr(cp, "get_world_connection_read_only", ReadOnlyConnection)
 
@@ -831,7 +835,11 @@ def test_restart_guard_proof_refuses_sha_monitor_or_queue_debt(monkeypatch):
     )
     assert cp.prove_deploy_live_restart_guard(witness)["green"] is False
 
-    monkeypatch.setattr(cp, "_read_loaded_sha", lambda: expected_sha)
+    monkeypatch.setattr(
+        cp,
+        "_read_loaded_identity",
+        lambda: (expected_sha, datetime(2026, 8, 8, tzinfo=timezone.utc)),
+    )
     import src.ops.monitor_cadence as monitor_cadence
 
     monkeypatch.setattr(
