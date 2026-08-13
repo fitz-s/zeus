@@ -328,6 +328,7 @@ class CollateralLedger:
         *,
         write: bool = False,
         owner: str = "collateral_read",
+        priority: str = "standard",
     ):
         if self._db_path is None:
             yield self._conn
@@ -351,7 +352,7 @@ class CollateralLedger:
                     (DBIdentity.TRADE,),
                     owner=owner,
                     write_class=WriteClass.LIVE,
-                    priority=WritePriority.STANDARD,
+                    priority=WritePriority(priority),
                     deadline_ms=_COLLATERAL_WRITE_LEASE_DEADLINE_MS,
                     max_hold_ms=_COLLATERAL_WRITE_LEASE_MAX_HOLD_MS,
                     connection_factory=lambda _path: _connect_owned_collateral_db(
@@ -1001,6 +1002,10 @@ class CollateralLedger:
         with self._connection_scope(
             write=True,
             owner="collateral_snapshot_persist",
+            # Current wealth is monitor authority for every global comparison.
+            # Register it ahead of STANDARD churn; the same 250ms deadline and
+            # hold limit keep this one-row DML path bounded and fail closed.
+            priority="monitor",
         ) as conn:
             if conn is None:
                 return

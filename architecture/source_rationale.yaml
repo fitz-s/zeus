@@ -2611,7 +2611,7 @@ files:
   src/state/collateral_ledger.py:
     zone: K2_runtime
     authority_role: collateral_runtime_truth
-    why: R3 Z4 pUSD/CTF collateral snapshot and reservation ledger; separates buy collateral from sell inventory, blocks double commitment, and exposes snapshot-level assertions shared by claim-time preflight and command-time CAS. `buy_preflight_in_transaction` reuses the initialized caller transaction without schema DDL or implicit commit, preserving atomic pre-SDK rollback. Recurring daemons may require the pre-migrated schema through a read-only construction check so hot snapshot cycles never acquire the canonical writer merely to repeat idempotent DDL; missing tables or the converted-amount migration still fail closed before network work.
+    why: R3 Z4 pUSD/CTF collateral snapshot and reservation ledger; separates buy collateral from sell inventory, blocks double commitment, and exposes snapshot-level assertions shared by claim-time preflight and command-time CAS. `buy_preflight_in_transaction` reuses the initialized caller transaction without schema DDL or implicit commit, preserving atomic pre-SDK rollback. Recurring daemons may require the pre-migrated schema through a read-only construction check so hot snapshot cycles never acquire the canonical writer merely to repeat idempotent DDL; missing tables or the converted-amount migration still fail closed before network work. The one-row current snapshot DML registers as MONITOR authority because fresh wealth is an input to held/BUY/SELL global comparison; its original 250ms acquisition and hold bounds remain unchanged, so it outranks STANDARD churn without becoming an unbounded writer.
     downstream:
     - src/execution/executor.py
     - src/execution/harvester.py

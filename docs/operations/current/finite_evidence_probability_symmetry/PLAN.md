@@ -4485,6 +4485,13 @@ committed snapshot with its own capture time; process liveness, an old balance,
 or schema validation alone cannot reset freshness debt. The independent
 statistical-BUY proof gate remains closed.
 
+Forward live evidence then showed the DDL-free cycle could still miss every
+refresh for minutes because its 250ms `STANDARD` snapshot append continually
+yielded to registered monitor writers. Current collateral is itself monitor
+authority for every held/BUY/SELL global comparison, so only the one-row
+snapshot DML now registers as `MONITOR`; schema bootstrap stays `STANDARD`.
+The original 250ms acquisition deadline and 250ms maximum hold remain intact.
+
 The additional allowed files are `src/state/collateral_ledger.py`,
 `src/execution/post_trade_capital.py`,
 `src/main.py`, `src/riskguard/riskguard.py`,

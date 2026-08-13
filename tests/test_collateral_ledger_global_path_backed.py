@@ -243,9 +243,15 @@ def test_path_backed_live_collateral_fetches_before_bounded_coordinated_persist(
 
     db_path = tmp_path / "zeus_trades.db"
     events: list[str] = []
+    priorities: dict[str, str] = {}
+
+    def telemetry(row) -> None:
+        events.append(row.owner)
+        priorities[row.owner] = row.priority
+
     coordinator = WriteCoordinator(
         {DBIdentity.TRADE: db_path},
-        telemetry_sink=lambda row: events.append(row.owner),
+        telemetry_sink=telemetry,
     )
     monkeypatch.setattr(state_db, "_zeus_trade_db_path", lambda: db_path)
     monkeypatch.setattr(
@@ -290,6 +296,8 @@ def test_path_backed_live_collateral_fetches_before_bounded_coordinated_persist(
     snapshot = ledger.refresh(Adapter())
     assert snapshot.authority_tier == "CHAIN"
     assert events[-1] == "collateral_snapshot_persist"
+    assert priorities["collateral_schema_init"] == "standard"
+    assert priorities["collateral_snapshot_persist"] == "monitor"
     ledger.close()
 
 

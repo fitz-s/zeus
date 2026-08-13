@@ -583,7 +583,7 @@ test_trust_policy:
     tests/test_charter_mandatory_evidence.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_charter_sunset_required.py: {created: "2026-05-06", last_used: "2026-05-06"}
     tests/test_check_pr_identity_collisions.py: {created: "2026-05-04", last_used: "2026-05-04"}
-    tests/test_collateral_ledger_global_path_backed.py: {created: "2026-05-13", last_used: "2026-08-12", note: "Path-backed singleton lifetime plus recurring-daemon read-only construction: a pre-migrated collateral schema runs no DDL, while missing required tables or converted_amount fails closed."}
+    tests/test_collateral_ledger_global_path_backed.py: {created: "2026-05-13", last_used: "2026-08-12", note: "Path-backed singleton lifetime plus recurring-daemon read-only construction: a pre-migrated collateral schema runs no DDL, while missing required tables or converted_amount fails closed. Current snapshot DML uses bounded MONITOR writer priority while schema bootstrap remains STANDARD."}
     tests/test_companion_loop_break.py: {created: "2026-05-07", last_used: "2026-05-07"}
     tests/test_contract_source_fields_baseline.py: {created: "2026-05-01", last_used: "2026-05-01"}
     tests/test_cycle_runner_db_lock_degrade.py: {created: "2026-05-05", last_used: "2026-05-05"}
