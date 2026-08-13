@@ -101,6 +101,7 @@ def _proof_summary(*, city: str, target_date: str, condition_id: str) -> dict[st
             "metric": "high",
             "condition_id": condition_id,
             "side": "YES",
+            "execution_mode": "TAKER_LIMIT",
             "cost_usd": "4",
             "probability_semantics_revision": (
                 evaluator.CURRENT_EVIDENCE_SEMANTICS_REVISION
@@ -109,6 +110,8 @@ def _proof_summary(*, city: str, target_date: str, condition_id: str) -> dict[st
                 "candidate_id": "proof-buy",
                 "action": "BUY",
                 "status": "SELECTED",
+                "execution_mode": "TAKER_LIMIT",
+                "capital_action_mode": "IMMEDIATE_TAKER_BUY",
                 "expected_growth": {
                     "probability_basis": "POSTERIOR_PREDICTIVE_MEAN"
                 },
@@ -379,10 +382,40 @@ def test_proof_sample_uses_verified_settlement_and_after_cost_terminal_wealth():
     )
 
     assert sample["token_won"] is True
+    assert sample["execution_mode"] == "TAKER_LIMIT"
     assert sample["realized_after_cost_payoff_usd"] == "6"
     assert sample["realized_delta_log_wealth"] == pytest.approx(
         evaluator.math.log(106 / 100)
     )
+
+
+def test_maker_counterfactual_without_fill_path_cannot_prove_capital_gain():
+    summary = _proof_summary(
+        city="Chicago",
+        target_date="2026-08-13",
+        condition_id="condition-1",
+    )
+    winner = summary["proof_counterfactual"]["winner"]
+    winner["execution_mode"] = "MAKER_REST"
+    winner["evaluation"]["execution_mode"] = "MAKER_REST"
+    winner["evaluation"]["capital_action_mode"] = "CONTINGENT_MAKER_REST_BUY"
+    summary["proof_counterfactual_sha256"] = evaluator.hashlib.sha256(
+        evaluator._canonical_json_bytes(summary["proof_counterfactual"])
+    ).hexdigest()
+    summary["artifact_summary_hash"] = global_auction_artifact_summary_hash(
+        summary
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="lacks immediate full-fill execution proof",
+    ):
+        evaluator._realized_proof_sample(
+            sqlite3.connect(":memory:"),
+            _settlement_db(),
+            decision_log_id=17,
+            summary=summary,
+        )
 
 
 def test_condition_resolution_uses_typed_integer_bin_geometry():

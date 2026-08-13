@@ -533,6 +533,19 @@ def _realized_proof_sample(
         or semantics not in CURRENT_PROBABILITY_SEMANTICS
     ):
         raise ValueError("proof winner identity/semantics invalid")
+    evaluation = winner.get("evaluation")
+    if not isinstance(evaluation, Mapping):
+        raise ValueError("proof winner evaluation missing")
+    execution_mode = str(winner.get("execution_mode") or "").strip().upper()
+    if execution_mode != "TAKER_LIMIT":
+        raise ValueError("proof winner lacks immediate full-fill execution proof")
+    if (
+        str(evaluation.get("execution_mode") or "").strip().upper()
+        != execution_mode
+        or str(evaluation.get("capital_action_mode") or "").strip().upper()
+        != "IMMEDIATE_TAKER_BUY"
+    ):
+        raise ValueError("proof winner taker execution certificate invalid")
     decision_at = _parse_aware(proof.get("decision_at_utc"))
     settlement = _verified_settlement(
         forecasts,
@@ -553,9 +566,6 @@ def _realized_proof_sample(
         settlement_unit=str(settlement["settlement_unit"]),
     )
     token_won = condition_yes if side == "YES" else not condition_yes
-    evaluation = winner.get("evaluation")
-    if not isinstance(evaluation, Mapping):
-        raise ValueError("proof winner evaluation missing")
     expected_growth = evaluation.get("expected_growth")
     terminal = evaluation.get("expected_terminal_wealth")
     if (
@@ -605,6 +615,7 @@ def _realized_proof_sample(
         "family_day": [city, target_date, metric],
         "condition_id": condition_id,
         "side": side,
+        "execution_mode": execution_mode,
         "probability_semantics_revision": semantics,
         "decision_at_utc": decision_at.isoformat(),
         "settlement_id": int(settlement["settlement_id"]),
