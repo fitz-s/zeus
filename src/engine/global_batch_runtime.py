@@ -4087,7 +4087,14 @@ def _store_global_auction_receipt(
                 str(receipt["book_native_side_encoding"]),
                 str(receipt["book_native_side_states_sha256"]),
             )
-            if book_identity == (
+            if not book_capture_complete:
+                # UNAVAILABLE is a self-contained current fact, never a delta
+                # from an older executable book.  Keep the last complete ref
+                # available for a later recovered cut without inheriting it
+                # into this receipt.
+                compact_receipt[book_field] = receipt[book_field]
+                inline_fields.add(book_field)
+            elif book_identity == (
                 book_ref.encoding,
                 book_ref.sha256,
             ):
@@ -4104,6 +4111,7 @@ def _store_global_auction_receipt(
                 < _GLOBAL_AUCTION_COMPONENT_MAX_DELTA_DEPTH
                 and book_identity[0] == book_ref.encoding
                 and isinstance(book_ref.payload, Sequence)
+                and bool(book_ref.payload)
             ):
                 book_delta = _book_native_side_delta_receipt(
                     base_rows=book_ref.payload,
@@ -4236,13 +4244,17 @@ def _store_global_auction_receipt(
                             sha256=holding_identity[1],
                             payload=holding_coverage_rows,
                         ),
-                        book=component_ref(
-                            field=book_field,
-                            delta_field="book_native_side_delta_zlib_b64",
-                            previous=book_ref,
-                            encoding=book_identity[0],
-                            sha256=book_identity[1],
-                            payload=current_book_rows,
+                        book=(
+                            book_ref
+                            if not book_capture_complete
+                            else component_ref(
+                                field=book_field,
+                                delta_field="book_native_side_delta_zlib_b64",
+                                previous=book_ref,
+                                encoding=book_identity[0],
+                                sha256=book_identity[1],
+                                payload=current_book_rows,
+                            )
                         ),
                         audit_context=component_ref(
                             field="audit_context_zlib_b64",

@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-12
+# Last reused/audited: 2026-08-13
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -2322,6 +2322,7 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(
         suffix: str,
         current_selected: object = selected,
         current_book_states: tuple[tuple[str, ...], ...] = book_states,
+        book_available: bool = True,
     ) -> int:
         row_id = global_batch_runtime._store_global_auction_receipt(
             conn,
@@ -2338,14 +2339,16 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(
             probability_ineligible_by_family={},
             book_epoch_identity=f"book-{suffix}",
             book_asset_count=len(families),
-            book_asset_states=current_book_states,
+            book_asset_states=(current_book_states if book_available else ()),
             wealth_witness=_test_receipt_wealth_witness(
                 witness_identity=f"wealth-{suffix}",
                 economic_identity="wealth-economics-current",
             ),
             fractional_kelly_multiplier=Decimal("0.25"),
-            book_captured_at_utc=at,
-            book_max_age=_dt.timedelta(seconds=30),
+            book_captured_at_utc=(at if book_available else None),
+            book_max_age=(
+                _dt.timedelta(seconds=30) if book_available else None
+            ),
         )
         assert row_id is not None
         return row_id
@@ -2418,6 +2421,36 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(
         assert field in full_summary
         assert field not in duplicate_summary
     assert len(rows[1]["artifact_json"]) < len(rows[0]["artifact_json"])
+
+    unavailable_row_id = store(
+        suffix="book-unavailable",
+        book_available=False,
+    )
+    unavailable_row = conn.execute(
+        "SELECT mode, artifact_json FROM decision_log WHERE id = ?",
+        (unavailable_row_id,),
+    ).fetchone()
+    unavailable_summary = json.loads(
+        unavailable_row["artifact_json"]
+    )["summary"]
+    assert unavailable_row["mode"] == "global_single_order_auction_delta"
+    assert unavailable_summary[
+        "book_native_side_candidate_coverage_status"
+    ] == "UNAVAILABLE"
+    assert unavailable_summary["book_native_side_state_count"] == 0
+    assert "book_native_side_states_zlib_b64" in unavailable_summary
+    assert "book_native_side_delta_zlib_b64" not in unavailable_summary
+    unavailable_payload = json.loads(
+        zlib.decompress(
+            base64.b64decode(
+                unavailable_summary["book_native_side_states_zlib_b64"]
+            )
+        )
+    )
+    assert unavailable_payload == {
+        "fields": list(global_batch_runtime._BOOK_NATIVE_SIDE_STATE_FIELDS),
+        "rows": [],
+    }
 
     changed_book_states = (
         (*book_states[0][:6], "book-new-yes", *book_states[0][7:]),
