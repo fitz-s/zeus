@@ -10816,26 +10816,13 @@ def test_durable_monitor_recovery_is_a_noop_with_fresh_canonical_coverage(
     assert observed_kwargs["monitor_refreshed_only"] is True
 
 
-def test_durable_monitor_recovery_requires_canonical_refresh_after_retry(
+def test_durable_monitor_recovery_dispatches_without_running_monitor_inline(
     monkeypatch,
 ) -> None:
     import src.main as main_module
     import src.ops.monitor_cadence as cadence_module
     import src.state.db as db_module
 
-    evidence = iter(
-        (
-            {
-                "stale_or_missing_position_count": 1,
-                "stale_or_missing_positions": [{"position_id": "p-stale"}],
-                "future_monitor_event_count": 0,
-            },
-            {
-                "stale_or_missing_position_count": 0,
-                "future_monitor_event_count": 0,
-            },
-        )
-    )
     calls: list[object] = []
 
     class ReadOnlyConnection:
@@ -10850,87 +10837,249 @@ def test_durable_monitor_recovery_requires_canonical_refresh_after_retry(
     monkeypatch.setattr(
         cadence_module,
         "collect_monitor_cadence_evidence",
-        lambda *_args, **_kwargs: next(evidence),
+        lambda *_args, **_kwargs: {
+            "stale_or_missing_position_count": 1,
+            "stale_or_missing_positions": [{"position_id": "p-stale"}],
+            "future_monitor_event_count": 0,
+        },
     )
     monkeypatch.setattr(
         main_module,
         "_exit_monitor_cycle",
-        lambda **kwargs: calls.append(("monitor", kwargs)) or True,
+        lambda **_kwargs: pytest.fail("the scheduler detector must not run monitor work"),
     )
-    main_module._periodic_held_position_monitor_fairness_debt.set()
+    worker = object()
+    monkeypatch.setattr(
+        main_module,
+        "_ensure_held_position_monitor_recovery_worker",
+        lambda: calls.append("dispatch") or worker,
+    )
+    main_module._held_position_monitor_canonical_debt.clear()
 
     try:
         assert (
             main_module._durable_held_position_monitor_recovery_cycle.__wrapped__()
             is True
         )
-        assert calls == [
-            "close",
-            ("monitor", {"recovery_full_book": True}),
-            "close",
+        assert calls == ["close", "dispatch"]
+        assert main_module._held_position_monitor_canonical_debt.is_set()
+    finally:
+        main_module._held_position_monitor_canonical_debt.clear()
+
+
+def test_durable_monitor_recovery_worker_redrives_until_canonical_refresh(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    stale = {"stale_or_missing_position_count": 1, "future_monitor_event_count": 0}
+    fresh = {"stale_or_missing_position_count": 0, "future_monitor_event_count": 0}
+    evidence = iter((stale, stale, fresh, fresh))
+    monitor_calls: list[dict] = []
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_recovery_evidence",
+        lambda: next(evidence),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_exit_monitor_cycle",
+        lambda **kwargs: monitor_calls.append(kwargs) or False,
+    )
+    monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
+    main_module._held_position_monitor_recovery_requested.clear()
+    main_module._held_position_monitor_canonical_debt.set()
+    main_module._periodic_held_position_monitor_fairness_debt.set()
+    try:
+        main_module._held_position_monitor_recovery_worker_main()
+        assert monitor_calls == [
+            {"recovery_full_book": True},
+            {"recovery_full_book": True},
         ]
         assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
+        assert not main_module._held_position_monitor_canonical_debt.is_set()
     finally:
+        main_module._held_position_monitor_recovery_requested.clear()
         main_module._periodic_held_position_monitor_fairness_debt.clear()
+        main_module._held_position_monitor_canonical_debt.clear()
 
 
-def test_durable_monitor_recovery_arms_fairness_debt_when_reactor_stays_busy(
+def test_durable_monitor_recovery_worker_survives_monitor_exception(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+
+    stale = {"stale_or_missing_position_count": 1, "future_monitor_event_count": 0}
+    fresh = {"stale_or_missing_position_count": 0, "future_monitor_event_count": 0}
+    evidence = iter((stale, stale, fresh, fresh))
+    attempts = iter((RuntimeError("db locked"), True))
+    calls = 0
+
+    def monitor(**_kwargs):
+        nonlocal calls
+        calls += 1
+        result = next(attempts)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_recovery_evidence",
+        lambda: next(evidence),
+    )
+    monkeypatch.setattr(main_module, "_exit_monitor_cycle", monitor)
+    monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
+    main_module._held_position_monitor_recovery_requested.clear()
+    main_module._held_position_monitor_canonical_debt.set()
+    try:
+        main_module._held_position_monitor_recovery_worker_main()
+        assert calls == 2
+        assert not main_module._held_position_monitor_canonical_debt.is_set()
+    finally:
+        main_module._held_position_monitor_recovery_requested.clear()
+        main_module._held_position_monitor_canonical_debt.clear()
+
+
+def test_durable_monitor_recovery_detector_dispatches_after_evidence_failure(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+
+    dispatched: list[str] = []
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_recovery_evidence",
+        lambda: (_ for _ in ()).throw(RuntimeError("database is locked")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_ensure_held_position_monitor_recovery_worker",
+        lambda: dispatched.append("worker") or object(),
+    )
+    main_module._held_position_monitor_canonical_debt.clear()
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="HELD_POSITION_MONITOR_RECOVERY_EVIDENCE_UNAVAILABLE",
+        ):
+            main_module._durable_held_position_monitor_recovery_cycle.__wrapped__()
+        assert dispatched == ["worker"]
+        assert main_module._held_position_monitor_canonical_debt.is_set()
+    finally:
+        main_module._held_position_monitor_canonical_debt.clear()
+
+
+def test_durable_monitor_recovery_worker_redrives_real_busy_handoff(
     monkeypatch,
 ) -> None:
     import src.execution.exit_lifecycle as exit_module
     import src.main as main_module
-    import src.ops.monitor_cadence as cadence_module
-    import src.state.db as db_module
 
     class BusyReactorGate:
         def acquire(self, *, timeout: float) -> bool:
             assert timeout == main_module._URGENT_EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
             return False
 
-    class ReadOnlyConnection:
-        def close(self) -> None:
-            pass
-
-    stale = {
-        "stale_or_missing_position_count": 1,
-        "stale_or_missing_positions": [{"position_id": "p-stale"}],
-        "future_monitor_event_count": 0,
-    }
-    main_module._periodic_held_position_monitor_fairness_debt.clear()
+    stale = {"stale_or_missing_position_count": 1, "future_monitor_event_count": 0}
+    fresh = {"stale_or_missing_position_count": 0, "future_monitor_event_count": 0}
+    evidence = iter((stale, fresh, fresh))
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_recovery_evidence",
+        lambda: next(evidence),
+    )
     monkeypatch.setattr(
         main_module,
         "_current_periodic_monitor_obligation_count",
         lambda: 1,
     )
-    monkeypatch.setattr(
-        db_module,
-        "get_trade_connection_read_only",
-        ReadOnlyConnection,
-    )
-    monkeypatch.setattr(
-        cadence_module,
-        "collect_monitor_cadence_evidence",
-        lambda *_args, **_kwargs: stale,
-    )
     monkeypatch.setattr(main_module, "_edli_reactor_active_lock", BusyReactorGate())
     monkeypatch.setattr(
         exit_module,
         "run_exit_monitor_cycle",
-        lambda **_kwargs: pytest.fail("busy reactor must not admit monitor writer"),
+        lambda **_kwargs: pytest.fail("busy handoff must not admit monitor body"),
     )
+    monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
+    main_module._held_position_monitor_recovery_requested.clear()
+    main_module._periodic_held_position_monitor_fairness_debt.clear()
+    main_module._held_position_monitor_canonical_debt.set()
     try:
-        with pytest.raises(
-            RuntimeError,
-            match="HELD_POSITION_MONITOR_RECOVERY_INCOMPLETE",
-        ):
-            main_module._durable_held_position_monitor_recovery_cycle.__wrapped__()
-        assert main_module._periodic_held_position_monitor_fairness_debt.is_set()
-        assert main_module._defer_for_held_position_monitor("edli_event_reactor")
+        main_module._held_position_monitor_recovery_worker_main()
+        assert not main_module._held_position_monitor_active.is_set()
+        assert not main_module._held_position_monitor_handoff_pending.is_set()
+        assert main_module._held_position_monitor_claim.acquire(blocking=False)
+        main_module._held_position_monitor_claim.release()
+        assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
+        assert not main_module._held_position_monitor_canonical_debt.is_set()
     finally:
         main_module._held_position_monitor_active.clear()
         main_module._held_position_monitor_handoff_pending.clear()
         main_module._periodic_held_position_monitor_handoff_pending.clear()
+        main_module._held_position_monitor_recovery_requested.clear()
         main_module._periodic_held_position_monitor_fairness_debt.clear()
+        main_module._held_position_monitor_canonical_debt.clear()
+
+
+def test_durable_monitor_recovery_dispatch_is_single_owner(monkeypatch) -> None:
+    import src.main as main_module
+
+    created: list[object] = []
+
+    class Worker:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+            self.started = False
+            created.append(self)
+
+        def is_alive(self) -> bool:
+            return self.started
+
+        def start(self) -> None:
+            self.started = True
+
+    monkeypatch.setattr(main_module.threading, "Thread", Worker)
+    main_module._held_position_monitor_recovery_requested.clear()
+    main_module._held_position_monitor_recovery_worker = None
+    try:
+        first = main_module._ensure_held_position_monitor_recovery_worker()
+        second = main_module._ensure_held_position_monitor_recovery_worker()
+        assert first is second
+        assert len(created) == 1
+        assert created[0].kwargs["daemon"] is True
+        assert created[0].kwargs["name"] == "held-position-monitor-recovery"
+        assert main_module._held_position_monitor_recovery_requested.is_set()
+    finally:
+        main_module._held_position_monitor_recovery_requested.clear()
+        main_module._held_position_monitor_recovery_worker = None
+
+
+def test_durable_monitor_recovery_worker_consumes_exit_race_dispatch(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+
+    fresh = {"stale_or_missing_position_count": 0, "future_monitor_event_count": 0}
+    reads = 0
+
+    def evidence():
+        nonlocal reads
+        reads += 1
+        return fresh
+
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_recovery_evidence",
+        evidence,
+    )
+    main_module._held_position_monitor_recovery_requested.set()
+    main_module._held_position_monitor_canonical_debt.set()
+    try:
+        main_module._held_position_monitor_recovery_worker_main()
+        assert reads == 2
+        assert not main_module._held_position_monitor_recovery_requested.is_set()
+        assert not main_module._held_position_monitor_canonical_debt.is_set()
+    finally:
+        main_module._held_position_monitor_recovery_requested.clear()
         main_module._held_position_monitor_canonical_debt.clear()
 
 

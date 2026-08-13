@@ -95,6 +95,9 @@ _held_position_monitor_handoff_pending = threading.Event()
 _periodic_held_position_monitor_handoff_pending = threading.Event()
 _periodic_held_position_monitor_fairness_debt = threading.Event()
 _held_position_monitor_canonical_debt = threading.Event()
+_held_position_monitor_recovery_requested = threading.Event()
+_held_position_monitor_recovery_worker_lock = threading.Lock()
+_held_position_monitor_recovery_worker: threading.Thread | None = None
 _held_position_monitor_canonical_recheck_lock = threading.Lock()
 _held_position_monitor_canonical_last_check = 0.0
 _HELD_POSITION_MONITOR_CANONICAL_RECHECK_SECONDS = 1.0
@@ -180,6 +183,7 @@ HELD_POSITION_MONITOR_BOOTSTRAP_CHECK_SECONDS = 5.0
 # monitor writer: _exit_monitor_cycle retains the process-wide claim.
 HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS = 30.0
 HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS = 150.0
+HELD_POSITION_MONITOR_RECOVERY_RETRY_SECONDS = 1.0
 # Fitz #5 scheduler-liveness (2026-06-08): the EDLI market-substrate warm cycle's
 # APScheduler interval. The refresh wall-clock budget
 # (ZEUS_REACTOR_REFRESH_BUDGET_SECONDS in src.data.substrate_observer) MUST be
@@ -9400,40 +9404,140 @@ def _exit_monitor_cycle(
         _release_monitor_claim()
 
 
-@_scheduler_job("exit_monitor_recovery")
-def _durable_held_position_monitor_recovery_cycle() -> bool:
-    """Re-drive a lost full-book monitor from canonical per-position evidence.
-
-    APScheduler coalescing and process restarts may erase an in-memory interval
-    tick.  Current open exposure plus its latest MONITOR_REFRESHED event is the
-    durable obligation; when any position exceeds the cadence deadline, this
-    independent executor retries the existing single-writer monitor lane.
-    """
+def _held_position_monitor_recovery_evidence() -> dict[str, Any]:
+    """Read the durable held-monitor obligation from canonical trade state."""
 
     from src.ops.monitor_cadence import (
         collect_monitor_cadence_evidence,
-        monitor_cadence_blocking_evidence,
     )
     from src.state.db import get_trade_connection_read_only
 
-    def _evidence() -> dict[str, Any]:
-        conn = get_trade_connection_read_only()
-        try:
-            return collect_monitor_cadence_evidence(
-                conn,
-                now=datetime.now(timezone.utc),
-                max_age_seconds=HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS,
-                monitor_refreshed_only=True,
-                require_fresh_inputs=True,
-                sample_limit=5,
-            )
-        finally:
-            conn.close()
+    conn = get_trade_connection_read_only()
+    try:
+        return collect_monitor_cadence_evidence(
+            conn,
+            now=datetime.now(timezone.utc),
+            max_age_seconds=HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS,
+            monitor_refreshed_only=True,
+            require_fresh_inputs=True,
+            sample_limit=5,
+        )
+    finally:
+        conn.close()
 
-    overdue = _evidence()
-    overdue_groups = monitor_cadence_blocking_evidence(overdue)
-    overdue_count = int(overdue_groups["blocking_stale_position_count"])
-    future_count = int(overdue.get("future_monitor_event_count") or 0)
+
+def _held_position_monitor_recovery_counts(
+    evidence: dict[str, Any],
+) -> tuple[int, int, dict[str, Any]]:
+    from src.ops.monitor_cadence import monitor_cadence_blocking_evidence
+
+    groups = monitor_cadence_blocking_evidence(evidence)
+    return (
+        int(groups["blocking_stale_position_count"]),
+        int(evidence.get("future_monitor_event_count") or 0),
+        groups,
+    )
+
+
+def _held_position_monitor_recovery_worker_main() -> None:
+    """Continuously drain canonical monitor debt through the sole writer lane."""
+
+    global _held_position_monitor_recovery_worker
+
+    current_worker = threading.current_thread()
+    try:
+        while True:
+            try:
+                evidence = _held_position_monitor_recovery_evidence()
+                overdue_count, future_count, groups = (
+                    _held_position_monitor_recovery_counts(evidence)
+                )
+            except Exception as exc:  # noqa: BLE001 - canonical read must retry.
+                _held_position_monitor_canonical_debt.set()
+                logger.error(
+                    "held-position monitor recovery evidence unavailable; retrying: %s",
+                    exc,
+                    exc_info=True,
+                )
+                time.sleep(HELD_POSITION_MONITOR_RECOVERY_RETRY_SECONDS)
+                continue
+
+            if overdue_count <= 0 and future_count <= 0:
+                with _held_position_monitor_recovery_worker_lock:
+                    if _held_position_monitor_recovery_requested.is_set():
+                        _held_position_monitor_recovery_requested.clear()
+                        continue
+                    _periodic_held_position_monitor_fairness_debt.clear()
+                    _held_position_monitor_canonical_debt.clear()
+                    if _held_position_monitor_recovery_worker is current_worker:
+                        _held_position_monitor_recovery_worker = None
+                    return
+
+            _held_position_monitor_canonical_debt.set()
+            logger.warning(
+                "held-position monitor recovery debt: overdue=%d future=%d sample=%s",
+                overdue_count,
+                future_count,
+                groups["blocking_stale_positions"]
+                or evidence.get("future_monitor_events")
+                or [],
+            )
+            try:
+                _exit_monitor_cycle(recovery_full_book=True)
+            except Exception as exc:  # noqa: BLE001 - durable debt must survive.
+                logger.error(
+                    "held-position monitor recovery attempt failed; retrying: %s",
+                    exc,
+                    exc_info=True,
+                )
+
+            # Do not return the debt to APScheduler.  A failed handoff, stale
+            # probability, missing executable book, or canonical write race is
+            # re-read and retried by this same single owner until DB evidence
+            # proves the obligation drained.
+            time.sleep(HELD_POSITION_MONITOR_RECOVERY_RETRY_SECONDS)
+    finally:
+        with _held_position_monitor_recovery_worker_lock:
+            if _held_position_monitor_recovery_worker is current_worker:
+                _held_position_monitor_recovery_worker = None
+
+
+def _ensure_held_position_monitor_recovery_worker() -> threading.Thread:
+    """Start exactly one durable monitor-debt worker without blocking its detector."""
+
+    global _held_position_monitor_recovery_worker
+
+    with _held_position_monitor_recovery_worker_lock:
+        worker = _held_position_monitor_recovery_worker
+        if worker is not None and worker.is_alive():
+            _held_position_monitor_recovery_requested.set()
+            return worker
+        _held_position_monitor_recovery_requested.clear()
+        worker = threading.Thread(
+            target=_held_position_monitor_recovery_worker_main,
+            name="held-position-monitor-recovery",
+            daemon=True,
+        )
+        _held_position_monitor_recovery_worker = worker
+        worker.start()
+        return worker
+
+
+@_scheduler_job("exit_monitor_recovery")
+def _durable_held_position_monitor_recovery_cycle() -> bool:
+    """Detect canonical monitor debt and dispatch its non-overlapping worker."""
+
+    try:
+        overdue = _held_position_monitor_recovery_evidence()
+        overdue_count, future_count, overdue_groups = (
+            _held_position_monitor_recovery_counts(overdue)
+        )
+    except Exception as exc:  # noqa: BLE001 - dispatch must survive DB pressure.
+        _held_position_monitor_canonical_debt.set()
+        _ensure_held_position_monitor_recovery_worker()
+        raise RuntimeError(
+            f"HELD_POSITION_MONITOR_RECOVERY_EVIDENCE_UNAVAILABLE:{exc}"
+        ) from exc
     if overdue_count <= 0 and future_count <= 0:
         _held_position_monitor_canonical_debt.clear()
         return True
@@ -9441,44 +9545,23 @@ def _durable_held_position_monitor_recovery_cycle() -> bool:
     _held_position_monitor_canonical_debt.set()
 
     # SCOPE: only current positive-exposure positions whose canonical monitor
-    # evidence is stale, missing, or invalid.  DRAIN: retry the existing
-    # full-book single-writer lane every 30s; a reactor handoff timeout arms the
-    # existing fairness debt so the next reactor tick yields.  RESET: every
-    # current position receives a fresh canonical MONITOR_REFRESHED event, or
-    # its lifecycle/exposure leaves the monitored set.  Because the predicate
-    # is rebuilt from the trade DB, restart cannot erase this obligation.
+    # evidence is stale, missing, or invalid. DRAIN: this fast detector starts
+    # one process-local worker; that worker immediately re-drives the existing
+    # full-book single-writer lane after every incomplete attempt instead of
+    # occupying and losing later scheduler ticks. RESET: every current position
+    # receives a fresh canonical MONITOR_REFRESHED event with fresh probability
+    # and held-side CLOB, or its lifecycle/exposure leaves the monitored set.
+    # Because every attempt rebuilds the predicate from the trade DB, restart
+    # cannot erase the obligation and stale evidence can never clear it.
     logger.warning(
-        "held-position monitor recovery debt: overdue=%d future=%d sample=%s",
+        "held-position monitor recovery dispatched: overdue=%d future=%d sample=%s",
         overdue_count,
         future_count,
         overdue_groups["blocking_stale_positions"]
         or overdue.get("future_monitor_events")
         or [],
     )
-    _exit_monitor_cycle(recovery_full_book=True)
-
-    remaining = _evidence()
-    remaining_groups = monitor_cadence_blocking_evidence(remaining)
-    remaining_overdue = int(remaining_groups["blocking_stale_position_count"])
-    remaining_future = int(remaining.get("future_monitor_event_count") or 0)
-    if remaining_overdue > 0 or remaining_future > 0:
-        raise RuntimeError(
-            "HELD_POSITION_MONITOR_RECOVERY_INCOMPLETE:"
-            f"overdue={remaining_overdue}:future={remaining_future}"
-        )
-    # The recovery attempt may lose the reactor handoff to an already-running
-    # urgent monitor.  That timeout arms periodic fairness debt, but the urgent
-    # owner can still satisfy the same current-capital obligation before this
-    # exact post-attempt read.  Once canonical evidence proves every held
-    # position fresh, retaining the concurrency debt would make each reserved
-    # global auction cancel itself forever even though there is no monitor work
-    # left to drain.
-    # SCOPE: the completed recovery obligation for the current held book only.
-    # DRAIN: this exact canonical post-attempt read proves zero blocking stale
-    # or future monitor evidence. RESET: a later periodic handoff timeout or
-    # newly overdue canonical position arms its own fresh debt.
-    _periodic_held_position_monitor_fairness_debt.clear()
-    _held_position_monitor_canonical_debt.clear()
+    _ensure_held_position_monitor_recovery_worker()
     return True
 
 
