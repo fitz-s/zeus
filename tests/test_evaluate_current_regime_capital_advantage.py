@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 
 import pytest
 
@@ -176,7 +177,8 @@ def test_current_receipt_without_settled_capital_proof_fails():
     assert verdict == "FAIL"
     assert "INSUFFICIENT_CURRENT_REGIME_SETTLED_FAMILY_DAYS" in failures
     assert "AFTER_COST_DELTA_LOG_WEALTH_LCB_NOT_POSITIVE" in failures
-    assert "EXACT_REVISION_LIVE_NET_CAPITAL_GAIN_NOT_POSITIVE" in failures
+    assert "INSUFFICIENT_EXACT_REVISION_LIVE_REALIZED_POSITIONS" in failures
+    assert "EXACT_REVISION_LIVE_CAPITAL_WEIGHTED_RETURN_NOT_POSITIVE" in failures
 
 
 def test_latest_delta_receipt_is_current_selection_evidence():
@@ -462,16 +464,36 @@ def test_live_curve_requires_exact_schema_22_edli_receipt_binding():
     assert bound["curve"][0]["global_auction_decision_log_id"] == 1
 
 
-def test_exact_global_exit_fill_is_reported_without_relaxing_admission():
+def test_exact_global_exit_is_ungraded_until_settlement_then_compared_with_hold():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(
         "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,artifact_json TEXT);"
         "CREATE TABLE venue_commands (command_id TEXT,position_id TEXT,"
-        "intent_kind TEXT,created_at TEXT,state TEXT);"
+        "intent_kind TEXT,created_at TEXT,state TEXT,token_id TEXT,envelope_id TEXT);"
         "CREATE TABLE position_events (event_id TEXT,position_id TEXT,"
         "sequence_no INTEGER,event_type TEXT,occurred_at TEXT,command_id TEXT,"
         "payload_json TEXT);"
+        "CREATE TABLE position_current (position_id TEXT,city TEXT,target_date TEXT,"
+        "temperature_metric TEXT,condition_id TEXT,direction TEXT,entry_price REAL,"
+        "shares REAL,cost_basis_usd REAL);"
+        "CREATE TABLE venue_submission_envelopes (envelope_id TEXT,post_only INTEGER,"
+        "fee_details_json TEXT,outcome_label TEXT);"
+        "CREATE TABLE execution_fact (command_id TEXT,order_role TEXT,fill_price REAL,"
+        "shares REAL,filled_at TEXT,terminal_exec_status TEXT);"
+        "CREATE TABLE execution_feasibility_evidence (token_id TEXT,quote_seen_at TEXT,"
+        "depth_before_json TEXT);"
+    )
+    forecasts = sqlite3.connect(":memory:")
+    forecasts.row_factory = sqlite3.Row
+    forecasts.executescript(
+        "CREATE TABLE settlement_outcomes (settlement_id TEXT,city TEXT,target_date TEXT,"
+        "temperature_metric TEXT,settlement_value REAL,settlement_unit TEXT,"
+        "settled_at TEXT,recorded_at TEXT,authority TEXT);"
+        "CREATE TABLE market_events (condition_id TEXT,city TEXT,target_date TEXT,"
+        "temperature_metric TEXT,range_low REAL,range_high REAL);"
+        "INSERT INTO market_events VALUES "
+        "('condition-1','Chicago','2026-08-13','high',80,81);"
     )
     summary = _proof_summary(
         city="Chicago",
@@ -526,13 +548,15 @@ def test_exact_global_exit_fill_is_reported_without_relaxing_admission():
         ),
     )
     conn.execute(
-        "INSERT INTO venue_commands VALUES (?,?,?,?,?)",
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?,?,?)",
         (
             "command-1",
             "position-1",
             "EXIT",
             "2026-08-13T00:00:02+00:00",
             "FILLED",
+            "token-yes",
+            "envelope-1",
         ),
     )
     conn.execute(
@@ -547,29 +571,114 @@ def test_exact_global_exit_fill_is_reported_without_relaxing_admission():
             "{}",
         ),
     )
-
-    evidence = evaluator._globally_selected_exit_realizations(
-        conn,
-        {
-            "forecast": {
-                "curve": [
-                    {
-                        "position_id": "position-1",
-                        "close_type": "EXIT_ORDER_FILLED",
-                        "realized_at": "2026-08-13T00:00:03+00:00",
-                        "capital_committed_usd": 2.0,
-                        "net_realized_pnl_usd": 0.5,
-                    }
-                ]
-            }
-        },
+    conn.execute(
+        "INSERT INTO position_current VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "position-1",
+            "Chicago",
+            "2026-08-13",
+            "high",
+            "condition-1",
+            "buy_yes",
+            0.2,
+            5.0,
+            1.0,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO venue_submission_envelopes VALUES (?,?,?,?)",
+        (
+            "envelope-1",
+            0,
+            json.dumps({"fee_rate_fraction": 0.0}),
+            "YES",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO execution_fact VALUES (?,?,?,?,?,?)",
+        (
+            "command-1",
+            "exit",
+            0.4,
+            5.0,
+            "2026-08-13T00:00:03+00:00",
+            "filled",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO execution_feasibility_evidence VALUES (?,?,?)",
+        (
+            "token-yes",
+            "2026-08-13T00:01:00+00:00",
+            json.dumps({"bids": [["0.50", "5"]], "asks": []}),
+        ),
     )
 
-    assert evidence["status"] == "positive"
-    assert evidence["realized_position_count"] == 1
-    assert evidence["net_realized_pnl_usd"] == 0.5
-    assert evidence["contributes_to_admission"] is False
-    assert evidence["curve"][0]["global_auction_decision_log_id"] == 1
+    curves = {
+        "forecast": {
+            "curve": [
+                {
+                    "position_id": "position-1",
+                    "close_type": "EXIT_ORDER_FILLED",
+                    "realized_at": "2026-08-13T00:00:03+00:00",
+                    "capital_committed_usd": 1.0,
+                    "net_realized_pnl_usd": 1.0,
+                }
+            ]
+        }
+    }
+    evidence = evaluator._globally_selected_exit_quality(
+        conn,
+        forecasts,
+        curves,
+        as_of=datetime(2026, 8, 13, 1, tzinfo=timezone.utc),
+    )
+
+    assert evidence["status"] == "awaiting_verified_settlement"
+    assert evidence["settlement_graded_exit_count"] == 0
+    assert evidence["exit_vs_hold_incremental_usd"] is None
+    assert evidence["curve"][0]["entry_to_exit_accounting_pnl_usd"] == 1.0
+    assert evidence["curve"][0]["observed_peak_miss_usd_lower_bound"] == 0.5
+    assert evidence["curve"][0]["peak_proof_status"].endswith(
+        "NOT_COMPLETE_PEAK_PROOF"
+    )
+
+    forecasts.execute(
+        "INSERT INTO settlement_outcomes VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            "settlement-1",
+            "Chicago",
+            "2026-08-13",
+            "high",
+            80,
+            "F",
+            "2026-08-14T00:00:00+00:00",
+            "2026-08-14T00:00:01+00:00",
+            "VERIFIED",
+        ),
+    )
+    graded = evaluator._globally_selected_exit_quality(
+        conn,
+        forecasts,
+        curves,
+        as_of=datetime(2026, 8, 14, 1, tzinfo=timezone.utc),
+    )
+
+    assert graded["status"] == "settlement_graded_nonpositive"
+    assert graded["settlement_graded_exit_count"] == 1
+    assert graded["curve"][0]["hold_to_binary_payoff_usd"] == 5.0
+    assert graded["curve"][0]["exit_vs_hold_incremental_usd"] == -3.0
+
+
+def test_executable_bid_vwap_requires_full_size_depth():
+    assert evaluator._executable_bid_vwap(
+        json.dumps({"bids": [["0.50", "2"], ["0.40", "3"]]}),
+        5,
+    ) == pytest.approx(0.44)
+    assert evaluator._executable_bid_vwap(
+        json.dumps({"bids": [["0.50", "2"]]}),
+        5,
+    ) is None
 
 
 def test_only_complete_positive_exact_revision_evidence_passes():
@@ -585,7 +694,9 @@ def test_only_complete_positive_exact_revision_evidence_passes():
         live_curves={
             "combined": {
                 "selection_revision_bound": True,
-                "net_realized_pnl_usd": 0.01,
+                "realized_position_count": 30,
+                "realized_capital_committed_usd": 100.0,
+                "net_realized_pnl_usd": 1.0,
             }
         },
     )

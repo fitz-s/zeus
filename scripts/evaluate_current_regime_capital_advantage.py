@@ -52,6 +52,7 @@ from src.data.replacement_forecast_cycle_policy import (  # noqa: E402
 )
 
 MIN_INDEPENDENT_FAMILY_DAYS = 30
+MIN_EXACT_LIVE_REALIZED_POSITIONS = 30
 WINDOW_DAYS = 35.0
 GLOBAL_AUCTION_RECEIPT_MODES = (
     "global_single_order_auction",
@@ -733,16 +734,61 @@ def _bind_live_curve_to_global_revision(
     }
 
 
-def _globally_selected_exit_realizations(
-    conn: sqlite3.Connection,
-    curves: Mapping[str, Mapping[str, object]],
-) -> dict[str, object]:
-    """Attribute realized position PnL to exact schema-22 EXIT selections.
+def _executable_bid_vwap(depth_json: object, shares: object) -> float | None:
+    """Return the bid-ladder VWAP for the full sold size, or fail closed."""
 
-    This proves that the globally selected EXIT reached a filled venue command
-    and reports the position's realized after-fee PnL.  It does not prove that
-    the original ENTRY used the current revision, nor that EXIT beat holding to
-    settlement, so this slice is deliberately excluded from admission.
+    try:
+        quantity = float(shares)
+        depth = json.loads(str(depth_json or ""))
+        raw_bids = depth["bids"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not math.isfinite(quantity) or quantity <= 0.0 or not isinstance(raw_bids, list):
+        return None
+    levels: list[tuple[float, float]] = []
+    for raw in raw_bids:
+        try:
+            if isinstance(raw, Mapping):
+                price = float(raw["price"])
+                size = float(raw["size"])
+            else:
+                price = float(raw[0])
+                size = float(raw[1])
+        except (KeyError, IndexError, TypeError, ValueError):
+            return None
+        if (
+            not math.isfinite(price)
+            or not math.isfinite(size)
+            or not 0.0 < price < 1.0
+            or size <= 0.0
+        ):
+            return None
+        levels.append((price, size))
+    remaining = quantity
+    proceeds = 0.0
+    for price, available in sorted(levels, reverse=True):
+        filled = min(remaining, available)
+        proceeds += filled * price
+        remaining -= filled
+        if remaining <= 1e-9:
+            return proceeds / quantity
+    return None
+
+
+def _globally_selected_exit_quality(
+    conn: sqlite3.Connection,
+    forecasts: sqlite3.Connection,
+    curves: Mapping[str, Mapping[str, object]],
+    *,
+    as_of: datetime,
+) -> dict[str, object]:
+    """Grade exact schema-22 EXITs against HOLD and later executable bids.
+
+    Entry-to-exit PnL is accounting, not an EXIT quality verdict.  EXIT only
+    becomes settlement-graded when the held token's binary payoff is VERIFIED.
+    Post-exit bid observations are size-executable lower bounds on the attainable
+    peak; they are never promoted to complete peak proof without a continuity
+    contract.
     """
 
     candidates: dict[str, dict[str, object]] = {}
@@ -770,7 +816,7 @@ def _globally_selected_exit_realizations(
                 raise ValueError("unique exit fill command unavailable")
             command_id = str(fills[0][0])
             command = conn.execute(
-                "SELECT created_at,state FROM venue_commands "
+                "SELECT created_at,state,token_id,envelope_id FROM venue_commands "
                 "WHERE command_id=? AND position_id=? AND intent_kind='EXIT'",
                 (command_id, position_id),
             ).fetchone()
@@ -800,6 +846,41 @@ def _globally_selected_exit_realizations(
                 certificate.get("global_auction_receipt"),
                 source="EXIT_INTENT",
             )
+            position = conn.execute(
+                "SELECT city,target_date,temperature_metric,condition_id,direction,"
+                "entry_price,shares,cost_basis_usd FROM position_current "
+                "WHERE position_id=?",
+                (position_id,),
+            ).fetchone()
+            if position is None:
+                raise ValueError("exit position truth unavailable")
+            fills = conn.execute(
+                "SELECT ef.fill_price,ef.shares,ef.filled_at,ef.terminal_exec_status,"
+                "vse.post_only,vse.fee_details_json,vse.outcome_label "
+                "FROM execution_fact AS ef "
+                "JOIN venue_submission_envelopes AS vse ON vse.envelope_id=? "
+                "WHERE ef.command_id=? AND ef.order_role='exit' "
+                "AND lower(COALESCE(ef.terminal_exec_status,'')) "
+                "IN ('filled','confirmed','partial')",
+                (command[3], command_id),
+            ).fetchall()
+            if len(fills) != 1:
+                raise ValueError("unique exact exit execution fact unavailable")
+            fill = fills[0]
+            fill_price = float(fill[0])
+            fill_shares = float(fill[1])
+            fill_at = _parse_aware(fill[2])
+            exit_fee = rg._submission_schedule_fee_usd(
+                post_only=fill[4],
+                fee_details_json=fill[5],
+                fill_price=fill_price,
+                shares=fill_shares,
+            )
+            if exit_fee is None:
+                raise ValueError("exact exit fee unavailable")
+            outcome_label = str(fill[6] or "").strip().upper()
+            if outcome_label not in {"YES", "NO"}:
+                raise ValueError("sold token outcome unavailable")
         except (
             KeyError,
             TypeError,
@@ -809,40 +890,142 @@ def _globally_selected_exit_realizations(
             reason = str(exc) or type(exc).__name__
             rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
             continue
+        city = str(position[0] or "").strip()
+        target_date = str(position[1] or "").strip()
+        metric = str(position[2] or "").strip().lower()
+        condition_id = str(position[3] or "").strip()
+        settlement_status = "awaiting_unique_verified_settlement"
+        hold_payoff_usd: float | None = None
+        exit_vs_hold_usd: float | None = None
+        try:
+            settlement = _verified_settlement(
+                forecasts,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                decision_at=fill_at,
+            )
+            condition_yes = _condition_resolved_yes(
+                forecasts,
+                condition_id=condition_id,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                settlement_value=_decimal(
+                    settlement["settlement_value"], "settlement_value"
+                ),
+                settlement_unit=str(settlement["settlement_unit"]),
+            )
+            sold_token_won = condition_yes if outcome_label == "YES" else not condition_yes
+            hold_payoff_usd = fill_shares if sold_token_won else 0.0
+            exit_vs_hold_usd = fill_price * fill_shares - exit_fee - hold_payoff_usd
+            settlement_status = "verified_binary_payoff"
+        except (TypeError, ValueError):
+            pass
+
+        path_rows = conn.execute(
+            "SELECT quote_seen_at,depth_before_json FROM execution_feasibility_evidence "
+            "WHERE token_id=? AND datetime(quote_seen_at)>datetime(?) "
+            "AND datetime(quote_seen_at)<=datetime(?) "
+            "AND depth_before_json IS NOT NULL AND depth_before_json!='' "
+            "ORDER BY datetime(quote_seen_at),rowid",
+            (str(command[2]), fill_at.isoformat(), as_of.isoformat()),
+        ).fetchall()
+        executable_path = [
+            (str(path[0]), vwap)
+            for path in path_rows
+            if (vwap := _executable_bid_vwap(path[1], fill_shares)) is not None
+        ]
+        observed_peak = (
+            max(vwap for _, vwap in executable_path) if executable_path else None
+        )
+        entry_price = float(position[5]) if position[5] is not None else None
+        cost_basis = float(position[7]) if position[7] is not None else None
+        accounting_pnl = (
+            fill_price * fill_shares - exit_fee - cost_basis
+            if cost_basis is not None
+            else row.get("net_realized_pnl_usd")
+        )
         exact_rows.append(
             {
-                **row,
+                "position_id": position_id,
+                "strategy": row.get("strategy"),
+                "city": city,
+                "target_date": target_date,
+                "metric": metric,
+                "condition_id": condition_id,
+                "direction": str(position[4] or ""),
+                "sold_outcome": outcome_label,
                 "command_id": command_id,
+                "filled_at": fill_at.isoformat(),
+                "filled_shares": fill_shares,
+                "fill_price": fill_price,
+                "exit_fee_usd": round(exit_fee, 6),
+                "entry_price": entry_price,
+                "cost_basis_usd": cost_basis,
+                "entry_to_exit_accounting_pnl_usd": (
+                    round(float(accounting_pnl), 6)
+                    if accounting_pnl is not None
+                    else None
+                ),
+                "settlement_status": settlement_status,
+                "hold_to_binary_payoff_usd": (
+                    round(hold_payoff_usd, 6)
+                    if hold_payoff_usd is not None
+                    else None
+                ),
+                "exit_vs_hold_incremental_usd": (
+                    round(exit_vs_hold_usd, 6)
+                    if exit_vs_hold_usd is not None
+                    else None
+                ),
+                "post_exit_executable_depth_observations": len(executable_path),
+                "observed_post_exit_peak_executable_bid_vwap": observed_peak,
+                "observed_peak_miss_usd_lower_bound": (
+                    round(max(0.0, observed_peak - fill_price) * fill_shares, 6)
+                    if observed_peak is not None
+                    else None
+                ),
+                "peak_proof_status": (
+                    "OBSERVED_PATH_LOWER_BOUND_NOT_COMPLETE_PEAK_PROOF"
+                    if executable_path
+                    else "UNPROVEN_NO_POST_EXIT_EXECUTABLE_DEPTH"
+                ),
                 "global_auction_decision_log_id": receipt.decision_log_id,
                 "global_auction_receipt_hash": receipt.receipt_hash,
-                "global_selection_epoch_identity": (
-                    receipt.selection_epoch_identity
-                ),
+                "global_selection_epoch_identity": receipt.selection_epoch_identity,
             }
         )
 
-    net_pnl = sum(
-        float(row.get("net_realized_pnl_usd") or 0.0) for row in exact_rows
-    )
-    capital = sum(
-        float(row.get("capital_committed_usd") or 0.0) for row in exact_rows
+    graded = [
+        row for row in exact_rows
+        if row.get("exit_vs_hold_incremental_usd") is not None
+    ]
+    exit_vs_hold = sum(
+        float(row["exit_vs_hold_incremental_usd"]) for row in graded
     )
     return {
-        "artifact_role": "EXIT_ACTION_ATTRIBUTION_ONLY_NOT_ENTRY_REGIME_PROOF",
+        "artifact_role": "EXIT_VS_HOLD_SETTLEMENT_GRADE_AND_POST_EXIT_PATH_AUDIT",
         "contributes_to_admission": False,
         "status": (
-            "positive"
-            if exact_rows and net_pnl > 0.0
-            else "nonpositive"
+            "settlement_graded_positive"
+            if graded and len(graded) == len(exact_rows) and exit_vs_hold > 0.0
+            else "settlement_graded_nonpositive"
+            if graded and len(graded) == len(exact_rows)
+            else "awaiting_verified_settlement"
             if exact_rows
             else "awaiting_exact_global_exit_fills"
         ),
         "global_selection_revision": CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
-        "realized_position_count": len(exact_rows),
-        "realized_capital_committed_usd": round(capital, 6),
-        "net_realized_pnl_usd": round(net_pnl, 6),
-        "return_on_realized_capital": (
-            round(net_pnl / capital, 6) if capital > 0.0 else None
+        "exact_global_exit_fill_count": len(exact_rows),
+        "settlement_graded_exit_count": len(graded),
+        "exit_vs_hold_incremental_usd": (
+            round(exit_vs_hold, 6) if graded else None
+        ),
+        "complete_peak_proof_count": 0,
+        "proof_warning": (
+            "ENTRY_TO_EXIT_PNL_IS_ACCOUNTING_ONLY; EXIT_CORRECTNESS_REQUIRES_"
+            "VERIFIED_BINARY_HOLD_PAYOFF; OBSERVED_BIDS_ARE_ONLY_A_PEAK_LOWER_BOUND"
         ),
         "rejection_counts": dict(sorted(rejection_counts.items())),
         "curve": exact_rows,
@@ -881,10 +1064,20 @@ def _build_verdict(
         and row.get("status") != "capital_truth_degraded"
         and row.get("net_realized_pnl_usd") is not None
     ]
-    if not exact_live or sum(
+    realized_count = sum(
+        int(row.get("realized_position_count") or 0) for row in exact_live
+    )
+    if realized_count < MIN_EXACT_LIVE_REALIZED_POSITIONS:
+        failures.append("INSUFFICIENT_EXACT_REVISION_LIVE_REALIZED_POSITIONS")
+    live_net_pnl = sum(
         float(row.get("net_realized_pnl_usd") or 0.0) for row in exact_live
-    ) <= 0.0:
-        failures.append("EXACT_REVISION_LIVE_NET_CAPITAL_GAIN_NOT_POSITIVE")
+    )
+    live_capital = sum(
+        float(row.get("realized_capital_committed_usd") or 0.0)
+        for row in exact_live
+    )
+    if live_capital <= 0.0 or live_net_pnl / live_capital <= 0.0:
+        failures.append("EXACT_REVISION_LIVE_CAPITAL_WEIGHTED_RETURN_NOT_POSITIVE")
     return ("PASS" if not failures else "FAIL", failures)
 
 
@@ -903,6 +1096,7 @@ def evaluate(
                 "venue_commands",
                 "venue_submission_envelopes",
                 "execution_fact",
+                "execution_feasibility_evidence",
                 "position_events",
                 "position_current",
             }
@@ -946,9 +1140,11 @@ def evaluate(
             )
             for strategy, curve in raw_live_curves.items()
         }
-        selected_exit_realizations = _globally_selected_exit_realizations(
+        selected_exit_quality = _globally_selected_exit_quality(
             trades,
+            forecasts,
             raw_live_curves,
+            as_of=as_of,
         )
     finally:
         forecasts.close()
@@ -967,8 +1163,12 @@ def evaluate(
         "failures": failures,
         "contract": {
             "minimum_independent_family_days": MIN_INDEPENDENT_FAMILY_DAYS,
+            "minimum_exact_live_realized_positions": (
+                MIN_EXACT_LIVE_REALIZED_POSITIONS
+            ),
             "delta_log_wealth_lcb95_must_exceed": 0.0,
-            "live_net_realized_pnl_must_exceed_usd": 0.0,
+            "live_capital_weighted_return_must_exceed": 0.0,
+            "absolute_small_dollar_pnl_is_not_advantage_proof": True,
             "global_selection_revision": (
                 CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
             ),
@@ -985,7 +1185,7 @@ def evaluate(
         "latest_global_receipt": receipt,
         "settled_counterfactuals": shadows,
         "live_realized_capital": live_curves,
-        "globally_selected_exit_realizations": selected_exit_realizations,
+        "globally_selected_exit_quality": selected_exit_quality,
     }
 
 

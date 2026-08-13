@@ -790,6 +790,87 @@ def test_open_position_tokens_are_market_channel_seed_priority():
     }
 
 
+def test_unsettled_schema22_exit_token_stays_market_channel_priority():
+    from src.ingest.price_channel_ingest import _edli_held_position_priority_token_ids
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE position_current (
+            position_id TEXT PRIMARY KEY,
+            phase TEXT,
+            settled_at TEXT,
+            token_id TEXT,
+            no_token_id TEXT
+        );
+        CREATE TABLE position_events (
+            position_id TEXT,
+            sequence_no INTEGER,
+            event_type TEXT,
+            command_id TEXT,
+            payload_json TEXT
+        );
+        CREATE TABLE venue_commands (
+            command_id TEXT,
+            position_id TEXT,
+            intent_kind TEXT,
+            state TEXT,
+            token_id TEXT
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO position_current VALUES (?,?,?,?,?)",
+        [
+            ("current", "economically_closed", None, "yes-current", "no-current"),
+            ("legacy", "economically_closed", None, "yes-legacy", "no-legacy"),
+            ("settled", "economically_closed", "2026-08-13T02:00:00+00:00", "yes-settled", "no-settled"),
+        ],
+    )
+    for position_id, schema_version in (("current", 22), ("legacy", 21), ("settled", 22)):
+        conn.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?)",
+            (
+                position_id,
+                1,
+                "EXIT_INTENT",
+                None,
+                json.dumps(
+                    {
+                        "exit_intent_capital_certificate": {
+                            "action": "SELL",
+                            "global_auction_receipt": {
+                                "schema_version": schema_version
+                            },
+                        }
+                    }
+                ),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO venue_commands VALUES (?,?,?,?,?)",
+            (
+                f"command-{position_id}",
+                position_id,
+                "EXIT",
+                "FILLED",
+                f"sold-{position_id}",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?)",
+            (
+                position_id,
+                2,
+                "EXIT_ORDER_FILLED",
+                f"command-{position_id}",
+                "{}",
+            ),
+        )
+
+    assert _edli_held_position_priority_token_ids(conn) == {"sold-current"}
+
+
 def test_open_rest_tokens_are_market_channel_seed_priority():
     from src.ingest.price_channel_ingest import _edli_open_rest_priority_token_ids
 

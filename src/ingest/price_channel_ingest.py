@@ -2503,6 +2503,81 @@ def _edli_candidate_priority_token_ids(world_conn, *, lookback_hours: float = 48
     return list(dict.fromkeys(str(row[0]) for row in rows if row and row[0]))[:requested_limit]
 
 
+def _edli_unsettled_global_exit_audit_token_ids(trade_conn) -> set[str]:
+    """Sold tokens whose schema-22 EXIT still needs settlement/peak evidence.
+
+    An economically closed position no longer carries exposure, but dropping its
+    sold token from the market channel at fill time destroys the causal evidence
+    needed to compare EXIT with HOLD and with later executable bids.  Keep only
+    exact current global-auction exits until lifecycle settlement closes the
+    audit window.  This is evidence collection, never order authority.
+    """
+
+    if trade_conn is None:
+        return set()
+    try:
+        tables = {
+            str(row[0])
+            for row in trade_conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if not {
+            "position_current",
+            "position_events",
+            "venue_commands",
+        }.issubset(tables):
+            return set()
+        position_columns = {
+            str(row[1])
+            for row in trade_conn.execute(
+                "PRAGMA table_info(position_current)"
+            ).fetchall()
+        }
+        if not {"position_id", "phase", "settled_at"}.issubset(position_columns):
+            return set()
+        rows = trade_conn.execute(
+            """
+            SELECT DISTINCT vc.token_id
+              FROM position_current AS pc
+              JOIN position_events AS fill
+                ON fill.position_id = pc.position_id
+               AND fill.event_type = 'EXIT_ORDER_FILLED'
+              JOIN venue_commands AS vc
+                ON vc.command_id = fill.command_id
+               AND vc.position_id = pc.position_id
+               AND vc.intent_kind = 'EXIT'
+               AND vc.state = 'FILLED'
+             WHERE pc.phase = 'economically_closed'
+               AND pc.settled_at IS NULL
+               AND vc.token_id IS NOT NULL
+               AND vc.token_id != ''
+               AND EXISTS (
+                    SELECT 1
+                      FROM position_events AS intent
+                     WHERE intent.position_id = pc.position_id
+                       AND intent.event_type = 'EXIT_INTENT'
+                       AND intent.sequence_no < fill.sequence_no
+                       AND json_extract(
+                            intent.payload_json,
+                            '$.exit_intent_capital_certificate.action'
+                       ) = 'SELL'
+                       AND json_extract(
+                            intent.payload_json,
+                            '$.exit_intent_capital_certificate.global_auction_receipt.schema_version'
+                       ) = 22
+               )
+            """
+        ).fetchall()
+    except Exception:
+        return set()
+    return {
+        str(row[0]).strip()
+        for row in rows
+        if row and str(row[0] or "").strip() not in {"", "None"}
+    }
+
+
 def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
     """Tokens for open local/chain exposure that need immediate quote evidence.
 
@@ -2578,6 +2653,7 @@ def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
             token = str(value or "").strip()
             if token and token != "None":
                 tokens.add(token)
+    tokens.update(_edli_unsettled_global_exit_audit_token_ids(trade_conn))
     return tokens
 
 
