@@ -1,6 +1,6 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-12
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-12; last_reused=2026-08-12
+# Last reused/audited: 2026-08-13
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-13; last_reused=2026-08-13
 # Authority basis: EDLI v1 implementation prompt §13 event reactor no-bypass contract.
 from __future__ import annotations
 
@@ -1353,12 +1353,12 @@ def test_main_monitor_cadence_debt_blocks_buy_but_keeps_reactor_live(monkeypatch
         "_held_position_monitor_entry_block_reason",
         lambda: "held_position_monitor_cadence_overdue",
     )
+    canonical_debt = threading.Event()
+    canonical_debt.set()
     monkeypatch.setattr(
         main,
         "_held_position_monitor_debt_pending",
-        lambda: pytest.fail(
-            "an already entry-blocked cycle must not be cancelled as stale"
-        ),
+        canonical_debt.is_set,
     )
     monkeypatch.setattr(
         reactor_module,
@@ -1373,6 +1373,9 @@ def test_main_monitor_cadence_debt_blocks_buy_but_keeps_reactor_live(monkeypatch
     monitor_pending = captured["held_position_monitor_pending"]
     assert callable(monitor_pending)
     assert monitor_pending() is False
+    monitor_debt_pending = captured["held_position_monitor_debt_pending"]
+    assert callable(monitor_debt_pending)
+    assert monitor_debt_pending() is True
 
 
 def test_main_monitor_bootstrap_blocks_buy_but_keeps_reactor_live(monkeypatch):

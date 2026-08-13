@@ -586,10 +586,11 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
         return True
 
     # SCOPE: all monitor kinds may defer reactor admission before it owns the
-    # active lock. Only the separate typed periodic signal may cancel an
-    # in-flight global auction. DRAIN: the claimed monitor gets the handoff or
-    # its bounded wait expires. RESET: _exit_monitor_cycle's finally block
-    # clears both the generic and periodic handoff events on every return path.
+    # active lock. Periodic fairness debt and canonical cadence debt may cancel
+    # an in-flight replayable auction at its next safe point. DRAIN: the claimed
+    # monitor gets the handoff or its bounded wait expires. RESET:
+    # _exit_monitor_cycle's finally block clears the handoff events, while full
+    # canonical coverage clears cadence debt.
     if (
         job_name in _HELD_POSITION_MONITOR_DEFER_JOBS
         and _held_position_monitor_handoff_pending.is_set()
@@ -4524,7 +4525,13 @@ def _edli_event_reactor_cycle(
             )
         ),
         held_position_monitor_debt_pending=(
-            _periodic_held_position_monitor_fairness_debt.is_set
+            # Canonical stale evidence is already a current-capital debt, not
+            # merely a BUY veto. Let the replayable auction yield at its next
+            # safe point so monitor redecision can refresh SELL/HOLD authority.
+            lambda: (
+                _periodic_held_position_monitor_fairness_debt.is_set()
+                or _held_position_monitor_debt_pending()
+            )
         ),
     )
     # Recovery is deliberately after the reactor invocation: this cycle keeps
