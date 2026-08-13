@@ -2,7 +2,7 @@
 # Lifecycle: created=2026-03-31; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-08-12
+# Last reused/audited: 2026-08-13
 # Authority basis: finite-evidence single-q global SELL ownership; 7-day capital-loop audit
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -12366,6 +12366,148 @@ def test_bounded_closed_market_metadata_does_not_swallow_transport_failure():
             pos,
             deadline_monotonic=time.monotonic() + 5.0,
         )
+
+
+def test_bounded_closed_market_metadata_defers_identical_inflight_request():
+    """Auxiliary metadata single-flight must not abort current q/book redecision."""
+    from src.data.polymarket_request_governor import RequestAdmissionDenied
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="inflight-held-market-info",
+        condition_id="inflight-held-condition",
+        market_id="inflight-held-condition",
+    )
+
+    class InflightHeldClob:
+        def get_held_clob_market_info(self, _condition_id, *, timeout=None):
+            assert timeout is not None
+            raise RequestAdmissionDenied(
+                "POLYMARKET_REQUEST_IN_FLIGHT:2026-08-13T08:31:41+00:00"
+            )
+
+    assert (
+        cycle_runtime._closed_non_accepting_market_info(
+            InflightHeldClob(),
+            pos,
+            deadline_monotonic=time.monotonic() + 5.0,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    (
+        "REQUEST_EMBARGOED:held-risk",
+        "POLYMARKET_ENDPOINT_EMBARGOED:/markets/condition",
+        "POLYMARKET_REQUEST_LEASE_LOST:held-risk",
+    ),
+)
+def test_bounded_closed_market_metadata_preserves_other_admission_failures(reason):
+    """Only exact single-flight duplication is safe to defer as no evidence."""
+    from src.data.polymarket_request_governor import RequestAdmissionDenied
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="denied-held-market-info",
+        condition_id="denied-held-condition",
+        market_id="denied-held-condition",
+    )
+
+    class DeniedHeldClob:
+        def get_held_clob_market_info(self, _condition_id, *, timeout=None):
+            assert timeout is not None
+            raise RequestAdmissionDenied(reason)
+
+    with pytest.raises(RequestAdmissionDenied, match=reason.split(":", 1)[0]):
+        cycle_runtime._closed_non_accepting_market_info(
+            DeniedHeldClob(),
+            pos,
+            deadline_monotonic=time.monotonic() + 5.0,
+        )
+
+
+def test_identical_metadata_inflight_continues_full_monitor_redecision(monkeypatch):
+    """An auxiliary duplicate request cannot suppress q/book/canonical decision."""
+    from src.data.polymarket_request_governor import RequestAdmissionDenied
+    from src.engine import cycle_runtime
+
+    position = _make_position(
+        trade_id="inflight-monitor-redecision",
+        condition_id="inflight-monitor-condition",
+        market_id="inflight-monitor-condition",
+        token_id="inflight-monitor-token",
+        state="holding",
+        chain_state="synced",
+    )
+    metadata_calls = []
+    refreshes = []
+    evaluated = []
+    canonical_emits = []
+
+    class InflightHeldClob:
+        def get_held_clob_market_info(self, condition_id, *, timeout=None):
+            metadata_calls.append(condition_id)
+            assert timeout is not None
+            raise RequestAdmissionDenied(
+                "POLYMARKET_REQUEST_IN_FLIGHT:2026-08-13T08:31:41+00:00"
+            )
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: [position],
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_day0_hard_fact_position_eligible",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: frozenset(),
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda _conn, _clob, pos: (
+            refreshes.append(pos.trade_id) or _monitor_test_edge_context(pos)
+        ),
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: (
+            evaluated.append(self.trade_id)
+            or ExitDecision(False, "CI_OVERLAP_HOLD")
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda _conn, pos, **_kwargs: (
+            canonical_emits.append(pos.trade_id) or True
+        ),
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        InflightHeldClob(),
+        _make_portfolio(position),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("inflight_monitor_redecision"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=20.0,
+    )
+
+    assert metadata_calls == [position.condition_id]
+    assert refreshes == evaluated == canonical_emits == [position.trade_id]
+    assert summary["monitors"] == 1
+    assert summary.get("monitor_failed", 0) == 0
 
 
 def test_held_monitor_prefetch_batches_books_and_skips_redundant_market_metadata():

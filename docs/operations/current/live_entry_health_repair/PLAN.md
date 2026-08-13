@@ -1845,3 +1845,27 @@ publication barrier.
 - Forbidden: treating order absence alone as no fill, applying entry semantics
   to held exits, increasing retry timers, or leaving a manual-review terminal
   with no executable drain.
+
+### Slice B98 — Keep auxiliary metadata single-flight out of held redecision (2026-08-13)
+
+- Live defect: three held monitors in one second reached current probability
+  work but aborted before canonical q/book redecision because an identical
+  bounded `/markets/{condition}` request was already in flight. Durable monitor
+  recovery then reported three, later six, overdue positions while BUY remained
+  reduce-only.
+- Structural invariant: closed/non-accepting market metadata is auxiliary to a
+  current executable q/book decision. An identical held-risk metadata request
+  already in flight contributes no new close evidence to this position, but
+  cannot revoke its current q/book redecision. Transport, HTTP, embargo, route,
+  lease-loss, and malformed-response failures remain visible and fail closed.
+- SCOPE: one exact `POLYMARKET_REQUEST_IN_FLIGHT` denial from the bounded
+  held-risk market-info call. DRAIN: the existing request owner records its
+  terminal success/failure while this monitor completes current q/book work.
+  RESET: the next monitor retries market metadata after lease release; static
+  market-close evidence remains independently available.
+- Forbidden: broad exception swallowing, cached closed-state inference,
+  widening monitor cadence, changing exit economics, or bypassing global
+  capital comparison. Acceptance: exact in-flight denial returns no new close
+  evidence; ordinary transport failure still raises; prefetched executable book
+  still avoids redundant metadata; focused governor and full live-safety tests,
+  compilation, independent review, and live cadence proof pass before closeout.

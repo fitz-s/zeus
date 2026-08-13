@@ -4557,14 +4557,30 @@ def _closed_non_accepting_market_info(
                 info = None
         else:
             remaining = float(deadline_monotonic) - time.monotonic()
-            # The held-risk adapter owns a timeout-capable contract.  Do not
-            # catch its failures here: the position monitor restores its
-            # incomplete refresh state and records the exact failure before
-            # continuing through the remaining book.
-            info = get_market_info(
-                condition_id,
-                timeout=max(0.0, remaining),
-            )
+            # The held-risk adapter owns a timeout-capable contract. Transport
+            # failures remain visible to the monitor failure lane; only an
+            # identical request already being served may reuse no new close
+            # evidence and continue through current q/book redecision.
+            try:
+                info = get_market_info(
+                    condition_id,
+                    timeout=max(0.0, remaining),
+                )
+            except Exception as exc:
+                from src.data.polymarket_request_governor import (
+                    RequestAdmissionDenied,
+                )
+
+                # SCOPE: only an identical held-risk metadata request already
+                # in flight. DRAIN: its bounded owner records success/failure;
+                # this monitor continues through current q/book redecision.
+                # RESET: the next monitor retries metadata after lease release.
+                if isinstance(exc, RequestAdmissionDenied) and str(exc).startswith(
+                    "POLYMARKET_REQUEST_IN_FLIGHT:"
+                ):
+                    info = None
+                else:
+                    raise
         if (
             deadline_monotonic is not None
             and time.monotonic() >= float(deadline_monotonic)
