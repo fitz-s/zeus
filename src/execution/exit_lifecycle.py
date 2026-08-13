@@ -10098,23 +10098,19 @@ def recover_global_sell_snapshot_reauction_debt(
     if not isinstance(refreshed_obligation, dict):
         refreshed_obligation = dict(obligation)
     if refreshed_obligation == obligation:
-        rearmed_at = _utcnow()
-        refreshed_obligation = {
-            **obligation,
-            "state": "ARMED",
-            "armed_at": rearmed_at.isoformat(),
-            "completion_deadline_at": (
-                rearmed_at
-                + timedelta(
-                    seconds=GLOBAL_SELL_REAUCTION_COMPLETION_DEADLINE_SECONDS
-                )
-            ).isoformat(),
-        }
-        setattr(
-            position,
-            "_held_sell_reauction_obligation",
-            refreshed_obligation,
-        )
+        # Crash recovery may republish the still-live exact attempt, but a
+        # callback that did not bind fresh q/book cannot slide an expired one.
+        deadline_text = str(
+            obligation.get("completion_deadline_at") or ""
+        ).strip()
+        try:
+            original_deadline = datetime.fromisoformat(
+                deadline_text.replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+        except (ValueError, AttributeError):
+            return False
+        if _utcnow().astimezone(timezone.utc) >= original_deadline:
+            return False
     if not record_global_sell_reauction_reserved(conn, position):
         conn.rollback()
         return False

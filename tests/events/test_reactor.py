@@ -7679,6 +7679,182 @@ def test_v4_no_executable_book_cut_completes_only_exact_attempt(tmp_path):
     )
 
 
+def test_v4_expired_held_sell_deadline_terminalizes_exact_attempt_without_venue(
+    tmp_path,
+):
+    from src.engine import global_batch_runtime
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    decision_at = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
+    request = reactor_wake.make_held_sell_reauction_request(
+        position_id="deadline-position",
+        family=("Paris", "2026-08-13", "high"),
+        probability_content_identity="q-deadline",
+        held_token_id="deadline-token",
+        held_best_bid=0.21,
+        bid_observed_at=(decision_at - timedelta(seconds=31)).isoformat(),
+        probability_observed_at=(decision_at - timedelta(seconds=31)).isoformat(),
+        completion_deadline_at=(decision_at - timedelta(seconds=1)).isoformat(),
+        schema_version=4,
+        book_state="EXECUTABLE",
+    )
+    venue_calls = 0
+
+    def actuate(*_args):
+        nonlocal venue_calls
+        venue_calls += 1
+        raise AssertionError("expired attempt cannot reach venue")
+
+    result = global_batch_runtime.process_current_global_batch(
+        (),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda _event: {},
+        prepare_event=lambda *_args: pytest.fail("expired before preparation"),
+        actuate_winner=actuate,
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: venue_calls,
+        current_execution=lambda *_args: None,
+        current_time_provider=lambda: decision_at,
+        held_sell_reauction_requests=(request,),
+    )
+
+    assert venue_calls == 0
+    assert result.held_sell_completion_cut is not None
+    assert result.held_sell_completion_cut.outcome == "DEADLINE_EXPIRED"
+    receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(request,),
+        result=ReactorResult(
+            global_held_sell_completion_cuts=[result.held_sell_completion_cut]
+        ),
+    )
+    assert len(receipts) == 1
+    assert receipts[0].status == reactor_wake.DEADLINE_EXPIRED
+    assert receipts[0].completion_deadline_at == request.completion_deadline_at
+
+    path = tmp_path / "deadline-wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        held_sell_reauction_requests=(request,),
+    )
+    assert reactor_wake.persist_held_sell_reauction_receipts(receipts, path=path)
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        (request,), path=path
+    )
+
+
+def test_v4_deadline_receipt_cannot_ack_another_attempt(tmp_path):
+    from src.runtime import reactor_wake
+
+    deadline = "2026-08-13T12:00:30+00:00"
+    common = dict(
+        position_id="deadline-fence-position",
+        family=("Paris", "2026-08-13", "high"),
+        held_token_id="deadline-fence-token",
+        schema_version=4,
+        generation="deadline-fence-generation",
+        scope_identity="deadline-fence-scope",
+        book_state="EXECUTABLE",
+        completion_deadline_at=deadline,
+    )
+    old = reactor_wake.make_held_sell_reauction_request(
+        **common,
+        probability_content_identity="q-old",
+        probability_observed_at="2026-08-13T12:00:00+00:00",
+        held_best_bid=0.21,
+        bid_observed_at="2026-08-13T12:00:00+00:00",
+    )
+    fresh = reactor_wake.make_held_sell_reauction_request(
+        **common,
+        probability_content_identity="q-fresh",
+        probability_observed_at="2026-08-13T12:00:20+00:00",
+        held_best_bid=0.17,
+        bid_observed_at="2026-08-13T12:00:20+00:00",
+    )
+    path = tmp_path / "deadline-fence-wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        held_sell_reauction_requests=(fresh,),
+    )
+    stale_receipt = reactor_wake.HeldSellReauctionReceipt(
+        request_id=old.request_id,
+        material_identity=old.material_identity,
+        generation=old.generation,
+        attempt_identity=old.attempt_identity,
+        completion_deadline_at=old.completion_deadline_at,
+        schema_version=4,
+        scope_identity=old.scope_identity,
+        book_state="EXECUTABLE",
+        status=reactor_wake.DEADLINE_EXPIRED,
+        reason="HELD_SELL_ACTUATION_DEADLINE_EXPIRED",
+    )
+
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (stale_receipt,), path=path
+    )
+    assert not reactor_wake.held_sell_reauction_requests_completed(
+        (fresh,), path=path
+    )
+
+
+def test_v4_earliest_deadline_does_not_terminalize_later_attempt():
+    from src.engine import global_batch_runtime
+    from src.events import reactor
+    from src.runtime import reactor_wake
+
+    decision_at = datetime(2026, 8, 13, 12, 0, tzinfo=timezone.utc)
+
+    def request(position_id: str, deadline: datetime):
+        return reactor_wake.make_held_sell_reauction_request(
+            position_id=position_id,
+            family=("Paris", "2026-08-13", "high"),
+            probability_content_identity=f"q-{position_id}",
+            held_token_id=f"token-{position_id}",
+            held_best_bid=0.21,
+            bid_observed_at=(decision_at - timedelta(seconds=1)).isoformat(),
+            probability_observed_at=(
+                decision_at - timedelta(seconds=1)
+            ).isoformat(),
+            completion_deadline_at=deadline.isoformat(),
+            schema_version=4,
+            book_state="EXECUTABLE",
+        )
+
+    expired = request("expired", decision_at)
+    live = request("live", decision_at + timedelta(seconds=10))
+    result = global_batch_runtime.process_current_global_batch(
+        (),
+        decision_time=decision_at,
+        world_conn=object(),
+        forecast_conn=object(),
+        trade_conn=object(),
+        payload_reader=lambda _event: {},
+        prepare_event=lambda *_args: pytest.fail("expired before preparation"),
+        actuate_winner=lambda *_args: pytest.fail("expired before venue"),
+        stamp_receipt=lambda receipt: receipt,
+        venue_submit_count=lambda: 0,
+        current_execution=lambda *_args: None,
+        current_time_provider=lambda: decision_at,
+        held_sell_reauction_requests=(expired, live),
+    )
+    receipts = reactor._held_sell_reauction_receipts_from_global_cut(
+        requests=(expired, live),
+        result=ReactorResult(
+            global_held_sell_completion_cuts=[result.held_sell_completion_cut]
+        ),
+    )
+
+    assert [receipt.request_id for receipt in receipts] == [expired.request_id]
+    assert receipts[0].status == reactor_wake.DEADLINE_EXPIRED
+
+
 @pytest.mark.parametrize("book_state", ("UNKNOWN", "STALE"))
 def test_v4_unknown_or_stale_book_cut_cannot_complete_attempt(book_state):
     from src.events import reactor

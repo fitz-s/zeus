@@ -6017,6 +6017,7 @@ def process_current_global_batch(
     epoch_superseded: Callable[[], bool] | None = None,
     selection_cancelled: Callable[[], bool] | None = None,
     final_actuation_cancelled: Callable[[], bool] | None = None,
+    held_sell_reauction_requests: tuple[object, ...] = (),
     restrict_to_family_keys: frozenset[str] | None = None,
     _probability_supersession_reauction_count: int = 0,
     _market_authority_supersession_reauction_count: int = 0,
@@ -6027,6 +6028,23 @@ def process_current_global_batch(
         raise ValueError("GLOBAL_AUCTION_DECISION_TIME_NAIVE")
     decision_time = decision_time.astimezone(UTC)
     event_tuple = tuple(events)
+    held_request_tuple = tuple(held_sell_reauction_requests or ())
+    held_completion_deadlines: list[datetime] = []
+    for request in held_request_tuple:
+        if int(getattr(request, "schema_version", 1) or 1) != 4:
+            continue
+        deadline_text = str(
+            getattr(request, "completion_deadline_at", "") or ""
+        ).strip()
+        if not deadline_text:
+            raise ValueError("HELD_SELL_COMPLETION_DEADLINE_MISSING")
+        deadline = datetime.fromisoformat(deadline_text.replace("Z", "+00:00"))
+        if deadline.tzinfo is None:
+            raise ValueError("HELD_SELL_COMPLETION_DEADLINE_NAIVE")
+        held_completion_deadlines.append(deadline.astimezone(UTC))
+    held_completion_deadline = (
+        min(held_completion_deadlines) if held_completion_deadlines else None
+    )
     if restrict_to_family_keys is not None and (
         not restrict_to_family_keys
         or any(not str(family_key or "").strip() for family_key in restrict_to_family_keys)
@@ -6173,6 +6191,34 @@ def process_current_global_batch(
         if now < decision_time:
             raise ValueError("GLOBAL_AUCTION_CLOCK_REGRESSION")
         return now
+
+    def held_completion_expired(at: datetime | None = None) -> bool:
+        if held_completion_deadline is None:
+            return False
+        return (at or current_time()) >= held_completion_deadline
+
+    def effective_actuation_deadline(book_deadline: datetime) -> datetime:
+        return (
+            min(book_deadline, held_completion_deadline)
+            if held_completion_deadline is not None
+            else book_deadline
+        )
+
+    def expired_held_request_bindings(
+        at: datetime | None = None,
+    ) -> tuple[object, ...]:
+        checked_at = at or current_time()
+        expired: list[object] = []
+        for request in held_request_tuple:
+            if int(getattr(request, "schema_version", 1) or 1) != 4:
+                continue
+            deadline = datetime.fromisoformat(
+                str(getattr(request, "completion_deadline_at", "") or "")
+                .replace("Z", "+00:00")
+            ).astimezone(UTC)
+            if checked_at >= deadline:
+                expired.append(request)
+        return tuple(expired)
 
     def superseded(stage: str) -> bool:
         if epoch_superseded is None:
@@ -6418,12 +6464,12 @@ def process_current_global_batch(
     ) -> GlobalHeldSellCompletionCut | None:
         """Freeze held completion proof before cache invalidation or later epochs."""
 
-        if latest_selected is None:
+        if latest_selected is None and outcome != "DEADLINE_EXPIRED":
             return None
         coverage = tuple(
             getattr(latest_selected, "holding_coverage", ()) or ()
-        )
-        if not coverage:
+        ) if latest_selected is not None else ()
+        if not coverage and outcome != "DEADLINE_EXPIRED":
             return None
         selected_position_id = None
         selected_token_id = None
@@ -6452,6 +6498,11 @@ def process_current_global_batch(
                     selected_candidate_id = candidate_id
                 else:
                     outcome = "INCOMPLETE"
+        request_bindings = (
+            expired_held_request_bindings()
+            if outcome == "DEADLINE_EXPIRED"
+            else held_request_tuple
+        )
         return GlobalHeldSellCompletionCut(
             holding_coverage=coverage,
             economic_cut_completed=economic_cut_completed,
@@ -6460,6 +6511,7 @@ def process_current_global_batch(
             selected_token_id=selected_token_id,
             selected_candidate_id=selected_candidate_id,
             terminal_no_trade_reason=terminal_no_trade_reason,
+            request_bindings=request_bindings,
         )
 
     def release_selection_snapshot() -> None:
@@ -6484,7 +6536,12 @@ def process_current_global_batch(
             and next_claim_event.event_id != deferred_claim_event.event_id
         ):
             raise ValueError("GLOBAL_DEFERRED_CLAIM_IDENTITY_CONFLICT")
-        terminal_cut_completed = economic_cut_completed and effective_next_claim is None
+        deadline_expired = reason == "HELD_SELL_DEADLINE_EXPIRED"
+        terminal_cut_completed = (
+            economic_cut_completed
+            and effective_next_claim is None
+            and not deadline_expired
+        )
         release_selection_snapshot()
         receipts: dict[str, EventSubmissionReceipt] = {}
         for event in event_tuple:
@@ -6520,15 +6577,23 @@ def process_current_global_batch(
             held_sell_completion_cut=held_sell_completion_cut(
                 economic_cut_completed=terminal_cut_completed,
                 outcome=(
-                    "CAPITAL_REJECTED"
-                    if terminal_cut_completed
-                    else "INCOMPLETE"
+                    "DEADLINE_EXPIRED"
+                    if deadline_expired
+                    else (
+                        "CAPITAL_REJECTED"
+                        if terminal_cut_completed
+                        else "INCOMPLETE"
+                    )
                 ),
-                terminal_no_trade_reason=(reason if terminal_cut_completed else ""),
+                terminal_no_trade_reason=(
+                    reason if terminal_cut_completed or deadline_expired else ""
+                ),
             ),
         )
 
     try:
+        if held_completion_expired():
+            return reject("HELD_SELL_DEADLINE_EXPIRED")
         selection_connections = tuple(selection_snapshot_connections)
         if isinstance(world_conn, sqlite3.Connection):
             selection_connections = (*selection_connections, world_conn)
@@ -7512,8 +7577,11 @@ def process_current_global_batch(
                     shadow_event,
                 )
             receipt_store_started = time.monotonic()
-            receipt_row_id = _store_global_auction_receipt(
-                trade_conn,
+            if held_completion_expired():
+                return reject("HELD_SELL_DEADLINE_EXPIRED")
+            try:
+                receipt_row_id = _store_global_auction_receipt(
+                    trade_conn,
                 selected=selected,
                 selection_epoch_identity=attempt_selection_epoch_identity,
                 selection_cut_at_utc=scope_at,
@@ -7584,12 +7652,21 @@ def process_current_global_batch(
                 holding_probability_witnesses=attempt_probabilities,
                 wealth_reauction_audit=wealth_reauction_audit,
                 proof_counterfactual=proof_counterfactual,
-                persist_artifact=_global_auction_artifact_persister(
-                    trade_conn,
-                    work_context=work_context,
-                    owner="global_auction_selection_receipt",
-                ),
-            )
+                    persist_artifact=_global_auction_artifact_persister(
+                        trade_conn,
+                        work_context=work_context,
+                        owner="global_auction_selection_receipt",
+                        before_commit=(
+                            lambda: (
+                                "HELD_SELL_DEADLINE_EXPIRED"
+                                if held_completion_expired()
+                                else None
+                            )
+                        ),
+                    ),
+                )
+            except _GlobalArtifactCommitRevoked as exc:
+                return reject(exc.reason)
             last_selection_receipt_row_id = receipt_row_id
             _LOG.info(
                 "global auction receipt store completed: elapsed_s=%.3f",
@@ -7636,6 +7713,8 @@ def process_current_global_batch(
             ),
         )
         latest_selected = selected
+        if held_completion_expired():
+            return reject("HELD_SELL_DEADLINE_EXPIRED")
         initial_select_stage = (
             "select_fence" if preflight_winner is not None else "select_initial"
         )
@@ -7711,7 +7790,7 @@ def process_current_global_batch(
             # posterior or Day0 observation landed during book/solve work. The
             # backing SQLite view released before the durable winner claim.
             attempt_book_epoch = book_epoch_fence
-            auction_deadline = (
+            auction_deadline = effective_actuation_deadline(
                 attempt_book_epoch.captured_at_utc + attempt_book_epoch.max_age
             )
             excluded_by_family: dict[str, str] = {}
@@ -7875,7 +7954,11 @@ def process_current_global_batch(
                     )
                 preflight_at = current_time()
                 if preflight_at > auction_deadline:
-                    return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")
+                    return reject(
+                        "HELD_SELL_DEADLINE_EXPIRED"
+                        if held_completion_expired(preflight_at)
+                        else "GLOBAL_REAUCTION_EPOCH_EXPIRED"
+                    )
                 preflight_authority = GlobalPreflightAuthority(
                     probability_manifest=probability_manifest,
                     book_epoch_identity=attempt_book_epoch.witness_identity,
@@ -7944,7 +8027,11 @@ def process_current_global_batch(
                         time.monotonic() - batch_started,
                         winner_id,
                     )
-                    return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")
+                    return reject(
+                        "HELD_SELL_DEADLINE_EXPIRED"
+                        if held_completion_expired()
+                        else "GLOBAL_REAUCTION_EPOCH_EXPIRED"
+                    )
                 if (
                     preflight_fence is not None
                     and preflight_fence.interrupt_reason == "cancelled"
@@ -7966,8 +8053,13 @@ def process_current_global_batch(
                     return reject(
                         "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
                     )
-                if current_time() > auction_deadline:
-                    return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")
+                checked_at = current_time()
+                if checked_at > auction_deadline:
+                    return reject(
+                        "HELD_SELL_DEADLINE_EXPIRED"
+                        if held_completion_expired(checked_at)
+                        else "GLOBAL_REAUCTION_EPOCH_EXPIRED"
+                    )
                 if final_cancelled("preflight_receipt_before_store"):
                     return reject(
                         "GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED"
@@ -7981,8 +8073,13 @@ def process_current_global_batch(
                 def preflight_commit_guard() -> str | None:
                     nonlocal preflight_guard_checked
                     preflight_guard_checked = True
-                    if current_time() > auction_deadline:
-                        return "GLOBAL_REAUCTION_EPOCH_EXPIRED"
+                    checked_at = current_time()
+                    if checked_at > auction_deadline:
+                        return (
+                            "HELD_SELL_DEADLINE_EXPIRED"
+                            if held_completion_expired(checked_at)
+                            else "GLOBAL_REAUCTION_EPOCH_EXPIRED"
+                        )
                     if final_cancelled("preflight_receipt_before_commit"):
                         return (
                             "GLOBAL_AUCTION_NO_TRADE:"
@@ -8470,6 +8567,8 @@ def process_current_global_batch(
         actuation_at = current_time()
         if preflight_winner is None and cancelled("actuation"):
             return reject("GLOBAL_AUCTION_NO_TRADE:GLOBAL_SELECTION_CANCELLED")
+        if held_completion_expired(actuation_at):
+            return reject("HELD_SELL_DEADLINE_EXPIRED")
         if preflight_winner is not None and actuation_at > auction_deadline:
             return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")
         candidate_family_key = str(
@@ -8590,6 +8689,8 @@ def process_current_global_batch(
 
         def checkpoint_final_actuation() -> tuple[datetime, bool]:
             checked_at = current_time()
+            if held_completion_expired(checked_at):
+                return checked_at, True
             if preflight_winner is not None and checked_at > auction_deadline:
                 if work_context is not None:
                     raise WorkDeferred(
@@ -8607,7 +8708,11 @@ def process_current_global_batch(
 
         final_actuation_at, auction_expired = checkpoint_final_actuation()
         if auction_expired:
-            return reject("GLOBAL_REAUCTION_EPOCH_EXPIRED")
+            return reject(
+                "HELD_SELL_DEADLINE_EXPIRED"
+                if held_completion_expired(final_actuation_at)
+                else "GLOBAL_REAUCTION_EPOCH_EXPIRED"
+            )
         actuation_started = True
         winner_receipt = (
             actuate_preflighted_winner.consume(
@@ -8623,6 +8728,12 @@ def process_current_global_batch(
         venue_delta = venue_submit_count() - before_calls
         if venue_delta not in {0, 1}:
             raise RuntimeError("GLOBAL_ACTUATION_VENUE_COUNT_INVALID")
+        if (
+            venue_delta == 0
+            and str(getattr(winner_receipt, "reason", "") or "")
+            == "HELD_SELL_DEADLINE_EXPIRED"
+        ):
+            return reject("HELD_SELL_DEADLINE_EXPIRED")
         continuation_event = (
             prepared_continuation_event
             if (

@@ -34,6 +34,7 @@ SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN = (
     "SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN"
 )
 NO_EXECUTABLE_BOOK = "NO_EXECUTABLE_BOOK"
+DEADLINE_EXPIRED = "DEADLINE_EXPIRED"
 SELL_OBLIGATION_ENDED_BY_CANONICAL_CHAIN_ZERO = (
     "SELL_OBLIGATION_ENDED_BY_CANONICAL_CHAIN_ZERO"
 )
@@ -189,6 +190,7 @@ class HeldSellReauctionReceipt:
     capital_objective_proof: str = ""
     answered_probability_content_identity: str = ""
     attempt_identity: str = ""
+    completion_deadline_at: str = ""
     position_id: str = ""
     held_token_id: str = ""
     debt_event_id: str = ""
@@ -1595,6 +1597,9 @@ def _held_sell_reauction_receipt_from_payload(
                 payload.get("answered_probability_content_identity") or ""
             ).strip(),
             attempt_identity=str(payload.get("attempt_identity") or "").strip(),
+            completion_deadline_at=str(
+                payload.get("completion_deadline_at") or ""
+            ).strip(),
             position_id=str(payload.get("position_id") or "").strip(),
             held_token_id=str(payload.get("held_token_id") or "").strip(),
             debt_event_id=str(payload.get("debt_event_id") or "").strip(),
@@ -1657,7 +1662,12 @@ def _held_sell_reauction_receipt_from_payload(
         HELD_SELL_REAUCTION_V4,
     } and (
         receipt.status
-        not in {"ACTUATED", "CAPITAL_REJECTED", NO_EXECUTABLE_BOOK}
+        not in {
+            "ACTUATED",
+            "CAPITAL_REJECTED",
+            NO_EXECUTABLE_BOOK,
+            DEADLINE_EXPIRED,
+        }
         or not receipt.scope_identity
         or (
             receipt.status == NO_EXECUTABLE_BOOK
@@ -1667,10 +1677,13 @@ def _held_sell_reauction_receipt_from_payload(
             )
         )
         or (
-            receipt.status != NO_EXECUTABLE_BOOK
+            receipt.status not in {NO_EXECUTABLE_BOOK, DEADLINE_EXPIRED}
             and receipt.book_state != "EXECUTABLE"
         )
-        or not receipt.answered_probability_content_identity
+        or (
+            receipt.status != DEADLINE_EXPIRED
+            and not receipt.answered_probability_content_identity
+        )
     ):
         return None
     if (
@@ -1698,6 +1711,11 @@ def _held_sell_reauction_receipt_from_payload(
             receipt.selection_epoch_identity,
             receipt.sell_book_witness_identity,
         )
+    ):
+        return None
+    if receipt.status == DEADLINE_EXPIRED and (
+        receipt.schema_version != HELD_SELL_REAUCTION_V4
+        or not receipt.completion_deadline_at
     ):
         return None
     return receipt
@@ -2064,6 +2082,7 @@ def persist_held_sell_reauction_receipts(
                             "ACTUATED",
                             "CAPITAL_REJECTED",
                             NO_EXECUTABLE_BOOK,
+                            DEADLINE_EXPIRED,
                         }
                         or not receipt.scope_identity
                         or (
@@ -2074,10 +2093,14 @@ def persist_held_sell_reauction_receipts(
                             )
                         )
                         or (
-                            receipt.status != NO_EXECUTABLE_BOOK
+                            receipt.status
+                            not in {NO_EXECUTABLE_BOOK, DEADLINE_EXPIRED}
                             and receipt.book_state != "EXECUTABLE"
                         )
-                        or not receipt.answered_probability_content_identity
+                        or (
+                            receipt.status != DEADLINE_EXPIRED
+                            and not receipt.answered_probability_content_identity
+                        )
                     )
                 )
                 or (
@@ -2105,6 +2128,13 @@ def persist_held_sell_reauction_receipts(
                     and not (
                         receipt.selection_epoch_identity
                         and receipt.sell_book_witness_identity
+                    )
+                )
+                or (
+                    receipt.status == DEADLINE_EXPIRED
+                    and (
+                        receipt.schema_version != HELD_SELL_REAUCTION_V4
+                        or not receipt.completion_deadline_at
                     )
                 )
             ):
@@ -2288,8 +2318,12 @@ def held_sell_reauction_requests_completed(
                                 "ACTUATED",
                                 "CAPITAL_REJECTED",
                                 NO_EXECUTABLE_BOOK,
+                                DEADLINE_EXPIRED,
                             }
-                            or not receipt.answered_probability_content_identity
+                            or (
+                                receipt.status != DEADLINE_EXPIRED
+                                and not receipt.answered_probability_content_identity
+                            )
                             or (
                                 receipt.status == NO_EXECUTABLE_BOOK
                                 and (
@@ -2299,6 +2333,15 @@ def held_sell_reauction_requests_completed(
                                     != NO_EXECUTABLE_BOOK
                                     or not receipt.selection_epoch_identity
                                     or not receipt.sell_book_witness_identity
+                                )
+                            )
+                            or (
+                                receipt.status == DEADLINE_EXPIRED
+                                and (
+                                    request.schema_version
+                                    != HELD_SELL_REAUCTION_V4
+                                    or receipt.completion_deadline_at
+                                    != request.completion_deadline_at
                                 )
                             )
                         )

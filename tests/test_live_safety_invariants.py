@@ -7981,6 +7981,11 @@ def test_global_sell_reauction_publish_failure_recovers_exact_armed_obligation_o
 
     from src.execution.exit_lifecycle import recover_global_sell_snapshot_reauction_debt
 
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle._utcnow",
+        lambda: armed_at + timedelta(seconds=5),
+    )
+
     assert recover_global_sell_snapshot_reauction_debt(
         position,
         conn=conn,

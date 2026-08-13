@@ -30676,6 +30676,12 @@ def test_global_final_actuation_gate_is_fail_closed(
         hard_authority_cancelled=unavailable,
         checked_at=checked_at,
     ).startswith("GLOBAL_FINAL_AUTHORITY_UNAVAILABLE:RuntimeError:")
+    assert era._global_final_actuation_block_reason(
+        deadline=checked_at,
+        hard_authority_cancelled=lambda: False,
+        checked_at=checked_at,
+        deadline_expired_reason="HELD_SELL_DEADLINE_EXPIRED",
+    ) == "HELD_SELL_DEADLINE_EXPIRED"
 
 
 def test_global_batch_curve_reauction_requires_new_epoch_identity(monkeypatch):

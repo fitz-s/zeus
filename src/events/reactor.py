@@ -1061,9 +1061,15 @@ class GlobalHeldSellCompletionCut:
     selected_token_id: str | None = None
     selected_candidate_id: str | None = None
     terminal_no_trade_reason: str = ""
+    request_bindings: tuple[object, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.outcome not in {"INCOMPLETE", "ACTUATED", "CAPITAL_REJECTED"}:
+        if self.outcome not in {
+            "INCOMPLETE",
+            "ACTUATED",
+            "CAPITAL_REJECTED",
+            "DEADLINE_EXPIRED",
+        }:
             raise ValueError("GLOBAL_HELD_SELL_COMPLETION_OUTCOME_INVALID")
         selected = (
             str(self.selected_position_id or "").strip(),
@@ -1080,6 +1086,13 @@ class GlobalHeldSellCompletionCut:
             or not str(self.terminal_no_trade_reason or "").strip()
         ):
             raise ValueError("GLOBAL_HELD_SELL_CAPITAL_OUTCOME_INVALID")
+        if self.outcome == "DEADLINE_EXPIRED" and (
+            self.economic_cut_completed
+            or any(selected)
+            or not self.request_bindings
+            or self.terminal_no_trade_reason != "HELD_SELL_DEADLINE_EXPIRED"
+        ):
+            raise ValueError("GLOBAL_HELD_SELL_DEADLINE_OUTCOME_INVALID")
 
 
 @dataclass(frozen=True)
@@ -7139,12 +7152,16 @@ def _held_sell_reauction_receipts_from_global_cut(
     """
 
     from src.runtime.reactor_wake import (
+        DEADLINE_EXPIRED,
         NO_EXECUTABLE_BOOK,
         HeldSellReauctionReceipt,
     )
 
     receipts: list[HeldSellReauctionReceipt] = []
     for request in requests:
+        request_deadline = str(
+            getattr(request, "completion_deadline_at", "") or ""
+        )
         receipt_identity = {
             "request_id": str(getattr(request, "request_id", "") or ""),
             "material_identity": str(
@@ -7154,11 +7171,54 @@ def _held_sell_reauction_receipts_from_global_cut(
             "attempt_identity": str(
                 getattr(request, "attempt_identity", "") or ""
             ),
+            "completion_deadline_at": request_deadline,
         }
         request_schema_version = int(getattr(request, "schema_version", 1) or 1)
         request_position_id = str(getattr(request, "position_id", "") or "")
         request_token_id = str(getattr(request, "held_token_id", "") or "")
         for cut in getattr(result, "global_held_sell_completion_cuts", ()):
+            cut_bindings = tuple(getattr(cut, "request_bindings", ()) or ())
+            exact_cut_binding = any(
+                (
+                    str(getattr(binding, "scope_identity", "") or ""),
+                    str(getattr(binding, "request_id", "") or ""),
+                    str(getattr(binding, "material_identity", "") or ""),
+                    str(getattr(binding, "generation", "") or ""),
+                    str(getattr(binding, "attempt_identity", "") or ""),
+                    str(getattr(binding, "completion_deadline_at", "") or ""),
+                )
+                == (
+                    str(getattr(request, "scope_identity", "") or ""),
+                    receipt_identity["request_id"],
+                    receipt_identity["material_identity"],
+                    receipt_identity["generation"],
+                    receipt_identity["attempt_identity"],
+                    request_deadline,
+                )
+                for binding in cut_bindings
+            )
+            if (
+                request_schema_version == 4
+                and request_deadline
+                and not exact_cut_binding
+            ):
+                continue
+            if str(getattr(cut, "outcome", "") or "") == DEADLINE_EXPIRED:
+                receipts.append(
+                    HeldSellReauctionReceipt(
+                        **receipt_identity,
+                        schema_version=request_schema_version,
+                        scope_identity=str(
+                            getattr(request, "scope_identity", "") or ""
+                        ),
+                        book_state=str(
+                            getattr(request, "book_state", "UNKNOWN") or "UNKNOWN"
+                        ),
+                        status=DEADLINE_EXPIRED,
+                        reason="HELD_SELL_ACTUATION_DEADLINE_EXPIRED",
+                    )
+                )
+                break
             coverage = next(
                 (
                     row
@@ -8571,6 +8631,7 @@ def run_edli_event_reactor_cycle(
                 if _monitor_completion_mode.reduce_only
                 else frozenset()
             ),
+            held_sell_reauction_requests=held_sell_completion_cut_requests,
             held_family_provider=held_family_provider,
         )
         _construct_checkpoint("after_adapter")

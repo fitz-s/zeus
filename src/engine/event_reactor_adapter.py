@@ -3424,12 +3424,13 @@ def _global_final_actuation_block_reason(
     deadline: datetime,
     hard_authority_cancelled: Callable[[], bool],
     checked_at: datetime | None = None,
+    deadline_expired_reason: str = "GLOBAL_REAUCTION_EPOCH_EXPIRED",
 ) -> str | None:
     """Linearize one preflighted action at its actual pre-venue boundary."""
 
     now = (checked_at or datetime.now(UTC)).astimezone(UTC)
-    if now > deadline.astimezone(UTC):
-        return "GLOBAL_REAUCTION_EPOCH_EXPIRED"
+    if now >= deadline.astimezone(UTC):
+        return deadline_expired_reason
     try:
         if hard_authority_cancelled():
             return "GLOBAL_AUCTION_NO_TRADE:GLOBAL_HARD_AUTHORITY_REVOKED"
@@ -6989,6 +6990,7 @@ def event_bound_live_adapter_from_trade_conn(
     selection_completion_fairness_reserved: bool = False,
     selection_completion_reserved: bool = False,
     selection_completion_sell_keys: frozenset[tuple[str, str]] = frozenset(),
+    held_sell_reauction_requests: tuple[object, ...] = (),
     held_family_provider: Callable[[], object] | None = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
@@ -7011,6 +7013,18 @@ def event_bound_live_adapter_from_trade_conn(
     # after process_pending and populate live_submit_attempts accurately.
     # No-submit / submit-blocked cycles always read 0.
     _live_submit_count: list[int] = [0]
+    held_completion_deadlines = tuple(
+        datetime.fromisoformat(
+            str(getattr(request, "completion_deadline_at", "") or "")
+            .replace("Z", "+00:00")
+        ).astimezone(UTC)
+        for request in held_sell_reauction_requests
+        if int(getattr(request, "schema_version", 1) or 1) == 4
+        and str(getattr(request, "completion_deadline_at", "") or "").strip()
+    )
+    held_completion_deadline = (
+        min(held_completion_deadlines) if held_completion_deadlines else None
+    )
 
     # FIX-4 venue_acks: per-cycle counter of actual venue ACKs (successful
     # place_limit_order responses).  Incremented when venue_ack_received is
@@ -8489,6 +8503,20 @@ def event_bound_live_adapter_from_trade_conn(
 
         def _actuate_preflighted(event, actuation, at, token, authority):
             now = at.astimezone(UTC)
+            if (
+                held_completion_deadline is not None
+                and authority.actuation_deadline == held_completion_deadline
+                and now >= held_completion_deadline
+            ):
+                return _stamp_live_adapter_lane(
+                    EventSubmissionReceipt(
+                        False,
+                        event.event_id,
+                        event.causal_snapshot_id,
+                        reason="HELD_SELL_DEADLINE_EXPIRED",
+                        proof_accepted=False,
+                    )
+                )
             for token_id, expires_at in tuple(
                 _consumed_global_preflight_tokens.items()
             ):
@@ -8509,8 +8537,8 @@ def event_bound_live_adapter_from_trade_conn(
                 or token.wealth_witness_identity
                 != str(getattr(actuation, "wealth_witness_identity", "") or "")
                 or now < token.issued_at
-                or now > token.expires_at
-                or now > token.actuation_deadline
+                or now >= token.expires_at
+                or now >= token.actuation_deadline
                 or token.token_id in _consumed_global_preflight_tokens
             ):
                 _stable_preflight_monitor_handoff[0] = False
@@ -10436,6 +10464,7 @@ def event_bound_live_adapter_from_trade_conn(
                 epoch_superseded=_epoch_superseded,
                 selection_cancelled=_day0_selection_cancelled,
                 final_actuation_cancelled=_hard_day0_authority_cancelled,
+                held_sell_reauction_requests=held_sell_reauction_requests,
                 # Delta facts narrow refresh I/O, never the economic feasible set.
                 # Actual BUY remains disabled above during an entry pause, while
                 # the proof-only solve needs the complete universe to avoid a
@@ -13141,6 +13170,12 @@ def _submit_current_global_sell(
             final_block = _global_final_actuation_block_reason(
                 deadline=final_authority_deadline,
                 hard_authority_cancelled=hard_authority_cancelled,
+                deadline_expired_reason=(
+                    "HELD_SELL_DEADLINE_EXPIRED"
+                    if held_completion_deadline is not None
+                    and final_authority_deadline == held_completion_deadline
+                    else "GLOBAL_REAUCTION_EPOCH_EXPIRED"
+                ),
             )
             if final_block is not None:
                 return _global_sell_receipt(
@@ -13163,6 +13198,12 @@ def _submit_current_global_sell(
             final_block = _global_final_actuation_block_reason(
                 deadline=final_authority_deadline,
                 hard_authority_cancelled=hard_authority_cancelled,
+                deadline_expired_reason=(
+                    "HELD_SELL_DEADLINE_EXPIRED"
+                    if held_completion_deadline is not None
+                    and final_authority_deadline == held_completion_deadline
+                    else "GLOBAL_REAUCTION_EPOCH_EXPIRED"
+                ),
             )
             if final_block is not None:
                 return _global_sell_receipt(
