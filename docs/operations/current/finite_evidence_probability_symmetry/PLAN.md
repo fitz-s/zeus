@@ -26,6 +26,15 @@ requires an antibody where a positive posterior-mean BUY has a negative
 confidence-cost margin, remains the proof winner, and is stamped blocked without
 changing selection or venue-submit counts.
 
+When no positive order exists, a bare CASH/HOLD result does not identify what
+must move before capital can be deployed.  The same proof receipt therefore
+freezes the nearest rejected executable BUY probe under the solver's exact
+posterior-mean comparator order: expected log-growth rate, expected delta-log
+wealth, capital efficiency, cost, then stable candidate identity.  Its current
+mean-cost and confidence-cost gaps expose the q/price frontier without turning a
+negative probe into an order.  The frontier is absent when no BUY reached exact
+fee/depth/economic scoring, and it resets on every complete global cut.
+
 ## 2026-08-13 Capital evidence is independent by target date
 
 The capital evaluator called `(city, target_date, metric)` an independent

@@ -5662,6 +5662,180 @@ def _capital_proof_counterfactual_receipt(
     evaluation_hash = hashlib.sha256(
         _canonical_json_bytes(evaluations)
     ).hexdigest()
+
+    def confidence_cost_diagnostic(
+        *,
+        family_key: str,
+        bin_id: str,
+        side: str,
+        token_id: str,
+        shares: Decimal,
+        cost: Decimal,
+    ) -> dict[str, object]:
+        diagnostic: dict[str, object] = {
+            "role": "DIAGNOSTIC_ONLY_NOT_SELECTION_OR_SUBMIT_AUTHORITY",
+            "probability_functional": "SELECTED_SIDE_LOWER_TAIL_CVAR",
+        }
+        witness = probability_witnesses.get(family_key)
+        cap = (payoff_q_lcb_by_candidate or {}).get(
+            (family_key, bin_id, side, token_id)
+        )
+        q_mean = (
+            family_payoff_point_q(witness, bin_id=bin_id, side=side)
+            if witness is not None and side in {"YES", "NO"}
+            else None
+        )
+        q_lcb = (
+            family_payoff_q_lcb(
+                witness,
+                bin_id=bin_id,
+                side=side,
+                payoff_q_lcb_cap=cap,
+            )
+            if witness is not None and side in {"YES", "NO"}
+            else None
+        )
+        if q_mean is None or q_lcb is None or shares <= 0 or cost < 0:
+            diagnostic.update(
+                {
+                    "readiness": "BLOCKED_DIAGNOSTIC_UNAVAILABLE",
+                    "confidence_cost_margin_positive": None,
+                }
+            )
+            return diagnostic
+        unit_cost = float(cost / shares)
+        mean_margin = float(q_mean) - unit_cost
+        confidence_margin = float(q_lcb) - unit_cost
+        confidence_positive = confidence_margin > 0.0
+        diagnostic.update(
+            {
+                "readiness": (
+                    "CONFIDENCE_COST_POSITIVE_REQUIRES_FULL_ADMISSION"
+                    if confidence_positive
+                    else "BLOCKED_CONFIDENCE_COST_MARGIN_NON_POSITIVE"
+                ),
+                "selected_side_q_mean": float(q_mean),
+                "selected_side_q_lcb_confidence": float(q_lcb),
+                "payoff_q_lcb_cap_applied": (
+                    float(cap) if cap is not None else None
+                ),
+                "all_in_cost_usd_per_share": unit_cost,
+                "mean_cost_margin_per_share": mean_margin,
+                "confidence_cost_margin_per_share": confidence_margin,
+                "confidence_cost_margin_positive": confidence_positive,
+                "probability_witness_identity": str(
+                    getattr(witness, "witness_identity", "") or ""
+                ),
+            }
+        )
+        return diagnostic
+
+    rejected_buy_frontiers: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    for evaluation in evaluations:
+        economics = evaluation.get("buy_rejection_economics")
+        if (
+            str(evaluation.get("action") or "").upper() != "BUY"
+            or not isinstance(economics, Mapping)
+            or economics.get("probability_basis")
+            != "POSTERIOR_PREDICTIVE_MEAN"
+        ):
+            continue
+        expected_du = float(
+            economics.get("probe_expected_delta_log_wealth") or 0.0
+        )
+        expected_ev = float(economics.get("probe_expected_ev_usd") or 0.0)
+        capital_efficiency = float(
+            economics.get("probe_expected_capital_efficiency") or 0.0
+        )
+        raw_rate = economics.get("probe_expected_log_growth_per_hour")
+        if raw_rate is None:
+            continue
+        growth_rate = float(raw_rate)
+        probe_shares = Decimal(str(economics.get("probe_shares") or "0"))
+        probe_cost = Decimal(str(economics.get("probe_cost_usd") or "0"))
+        if (
+            not all(
+                math.isfinite(value)
+                for value in (
+                    growth_rate,
+                    expected_du,
+                    expected_ev,
+                    capital_efficiency,
+                )
+            )
+            or probe_shares <= 0
+            or probe_cost <= 0
+        ):
+            continue
+        candidate_id = str(evaluation.get("candidate_id") or "")
+        family_key = str(evaluation.get("family_key") or "")
+        bin_id = str(evaluation.get("bin_id") or "")
+        side = str(evaluation.get("side") or "").upper()
+        token_id = str(evaluation.get("token_id") or "")
+        context = dict(family_context_by_key.get(family_key, {}))
+        frontier = {
+            "role": "NEAREST_REJECTED_EXECUTABLE_BUY_NOT_ORDER_AUTHORITY",
+            "candidate_id": candidate_id,
+            "family_key": family_key,
+            "city": str(context.get("city") or ""),
+            "target_date": str(context.get("target_date") or ""),
+            "metric": str(context.get("metric") or ""),
+            "probability_semantics_revision": str(
+                probability_semantics_by_family.get(family_key) or ""
+            ),
+            "bin_id": bin_id,
+            "condition_id": str(evaluation.get("condition_id") or ""),
+            "side": side,
+            "token_id": token_id,
+            "execution_mode": str(evaluation.get("execution_mode") or ""),
+            "solver_rejection_reason": str(
+                economics.get("rejection_reason")
+                or evaluation.get("rejection_reason")
+                or ""
+            ),
+            "probe_kind": str(economics.get("probe_kind") or ""),
+            "probe_shares": str(probe_shares),
+            "probe_cost_usd": str(probe_cost),
+            "probe_limit_price": str(
+                economics.get("probe_limit_price") or "0"
+            ),
+            "probe_expected_fill_price_before_fee": str(
+                economics.get("probe_expected_fill_price_before_fee") or "0"
+            ),
+            "probe_expected_delta_log_wealth": expected_du,
+            "probe_expected_log_growth_per_hour": (
+                float(raw_rate) if raw_rate is not None else None
+            ),
+            "probe_expected_ev_usd": expected_ev,
+            "probe_expected_capital_efficiency": capital_efficiency,
+            "confidence_cost_amplification_diagnostic": (
+                confidence_cost_diagnostic(
+                    family_key=family_key,
+                    bin_id=bin_id,
+                    side=side,
+                    token_id=token_id,
+                    shares=probe_shares,
+                    cost=probe_cost,
+                )
+            ),
+        }
+        rejected_buy_frontiers.append(
+            (
+                (
+                    -growth_rate,
+                    -expected_du,
+                    -capital_efficiency,
+                    probe_cost,
+                    candidate_id,
+                ),
+                frontier,
+            )
+        )
+    nearest_rejected_buy_frontier = (
+        min(rejected_buy_frontiers, key=lambda item: item[0])[1]
+        if rejected_buy_frontiers
+        else None
+    )
     winner = None
     winner_evaluation = None
     if candidate is not None:
@@ -5679,73 +5853,27 @@ def _capital_proof_counterfactual_receipt(
                 "GLOBAL_CAPITAL_PROOF_COUNTERFACTUAL_WINNER_EVALUATION_MISSING"
             )
         action = str(getattr(candidate, "action", "BUY") or "BUY").upper()
-        amplification_diagnostic: dict[str, object] = {
-            "role": "DIAGNOSTIC_ONLY_NOT_SELECTION_OR_SUBMIT_AUTHORITY",
-            "probability_functional": "SELECTED_SIDE_LOWER_TAIL_CVAR",
-        }
         if action == "SELL":
-            amplification_diagnostic.update(
-                {
-                    "readiness": "NOT_APPLICABLE_CAPITAL_RELEASE",
-                    "confidence_cost_margin_positive": None,
-                }
-            )
+            amplification_diagnostic = {
+                "role": "DIAGNOSTIC_ONLY_NOT_SELECTION_OR_SUBMIT_AUTHORITY",
+                "probability_functional": "SELECTED_SIDE_LOWER_TAIL_CVAR",
+                "readiness": "NOT_APPLICABLE_CAPITAL_RELEASE",
+                "confidence_cost_margin_positive": None,
+            }
         else:
             side = str(getattr(candidate, "side", "") or "").upper()
             bin_id = str(getattr(candidate, "bin_id", "") or "")
             token_id = str(getattr(candidate, "token_id", "") or "")
-            witness = probability_witnesses.get(family_key)
-            cap = (payoff_q_lcb_by_candidate or {}).get(
-                (family_key, bin_id, side, token_id)
-            )
-            q_mean = (
-                family_payoff_point_q(witness, bin_id=bin_id, side=side)
-                if witness is not None and side in {"YES", "NO"}
-                else None
-            )
-            q_lcb = (
-                family_payoff_q_lcb(
-                    witness,
-                    bin_id=bin_id,
-                    side=side,
-                    payoff_q_lcb_cap=cap,
-                )
-                if witness is not None and side in {"YES", "NO"}
-                else None
-            )
             shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
             cost = Decimal(str(getattr(decision, "cost_usd", "0") or "0"))
-            if q_mean is None or q_lcb is None or shares <= 0 or cost < 0:
-                amplification_diagnostic.update(
-                    {
-                        "readiness": "BLOCKED_DIAGNOSTIC_UNAVAILABLE",
-                        "confidence_cost_margin_positive": None,
-                    }
-                )
-            else:
-                unit_cost = float(cost / shares)
-                margin = float(q_lcb) - unit_cost
-                margin_positive = margin > 0.0
-                amplification_diagnostic.update(
-                    {
-                        "readiness": (
-                            "CONFIDENCE_COST_POSITIVE_REQUIRES_FULL_ADMISSION"
-                            if margin_positive
-                            else "BLOCKED_CONFIDENCE_COST_MARGIN_NON_POSITIVE"
-                        ),
-                        "selected_side_q_mean": float(q_mean),
-                        "selected_side_q_lcb_confidence": float(q_lcb),
-                        "payoff_q_lcb_cap_applied": (
-                            float(cap) if cap is not None else None
-                        ),
-                        "all_in_cost_usd_per_share": unit_cost,
-                        "confidence_cost_margin_per_share": margin,
-                        "confidence_cost_margin_positive": margin_positive,
-                        "probability_witness_identity": str(
-                            getattr(witness, "witness_identity", "") or ""
-                        ),
-                    }
-                )
+            amplification_diagnostic = confidence_cost_diagnostic(
+                family_key=family_key,
+                bin_id=bin_id,
+                side=side,
+                token_id=token_id,
+                shares=shares,
+                cost=cost,
+            )
         winner = {
             "candidate_id": candidate_id,
             "action": action,
@@ -5830,6 +5958,7 @@ def _capital_proof_counterfactual_receipt(
             if growth is not None
             else None
         ),
+        "nearest_rejected_buy_frontier": nearest_rejected_buy_frontier,
         "candidate_input_count": getattr(decision, "candidate_input_count", None),
         "candidate_evaluation_count": len(evaluations),
         "candidate_evaluations_sha256": evaluation_hash,

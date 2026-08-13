@@ -1465,12 +1465,156 @@ def test_capital_proof_blocks_amplification_when_confidence_cost_margin_is_negat
         "selected_side_q_lcb_confidence": pytest.approx(0.08),
         "payoff_q_lcb_cap_applied": None,
         "all_in_cost_usd_per_share": pytest.approx(0.10),
+        "mean_cost_margin_per_share": pytest.approx(0.20),
         "confidence_cost_margin_per_share": pytest.approx(-0.02),
         "confidence_cost_margin_positive": False,
         "probability_witness_identity": probability.witness_identity,
     }
     assert receipt["venue_submit_count_before"] == 3
     assert receipt["venue_submit_count_after"] == 3
+
+
+def test_capital_proof_locates_nearest_rejected_executable_buy_frontier():
+    @dataclass(frozen=True)
+    class Evaluation:
+        candidate_id: str
+        family_key: str
+        bin_id: str
+        condition_id: str
+        side: str
+        token_id: str
+        action: str
+        execution_mode: str
+        rejection_reason: str
+        buy_rejection_economics: dict[str, object]
+
+    at = _dt.datetime(2026, 8, 12, 1, 0, tzinfo=_dt.timezone.utc)
+    bindings = (
+        OutcomeTokenBinding(
+            bin_id="34C",
+            condition_id="condition-34",
+            yes_token_id="yes-34",
+            no_token_id="no-34",
+        ),
+        OutcomeTokenBinding(
+            bin_id="other",
+            condition_id="condition-other",
+            yes_token_id="yes-other",
+            no_token_id="no-other",
+        ),
+    )
+    samples = np.tile(np.asarray(((0.30, 0.70),)), (400, 1))
+    samples[:20] = np.asarray((0.08, 0.92))
+    witness_fields = {
+        "family_key": "family-buy",
+        "bindings": bindings,
+        "q_version": "current-q",
+        "resolution_identity": "resolution",
+        "topology_identity": "topology",
+        "posterior_identity_hash": "posterior",
+        "source_truth_identity": "source",
+        "authority_certificate_hash": "certificate",
+        "band_alpha": 0.05,
+        "band_basis": "current-evidence",
+        "yes_point_q": np.asarray((0.30, 0.70)),
+        "yes_q_samples": samples,
+        "captured_at_utc": at,
+    }
+    probability = JointOutcomeProbabilityWitness(
+        **witness_fields,
+        max_age=_dt.timedelta(minutes=3),
+        witness_identity=joint_probability_witness_identity(**witness_fields),
+    )
+
+    def evaluation(candidate_id: str, expected_du: float) -> Evaluation:
+        return Evaluation(
+            candidate_id=candidate_id,
+            family_key="family-buy",
+            bin_id="34C",
+            condition_id="condition-34",
+            side="YES",
+            token_id="yes-34",
+            action="BUY",
+            execution_mode="TAKER_LIMIT",
+            rejection_reason="NON_POSITIVE_EXPECTED_OBJECTIVE",
+            buy_rejection_economics={
+                "candidate_id": candidate_id,
+                "rejection_reason": "NON_POSITIVE_EXPECTED_OBJECTIVE",
+                "probability_basis": "POSTERIOR_PREDICTIVE_MEAN",
+                "payoff_probability_mean": 0.30,
+                "minimum_all_in_unit_cost": "0.31",
+                "probe_kind": "MINIMUM_MARKETABLE",
+                "probe_shares": "10",
+                "probe_cost_usd": "3.1",
+                "probe_limit_price": "0.30",
+                "probe_expected_fill_price_before_fee": "0.30",
+                "probe_expected_delta_log_wealth": expected_du,
+                "probe_expected_log_growth_per_hour": expected_du / 24.0,
+                "probe_expected_ev_usd": -0.1,
+                "probe_expected_capital_efficiency": expected_du / 3.1,
+            },
+        )
+
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(
+            candidate=None,
+            expected_growth=None,
+            candidate_evaluations=(
+                evaluation("farther", -0.004),
+                evaluation("nearest", -0.002),
+            ),
+            shares=Decimal("0"),
+            cost_usd=Decimal("0"),
+            limit_price=None,
+            max_spend_usd=None,
+            cash_proceeds_usd=None,
+            candidate_input_count=2,
+            no_trade_reason="NO_CURRENT_EXECUTABLE_POSITIVE_ORDER",
+        )
+    )
+
+    receipt = global_batch_runtime._capital_proof_counterfactual_receipt(
+        selected,
+        selection_epoch_identity="epoch",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+        probability_manifest=(("family-buy", probability.witness_identity),),
+        full_scope_identity="scope",
+        book_epoch_identity="book",
+        wealth_witness=SimpleNamespace(
+            witness_identity="wealth",
+            economic_identity="wealth-economics",
+        ),
+        family_context_by_key={
+            "family-buy": {
+                "city": "Taipei",
+                "target_date": "2026-08-14",
+                "metric": "high",
+            }
+        },
+        probability_semantics_by_family={
+            "family-buy": "stale_ensemble_absolute_disagreement_v2"
+        },
+        probability_witnesses={"family-buy": probability},
+        payoff_q_lcb_by_candidate=None,
+        venue_submit_count_before=5,
+        venue_submit_count_after=5,
+    )
+
+    frontier = receipt["nearest_rejected_buy_frontier"]
+    assert receipt["winner"] is None
+    assert frontier["candidate_id"] == "nearest"
+    assert frontier["city"] == "Taipei"
+    assert frontier["solver_rejection_reason"] == (
+        "NON_POSITIVE_EXPECTED_OBJECTIVE"
+    )
+    assert frontier["probe_expected_delta_log_wealth"] == pytest.approx(-0.002)
+    diagnostic = frontier["confidence_cost_amplification_diagnostic"]
+    assert diagnostic["mean_cost_margin_per_share"] == pytest.approx(-0.01)
+    assert diagnostic["confidence_cost_margin_per_share"] == pytest.approx(-0.23)
+    assert diagnostic["confidence_cost_margin_positive"] is False
+    assert receipt["venue_submit_count_before"] == 5
+    assert receipt["venue_submit_count_after"] == 5
 
 
 def test_book_native_side_receipt_requires_current_neg_risk_state_shape():
