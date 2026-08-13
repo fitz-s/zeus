@@ -3452,28 +3452,16 @@ def _append_matched_order_fill_projection(
             if str(candidate.get("command_id") or "") == command_id
         ]
         if len(candidates) == 1:
-            try:
-                if _append_filled_entry_projection_repair(
-                    conn,
-                    candidate=candidates[0],
-                ):
-                    return
-            except Exception:
-                logger.exception(
-                    "recovery: certificate-bound EDLI entry fill projection failed "
-                    "for command %s order %s",
-                    command_id,
-                    venue_order_id,
-                )
+            if _append_filled_entry_projection_repair(
+                conn,
+                candidate=candidates[0],
+            ):
                 return
-        logger.error(
-            "recovery: certificate-bound EDLI entry fill projection requires exactly "
-            "one unprojected candidate command=%s order=%s candidates=%d",
-            command_id,
-            venue_order_id,
-            len(candidates),
+        raise RuntimeError(
+            "certificate-bound EDLI entry fill projection requires exactly one "
+            f"successful candidate: command={command_id} order={venue_order_id} "
+            f"candidates={len(candidates)}"
         )
-        return
     try:
         from src.execution.exchange_reconcile import _ensure_entry_fill_position_event
 
@@ -3486,10 +3474,18 @@ def _append_matched_order_fill_projection(
             observed_at=_coerce_iso_datetime(observed_at),
             order_fact_source=order_fact_source,
         )
+    except sqlite3.OperationalError as exc:
+        if "database is locked" in str(exc).lower():
+            raise
+        logger.exception(
+            "recovery: entry fill projection failed for command %s order %s",
+            command_id,
+            venue_order_id,
+        )
     except Exception:
         logger.exception(
             "recovery: entry fill projection failed for command %s order %s",
-            command.get("command_id"),
+            command_id,
             venue_order_id,
         )
 
@@ -23583,6 +23579,8 @@ def _authenticated_entry_trade_fact_candidates(
             "venue_submission_envelopes",
             "venue_trade_facts",
             "position_current",
+            "position_events",
+            "execution_fact",
         )
     ):
         return []
@@ -23614,7 +23612,8 @@ def _authenticated_entry_trade_fact_candidates(
                 'POST_ACKED',
                 'ACKED',
                 'PARTIAL',
-                'CANCEL_PENDING'
+                'CANCEL_PENDING',
+                'FILLED'
            )
            AND COALESCE(cmd.venue_order_id, '') != ''
            AND (
@@ -23630,6 +23629,47 @@ def _authenticated_entry_trade_fact_candidates(
                    AND fact.source IN ('REST', 'WS_USER')
                    AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
                    AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+           )
+           AND (
+                cmd.state != 'FILLED'
+                OR (
+                    lower(COALESCE(pc.order_id, '')) != lower(cmd.venue_order_id)
+                    AND EXISTS (
+                        SELECT 1
+                          FROM execution_fact prior_execution
+                          JOIN venue_commands prior_command
+                            ON prior_command.command_id = prior_execution.command_id
+                         WHERE prior_execution.position_id = cmd.position_id
+                           AND prior_execution.command_id != cmd.command_id
+                           AND prior_execution.order_role = 'entry'
+                           AND prior_execution.voided_at IS NULL
+                           AND prior_execution.filled_at IS NOT NULL
+                           AND prior_execution.shares > 0
+                           AND prior_command.token_id = cmd.token_id
+                    )
+                    AND (
+                        NOT EXISTS (
+                            SELECT 1
+                              FROM position_events event
+                             WHERE event.position_id = cmd.position_id
+                               AND event.event_type = 'ENTRY_ORDER_FILLED'
+                               AND (
+                                    event.command_id = cmd.command_id
+                                    OR lower(COALESCE(event.order_id, '')) =
+                                       lower(cmd.venue_order_id)
+                               )
+                        )
+                        OR NOT EXISTS (
+                            SELECT 1
+                              FROM execution_fact execution
+                             WHERE execution.position_id = cmd.position_id
+                               AND execution.command_id = cmd.command_id
+                               AND execution.order_role = 'entry'
+                               AND execution.filled_at IS NOT NULL
+                               AND execution.shares > 0
+                        )
+                    )
+                )
            )
         """
         + command_clause
@@ -23807,8 +23847,10 @@ def _reconcile_authenticated_entry_trade_fact(
         raise ValueError(
             "authenticated entry fill exceeds submitted share/capital bound"
         )
+    command_state = str(command.get("state") or "")
+    already_filled = command_state == CommandState.FILLED.value
     if (
-        str(command.get("state") or "") == CommandState.PARTIAL.value
+        command_state == CommandState.PARTIAL.value
         and _latest_order_fact_matched_size(
             conn,
             command_id=command_id,
@@ -23822,7 +23864,11 @@ def _reconcile_authenticated_entry_trade_fact(
         requested,
         side=command.get("side"),
     )
-    cancel_pending = str(command.get("state") or "") == CommandState.CANCEL_PENDING.value
+    if already_filled and not complete:
+        raise ValueError(
+            "terminal FILLED entry lacks complete authenticated fill economics"
+        )
+    cancel_pending = command_state == CommandState.CANCEL_PENDING.value
     if cancel_pending and not complete:
         return "stayed"
     event_type = (
@@ -23887,7 +23933,7 @@ def _reconcile_authenticated_entry_trade_fact(
     sp_name = f"sp_authenticated_entry_fill_{safe_command_id}"
     conn.execute(f"SAVEPOINT {sp_name}")
     try:
-        if str(command.get("state") or "") == CommandState.SUBMITTING.value:
+        if command_state == CommandState.SUBMITTING.value:
             append_event(
                 conn,
                 command_id=command_id,
@@ -23936,26 +23982,27 @@ def _reconcile_authenticated_entry_trade_fact(
                     "source_fill_time_valid": True,
                 },
             }
-        append_order_fact(
-            conn,
-            venue_order_id=venue_order_id,
-            command_id=command_id,
-            state="MATCHED" if complete else "PARTIALLY_MATCHED",
-            remaining_size=_decimal_text(remaining),
-            matched_size=_decimal_text(filled),
-            source=source,
-            observed_at=observed_at,
-            venue_timestamp=observed_at,
-            raw_payload_hash=_payload_hash(payload),
-            raw_payload_json=payload,
-        )
-        append_event(
-            conn,
-            command_id=command_id,
-            event_type=event_type,
-            occurred_at=observed_at,
-            payload=fill_event_payload,
-        )
+        if not already_filled:
+            append_order_fact(
+                conn,
+                venue_order_id=venue_order_id,
+                command_id=command_id,
+                state="MATCHED" if complete else "PARTIALLY_MATCHED",
+                remaining_size=_decimal_text(remaining),
+                matched_size=_decimal_text(filled),
+                source=source,
+                observed_at=observed_at,
+                venue_timestamp=observed_at,
+                raw_payload_hash=_payload_hash(payload),
+                raw_payload_json=payload,
+            )
+            append_event(
+                conn,
+                command_id=command_id,
+                event_type=event_type,
+                occurred_at=observed_at,
+                payload=fill_event_payload,
+            )
         _ensure_entry_fill_position_event(
             conn,
             command=projection_command,

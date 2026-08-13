@@ -8029,6 +8029,36 @@ class TestRecoveryResolutionTable:
 
         assert calls == [candidate]
 
+    def test_matched_entry_projection_propagates_writer_failure(
+        self, conn, monkeypatch
+    ):
+        """A lost projection write stays retryable instead of being logged as success."""
+        from src.execution import command_recovery, exchange_reconcile
+
+        monkeypatch.setattr(
+            exchange_reconcile,
+            "_ensure_entry_fill_position_event",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                sqlite3.OperationalError("database is locked")
+            ),
+        )
+
+        with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            command_recovery._append_matched_order_fill_projection(
+                conn,
+                command={
+                    "command_id": "cmd-projection-lock",
+                    "position_id": "pos-projection-lock",
+                    "decision_id": "dec-projection-lock",
+                    "intent_kind": "ENTRY",
+                    "side": "BUY",
+                },
+                venue_order_id="ord-projection-lock",
+                matched_size="17",
+                fill_price="0.30",
+                observed_at="2026-04-26T00:02:00Z",
+            )
+
     def test_restart_preflight_admits_only_exact_confirmed_matched_submit_review(
         self, conn
     ):
@@ -23709,6 +23739,177 @@ class TestRecoveryResolutionTable:
         payload = json.loads(event["payload_json"])
         assert payload["proof_class"] == "authenticated_trade_fact_full_fill"
         assert payload["filled_size"] == "242.994563"
+
+    def test_terminal_increment_fill_projection_recovers_after_post_submit_lock(
+        self,
+        conn,
+    ):
+        """A FILLED refill remains recoverable after its first projection write loses."""
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+        from src.state.db import log_execution_fact
+        from src.state.venue_command_repo import append_event
+
+        position_id = "pos-terminal-increment"
+        seed_command = "cmd-terminal-increment-seed"
+        seed_order = "ord-terminal-increment-seed"
+        refill_command = "cmd-terminal-increment-refill"
+        refill_order = "ord-terminal-increment-refill"
+
+        _insert(
+            conn,
+            command_id=seed_command,
+            position_id=position_id,
+            decision_id="dec-terminal-increment-seed",
+            size=5.0,
+            price=0.32,
+        )
+        _advance_to_acked(conn, command_id=seed_command, venue_order_id=seed_order)
+        conn.execute(
+            "UPDATE venue_commands SET state = 'FILLED' WHERE command_id = ?",
+            (seed_command,),
+        )
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=seed_command,
+            order_id=seed_order,
+        )
+        _append_test_filled_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=seed_command,
+            order_id=seed_order,
+            shares=5.0,
+            cost_basis_usd=1.60,
+            size_usd=1.60,
+            entry_price=0.32,
+        )
+        log_execution_fact(
+            conn,
+            intent_id=f"{position_id}:entry:{seed_command}",
+            position_id=position_id,
+            decision_id="dec-terminal-increment-seed",
+            command_id=seed_command,
+            order_role="entry",
+            posted_at="2026-04-26T00:00:00Z",
+            filled_at="2026-04-26T00:01:00Z",
+            submitted_price=0.32,
+            fill_price=0.32,
+            shares=5.0,
+            venue_status="FILLED",
+            terminal_exec_status="filled",
+            decision_law_id="predicted_bin_ev_v1",
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET chain_state = 'synced',
+                   chain_shares = 5.0,
+                   chain_cost_basis_usd = 1.60
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        )
+
+        _insert(
+            conn,
+            command_id=refill_command,
+            position_id=position_id,
+            decision_id="dec-terminal-increment-refill",
+            size=17.0,
+            price=0.30,
+            created_at="2026-04-26T00:02:00Z",
+        )
+        _advance_to_acked(
+            conn,
+            command_id=refill_command,
+            venue_order_id=refill_order,
+        )
+        _append_trade_fact(
+            conn,
+            command_id=refill_command,
+            order_id=refill_order,
+            trade_id="trade-terminal-increment-refill",
+            filled_size="17",
+            fill_price="0.30",
+        )
+        _append_order_fact(
+            conn,
+            command_id=refill_command,
+            order_id=refill_order,
+            state="MATCHED",
+            matched_size="17",
+            remaining_size="0",
+        )
+        append_event(
+            conn,
+            command_id=refill_command,
+            event_type="FILL_CONFIRMED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "venue_order_id": refill_order,
+                "filled_size": "17",
+                "fill_price": "0.30",
+            },
+        )
+
+        assert conn.execute(
+            "SELECT state FROM venue_commands WHERE command_id = ?",
+            (refill_command,),
+        ).fetchone()[0] == "FILLED"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM position_events WHERE command_id = ?",
+            (refill_command,),
+        ).fetchone()[0] == 0
+
+        summary = reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=refill_command,
+        )
+
+        assert summary == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            """
+            SELECT shares, cost_basis_usd, entry_price, chain_state, chain_shares
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert Decimal(str(current["shares"])) == Decimal("22")
+        assert Decimal(str(current["cost_basis_usd"])) == Decimal("6.7")
+        assert current["entry_price"] == pytest.approx(float(Decimal("6.7") / Decimal("22")))
+        assert current["chain_state"] == "unknown"
+        assert Decimal(str(current["chain_shares"])) == Decimal("5")
+        assert conn.execute(
+            """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND command_id = ?
+               AND event_type = 'ENTRY_ORDER_FILLED'
+            """,
+            (position_id, refill_command),
+        ).fetchone()[0] == 1
+        execution = conn.execute(
+            """
+            SELECT shares, fill_price
+              FROM execution_fact
+             WHERE position_id = ? AND command_id = ? AND order_role = 'entry'
+            """,
+            (position_id, refill_command),
+        ).fetchone()
+        assert dict(execution) == {"shares": 17.0, "fill_price": 0.3}
+        assert sum(
+            event["event_type"] == "FILL_CONFIRMED"
+            for event in _get_events(conn, refill_command)
+        ) == 1
+        assert reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=refill_command,
+        ) == {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
 
     def test_filled_entry_execution_fact_repair_preserves_position_increments(
         self,

@@ -4,6 +4,40 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-13 Terminal incremental fills remain canonical recovery debt
+
+The first live 1/8-Kelly cut produced four venue-confirmed entries.  The Miami
+refill command bought 17 additional NO shares at 0.30, but its immediate
+position projection lost a SQLite writer race after the command had already
+become `FILLED`.  The canonical position therefore remained at the prior five
+shares and $1.60 cost even though the confirmed fill made the true aggregate 22
+shares and $6.70 cost.  Periodic authenticated-fill recovery excluded every
+`FILLED` command, while the terminal-order repair compared the 17-share refill
+against the whole five-share position instead of treating it as a delta.
+
+A terminal `FILLED` ENTRY with exact confirmed trade facts, a pre-existing
+same-token command-level fill aggregate, a different current order id, and no
+command-bound fill projection/execution fact is now explicit recovery debt.
+Recovery rebuilds the aggregate from command-level execution facts, writes one
+idempotent `ENTRY_ORDER_FILLED` delta, and preserves the terminal command event.
+A lagging pre-fill chain balance downgrades `chain_state` to `unknown`; it may
+not remain falsely `synced` while command-derived exposure is larger.  A SQLite
+writer-lock failure propagates to the bounded recovery policy instead of being
+logged and counted as success.
+
+SCOPE is one exact terminal refill command and its same-token aggregate
+position.  DRAIN is the next authenticated-entry recovery pass under the
+canonical TRADE writer lease.  RESET is the presence of both the exact
+command-bound fill event and positive execution fact; a `FILLED` command or log
+message alone is not reset.  Acceptance requires the 5 + 17 = 22 shares,
+$1.60 + $5.10 = $6.70 cost antibody, one-event replay idempotence, explicit
+writer-lock propagation, focused recovery/reconciliation suites, and live proof
+that command `6a5be1b238f3472d` is represented by the canonical Miami position.
+
+Allowed files for this repair are `src/execution/command_recovery.py`,
+`src/execution/exchange_reconcile.py`, `tests/test_command_recovery.py`,
+`architecture/test_topology.yaml`, and this plan.
+
 ## 2026-08-13 Governed 1/8 Kelly removes artificial capital starvation
 
 Current complete global cuts found a positive posterior-mean London 32C YES

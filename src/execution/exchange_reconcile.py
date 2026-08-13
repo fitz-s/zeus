@@ -5742,6 +5742,12 @@ def _ensure_entry_fill_position_event(
                     chain_shares,
                 )
                 return
+            else:
+                # A confirmed command fill is current exposure truth while the
+                # chain mirror can still show the pre-fill balance.  Preserve
+                # exact command-derived exposure, but never label the lagging
+                # chain quantity as synchronized.
+                chain_state_after = "unknown"
         if projection_shares <= Decimal("0") or projection_cost <= Decimal("0"):
             logger.error(
                 "exchange_reconcile: refuse non-positive entry increment "
