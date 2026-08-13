@@ -12565,6 +12565,75 @@ def test_scoped_network_prefetch_preserves_unscoped_local_monitor_books(monkeypa
     assert monitor_refresh.monitor_orderbook_prefetch_attempted(clob, network.token_id)
 
 
+def test_monitor_prefetch_merge_overrides_same_token_and_unions_attempts():
+    from src.engine import monitor_refresh
+
+    clob = type("Clob", (), {})()
+    old_book = {"asset_id": "same-token", "bids": [{"price": "0.20"}]}
+    new_book = {"asset_id": "same-token", "bids": [{"price": "0.30"}]}
+    other_book = {"asset_id": "other-token", "bids": [{"price": "0.40"}]}
+    assert monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {"same-token": old_book, "other-token": other_book},
+        attempted_token_ids={"old-attempt"},
+    )
+
+    assert monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {"same-token": new_book},
+        attempted_token_ids={"new-attempt"},
+        merge=True,
+    )
+
+    assert monitor_refresh.prefetched_monitor_orderbook(clob, "same-token") == new_book
+    assert monitor_refresh.prefetched_monitor_orderbook(clob, "other-token") == other_book
+    assert monitor_refresh.monitor_orderbook_prefetch_attempted(clob, "old-attempt")
+    assert monitor_refresh.monitor_orderbook_prefetch_attempted(clob, "new-attempt")
+
+
+def test_scoped_prefetch_deadline_preserves_existing_cycle_cache(monkeypatch):
+    from src.engine import cycle_runtime, monitor_refresh
+
+    position = _make_position(
+        trade_id="deadline-network",
+        condition_id="deadline-network-condition",
+        token_id="deadline-network-token",
+        direction="buy_yes",
+    )
+    preserved_book = {
+        "asset_id": "preserved-token",
+        "bids": [{"price": "0.31", "size": "20"}],
+        "asks": [{"price": "0.33", "size": "20"}],
+    }
+    clob = type("Clob", (), {})()
+    assert monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {"preserved-token": preserved_book},
+        attempted_token_ids={"preserved-attempt"},
+    )
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: 10.0)
+
+    missing = cycle_runtime._prefetch_held_monitor_orderbooks(
+        None,
+        clob,
+        [position],
+        {},
+        now_utc=datetime.now(timezone.utc),
+        deps=type(
+            "Deps",
+            (),
+            {"logger": type("Logger", (), {"warning": staticmethod(lambda *args: None)})()},
+        )(),
+        local_only=True,
+        preserve_existing=True,
+        deadline_monotonic=9.0,
+    )
+
+    assert missing == frozenset()
+    assert monitor_refresh.prefetched_monitor_orderbook(clob, "preserved-token") == preserved_book
+    assert monitor_refresh.monitor_orderbook_prefetch_attempted(clob, "preserved-attempt")
+
+
 def test_monitor_global_sell_handoff_is_exact_and_does_not_extend_time():
     from src.engine import event_reactor_adapter, monitor_refresh
 

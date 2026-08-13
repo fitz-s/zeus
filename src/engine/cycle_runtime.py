@@ -4976,7 +4976,11 @@ def _prefetch_held_monitor_orderbooks(
             "AUXILIARY_DEADLINE_EXPIRED"
         )
         summary["held_monitor_orderbook_prefetch_bypassed"] = True
-        install_monitor_orderbook_prefetch(clob, {})
+        install_monitor_orderbook_prefetch(
+            clob,
+            {},
+            merge=preserve_existing,
+        )
         return frozenset()
     local_capture_times: list[datetime] = []
     fresh_local_books = _fresh_local_held_monitor_orderbooks(
