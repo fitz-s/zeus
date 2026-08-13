@@ -177,7 +177,7 @@ def _receipt_revision_coverage(conn: sqlite3.Connection) -> dict[str, object]:
         )
     )
     try:
-        _summary_proof(summary)
+        _summary_proof(conn, int(row["id"]), summary)
         proof_ready = True
     except (KeyError, TypeError, ValueError):
         proof_ready = False
@@ -200,7 +200,120 @@ def _receipt_revision_coverage(conn: sqlite3.Connection) -> dict[str, object]:
     }
 
 
-def _summary_proof(summary: Mapping[str, object]) -> Mapping[str, object]:
+def _audit_context_for_summary(
+    conn: sqlite3.Connection,
+    decision_log_id: int,
+    summary: Mapping[str, object],
+    *,
+    seen: frozenset[int] = frozenset(),
+) -> dict[str, object]:
+    """Rehydrate and verify compact schema-22 audit context from its chain."""
+
+    if decision_log_id in seen or len(seen) >= 16:
+        raise ValueError("audit context reference cycle/depth invalid")
+    expected_sha = str(summary.get("audit_context_sha256") or "")
+    if len(expected_sha) != 64:
+        raise ValueError("audit context hash unavailable")
+
+    inline = summary.get("audit_context_zlib_b64")
+    if inline is not None:
+        try:
+            raw = zlib.decompress(base64.b64decode(str(inline), validate=True))
+            context = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError, zlib.error) as exc:
+            raise ValueError("audit context inline payload invalid") from exc
+        if (
+            not isinstance(context, dict)
+            or hashlib.sha256(_canonical_json_bytes(context)).hexdigest()
+            != expected_sha
+        ):
+            raise ValueError("audit context inline hash mismatch")
+        return context
+
+    if summary.get("audit_context_reference_decision_log_id") is not None:
+        base_id = int(summary["audit_context_reference_decision_log_id"])
+        base_mode = str(summary.get("audit_context_reference_mode") or "")
+        base_receipt_hash = str(
+            summary.get("audit_context_reference_receipt_hash") or ""
+        )
+        base_sha = str(summary.get("audit_context_reference_sha256") or "")
+        if base_sha != expected_sha:
+            raise ValueError("audit context exact reference hash mismatch")
+        delta = None
+    elif summary.get("audit_context_base_decision_log_id") is not None:
+        base_id = int(summary["audit_context_base_decision_log_id"])
+        base_mode = str(summary.get("audit_context_base_mode") or "")
+        base_receipt_hash = str(
+            summary.get("audit_context_base_receipt_hash") or ""
+        )
+        base_sha = str(summary.get("audit_context_base_sha256") or "")
+        try:
+            delta_raw = zlib.decompress(
+                base64.b64decode(
+                    str(summary["audit_context_delta_zlib_b64"]),
+                    validate=True,
+                )
+            )
+            delta = json.loads(delta_raw)
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+            zlib.error,
+        ) as exc:
+            raise ValueError("audit context delta payload invalid") from exc
+        if (
+            not isinstance(delta, Mapping)
+            or hashlib.sha256(_canonical_json_bytes(delta)).hexdigest()
+            != str(summary.get("audit_context_delta_sha256") or "")
+        ):
+            raise ValueError("audit context delta hash mismatch")
+    else:
+        raise ValueError("audit context payload/reference unavailable")
+
+    row = conn.execute(
+        "SELECT mode,artifact_json FROM decision_log WHERE id=?",
+        (base_id,),
+    ).fetchone()
+    if row is None or str(row[0]) != base_mode:
+        raise ValueError("audit context base row unavailable")
+    try:
+        base_summary = json.loads(str(row[1] or ""))["summary"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("audit context base summary invalid") from exc
+    if (
+        not isinstance(base_summary, Mapping)
+        or str(base_summary.get("receipt_hash") or "") != base_receipt_hash
+        or str(base_summary.get("audit_context_sha256") or "") != base_sha
+    ):
+        raise ValueError("audit context base identity mismatch")
+    base = _audit_context_for_summary(
+        conn,
+        base_id,
+        base_summary,
+        seen=seen | {decision_log_id},
+    )
+    if delta is None:
+        return base
+    replacements = delta.get("replacements")
+    removed = delta.get("removed_keys")
+    if not isinstance(replacements, Mapping) or not isinstance(removed, list):
+        raise ValueError("audit context delta shape invalid")
+    context = dict(base)
+    for key in removed:
+        context.pop(str(key), None)
+    context.update((str(key), value) for key, value in replacements.items())
+    if hashlib.sha256(_canonical_json_bytes(context)).hexdigest() != expected_sha:
+        raise ValueError("audit context reconstructed hash mismatch")
+    return context
+
+
+def _summary_proof(
+    conn: sqlite3.Connection,
+    decision_log_id: int,
+    summary: Mapping[str, object],
+) -> Mapping[str, object]:
     assert_global_auction_summary_integrity(summary)
     if summary.get("schema_version") != 22:
         raise ValueError("proof receipt is not schema 22")
@@ -235,6 +348,11 @@ def _summary_proof(summary: Mapping[str, object]) -> Mapping[str, object]:
         != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
     ):
         raise ValueError("proof counterfactual side-effect contract invalid")
+    audit_context = _audit_context_for_summary(
+        conn,
+        decision_log_id,
+        summary,
+    )
     for field in (
         "selection_epoch_identity",
         "selection_cut_at_utc",
@@ -245,7 +363,12 @@ def _summary_proof(summary: Mapping[str, object]) -> Mapping[str, object]:
         "wealth_witness_identity",
         "wealth_economic_identity",
     ):
-        if proof.get(field) != summary.get(field):
+        expected = (
+            audit_context.get(field)
+            if field in audit_context
+            else summary.get(field)
+        )
+        if proof.get(field) != expected:
             raise ValueError(f"proof counterfactual cut mismatch: {field}")
     if (
         int(proof.get("candidate_input_count") or -1) <= 0
@@ -272,7 +395,7 @@ def _latest_proof_receipt_coverage(
         try:
             artifact = json.loads(str(row["artifact_json"] or ""))
             summary = artifact["summary"]
-            _summary_proof(summary)
+            _summary_proof(conn, int(row["id"]), summary)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             if latest_invalid is None:
                 latest_invalid = {
@@ -385,12 +508,13 @@ def _condition_resolved_yes(
 
 
 def _realized_proof_sample(
+    trades: sqlite3.Connection,
     forecasts: sqlite3.Connection,
     *,
     decision_log_id: int,
     summary: Mapping[str, object],
 ) -> dict[str, object]:
-    proof = _summary_proof(summary)
+    proof = _summary_proof(trades, decision_log_id, summary)
     winner = proof.get("winner")
     if not isinstance(winner, Mapping) or winner.get("action") != "BUY":
         raise ValueError("proof winner is not a statistical BUY")
@@ -516,6 +640,7 @@ def _settled_global_counterfactual_evidence(
             artifact = json.loads(str(row["artifact_json"] or ""))
             summary = artifact["summary"]
             sample = _realized_proof_sample(
+                trades,
                 forecasts,
                 decision_log_id=int(row["id"]),
                 summary=summary,

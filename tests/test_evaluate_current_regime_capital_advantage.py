@@ -126,6 +126,20 @@ def _proof_summary(*, city: str, target_date: str, condition_id: str) -> dict[st
     summary["proof_counterfactual_sha256"] = evaluator.hashlib.sha256(
         evaluator._canonical_json_bytes(proof)
     ).hexdigest()
+    audit_context = {
+        "probability_manifest": summary["probability_manifest"],
+        "buy_disabled_reason_by_family": {},
+        "excluded_by_family": {},
+        "excluded_by_candidate": {},
+    }
+    raw_audit_context = evaluator._canonical_json_bytes(audit_context)
+    summary["audit_context_encoding"] = "zlib+base64+canonical-json-object-v1"
+    summary["audit_context_sha256"] = evaluator.hashlib.sha256(
+        raw_audit_context
+    ).hexdigest()
+    summary["audit_context_zlib_b64"] = base64.b64encode(
+        zlib.compress(raw_audit_context)
+    ).decode("ascii")
     summary["execution_binding_hash"] = global_auction_execution_binding_hash(
         summary
     )
@@ -210,6 +224,89 @@ def test_latest_delta_receipt_is_current_selection_evidence():
     assert evidence["ready"] is True
 
 
+def test_compacted_audit_context_delta_rehydrates_probability_manifest():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,"
+        "completed_at TEXT,artifact_json TEXT)"
+    )
+    base = _proof_summary(
+        city="Chicago",
+        target_date="2026-08-13",
+        condition_id="condition-1",
+    )
+    current = json.loads(json.dumps(base))
+    current_manifest = [["family", "q-witness-new"]]
+    current["proof_counterfactual"]["probability_manifest"] = current_manifest
+    current["proof_counterfactual_sha256"] = evaluator.hashlib.sha256(
+        evaluator._canonical_json_bytes(current["proof_counterfactual"])
+    ).hexdigest()
+    current_context = {
+        "probability_manifest": current_manifest,
+        "buy_disabled_reason_by_family": {},
+        "excluded_by_family": {},
+        "excluded_by_candidate": {},
+    }
+    current_context_raw = evaluator._canonical_json_bytes(current_context)
+    delta = {
+        "removed_keys": [],
+        "replacements": {"probability_manifest": current_manifest},
+    }
+    delta_raw = evaluator._canonical_json_bytes(delta)
+    current["audit_context_sha256"] = evaluator.hashlib.sha256(
+        current_context_raw
+    ).hexdigest()
+    current.pop("audit_context_zlib_b64")
+    current.pop("probability_manifest")
+    current.update(
+        {
+            "audit_context_compacted": True,
+            "audit_context_delta_encoding": (
+                "zlib+base64+canonical-json-object-delta-v1"
+            ),
+            "audit_context_delta_sha256": evaluator.hashlib.sha256(
+                delta_raw
+            ).hexdigest(),
+            "audit_context_delta_zlib_b64": base64.b64encode(
+                zlib.compress(delta_raw)
+            ).decode("ascii"),
+            "audit_context_base_decision_log_id": 1,
+            "audit_context_base_mode": "global_single_order_auction",
+            "audit_context_base_receipt_hash": base["receipt_hash"],
+            "audit_context_base_sha256": base["audit_context_sha256"],
+            "audit_context_delta_chain_depth": 1,
+        }
+    )
+    current["execution_binding_hash"] = global_auction_execution_binding_hash(
+        current
+    )
+    current["artifact_summary_hash"] = global_auction_artifact_summary_hash(
+        current
+    )
+    conn.executemany(
+        "INSERT INTO decision_log VALUES (?,?,?,?)",
+        [
+            (
+                1,
+                "global_single_order_auction",
+                "2026-08-13T00:00:00+00:00",
+                json.dumps({"summary": base}),
+            ),
+            (
+                2,
+                "global_single_order_auction_delta",
+                "2026-08-13T00:00:01+00:00",
+                json.dumps({"summary": current}),
+            ),
+        ],
+    )
+
+    proof = evaluator._summary_proof(conn, 2, current)
+
+    assert proof["probability_manifest"] == current_manifest
+
+
 def test_latest_proof_receipt_scan_skips_newer_rebound_without_proof():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
@@ -271,6 +368,7 @@ def test_proof_sample_uses_verified_settlement_and_after_cost_terminal_wealth():
         ),
     )
     sample = evaluator._realized_proof_sample(
+        sqlite3.connect(":memory:"),
         forecasts,
         decision_log_id=17,
         summary=_proof_summary(
@@ -341,7 +439,7 @@ def test_tampered_proof_payoff_is_rejected_by_hash():
     )
 
     with pytest.raises(ValueError, match="proof counterfactual hash mismatch"):
-        evaluator._summary_proof(summary)
+        evaluator._summary_proof(sqlite3.connect(":memory:"), 1, summary)
 
 
 def test_counterfactual_evidence_counts_only_first_receipt_per_family_day():
