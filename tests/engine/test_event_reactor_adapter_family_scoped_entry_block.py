@@ -386,7 +386,9 @@ def test_live_global_batch_wires_family_block_into_selection_policy(monkeypatch)
     assert policy(SimpleNamespace(action="SELL", family_key=FAMILY_A)) is None
 
 
-def test_paused_held_batch_wires_exact_held_family_restriction(monkeypatch):
+def test_paused_held_batch_keeps_global_proof_scope_without_enabling_actual_buy(
+    monkeypatch,
+):
     from src.engine import global_batch_runtime
 
     captured = {}
@@ -419,8 +421,19 @@ def test_paused_held_batch_wires_exact_held_family_restriction(monkeypatch):
     adapter.process_global_batch((_make_event(city="Dallas", target_date="2026-07-25", metric="high"),), NOW)
 
     assert captured["buy_candidates_enabled"] is False
-    assert captured["restrict_to_family_keys"] == frozenset({FAMILY_A})
-    assert captured["restrict_to_family_keys"].isdisjoint({FAMILY_B})
+    assert captured["restrict_to_family_keys"] is None
+    assert callable(captured["proof_candidate_policy_rejection_resolver"])
+    assert (
+        captured["proof_candidate_policy_rejection_resolver"](
+            SimpleNamespace(
+                action="BUY",
+                family_key=FAMILY_A,
+                bin_id="70F",
+                side="YES",
+            )
+        )
+        != "GLOBAL_CURRENT_REGIME_SETTLEMENT_GRADED_CAPITAL_ADVANTAGE_UNPROVEN"
+    )
 
 
 def test_paused_zero_held_batch_uses_unrestricted_reduce_only_no_trade(monkeypatch):

@@ -348,7 +348,7 @@ scripts:
     canonical_command: "PYTHONPATH=. python3 scripts/evaluate_current_regime_capital_advantage.py --trades state/zeus_trades.db --forecasts state/zeus-forecasts.db --artifact state/current_regime_capital_advantage.json"
     external_inputs: []
     promotion_barrier: "Only an exact-revision PASS may be consumed by a separate reviewed admission seam; this script never submits orders or writes canonical DB truth."
-    required_helpers: [src.riskguard.riskguard._day0_live_realized_capital_curve, src.riskguard.riskguard._qkernel_live_realized_capital_curve, src.riskguard.riskguard._settled_market_relative_alpha_shadow_rows]
+    required_helpers: [src.engine.global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION, src.contracts.global_auction_receipt.assert_global_auction_summary_integrity, src.riskguard.riskguard._day0_live_realized_capital_curve, src.riskguard.riskguard._qkernel_live_realized_capital_curve]
     required_tests: [tests/test_evaluate_current_regime_capital_advantage.py, tests/test_riskguard.py]
     unguarded_write_rationale: "Reads all canonical DBs through SQLite mode=ro and atomically writes only the declared non-authority JSON evidence artifact."
   audit_replay_fidelity.py: {class: read_only_evidence}

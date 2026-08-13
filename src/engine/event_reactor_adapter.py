@@ -7913,32 +7913,6 @@ def event_bound_live_adapter_from_trade_conn(
         entry_pause_reason = _entry_pause_blocks_live_submit(
             live_cap_conn or trade_conn
         )
-        paused_held_family_keys = None
-        if entry_pause_reason is not None and held_family_provider is not None:
-            try:
-                held_family_keys = set()
-                for raw_family in held_family_provider() or ():
-                    city, target_date, metric = raw_family
-                    if not all((city, target_date, metric)):
-                        continue
-                    held_family_keys.add(
-                        weather_family_id(
-                            city=str(city),
-                            target_date=str(target_date),
-                            metric=str(metric).lower(),
-                        )
-                    )
-                # ``None`` means the global batch is unrestricted by an exact
-                # held-family carrier.  An empty set is not a valid restricted
-                # scope: under entry pause, zero held families must reach the
-                # ordinary reduce-only no-trade result instead of raising and
-                # requeueing every forecast event forever.
-                paused_held_family_keys = frozenset(held_family_keys) or None
-            except Exception:  # noqa: BLE001 - global runtime retains its own fail-closed read
-                logging.getLogger(__name__).warning(
-                    "paused held-family restriction read failed; retaining runtime held-only gate",
-                    exc_info=True,
-                )
         day0_urgent_batch = bool(events) and all(
             str(getattr(event, "event_type", "") or "")
             == "DAY0_EXTREME_UPDATED"
@@ -10297,7 +10271,11 @@ def event_bound_live_adapter_from_trade_conn(
 
         strategy_policy_cache: dict[str, str | None] = {}
 
-        def _current_entry_candidate_policy(candidate):
+        def _current_entry_candidate_policy(
+            candidate,
+            *,
+            proof_only: bool = False,
+        ):
             action = str(
                 getattr(candidate, "action", "BUY") or "BUY"
             ).strip().upper()
@@ -10312,7 +10290,11 @@ def event_bound_live_adapter_from_trade_conn(
                 ) not in exact_completion_sell_keys:
                     return "GLOBAL_EXACT_HELD_COMPLETION_OTHER_POSITION"
                 return None
-            if entry_submit_suppression_reason is not None:
+            # The proof solve has no actuator and therefore may ignore only
+            # bankroll-wide admission state whose own recovery needs current
+            # economic evidence. Candidate-local data/source/strategy/risk/
+            # price/capital laws below remain identical to live selection.
+            if entry_submit_suppression_reason is not None and not proof_only:
                 return entry_submit_suppression_reason
             family_block_reason = _entry_family_blocked_candidate_reason(
                 candidate,
@@ -10348,13 +10330,14 @@ def event_bound_live_adapter_from_trade_conn(
             # selection rule, executable-cost regime, and settlement outcome.
             # RESET: only successful validation consumed at this seam; process
             # health, a fresh q, or an operator restart cannot clear the gate.
-            advantage_reason = (
-                _unproven_statistical_entry_advantage_rejection_reason(
-                    day0_payoff_truth=day0_payoff_truth,
+            if not proof_only:
+                advantage_reason = (
+                    _unproven_statistical_entry_advantage_rejection_reason(
+                        day0_payoff_truth=day0_payoff_truth,
+                    )
                 )
-            )
-            if advantage_reason is not None:
-                return advantage_reason
+                if advantage_reason is not None:
+                    return advantage_reason
             try:
                 strategy_key = _event_bound_strategy_key(
                     event_type=event_type,
@@ -10418,6 +10401,12 @@ def event_bound_live_adapter_from_trade_conn(
                 candidate_policy_rejection_resolver=(
                     _current_entry_candidate_policy
                 ),
+                proof_candidate_policy_rejection_resolver=(
+                    lambda candidate: _current_entry_candidate_policy(
+                        candidate,
+                        proof_only=True,
+                    )
+                ),
                 # A held-SELL completion wake exists because local monitoring
                 # found a sell candidate that still needs the globally
                 # comparable SELL/HOLD/CASH cut.  Do not make that cut depend
@@ -10445,9 +10434,10 @@ def event_bound_live_adapter_from_trade_conn(
                 selection_cancelled=_day0_selection_cancelled,
                 final_actuation_cancelled=_hard_day0_authority_cancelled,
                 # Delta facts narrow refresh I/O, never the economic feasible set.
-                # The paused held-family restriction is the explicit reduce-only
-                # admission scope; otherwise leave the auction universe global.
-                restrict_to_family_keys=paused_held_family_keys,
+                # Actual BUY remains disabled above during an entry pause, while
+                # the proof-only solve needs the complete universe to avoid a
+                # self-referential held-family sample.
+                restrict_to_family_keys=None,
             )
             logging.getLogger(__name__).debug(
                 "global probability family cache: hits=%d ineligible_hits=%d "

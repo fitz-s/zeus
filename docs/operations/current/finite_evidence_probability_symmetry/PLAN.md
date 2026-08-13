@@ -34,6 +34,26 @@ deadline, and successful exact-head restart with entries still paused.
 
 ## 2026-08-12 Current truth is not current-regime capital advantage
 
+### Side-effect-free global capital counterfactual
+
+An entry pause cannot itself shrink the evidence universe to held families:
+that makes the capital-proof gate self-referential because statistical BUYs
+are rejected before their economics exist.  Each complete current q/book/
+wealth cut therefore runs one additional proof-only selection over the same
+prepared universe.  It ignores only non-actuation global admission state
+(including the settlement-graded capital-proof pause that the receipt is
+intended to drain); freshness, probability semantics, source quality,
+family-local readiness, strategy policy, price band, fees, depth, Kelly, risk
+and capital limits remain unchanged.
+
+The proof result is embedded in the actual schema-22 global-auction receipt,
+has `venue_actuation_available=false`, and asserts the venue submit counter is
+unchanged.  The ordinary selected object remains the sole preflight/actuator
+input.  SCOPE is statistical evidence for current selection-law evaluation.
+DRAIN is settlement joining of one first complete receipt per independent
+family-day.  RESET is a new selection/probability revision, which makes prior
+receipts ineligible rather than mutating them.
+
 The full global solver used current q, book, and wealth but let its
 `current_state_solve` path bypass settlement-graded OOF reliability.  Freshness
 prevents time travel; it does not prove that the model is more accurate than

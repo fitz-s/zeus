@@ -58,6 +58,7 @@ from src.engine.global_single_order_auction import (
 )
 from src.engine.qkernel_spine_bridge import sell_action_authority_identity
 from src.events.candidate_binding import weather_family_id
+from src.events.day0_authority import day0_probability_semantics_revision
 from src.events.opportunity_event import OpportunityEvent, make_opportunity_event
 from src.events.reactor import (
     EventSubmissionReceipt,
@@ -3239,6 +3240,7 @@ def _store_global_auction_receipt(
     expected_holding_obligations: Sequence[_CurrentHeldObligation] = (),
     holding_probability_witnesses: Mapping[str, object] | None = None,
     wealth_reauction_audit: _WealthReauctionAudit | None = None,
+    proof_counterfactual: Mapping[str, object] | None = None,
     persist_artifact: Callable[[object], int | None] | None = None,
 ) -> int | None:
     """Persist one complete auction comparison before any venue side effect."""
@@ -3782,6 +3784,19 @@ def _store_global_auction_receipt(
             minimum_repair_zlib
         ).decode("ascii"),
     }
+    if proof_counterfactual is not None:
+        proof = dict(proof_counterfactual)
+        if (
+            proof.get("role") != "SIDE_EFFECT_FREE_CAPITAL_COUNTERFACTUAL"
+            or proof.get("venue_actuation_available") is not False
+            or proof.get("global_selection_revision")
+            != CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        ):
+            raise ValueError("GLOBAL_AUCTION_PROOF_COUNTERFACTUAL_INVALID")
+        receipt["proof_counterfactual"] = proof
+        receipt["proof_counterfactual_sha256"] = hashlib.sha256(
+            _canonical_json_bytes(proof)
+        ).hexdigest()
     audit_context = {
         field: receipt[field]
         for field in _GLOBAL_AUCTION_AUDIT_CONTEXT_FIELDS
@@ -5593,6 +5608,145 @@ def _no_trade_rejection_log_summary(
     return visible, len(exact_reasons), max(0, len(ranked) - len(visible))
 
 
+def _capital_proof_counterfactual_receipt(
+    selected: object,
+    *,
+    selection_epoch_identity: str,
+    selection_cut_at_utc: datetime,
+    decision_at_utc: datetime,
+    probability_manifest: tuple[tuple[str, str], ...],
+    full_scope_identity: str,
+    book_epoch_identity: str,
+    wealth_witness: object,
+    family_context_by_key: Mapping[str, Mapping[str, str]],
+    probability_semantics_by_family: Mapping[str, str],
+    venue_submit_count_before: int,
+    venue_submit_count_after: int,
+) -> dict[str, object]:
+    """Freeze one proof-only winner from the exact actual-decision cut."""
+
+    if venue_submit_count_after != venue_submit_count_before:
+        raise ValueError("GLOBAL_CAPITAL_PROOF_COUNTERFACTUAL_VENUE_SIDE_EFFECT")
+    decision = getattr(selected, "decision", None)
+    if decision is None:
+        raise ValueError("GLOBAL_CAPITAL_PROOF_COUNTERFACTUAL_DECISION_MISSING")
+    candidate = getattr(decision, "candidate", None)
+    growth = getattr(decision, "expected_growth", None)
+    family_key = str(getattr(candidate, "family_key", "") or "")
+    context = dict(family_context_by_key.get(family_key, {}))
+    evaluations = tuple(
+        asdict(row)
+        for row in tuple(getattr(decision, "candidate_evaluations", ()) or ())
+    )
+    evaluation_hash = hashlib.sha256(
+        _canonical_json_bytes(evaluations)
+    ).hexdigest()
+    winner = None
+    winner_evaluation = None
+    if candidate is not None:
+        candidate_id = str(getattr(candidate, "candidate_id", "") or "")
+        winner_evaluation = next(
+            (
+                row
+                for row in evaluations
+                if str(row.get("candidate_id") or "") == candidate_id
+            ),
+            None,
+        )
+        if winner_evaluation is None:
+            raise ValueError(
+                "GLOBAL_CAPITAL_PROOF_COUNTERFACTUAL_WINNER_EVALUATION_MISSING"
+            )
+        winner = {
+            "candidate_id": candidate_id,
+            "action": str(getattr(candidate, "action", "BUY") or "BUY").upper(),
+            "family_key": family_key,
+            "city": str(context.get("city") or ""),
+            "target_date": str(context.get("target_date") or ""),
+            "metric": str(context.get("metric") or ""),
+            "probability_semantics_revision": str(
+                probability_semantics_by_family.get(family_key) or ""
+            ),
+            "bin_id": str(getattr(candidate, "bin_id", "") or ""),
+            "condition_id": str(getattr(candidate, "condition_id", "") or ""),
+            "side": str(getattr(candidate, "side", "") or ""),
+            "token_id": str(getattr(candidate, "token_id", "") or ""),
+            "execution_mode": _global_candidate_execution_mode(candidate),
+            "shares": str(getattr(decision, "shares", "0")),
+            "cost_usd": str(getattr(decision, "cost_usd", "0")),
+            "limit_price": (
+                str(getattr(decision, "limit_price"))
+                if getattr(decision, "limit_price", None) is not None
+                else None
+            ),
+            "max_spend_usd": (
+                str(getattr(decision, "max_spend_usd"))
+                if getattr(decision, "max_spend_usd", None) is not None
+                else None
+            ),
+            "cash_proceeds_usd": (
+                str(getattr(decision, "cash_proceeds_usd"))
+                if getattr(decision, "cash_proceeds_usd", None) is not None
+                else None
+            ),
+            "evaluation": winner_evaluation,
+        }
+    return {
+        "role": "SIDE_EFFECT_FREE_CAPITAL_COUNTERFACTUAL",
+        "venue_actuation_available": False,
+        "global_selection_revision": CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+        "selection_epoch_identity": selection_epoch_identity,
+        "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
+        "decision_at_utc": decision_at_utc.isoformat(),
+        "probability_manifest": probability_manifest,
+        "full_scope_identity": full_scope_identity,
+        "book_epoch_identity": book_epoch_identity,
+        "wealth_witness_identity": str(
+            getattr(wealth_witness, "witness_identity", "") or ""
+        ),
+        "wealth_economic_identity": str(
+            getattr(wealth_witness, "economic_identity", "") or ""
+        ),
+        "winner": winner,
+        "no_trade_reason": str(
+            getattr(decision, "no_trade_reason", "") or ""
+        ),
+        "expected_growth": (
+            {
+                "probability_basis": str(
+                    getattr(growth, "probability_basis", "") or ""
+                ),
+                "expected_delta_log_wealth": float(
+                    getattr(growth, "expected_delta_log_wealth", 0.0) or 0.0
+                ),
+                "expected_log_growth_per_hour": float(
+                    getattr(growth, "expected_log_growth_per_hour", 0.0) or 0.0
+                ),
+                "expected_ev_usd": float(
+                    getattr(growth, "expected_ev_usd", 0.0) or 0.0
+                ),
+                "expected_capital_efficiency": float(
+                    getattr(growth, "expected_capital_efficiency", 0.0) or 0.0
+                ),
+                "ruin_probability_reduction": float(
+                    getattr(growth, "ruin_probability_reduction", 0.0) or 0.0
+                ),
+                "capital_lock_hours": float(
+                    getattr(growth, "capital_lock_hours", 0.0) or 0.0
+                ),
+            }
+            if growth is not None
+            else None
+        ),
+        "candidate_input_count": getattr(decision, "candidate_input_count", None),
+        "candidate_evaluation_count": len(evaluations),
+        "candidate_evaluations_sha256": evaluation_hash,
+        "venue_submit_count_before": venue_submit_count_before,
+        "venue_submit_count_after": venue_submit_count_after,
+        "venue_side_effect_free": True,
+    }
+
+
 def process_current_global_batch(
     events: Sequence[OpportunityEvent],
     *,
@@ -5630,6 +5784,8 @@ def process_current_global_batch(
     current_capital_limit_resolver: Callable[[object, str, str], object]
     | None = None,
     candidate_policy_rejection_resolver: Callable[[object], str | None]
+    | None = None,
+    proof_candidate_policy_rejection_resolver: Callable[[object], str | None]
     | None = None,
     buy_candidates_enabled: bool = True,
     fractional_kelly_multiplier: Decimal = Decimal("1"),
@@ -6188,7 +6344,14 @@ def process_current_global_batch(
                 raise ValueError("CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS")
             held_families = _current_held_weather_families(scope_trade_conn)
         scope_at = current_time()
-        if not buy_candidates_enabled and not held_families:
+        proof_buy_candidates_enabled = (
+            proof_candidate_policy_rejection_resolver is not None
+        )
+        if (
+            not buy_candidates_enabled
+            and not proof_buy_candidates_enabled
+            and not held_families
+        ):
             return reject("GLOBAL_AUCTION_NO_REDUCE_ONLY_FAMILY")
         restricted_families = None
         if restrict_to_family_keys is not None:
@@ -6265,6 +6428,7 @@ def process_current_global_batch(
                     restrict_to_families=(
                         held_families
                         if not buy_candidates_enabled
+                        and not proof_buy_candidates_enabled
                         else (restricted_families or None)
                     ),
                     day0_only=day0_only_scope,
@@ -6347,7 +6511,7 @@ def process_current_global_batch(
                 len(held_family_keys),
                 len(full_scope.events_by_family),
             )
-        if not buy_candidates_enabled:
+        if not buy_candidates_enabled and not proof_buy_candidates_enabled:
             held_family_keys = frozenset(
                 weather_family_id(
                     city=city,
@@ -6843,6 +7007,25 @@ def process_current_global_batch(
                 if candidate_policy_rejection_resolver is None:
                     return None
                 return candidate_policy_rejection_resolver(candidate)
+
+            def proof_candidate_policy(candidate):
+                action = str(
+                    getattr(candidate, "action", "BUY") or "BUY"
+                ).upper()
+                key = (
+                    action,
+                    str(getattr(candidate, "family_key", "") or ""),
+                    str(getattr(candidate, "bin_id", "") or ""),
+                    str(getattr(candidate, "side", "") or ""),
+                    str(getattr(candidate, "token_id", "") or ""),
+                    _global_candidate_execution_mode(candidate),
+                )
+                reason = excluded_candidates.get(key)
+                if reason is not None:
+                    return f"GLOBAL_PREFLIGHT_CANDIDATE_INELIGIBLE:{reason}"
+                if proof_candidate_policy_rejection_resolver is None:
+                    return None
+                return proof_candidate_policy_rejection_resolver(candidate)
             venue_identity = (
                 attempt_book_epoch.witness_identity
                 if attempt_book_epoch is not None
@@ -6907,6 +7090,57 @@ def process_current_global_batch(
                 payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
                 cancelled=selection_cancelled,
             )
+            proof_selected = None
+            proof_submit_count_before = None
+            proof_submit_count_after = None
+            if proof_candidate_policy_rejection_resolver is not None:
+                proof_submit_count_before = venue_submit_count()
+                proof_selected = select_prepared_global_auction(
+                    prepared_for_selection,
+                    selection_epoch_identity=attempt_selection_epoch_identity,
+                    selection_cut_at_utc=scope_at,
+                    current_scope=scope,
+                    current_scope_identity_resolver=lambda: scope.scope_identity,
+                    venue_universe_identity=venue_identity,
+                    current_venue_universe_identity_resolver=lambda: venue_identity,
+                    universe_max_age=(
+                        attempt_book_epoch.max_age
+                        if attempt_book_epoch is not None
+                        else FRESHNESS_WINDOW_DEFAULT
+                    ),
+                    current_probability_resolver=probability_resolver,
+                    current_execution_resolver=execution_resolver,
+                    current_wealth_identity_resolver=(
+                        lambda: selection_wealth.economic_identity
+                    ),
+                    wealth_witness=selection_wealth,
+                    capital_limit_usd=(
+                        selection_wealth.strategy_capital_allocation
+                        .remaining_buy_capacity_usd
+                    ),
+                    fractional_kelly_multiplier=fractional_kelly_multiplier,
+                    decision_at_utc=selection_at,
+                    book_epoch=attempt_book_epoch,
+                    current_capital_limit_resolver=current_capital_limit_resolver,
+                    candidate_policy_rejection_resolver=(
+                        proof_candidate_policy
+                    ),
+                    preflight_excluded_by_family=(
+                        preflight_excluded_by_family
+                    ),
+                    buy_disabled_family_keys=frozenset(
+                        held_only_family_keys.intersection(
+                            attempt_probabilities
+                        )
+                    ),
+                    payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
+                    cancelled=selection_cancelled,
+                )
+                proof_submit_count_after = venue_submit_count()
+                if proof_submit_count_after != proof_submit_count_before:
+                    raise RuntimeError(
+                        "GLOBAL_CAPITAL_PROOF_COUNTERFACTUAL_VENUE_SIDE_EFFECT"
+                    )
             if (
                 selected.decision.candidate is None
                 and selected.decision.no_trade_reason
@@ -6984,6 +7218,59 @@ def process_current_global_batch(
                 for family_key, scope_event in full_scope_event_by_family.items()
                 for payload in (payload_reader(scope_event),)
             }
+            qkernel_semantics_by_posterior = (
+                _qkernel_shadow_current_semantics_by_posterior(
+                    forecast_conn,
+                    attempt_probabilities,
+                )
+            )
+            proof_counterfactual = (
+                # This is evidence only. The actual selected object above is
+                # the sole path that can reach winner preflight or actuation.
+                _capital_proof_counterfactual_receipt(
+                    proof_selected,
+                    selection_epoch_identity=(
+                        attempt_selection_epoch_identity
+                    ),
+                    selection_cut_at_utc=scope_at,
+                    decision_at_utc=selection_at,
+                    probability_manifest=_probability_manifest(
+                        attempt_probabilities
+                    ),
+                    full_scope_identity=_accounted_scope_identity(
+                        decision_scope,
+                        ineligible_by_family,
+                    ),
+                    book_epoch_identity=venue_identity,
+                    wealth_witness=selection_wealth,
+                    family_context_by_key=family_context_by_key,
+                    probability_semantics_by_family={
+                        family_key: (
+                            day0_probability_semantics_revision(
+                                str(getattr(witness, "q_version", "") or "")
+                            )
+                            or str(
+                                qkernel_semantics_by_posterior.get(
+                                    str(
+                                        getattr(
+                                            witness,
+                                            "posterior_identity_hash",
+                                            "",
+                                        )
+                                        or ""
+                                    )
+                                )
+                                or ""
+                            )
+                        )
+                        for family_key, witness in attempt_probabilities.items()
+                    },
+                    venue_submit_count_before=int(proof_submit_count_before),
+                    venue_submit_count_after=int(proof_submit_count_after),
+                )
+                if proof_selected is not None
+                else None
+            )
             alpha_shadow_events = _market_relative_alpha_shadow_events(
                 selected=selected,
                 probability_witnesses=attempt_probabilities,
@@ -6993,10 +7280,7 @@ def process_current_global_batch(
                 selection_cut_at_utc=scope_at,
                 decision_at_utc=selection_at,
                 qkernel_semantics_by_posterior=(
-                    _qkernel_shadow_current_semantics_by_posterior(
-                        forecast_conn,
-                        attempt_probabilities,
-                    )
+                    qkernel_semantics_by_posterior
                 ),
             )
             for shadow_event in alpha_shadow_events:
@@ -7076,6 +7360,7 @@ def process_current_global_batch(
                 expected_holding_obligations=holding_obligations,
                 holding_probability_witnesses=attempt_probabilities,
                 wealth_reauction_audit=wealth_reauction_audit,
+                proof_counterfactual=proof_counterfactual,
                 persist_artifact=_global_auction_artifact_persister(
                     trade_conn,
                     work_context=work_context,
@@ -7704,6 +7989,9 @@ def process_current_global_batch(
                         current_capital_limit_resolver=current_capital_limit_resolver,
                         candidate_policy_rejection_resolver=(
                             candidate_policy_rejection_resolver
+                        ),
+                        proof_candidate_policy_rejection_resolver=(
+                            proof_candidate_policy_rejection_resolver
                         ),
                         buy_candidates_enabled=buy_candidates_enabled,
                         fractional_kelly_multiplier=fractional_kelly_multiplier,

@@ -774,6 +774,20 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
                 "TAKER_LIMIT",
             ): "jit depth insufficient"
         },
+        proof_counterfactual={
+            "role": "SIDE_EFFECT_FREE_CAPITAL_COUNTERFACTUAL",
+            "venue_actuation_available": False,
+            "global_selection_revision": (
+                global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+            ),
+            "selection_epoch_identity": "epoch-current",
+            "venue_side_effect_free": True,
+            "winner": {
+                "candidate_id": "proof-buy",
+                "action": "BUY",
+                "family_key": "family-buy",
+            },
+        },
     )
     row_id = global_batch_runtime._store_global_auction_receipt(
         conn,
@@ -824,6 +838,15 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     assert summary["winner_event_id"] == "event-buy"
     assert summary["winner_candidate_id"] == "buy-repaired"
     assert summary["winner_actuation_identity"] == receipt_actuation_identity
+    assert summary["proof_counterfactual"] == receipt_kwargs[
+        "proof_counterfactual"
+    ]
+    assert summary["proof_counterfactual"]["venue_actuation_available"] is False
+    assert summary["proof_counterfactual_sha256"] == hashlib.sha256(
+        global_batch_runtime._canonical_json_bytes(
+            receipt_kwargs["proof_counterfactual"]
+        )
+    ).hexdigest()
     receipt_ref = global_auction_receipt_ref_from_artifact(
         decision_log_id=row_id,
         decision_log_mode=row["mode"],
@@ -896,6 +919,8 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
         "SELECT artifact_json FROM decision_log WHERE id = ?",
         (row_id,),
     ).fetchone()[0] == row["artifact_json"]
+
+
     assert summary["winner_event_id"] == "event-buy"
     assert summary["strategy_capital_allocation"] == {
         "allocation_version": receipt_allocation.allocation_version,
@@ -1280,6 +1305,56 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             fractional_kelly_multiplier=Decimal("0.25"),
         )
     conn.close()
+
+
+def test_capital_proof_counterfactual_rejects_any_venue_side_effect():
+    evaluation = SimpleNamespace(candidate_id="proof-buy")
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(
+            candidate=SimpleNamespace(
+                candidate_id="proof-buy",
+                family_key="family-buy",
+                action="BUY",
+                bin_id="bin",
+                condition_id="condition",
+                side="YES",
+                token_id="token",
+            ),
+            expected_growth=None,
+            candidate_evaluations=(evaluation,),
+            shares=Decimal("10"),
+            cost_usd=Decimal("4"),
+            limit_price=Decimal("0.40"),
+            max_spend_usd=Decimal("4"),
+            cash_proceeds_usd=Decimal("0"),
+            candidate_input_count=1,
+            no_trade_reason=None,
+        )
+    )
+    at = _dt.datetime(2026, 8, 12, 1, 0, tzinfo=_dt.timezone.utc)
+    kwargs = {
+        "selection_epoch_identity": "epoch",
+        "selection_cut_at_utc": at,
+        "decision_at_utc": at,
+        "probability_manifest": (("family-buy", "q-buy"),),
+        "full_scope_identity": "scope",
+        "book_epoch_identity": "book",
+        "wealth_witness": SimpleNamespace(
+            witness_identity="wealth",
+            economic_identity="wealth-economics",
+        ),
+        "family_context_by_key": {},
+        "probability_semantics_by_family": {},
+        "venue_submit_count_before": 3,
+        "venue_submit_count_after": 4,
+    }
+
+    with pytest.raises(
+        ValueError, match="GLOBAL_CAPITAL_PROOF_COUNTERFACTUAL_VENUE_SIDE_EFFECT"
+    ):
+        global_batch_runtime._capital_proof_counterfactual_receipt(
+            selected, **kwargs
+        )
 
 
 def test_book_native_side_receipt_requires_current_neg_risk_state_shape():
