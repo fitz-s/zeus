@@ -16962,6 +16962,45 @@ def test_reduce_only_token_rebind_keeps_unheld_incomplete_binding():
         )
 
 
+def test_reduce_only_token_rebind_validates_required_tokens_per_family():
+    first = _current_global_book_probability()
+    second = universe.rebind_family_payoff_witness(
+        first,
+        bindings=tuple(
+            replace(
+                binding,
+                condition_id=f"other-{binding.condition_id}",
+                yes_token_id=f"other-{binding.yes_token_id}",
+                no_token_id=f"other-{binding.no_token_id}",
+            )
+            for binding in first.bindings
+        ),
+    )
+    held_tokens = frozenset(
+        {first.bindings[0].yes_token_id, second.bindings[0].yes_token_id}
+    )
+
+    for witness in (first, second):
+        family_required = frozenset(
+            token
+            for binding in witness.bindings
+            for token in (binding.yes_token_id, binding.no_token_id)
+            if token in held_tokens
+        )
+        rebound = universe._rebind_probability_witness_tokens(
+            witness,
+            token_map_by_condition={},
+            required_token_ids=family_required,
+        )
+        assert family_required.issubset(
+            {
+                token
+                for binding in rebound.bindings
+                for token in (binding.yes_token_id, binding.no_token_id)
+            }
+        )
+
+
 def test_current_global_book_epoch_batches_snapshot_invalidation_truth():
     probability = _current_global_book_probability()
     conn = _global_book_metadata_conn(probability)

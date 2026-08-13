@@ -2407,10 +2407,20 @@ def bind_current_global_probability_tokens(
                 raise ValueError(
                     f"GLOBAL_CURRENT_GAMMA_METADATA_INCOMPLETE:{family_key}:{missing}"
                 )
+        family_required_tokens = (
+            frozenset(
+                token
+                for binding in witness.bindings
+                for token in (binding.yes_token_id, binding.no_token_id)
+                if token in required_tokens
+            )
+            if required_tokens is not None
+            else None
+        )
         rebound[family_key] = _rebind_probability_witness_tokens(
             witness,
             token_map_by_condition=token_map,
-            required_token_ids=required_tokens,
+            required_token_ids=family_required_tokens,
         )
     return rebound
 
