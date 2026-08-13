@@ -1,5 +1,5 @@
 # Created: 2026-08-12
-# Last reused/audited: 2026-08-12
+# Last reused/audited: 2026-08-13
 # Authority: current-regime capital proof must fail closed before entry reopens.
 
 from __future__ import annotations
@@ -460,6 +460,116 @@ def test_live_curve_requires_exact_schema_22_edli_receipt_binding():
     assert bound["realized_position_count"] == 1
     assert bound["net_realized_pnl_usd"] == 1.0
     assert bound["curve"][0]["global_auction_decision_log_id"] == 1
+
+
+def test_exact_global_exit_fill_is_reported_without_relaxing_admission():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,artifact_json TEXT);"
+        "CREATE TABLE venue_commands (command_id TEXT,position_id TEXT,"
+        "intent_kind TEXT,created_at TEXT,state TEXT);"
+        "CREATE TABLE position_events (event_id TEXT,position_id TEXT,"
+        "sequence_no INTEGER,event_type TEXT,occurred_at TEXT,command_id TEXT,"
+        "payload_json TEXT);"
+    )
+    summary = _proof_summary(
+        city="Chicago",
+        target_date="2026-08-13",
+        condition_id="condition-1",
+    )
+    summary.update(
+        winner_event_id="event-1",
+        winner_candidate_id="candidate-1",
+        winner_actuation_identity="actuation-1",
+    )
+    summary["execution_binding_hash"] = global_auction_execution_binding_hash(
+        summary
+    )
+    summary["artifact_summary_hash"] = global_auction_artifact_summary_hash(
+        summary
+    )
+    conn.execute(
+        "INSERT INTO decision_log VALUES (1,?,?)",
+        ("global_single_order_auction", json.dumps({"summary": summary})),
+    )
+    receipt = GlobalAuctionReceiptRef(
+        decision_log_id=1,
+        decision_log_mode="global_single_order_auction",
+        receipt_hash=summary["receipt_hash"],
+        execution_binding_hash=summary["execution_binding_hash"],
+        artifact_summary_hash=summary["artifact_summary_hash"],
+        schema_version=22,
+        winner_event_id=summary["winner_event_id"],
+        winner_candidate_id=summary["winner_candidate_id"],
+        winner_actuation_identity=summary["winner_actuation_identity"],
+        selection_epoch_identity=summary["selection_epoch_identity"],
+    )
+    conn.execute(
+        "INSERT INTO position_events VALUES (?,?,?,?,?,?,?)",
+        (
+            "intent-1",
+            "position-1",
+            1,
+            "EXIT_INTENT",
+            "2026-08-13T00:00:01+00:00",
+            None,
+            json.dumps(
+                {
+                    "exit_intent_capital_certificate": {
+                        "action": "SELL",
+                        "position_id": "position-1",
+                        "global_auction_receipt": receipt.as_payload(),
+                    }
+                }
+            ),
+        ),
+    )
+    conn.execute(
+        "INSERT INTO venue_commands VALUES (?,?,?,?,?)",
+        (
+            "command-1",
+            "position-1",
+            "EXIT",
+            "2026-08-13T00:00:02+00:00",
+            "FILLED",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO position_events VALUES (?,?,?,?,?,?,?)",
+        (
+            "fill-1",
+            "position-1",
+            2,
+            "EXIT_ORDER_FILLED",
+            "2026-08-13T00:00:03+00:00",
+            "command-1",
+            "{}",
+        ),
+    )
+
+    evidence = evaluator._globally_selected_exit_realizations(
+        conn,
+        {
+            "forecast": {
+                "curve": [
+                    {
+                        "position_id": "position-1",
+                        "close_type": "EXIT_ORDER_FILLED",
+                        "realized_at": "2026-08-13T00:00:03+00:00",
+                        "capital_committed_usd": 2.0,
+                        "net_realized_pnl_usd": 0.5,
+                    }
+                ]
+            }
+        },
+    )
+
+    assert evidence["status"] == "positive"
+    assert evidence["realized_position_count"] == 1
+    assert evidence["net_realized_pnl_usd"] == 0.5
+    assert evidence["contributes_to_admission"] is False
+    assert evidence["curve"][0]["global_auction_decision_log_id"] == 1
 
 
 def test_only_complete_positive_exact_revision_evidence_passes():

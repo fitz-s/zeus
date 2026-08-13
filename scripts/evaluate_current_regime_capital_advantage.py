@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Lifecycle: created=2026-08-12; last_reviewed=2026-08-12; last_reused=2026-08-12
+# Lifecycle: created=2026-08-12; last_reviewed=2026-08-13; last_reused=2026-08-13
 # Purpose: Grade exact current selection/probability revisions on causal capital outcomes.
 # Reuse: Run read-only against canonical WORLD/FORECAST/TRADES DBs; output is evidence, not authority.
 """Fail-closed evaluator for current-regime capital advantage.
@@ -586,6 +586,38 @@ def _realized_curve_with_deadline(
         conn.set_progress_handler(None, 0)
 
 
+def _validated_global_receipt(
+    conn: sqlite3.Connection,
+    raw_receipt: object,
+    *,
+    source: str,
+) -> GlobalAuctionReceiptRef:
+    try:
+        receipt = GlobalAuctionReceiptRef.from_payload(raw_receipt)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{source} global receipt invalid") from exc
+    if receipt.schema_version != 22:
+        raise ValueError(f"{source} global receipt is not schema 22")
+    row = conn.execute(
+        "SELECT mode,artifact_json FROM decision_log WHERE id=?",
+        (receipt.decision_log_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"{source} global receipt row missing")
+    assert_global_auction_receipt_artifact(
+        expected=receipt,
+        decision_log_id=receipt.decision_log_id,
+        decision_log_mode=str(row[0]),
+        artifact_json=row[1],
+    )
+    artifact = json.loads(str(row[1]))
+    if artifact["summary"].get("global_selection_revision") != (
+        CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+    ):
+        raise ValueError(f"{source} global receipt selection revision mismatch")
+    return receipt
+
+
 def _command_global_receipt(
     conn: sqlite3.Connection,
     *,
@@ -613,29 +645,13 @@ def _command_global_receipt(
                 if isinstance(economics, Mapping)
                 else None
             )
-        receipt = GlobalAuctionReceiptRef.from_payload(raw_receipt)
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError("EDLI global receipt invalid") from exc
-    if receipt.schema_version != 22:
-        raise ValueError("EDLI global receipt is not schema 22")
-    row = conn.execute(
-        "SELECT mode,artifact_json FROM decision_log WHERE id=?",
-        (receipt.decision_log_id,),
-    ).fetchone()
-    if row is None:
-        raise ValueError("EDLI global receipt row missing")
-    assert_global_auction_receipt_artifact(
-        expected=receipt,
-        decision_log_id=receipt.decision_log_id,
-        decision_log_mode=str(row[0]),
-        artifact_json=row[1],
+    return _validated_global_receipt(
+        conn,
+        raw_receipt,
+        source="EDLI",
     )
-    artifact = json.loads(str(row[1]))
-    if artifact["summary"].get("global_selection_revision") != (
-        CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
-    ):
-        raise ValueError("EDLI global receipt selection revision mismatch")
-    return receipt
 
 
 def _bind_live_curve_to_global_revision(
@@ -714,6 +730,122 @@ def _bind_live_curve_to_global_revision(
         ),
         "curve": exact_rows,
         "all_current_probability_semantics": dict(curve),
+    }
+
+
+def _globally_selected_exit_realizations(
+    conn: sqlite3.Connection,
+    curves: Mapping[str, Mapping[str, object]],
+) -> dict[str, object]:
+    """Attribute realized position PnL to exact schema-22 EXIT selections.
+
+    This proves that the globally selected EXIT reached a filled venue command
+    and reports the position's realized after-fee PnL.  It does not prove that
+    the original ENTRY used the current revision, nor that EXIT beat holding to
+    settlement, so this slice is deliberately excluded from admission.
+    """
+
+    candidates: dict[str, dict[str, object]] = {}
+    for strategy, curve in curves.items():
+        for raw in tuple(curve.get("curve") or ()):
+            row = dict(raw)
+            if row.get("close_type") != "EXIT_ORDER_FILLED":
+                continue
+            position_id = str(row.get("position_id") or "").strip()
+            if position_id:
+                candidates[position_id] = {**row, "strategy": strategy}
+
+    exact_rows: list[dict[str, object]] = []
+    rejection_counts: dict[str, int] = {}
+    for position_id, row in sorted(candidates.items()):
+        try:
+            realized_at = _parse_aware(row.get("realized_at"))
+            fills = conn.execute(
+                "SELECT command_id,payload_json FROM position_events "
+                "WHERE position_id=? AND event_type='EXIT_ORDER_FILLED' "
+                "AND occurred_at=? ORDER BY sequence_no DESC LIMIT 2",
+                (position_id, realized_at.isoformat()),
+            ).fetchall()
+            if len(fills) != 1 or not str(fills[0][0] or "").strip():
+                raise ValueError("unique exit fill command unavailable")
+            command_id = str(fills[0][0])
+            command = conn.execute(
+                "SELECT created_at,state FROM venue_commands "
+                "WHERE command_id=? AND position_id=? AND intent_kind='EXIT'",
+                (command_id, position_id),
+            ).fetchone()
+            if command is None or str(command[1]) != "FILLED":
+                raise ValueError("filled exit venue command unavailable")
+            intents = conn.execute(
+                "SELECT occurred_at,payload_json FROM position_events "
+                "WHERE position_id=? AND event_type='EXIT_INTENT' "
+                "AND datetime(occurred_at)<=datetime(?) "
+                "AND datetime(occurred_at)<=datetime(?) "
+                "ORDER BY sequence_no DESC LIMIT 1",
+                (position_id, command[0], realized_at.isoformat()),
+            ).fetchall()
+            if len(intents) != 1:
+                raise ValueError("exit intent unavailable")
+            payload = json.loads(str(intents[0][1] or ""))
+            certificate = payload.get("exit_intent_capital_certificate")
+            if not isinstance(certificate, Mapping):
+                raise ValueError("exit capital certificate unavailable")
+            if (
+                certificate.get("action") != "SELL"
+                or str(certificate.get("position_id") or "") != position_id
+            ):
+                raise ValueError("exit capital certificate identity mismatch")
+            receipt = _validated_global_receipt(
+                conn,
+                certificate.get("global_auction_receipt"),
+                source="EXIT_INTENT",
+            )
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
+            reason = str(exc) or type(exc).__name__
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+            continue
+        exact_rows.append(
+            {
+                **row,
+                "command_id": command_id,
+                "global_auction_decision_log_id": receipt.decision_log_id,
+                "global_auction_receipt_hash": receipt.receipt_hash,
+                "global_selection_epoch_identity": (
+                    receipt.selection_epoch_identity
+                ),
+            }
+        )
+
+    net_pnl = sum(
+        float(row.get("net_realized_pnl_usd") or 0.0) for row in exact_rows
+    )
+    capital = sum(
+        float(row.get("capital_committed_usd") or 0.0) for row in exact_rows
+    )
+    return {
+        "artifact_role": "EXIT_ACTION_ATTRIBUTION_ONLY_NOT_ENTRY_REGIME_PROOF",
+        "contributes_to_admission": False,
+        "status": (
+            "positive"
+            if exact_rows and net_pnl > 0.0
+            else "nonpositive"
+            if exact_rows
+            else "awaiting_exact_global_exit_fills"
+        ),
+        "global_selection_revision": CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+        "realized_position_count": len(exact_rows),
+        "realized_capital_committed_usd": round(capital, 6),
+        "net_realized_pnl_usd": round(net_pnl, 6),
+        "return_on_realized_capital": (
+            round(net_pnl / capital, 6) if capital > 0.0 else None
+        ),
+        "rejection_counts": dict(sorted(rejection_counts.items())),
+        "curve": exact_rows,
     }
 
 
@@ -814,6 +946,10 @@ def evaluate(
             )
             for strategy, curve in raw_live_curves.items()
         }
+        selected_exit_realizations = _globally_selected_exit_realizations(
+            trades,
+            raw_live_curves,
+        )
     finally:
         forecasts.close()
         trades.close()
@@ -849,6 +985,7 @@ def evaluate(
         "latest_global_receipt": receipt,
         "settled_counterfactuals": shadows,
         "live_realized_capital": live_curves,
+        "globally_selected_exit_realizations": selected_exit_realizations,
     }
 
 
