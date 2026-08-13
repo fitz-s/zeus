@@ -51,6 +51,7 @@ from src.state.db import (  # noqa: E402
 from src.types.market import Bin  # noqa: E402
 from src.data.replacement_forecast_cycle_policy import (  # noqa: E402
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
 )
 
 MIN_INDEPENDENT_FAMILY_DAYS = 30
@@ -68,6 +69,7 @@ CURRENT_PROBABILITY_SEMANTICS = frozenset(
     {
         DAY0_PROBABILITY_SEMANTICS_REVISION,
         CURRENT_EVIDENCE_SEMANTICS_REVISION,
+        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     }
 )
 
@@ -543,7 +545,10 @@ def _realized_proof_sample(
         str(evaluation.get("execution_mode") or "").strip().upper()
         != execution_mode
         or str(evaluation.get("capital_action_mode") or "").strip().upper()
-        != "IMMEDIATE_TAKER_BUY"
+        != "SETTLEMENT_LOCKED_BUY"
+        or float(evaluation.get("fill_probability") or 0.0) != 1.0
+        or str(evaluation.get("fill_probability_source") or "").strip()
+        != "immediate_taker"
     ):
         raise ValueError("proof winner taker execution certificate invalid")
     decision_at = _parse_aware(proof.get("decision_at_utc"))
@@ -1533,7 +1538,12 @@ def evaluate(
             ),
             "probability_semantics_revisions": {
                 "day0_nowcast_entry": DAY0_PROBABILITY_SEMANTICS_REVISION,
-                "forecast_qkernel_entry": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                "forecast_qkernel_entry": sorted(
+                    {
+                        CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+                    }
+                ),
             },
         },
         "database_paths": {

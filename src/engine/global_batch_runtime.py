@@ -31,7 +31,9 @@ from src.data.market_topology_rows import prime_frozen_schema_reads
 from src.data.replacement_forecast_cycle_policy import (
     BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN,
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     _current_evidence_shape,
+    current_evidence_shape_has_entry_authority,
     current_evidence_shape_semantics_mismatch,
 )
 from src.engine.global_auction_universe import (
@@ -5004,8 +5006,10 @@ def _qkernel_shadow_current_semantics_by_posterior(
         return {}
     # FAIL-CLOSED GATE CONTRACT
     # SCOPE: qkernel no-money shadow evidence only; auction actions are unchanged.
-    # DRAIN: the next same-cycle v4 posterior on this decision snapshot is eligible.
-    # RESET: a fresh posterior hash maps to v4 and may claim its target-date key.
+    # DRAIN: the next same-cycle or bounded latest-causal posterior on this
+    # decision snapshot is eligible.
+    # RESET: a fresh posterior hash maps to its exact licensed semantics and
+    # may claim its target-date key.
     output: dict[str, str] = {}
     try:
         for start in range(0, len(posterior_hashes), 500):
@@ -5021,23 +5025,18 @@ def _qkernel_shadow_current_semantics_by_posterior(
                 shape = _current_evidence_shape(provenance)
                 if shape is None:
                     continue
-                try:
-                    shape_lag_hours = float(shape.get("shape_lag_hours") or 0.0)
-                except (TypeError, ValueError):
-                    continue
                 if (
-                    str(shape.get("semantics_revision") or "")
-                    == CURRENT_EVIDENCE_SEMANTICS_REVISION
-                    and shape.get("translation_applied") is False
-                    and shape_lag_hours == 0.0
-                    and shape.get("stale_shape_reused") is not True
+                    current_evidence_shape_has_entry_authority(provenance)
                     and shape.get("between_cohort_status")
                     == BETWEEN_COHORT_STATUS_SIMULTANEOUS_PROVEN
                     and not current_evidence_shape_semantics_mismatch(provenance)
                 ):
-                    output[str(posterior_identity_hash)] = (
-                        CURRENT_EVIDENCE_SEMANTICS_REVISION
-                    )
+                    revision = str(shape.get("semantics_revision") or "")
+                    if revision in {
+                        CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+                    }:
+                        output[str(posterior_identity_hash)] = revision
     except (sqlite3.Error, TypeError, ValueError):
         # Evidence collection may drain an entry gate but must never disturb the
         # auction's SELL/HOLD/CASH result. Missing authority simply emits no row.

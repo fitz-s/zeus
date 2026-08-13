@@ -111,7 +111,9 @@ def _proof_summary(*, city: str, target_date: str, condition_id: str) -> dict[st
                 "action": "BUY",
                 "status": "SELECTED",
                 "execution_mode": "TAKER_LIMIT",
-                "capital_action_mode": "IMMEDIATE_TAKER_BUY",
+                "capital_action_mode": "SETTLEMENT_LOCKED_BUY",
+                "fill_probability": 1.0,
+                "fill_probability_source": "immediate_taker",
                 "expected_growth": {
                     "probability_basis": "POSTERIOR_PREDICTIVE_MEAN"
                 },
@@ -402,6 +404,53 @@ def test_proof_sample_uses_verified_settlement_and_after_cost_terminal_wealth():
     assert sample["realized_after_cost_payoff_usd"] == "6"
     assert sample["realized_delta_log_wealth"] == pytest.approx(
         evaluator.math.log(106 / 100)
+    )
+
+
+def test_bounded_latest_causal_semantics_is_current_capital_evidence():
+    forecasts = _settlement_db()
+    forecasts.execute(
+        "INSERT INTO market_events VALUES (?,?,?,?,?,?)",
+        ("condition-1", "Chicago", "2026-08-13", "high", 80, 81),
+    )
+    forecasts.execute(
+        "INSERT INTO settlement_outcomes VALUES (1,?,?,?,?,?,?,?,?)",
+        (
+            "Chicago",
+            "2026-08-13",
+            "high",
+            81,
+            "F",
+            "2026-08-13T20:00:00+00:00",
+            "2026-08-13T20:01:00+00:00",
+            "VERIFIED",
+        ),
+    )
+    summary = _proof_summary(
+        city="Chicago",
+        target_date="2026-08-13",
+        condition_id="condition-1",
+    )
+    winner = summary["proof_counterfactual"]["winner"]
+    winner["probability_semantics_revision"] = (
+        evaluator.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+    )
+    summary["proof_counterfactual_sha256"] = evaluator.hashlib.sha256(
+        evaluator._canonical_json_bytes(summary["proof_counterfactual"])
+    ).hexdigest()
+    summary["artifact_summary_hash"] = global_auction_artifact_summary_hash(
+        summary
+    )
+
+    sample = evaluator._realized_proof_sample(
+        sqlite3.connect(":memory:"),
+        forecasts,
+        decision_log_id=18,
+        summary=summary,
+    )
+
+    assert sample["probability_semantics_revision"] == (
+        evaluator.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
     )
 
 

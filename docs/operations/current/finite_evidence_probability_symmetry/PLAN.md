@@ -4,6 +4,38 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-13 Capital proof retains every licensed current-evidence revision
+
+The live replacement authority admits two exact, non-interchangeable current-
+evidence shapes: same-cycle `ensemble_center_scenarios_v4`, and bounded latest-
+causal `stale_ensemble_absolute_disagreement_v2`.  The latter retains raw
+absolute ENS members, charges their full center disagreement against the
+current provider center, forbids translation, and remains bounded by the
+existing source-cycle age law.  The capital-proof writer nevertheless stamped
+only the same-cycle revision.  A latest-causal statistical BUY could therefore
+win the exact current q/book/wealth comparison with an empty semantics field,
+making every later settlement sample ungradeable even though the probability
+reader had already proven entry authority.
+
+The proof writer now reuses the canonical entry-authority predicate and freezes
+the exact persisted revision for both licensed shapes.  The evaluator accepts
+those two revisions explicitly and verifies the solver's real immediate-taker
+certificate: `TAKER_LIMIT`, full immediate fill probability, and the existing
+`SETTLEMENT_LOCKED_BUY` capital mode.  It no longer asks for the nonexistent
+`IMMEDIATE_TAKER_BUY` label.  Maker-rest or partial-fill counterfactuals remain
+inadmissible, and neither revision bypasses executable book, fee, wealth,
+pre-cliff liquidation, settlement, or positive lower-bound requirements.
+
+SCOPE is proof-only probability semantics and later settlement grading; live
+order selection and actuation are unchanged.  DRAIN is the next complete
+global cut, which stamps the exact licensed revision on its proof winner, then
+the ordinary causal settlement join.  RESET is a fresh posterior whose shape
+passes the canonical entry-authority predicate; malformed, translated,
+revision-mismatched, or over-age shapes emit no proof semantics.  Acceptance
+requires antibodies for same-cycle and bounded latest-causal stamping, stale-
+revision settlement grading, immediate full-fill taker proof, and continued
+maker rejection.
+
 ## 2026-08-12 Restart recovery is current-risk bounded
 
 The live-trading restart lane stopped the order daemon safely, then spent its

@@ -33386,6 +33386,9 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
                                 "translation_applied": False,
                                 "shape_lag_hours": lag,
                                 "stale_shape_reused": reused,
+                                "source_cycle_time": (
+                                    "2026-08-11T00:00:00+00:00"
+                                ),
                                 "between_cohort_status": (
                                     "SIMULTANEOUS_PROVEN"
                                 ),
@@ -33405,7 +33408,10 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
     assert semantics_by_posterior == {
         f"posterior-{family_a}": (
             global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION
-        )
+        ),
+        f"posterior-{family_b}": (
+            global_batch_runtime.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        ),
     }
     qkernel_events = global_batch_runtime._market_relative_alpha_shadow_events(
         selected=SimpleNamespace(
