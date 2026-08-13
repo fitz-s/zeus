@@ -410,7 +410,12 @@ def latest_complete_global_auction_receipt(
                 if (
                     any(not position_id for position_id in receipt_position_ids)
                     or len(set(receipt_position_ids)) != len(receipt_position_ids)
-                    or required_position_ids != set(receipt_position_ids)
+                    # The receipt may contain an additional position that is
+                    # no longer a current monitor obligation (for example an
+                    # unexecutable dust remainder). Every current obligation
+                    # must still be present; a newly opened or omitted current
+                    # position therefore keeps the restart guard closed.
+                    or not required_position_ids.issubset(receipt_position_ids)
                     or len(receipt_position_ids) != held_expected_count
                     or sum(
                         item.get("status") == "EVALUATED"

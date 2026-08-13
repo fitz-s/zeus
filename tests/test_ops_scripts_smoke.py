@@ -3226,11 +3226,11 @@ def test_exact_held_restart_proof_rejects_legacy_global_auction_receipt(tmp_path
     conn.close()
 
 
-def test_exact_held_restart_proof_does_not_accept_superset_receipt(monkeypatch):
+def test_held_restart_proof_accepts_receipt_superset_but_not_missing_current(monkeypatch):
     from src.ops import monitor_cadence
 
     summary = {
-        "schema_version": 21,
+        "schema_version": 22,
         "candidate_coverage_complete": True,
         "scope_family_coverage_complete": True,
         "candidate_evaluation_count": 1,
@@ -3281,6 +3281,14 @@ def test_exact_held_restart_proof_does_not_accept_superset_receipt(monkeypatch):
         ),
         require_held_coverage_count=1,
         require_held_position_ids=("current",),
+    ) == (1, 1, 1)
+    assert monitor_cadence.latest_complete_global_auction_receipt(
+        FakeConn(),
+        completed_not_before=datetime.fromisoformat(
+            "2026-08-13T00:00:00+00:00"
+        ),
+        require_held_coverage_count=2,
+        require_held_position_ids=("current", "new-current"),
     ) is None
 
 

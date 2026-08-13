@@ -4751,6 +4751,37 @@ Allowed files for this hot-fix are
 `src/data/replacement_forecast_current_target_plan.py` and this plan. The
 already-landed Shenzhen correction antibody is reused unchanged.
 
+## 2026-08-13 Restart proof covers current obligations without dust equality
+
+After Shenzhen probability freshness recovered on the exact loaded SHA, the
+restart guard remained closed despite complete current global-auction receipts.
+The current monitor set contained 27 executable obligations, while every
+receipt contained those 27 plus Miami position `ada88123-2d6`, an exact
+0.00857-share residual classified by the auction as
+`EXCLUDED:SELLABLE_SHARES_BELOW_PRECISION`. The execution lifecycle correctly
+keeps that dust as real exposure, but it is not a current monitor execution
+obligation. Requiring equality between those two differently typed sets made
+the guard a permanent global entry veto.
+
+A complete post-loaded-SHA receipt now proves restart coverage when its held
+identity set is a superset of the current monitor-obligation set. All current
+obligations must still appear; duplicate or blank receipt identities, a newly
+opened current position absent from the receipt, incomplete held coverage,
+stale decision time, or any blocking monitor input still fails closed. Extra
+receipt identities cannot hide missing current capital.
+
+SCOPE is only restart-guard recovery after an exact loaded SHA, fresh monitor
+inputs, and a complete global-auction receipt. DRAIN is the next complete
+auction over the current held set. RESET requires every current monitor
+obligation to be present in that receipt; process liveness, a legacy receipt,
+or a receipt missing a newly current position cannot reset the guard.
+Acceptance requires the superset/missing-current antibody pair, the focused
+restart proof suites, live deployment, proof-driven guard reset, and resumed
+new-order submissions or their exact current winner rejection.
+
+Allowed files for this hot-fix are `src/ops/monitor_cadence.py`,
+`tests/test_ops_scripts_smoke.py`, and this plan.
+
 ## 2026-08-13 Selected global BUY uses its mandatory JIT book
 
 After entry resumed, the complete auction selected a Paris LOW NO
