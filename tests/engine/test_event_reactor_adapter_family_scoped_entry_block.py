@@ -1,6 +1,6 @@
 # Created: 2026-07-25
-# Last reused or audited: 2026-08-12
-# Lifecycle: created=2026-07-25; last_reviewed=2026-08-12; last_reused=2026-08-12
+# Last reused or audited: 2026-08-13
+# Lifecycle: created=2026-07-25; last_reviewed=2026-08-13; last_reused=2026-08-13
 # Authority basis: 7-day production block-event audit -- one stuck EDLI order
 #   was blocking new-entry BUY admission for every family (32,763 blocking
 #   instances, 20.97h/7d). This narrows the adapter-level gate
@@ -209,6 +209,42 @@ def test_current_day0_hard_fact_does_not_need_statistical_advantage(truth):
     assert era._unproven_statistical_entry_advantage_rejection_reason(
         day0_payoff_truth=truth,
     ) is None
+
+
+def test_statistical_maker_buy_cannot_supply_immediate_execution_proof():
+    reason = era._unproven_statistical_maker_fill_rejection_reason(
+        SimpleNamespace(action="BUY", execution_mode="MAKER_REST"),
+        day0_payoff_truth=None,
+    )
+
+    assert reason == "GLOBAL_STATISTICAL_BUY_MAKER_FILL_ADVANTAGE_UNPROVEN"
+
+
+def test_statistical_taker_and_hard_fact_maker_remain_comparable():
+    assert era._unproven_statistical_maker_fill_rejection_reason(
+        SimpleNamespace(action="BUY", execution_mode="TAKER_LIMIT"),
+        day0_payoff_truth=None,
+    ) is None
+    assert era._unproven_statistical_maker_fill_rejection_reason(
+        SimpleNamespace(action="BUY", execution_mode="MAKER_REST"),
+        day0_payoff_truth="locked",
+    ) is None
+    assert era._unproven_statistical_maker_fill_rejection_reason(
+        SimpleNamespace(action="SELL", execution_mode="MAKER_REST"),
+        day0_payoff_truth=None,
+    ) is None
+
+
+def test_maker_fill_gate_applies_to_actual_and_proof_selection():
+    import inspect
+
+    source = inspect.getsource(era.event_bound_live_adapter_from_trade_conn)
+    maker_at = source.index(
+        "_unproven_statistical_maker_fill_rejection_reason("
+    )
+    proof_bypass_at = source.index("if not proof_only:", maker_at)
+
+    assert maker_at < proof_bypass_at
 
 
 def test_settlement_advantage_gate_precedes_strategy_and_capital_checks():
