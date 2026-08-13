@@ -3604,6 +3604,7 @@ def current_portfolio_wealth_witness(
         from src.contracts.position_truth import has_current_money_risk_chain_state
         from src.state.chain_reconciliation import _CHAIN_SEEN_AT_MAX_AGE_SECONDS
         from src.state.portfolio import (
+            FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
             current_tradable_exposure_shares,
             has_verified_trade_fill,
         )
@@ -3680,7 +3681,20 @@ def current_portfolio_wealth_witness(
                     (f"position_claim:{position_id}", token, micro)
                 )
             try:
-                if has_verified_trade_fill(position):
+                fill_authority = str(
+                    getattr(position, "fill_authority", "") or ""
+                ).strip()
+                if fill_authority == FILL_AUTHORITY_VENUE_POSITION_OBSERVED:
+                    # A balance-only rescue has no authenticated trade-fill
+                    # economics.  Its exact chain slice is the sole authority;
+                    # submitted/local intent must not enlarge or shrink it.
+                    cost = Decimal(
+                        str(getattr(position, "chain_cost_basis_usd", 0) or 0)
+                    )
+                    basis_shares = Decimal(
+                        str(getattr(position, "chain_shares", 0) or 0)
+                    )
+                elif has_verified_trade_fill(position):
                     # A partial SELL makes the current open fill slice smaller
                     # than the immutable entry fill.  The chain API may retain
                     # the original lot's initialValue after the exact token

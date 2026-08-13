@@ -21345,6 +21345,45 @@ def test_verified_partial_exit_ignores_stale_full_lot_chain_cost():
     assert wealth.native_commitments_micro == (("no-a", 2_400),)
 
 
+def test_balance_only_wealth_uses_chain_slice_not_stale_local_intent():
+    """Balance-only authority cannot consume larger stale submitted economics."""
+
+    position = SimpleNamespace(
+        trade_id="balance-only-rescue",
+        position_id="balance-only-rescue",
+        condition_id="condition-a",
+        direction="buy_no",
+        token_id="yes-a",
+        no_token_id="no-a",
+        shares=Decimal("20"),
+        effective_shares=Decimal("5"),
+        chain_shares=Decimal("5"),
+        cost_basis_usd=Decimal("9.6"),
+        size_usd=Decimal("9.6"),
+        effective_cost_basis_usd=Decimal("2.4"),
+        chain_cost_basis_usd=Decimal("2.4"),
+        chain_state="synced",
+        chain_verified_at="2026-08-13T17:06:20+00:00",
+        fill_authority="venue_position_observed",
+        state="entered",
+    )
+    at = _dt.datetime(2026, 8, 13, 17, 6, 21, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(captured_at=at, ctf={"no-a": 5_000_000})
+    wealth = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=at,
+        max_age=_dt.timedelta(seconds=10),
+        portfolio_state=PortfolioState(
+            positions=[position],
+            authority="canonical_db",
+            authority_scope="runtime_exposure",
+        ),
+    )
+
+    assert wealth.native_holdings_micro == (("no-a", 5_000_000),)
+    assert wealth.native_commitments_micro == (("no-a", 2_400_000),)
+
+
 def test_global_selection_counts_open_entry_without_granting_sell_inventory():
     """A durable BUY commitment consumes Kelly target before chain projection."""
 
