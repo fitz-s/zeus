@@ -27346,6 +27346,20 @@ def _selection_scoped_proofs(
             )
         )
 
+    def _global_current_book_may_rebind_rejection(
+        missing_reason: str | None,
+    ) -> bool:
+        """Defer only a stale local quote rejection to the selected BUY JIT."""
+
+        # SCOPE: the exact globally selected BUY proof only; callers must also
+        # set allow_global_current_state_rebind. DRAIN: winner preflight fetches
+        # the selected native token's raw CLOB book and reconstructs its full
+        # curve before any venue side effect. RESET: that JIT curve must preserve
+        # the selected in-band limit/cost or the candidate is superseded.
+        return str(missing_reason or "").startswith(
+            "LIVE_UNIT_PRICE_OUT_OF_BOUNDS:"
+        )
+
     if honor_admission_rejections:
         admission_input = executable
         executable = []
@@ -27364,9 +27378,18 @@ def _selection_scoped_proofs(
         executable = []
         admission_rejections = []
         for proof in admission_input:
-            if _qkernel_may_rescore_rejected_proof(proof.missing_reason) or (
-                allow_same_family_monitor_owned
-                and _is_entry_held_redecision_reason(proof.missing_reason)
+            if (
+                _qkernel_may_rescore_rejected_proof(proof.missing_reason)
+                or (
+                    allow_global_current_state_rebind
+                    and _global_current_book_may_rebind_rejection(
+                        proof.missing_reason
+                    )
+                )
+                or (
+                    allow_same_family_monitor_owned
+                    and _is_entry_held_redecision_reason(proof.missing_reason)
+                )
             ):
                 executable.append(proof)
             else:

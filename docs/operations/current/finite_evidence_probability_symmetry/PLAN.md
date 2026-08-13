@@ -4719,6 +4719,33 @@ antibody that emits no aggregate `ENTRY_ORDER_VOIDED`.
 Allowed files for this hot-fix are `src/execution/command_recovery.py`,
 `tests/test_command_recovery.py`, and this plan.
 
+## 2026-08-13 Selected global BUY uses its mandatory JIT book
+
+After entry resumed, the complete auction selected a Paris LOW NO
+`TAKER_LIMIT` at `0.56` with positive posterior-mean expected log growth. The
+selected native token's current raw CLOB book remained executable and in-band,
+but the event-local proof still carried an older `0.98` ask and classified the
+exact winner as `LIVE_UNIT_PRICE_OUT_OF_BOUNDS`. Global preflight consequently
+requeued the same positive winner without reaching its already-mandatory native
+JIT book fetch.
+
+For the exact globally selected BUY only, that stale local-quote rejection may
+now reach the existing current-state rebind. No price band changes: winner
+preflight must still fetch the selected native token's current raw CLOB book,
+reconstruct the full curve, preserve the selected in-band limit and cost, and
+pass the independent executor/SDK boundaries before any venue side effect.
+Ordinary family selection and a global BUY without the current-state rebind
+continue to reject the same stale out-of-band proof.
+
+SCOPE is the exact global BUY winner carrying the typed stale local-quote
+reason. DRAIN is its synchronous native-token JIT raw-book fetch and full-curve
+rebind. RESET requires current in-band economics that preserve the sealed
+winner; a worse, out-of-band, unavailable, or identity-mismatched JIT book
+supersedes the candidate. Acceptance requires both sides of the antibody
+(global current rebind admits; ordinary admission rejects), focused integration
+tests, live deployment, and a new command or a different exact current
+preflight reason for the observed Paris winner.
+
 ## 2026-08-12 Current-regime capital advantage is the statistical entry license
 
 The last month of chain outcomes is net negative, and forward reconstruction

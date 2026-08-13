@@ -19170,6 +19170,27 @@ def test_global_taker_winner_rebinds_local_maker_rejection_without_witness_bypas
         honor_admission_rejections=False,
         enforce_win_rate_floor=False,
     ) == ()
+    stale_local_quote_exact = (
+        replace(
+            rebound[0],
+            execution_price=None,
+            missing_reason=(
+                "LIVE_UNIT_PRICE_OUT_OF_BOUNDS:"
+                "live order unit price 0.98 outside inclusive [0.05, 0.95]"
+            ),
+        ),
+    )
+    assert era._selection_scoped_proofs(
+        proofs=stale_local_quote_exact,
+        honor_admission_rejections=False,
+        allow_global_current_state_rebind=True,
+        enforce_win_rate_floor=False,
+    ) == stale_local_quote_exact
+    assert era._selection_scoped_proofs(
+        proofs=stale_local_quote_exact,
+        honor_admission_rejections=False,
+        enforce_win_rate_floor=False,
+    ) == ()
     assert era._selection_scoped_proofs(
         proofs=(sibling,),
         honor_admission_rejections=False,
