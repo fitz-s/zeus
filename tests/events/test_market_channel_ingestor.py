@@ -663,6 +663,47 @@ def test_quote_cache_seeded_from_rest_on_connect():
     assert latest_rows[1] == ("sell_yes", 0.48, 0.52, None)
 
 
+def test_selective_audit_token_appends_every_full_depth_quote():
+    conn, writer = _conn_writer()
+    audit_tokens = {"token-1"}
+    metadata = {
+        **_metadata("token-1"),
+        **_metadata("token-2"),
+    }
+    ingestor = MarketChannelIngestor(
+        writer,
+        active_token_ids=set(metadata),
+        token_metadata=metadata,
+        append_evidence_token_ids=lambda: set(audit_tokens),
+    )
+    service = MarketChannelOnlineService(
+        ingestor,
+        fetch_orderbook=lambda token_id: {
+            "asset_id": token_id,
+            "market": "0xcondition",
+            "bids": [{"price": "0.48", "size": "10"}],
+            "asks": [{"price": "0.52", "size": "10"}],
+            "hash": f"hash-{token_id}",
+        },
+    )
+
+    service.on_connect(received_at="2026-08-13T08:44:00+00:00")
+
+    assert conn.execute(
+        "SELECT token_id,direction,depth_before_json "
+        "FROM execution_feasibility_evidence"
+    ).fetchall() == [
+        (
+            "token-1",
+            "buy_yes",
+            '{"asks": [{"price": "0.52", "size": "10"}], "bids": [{"price": "0.48", "size": "10"}]}',
+        )
+    ]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM execution_feasibility_latest"
+    ).fetchone()[0] == 4
+
+
 def test_buffered_older_delta_cannot_regress_seeded_quote():
     conn, writer = _conn_writer()
     cache = QuoteCache()

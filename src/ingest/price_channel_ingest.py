@@ -136,6 +136,8 @@ def _market_substrate_priority_turnstile():
 
 _held_quote_seed_refresh_lock = threading.Lock()
 _candidate_quote_seed_refresh_lock = threading.Lock()
+_global_exit_audit_token_ids_lock = threading.Lock()
+_global_exit_audit_token_ids: set[str] = set()
 
 EDLI_EVENT_DRIVEN_MODES = {
     "edli_live",
@@ -2569,13 +2571,51 @@ def _edli_unsettled_global_exit_audit_token_ids(trade_conn) -> set[str]:
                )
             """
         ).fetchall()
+        pending_rows = []
+        if {"direction", "token_id", "no_token_id"}.issubset(position_columns):
+            pending_rows = trade_conn.execute(
+                """
+                SELECT DISTINCT CASE
+                         WHEN lower(pc.direction) = 'buy_no' THEN pc.no_token_id
+                         ELSE pc.token_id
+                       END AS held_token_id
+                  FROM position_current AS pc
+                 WHERE pc.phase = 'pending_exit'
+                   AND pc.settled_at IS NULL
+                   AND EXISTS (
+                        SELECT 1
+                          FROM position_events AS intent
+                         WHERE intent.position_id = pc.position_id
+                           AND intent.event_type = 'EXIT_INTENT'
+                           AND json_extract(
+                                intent.payload_json,
+                                '$.exit_intent_capital_certificate.action'
+                           ) = 'SELL'
+                           AND json_extract(
+                                intent.payload_json,
+                                '$.exit_intent_capital_certificate.global_auction_receipt.schema_version'
+                           ) = 22
+                   )
+                """
+            ).fetchall()
     except Exception:
         return set()
     return {
         str(row[0]).strip()
-        for row in rows
+        for row in (*rows, *pending_rows)
         if row and str(row[0] or "").strip() not in {"", "None"}
     }
+
+
+def _edli_publish_global_exit_audit_token_ids(token_ids: set[str]) -> None:
+    with _global_exit_audit_token_ids_lock:
+        _global_exit_audit_token_ids.clear()
+        _global_exit_audit_token_ids.update(token_ids)
+
+
+def _edli_current_global_exit_audit_token_ids() -> set[str]:
+    with _global_exit_audit_token_ids_lock:
+        return set(_global_exit_audit_token_ids)
 
 
 def _edli_append_global_exit_audit_quote_evidence(
@@ -2688,7 +2728,9 @@ def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
             token = str(value or "").strip()
             if token and token != "None":
                 tokens.add(token)
-    tokens.update(_edli_unsettled_global_exit_audit_token_ids(trade_conn))
+    exit_audit_tokens = _edli_unsettled_global_exit_audit_token_ids(trade_conn)
+    _edli_publish_global_exit_audit_token_ids(exit_audit_tokens)
+    tokens.update(exit_audit_tokens)
     return tokens
 
 
@@ -4287,6 +4329,9 @@ def _edli_market_channel_ingestor_cycle() -> dict | None:
                             _edli_coalesced_price_channel_redecision_sink()
                         ),
                         market_event_sink_independently_coordinated=True,
+                        append_evidence_token_ids=(
+                            _edli_current_global_exit_audit_token_ids
+                        ),
                     ),
                     fetch_orderbook=clob.get_orderbook_snapshot,
                     fetch_orderbooks=getattr(clob, "get_orderbook_snapshots", None),

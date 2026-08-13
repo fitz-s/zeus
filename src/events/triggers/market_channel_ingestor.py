@@ -199,6 +199,7 @@ class MarketChannelIngestor:
         coalescer: EventCoalescer | None = None,
         market_event_sink: Callable[[list[OpportunityEvent]], None] | None = None,
         market_event_sink_independently_coordinated: bool = False,
+        append_evidence_token_ids: Callable[[], Iterable[str]] | None = None,
     ) -> None:
         self._writer = writer
         if feasibility_conn is None:
@@ -221,6 +222,7 @@ class MarketChannelIngestor:
         self._market_event_sink_independently_coordinated = bool(
             market_event_sink_independently_coordinated
         )
+        self._append_evidence_token_ids = append_evidence_token_ids
         self._deferred_market_event_sink_depth = 0
         self._deferred_market_event_sink_events: list[OpportunityEvent] = []
         self._deferred_market_event_sink_indexes: dict[tuple[str, ...], int] = {}
@@ -838,6 +840,33 @@ class MarketChannelIngestor:
             append_evidence=False,
             prepared_rows=True,
         )
+        append_tokens: set[str] = set()
+        if self._append_evidence_token_ids is not None:
+            try:
+                append_tokens = {
+                    str(token_id)
+                    for token_id in self._append_evidence_token_ids()
+                    if str(token_id)
+                }
+            except Exception:  # noqa: BLE001 - audit retention cannot blind quote ingest
+                _logger.exception(
+                    "selective market-channel evidence append set unavailable"
+                )
+        audit_rows = [
+            row
+            for row in rows
+            if str(row.get("token_id") or "") in append_tokens
+            and str(row.get("direction") or "").startswith("buy_")
+            and row.get("depth_before_json") not in {None, ""}
+        ]
+        if audit_rows:
+            insert_execution_feasibility_evidence_batch(
+                self._feasibility_conn,
+                audit_rows,
+                schema=self._feasibility_schema,
+                append_evidence=True,
+                prepared_rows=True,
+            )
         return current
 
     def finalize_prepared_quote_events(

@@ -791,7 +791,10 @@ def test_open_position_tokens_are_market_channel_seed_priority():
 
 
 def test_unsettled_schema22_exit_token_stays_market_channel_priority():
-    from src.ingest.price_channel_ingest import _edli_held_position_priority_token_ids
+    from src.ingest.price_channel_ingest import (
+        _edli_current_global_exit_audit_token_ids,
+        _edli_held_position_priority_token_ids,
+    )
 
     conn = sqlite3.connect(":memory:")
     conn.executescript(
@@ -800,6 +803,7 @@ def test_unsettled_schema22_exit_token_stays_market_channel_priority():
             position_id TEXT PRIMARY KEY,
             phase TEXT,
             settled_at TEXT,
+            direction TEXT,
             token_id TEXT,
             no_token_id TEXT
         );
@@ -820,11 +824,12 @@ def test_unsettled_schema22_exit_token_stays_market_channel_priority():
         """
     )
     conn.executemany(
-        "INSERT INTO position_current VALUES (?,?,?,?,?)",
+        "INSERT INTO position_current VALUES (?,?,?,?,?,?)",
         [
-            ("current", "economically_closed", None, "yes-current", "no-current"),
-            ("legacy", "economically_closed", None, "yes-legacy", "no-legacy"),
-            ("settled", "economically_closed", "2026-08-13T02:00:00+00:00", "yes-settled", "no-settled"),
+            ("current", "economically_closed", None, "buy_yes", "yes-current", "no-current"),
+            ("legacy", "economically_closed", None, "buy_yes", "yes-legacy", "no-legacy"),
+            ("settled", "economically_closed", "2026-08-13T02:00:00+00:00", "buy_yes", "yes-settled", "no-settled"),
+            ("pending", "pending_exit", None, "buy_no", "yes-pending", "no-pending"),
         ],
     )
     for position_id, schema_version in (("current", 22), ("legacy", 21), ("settled", 22)):
@@ -868,7 +873,33 @@ def test_unsettled_schema22_exit_token_stays_market_channel_priority():
             ),
         )
 
-    assert _edli_held_position_priority_token_ids(conn) == {"sold-current"}
+    conn.execute(
+        "INSERT INTO position_events VALUES (?,?,?,?,?)",
+        (
+            "pending",
+            1,
+            "EXIT_INTENT",
+            None,
+            json.dumps(
+                {
+                    "exit_intent_capital_certificate": {
+                        "action": "SELL",
+                        "global_auction_receipt": {"schema_version": 22},
+                    }
+                }
+            ),
+        ),
+    )
+
+    assert _edli_held_position_priority_token_ids(conn) == {
+        "sold-current",
+        "no-pending",
+        "yes-pending",
+    }
+    assert _edli_current_global_exit_audit_token_ids() == {
+        "sold-current",
+        "no-pending",
+    }
 
 
 def test_global_exit_audit_appends_only_full_depth_buy_projection():
