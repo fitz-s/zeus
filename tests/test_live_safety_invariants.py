@@ -6807,6 +6807,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         lambda: invalidations.append("venue_side_effect"),
     )
     execute_calls = []
+    same_turn_reauction_drain_attempts = []
     auction_completion_requests = []
     published_requests = []
     reserved_requests = []
@@ -6897,6 +6898,17 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
     monkeypatch.setattr(
         "src.execution.exit_lifecycle.execute_exit",
         fake_execute_exit,
+    )
+    real_same_turn_drain = (
+        exit_lifecycle._drain_same_turn_global_sell_reauction_after_no_fill
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_drain_same_turn_global_sell_reauction_after_no_fill",
+        lambda position, **kwargs: (
+            same_turn_reauction_drain_attempts.append(position.trade_id),
+            real_same_turn_drain(position, **kwargs),
+        )[1],
     )
 
     monitor_now = (
@@ -7142,8 +7154,11 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
                 pos.applied_validations
             )
         assert execute_calls == [pos]
+        assert same_turn_reauction_drain_attempts == [pos.trade_id]
     if outcome not in {"blocked", "request_failed", "dust"}:
         assert auction_completion_requests == []
+    if outcome != "direct":
+        assert same_turn_reauction_drain_attempts == []
     assert invalidations == ([] if outcome != "direct" else ["venue_side_effect"])
     conn.close()
 

@@ -5,6 +5,11 @@
 
 ## 现状(forward)
 
+### 2026-08-13 B102 — deterministic FAK no-fill 后同 turn 重拍
+- **实时反例:** Seoul `1772ee93-a80` 在 `06:34:46Z` 已有 current q `0.04658`、bid `0.06` 与负 edge，global auction 正确选择 TAKER SELL；`06:35:02Z` venue 返回 deterministic `FAK no match`。系统只把 `next_retry_at` 设为当前时间，却直到 `06:45:39Z` 才 release/publish 新 reauction；`06:46:04Z` bid 已跌至 `0.01`。FAK 竞态本身不可保证，但这 10m36s 无 delivery guarantee 是 engine-preventable。
+- **结构性修复:** FAK no-fill / post-only cross 的 canonical no-side-effect rejection 与 exact V4 outbox 在同一 monitor turn bounded commit；commit 成功后立即 drain position-scoped debt并发布 fresh global reauction，重新比较 TAKER、MAKER_REST、HOLD/CASH。不得原地把旧 TAKER certificate 改成 maker；commit/publish 失败保留 canonical debt给 recovery。
+- **验收:** antibody 从未提交的 no-fill retry/outbox 开始，不调用下一轮 pending-retry scan，断言同 turn commit + exact V4 wake；原 request identity 不被当作 fresh execution authority。SCOPE 是 position+held token+family+q identity+generation；DRAIN/RESET 仍由 immutable terminal receipt 或新 generation 完成。
+
 ### 2026-08-13 B101 — monitor bootstrap 不能吞掉连续概率重估预算
 - **实时反例:** full-book attempt `417337` 持有约 75 秒 claim，但 `CycleArtifact` 创建时只剩 `26.170s`；artifact 前约 48.8 秒没有 q/book 决策。`run_exit_monitor_cycle` 把完整 outer deadline 交给 trade DB connection、ATTACH、watchdog、portfolio load 与 allocator refresh，因此 SQLite 争用可以合法耗尽本应属于 held redecision 的时间。
 - **结构性修复:** normal/YELLOW/ORANGE monitor 的 reactor handoff 必须先为 bootstrap + 一次完整 q read 保留两个 tranche；bootstrap 本身再限制为一个 tranche，并始终把另一个完整 tranche 留给 current probability + executable book。准备超时只终止本次 attempt，由 recurring monitor 在 DB writer 释放后重试。RED 不保留 statistical tranche，继续让 force-exit 使用完整 claim。准备阶段所有 connection/load/retry-release 使用同一 preparation cutoff，receipt 记录 handoff 耗时、准备预算/耗时与留给 primary 的剩余时间。

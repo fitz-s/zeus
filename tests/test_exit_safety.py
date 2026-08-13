@@ -7,6 +7,7 @@
 """R3 M4 exit-safety antibodies for cancel/replace and exit mutex behavior."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import sqlite3
@@ -11209,19 +11210,6 @@ def test_global_fak_zero_fill_reauctions_immediately_with_durable_proof(
     assert exit_lifecycle.has_global_sell_snapshot_reauction_retry(position, conn)
     assert exit_lifecycle._relinquished_global_sell_command_id(conn, position) == command_id
 
-    # The no-fill marker is not the recovery itself.  Prove the complete
-    # handoff that failed in the Seoul incident: canonical retry release, a new
-    # exact durable request bound to current q/book, and deadline-priority over
-    # an ordinary Day0 wake.  A selector-only test cannot prove this producer
-    # seam leaves an actionable request behind after the rejected command.
-    conn.commit()
-    assert exit_lifecycle.check_pending_retries(
-        position,
-        conn=conn,
-        global_sell_reauction_requester=lambda _position, _force: False,
-    ) is True
-    conn.commit()
-
     wake_path = tmp_path / f"{position_id}-wake.json"
     requests = []
 
@@ -11253,10 +11241,14 @@ def test_global_fak_zero_fill_reauctions_immediately_with_durable_proof(
             requests.append(request)
         return bool(accepted)
 
-    assert exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+    # The rejected FAK's canonical retry and outbox are still uncommitted here.
+    # The production seam must commit them and publish in this same turn;
+    # waiting for a later pending-retry scan recreates the Seoul 10m36s gap.
+    assert exit_lifecycle._drain_same_turn_global_sell_reauction_after_no_fill(
         position,
         conn=conn,
         requester=publish_current_reauction,
+        deadline_monotonic=exit_lifecycle._time_module.monotonic() + 5.0,
     ) is True
     assert len(requests) == 1
     request = requests[0]
@@ -11277,6 +11269,168 @@ def test_global_fak_zero_fill_reauctions_immediately_with_durable_proof(
     assert selected is not None
     assert selected != day0
     assert selected.held_sell_reauction_requests == (request,)
+
+
+def test_same_turn_reauction_release_commit_failure_restores_runtime(monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="same-turn-release-commit-failure",
+        market_id="condition-release-failure",
+        city="Paris",
+        cluster="Paris",
+        target_date="2026-08-13",
+        temperature_metric="high",
+        bin_label="28C",
+        direction="buy_yes",
+        token_id="same-turn-release-token",
+        no_token_id="same-turn-release-no-token",
+        condition_id="condition-release-failure",
+        state="pending_exit",
+        pre_exit_state="holding",
+        chain_state="synced",
+        shares=10.0,
+        chain_shares=10.0,
+        exit_state="retry_pending",
+        order_status="retry_pending",
+        last_exit_error="global_sell_exit_fak_no_fill_reauction:venue_fak_no_match_400",
+        next_exit_retry_at="2026-08-13T00:00:00+00:00",
+    )
+    before = copy.deepcopy(position.__dict__)
+
+    class Conn:
+        in_transaction = True
+        commits = 0
+
+        def commit(self):
+            self.commits += 1
+            if self.commits == 2:
+                raise sqlite3.OperationalError("release commit failed")
+            self.in_transaction = False
+
+        def rollback(self):
+            self.in_transaction = False
+
+    conn = Conn()
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "has_proven_sync_no_side_effect_sell_reauction",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def release(*_args, **_kwargs):
+        position.state = "holding"
+        position.exit_state = ""
+        position.order_status = "filled"
+        position.next_exit_retry_at = ""
+        conn.in_transaction = True
+        return True
+
+    monkeypatch.setattr(exit_lifecycle, "check_pending_retries", release)
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "recover_global_sell_snapshot_reauction_debt",
+        lambda *_args, **_kwargs: pytest.fail("uncommitted release must not publish"),
+    )
+
+    assert not exit_lifecycle._drain_same_turn_global_sell_reauction_after_no_fill(
+        position,
+        conn=conn,
+        requester=lambda *_args: True,
+    )
+    assert position.__dict__ == before
+
+
+def test_same_turn_reauction_rejects_ordinary_snapshot_debt(monkeypatch):
+    from src.execution import exit_lifecycle
+    from types import SimpleNamespace
+
+    position = SimpleNamespace(
+        trade_id="ordinary-snapshot-debt",
+        last_exit_error="global_sell_exit_executable_snapshot_unavailable",
+    )
+    published = []
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "check_pending_retries",
+        lambda *_args, **_kwargs: pytest.fail("ordinary debt must not fast-release"),
+    )
+
+    assert not exit_lifecycle._drain_same_turn_global_sell_reauction_after_no_fill(
+        position,
+        conn=SimpleNamespace(),
+        requester=lambda *_args: published.append(True) or True,
+    )
+    assert published == []
+
+
+def test_reauction_deadline_expires_before_external_publish(monkeypatch):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from src.execution import executor, exit_lifecycle
+
+    position = SimpleNamespace(trade_id="deadline-before-publish")
+
+    class Conn:
+        in_transaction = False
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+    conn = Conn()
+    monotonic = iter((0.0, 0.0, 0.0, 0.0, 0.0, 6.0))
+    monkeypatch.setattr(
+        exit_lifecycle._time_module,
+        "monotonic",
+        lambda: next(monotonic),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "needs_global_sell_snapshot_reauction",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "latest_held_sell_reauction_obligation",
+        lambda *_args, **_kwargs: {
+            "schema_version": 4,
+            "generation": "deadline-generation",
+        },
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_pending_exit_no_order_waits_for_liquidity",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_canonical_global_sell_command_ownership",
+        lambda *_args, **_kwargs: "GLOBAL_NO_COMMAND",
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_record_global_sell_reauction_publish_claim",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        executor,
+        "_canonical_trade_write_lease",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
+    published = []
+
+    assert not exit_lifecycle.recover_global_sell_snapshot_reauction_debt(
+        position,
+        conn=conn,
+        requester=lambda *_args: published.append(True) or True,
+        deadline_monotonic=5.0,
+    )
+    assert published == []
 
 def test_persisted_exit_envelope_rejects_non_maker_non_fak_mode(conn):
     from src.state.venue_command_repo import insert_command

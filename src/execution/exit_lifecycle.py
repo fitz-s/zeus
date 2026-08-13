@@ -13,6 +13,7 @@ This module owns all exit state transitions. CycleRunner calls it;
 CycleRunner does not contain exit business logic.
 """
 
+import copy
 import hashlib
 import logging
 import json
@@ -1457,6 +1458,22 @@ def has_global_sell_snapshot_reauction_retry(
     if _is_post_only_cross_reauction_error(error):
         return _post_only_cross_reauction_proof_for_position(conn, position)
     return _is_global_sell_snapshot_reauction_error(error)
+
+
+def has_proven_sync_no_side_effect_sell_reauction(
+    position: Position,
+    conn: sqlite3.Connection | None = None,
+) -> bool:
+    """Recognize only a command-proved synchronous SELL no-fill rejection."""
+
+    error = str(getattr(position, "last_exit_error", "") or "")
+    if not error:
+        error = _latest_exit_reject_error(conn, position)
+    if _is_post_only_cross_reauction_error(error):
+        return _post_only_cross_reauction_proof_for_position(conn, position)
+    if _is_fak_no_fill_reauction_error(error):
+        return _fak_no_fill_reauction_proof_for_position(conn, position)
+    return False
 
 
 def _canonical_global_sell_command_ownership(
@@ -9992,14 +10009,30 @@ def recover_global_sell_snapshot_reauction_debt(
     *,
     conn: sqlite3.Connection | None,
     requester: Callable[[Position, bool], bool],
+    deadline_monotonic: float | None = None,
 ) -> bool:
     """Publish and acknowledge one already-committed canonical release debt."""
 
+    def ensure_live() -> None:
+        if (
+            deadline_monotonic is not None
+            and _time_module.monotonic() >= float(deadline_monotonic)
+        ):
+            raise TimeoutError("GLOBAL_SELL_REAUCTION_DEADLINE_EXPIRED")
+
+    try:
+        ensure_live()
+    except TimeoutError:
+        return False
     if not needs_global_sell_snapshot_reauction(position, conn):
         return False
     if conn is None or conn.in_transaction:
         return False
-    obligation = latest_held_sell_reauction_obligation(conn, position)
+    obligation = latest_held_sell_reauction_obligation(
+        conn,
+        position,
+        deadline_monotonic=deadline_monotonic,
+    )
     if not obligation:
         return False
     if _pending_exit_no_order_waits_for_liquidity(position, conn=conn):
@@ -10012,6 +10045,7 @@ def recover_global_sell_snapshot_reauction_debt(
     from src.state.write_coordinator import WritePriority
 
     try:
+        ensure_live()
         with _canonical_trade_write_lease(
             conn,
             owner="global_sell_reauction_publish_claim",
@@ -10019,6 +10053,7 @@ def recover_global_sell_snapshot_reauction_debt(
             max_hold_ms=_EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS,
             priority=WritePriority.MONITOR,
         ):
+            ensure_live()
             if (
                 _canonical_global_sell_command_ownership(
                     conn,
@@ -10034,7 +10069,9 @@ def recover_global_sell_snapshot_reauction_debt(
             ):
                 conn.rollback()
                 return False
+            ensure_live()
             conn.commit()
+            ensure_live()
     except Exception as exc:  # noqa: BLE001 - an uncommitted claim is no fence.
         try:
             conn.rollback()
@@ -10047,6 +10084,10 @@ def recover_global_sell_snapshot_reauction_debt(
         )
         return False
     setattr(position, "_held_sell_reauction_obligation", obligation)
+    try:
+        ensure_live()
+    except TimeoutError:
+        return False
     if not requester(position, True):
         return False
     refreshed_obligation = getattr(
@@ -10078,6 +10119,8 @@ def recover_global_sell_snapshot_reauction_debt(
         conn.rollback()
         return False
     try:
+        # The wake is already externally visible. Always durably acknowledge it;
+        # a deadline overrun here must not turn one publication into replay debt.
         conn.commit()
     except Exception as exc:  # noqa: BLE001 - an uncommitted ack is not durable.
         try:
@@ -10092,6 +10135,71 @@ def recover_global_sell_snapshot_reauction_debt(
         return False
     position.last_exit_error = ""
     return True
+
+
+def _drain_same_turn_global_sell_reauction_after_no_fill(
+    position: Position,
+    *,
+    conn: sqlite3.Connection | None,
+    requester: Callable[[Position, bool], bool] | None,
+    deadline_monotonic: float | None = None,
+) -> bool:
+    """Commit a no-side-effect rejection, then publish its exact fresh reauction."""
+
+    if conn is None or requester is None:
+        return False
+    if not has_proven_sync_no_side_effect_sell_reauction(position, conn):
+        return False
+
+    def commit_before_external_publish() -> None:
+        if not conn.in_transaction:
+            return
+        if deadline_monotonic is None:
+            conn.commit()
+            return
+        with _held_monitor_preparation_deadline(
+            conn,
+            float(deadline_monotonic),
+        ) as ensure_live:
+            conn.commit()
+            ensure_live()
+
+    release_runtime_before = copy.deepcopy(position.__dict__)
+    release_started = False
+    try:
+        # First make the deterministic no-side-effect rejection authoritative.
+        commit_before_external_publish()
+        # Convert its immediate-eligibility marker into the same typed release
+        # event the recovery scanner would have written on a later pass.
+        if not check_pending_retries(
+            position,
+            conn=conn,
+            global_sell_reauction_requester=requester,
+        ):
+            return False
+        release_started = True
+        # The release event is the outbox. It must commit before any wake.
+        commit_before_external_publish()
+    except Exception as exc:  # noqa: BLE001 - uncommitted debt must never publish.
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        if release_started:
+            position.__dict__.clear()
+            position.__dict__.update(release_runtime_before)
+        logger.warning(
+            "GLOBAL_SELL_REAUCTION same-turn commit failed for %s: %s",
+            getattr(position, "trade_id", ""),
+            exc,
+        )
+        return False
+    return recover_global_sell_snapshot_reauction_debt(
+        position,
+        conn=conn,
+        requester=requester,
+        deadline_monotonic=deadline_monotonic,
+    )
 
 
 def release_pending_exit_without_order_if_retryable(

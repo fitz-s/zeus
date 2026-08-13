@@ -6191,6 +6191,7 @@ def execute_monitoring_phase(
         is_exit_cooldown_active,
         latest_held_sell_reauction_obligation,
         preserve_held_sell_reauction_deadline,
+        _drain_same_turn_global_sell_reauction_after_no_fill,
         recover_global_sell_snapshot_reauction_debt,
         release_backoff_exhausted_pending_exit_for_redecision,
         release_pending_exit_without_order_if_retryable,
@@ -6293,11 +6294,18 @@ def execute_monitoring_phase(
     def request_global_sell_snapshot_reauction(
         position,
         force_new_generation: bool = False,
+        *,
+        deadline_monotonic: float | None = None,
     ) -> bool:
         """Reserve a durable global cut for a canonical reauction debt."""
 
+        request_deadline = (
+            global_sell_debt_deadline
+            if deadline_monotonic is None
+            else float(deadline_monotonic)
+        )
         try:
-            if time.monotonic() >= global_sell_debt_deadline:
+            if time.monotonic() >= request_deadline:
                 defer_optional_maintenance("GLOBAL_SELL_DEBT_REQUEST_DEADLINE")
                 raise TimeoutError(
                     "GLOBAL_SELL_REAUCTION_AUXILIARY_DEADLINE_EXPIRED"
@@ -6307,7 +6315,7 @@ def execute_monitoring_phase(
             obligation = getattr(position, "_held_sell_reauction_obligation", {})
             obligation = obligation if isinstance(obligation, dict) else {}
             if force_new_generation:
-                if time.monotonic() >= global_sell_debt_deadline:
+                if time.monotonic() >= request_deadline:
                     raise TimeoutError(
                         "GLOBAL_SELL_REAUCTION_AUXILIARY_DEADLINE_EXPIRED"
                     )
@@ -6319,7 +6327,7 @@ def execute_monitoring_phase(
                 setattr(
                     position,
                     _HELD_MONITOR_DEADLINE_ATTR,
-                    global_sell_debt_deadline,
+                    request_deadline,
                 )
                 try:
                     refresh_position(conn, clob, position)
@@ -6335,7 +6343,7 @@ def execute_monitoring_phase(
                             _HELD_MONITOR_DEADLINE_ATTR,
                             previous_deadline,
                         )
-                if time.monotonic() >= global_sell_debt_deadline:
+                if time.monotonic() >= request_deadline:
                     raise TimeoutError(
                         "GLOBAL_SELL_REAUCTION_AUXILIARY_DEADLINE_EXPIRED"
                     )
@@ -6489,6 +6497,10 @@ def execute_monitoring_phase(
                     or current_observed_at
                 )
                 book_state = str(obligation.get("book_state") or "UNKNOWN")
+            if time.monotonic() >= request_deadline:
+                raise TimeoutError(
+                    "GLOBAL_SELL_REAUCTION_AUXILIARY_DEADLINE_EXPIRED"
+                )
             request_scope_identity = str(
                 obligation.get("scope_identity") or ""
             )
@@ -9128,6 +9140,25 @@ def execute_monitoring_phase(
                         else None
                     ),
                 )
+                if _drain_same_turn_global_sell_reauction_after_no_fill(
+                    pos,
+                    conn=conn,
+                    requester=lambda position, force_new: (
+                        request_global_sell_snapshot_reauction(
+                            position,
+                            force_new,
+                            deadline_monotonic=monitor_deadline,
+                        )
+                    ),
+                    deadline_monotonic=monitor_deadline,
+                ):
+                    portfolio_dirty = True
+                    summary[
+                        "global_sell_snapshot_reauction_same_turn_recovered"
+                    ] = summary.get(
+                        "global_sell_snapshot_reauction_same_turn_recovered",
+                        0,
+                    ) + 1
                 if outcome.startswith("exit_filled:"):
                     tracker.record_exit(pos)
                     tracker_dirty = True
