@@ -2451,6 +2451,49 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(
         "fields": list(global_batch_runtime._BOOK_NATIVE_SIDE_STATE_FIELDS),
         "rows": [],
     }
+    connection_key = global_batch_runtime._decision_log_connection_key(conn)
+    assert global_batch_runtime._GLOBAL_AUCTION_PAYLOAD_REFS[
+        connection_key
+    ].book.row_id == full_row_id
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_AUCTION_RECEIPT_BOOK_SIDE_STATE_INVALID",
+    ):
+        global_batch_runtime._book_native_side_receipt(
+            asset_states=(("malformed",),),
+            probability_keys=(),
+            buy_candidate_index=(),
+            excluded_by_family={},
+            required=False,
+        )
+
+    original_canonical_json_bytes = global_batch_runtime._canonical_json_bytes
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_canonical_json_bytes",
+        lambda value: (
+            original_canonical_json_bytes(value) + b"x" * 1_000_000
+            if isinstance(value, dict) and value.get("payload_compacted") is True
+            else original_canonical_json_bytes(value)
+        ),
+    )
+    unavailable_full_row_id = store(
+        suffix="book-unavailable-full-anchor",
+        book_available=False,
+    )
+    assert conn.execute(
+        "SELECT mode FROM decision_log WHERE id = ?",
+        (unavailable_full_row_id,),
+    ).fetchone()["mode"] == "global_single_order_auction"
+    assert global_batch_runtime._GLOBAL_AUCTION_PAYLOAD_REFS[
+        connection_key
+    ].book.row_id == full_row_id
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "_canonical_json_bytes",
+        original_canonical_json_bytes,
+    )
 
     changed_book_states = (
         (*book_states[0][:6], "book-new-yes", *book_states[0][7:]),

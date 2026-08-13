@@ -1970,6 +1970,8 @@ def _book_native_side_receipt(
     """Prove every bound side became a candidate or a typed current-book exclusion."""
 
     if not required:
+        if tuple(asset_states):
+            raise ValueError("GLOBAL_AUCTION_RECEIPT_BOOK_SIDE_STATE_INVALID")
         payload = {
             "fields": list(_BOOK_NATIVE_SIDE_STATE_FIELDS),
             "rows": [],
@@ -4329,13 +4331,17 @@ def _store_global_auction_receipt(
                     sha256=str(receipt["holding_auction_coverage_sha256"]),
                     payload=holding_coverage_rows,
                 ),
-                book=_GlobalAuctionComponentRef(
-                    row_id=row_id,
-                    mode=mode,
-                    receipt_hash=current_receipt_hash,
-                    encoding=str(receipt["book_native_side_encoding"]),
-                    sha256=str(receipt["book_native_side_states_sha256"]),
-                    payload=current_book_rows,
+                book=(
+                    payload_ref.book
+                    if not book_capture_complete and payload_ref is not None
+                    else _GlobalAuctionComponentRef(
+                        row_id=row_id,
+                        mode=mode,
+                        receipt_hash=current_receipt_hash,
+                        encoding=str(receipt["book_native_side_encoding"]),
+                        sha256=str(receipt["book_native_side_states_sha256"]),
+                        payload=current_book_rows,
+                    )
                 ),
                 audit_context=_GlobalAuctionComponentRef(
                     row_id=row_id,
