@@ -1683,6 +1683,97 @@ def test_bounded_full_apply_factory_requests_two_layer_nowait():
     assert calls == [{"blocking": False, "busy_timeout_ms": 0}]
 
 
+def test_restart_preflight_apply_factory_requests_two_layer_nowait():
+    from src.execution import command_recovery
+
+    calls = []
+
+    def _factory(**kwargs):
+        calls.append(kwargs)
+        conn = sqlite3.connect(":memory:")
+        conn.execute(f"PRAGMA busy_timeout = {kwargs['busy_timeout_ms']}")
+        return conn
+
+    _factory.supports_nonblocking_flocks = True
+    restart_factory = command_recovery._recovery_apply_conn_factory(
+        _factory,
+        scope="restart_preflight",
+        deadline_monotonic=command_recovery.time.monotonic() + 1.0,
+    )
+
+    conn = restart_factory()
+    try:
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+    assert calls == [{"blocking": False, "busy_timeout_ms": 0}]
+
+
+def test_restart_preflight_pass_defers_after_deadline_without_retry(monkeypatch):
+    from src.execution import command_recovery
+
+    calls = []
+    summary = {}
+
+    def _pass():
+        calls.append("attempt")
+        raise command_recovery.WriteLeaseTimeout("restart recovery writer busy")
+
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: 10.0)
+    result = command_recovery._run_recovery_pass_with_lock_policy(
+        "current_danger_apply",
+        _pass,
+        scope="restart_preflight",
+        summary=summary,
+        deadline_monotonic=9.0,
+        bounded_lock_retry_delays=(1.0, 1.0),
+    )
+
+    assert result is None
+    assert calls == ["attempt"]
+    assert summary == {
+        "db_lock_deferred": True,
+        "db_lock_deferred_at": "current_danger_apply",
+        "db_lock_deferred_count": 1,
+    }
+
+
+def test_restart_preflight_priority_writer_lease_is_deadline_bounded(monkeypatch):
+    from contextlib import nullcontext
+
+    from src.execution import command_recovery
+    from src.state import write_coordinator
+
+    lease_deadlines = []
+
+    class _Coordinator:
+        def lease(self, _dbs, **kwargs):
+            lease_deadlines.append(kwargs["deadline_ms"])
+            return nullcontext()
+
+    def _factory(**_kwargs):
+        return sqlite3.connect(":memory:")
+
+    _factory.requires_writer_flocks = True
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(
+        write_coordinator,
+        "default_runtime_write_coordinator",
+        lambda: _Coordinator(),
+    )
+    restart_factory = command_recovery._recovery_priority_conn_factory(
+        _factory,
+        scope="restart_preflight",
+        deadline_monotonic=10.75,
+    )
+
+    conn = restart_factory(blocking=False, busy_timeout_ms=0)
+    conn.close()
+
+    assert lease_deadlines == [750]
+
+
 def test_bounded_recovery_read_factory_rejects_expired_deadline():
     from src.execution import command_recovery
 

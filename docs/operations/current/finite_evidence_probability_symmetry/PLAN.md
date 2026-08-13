@@ -4,6 +4,32 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-12 Restart recovery is current-risk bounded
+
+The live-trading restart lane stopped the order daemon safely, then spent its
+entire outer timeout inside command recovery even though the restart scope is
+defined as current dangerous side effects only.  Unlike `live_tick` and the
+bounded full sweep, `restart_preflight` did not thread its supplied scheduler
+deadline into writer-lease acquisition, SQLite progress interruption, or the
+per-pass apply factory.  A historical scan could therefore keep held-position
+redecision offline while doing work that the recurring recovery lane already
+owns.
+
+Restart recovery now receives an absolute deadline shorter than the deploy
+subprocess timeout and treats `restart_preflight` as a bounded scope throughout
+its read/apply topology.  Deadline exhaustion records a typed deferral; the
+subsequent read-only preflight remains responsible for refusing startup if any
+current submit/cancel/exit ambiguity is still dangerous.  No historical row is
+deleted, relabeled, or used to authorize a trade.
+
+SCOPE is deploy-time command recovery before `live-trading` bootstrap.  DRAIN
+is the existing recurring `live_tick`/full recovery after the daemon starts,
+while current restart-dangerous commands remain covered by the read-only
+preflight.  RESET is a fresh restart invocation with a new finite deadline.
+Acceptance requires factory tests proving deadline interruption and finite
+writer-lease acquisition for `restart_preflight`, deploy wiring of the absolute
+deadline, and successful exact-head restart with entries still paused.
+
 ## 2026-08-12 Current truth is not current-regime capital advantage
 
 The full global solver used current q, book, and wealth but let its

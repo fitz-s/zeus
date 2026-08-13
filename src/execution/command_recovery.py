@@ -25570,7 +25570,7 @@ def _recovery_apply_conn_factory(
     scope: str,
     deadline_monotonic: float | None = None,
 ):
-    bounded_scope = scope == "live_tick" or (
+    bounded_scope = scope in {"live_tick", "restart_preflight"} or (
         scope == "full" and deadline_monotonic is not None
     )
     if not bounded_scope:
@@ -25691,8 +25691,6 @@ def _recovery_priority_conn_factory(
     def _factory(*, blocking: bool = True, busy_timeout_ms: int | None = None):
         if priority is WritePriority.BACKGROUND_RECOVERY:
             lease_deadline_ms = 0
-        elif scope == "restart_preflight":
-            lease_deadline_ms = None
         elif deadline_monotonic is None:
             lease_deadline_ms = int(_LIVE_TICK_DB_BUDGET_SECONDS * 1000)
         else:
@@ -25763,7 +25761,7 @@ def _run_recovery_pass_with_lock_policy(
     deadline_monotonic: float | None = None,
     bounded_lock_retry_delays: Sequence[float] = (),
 ):
-    bounded_scope = scope == "live_tick" or (
+    bounded_scope = scope in {"live_tick", "restart_preflight"} or (
         scope == "full" and deadline_monotonic is not None
     )
     if bounded_scope and (
@@ -26747,7 +26745,11 @@ def _reconcile_passes_short_conn(
         full_budget = _full_sweep_budget_seconds()
         summary["full_sweep_budget_seconds"] = full_budget
         full_deadline = scheduler_deadline or (time.monotonic() + full_budget)
-    apply_deadline = live_tick_deadline or full_deadline
+    apply_deadline = (
+        live_tick_deadline
+        or full_deadline
+        or (scheduler_deadline if scope == "restart_preflight" else None)
+    )
     conn_factory = _recovery_priority_conn_factory(
         conn_factory,
         scope=scope,

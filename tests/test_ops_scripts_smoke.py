@@ -2494,6 +2494,8 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     assert "get_world_connection_with_trades_required(write_class='live')" in calls[0][2]
     assert "get_trade_connection_with_world_required(write_class='live')" not in calls[0][2]
     assert "append_rest_filled_orphan_trade_facts_to_edli" in calls[0][2]
+    assert "recovery_deadline_monotonic = time.monotonic() + 90.0" in calls[0][2]
+    assert "deadline_monotonic=recovery_deadline_monotonic" in calls[0][2]
     recovery_script = calls[0][2]
     assert recovery_script.index("target='202608_edli_active_redecision_projection'") < (
         recovery_script.index(

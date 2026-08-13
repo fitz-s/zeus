@@ -1463,6 +1463,7 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
     code = textwrap.dedent(
         """
         import json
+        import time
         from scripts.migrations import apply_migrations
         from scripts.deploy_live import (
             _assert_restart_trade_schema_ready,
@@ -1553,7 +1554,11 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
             append_rest_filled_orphan_trade_facts_to_edli,
         )
 
-        summary = reconcile_unresolved_commands(scope='restart_preflight')
+        recovery_deadline_monotonic = time.monotonic() + 90.0
+        summary = reconcile_unresolved_commands(
+            scope='restart_preflight',
+            deadline_monotonic=recovery_deadline_monotonic,
+        )
         bridge_conn = get_world_connection_with_trades_required(write_class='live')
         try:
             summary['confirmed_fill_bridge_appended'] = append_confirmed_trade_facts_to_edli(
