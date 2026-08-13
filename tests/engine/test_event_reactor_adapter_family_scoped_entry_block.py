@@ -194,23 +194,6 @@ def test_day0_entry_containment_preserves_hard_facts_and_non_day0_candidates():
     ) is None
 
 
-def test_statistical_entry_requires_current_regime_settlement_advantage():
-    reason = era._unproven_statistical_entry_advantage_rejection_reason(
-        day0_payoff_truth=None,
-    )
-
-    assert reason == (
-        "GLOBAL_CURRENT_REGIME_SETTLEMENT_GRADED_CAPITAL_ADVANTAGE_UNPROVEN"
-    )
-
-
-@pytest.mark.parametrize("truth", ("locked", "refuted"))
-def test_current_day0_hard_fact_does_not_need_statistical_advantage(truth):
-    assert era._unproven_statistical_entry_advantage_rejection_reason(
-        day0_payoff_truth=truth,
-    ) is None
-
-
 def test_statistical_maker_buy_cannot_supply_immediate_execution_proof():
     reason = era._unproven_statistical_maker_fill_rejection_reason(
         SimpleNamespace(action="BUY", execution_mode="MAKER_REST"),
@@ -242,25 +225,29 @@ def test_maker_fill_gate_applies_to_actual_and_proof_selection():
     maker_at = source.index(
         "_unproven_statistical_maker_fill_rejection_reason("
     )
-    proof_bypass_at = source.index("if not proof_only:", maker_at)
+    strategy_at = source.index("_event_bound_strategy_key(", maker_at)
 
-    assert maker_at < proof_bypass_at
+    assert maker_at < strategy_at
 
 
-def test_settlement_advantage_gate_precedes_strategy_and_capital_checks():
+def test_current_statistical_taker_reaches_strategy_and_capital_checks():
     import inspect
 
     source = inspect.getsource(era.event_bound_live_adapter_from_trade_conn)
-    advantage_at = source.index(
-        "_unproven_statistical_entry_advantage_rejection_reason("
+    maker_at = source.index(
+        "_unproven_statistical_maker_fill_rejection_reason("
     )
-    strategy_at = source.index("_event_bound_strategy_key(", advantage_at)
+    strategy_at = source.index("_event_bound_strategy_key(", maker_at)
     capital_at = source.index(
         "_global_current_entry_feasibility_rejection_reason(",
-        advantage_at,
+        maker_at,
     )
 
-    assert advantage_at < strategy_at < capital_at
+    assert maker_at < strategy_at < capital_at
+    assert (
+        "GLOBAL_CURRENT_REGIME_SETTLEMENT_GRADED_CAPITAL_ADVANTAGE_UNPROVEN"
+        not in source
+    )
     assert era._day0_unresolved_entry_probability_rejection_reason(
         day0_payoff_truth="refuted",
     ) is None

@@ -6964,29 +6964,6 @@ def _day0_unresolved_entry_probability_rejection_reason(
     return None
 
 
-def _unproven_statistical_entry_advantage_rejection_reason(
-    *,
-    day0_payoff_truth: object,
-) -> str | None:
-    """Require current-regime settlement proof before any statistical BUY.
-
-    A current probability and book are necessary inputs to capital ranking, not
-    evidence that the probability has positive out-of-sample value.  Only an
-    already LOCKED/REFUTED monotone Day0 payoff is current hard fact rather than
-    a statistical claim.  All other BUYs remain outside the feasible set until
-    a version-bound, settlement-graded capital-advantage artifact is consumed by
-    this seam.
-    """
-
-    truth = str(day0_payoff_truth or "").strip().lower()
-    if truth in {
-        Day0PayoffTruth.LOCKED.value,
-        Day0PayoffTruth.REFUTED.value,
-    }:
-        return None
-    return "GLOBAL_CURRENT_REGIME_SETTLEMENT_GRADED_CAPITAL_ADVANTAGE_UNPROVEN"
-
-
 def _unproven_statistical_maker_fill_rejection_reason(
     candidate: object,
     *,
@@ -10400,20 +10377,6 @@ def event_bound_live_adapter_from_trade_conn(
             )
             if maker_fill_reason is not None:
                 return maker_fill_reason
-            # SCOPE: every risk-increasing statistical BUY, across forecast and
-            # unresolved/unknown Day0 families. DRAIN: a strictly causal OOS
-            # artifact must grade the exact current probability semantics,
-            # selection rule, executable-cost regime, and settlement outcome.
-            # RESET: only successful validation consumed at this seam; process
-            # health, a fresh q, or an operator restart cannot clear the gate.
-            if not proof_only:
-                advantage_reason = (
-                    _unproven_statistical_entry_advantage_rejection_reason(
-                        day0_payoff_truth=day0_payoff_truth,
-                    )
-                )
-                if advantage_reason is not None:
-                    return advantage_reason
             try:
                 strategy_key = _event_bound_strategy_key(
                     event_type=event_type,

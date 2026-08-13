@@ -4,6 +4,32 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-13 Current positive growth, not prior settlement, admits risk
+
+The statistical-entry gate required profitable settlement evidence from the
+exact current selection revision before that revision could place its first
+order.  The proof-only comparator then repeatedly found positive executable
+posterior-mean BUY winners while the actual comparator was forced to CASH.
+This is circular admission: it prevents both current capital gain and the very
+realized evidence demanded to clear it.
+
+Statistical immediate-taker BUYs now enter the same live feasible set as their
+proof comparison.  They still require current licensed probability semantics,
+source freshness, exact executable book and fees, pre-cliff liquidation depth,
+strategy policy, Fractional Kelly sizing, capital/risk limits, and submit-time
+JIT reproduction.  Unresolved Day0 probability and unproved maker fills remain
+blocked.  A negative or absent expected-growth winner still selects CASH; this
+change does not create a minimum-order quota.
+
+SCOPE is the removed bankroll-wide settlement-history veto only.  DRAIN is the
+next complete global cut, whose positive winner proceeds to ordinary preflight
+and actuation.  RESET is every new q/book/wealth cut and submit-time preflight;
+stale or negative economics cannot inherit an earlier winner.  Acceptance
+requires the actual candidate policy to contain no settlement-history veto,
+focused adapter and global-auction tests, exact-head restart, and a current
+receipt showing either a genuinely submitted positive winner or current CASH
+with no positive proof winner.
+
 ## 2026-08-13 Capital proof winner identity is isolated from frontier telemetry
 
 The proof receipt scans rejected BUY frontiers before serializing its winner.
