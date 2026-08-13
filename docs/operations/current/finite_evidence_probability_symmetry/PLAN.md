@@ -4819,3 +4819,39 @@ this plan. Acceptance requires construction-without-DDL and missing-schema
 antibodies, the focused collateral suites, live sidecar restart on the exact
 landed SHA, a newly committed current collateral snapshot, and a subsequent
 global proof receipt or the next exact fail-closed reason.
+
+## 2026-08-13 Terminal fill projection owns current-capital recovery priority
+
+Live reconstruction after a 100-second FOK submit found an authenticated
+Mexico City ENTRY fill in terminal `FILLED` command and confirmed venue-trade
+truth while `position_current`, the command-bound `ENTRY_ORDER_FILLED` event,
+and `execution_fact` were still absent. The existing filled-entry repair could
+reconstruct all three, but `capital_blocking_command_count()` counted only
+in-flight submits and unresolved cancels. With held-monitor cadence debt active,
+the scheduler therefore classified the missing live exposure as zero capital
+blockers and repeatedly deferred command recovery behind a monitor that could
+not yet see the unprojected position.
+
+Terminal authenticated positive fill truth is current capital even after the
+venue command reaches `FILLED`. The capital-blocker classifier now includes
+only an exact FILLED ENTRY command with a bound venue order, a positive
+confirmed REST/WS_USER trade fact, and a missing positive same-token canonical
+position, command-bound fill event, or positive command execution fact. It does
+not treat a fully projected terminal command as unresolved. Current-capital
+priority is bounded to the first hour after the confirmed fill (sixty ordinary
+recovery cadences); older repair debt remains in the background lane and cannot
+turn prior garbage into a permanent live-entry monopoly.
+
+SCOPE is the exact terminal ENTRY command whose authenticated positive fill is
+not completely projected. DRAIN is the next scheduled command-recovery turn,
+which receives the existing current-capital handoff and runs the existing
+filled-entry projection repair. RESET requires all three command-bound
+authorities: positive open `position_current`, `ENTRY_ORDER_FILLED`, and
+positive `execution_fact`; command status or elapsed time alone cannot reset
+the projection, while elapsed time only demotes stale debt from capital-priority
+to background recovery. Acceptance requires a missing-projection blocker antibody, its
+full-projection reset twin, the focused command-recovery suite, live deployment,
+and canonical convergence of the observed Mexico fill.
+
+Allowed files for this hot-fix are `src/execution/command_recovery.py`,
+`tests/test_command_recovery.py`, and this plan.

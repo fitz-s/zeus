@@ -4627,6 +4627,7 @@ def _append_trade_fact(
     fill_price="0.50",
     tx_hash: str | None = None,
     source="REST",
+    observed_at="2026-04-26T00:06:00Z",
 ):
     from src.state.venue_command_repo import append_trade_fact
 
@@ -4639,8 +4640,8 @@ def _append_trade_fact(
         filled_size=filled_size,
         fill_price=fill_price,
         source=source,
-        observed_at="2026-04-26T00:06:00Z",
-        venue_timestamp="2026-04-26T00:06:00Z",
+        observed_at=observed_at,
+        venue_timestamp=observed_at,
         tx_hash=tx_hash,
         raw_payload_hash=hashlib.sha256(
             f"{command_id}:{order_id}:{trade_id}:{state}:{filled_size}:{fill_price}:{tx_hash}:{source}".encode()
@@ -31697,8 +31698,11 @@ class TestEdliAbsenceVenueCommandSync:
 # ---------------------------------------------------------------------------
 
 
-def test_capital_blocker_count_includes_only_identity_bound_submits(conn):
+def test_capital_blocker_count_includes_identity_bound_submits_and_unprojected_fills(
+    conn,
+):
     from src.execution.command_recovery import capital_blocking_command_count
+    from src.state.db import log_execution_fact
 
     _insert(conn, command_id="cmd-bound-entry", position_id="pos-bound-entry")
     _advance_to_submitting(
@@ -31719,6 +31723,64 @@ def test_capital_blocker_count_includes_only_identity_bound_submits(conn):
         conn,
         command_id="cmd-bound-exit",
         venue_order_id="ord-bound-exit",
+    )
+
+    _insert(
+        conn,
+        command_id="cmd-filled-unprojected",
+        position_id="pos-filled-unprojected",
+        size=1.25,
+        price=0.50,
+    )
+    _advance_to_acked(
+        conn,
+        command_id="cmd-filled-unprojected",
+        venue_order_id="ord-filled-unprojected",
+    )
+    conn.execute(
+        "UPDATE venue_commands SET state = 'FILLED' WHERE command_id = ?",
+        ("cmd-filled-unprojected",),
+    )
+    _append_trade_fact(
+        conn,
+        command_id="cmd-filled-unprojected",
+        order_id="ord-filled-unprojected",
+        trade_id="trade-filled-unprojected",
+        filled_size="1.25",
+        fill_price="0.50",
+        observed_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+    assert capital_blocking_command_count(conn) == 3
+
+    _seed_pending_entry_projection(
+        conn,
+        position_id="pos-filled-unprojected",
+        command_id="cmd-filled-unprojected",
+        order_id="ord-filled-unprojected",
+    )
+    _append_test_filled_entry_projection(
+        conn,
+        position_id="pos-filled-unprojected",
+        command_id="cmd-filled-unprojected",
+        order_id="ord-filled-unprojected",
+        shares=1.25,
+        cost_basis_usd=0.625,
+        size_usd=0.625,
+        entry_price=0.50,
+    )
+    log_execution_fact(
+        conn,
+        intent_id="pos-filled-unprojected:entry:cmd-filled-unprojected",
+        position_id="pos-filled-unprojected",
+        decision_id="dec-001",
+        command_id="cmd-filled-unprojected",
+        order_role="entry",
+        filled_at="2026-04-26T00:06:00Z",
+        fill_price=0.50,
+        shares=1.25,
+        venue_status="FILLED",
+        terminal_exec_status="filled",
     )
 
     assert capital_blocking_command_count(conn) == 2

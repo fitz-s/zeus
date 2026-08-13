@@ -538,6 +538,7 @@ _REBALANCE_LIVE_EXPOSURE_PHASES = frozenset({
 })
 _SAFE_REPLAY_MIN_AGE_SECONDS = 15 * 60
 _MATCHED_RECOVERY_TERMINAL_ZERO_LOOKBACK_SECONDS = 48 * 60 * 60
+_TERMINAL_FILL_PROJECTION_PRIORITY_SECONDS = 60 * 60
 _POST_ACK_PERSISTENCE_REVIEW_REASONS = frozenset({
     "entry_ack_persistence_failed_after_side_effect",
     "exit_ack_persistence_failed_after_side_effect",
@@ -26194,6 +26195,88 @@ def _capital_blocking_cancel_commands(conn: sqlite3.Connection) -> list[dict]:
     return rows
 
 
+def _terminal_filled_entry_projection_blocker_count(
+    conn: sqlite3.Connection,
+) -> int:
+    """Count confirmed ENTRY fills that canonical position truth has not absorbed."""
+
+    required = {
+        "venue_commands",
+        "venue_trade_facts",
+        "position_current",
+        "position_events",
+        "execution_fact",
+    }
+    if not all(_table_exists(conn, table) for table in required):
+        return 0
+    # SCOPE: one recent terminal FILLED ENTRY command with authenticated positive
+    # fill truth but incomplete command-bound position/execution projection.
+    # DRAIN: scheduled command recovery runs the existing filled-entry projection
+    # repair under current-capital priority for one hour (sixty normal cadences);
+    # older debt remains in background recovery rather than monopolizing current
+    # capital I/O. RESET: the exact positive position row, ENTRY_ORDER_FILLED
+    # event, and execution_fact all exist for that command.
+    row = conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM venue_commands cmd
+         WHERE cmd.intent_kind = 'ENTRY'
+           AND cmd.side = 'BUY'
+           AND cmd.state = 'FILLED'
+           AND COALESCE(cmd.venue_order_id, '') != ''
+           AND EXISTS (
+                SELECT 1
+                  FROM venue_trade_facts fact
+                 WHERE fact.command_id = cmd.command_id
+                   AND fact.venue_order_id = cmd.venue_order_id
+                   AND fact.state = 'CONFIRMED'
+                   AND fact.source IN ('REST', 'WS_USER')
+                   AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                   AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+                   AND datetime(fact.observed_at) >= datetime('now', ?)
+           )
+           AND (
+                NOT EXISTS (
+                    SELECT 1
+                      FROM position_current pc
+                     WHERE pc.position_id = cmd.position_id
+                       AND pc.phase IN (
+                            'active', 'day0_window', 'pending_exit'
+                       )
+                       AND CAST(COALESCE(pc.shares, '0') AS REAL) > 0
+                       AND CAST(COALESCE(pc.cost_basis_usd, '0') AS REAL) > 0
+                       AND cmd.token_id IN (
+                            COALESCE(pc.token_id, ''),
+                            COALESCE(pc.no_token_id, '')
+                       )
+                )
+                OR NOT EXISTS (
+                    SELECT 1
+                      FROM position_events event
+                     WHERE event.position_id = cmd.position_id
+                       AND event.event_type = 'ENTRY_ORDER_FILLED'
+                       AND (
+                            event.command_id = cmd.command_id
+                            OR lower(COALESCE(event.order_id, '')) =
+                               lower(cmd.venue_order_id)
+                       )
+                )
+                OR NOT EXISTS (
+                    SELECT 1
+                      FROM execution_fact execution
+                     WHERE execution.position_id = cmd.position_id
+                       AND execution.command_id = cmd.command_id
+                       AND execution.order_role = 'entry'
+                       AND execution.filled_at IS NOT NULL
+                       AND execution.shares > 0
+                )
+           )
+        """,
+        (f"-{_TERMINAL_FILL_PROJECTION_PRIORITY_SECONDS} seconds",),
+    ).fetchone()
+    return int(row[0] or 0) if row is not None else 0
+
+
 def capital_blocking_command_count(conn: sqlite3.Connection) -> int:
     """Return exact unresolved venue side effects that freeze current capital."""
 
@@ -26213,7 +26296,8 @@ def capital_blocking_command_count(conn: sqlite3.Connection) -> int:
         ).fetchone()[0]
         or 0
     )
-    return cancel_count + inflight_submit_count
+    projection_count = _terminal_filled_entry_projection_blocker_count(conn)
+    return cancel_count + inflight_submit_count + projection_count
 
 
 def _identity_bound_submitting_candidates(
