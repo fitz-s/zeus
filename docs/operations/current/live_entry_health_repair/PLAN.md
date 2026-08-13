@@ -1869,3 +1869,25 @@ publication barrier.
   evidence; ordinary transport failure still raises; prefetched executable book
   still avoids redundant metadata; focused governor and full live-safety tests,
   compilation, independent review, and live cadence proof pass before closeout.
+
+### Slice B99 — Isolate admitted belief failure from the held-position tail (2026-08-13)
+
+- Live defect: a 47.759-second held-monitor claim ended after 32.612 seconds.
+  Two admitted positions exhausted their own five-second child deadlines, then
+  `primary_belief_admitted_slice_failed` skipped seven unvisited positions even
+  though the global claim still had time. Three consecutive decisions repeated
+  the same batch-wide deferral, leaving pending-exit and active holdings stale.
+- Structural invariant: one position owns one bounded belief attempt. Its
+  timeout or exception rolls back and defers only that position; remaining
+  positions may consume the unchanged global claim through their own five-second
+  deadlines. Only the global deadline, urgent preemption, or insufficient time
+  for one complete child attempt may stop the tail.
+- SCOPE: one failed or expired held-position probability/metadata child.
+  DRAIN: the same pass continues with independent peers while fair rotation
+  retries the failed position on a later pass. RESET: any later complete child
+  attempt emits its current canonical q/book decision.
+- Forbidden: widening child/global budgets, changing fair rotation, changing
+  target-family scope, suppressing per-position failure telemetry, or treating
+  stale data as current. Acceptance: timeout and exception antibodies prove the
+  failed position remains deferred while admitted and non-admitted peers both
+  refresh, evaluate, and emit canonical decisions before the global deadline.

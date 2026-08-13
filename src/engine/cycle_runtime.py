@@ -7314,7 +7314,6 @@ def execute_monitoring_phase(
     summary["held_monitor_budget_bypass_scanned"] = 0
     monitor_wealth_witness_cache: dict[str, object] = {}
     deadline_rescue_used = False
-    primary_belief_slice_failed = False
     refresh_owned_attrs = (
         "last_monitor_at",
         "last_monitor_best_bid",
@@ -7375,10 +7374,8 @@ def execute_monitoring_phase(
                 deferred_ids.append(deferred_id)
 
     def record_admitted_child_failure(position_id: str, stage: str) -> None:
-        """Close tail admission after one admitted statistical child fails."""
+        """Record one admitted statistical child failure without poisoning peers."""
 
-        nonlocal primary_belief_slice_failed
-        primary_belief_slice_failed = True
         failed_ids = summary["held_monitor_primary_belief_failed_position_ids"]
         if position_id in failed_ids:
             return
@@ -7404,13 +7401,10 @@ def execute_monitoring_phase(
     ) -> str | None:
         """Classify one exhausted child claim without starving the held book."""
 
-        nonlocal primary_belief_slice_failed
-
         now_monotonic = time.monotonic()
         if now_monotonic < position_deadline:
             return None
         if blocks_statistical_tail:
-            primary_belief_slice_failed = True
             expired_ids = summary[
                 "held_monitor_primary_belief_expired_position_ids"
             ]
@@ -7425,7 +7419,10 @@ def execute_monitoring_phase(
                 summary.get("held_monitor_primary_belief_read_deferred", 0)
                 + deferred_count
             )
-            summary["held_monitor_positions_deferred"] = deferred_count
+            summary["held_monitor_positions_deferred"] = (
+                summary.get("held_monitor_positions_deferred", 0)
+                + deferred_count
+            )
             summary["held_monitor_defer_reason"] = (
                 "MONITOR_DEADLINE_EXPIRED_AFTER_REFRESH"
             )
@@ -7526,34 +7523,6 @@ def execute_monitoring_phase(
             primary_belief_required
             and id(pos) in selected_coverage_position_ids
         )
-        if (
-            not deadline_rescue
-            and primary_belief_required
-            and id(pos) not in selected_coverage_position_ids
-            and primary_belief_slice_failed
-        ):
-            # The fair coverage reservation is the guaranteed admission slice.
-            # Once any admitted q read consumes its deadline, serial tail reads
-            # would be allowed to spend the whole claim even when every quote is
-            # already local.  Fast successful slices may still use remaining
-            # time, preserving normal full-book throughput.
-            # SCOPE: this non-hard-fact position in this monitor pass. DRAIN:
-            # the recurring pass rotates bounded_coverage by attempt identity.
-            # RESET: a new pass whose admitted slice completes without expiry.
-            summary["held_monitor_primary_belief_read_deferred"] = (
-                summary.get("held_monitor_primary_belief_read_deferred", 0)
-                + 1
-            )
-            summary["held_monitor_positions_deferred"] = (
-                summary.get("held_monitor_positions_deferred", 0) + 1
-            )
-            summary["held_monitor_defer_reason"] = (
-                "primary_belief_admitted_slice_failed"
-            )
-            summary["held_monitor_primary_belief_deferred_position_ids"].append(
-                str(getattr(pos, "trade_id", "") or "")
-            )
-            continue
         if (
             not deadline_rescue
             and primary_belief_required

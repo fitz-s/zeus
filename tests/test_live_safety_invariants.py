@@ -514,10 +514,10 @@ def test_monitoring_phase_uses_full_budget_before_deferring_held_positions(
     )
 
 
-def test_monitor_probability_reads_are_bounded_to_fair_admitted_slice(
+def test_monitor_probability_reads_use_remaining_claim_after_fair_admitted_slice(
     monkeypatch,
 ):
-    """Local quotes cannot let serial slow q reads consume the full-book claim."""
+    """Fair admission is a minimum guarantee, not a ceiling below global budget."""
     from src.engine import cycle_runtime
 
     positions = [
@@ -531,6 +531,7 @@ def test_monitor_probability_reads_are_bounded_to_fair_admitted_slice(
     ]
     clock = [0.0]
     started_by_pass: list[list[str]] = []
+    admitted_by_pass: list[list[str]] = []
 
     monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(
@@ -594,10 +595,12 @@ def test_monitor_probability_reads_are_bounded_to_fair_admitted_slice(
             held_position_monitor_budget_seconds=75.0,
         )
         started_by_pass.append(list(current_started))
-        assert current_started == summary[
-            "held_monitor_primary_belief_admitted_position_ids"
-        ]
-        assert summary["held_monitor_primary_belief_read_started"] == 5
+        admitted_by_pass.append(
+            list(summary["held_monitor_primary_belief_admitted_position_ids"])
+        )
+        assert set(current_started) == {position.trade_id for position in positions}
+        assert current_started[:5] == admitted_by_pass[-1]
+        assert summary["held_monitor_primary_belief_read_started"] == 15
         assert summary["held_monitor_primary_belief_read_completed"] == 0
         assert summary["held_monitor_primary_belief_read_deferred"] == 15
         assert summary["held_monitor_positions_deferred"] == 15
@@ -606,14 +609,15 @@ def test_monitor_probability_reads_are_bounded_to_fair_admitted_slice(
         )
         assert summary["held_monitor_primary_belief_completed_position_ids"] == []
         assert summary["held_monitor_primary_belief_expired_position_ids"] == (
-            current_started
+            admitted_by_pass[-1]
         )
         assert set(summary["held_monitor_primary_belief_deferred_position_ids"]) == (
             {position.trade_id for position in positions}
         )
-        assert clock[0] == pytest.approx(25.0)
+        assert clock[0] == pytest.approx(75.0)
 
-    assert set(started_by_pass[0]).isdisjoint(started_by_pass[1])
+    assert set(admitted_by_pass[0]).isdisjoint(admitted_by_pass[1])
+    assert all(len(started) == len(positions) for started in started_by_pass)
 
 
 def test_urgent_admitted_coverage_prefers_local_quote_before_network():
@@ -20928,6 +20932,118 @@ def test_refresh_exception_restores_owned_state_and_continues_held_book(monkeypa
     assert summary["monitors"] == 1
 
 
+def test_admitted_refresh_exception_does_not_poison_statistical_tail(monkeypatch):
+    """A failed admitted refresh rolls back once and cannot suppress tail peers."""
+    from src.engine import cycle_runtime
+
+    positions = [
+        _make_position(
+            trade_id=f"refresh-exception-tail-{index}",
+            token_id=f"refresh-exception-tail-token-{index}",
+            state="holding",
+            chain_state="synced",
+        )
+        for index in range(4)
+    ]
+    with cycle_runtime._HELD_MONITOR_CURSOR_LOCK:
+        cycle_runtime._HELD_MONITOR_ATTEMPT_STATE_BY_LANE.pop(
+            "bounded_coverage",
+            None,
+        )
+        cycle_runtime._HELD_MONITOR_ATTEMPT_SEQUENCE_BY_LANE.pop(
+            "bounded_coverage",
+            None,
+        )
+    original_prob = positions[0].last_monitor_prob
+    refreshes = []
+    evaluated = []
+    canonical_emits = []
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: positions,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_day0_hard_fact_position_eligible",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {
+            position.token_id: {
+                "asset_id": position.token_id,
+                "bids": [{"price": "0.40", "size": "20"}],
+                "asks": [{"price": "0.42", "size": "20"}],
+            }
+            for position in positions
+        },
+    )
+
+    def refresh(_conn, _clob, position):
+        refreshes.append(position.trade_id)
+        if position is positions[0]:
+            position.last_monitor_prob = 0.01
+            position.last_monitor_prob_is_fresh = True
+            position.applied_validations.append("partial-refresh-must-rollback")
+            position.concurrent_evidence = "must-survive-refresh-exception"
+            raise RuntimeError("refresh transport failed")
+        return _monitor_test_edge_context(position)
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: (
+            evaluated.append(self.trade_id)
+            or ExitDecision(False, "CI_OVERLAP_HOLD")
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda _conn, position, **_kwargs: (
+            canonical_emits.append(position.trade_id) or True
+        ),
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        SimpleNamespace(),
+        _make_portfolio(*positions),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("refresh_exception_tail"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=20.0,
+    )
+
+    assert refreshes == [position.trade_id for position in positions]
+    assert evaluated == canonical_emits == [
+        positions[1].trade_id,
+        positions[2].trade_id,
+        positions[3].trade_id,
+    ]
+    assert positions[0].last_monitor_prob == original_prob
+    assert "partial-refresh-must-rollback" not in positions[0].applied_validations
+    assert positions[0].concurrent_evidence == "must-survive-refresh-exception"
+    assert summary["held_monitor_primary_belief_failed_position_ids"] == [
+        positions[0].trade_id
+    ]
+    assert summary["held_monitor_primary_belief_failed_stages"] == [
+        {"position_id": positions[0].trade_id, "stage": "refresh"}
+    ]
+    assert summary["held_monitor_primary_belief_deferred_position_ids"] == [
+        positions[0].trade_id
+    ]
+    assert summary["held_monitor_positions_deferred"] == 1
+    assert summary["monitor_failed"] == 1
+    assert summary["monitors"] == 3
+
+
 def test_closed_market_metadata_child_timeout_continues_held_book(monkeypatch):
     """Expired venue metadata cannot commit close state or blind later positions."""
     from src.engine import cycle_runtime
@@ -21006,11 +21122,11 @@ def test_closed_market_metadata_child_timeout_continues_held_book(monkeypatch):
 
 
 @pytest.mark.parametrize("failure_mode", ("timeout", "exception"))
-def test_admitted_metadata_failure_blocks_only_nonadmitted_statistical_tail(
+def test_admitted_metadata_failure_does_not_poison_statistical_tail(
     monkeypatch,
     failure_mode,
 ):
-    """Any admitted child failure closes tail admission without blinding peers."""
+    """One admitted child failure stays local while remaining budget serves peers."""
     from src.engine import cycle_runtime
 
     positions = [
@@ -21106,19 +21222,25 @@ def test_admitted_metadata_failure_blocks_only_nonadmitted_statistical_tail(
         positions[0].trade_id,
         positions[1].trade_id,
     ]
-    assert metadata_calls == [positions[0].trade_id, positions[1].trade_id]
-    assert refreshes == canonical_emits == [positions[1].trade_id]
+    assert metadata_calls == [position.trade_id for position in positions]
+    assert refreshes == canonical_emits == [
+        positions[1].trade_id,
+        positions[2].trade_id,
+        positions[3].trade_id,
+    ]
     assert summary["held_monitor_primary_belief_expired_position_ids"] == (
         [positions[0].trade_id] if failure_mode == "timeout" else []
     )
     assert summary["held_monitor_primary_belief_failed_position_ids"] == (
         [positions[0].trade_id] if failure_mode == "exception" else []
     )
-    assert set(summary["held_monitor_primary_belief_deferred_position_ids"]) == {
-        positions[0].trade_id,
-        positions[2].trade_id,
-        positions[3].trade_id,
-    }
+    assert summary["held_monitor_primary_belief_deferred_position_ids"] == [
+        positions[0].trade_id
+    ]
+    assert summary.get("held_monitor_defer_reason") != (
+        "primary_belief_admitted_slice_failed"
+    )
+    assert summary["monitors"] == 3
 
 
 def test_market_velocity_uses_causal_source_time_not_legacy_text_order(tmp_path):
