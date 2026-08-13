@@ -19857,10 +19857,12 @@ def test_exit_monitor_budget_starts_at_claim_and_wrapper_forwards_remaining(
     source = inspect.getsource(run_exit_monitor_cycle)
     claim_offset = source.index("held_position_monitor_active.set()")
     deadline_offset = source.index("monitor_deadline_monotonic =")
+    cutoff_offset = source.index("preparation_deadline_monotonic =")
     connection_offset = source.index(
-        "conn = get_connection(deadline_monotonic=monitor_deadline_monotonic)"
+        "conn = get_connection(deadline_monotonic=preparation_deadline_monotonic)"
     )
     assert claim_offset < deadline_offset < connection_offset
+    assert deadline_offset < cutoff_offset < connection_offset
     preparation_offset = source.index("with _held_monitor_preparation_deadline(")
     portfolio_offset = source.index("portfolio = load_portfolio(")
     assert connection_offset < preparation_offset < portfolio_offset
@@ -20015,6 +20017,89 @@ def test_monitor_preparation_sql_deadline_interrupts_and_restores(monkeypatch):
 
     assert conn.handler is None
     assert conn.busy_ms == 30_000
+
+
+def test_monitor_preparation_cutoff_preserves_one_complete_probability_read(
+    monkeypatch,
+):
+    from src.engine.monitor_refresh import HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+    from src.execution import exit_lifecycle
+
+    monkeypatch.setattr(exit_lifecycle._time_module, "monotonic", lambda: 10.0)
+
+    cutoff = exit_lifecycle._held_monitor_preparation_cutoff(85.0)
+
+    assert cutoff == pytest.approx(
+        10.0 + HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+    )
+    assert 85.0 - cutoff >= HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+
+
+def test_monitor_preparation_cutoff_rejects_claim_without_complete_q_reserve(
+    monkeypatch,
+):
+    from src.engine.monitor_refresh import HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+    from src.execution import exit_lifecycle
+
+    monkeypatch.setattr(exit_lifecycle._time_module, "monotonic", lambda: 10.0)
+
+    assert exit_lifecycle._held_monitor_preparation_cutoff(
+        10.0 + HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+    ) == pytest.approx(10.0)
+
+
+def test_red_monitor_preparation_cutoff_keeps_force_exit_claim(monkeypatch):
+    from src.execution import exit_lifecycle
+
+    monkeypatch.setattr(exit_lifecycle._time_module, "monotonic", lambda: 10.0)
+
+    assert exit_lifecycle._held_monitor_preparation_cutoff(
+        85.0,
+        reserve_primary_redecision=False,
+    ) == pytest.approx(85.0)
+
+
+def test_monitor_pre_artifact_reserve_covers_bootstrap_and_one_q_read():
+    from src.engine.monitor_refresh import HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+    from src.execution import exit_lifecycle
+
+    assert exit_lifecycle.held_monitor_pre_artifact_reserve_seconds() == pytest.approx(
+        2.0 * HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+    )
+
+
+def test_exit_monitor_db_bootstrap_uses_preparation_cutoff(monkeypatch):
+    from src.engine import cycle_runner
+    from src.execution import exit_lifecycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    observed_deadlines = []
+    completed = []
+    active = threading.Event()
+    monkeypatch.setattr(exit_lifecycle._time_module, "monotonic", lambda: 10.0)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(
+        cycle_runner,
+        "get_connection",
+        lambda *, deadline_monotonic: observed_deadlines.append(
+            deadline_monotonic
+        ) or None,
+    )
+
+    result = exit_lifecycle.run_exit_monitor_cycle(
+        held_position_monitor_active=active,
+        mark_held_position_monitor_complete=lambda: (
+            active.clear(),
+            completed.append(True),
+        ),
+        monitor_deadline_monotonic=85.0,
+    )
+
+    assert result is False
+    assert observed_deadlines == [pytest.approx(15.0)]
+    assert completed == [True]
+    assert not active.is_set()
 
 
 def test_allocator_retry_release_stops_between_positions_at_monitor_deadline(

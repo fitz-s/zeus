@@ -8588,6 +8588,56 @@ def test_exit_monitor_claims_priority_and_waits_for_reactor_handoff(monkeypatch)
     assert not main_module._held_position_monitor_active.is_set()
 
 
+def test_exit_monitor_handoff_preserves_bootstrap_and_primary_q_budget(
+    monkeypatch,
+) -> None:
+    import src.engine.cycle_runtime as cycle_runtime
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+    from src.riskguard.risk_level import RiskLevel
+
+    clock = [0.0]
+    observed: dict[str, float] = {}
+
+    class ReactorGate:
+        def acquire(self, *, timeout: float) -> bool:
+            observed["timeout"] = timeout
+            clock[0] += timeout
+            return True
+
+        def release(self) -> None:
+            return None
+
+    def run(**kwargs) -> bool:
+        observed["handoff_elapsed"] = kwargs[
+            "monitor_handoff_elapsed_seconds"
+        ]
+        observed["remaining"] = kwargs["monitor_deadline_monotonic"] - clock[0]
+        kwargs["mark_held_position_monitor_complete"]()
+        return True
+
+    main_module._held_position_monitor_active.clear()
+    monkeypatch.setattr(main_module.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_held_position_monitor_budget_seconds",
+        lambda: 12.0,
+    )
+    monkeypatch.setattr(main_module, "_edli_reactor_active_lock", ReactorGate())
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: RiskLevel.GREEN,
+    )
+    monkeypatch.setattr(exit_module, "run_exit_monitor_cycle", run)
+
+    assert main_module._exit_monitor_cycle() is True
+    assert observed["timeout"] == pytest.approx(2.0)
+    assert observed["handoff_elapsed"] == pytest.approx(2.0)
+    assert observed["remaining"] == pytest.approx(
+        exit_module.held_monitor_pre_artifact_reserve_seconds()
+    )
+
+
 def test_reactor_bootstrap_releases_after_canonical_monitor_coverage(
     monkeypatch,
 ) -> None:

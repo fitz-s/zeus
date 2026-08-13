@@ -9073,7 +9073,12 @@ def _exit_monitor_cycle(
     hold that gate. The dispatcher owns both signals.
     """
     from src.engine.cycle_runtime import _held_position_monitor_budget_seconds
-    from src.execution.exit_lifecycle import run_exit_monitor_cycle
+    from src.execution.exit_lifecycle import (
+        held_monitor_pre_artifact_reserve_seconds,
+        run_exit_monitor_cycle,
+    )
+    from src.riskguard.risk_level import RiskLevel
+    from src.riskguard.riskguard import get_current_level
 
     urgent_fact = urgent_day0 or urgent_forecast
     absorbed_overdue_families: frozenset[tuple[str, str, str]] = frozenset()
@@ -9230,11 +9235,27 @@ def _exit_monitor_cycle(
             if urgent_fact or recovery_full_book
             else _EXIT_MONITOR_REACTOR_HANDOFF_SECONDS
         )
+        risk_level_at_claim = get_current_level()
+        handoff_reserve_seconds = (
+            0.0
+            if risk_level_at_claim is RiskLevel.RED
+            else held_monitor_pre_artifact_reserve_seconds()
+        )
         handoff_timeout = min(
             configured_handoff_timeout,
-            max(0.0, monitor_deadline_monotonic - time.monotonic()),
+            max(
+                0.0,
+                monitor_deadline_monotonic
+                - time.monotonic()
+                - handoff_reserve_seconds,
+            ),
         )
+        handoff_started_monotonic = time.monotonic()
         reactor_idle = _edli_reactor_active_lock.acquire(timeout=handoff_timeout)
+        handoff_elapsed_seconds = max(
+            0.0,
+            time.monotonic() - handoff_started_monotonic,
+        )
         if not reactor_idle:
             if periodic_full_book:
                 current_obligation_count = (
@@ -9322,6 +9343,7 @@ def _exit_monitor_cycle(
             mark_held_position_monitor_complete=_release_monitor_claim,
             monitor_claimed=True,
             monitor_deadline_monotonic=monitor_deadline_monotonic,
+            monitor_handoff_elapsed_seconds=handoff_elapsed_seconds,
             target_families=target_families,
             should_preempt_for_urgent_day0=should_preempt_for_urgent_day0,
         )

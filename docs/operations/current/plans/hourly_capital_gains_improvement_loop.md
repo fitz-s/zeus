@@ -5,6 +5,11 @@
 
 ## 现状(forward)
 
+### 2026-08-13 B101 — monitor bootstrap 不能吞掉连续概率重估预算
+- **实时反例:** full-book attempt `417337` 持有约 75 秒 claim，但 `CycleArtifact` 创建时只剩 `26.170s`；artifact 前约 48.8 秒没有 q/book 决策。`run_exit_monitor_cycle` 把完整 outer deadline 交给 trade DB connection、ATTACH、watchdog、portfolio load 与 allocator refresh，因此 SQLite 争用可以合法耗尽本应属于 held redecision 的时间。
+- **结构性修复:** normal/YELLOW/ORANGE monitor 的 reactor handoff 必须先为 bootstrap + 一次完整 q read 保留两个 tranche；bootstrap 本身再限制为一个 tranche，并始终把另一个完整 tranche 留给 current probability + executable book。准备超时只终止本次 attempt，由 recurring monitor 在 DB writer 释放后重试。RED 不保留 statistical tranche，继续让 force-exit 使用完整 claim。准备阶段所有 connection/load/retry-release 使用同一 preparation cutoff，receipt 记录 handoff 耗时、准备预算/耗时与留给 primary 的剩余时间。
+- **验收:** deterministic clock 抗体证明 75 秒 claim 的 bootstrap 不能超过一个 q-read tranche、不足以同时容纳 preparation 和完整 q read 时不启动 DB、RED 仍保留完整 sweep claim；既有 absolute claim、SQLite deadline、pending-exit 和 monitor progress 抗体必须继续通过。此项不改变 probability、edge、Kelly 或 exit economics，只修复时间预算的因果所有权。
+
 ### 2026-08-12 12:35 CDT tick — current-law 前向资本已为正且 truth complete；robust 仍未证明
 - **live 结果:** loaded SHA `b9f9dd0e8`。以 `2026-08-11T00:00:00Z` 为显式起点、`2026-08-12T17:34:52Z` 为 decision-time cut 的 canonical read-only audit 覆盖 55 个真实 filled commands，chain matched/partially-matched fact coverage complete，0 个 pre-boundary entry fills、0 个未分类 fills。
 - **资本证明:** 23 个 realized positions，gross realized PnL `+$24.183599`，submission-schedule fee bound `$2.347814`，net realized PnL `+$21.835785`，realized-capital return `+41.998%`；8 win / 15 loss。Day0 curve 为 13 realized、net `+$2.975415`；qkernel curve 为 10 realized、net `+$18.860370`。两条 strategy curve 的 `blocked_position_count=0`，总状态为 `positive_observed` / `capital_truth_complete=true`。

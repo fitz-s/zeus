@@ -11413,12 +11413,49 @@ def _held_monitor_preparation_deadline(
         conn.execute(f"PRAGMA busy_timeout = {previous_busy_ms}")
 
 
+def _held_monitor_preparation_cutoff(
+    monitor_deadline_monotonic: float,
+    *,
+    reserve_primary_redecision: bool = True,
+) -> float:
+    """Cap monitor bootstrap so it cannot consume the first complete q read."""
+
+    outer_deadline = float(monitor_deadline_monotonic)
+    now = _time_module.monotonic()
+    if not reserve_primary_redecision:
+        return outer_deadline
+
+    from src.engine.monitor_refresh import HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+
+    primary_reserve = float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS)
+    remaining = outer_deadline - now
+    if not math.isfinite(remaining) or remaining <= primary_reserve:
+        return now
+    # Bootstrap is prerequisite work, not held-position redecision. Give it at
+    # most one q-read tranche and preserve another complete tranche for the
+    # probability/book path. SCOPE: this monitor attempt's DB/watchdog/load/
+    # allocator preparation only. DRAIN: the recurring monitor retries after
+    # the incumbent DB writer commits. RESET: the next attempt recomputes this
+    # cutoff from its own fresh claim.
+    preparation_budget = min(primary_reserve, remaining - primary_reserve)
+    return min(outer_deadline, now + preparation_budget)
+
+
+def held_monitor_pre_artifact_reserve_seconds() -> float:
+    """Minimum claim remainder needed for bootstrap plus one complete q read."""
+
+    from src.engine.monitor_refresh import HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS
+
+    return 2.0 * float(HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS)
+
+
 def run_exit_monitor_cycle(
     *,
     held_position_monitor_active: threading.Event,
     mark_held_position_monitor_complete: Callable[[], None],
     monitor_claimed: bool = False,
     monitor_deadline_monotonic: float | None = None,
+    monitor_handoff_elapsed_seconds: float = 0.0,
     target_families: Collection[tuple[str, str, str]] | None = None,
     should_preempt_for_urgent_day0: Callable[[], bool] | None = None,
 ) -> bool:
@@ -11491,9 +11528,25 @@ def run_exit_monitor_cycle(
         mark_held_position_monitor_complete()
         return False
 
-    conn = get_connection(deadline_monotonic=monitor_deadline_monotonic)
+    preparation_started_monotonic = _time_module.monotonic()
+    preparation_deadline_monotonic = _held_monitor_preparation_cutoff(
+        monitor_deadline_monotonic,
+        reserve_primary_redecision=risk_level is not RiskLevel.RED,
+    )
+    if preparation_deadline_monotonic <= preparation_started_monotonic:
+        logger.warning(
+            "exit_monitor: insufficient claim budget for preparation plus one "
+            "complete probability redecision"
+        )
+        mark_held_position_monitor_complete()
+        return False
+
+    conn = get_connection(deadline_monotonic=preparation_deadline_monotonic)
     if conn is None:
-        logger.warning("exit_monitor: DB write-lock degrade — skipping cycle")
+        logger.warning(
+            "exit_monitor: DB preparation deadline expired — preserving primary "
+            "redecision reserve for the recurring retry"
+        )
         mark_held_position_monitor_complete()
         return False
 
@@ -11501,6 +11554,14 @@ def run_exit_monitor_cycle(
         "monitors": 0,
         "exits": 0,
         "risk_level": risk_level.value,
+        "held_monitor_preparation_budget_seconds": max(
+            0.0,
+            preparation_deadline_monotonic - preparation_started_monotonic,
+        ),
+        "held_monitor_reactor_handoff_elapsed_seconds": max(
+            0.0,
+            float(monitor_handoff_elapsed_seconds),
+        ),
     }
     full_book_open_position_count = 0
     succeeded = False
@@ -11508,7 +11569,7 @@ def run_exit_monitor_cycle(
     try:
         with _held_monitor_preparation_deadline(
             conn,
-            monitor_deadline_monotonic,
+            preparation_deadline_monotonic,
         ) as ensure_preparation_live:
             # FIX 2c (2026-06-20): detect a lapsed MONITOR_REFRESHED cadence
             # on the first cycle after recovery. Detection only.
@@ -11526,7 +11587,7 @@ def run_exit_monitor_cycle(
                 open_positions_only=True,
                 target_families=target_families,
                 connection=conn,
-                deadline_monotonic=monitor_deadline_monotonic,
+                deadline_monotonic=preparation_deadline_monotonic,
             )
             ensure_preparation_live()
             if risk_level is RiskLevel.RED:
@@ -11556,9 +11617,17 @@ def run_exit_monitor_cycle(
                         conn,
                         portfolio,
                         observed_at=datetime.now(timezone.utc),
-                        deadline_monotonic=monitor_deadline_monotonic,
+                        deadline_monotonic=preparation_deadline_monotonic,
                     )
                 )
+        summary["held_monitor_preparation_elapsed_seconds"] = max(
+            0.0,
+            _time_module.monotonic() - preparation_started_monotonic,
+        )
+        summary["held_monitor_primary_budget_remaining_seconds"] = max(
+            0.0,
+            monitor_deadline_monotonic - _time_module.monotonic(),
+        )
         monitor_portfolio = _portfolio_for_target_families(portfolio, target_families)
         if target_families is None:
             full_book_open_position_count = len(monitor_portfolio.positions)
