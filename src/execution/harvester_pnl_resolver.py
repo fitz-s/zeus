@@ -1,4 +1,4 @@
-# Lifecycle: created=2026-04-30; last_reviewed=2026-06-03; last_reused=2026-06-03
+# Lifecycle: created=2026-04-30; last_reviewed=2026-08-13; last_reused=2026-08-13
 # Authority basis: docs/operations/task_2026-04-30_two_system_independence/design.md §5 Phase 1.5; docs/archive/2026-Q2/task_2026-05-16_deep_alignment_audit/REPORT.md Finding #4
 # W2 (2026-06-03): repointed from forecasts.settlements → forecasts.settlement_outcomes.
 """Trading-side P&L resolver (Phase 1.5 harvester split).
@@ -26,6 +26,9 @@ import copy
 import logging
 
 logger = logging.getLogger(__name__)
+
+_FINALIZED_PAYOUT_SOURCE = "chain_rpc_finalized_v1"
+_TERMINAL_PAYOUT_STATES = frozenset({"RESOLVED_ZERO", "RESOLVED_NONZERO"})
 
 
 def _row_value(row, key: str, index: int, default=None):
@@ -106,6 +109,149 @@ def _read_verified_settlement_rows(forecasts_conn, keys: set[tuple[str, str, str
             ).fetchall()
         )
     return rows
+
+
+def _read_finalized_payout_settlement_rows(trade_conn, portfolio, keys):
+    """Translate complete finalized CTF payouts into condition-scoped closes.
+
+    This is economic payout truth only.  It never creates a physical
+    temperature, family winner, forecast settlement row, or calibration fact.
+    CTF binary outcome slots are YES=0 and NO=1 by the observer's explicit
+    adapter contract; the executable snapshot must independently bind those
+    labels to the same YES/NO tokens carried by every open position before the
+    payout can authorize a close.
+
+    The observer appends only when a value changes, so the two latest outcome
+    facts need not share a block.  Each fact must independently be finalized,
+    complete, and terminal; together they must form the strict binary vector
+    ``[denominator, 0]`` or ``[0, denominator]``.
+    """
+    positions_by_condition: dict[str, list] = {}
+    for pos in getattr(portfolio, "positions", []) or []:
+        key = (
+            str(getattr(pos, "city", "") or "").strip(),
+            str(getattr(pos, "target_date", "") or "").strip(),
+            str(getattr(pos, "temperature_metric", "") or "high").strip().lower(),
+        )
+        condition_id = str(getattr(pos, "condition_id", "") or "").strip()
+        if key in keys and condition_id:
+            positions_by_condition.setdefault(condition_id, []).append(pos)
+    if not positions_by_condition:
+        return []
+
+    condition_ids = sorted(positions_by_condition)
+    placeholders = ",".join("?" for _ in condition_ids)
+    payout_rows = trade_conn.execute(
+        f"""
+        WITH latest AS (
+            SELECT condition_id, outcome_index, payout_numerator,
+                   payout_denominator, state, block_number, block_hash, source,
+                   observed_at,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY condition_id, outcome_index ORDER BY id DESC
+                   ) AS row_rank
+              FROM payout_observations
+             WHERE condition_id IN ({placeholders})
+               AND outcome_index IN (0, 1)
+        )
+        SELECT condition_id, outcome_index, payout_numerator,
+               payout_denominator, state, block_number, block_hash, source,
+               observed_at
+          FROM latest
+         WHERE row_rank = 1
+         ORDER BY condition_id, outcome_index
+        """,
+        condition_ids,
+    ).fetchall()
+    snapshot_rows = trade_conn.execute(
+        f"""
+        WITH latest AS (
+            SELECT condition_id, yes_token_id, no_token_id, event_slug,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY condition_id ORDER BY captured_at DESC
+                   ) AS row_rank
+              FROM executable_market_snapshots
+             WHERE condition_id IN ({placeholders})
+        )
+        SELECT condition_id, yes_token_id, no_token_id, event_slug
+          FROM latest
+         WHERE row_rank = 1
+        """,
+        condition_ids,
+    ).fetchall()
+
+    observations: dict[str, dict[int, object]] = {}
+    for row in payout_rows:
+        condition_id = str(_row_value(row, "condition_id", 0, "") or "")
+        outcome_index = int(_row_value(row, "outcome_index", 1, -1))
+        observations.setdefault(condition_id, {})[outcome_index] = row
+    snapshots = {
+        str(_row_value(row, "condition_id", 0, "") or ""): row
+        for row in snapshot_rows
+    }
+
+    resolved = []
+    for condition_id, positions in positions_by_condition.items():
+        by_index = observations.get(condition_id, {})
+        if set(by_index) != {0, 1}:
+            continue
+        rows = [by_index[0], by_index[1]]
+        if any(
+            str(_row_value(row, "source", 7, "") or "") != _FINALIZED_PAYOUT_SOURCE
+            or str(_row_value(row, "state", 4, "") or "") not in _TERMINAL_PAYOUT_STATES
+            or _row_value(row, "block_number", 5, None) is None
+            or not str(_row_value(row, "block_hash", 6, "") or "").strip()
+            for row in rows
+        ):
+            continue
+        try:
+            denominators = [int(_row_value(row, "payout_denominator", 3, 0)) for row in rows]
+            numerators = [int(_row_value(row, "payout_numerator", 2, -1)) for row in rows]
+        except (TypeError, ValueError):
+            continue
+        if (
+            denominators[0] <= 0
+            or denominators[0] != denominators[1]
+            or sorted(numerators) != [0, denominators[0]]
+        ):
+            continue
+
+        snapshot = snapshots.get(condition_id)
+        if snapshot is None:
+            continue
+        yes_token = str(_row_value(snapshot, "yes_token_id", 1, "") or "").strip()
+        no_token = str(_row_value(snapshot, "no_token_id", 2, "") or "").strip()
+        if not yes_token or not no_token or yes_token == no_token:
+            continue
+        identity_keys = {
+            (
+                str(getattr(pos, "city", "") or "").strip(),
+                str(getattr(pos, "target_date", "") or "").strip(),
+                str(getattr(pos, "temperature_metric", "") or "high").strip().lower(),
+            )
+            for pos in positions
+        }
+        if len(identity_keys) != 1 or any(
+            str(getattr(pos, "token_id", "") or "").strip() != yes_token
+            or str(getattr(pos, "no_token_id", "") or "").strip() != no_token
+            for pos in positions
+        ):
+            continue
+        city, target_date, metric = next(iter(identity_keys))
+        resolved.append({
+            "city": city,
+            "target_date": target_date,
+            "market_slug": str(_row_value(snapshot, "event_slug", 3, "") or ""),
+            "winning_bin": None,
+            "temperature_metric": metric,
+            "authority": "VENUE_RESOLVED",
+            "settlement_source": "polymarket_chain_rpc_finalized_v1",
+            "settlement_value": None,
+            "settlement_scope": "condition",
+            "condition_id": condition_id,
+            "condition_yes_won": numerators[0] == denominators[0],
+        })
+    return resolved
 
 
 def _read_venue_resolved_settlement_rows(trade_conn, portfolio, keys):
@@ -285,7 +431,7 @@ def _read_venue_resolved_settlement_rows(trade_conn, portfolio, keys):
 
 
 def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
-    """Resolve P&L for markets that have been settled in forecasts.settlements.
+    """Resolve P&L from physical settlement or exact economic payout truth.
 
     Reads settled rows from forecasts.settlements that have not yet been processed
     by the trading side. Settles matching positions and writes decision_log rows.
@@ -312,22 +458,27 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
     from src.state.strategy_tracker import get_tracker, save_tracker
     from src.state.canonical_write import commit_then_export
 
-    portfolio = load_portfolio()
+    # Reuse the caller's connection. Opening a second trade connection here can
+    # pin a read snapshot on one handle and later deadlock its write upgrade on
+    # the other under the continuously-writing live daemon.
+    portfolio = load_portfolio(
+        connection=trade_conn,
+        open_positions_only=True,
+    )
     settlement_keys = _open_position_settlement_keys(trade_conn, portfolio)
 
     # Read settled rows from forecasts.settlement_outcomes (VERIFIED authority only).
     # W2 (2026-06-03): repointed from legacy settlements table to canonical settlement_outcomes.
+    forecast_read_errors = 0
     try:
         verified_rows = _read_verified_settlement_rows(forecasts_conn, settlement_keys)
     except Exception as exc:
         logger.warning("harvester_pnl_resolver: settlement_outcomes read failed: %s", exc)
-        return {
-            "status": "settlement_outcomes_read_error",
-            "error": str(exc),
-            "positions_settled": 0,
-            "decision_log_rows_written": 0,
-            "errors": 1,
-        }
+        # Forecast truth and finalized chain payout are independent authorities.
+        # Preserve the forecast error, but do not let it veto a complete local
+        # condition payout that can safely release canonical trade exposure.
+        verified_rows = []
+        forecast_read_errors = 1
 
     verified_keys = {
         (
@@ -337,14 +488,72 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
         )
         for row in verified_rows
     }
+    payout_rows = _read_finalized_payout_settlement_rows(
+        trade_conn,
+        portfolio,
+        settlement_keys - verified_keys,
+    )
     venue_rows = _read_venue_resolved_settlement_rows(
         trade_conn,
         portfolio,
         settlement_keys - verified_keys,
     )
-    rows = [*verified_rows, *venue_rows]
+
+    # End every discovery/read snapshot before requesting the WAL writer slot.
+    # A DEFERRED read transaction cannot be safely upgraded after another live
+    # writer advances the WAL (SQLITE_BUSY_SNAPSHOT ignores busy_timeout). Take
+    # write authority first, then re-read canonical exposure and finalized local
+    # payout truth inside that fresh transaction. No HTTP occurs after this line.
+    if trade_conn.in_transaction:
+        trade_conn.rollback()
+    trade_conn.execute("BEGIN IMMEDIATE")
+    portfolio = load_portfolio(
+        connection=trade_conn,
+        open_positions_only=True,
+    )
+    settlement_keys = _open_position_settlement_keys(trade_conn, portfolio)
+    verified_rows = [
+        row
+        for row in verified_rows
+        if (
+            str(_row_value(row, "city", 0, "") or ""),
+            str(_row_value(row, "target_date", 1, "") or ""),
+            str(_row_value(row, "temperature_metric", 4, "") or ""),
+        ) in settlement_keys
+    ]
+    payout_rows = _read_finalized_payout_settlement_rows(
+        trade_conn,
+        portfolio,
+        settlement_keys - verified_keys,
+    )
+    current_condition_ids = {
+        str(getattr(pos, "condition_id", "") or "").strip()
+        for pos in getattr(portfolio, "positions", []) or []
+    }
+    payout_condition_ids = {
+        str(row.get("condition_id") or "").strip() for row in payout_rows
+    }
+    venue_rows = [
+        row
+        for row in venue_rows
+        if (
+            str(row.get("settlement_scope") or "family") == "condition"
+            and str(row.get("condition_id") or "").strip() in current_condition_ids
+            and str(row.get("condition_id") or "").strip() not in payout_condition_ids
+        )
+        or (
+            str(row.get("settlement_scope") or "family") == "family"
+            and (
+                str(row.get("city") or ""),
+                str(row.get("target_date") or ""),
+                str(row.get("temperature_metric") or ""),
+            ) in settlement_keys
+        )
+    ]
+    rows = [*verified_rows, *payout_rows, *venue_rows]
 
     if not rows:
+        trade_conn.rollback()
         logger.debug(
             "harvester_pnl_resolver: no VERIFIED rows in forecasts.settlement_outcomes "
             "for open position keys; truth writer may not have run yet"
@@ -354,7 +563,7 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
             "open_position_keys_checked": len(settlement_keys),
             "positions_settled": 0,
             "decision_log_rows_written": 0,
-            "errors": 0,
+            "errors": forecast_read_errors,
         }
 
     settlement_records: list[SettlementRecord] = []
@@ -362,7 +571,7 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
     tracker_dirty = False
 
     positions_settled = 0
-    errors = 0
+    errors = forecast_read_errors
     batch_portfolio_snapshot = copy.deepcopy(portfolio.__dict__)
     batch_tracker_snapshot = copy.deepcopy(getattr(tracker, "__dict__", {}))
     batch_savepoint = "harvester_pnl_resolver_batch"
@@ -442,9 +651,14 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
                     "forecasts.settlement_outcomes"
                     if authority == "VERIFIED"
                     else (
+                        "trades.payout_observations"
+                        if str(settlement_source or "")
+                        == "polymarket_chain_rpc_finalized_v1"
+                        else (
                         "gamma_exact_held_condition"
                         if settlement_scope == "condition"
                         else "gamma_exact_held_event"
+                        )
                     )
                 ),
                 settlement_market_slug=str(market_slug or ""),

@@ -1,5 +1,5 @@
 # Created: 2026-06-03
-# Last reused or audited: 2026-07-25
+# Last reused or audited: 2026-08-13
 # Authority basis: 守護 blocker — settlement_outcomes (VERIFIED truth) -> resolver ->
 #   position settled. Relationship test across the
 #   settlement_outcomes -> position_current boundary that the
@@ -31,6 +31,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.state.db import init_schema
+from src.state.schema.payout_observations_schema import ensure_table as ensure_payout_table
+from src.state.snapshot_repo import init_snapshot_schema
 
 
 @pytest.fixture()
@@ -328,6 +330,288 @@ def test_partial_parent_resolution_emits_exact_held_condition_truth(monkeypatch)
         "condition_id": condition_id,
         "condition_yes_won": False,
     }]
+
+
+def _insert_payout(
+    conn,
+    *,
+    condition_id,
+    outcome_index,
+    numerator,
+    denominator=1,
+    state=None,
+    source="chain_rpc_finalized_v1",
+    block_number=100,
+    block_hash="0xabc",
+):
+    conn.execute(
+        """INSERT INTO payout_observations (
+               condition_id, outcome_index, payout_numerator,
+               payout_denominator, state, block_number, block_hash,
+               observed_at, source
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, '2026-08-13T07:10:00+00:00', ?)""",
+        (
+            condition_id,
+            outcome_index,
+            numerator,
+            denominator,
+            state or ("RESOLVED_ZERO" if numerator == 0 else "RESOLVED_NONZERO"),
+            block_number,
+            block_hash,
+            source,
+        ),
+    )
+
+
+def test_finalized_payout_rows_bind_tokens_and_allow_independent_blocks(trade_conn):
+    from src.execution import harvester_pnl_resolver as resolver
+
+    ensure_payout_table(trade_conn)
+    init_snapshot_schema(trade_conn, include_latest=False)
+    condition_id = "0x" + "e" * 64
+    portfolio, position = _winning_position(
+        trade_id="chain-finalized-no",
+        city="NYC",
+        target_date="2026-08-12",
+    )
+    position.condition_id = condition_id
+    position.token_id = "yes-token"
+    position.no_token_id = "no-token"
+    position.temperature_metric = "high"
+    trade_conn.execute(
+        """INSERT INTO executable_market_snapshots (
+               snapshot_id, gamma_market_id, event_id, event_slug, condition_id,
+               question_id, yes_token_id, no_token_id, enable_orderbook, active,
+               closed, min_tick_size, min_order_size, fee_details_json,
+               token_map_json, neg_risk, orderbook_top_bid, orderbook_top_ask,
+               orderbook_depth_json, raw_gamma_payload_hash,
+               raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
+               captured_at, freshness_deadline
+           ) VALUES (
+               'snap-finalized', 'gamma', 'event', 'nyc-aug-12', ?, 'question',
+               'yes-token', 'no-token', 1, 0, 1, '0.001', '1', '{}',
+               '{"YES":"yes-token","NO":"no-token"}', 0, '0', '0', '{}',
+               'g', 'c', 'b', 'CHAIN', '2026-08-13T07:20:00+00:00',
+               '2026-08-13T07:21:00+00:00'
+           )""",
+        (condition_id,),
+    )
+    _insert_payout(
+        trade_conn,
+        condition_id=condition_id,
+        outcome_index=0,
+        numerator=0,
+        block_number=101,
+        block_hash="0x101",
+    )
+    _insert_payout(
+        trade_conn,
+        condition_id=condition_id,
+        outcome_index=1,
+        numerator=1,
+        block_number=100,
+        block_hash="0x100",
+    )
+
+    rows = resolver._read_finalized_payout_settlement_rows(
+        trade_conn,
+        portfolio,
+        {("NYC", "2026-08-12", "high")},
+    )
+
+    assert rows == [{
+        "city": "NYC",
+        "target_date": "2026-08-12",
+        "market_slug": "nyc-aug-12",
+        "winning_bin": None,
+        "temperature_metric": "high",
+        "authority": "VENUE_RESOLVED",
+        "settlement_source": "polymarket_chain_rpc_finalized_v1",
+        "settlement_value": None,
+        "settlement_scope": "condition",
+        "condition_id": condition_id,
+        "condition_yes_won": False,
+    }]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_slot",
+        "unknown",
+        "legacy_source",
+        "unequal_denominator",
+        "double_winner",
+        "partial_payout",
+        "token_mismatch",
+    ],
+)
+def test_finalized_payout_reader_fails_closed_on_incomplete_authority(
+    trade_conn, mutation
+):
+    from src.execution import harvester_pnl_resolver as resolver
+
+    ensure_payout_table(trade_conn)
+    init_snapshot_schema(trade_conn, include_latest=False)
+    condition_id = "0x" + "f" * 64
+    portfolio, position = _winning_position(
+        trade_id=f"malformed-{mutation}", city="Dallas", target_date="2026-08-12"
+    )
+    position.condition_id = condition_id
+    position.token_id = "yes-token"
+    position.no_token_id = "no-token"
+    position.temperature_metric = "high"
+    snapshot_no = "wrong-no-token" if mutation == "token_mismatch" else "no-token"
+    trade_conn.execute(
+        """INSERT INTO executable_market_snapshots (
+               snapshot_id, gamma_market_id, event_id, event_slug, condition_id,
+               question_id, yes_token_id, no_token_id, enable_orderbook, active,
+               closed, min_tick_size, min_order_size, fee_details_json,
+               token_map_json, neg_risk, orderbook_top_bid, orderbook_top_ask,
+               orderbook_depth_json, raw_gamma_payload_hash,
+               raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
+               captured_at, freshness_deadline
+           ) VALUES (
+               ?, 'gamma', 'event', 'dallas-aug-12', ?, 'question',
+               'yes-token', ?, 1, 0, 1, '0.001', '1', '{}', '{}', 0,
+               '0', '0', '{}', 'g', 'c', 'b', 'CHAIN',
+               '2026-08-13T07:20:00+00:00', '2026-08-13T07:21:00+00:00'
+           )""",
+        (f"snap-{mutation}", condition_id, snapshot_no),
+    )
+    if mutation != "missing_slot":
+        _insert_payout(
+            trade_conn,
+            condition_id=condition_id,
+            outcome_index=0,
+            numerator=(
+                None
+                if mutation == "unknown"
+                else (1 if mutation == "double_winner" else 0)
+            ),
+            denominator=(2 if mutation == "partial_payout" else 1),
+            state=("UNKNOWN" if mutation == "unknown" else None),
+            source=("chain_rpc" if mutation == "legacy_source" else "chain_rpc_finalized_v1"),
+        )
+    _insert_payout(
+        trade_conn,
+        condition_id=condition_id,
+        outcome_index=1,
+        numerator=1,
+        denominator=(2 if mutation == "unequal_denominator" else 1),
+    )
+
+    assert resolver._read_finalized_payout_settlement_rows(
+        trade_conn,
+        portfolio,
+        {("Dallas", "2026-08-12", "high")},
+    ) == []
+
+
+def test_finalized_payout_drains_when_forecast_read_fails_without_hiding_family_truth(
+    trade_conn, monkeypatch
+):
+    """Economic payout drains independently; family truth still reaches siblings."""
+    from src.execution import harvester as hv
+    from src.execution import harvester_pnl_resolver as resolver
+
+    ensure_payout_table(trade_conn)
+    init_snapshot_schema(trade_conn, include_latest=False)
+    payout_condition = "0x" + "1" * 64
+    sibling_condition = "0x" + "2" * 64
+    portfolio, payout_position = _winning_position(
+        trade_id="payout-position", city="NYC", target_date="2026-08-12"
+    )
+    payout_position.condition_id = payout_condition
+    payout_position.token_id = "payout-yes"
+    payout_position.no_token_id = "payout-no"
+    _, sibling_position = _winning_position(
+        trade_id="sibling-position", city="NYC", target_date="2026-08-12"
+    )
+    sibling_position.condition_id = sibling_condition
+    sibling_position.token_id = "sibling-yes"
+    sibling_position.no_token_id = "sibling-no"
+    portfolio.positions.append(sibling_position)
+    trade_conn.execute(
+        """INSERT INTO executable_market_snapshots (
+               snapshot_id, gamma_market_id, event_id, event_slug, condition_id,
+               question_id, yes_token_id, no_token_id, enable_orderbook, active,
+               closed, min_tick_size, min_order_size, fee_details_json,
+               token_map_json, neg_risk, orderbook_top_bid, orderbook_top_ask,
+               orderbook_depth_json, raw_gamma_payload_hash,
+               raw_clob_market_info_hash, raw_orderbook_hash, authority_tier,
+               captured_at, freshness_deadline
+           ) VALUES (
+               'snap-e2e', 'gamma', 'event', 'nyc-aug-12', ?, 'question',
+               'payout-yes', 'payout-no', 1, 0, 1, '0.001', '1', '{}', '{}',
+               0, '0', '0', '{}', 'g', 'c', 'b', 'CHAIN',
+               '2026-08-13T07:20:00+00:00', '2026-08-13T07:21:00+00:00'
+           )""",
+        (payout_condition,),
+    )
+    _insert_payout(
+        trade_conn,
+        condition_id=payout_condition,
+        outcome_index=0,
+        numerator=0,
+    )
+    _insert_payout(
+        trade_conn,
+        condition_id=payout_condition,
+        outcome_index=1,
+        numerator=1,
+    )
+    trade_conn.commit()
+
+    family_row = {
+        "city": "NYC",
+        "target_date": "2026-08-12",
+        "market_slug": "nyc-aug-12",
+        "winning_bin": "31°C",
+        "temperature_metric": "high",
+        "authority": "VENUE_RESOLVED",
+        "settlement_source": "polymarket_gamma",
+        "settlement_value": None,
+    }
+    forecasts_conn = MagicMock()
+    forecasts_conn.execute.side_effect = sqlite3.OperationalError("forecast unavailable")
+    monkeypatch.setattr(
+        "src.state.portfolio.load_portfolio", lambda *args, **kwargs: portfolio
+    )
+    monkeypatch.setattr("src.state.portfolio.save_portfolio", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "src.state.strategy_tracker.get_tracker", lambda: MagicMock()
+    )
+    monkeypatch.setattr("src.state.strategy_tracker.save_tracker", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        "src.state.canonical_write.commit_then_export",
+        lambda conn, *, db_op, json_exports: db_op(),
+    )
+    monkeypatch.setattr(
+        "src.state.decision_chain.store_settlement_records", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(
+        resolver, "_read_venue_resolved_settlement_rows", lambda *a, **kw: [family_row]
+    )
+    calls = []
+
+    def capture_settlement(*args, **kwargs):
+        calls.append({
+            "truth": kwargs["settlement_truth_source"],
+            "condition_id": kwargs["settlement_condition_id"],
+        })
+        return 0
+
+    monkeypatch.setattr(hv, "_settle_positions", capture_settlement)
+
+    result = resolver.resolve_pnl_for_settled_markets(trade_conn, forecasts_conn)
+
+    assert result["status"] == "ok"
+    assert result["errors"] == 1
+    assert calls == [
+        {"truth": "trades.payout_observations", "condition_id": payout_condition},
+        {"truth": "gamma_exact_held_event", "condition_id": ""},
+    ]
 
 
 def test_exact_condition_no_settles_only_matching_position(trade_conn, monkeypatch):

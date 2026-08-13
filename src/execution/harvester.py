@@ -2813,6 +2813,20 @@ def _settle_positions(
         exit_state = getattr(pos, "exit_state", "")
         chain_state = getattr(pos, "chain_state", "")
         pending_exit_at_settlement = state_name == "pending_exit"
+        if _db_phase != "economically_closed":
+            from src.execution.exit_lifecycle import _exit_trade_fact_close_candidate
+
+            fill_candidate = _exit_trade_fact_close_candidate(conn, pos)
+            if (
+                fill_candidate is not None
+                and fill_candidate.get("closes_position") is True
+            ):
+                logger.info(
+                    "Skipping settlement for %s: confirmed full exit fill awaits "
+                    "economically_closed projection",
+                    pos.trade_id,
+                )
+                continue
         if (
             state_name in {"pending_tracked", "admin_closed", "voided", "settled"}
             or (

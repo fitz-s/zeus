@@ -1652,6 +1652,120 @@ def test_madrid_partial_exit_realized_pnl_is_canonical_and_settlement_adds_resid
     assert settled["realized_pnl_usd"] == pytest.approx(expected_pnl)
 
 
+def test_completed_partial_exit_does_not_block_residual_settlement(conn):
+    """A 6/6 reduction fill is not a full-position close projection debt."""
+    from src.execution import exit_lifecycle
+    from src.execution.harvester import _settle_positions
+    from src.state.portfolio import PortfolioState, Position
+    from src.state.venue_command_repo import append_trade_fact
+
+    position = Position(
+        trade_id="pos-complete-reduction-before-settlement",
+        market_id="mkt-complete-reduction-before-settlement",
+        city="Madrid",
+        cluster="europe",
+        target_date="2026-08-12",
+        bin_label="30C",
+        direction="buy_yes",
+        strategy_key="center_buy",
+        size_usd=10.0,
+        entry_price=0.50,
+        shares=20.0,
+        cost_basis_usd=10.0,
+        state="holding",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        condition_id="condition-complete-reduction-before-settlement",
+        env="live",
+        last_monitor_market_price=0.60,
+    )
+    intent = exit_lifecycle.ExitIntent(
+        trade_id=position.trade_id,
+        reason="GLOBAL_CAPITAL_OPTIMAL_SELL",
+        token_id=YES_TOKEN,
+        shares=6.0,
+        current_market_price=0.60,
+        best_bid=0.60,
+        close_position=False,
+    )
+    exit_lifecycle._record_exit_intent_before_execution_gates(conn, position, intent)
+    occurred_at = conn.execute(
+        "SELECT occurred_at FROM position_events WHERE position_id = ? "
+        "AND event_type = 'EXIT_INTENT' ORDER BY sequence_no DESC LIMIT 1",
+        (position.trade_id,),
+    ).fetchone()[0]
+    command_created_at = (
+        datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+        + timedelta(microseconds=1)
+    )
+    _insert_exit_command(
+        conn,
+        command_id="cmd-complete-reduction-before-settlement",
+        position_id=position.trade_id,
+        size=6.0,
+        price=0.60,
+        venue_order_id="ord-complete-reduction-before-settlement",
+        created_at=command_created_at,
+    )
+    _ack_exit(
+        conn,
+        command_id="cmd-complete-reduction-before-settlement",
+        venue_order_id="ord-complete-reduction-before-settlement",
+    )
+    position.last_exit_order_id = "ord-complete-reduction-before-settlement"
+    position.exit_state = "sell_placed"
+    position.order_status = "sell_placed"
+    assert exit_lifecycle._dual_write_canonical_pending_exit_if_available(
+        conn,
+        position,
+        reason=intent.reason,
+        error="",
+        event_type="EXIT_ORDER_POSTED",
+    )
+    append_trade_fact(
+        conn,
+        trade_id="trade-complete-reduction-before-settlement",
+        venue_order_id=position.last_exit_order_id,
+        command_id="cmd-complete-reduction-before-settlement",
+        state="CONFIRMED",
+        filled_size="6",
+        fill_price="0.60",
+        source="REST",
+        observed_at=_NOW.isoformat(),
+        raw_payload_hash="d" * 64,
+        raw_payload_json={"size_matched": "6", "status": "CONFIRMED"},
+    )
+
+    class NoPoll:
+        def get_order_status(self, order_id):
+            raise AssertionError(f"confirmed reduction must not poll {order_id}")
+
+    portfolio = PortfolioState(positions=[position])
+    stats = exit_lifecycle.check_pending_exits(portfolio, NoPoll(), conn=conn)
+    assert stats["reduced_from_trade_fact"] == 1
+    assert position.state == "holding"
+    assert position.shares == pytest.approx(14.0)
+    candidate = exit_lifecycle._exit_trade_fact_close_candidate(conn, position)
+    assert candidate is not None
+    assert candidate["closes_position"] is False
+
+    assert _settle_positions(
+        conn,
+        portfolio,
+        "Madrid",
+        "2026-08-12",
+        "30C",
+        settlement_condition_id=position.condition_id,
+        settlement_condition_yes_won=False,
+    ) == 1
+    settled = conn.execute(
+        "SELECT phase, shares FROM position_current WHERE position_id = ?",
+        (position.trade_id,),
+    ).fetchone()
+    assert settled["phase"] == "settled"
+    assert settled["shares"] == pytest.approx(14.0)
+
+
 def test_settlement_accepts_chain_confirmed_partial_residual_over_stale_runtime(conn):
     """Chain may refine residual precision, not invent missing exit economics."""
     from src.engine.lifecycle_events import (
@@ -3011,7 +3125,9 @@ def test_resolver_partial_exit_debt_rolls_back_whole_settlement_row(
             self.settlement_count += 1
 
     tracker = Tracker()
-    monkeypatch.setattr("src.state.portfolio.load_portfolio", lambda: portfolio)
+    monkeypatch.setattr(
+        "src.state.portfolio.load_portfolio", lambda *args, **kwargs: portfolio
+    )
     monkeypatch.setattr("src.state.portfolio.save_portfolio", lambda *a, **kw: None)
     monkeypatch.setattr("src.state.strategy_tracker.get_tracker", lambda: tracker)
     monkeypatch.setattr("src.state.strategy_tracker.save_tracker", lambda *a, **kw: None)
