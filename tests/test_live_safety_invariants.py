@@ -21280,6 +21280,72 @@ def test_monitor_refresh_deadline_defers_before_canonical_emit(monkeypatch):
     ]
 
 
+def test_completed_position_commit_uses_outer_monitor_deadline(monkeypatch):
+    """A consumed q child clock cannot roll back its completed monitor event."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(
+        trade_id="completed-child-commit",
+        state="holding",
+        chain_state="synced",
+    )
+    clock = [0.0]
+    commit_deadlines = []
+    monkeypatch.setattr(cycle_runtime.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: [position],
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_day0_hard_fact_position_eligible",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *_args: (clock.__setitem__(0, 4.9) or _monitor_test_edge_context(position)),
+    )
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda *_args, **_kwargs: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def release(_conn, _summary, _deps, *, boundary, deadline_monotonic=None):
+        if boundary == "position_monitor":
+            commit_deadlines.append(deadline_monotonic)
+        return True
+
+    monkeypatch.setattr(cycle_runtime, "_release_monitor_write_lock_boundary", release)
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_portfolio_rotation_evaluation_status",
+        lambda *_args, **_kwargs: None,
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        object(),
+        object(),
+        _make_portfolio(position),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("completed_child_commit"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=20.0,
+    )
+
+    assert summary["monitors"] == 1
+    assert commit_deadlines == [pytest.approx(20.0)]
+
+
 def test_one_position_deadline_does_not_blind_remaining_held_book(monkeypatch):
     """One slow family loses only its own snapshot; later positions still decide."""
     from src.engine import cycle_runtime

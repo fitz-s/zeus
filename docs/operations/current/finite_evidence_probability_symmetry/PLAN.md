@@ -4726,6 +4726,20 @@ canonical debt, normal admission after exact reset, a ready 25-family HWM cut,
 new MONITOR_REFRESHED coverage for the held book, and only then restart-guard
 release and a fresh global auction.
 
+With reactor/recovery contention removed, the next complete monitor cut proved
+the artifact HWM ready in 0.284 seconds and completed seven current probability
+reads. Four completed results were nevertheless rolled back at the final
+position transaction boundary because that commit reused the already-consumed
+five-second q child deadline. The child clock governs whether a remote
+q/book/decision unit may start and finish; after a canonical monitor event is
+constructed, its commit is existing local work and is governed by the unchanged
+outer monitor claim. SCOPE is the completed position transaction only. DRAIN is
+its commit before the outer monitor deadline. RESET is the next position's new
+child deadline; an expired child still cannot authorize new remote work or a
+late canonical decision. Acceptance adds an antibody proving that a completed
+child commits against the outer claim while a refresh that crosses its child
+deadline remains deferred before canonical emit.
+
 The Seoul reconstruction also exposed a separate authority contradiction in
 ENTRY recovery. An authenticated canonical order fact already recorded
 `matched_size=11.627905`, while a later incomplete account read found no local

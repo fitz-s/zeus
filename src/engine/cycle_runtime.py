@@ -9321,7 +9321,15 @@ def execute_monitoring_phase(
                 summary,
                 deps,
                 boundary="position_monitor",
-                deadline_monotonic=position_deadline,
+                # The child deadline authorizes starting and completing this
+                # position's q/book/decision work. Once that work has produced
+                # a canonical monitor event, durability belongs to the outer
+                # monitor claim: reusing an already-consumed child deadline
+                # here rolls back the exact current truth the child obtained.
+                # SCOPE: this position's completed local transaction only.
+                # DRAIN: commit before the unchanged outer claim expires.
+                # RESET: the next position receives its own fresh child clock.
+                deadline_monotonic=monitor_deadline,
             )
 
     _emit_portfolio_rotation_evaluation_status(
