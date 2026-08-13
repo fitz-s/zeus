@@ -723,6 +723,7 @@ def _paused_entry_wake_should_park(
     allow_forecast_carrier_progress: bool = False,
     durable_exact_held_completion: bool = False,
     allow_capital_proof_progress: bool = False,
+    monitor_completion_reserved: bool = False,
 ) -> bool:
     """Park paused BUY work unless this wake has protected non-BUY progress."""
 
@@ -750,6 +751,16 @@ def _paused_entry_wake_should_park(
         # carrier freezes one settlement-grade proof receipt. RESET: a passing
         # capital evaluator clears the independent entry gate; disabling this
         # flag restores queue parking without changing venue authority.
+        return False
+    if monitor_completion_reserved:
+        # A generic completion debt is the durable successor of a global cut
+        # that yielded to the held monitor.  Parking it while BUY is paused
+        # breaks its RESET path: no later cut can attest current held coverage,
+        # so both monitor fairness and the deploy restart guard remain armed.
+        # Generic fairness debt is cut-scoped, not exposure-scoped: even an
+        # empty current portfolio must finish the reserved cut so the debt can
+        # RESET.  The existing entry pause remains part of the adapter/action
+        # law and still forbids every BUY submission.
         return False
     if not held_sell_reauction_requests:
         return True
@@ -7758,6 +7769,7 @@ def run_edli_event_reactor_cycle(
         allow_forecast_carrier_progress=forecast_posterior_wake,
         durable_exact_held_completion=held_sell_completion_cycle,
         allow_capital_proof_progress=True,
+        monitor_completion_reserved=completion_recovery_cycle,
     ):
         if active_lock.acquire(blocking=False):
             try:
@@ -8597,6 +8609,7 @@ def run_edli_event_reactor_cycle(
                     active_held_sell_completion_cycle
                 ),
                 allow_capital_proof_progress=True,
+                monitor_completion_reserved=completion_recovery_cycle,
             ),
             final_intent_submit=submit_adapter,
             reject=lambda _event, _stage, _reason: None,

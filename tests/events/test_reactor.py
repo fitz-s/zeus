@@ -696,6 +696,9 @@ def test_completion_risk_bypass_is_bound_to_reduce_only_mode():
 
     source = inspect.getsource(run_edli_event_reactor_cycle)
 
+    assert source.count(
+        "monitor_completion_reserved=completion_recovery_cycle"
+    ) == 2
     assert (
         "_monitor_completion_mode.reduce_only or entry_risk_gate(event)"
         in source
@@ -988,6 +991,90 @@ def test_paused_entry_park_requires_exact_canonical_held_sell_work():
         pause_reason="operator",
         allow_capital_proof_progress=True,
     ) is False
+    assert _paused_entry_wake_should_park(
+        pause_reason="operator",
+        monitor_completion_reserved=True,
+    ) is False
+    assert _paused_entry_wake_should_park(
+        pause_reason="operator",
+        monitor_completion_reserved=False,
+        held_sell_request_exposure_provider=lambda: frozenset(),
+    ) is True
+
+
+def test_paused_generic_completion_runs_cut_without_buy_and_clears_debt():
+    """A paused BUY lane cannot strand an already-reserved global cut."""
+
+    from types import SimpleNamespace
+
+    from src.events import reactor as reactor_module
+
+    conn, store = _store()
+    event = _forecast_event(
+        "paused-generic-completion",
+        target_date="2026-05-25",
+    )
+    store.insert_or_ignore(event)
+    calls = {"auction": 0, "buy": 0}
+
+    def submit(*_args, **_kwargs):
+        calls["buy"] += 1
+        raise AssertionError("entry pause must forbid direct BUY submit")
+
+    def process_global_batch(events, _decision_time, *, claim_unpaged_winner=None):
+        calls["auction"] += 1
+        assert claim_unpaged_winner is not None
+        return GlobalBatchSubmitResult(
+            receipts={
+                current.event_id: EventSubmissionReceipt(
+                    submitted=False,
+                    event_id=current.event_id,
+                    causal_snapshot_id=current.causal_snapshot_id,
+                    reason="entries_paused:operator",
+                    proof_accepted=False,
+                )
+                for current in events
+            },
+            winner_event_id=None,
+            venue_submit_count=0,
+            economic_cut_completed=True,
+        )
+
+    submit.process_global_batch = process_global_batch  # type: ignore[attr-defined]
+    completion_reactor = OpportunityEventReactor(
+        store,
+        source_truth_gate=lambda _event: True,
+        executable_snapshot_gate=lambda *_args: True,
+        riskguard_gate=lambda _event: True,
+        final_intent_submit=submit,
+        reject=lambda *_args: None,
+        paused_entry_wake_gate=lambda: reactor_module._paused_entry_wake_should_park(
+            pause_reason="operator",
+            monitor_completion_reserved=True,
+        ),
+        config=ReactorConfig(),
+        regret_ledger=NoTradeRegretLedger(conn),
+    )
+
+    reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    try:
+        result = completion_reactor.process_pending(
+            decision_time=_DT_VENUE_OPEN,
+            limit=10,
+        )
+        assert calls == {"auction": 1, "buy": 0}, result
+        assert result.global_auction_completed_non_cancelled == 1
+        assert reactor_module._settle_global_auction_monitor_fairness(
+            completion_due_at_start=True,
+            result=SimpleNamespace(
+                global_auction_completed_non_cancelled=(
+                    result.global_auction_completed_non_cancelled
+                ),
+            ),
+        )
+        assert not reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    finally:
+        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
 def test_paused_targeted_forecast_carrier_redecides_without_touching_ordinary_queue():
