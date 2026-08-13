@@ -3326,6 +3326,29 @@ def _emit_monitor_refreshed_canonical_if_available(
         else datetime.now(timezone.utc).isoformat()
     )
 
+    # A monitor refresh can persist auxiliary facts on this long-lived
+    # connection before it reaches the canonical append.  Never wait for the
+    # unified writer lease while retaining that SQLite transaction: another
+    # process may already own the lease and be waiting for this connection's
+    # SQLite writer, forming a cross-process lock-order cycle.  The canonical
+    # MONITOR_REFRESHED event+projection remains one later transaction inside
+    # the lease; prior auxiliary work is a separate commit boundary by design.
+    if conn.in_transaction:
+        try:
+            conn.commit()
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            deps.logger.warning(
+                "CANONICAL_MONITOR_REFRESHED_PRELEASE_COMMIT_FAILED "
+                "trade_id=%s reason=%s",
+                position_id,
+                exc,
+            )
+            return False
+
     def append_frozen_monitor_refreshed() -> bool:
         current = conn.execute(
             "SELECT phase, updated_at FROM position_current WHERE position_id = ?",

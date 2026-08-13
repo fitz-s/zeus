@@ -4,6 +4,34 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-13 Canonical monitor never waits for a lease while holding SQLite
+
+Current runtime evidence showed a three-process lock-order cycle on the live
+trade DB.  The held-position monitor retained an open SQLite write transaction
+while requesting its canonical MONITOR lease; the substrate observer held the
+MONITOR waiter/turnstile while waiting for the unified writer; post-trade
+capital held that unified writer while waiting for SQLite.  Nine held
+positions then exceeded canonical monitor cadence, BUY admission correctly
+failed closed, and command recovery could not re-decide the live Miami maker
+order.  This is a capital-path liveness defect, not evidence that CASH is the
+global economic optimum.
+
+Before requesting the canonical writer lease, the monitor now commits any
+already-open auxiliary transaction on its long-lived connection.  The later
+MONITOR_REFRESHED event and projection still append atomically in their own
+bounded leased transaction.  No network call, probability value, exit verdict,
+or order authority is changed.
+
+SCOPE is one held-monitor canonical append on the live trade DB.  DRAIN is the
+pre-lease commit releasing SQLite, followed by the existing bounded MONITOR
+lease and event+projection transaction.  RESET is every append attempt; an
+auxiliary commit failure rolls back and defers the canonical event to the next
+monitor cycle.  Acceptance requires an antibody proving the connection is not
+in a SQLite transaction when lease acquisition starts, focused monitor/write
+coordinator tests, exact live reload, disappearance of the lock-order cycle,
+fresh canonical coverage for all current positions, and command recovery of
+the current resting order.
+
 ## 2026-08-13 Current witnessed maker competes on capital growth
 
 The global auction already constructs a candidate-bound

@@ -3609,6 +3609,92 @@ def test_monitor_retry_waits_out_one_incumbent_writer() -> None:
     assert cycle_runtime._MONITOR_CANONICAL_WRITE_RETRY_DEADLINE_MS >= 5_000
 
 
+def test_monitor_releases_open_sqlite_writer_before_canonical_lease(
+    tmp_path,
+    monkeypatch,
+):
+    """Monitor cannot retain SQLite while waiting behind a lease-owning writer."""
+    from contextlib import nullcontext
+
+    from src.engine import cycle_runtime
+    from src.engine.lifecycle_events import build_entry_canonical_write
+    from src.state.db import append_many_and_project, get_connection, init_schema
+    from src.state.lifecycle_manager import LifecyclePhase
+
+    db_path = tmp_path / "monitor-prelease-order.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    position = _make_position(
+        trade_id="monitor-prelease-order",
+        state="holding",
+        city="Chicago",
+        target_date="2026-07-30",
+        order_id="o-monitor-prelease-order",
+        entered_at="2026-07-30T17:00:00+00:00",
+        order_status="filled",
+        strategy_key="opening_inertia",
+        bin_label="90-91°F",
+        condition_id="0xmonitorprelease00000000000000000000000000000000000000000001",
+    )
+    entry_events, entry_projection = build_entry_canonical_write(
+        position,
+        phase_after=LifecyclePhase.ACTIVE.value,
+        decision_id="decision-monitor-prelease-order-seed",
+        source_module="tests/test_monitor_releases_open_sqlite_writer_before_canonical_lease",
+    )
+    append_many_and_project(conn, entry_events, entry_projection)
+    conn.commit()
+    conn.execute(
+        "UPDATE position_current SET last_monitor_edge = ? WHERE position_id = ?",
+        (0.123, position.trade_id),
+    )
+    assert conn.in_transaction is True
+
+    lease_observations: list[bool] = []
+
+    def assert_sqlite_released(*_args, **_kwargs):
+        lease_observations.append(conn.in_transaction)
+        verifier = sqlite3.connect(db_path)
+        try:
+            committed = verifier.execute(
+                "SELECT last_monitor_edge FROM position_current WHERE position_id = ?",
+                (position.trade_id,),
+            ).fetchone()
+        finally:
+            verifier.close()
+        assert committed[0] == pytest.approx(0.123)
+        return nullcontext()
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_canonical_trade_write_lease",
+        assert_sqlite_released,
+    )
+    deps = type(
+        "Deps",
+        (),
+        {
+            "logger": logging.getLogger("test_monitor_prelease_order"),
+            "_utcnow": staticmethod(
+                lambda: datetime(2026, 7, 30, 19, 0, tzinfo=timezone.utc)
+            ),
+        },
+    )
+    try:
+        assert (
+            cycle_runtime._emit_monitor_refreshed_canonical_if_available(
+                conn,
+                position,
+                deps=deps,
+            )
+            is True
+        )
+        assert lease_observations == [False]
+        assert conn.in_transaction is False
+    finally:
+        conn.close()
+
+
 def test_monitor_append_failure_rolls_back_and_retains_retry_debt(tmp_path, monkeypatch):
     """A failed append cannot leave a transaction or in-memory monitor debt cleared."""
     from src.engine import cycle_runtime
