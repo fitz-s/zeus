@@ -1,6 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-12
-# Lifecycle: created=2026-07-03; last_reviewed=2026-08-12; last_reused=2026-08-12
+# Last reused/audited: 2026-08-13
+# Lifecycle: created=2026-07-03; last_reviewed=2026-08-13; last_reused=2026-08-13
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
 
@@ -2775,7 +2775,7 @@ def test_passive_buy_uses_bid_capacity_when_taker_best_ask_is_subminimum():
     )
 
 
-def test_global_buy_generation_keeps_maker_when_taker_ask_depth_is_subminimum():
+def test_seeded_global_buy_keeps_maker_when_taker_ask_depth_is_subminimum():
     seed = _global_candidate(
         candidate_id="maker-ask-dust-generation",
         family="maker-ask-dust-generation-family",
@@ -2837,6 +2837,7 @@ def test_global_buy_generation_keeps_maker_when_taker_ask_depth_is_subminimum():
         include_maker=True,
         maker_fill_witness=placeholder,
         asset_epoch_identity=asset_epoch,
+        current_token_shares=Decimal("5"),
     )
     assert provisional_taker.execution_mode == "TAKER_LIMIT"
     assert provisional_maker.execution_mode == "MAKER_REST"
@@ -2863,6 +2864,7 @@ def test_global_buy_generation_keeps_maker_when_taker_ask_depth_is_subminimum():
         include_maker=True,
         maker_fill_witness=maker_witness,
         asset_epoch_identity=asset_epoch,
+        current_token_shares=Decimal("5"),
     )
 
     assert taker.execution_mode == "TAKER_LIMIT"

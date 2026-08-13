@@ -2198,7 +2198,7 @@ def global_candidates_from_native(
         if maker_curve is None or maker_fill_witness is None or not asset_epoch_identity:
             return (taker,)
         maker_eligibility_reason = eligibility_reason
-        if not settlement_locked_exact_payoff and maker_eligibility_reason is None:
+        if maker_eligibility_reason is None:
             try:
                 witnessed_token_shares = Decimal(current_token_shares)
             except (TypeError, ValueError, ArithmeticError):

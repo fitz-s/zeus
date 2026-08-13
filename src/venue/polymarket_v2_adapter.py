@@ -3505,9 +3505,33 @@ def _assert_final_executable_price_bound(
     _client: Any,
     envelope: VenueSubmissionEnvelope,
 ) -> None:
-    """Independently require a direction-aware bounded fill pre-POST."""
+    """Independently require a venue-legal bounded fill pre-POST."""
 
     _assert_absolute_live_price_before_sdk(envelope.price)
+    tick_size = Decimal(envelope.tick_size)
+    price = Decimal(envelope.price)
+    if (
+        not tick_size.is_finite()
+        or tick_size <= 0
+        or price % tick_size != 0
+    ):
+        raise ValueError(
+            "LIVE_ORDER_TICK_INVALID:FINAL_SDK_BOUNDARY:"
+            f"price={price}:tick_size={tick_size}"
+        )
+    size = Decimal(envelope.size)
+    min_order_size = Decimal(envelope.min_order_size)
+    if (
+        not size.is_finite()
+        or not min_order_size.is_finite()
+        or size <= 0
+        or min_order_size <= 0
+        or size < min_order_size
+    ):
+        raise ValueError(
+            "LIVE_ORDER_SIZE_INVALID:FINAL_SDK_BOUNDARY:"
+            f"size={size}:min_order_size={min_order_size}"
+        )
     order_type = str(envelope.order_type or "").strip().upper()
     maker = envelope.post_only and order_type in {"GTC", "GTD"}
     marketable_taker = (

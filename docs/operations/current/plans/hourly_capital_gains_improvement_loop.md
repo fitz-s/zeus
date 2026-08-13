@@ -377,3 +377,27 @@
   `partial_exit_economic_events`; it supersedes no lifecycle or command state.
   `tests/test_exit_safety.py` and `tests/test_harvester_settlement_redeem.py`
   provide the MP-ECO-001/002 and MP-RED-001/002 behavioral evidence.
+
+### 2026-08-13 — first-lot partial-fill exitability and final SDK boundary (B104)
+
+- **Observed defect:** canonical seven-day full-loss entries are dominated by
+  post-only GTC commands, and several first fills materialized below the venue
+  minimum SELL lot.  The monitor cannot liquidate such a first-lot remainder;
+  later probability redecision is therefore too late by construction.
+- **Structural cause:** the global solver correctly made deterministic
+  settlement payoff a taker-only exception to the pre-cliff depth gate, but the
+  same predicate also bypassed the maker seed requirement.  A new-token maker
+  could consequently rest without an already-sellable holding, and any venue
+  partial fill could create an unexitably small position.
+- **Contract:** deterministic exact payoff may continue to authorize an atomic
+  FOK taker.  Every maker-rest BUY, including its deterministic sibling, needs
+  current selected-token shares at least equal to the venue minimum order size.
+  The SDK boundary independently rejects non-positive/sub-minimum size and
+  off-tick price for both single and batch submission, even if an upstream
+  envelope check is bypassed.
+- **Acceptance:** unseeded exact maker is absent with
+  `MAKER_REST_EXITABILITY_SEED_REQUIRED`; seeded maker and exact FOK taker remain
+  available.  Single/batch adapter antibodies prove no SDK POST occurs for
+  sub-minimum or off-tick orders.  Targeted suites: adapter 204, solver 211,
+  solve integration 470, fill simulator 20; compile and `git diff --check`
+  clean.  Rollback is one B104 hot-fix commit.

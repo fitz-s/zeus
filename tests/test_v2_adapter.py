@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-10; last_reused=2026-08-10
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-13; last_reused=2026-08-13
 # Purpose: R3 Z2 Polymarket V2 adapter and submission envelope antibodies.
 # Reuse: Run when V2 SDK adapter, envelope provenance, or Q1 preflight behavior changes.
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-10
+# Last reused/audited: 2026-08-13
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z2.yaml
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md
 #                  + docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_goal/LIVE_ORDER_E2E_GOAL_PLAN.md
@@ -2966,6 +2966,91 @@ def test_final_sdk_boundary_independently_rejects_non_maker_before_post(
     assert not any(call[0] == "post_order" for call in fake.calls)
 
 
+def test_final_sdk_boundary_independently_rejects_size_below_minimum_before_post(
+    tmp_path, monkeypatch
+):
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+    fake = FakeTwoStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC", post_only=True
+    ).with_updates(size=Decimal("0.5"), min_order_size=Decimal("1"))
+    monkeypatch.setattr(
+        "src.venue.polymarket_v2_adapter._deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected",
+    )
+    monkeypatch.setattr(
+        VenueSubmissionEnvelope,
+        "assert_live_fill_price_bound",
+        lambda self: None,
+    )
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
+    assert "LIVE_ORDER_SIZE_INVALID:FINAL_SDK_BOUNDARY" in (
+        result.error_message or ""
+    )
+    assert any(call[0] == "create_order" for call in fake.calls)
+    assert not any(call[0] == "post_order" for call in fake.calls)
+
+
+def test_final_sdk_boundary_independently_rejects_off_tick_before_post(
+    tmp_path, monkeypatch
+):
+    from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+    fake = FakeTwoStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC", post_only=True
+    ).with_updates(price=Decimal("0.505"), tick_size=Decimal("0.01"))
+    monkeypatch.setattr(
+        "src.venue.polymarket_v2_adapter._deterministic_v2_order_id",
+        lambda *args, **kwargs: "0xexpected",
+    )
+    monkeypatch.setattr(
+        VenueSubmissionEnvelope,
+        "assert_live_fill_price_bound",
+        lambda self: None,
+    )
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "V2_PRE_SUBMIT_EXCEPTION"
+    assert "LIVE_ORDER_TICK_INVALID:FINAL_SDK_BOUNDARY" in (
+        result.error_message or ""
+    )
+    assert any(call[0] == "create_order" for call in fake.calls)
+    assert not any(call[0] == "post_order" for call in fake.calls)
+
+
+@pytest.mark.parametrize(
+    ("size", "minimum"),
+    (("NaN", "1"), ("1", "NaN"), ("0", "1"), ("1", "0")),
+)
+def test_live_envelope_rejects_invalid_size_authority_before_sdk(
+    tmp_path, size, minimum
+):
+    fake = FakeTwoStepClient()
+    adapter, _ = _adapter(tmp_path, fake)
+    envelope = adapter.create_submission_envelope(
+        _intent(), FakeSnapshot(), order_type="GTC", post_only=True
+    ).with_updates(size=Decimal(size), min_order_size=Decimal(minimum))
+
+    result = _submit(adapter, envelope)
+
+    assert result.status == "rejected"
+    assert result.error_code == "BOUND_ENVELOPE_NOT_LIVE_AUTHORITY"
+    assert "live order size is below venue minimum or invalid" in (
+        result.error_message or ""
+    )
+    assert fake.calls == []
+
+
 @pytest.mark.parametrize(
     ("side", "order_type"),
     [("BUY", "GTC"), ("BUY", "GTD"), ("SELL", "FOK")],
@@ -4275,6 +4360,62 @@ class TestSubmitBatch:
             for result in results
         )
         assert not fake.calls
+
+    def test_sdk_boundary_rejects_subminimum_batch_even_if_envelope_guard_is_bypassed(
+        self, tmp_path, monkeypatch
+    ):
+        from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+        fake = FakeBatchTwoStepClient()
+        adapter, _ = _adapter(tmp_path, fake)
+        envelopes = _batch_envelopes(adapter, 2)
+        envelopes[1] = envelopes[1].with_updates(
+            size=Decimal("0.5"),
+            min_order_size=Decimal("1"),
+        )
+        monkeypatch.setattr(
+            VenueSubmissionEnvelope,
+            "assert_live_fill_price_bound",
+            lambda self: None,
+        )
+
+        results = adapter.submit_batch(envelopes)
+
+        assert [result.status for result in results] == ["rejected", "rejected"]
+        assert all(
+            "LIVE_ORDER_SIZE_INVALID:FINAL_SDK_BOUNDARY"
+            in str(result.error_message)
+            for result in results
+        )
+        assert not any(call[0] == "post_orders" for call in fake.calls)
+
+    def test_sdk_boundary_rejects_off_tick_batch_even_if_envelope_guard_is_bypassed(
+        self, tmp_path, monkeypatch
+    ):
+        from src.contracts.venue_submission_envelope import VenueSubmissionEnvelope
+
+        fake = FakeBatchTwoStepClient()
+        adapter, _ = _adapter(tmp_path, fake)
+        envelopes = _batch_envelopes(adapter, 2)
+        envelopes[1] = envelopes[1].with_updates(
+            price=Decimal("0.505"),
+            tick_size=Decimal("0.01"),
+        )
+        monkeypatch.setattr(
+            VenueSubmissionEnvelope,
+            "assert_live_fill_price_bound",
+            lambda self: None,
+        )
+
+        results = adapter.submit_batch(envelopes)
+
+        assert [result.status for result in results] == ["rejected", "rejected"]
+        assert all(
+            "LIVE_ORDER_TICK_INVALID:FINAL_SDK_BOUNDARY"
+            in str(result.error_message)
+            for result in results
+        )
+        assert not any(call[0] == "post_orders" for call in fake.calls)
 
     def test_index_fallback_maps_results_in_order(self, tmp_path):
         fake = FakeBatchTwoStepClient(

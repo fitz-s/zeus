@@ -99,6 +99,7 @@ from src.solve.solver import (
     global_sell_fill_prefix_objective,
     global_sell_execution_terms,
     current_maker_fill_witness_identity,
+    deterministic_bin_payoff_witness_identity,
     executable_curve_identity,
     joint_probability_content_identity,
     joint_probability_witness_identity,
@@ -3943,6 +3944,124 @@ def test_current_maker_fill_sample_materializes_taker_and_bound_maker_buy():
         if candidate.execution_mode == "MAKER_REST"
     )
     assert unseeded_maker.eligibility_reason == (
+        "MAKER_REST_EXITABILITY_SEED_REQUIRED"
+    )
+
+    exact_fields = {
+        "family_key": "family",
+        "bindings": probability.bindings,
+        "exact_yes_payoffs": (("bin", 1),),
+        "q_version": "exact-q",
+        "resolution_identity": "exact-resolution",
+        "topology_identity": "exact-topology",
+        "posterior_identity_hash": "exact-posterior",
+        "source_truth_identity": "exact-source",
+        "authority_certificate_hash": "exact-certificate",
+        "band_alpha": probability.band_alpha,
+        "band_basis": "day0_deterministic_bin_payoff_v1",
+        "captured_at_utc": at,
+    }
+    exact_probability = DeterministicBinPayoffWitness(
+        **exact_fields,
+        max_age=_dt.timedelta(seconds=30),
+        witness_identity=deterministic_bin_payoff_witness_identity(**exact_fields),
+    )
+    exact_unseeded = global_candidates_from_native(
+        native,
+        probability_witness=exact_probability,
+        ledger_snapshot_id="ledger",
+        book_captured_at_utc=at,
+        native_bid_levels=asset.bid_levels,
+        include_maker=True,
+        maker_fill_witness=maker_witness,
+        asset_epoch_identity=epoch.witness_identity,
+        current_token_shares=Decimal("0"),
+        neg_risk=False,
+    )
+    exact_taker = next(
+        candidate
+        for candidate in exact_unseeded
+        if candidate.execution_mode == "TAKER_LIMIT"
+    )
+    exact_maker = next(
+        candidate
+        for candidate in exact_unseeded
+        if candidate.execution_mode == "MAKER_REST"
+    )
+    assert exact_taker.settlement_locked_exact_payoff is True
+    assert exact_taker.eligibility_reason is None
+    assert exact_maker.settlement_locked_exact_payoff is False
+    assert exact_maker.eligibility_reason == "MAKER_REST_EXITABILITY_SEED_REQUIRED"
+
+    no_curve = ExecutableCostCurve(
+        token_id="no-token",
+        side="NO",
+        snapshot_id="no-snapshot",
+        book_hash="no-book",
+        levels=(BookLevel(price=Decimal("0.40"), size=Decimal("100")),),
+        fee_model=FeeModel(fee_rate=Decimal("0")),
+        min_tick=Decimal("0.01"),
+        min_order_size=Decimal("5"),
+        quote_ttl=_dt.timedelta(seconds=30),
+    )
+    no_native = SimpleNamespace(
+        no_trade_reason=None,
+        executable_cost_curve=no_curve,
+        family_key="family",
+        bin_id="bin",
+        condition_id="condition",
+        side="NO",
+        token_id="no-token",
+        neg_risk=False,
+        hypothesis_id="no-hypothesis",
+    )
+    exact_no_fields = {
+        **exact_fields,
+        "bindings": (
+            binding,
+            OutcomeTokenBinding(
+                bin_id="winning-sibling",
+                condition_id="winning-condition",
+                yes_token_id="winning-yes-token",
+                no_token_id="winning-no-token",
+            ),
+        ),
+        "exact_yes_payoffs": (("bin", 0), ("winning-sibling", 1)),
+        "q_version": "exact-no-q",
+    }
+    exact_no_probability = DeterministicBinPayoffWitness(
+        **exact_no_fields,
+        max_age=_dt.timedelta(seconds=30),
+        witness_identity=deterministic_bin_payoff_witness_identity(
+            **exact_no_fields
+        ),
+    )
+    exact_no_unseeded = global_candidates_from_native(
+        no_native,
+        probability_witness=exact_no_probability,
+        ledger_snapshot_id="ledger",
+        book_captured_at_utc=at,
+        native_bid_levels=asset.bid_levels,
+        include_maker=True,
+        maker_fill_witness=maker_witness,
+        asset_epoch_identity=epoch.witness_identity,
+        current_token_shares=Decimal("0"),
+        neg_risk=False,
+    )
+    exact_no_taker = next(
+        candidate
+        for candidate in exact_no_unseeded
+        if candidate.execution_mode == "TAKER_LIMIT"
+    )
+    exact_no_maker = next(
+        candidate
+        for candidate in exact_no_unseeded
+        if candidate.execution_mode == "MAKER_REST"
+    )
+    assert exact_no_taker.settlement_locked_exact_payoff is True
+    assert exact_no_taker.eligibility_reason is None
+    assert exact_no_maker.settlement_locked_exact_payoff is False
+    assert exact_no_maker.eligibility_reason == (
         "MAKER_REST_EXITABILITY_SEED_REQUIRED"
     )
 
