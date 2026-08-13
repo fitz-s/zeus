@@ -359,7 +359,7 @@ def test_complete_account_snapshot_also_captures_authenticated_point_order_reads
     assert snapshot.get_order("order-absent") is None
 
 
-def test_capture_snapshot_normalizes_exact_empty_point_order_shape_to_not_found():
+def test_capture_snapshot_keeps_empty_point_order_shape_failure_unknown():
     from src.execution import venue_sync_contract as vsc
     from src.venue.response_contracts import VenueResponseShapeError
 
@@ -373,7 +373,8 @@ def test_capture_snapshot_normalizes_exact_empty_point_order_shape_to_not_found(
 
     snapshot = vsc.capture_venue_read_snapshot(Client(), order_ids=["order-1"])
 
-    assert snapshot.get_order("order-1") is None
+    with pytest.raises(vsc.SnapshotMissError, match="missing status"):
+        snapshot.get_order("order-1")
 
 
 # ---------------------------------------------------------------------------

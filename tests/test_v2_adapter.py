@@ -4160,6 +4160,27 @@ def test_polymarket_client_maps_typed_point_order_absence_to_none():
     assert client.get_order("ord-missing") is None
 
 
+@pytest.mark.parametrize(
+    "error",
+    (
+        RuntimeError("order not found after transport reset"),
+        RuntimeError("upstream returned 404 without typed venue proof"),
+    ),
+)
+def test_polymarket_client_does_not_infer_point_absence_from_error_text(error):
+    from src.data.polymarket_client import PolymarketClient
+
+    class FakeAdapter:
+        def get_order(self, _order_id):
+            raise error
+
+    client = PolymarketClient()
+    client._v2_adapter = FakeAdapter()
+
+    with pytest.raises(RuntimeError, match=str(error)):
+        client.get_order("ord-unknown")
+
+
 def test_polymarket_client_wrapper_fails_closed_before_unbound_v2_preflight():
     from src.data.polymarket_client import PolymarketClient
 

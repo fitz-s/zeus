@@ -606,11 +606,7 @@ def capture_venue_read_snapshot(
                 orders[oid] = None
             except VenueResponseShapeError as exc:
                 logger.warning("venue_sync_contract: get_order(%s) failed during snapshot", oid, exc_info=True)
-                orders[oid] = (
-                    None
-                    if exc.endpoint == "get_order" and exc.raw == {}
-                    else _CapturedVenueReadFailure(exc)
-                )
+                orders[oid] = _CapturedVenueReadFailure(exc)
             except Exception as exc:  # noqa: BLE001 — preserve timeout/auth/read failure.
                 logger.warning("venue_sync_contract: get_order(%s) failed during snapshot", oid, exc_info=True)
                 orders[oid] = _CapturedVenueReadFailure(exc)

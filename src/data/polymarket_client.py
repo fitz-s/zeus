@@ -1155,10 +1155,10 @@ class PolymarketClient:
         {"orderID": str, "status": str} so the recovery loop is stable
         against SDK response shape changes.
 
-        Returns None when the venue returns 404 or similar "not found" signal.
-        Other exceptions (network error, auth failure) propagate — the
-        recovery loop catches and logs them so a single bad lookup does not
-        kill the loop.
+        Returns None only when the authenticated adapter raises the typed
+        ``VenueOrderNotFound`` absence signal. Network, auth, transport, and
+        malformed-response failures propagate so recovery cannot mistake an
+        unreadable order for proven absence.
         """
         from src.venue.response_contracts import VenueOrderNotFound
 
@@ -1184,16 +1184,6 @@ class PolymarketClient:
                 )
         except VenueOrderNotFound:
             return None
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 404:
-                return None
-            raise
-        except Exception as exc:
-            # Some SDK versions raise a plain exception on 404; treat any
-            # message containing "not found" (case-insensitive) as None.
-            if "not found" in str(exc).lower() or "404" in str(exc):
-                return None
-            raise
 
         result = dict(state.raw)
 
