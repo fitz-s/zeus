@@ -19933,6 +19933,141 @@ def test_local_orderbook_prefetch_auxiliary_deadline_bypasses_to_primary_refresh
     assert summary["held_monitor_primary_belief_read_completed"] == 1
 
 
+def test_shared_orderbook_prefetch_cannot_consume_admitted_probability_deadline(
+    monkeypatch,
+):
+    """Shared quote warming leaves the admitted position a complete q tranche."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(
+        trade_id="primary-after-shared-orderbook",
+        token_id="primary-after-shared-orderbook-token",
+        state="holding",
+        chain_state="synced",
+    )
+    clock = [0.0]
+    evaluations = _assert_primary_monitor_progress(
+        monkeypatch,
+        clock=clock,
+        position=position,
+    )
+    prefetch_calls: list[bool] = []
+
+    def prefetch(*_args, local_only=False, **_kwargs):
+        prefetch_calls.append(local_only)
+        if local_only:
+            return frozenset({position.token_id})
+        # Cross the child deadline created at the start of the position loop,
+        # while remaining inside the unchanged 20-second outer claim.
+        clock[0] = 7.0
+        return frozenset()
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_monitor_orderbooks",
+        prefetch,
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("primary_after_shared_orderbook"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=20.0,
+    )
+
+    assert prefetch_calls == [True, False]
+    assert evaluations == [position.trade_id]
+    assert summary["held_monitor_primary_belief_read_completed"] == 1
+    assert summary["held_monitor_primary_deadline_started_after_shared_work"] == 1
+    assert summary["monitors"] == 1
+
+
+def test_failed_shared_orderbook_batch_renews_admitted_singular_recovery_clock(
+    monkeypatch,
+):
+    """A late failed batch cannot suppress current one-token quote recovery."""
+    from src.engine import cycle_runtime, monitor_refresh
+
+    position = _make_position(
+        trade_id="primary-after-failed-shared-orderbook",
+        token_id="primary-after-failed-shared-orderbook-token",
+        state="holding",
+        chain_state="synced",
+    )
+    clock = [0.0]
+    evaluations = _assert_primary_monitor_progress(
+        monkeypatch,
+        clock=clock,
+        position=position,
+    )
+    prefetch_calls: list[bool] = []
+    fallback_deadlines: list[float] = []
+
+    def prefetch(
+        _conn,
+        _clob,
+        _positions,
+        prefetch_summary,
+        *,
+        local_only=False,
+        **_kwargs,
+    ):
+        prefetch_calls.append(local_only)
+        if local_only:
+            return frozenset({position.token_id})
+        clock[0] = 7.0
+        prefetch_summary["held_monitor_orderbook_prefetch_error"] = "late batch failed"
+        prefetch_summary["held_monitor_orderbook_prefetch_transport_failed"] = True
+        return frozenset({position.token_id})
+
+    def singular_quote(_conn, _clob, pos, *, retry_after_prefetch):
+        assert retry_after_prefetch is True
+        fallback_deadlines.append(pos._zeus_held_monitor_deadline_monotonic)
+        assert pos._zeus_held_monitor_deadline_monotonic > clock[0]
+        return monitor_refresh.HeldTokenMonitorQuote(
+            token_id=position.token_id,
+            best_bid=0.40,
+            best_ask=0.42,
+            bid_size=20.0,
+            ask_size=20.0,
+            mark_price=0.41,
+            source_timestamp="2026-08-13T20:00:00+00:00",
+        )
+
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_monitor_orderbooks",
+        prefetch,
+    )
+    monkeypatch.setattr(monitor_refresh, "monitor_quote_refresh", singular_quote)
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("primary_after_failed_shared_orderbook"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=20.0,
+    )
+
+    assert prefetch_calls == [True, False]
+    assert fallback_deadlines == [pytest.approx(12.0)]
+    assert evaluations == [position.trade_id]
+    assert summary["held_monitor_batch_failure_singular_recovered"] == 1
+    assert summary["held_monitor_primary_belief_read_completed"] == 1
+    assert summary["monitors"] == 1
+
+
 def test_exit_monitor_budget_starts_at_claim_and_wrapper_forwards_remaining(
     monkeypatch,
 ):

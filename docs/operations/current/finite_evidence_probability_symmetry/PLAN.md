@@ -4,6 +4,29 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-13 Shared quote warming cannot consume the reserved q tranche
+
+Live restart recovery repeatedly admitted a full-book held monitor with roughly
+74 seconds remaining and explicitly reserved 35 seconds for seven current
+probability reads.  The first position's five-second child deadline was created
+before the shared network order-book batch, however.  When that auxiliary batch
+returned after the child deadline, the position was rejected before its first q
+read; the entire pass then produced zero canonical `MONITOR_REFRESHED` rows,
+retaining both monitor debt and the restart entry guard.
+
+An admitted statistical position now receives its bounded child deadline after
+shared quote warming and immediately before its position-owned metadata/q path.
+The outer monitor deadline remains absolute and unchanged; non-admitted
+positions receive no extra capacity, and missing HWM, probability, or quote
+truth still fails closed.  SCOPE is only an admitted held-position statistical
+redecision whose earlier child clock was consumed by shared prerequisite work.
+DRAIN is a complete fresh q/book evaluation followed by the existing canonical
+monitor append.  RESET is every position attempt and every new outer monitor
+claim.  Acceptance requires an antibody where shared prefetch crosses the old
+child deadline but the admitted position still completes inside the unchanged
+outer deadline, plus live canonical coverage, restart-guard CAS recovery, and a
+new global BUY/SELL/HOLD/CASH cut.
+
 ## 2026-08-13 Partial exits retire sold capital from every auction authority
 
 An authenticated Miami SELL reduced the current open position to 0.00857 shares

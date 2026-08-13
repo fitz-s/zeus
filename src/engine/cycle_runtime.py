@@ -7952,6 +7952,16 @@ def execute_monitoring_phase(
                             None,
                         )
                         network_prefetch_singular_fallback_attempted = True
+                        if admitted_statistical_position:
+                            # The failed shared batch owns its auxiliary clock;
+                            # it cannot arrive with an already-expired child
+                            # deadline and thereby suppress the bounded
+                            # singular quote recovery of an admitted q tranche.
+                            position_deadline = min(
+                                monitor_deadline,
+                                time.monotonic()
+                                + HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
+                            )
                         setattr(pos, _HELD_MONITOR_DEADLINE_ATTR, position_deadline)
                         try:
                             fallback_quote = monitor_quote_refresh(
@@ -8015,6 +8025,30 @@ def execute_monitoring_phase(
             summary["held_monitor_dead_bin_deadline_rescue_without_io"] = (
                 summary.get(
                     "held_monitor_dead_bin_deadline_rescue_without_io",
+                    0,
+                )
+                + 1
+            )
+
+        if admitted_statistical_position:
+            # The reservation is for one complete position-owned q read, not
+            # for shared quote warming that happened to start while this
+            # position was at the head of the schedule.  Start that bounded
+            # child clock only after shared prerequisites finish.  The outer
+            # monitor deadline remains absolute, so this cannot extend the
+            # cycle or lend capacity to an unadmitted tail.
+            # SCOPE: this admitted statistical position only. DRAIN: its
+            # current metadata/q/book path reaches canonical redecision within
+            # this child tranche. RESET: every position attempt recomputes the
+            # deadline from the unchanged outer claim.
+            position_deadline = min(
+                monitor_deadline,
+                time.monotonic()
+                + HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
+            )
+            summary["held_monitor_primary_deadline_started_after_shared_work"] = (
+                summary.get(
+                    "held_monitor_primary_deadline_started_after_shared_work",
                     0,
                 )
                 + 1
