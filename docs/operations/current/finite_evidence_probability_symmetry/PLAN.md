@@ -4,37 +4,6 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
-## 2026-08-13 Settlement-locked taker BUY is not an early-exit promise
-
-The global solver names every immediate BUY `SETTLEMENT_LOCKED_BUY`, scores its
-binary terminal payoff, and penalizes its capital through the exact family
-resolution horizon.  It nevertheless excluded or capped a statistical taker
-BUY by the current same-token bid depth above the live SELL floor.  That turns
-optional early-exit liquidity into a categorical entry requirement and makes
-the executable law contradict its own hold-to-settlement objective.  The
-latest complete cut exposed the material loss of scope: 1,249 BUY candidates
-were rejected as `CURRENT_PRECLIFF_LIQUIDATION_CAPACITY_MISSING` before their
-terminal wealth could compete globally.
-
-Immediate taker BUYs now use only their exact fee-inclusive ask curve for
-execution capacity; current bids remain telemetry and future exit input, not a
-promise that must exist before a settlement-locked action.  Maker BUYs retain
-their current pre-cliff capacity requirement because a contingent adverse-
-selection fill and its rest size still require an independently executable
-path witness.  Submit-time JIT preserves the same split and still rebuilds the
-selected ask curve, fee, tick, minimum size, identity, probability, wealth, and
-capital authority before any venue side effect.
-
-SCOPE is statistical immediate-taker BUY selection and JIT sizing.  DRAIN is
-the next complete q/book/wealth cut, where the previously excluded candidates
-compete on posterior-mean expected log-growth per capital-hour.  RESET is a
-fresh full-depth ask curve and settlement horizon; stale or insufficient asks
-still reject, while later bid loss cannot invalidate an action whose certified
-capital mode is hold through settlement.  Acceptance requires solver and JIT
-antibodies proving taker independence from current bid depth, maker dependence
-on it, full ask-depth sizing, and unchanged no-order behavior when expected
-growth or EV is non-positive.
-
 ## 2026-08-12 Restart recovery is current-risk bounded
 
 The live-trading restart lane stopped the order daemon safely, then spent its
