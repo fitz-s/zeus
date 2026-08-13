@@ -2689,19 +2689,38 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _commit_exit_write_boundary(conn: sqlite3.Connection | None, *, stage: str) -> None:
+def _commit_exit_write_boundary(
+    conn: sqlite3.Connection | None,
+    *,
+    stage: str,
+    deadline_monotonic: float | None = None,
+) -> bool:
     """Release trade DB writes before slow exit work or venue I/O."""
 
     if conn is None:
-        return
+        return True
     try:
-        conn.commit()
+        if deadline_monotonic is None:
+            conn.commit()
+        else:
+            with _held_monitor_preparation_deadline(
+                conn,
+                float(deadline_monotonic),
+            ) as ensure_live:
+                conn.commit()
+                ensure_live()
     except Exception as exc:  # noqa: BLE001
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001 - preserve the commit failure.
+            pass
         logger.warning(
             "exit lifecycle write-boundary commit failed at %s: %s",
             stage,
             exc,
         )
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -8748,7 +8767,14 @@ def check_pending_exits(
             stats["pending_exit_defer_reason"] = "cycle_budget"
             break
         processed_scan_positions += 1
-        _commit_exit_write_boundary(conn, stage="pending_exit_position_scan")
+        if not _commit_exit_write_boundary(
+            conn,
+            stage="pending_exit_position_scan",
+            deadline_monotonic=deadline,
+        ):
+            stats["pending_exit_positions_deferred"] = len(scan_positions) - index
+            stats["pending_exit_defer_reason"] = "write_boundary_unavailable"
+            break
         raw_exit_state = getattr(pos, "exit_state", "")
         exit_state = str(getattr(raw_exit_state, "value", raw_exit_state) or "")
         fill = _exit_trade_fact_close_candidate(conn, pos)
@@ -8816,14 +8842,46 @@ def check_pending_exits(
             stats["exit_confirmation_pending"] = stats.get("exit_confirmation_pending", 0) + 1
             continue
         if exit_state == "retry_pending":
-            if (
-                str(getattr(pos, "next_exit_retry_at", "") or "").strip()
-                and check_pending_retries(
-                    pos,
-                    conn=conn,
-                    global_sell_reauction_requester=global_sell_reauction_requester,
+            import copy
+
+            retry_released = False
+            retry_runtime_before = copy.deepcopy(pos.__dict__)
+            try:
+                if str(getattr(pos, "next_exit_retry_at", "") or "").strip():
+                    if conn is None:
+                        retry_released = check_pending_retries(
+                            pos,
+                            conn=conn,
+                            global_sell_reauction_requester=(
+                                global_sell_reauction_requester
+                            ),
+                        )
+                    else:
+                        with _held_monitor_preparation_deadline(
+                            conn,
+                            deadline,
+                        ) as ensure_live:
+                            retry_released = check_pending_retries(
+                                pos,
+                                conn=conn,
+                                global_sell_reauction_requester=(
+                                    global_sell_reauction_requester
+                                ),
+                            )
+                            ensure_live()
+            except (sqlite3.Error, TimeoutError):
+                try:
+                    if conn is not None:
+                        conn.rollback()
+                finally:
+                    pos.__dict__.clear()
+                    pos.__dict__.update(retry_runtime_before)
+                stats["pending_exit_positions_deferred"] = (
+                    len(scan_positions) - index
                 )
-            ):
+                stats["pending_exit_defer_reason"] = "retry_truth_deadline"
+                break
+            if retry_released:
                 stats["retried"] += 1
                 stats["released_retry"] = stats.get("released_retry", 0) + 1
             else:
@@ -8944,7 +9002,14 @@ def check_pending_exits(
                 stats["filled_from_trade_fact"] = stats.get("filled_from_trade_fact", 0) + 1
                 continue
 
-        _commit_exit_write_boundary(conn, stage="pending_exit_status_poll")
+        if not _commit_exit_write_boundary(
+            conn,
+            stage="pending_exit_status_poll",
+            deadline_monotonic=deadline,
+        ):
+            stats["pending_exit_positions_deferred"] = len(scan_positions) - index
+            stats["pending_exit_defer_reason"] = "write_boundary_unavailable"
+            break
         try:
             status, status_payload = _check_order_fill(
                 clob,
@@ -9313,7 +9378,18 @@ def check_pending_exits(
                     stats["unchanged"] += 1
             else:
                 token_id = _asset_id_for_position(pos)
-                _commit_exit_write_boundary(conn, stage="pending_exit_reprice")
+                if not _commit_exit_write_boundary(
+                    conn,
+                    stage="pending_exit_reprice",
+                    deadline_monotonic=deadline,
+                ):
+                    stats["pending_exit_positions_deferred"] = (
+                        len(scan_positions) - index
+                    )
+                    stats["pending_exit_defer_reason"] = (
+                        "write_boundary_unavailable"
+                    )
+                    break
                 if _cancel_stale_pending_exit_for_reprice(
                     conn=conn,
                     position=pos,

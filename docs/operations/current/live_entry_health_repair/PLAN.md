@@ -1891,3 +1891,28 @@ publication barrier.
   stale data as current. Acceptance: timeout and exception antibodies prove the
   failed position remains deferred while admitted and non-admitted peers both
   refresh, evaluate, and emit canonical decisions before the global deadline.
+
+### Slice B100 — Fence pending-exit SQLite work inside the auxiliary tranche (2026-08-13)
+
+- Live defect: decision 417045 admitted eleven held positions with a 10.379s
+  monitor budget, completed the HWM cut in 0.091s, then spent 62.380s before
+  starting any probability read. The pending-exit preflight received the
+  auxiliary absolute deadline, but its write-boundary commits and the caller's
+  post-preflight commit retained the process default 30-second SQLite busy
+  timeout. Two serial lock waits could therefore consume the primary q reserve
+  and blind every holding despite the logical deadline.
+- Structural invariant: every SQLite scan, mutation, and commit in pending-exit
+  preflight uses the same absolute auxiliary deadline. Lock acquisition is
+  nonblocking inside that tranche, VM work has a progress deadline, and an
+  unavailable commit rolls back and returns typed per-pass deferral. No
+  auxiliary operation may begin or continue after the primary q reserve starts.
+- SCOPE: pending-exit preflight and its immediate monitor write-boundary only.
+  DRAIN: the next recurring monitor retries canonical order/retry truth under a
+  fresh auxiliary tranche. RESET: a bounded successful commit clears the
+  deferral and the normal fill/retry state machine resumes.
+- Forbidden: increasing monitor or SQLite timeouts, skipping canonical writes,
+  interpreting lock failure as venue/order truth, or suppressing primary q/book
+  refresh. Acceptance: deterministic blocked-commit antibodies prove immediate
+  rollback/defer, restored connection settings, no venue read after deferral,
+  and the next unlocked pass reaches primary refresh without serialized
+  30-second lock debt.

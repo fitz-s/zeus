@@ -14,6 +14,7 @@ GOLDEN RULE: economic close is ONLY created after CONFIRMED fill truth.
 
 import logging
 import base64
+import copy
 import inspect
 import json
 import math
@@ -23,6 +24,7 @@ import sqlite3
 import threading
 import time
 import zlib
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_FLOOR
@@ -19317,6 +19319,175 @@ def test_pending_exit_preflight_auxiliary_deadline_preserves_primary_refresh(
     assert evaluations == [position.trade_id]
     assert summary["held_monitor_primary_belief_read_started"] == 1
     assert summary["held_monitor_primary_belief_read_completed"] == 1
+
+
+def test_pending_exit_commit_obeys_auxiliary_deadline_and_restores_connection(
+    monkeypatch,
+):
+    from src.execution import exit_lifecycle
+
+    clock = [10.0]
+
+    class Result:
+        def __init__(self, row=None):
+            self._row = row
+
+        def fetchone(self):
+            return self._row
+
+    class Conn:
+        def __init__(self):
+            self.busy_ms = 30_000
+            self.handler = None
+            self.rolled_back = False
+
+        def execute(self, sql):
+            if sql == "PRAGMA busy_timeout":
+                return Result((self.busy_ms,))
+            if sql.startswith("PRAGMA busy_timeout = "):
+                self.busy_ms = int(sql.rsplit(" ", 1)[-1])
+                return Result()
+            raise AssertionError(sql)
+
+        def set_progress_handler(self, handler, _opcodes):
+            self.handler = handler
+
+        def commit(self):
+            assert self.busy_ms == 0
+            clock[0] = 12.1
+
+        def rollback(self):
+            self.rolled_back = True
+
+    conn = Conn()
+    monkeypatch.setattr(exit_lifecycle._time_module, "monotonic", lambda: clock[0])
+
+    assert not exit_lifecycle._commit_exit_write_boundary(
+        conn,
+        stage="test_pending_exit_commit_deadline",
+        deadline_monotonic=12.0,
+    )
+    assert conn.rolled_back is True
+    assert conn.handler is None
+    assert conn.busy_ms == 30_000
+
+
+def test_pending_exit_commit_does_not_wait_on_real_sqlite_reader(tmp_path):
+    from src.execution import exit_lifecycle
+
+    db_path = tmp_path / "commit-deadline.db"
+    writer = sqlite3.connect(db_path, timeout=30.0)
+    reader = sqlite3.connect(db_path, timeout=30.0)
+    writer.execute("CREATE TABLE facts (value INTEGER NOT NULL)")
+    writer.commit()
+    reader.execute("BEGIN")
+    assert reader.execute("SELECT COUNT(*) FROM facts").fetchone() == (0,)
+    writer.execute("INSERT INTO facts(value) VALUES (1)")
+
+    started = time.monotonic()
+    try:
+        assert not exit_lifecycle._commit_exit_write_boundary(
+            writer,
+            stage="test_real_sqlite_reader",
+            deadline_monotonic=started + 0.25,
+        )
+        assert time.monotonic() - started < 0.25
+        assert writer.execute("PRAGMA busy_timeout").fetchone() == (30_000,)
+        assert writer.in_transaction is False
+    finally:
+        reader.rollback()
+        reader.close()
+        writer.close()
+
+
+def test_pending_exit_commit_deferral_never_reaches_venue(monkeypatch):
+    from src.execution import exit_lifecycle
+
+    position = _make_position(trade_id="pending-exit-commit-deferred")
+    position.state = "pending_exit"
+    position.exit_state = "sell_pending"
+    position.last_exit_order_id = "order-must-not-be-read"
+    venue_reads: list[str] = []
+
+    class Clob:
+        def get_order_status(self, order_id, *, deadline_monotonic):
+            del deadline_monotonic
+            venue_reads.append(order_id)
+            raise AssertionError("venue read started after commit deferral")
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_commit_exit_write_boundary",
+        lambda *_args, **_kwargs: False,
+    )
+    stats = exit_lifecycle.check_pending_exits(
+        _make_portfolio(position),
+        Clob(),
+        conn=sqlite3.connect(":memory:"),
+        deadline_monotonic=time.monotonic() + 1.0,
+    )
+
+    assert stats["pending_exit_positions_scanned"] == 1
+    assert stats["pending_exit_positions_deferred"] == 1
+    assert stats["pending_exit_defer_reason"] == "write_boundary_unavailable"
+    assert venue_reads == []
+
+
+def test_pending_exit_retry_deadline_restores_complete_runtime_state(
+    monkeypatch,
+    tmp_path,
+):
+    from src.execution import exit_lifecycle
+    from src.state.db import get_connection, init_schema
+
+    conn = get_connection(tmp_path / "pending-retry-runtime-rollback.db")
+    init_schema(conn)
+
+    position = _make_position(trade_id="pending-retry-runtime-rollback")
+    position.state = "pending_exit"
+    position.pre_exit_state = "day0_window"
+    position.exit_state = "retry_pending"
+    position.next_exit_retry_at = "2026-08-13T00:00:00+00:00"
+    position.exit_reason = "ORIGINAL_REASON"
+    position.last_exit_error = "original_error"
+    before = copy.deepcopy(position.__dict__)
+
+    @contextmanager
+    def deadline_context(_conn, _deadline):
+        yield lambda: (_ for _ in ()).throw(TimeoutError("expired"))
+
+    def mutate_then_return(*_args, **_kwargs):
+        position.state = "day0_window"
+        position.exit_state = ""
+        position.exit_reason = "MUTATED_REASON"
+        position.last_exit_error = "mutated_error"
+        position.applied_validations.append("mutated_validation")
+        return True
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_commit_exit_write_boundary",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_held_monitor_preparation_deadline",
+        deadline_context,
+    )
+    monkeypatch.setattr(exit_lifecycle, "check_pending_retries", mutate_then_return)
+
+    try:
+        stats = exit_lifecycle.check_pending_exits(
+            _make_portfolio(position),
+            object(),
+            conn=conn,
+            deadline_monotonic=time.monotonic() + 1.0,
+        )
+
+        assert stats["pending_exit_defer_reason"] == "retry_truth_deadline"
+        assert position.__dict__ == before
+    finally:
+        conn.close()
 
 
 def test_replacement_hwm_prefetch_has_independent_wall_deadline(monkeypatch):

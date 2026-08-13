@@ -404,7 +404,7 @@ test_trust_policy:
     tests/test_kelly_cascade_bounds.py: {created: "2026-04-07", last_used: "2026-04-23"}
     tests/test_live_execution.py: {created: "2026-04-27", last_used: "2026-04-27"}
     tests/test_live_safe_strategies.py: {created: "2026-04-26", last_used: "2026-05-02"}
-    tests/test_live_safety_invariants.py: {created: "2026-03-31", last_used: "2026-08-12", note: "Held monitoring uses one cycle deadline; public-book reads are DB-free and killable, shared batch scope follows bounded cycle admission, batch failure defers without singular fan-out, and the next cycle retries fresh truth."}
+    tests/test_live_safety_invariants.py: {created: "2026-03-31", last_used: "2026-08-13", note: "Held monitoring uses one cycle deadline; pending-exit SQLite commits are fenced inside the auxiliary tranche and defer before venue I/O, public-book reads are DB-free and killable, shared batch scope follows bounded cycle admission, batch failure defers without singular fan-out, and the next cycle retries fresh truth."}
     tests/test_audit_trade_db_growth.py: {created: "2026-07-28", last_used: "2026-07-28", note: "Read-only trade DB census uses schema metadata, rowid high-water marks, and bounded tail samples; never dbstat/full scan/mutation."}
     tests/test_load_platt_v2_data_version_filter.py: {created: "2026-04-30", last_used: "2026-04-30"}
     tests/test_market_scanner_provenance.py: {created: "2026-04-17", last_used: "2026-08-10", note: "Market-source provenance plus executable snapshot persistence; immutable snapshot order reconstructs raw-book hash changes without duplicate book_hash_transitions appends."}

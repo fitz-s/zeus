@@ -5976,13 +5976,32 @@ def _execution_stub(candidate, decision, result, city, mode, *, deps):
     )
 
 
-def _release_monitor_write_lock_boundary(conn, summary: dict, deps, *, boundary: str) -> bool:
+def _release_monitor_write_lock_boundary(
+    conn,
+    summary: dict,
+    deps,
+    *,
+    boundary: str,
+    deadline_monotonic: float | None = None,
+) -> bool:
     """Commit monitor writes at bounded points so live price/decision writers can run."""
 
     if conn is None:
         return True
     try:
-        conn.commit()
+        if deadline_monotonic is None:
+            conn.commit()
+        else:
+            from src.execution.exit_lifecycle import (
+                _held_monitor_preparation_deadline,
+            )
+
+            with _held_monitor_preparation_deadline(
+                conn,
+                float(deadline_monotonic),
+            ) as ensure_live:
+                conn.commit()
+                ensure_live()
     except Exception as exc:  # noqa: BLE001
         try:
             conn.rollback()
@@ -6668,6 +6687,7 @@ def execute_monitoring_phase(
             summary,
             deps,
             boundary="late_global_sell_snapshot_reauction",
+            deadline_monotonic=auxiliary_deadline,
         ):
             assert previous_runtime is not None
             for field, value in previous_runtime.items():
@@ -6883,6 +6903,7 @@ def execute_monitoring_phase(
             summary,
             deps,
             boundary="exit_preflight",
+            deadline_monotonic=auxiliary_deadline,
         ):
             restore_global_retry_runtime(global_retry_runtime_before_preflight)
             summary["held_monitor_orderbook_prefetch_defer_reason"] = (
@@ -6975,6 +6996,7 @@ def execute_monitoring_phase(
             summary,
             deps,
             boundary="before_global_sell_snapshot_reauction",
+            deadline_monotonic=global_sell_debt_deadline,
         ):
             summary["global_sell_snapshot_reauction_debts_pending"] = (
                 summary.get("global_sell_snapshot_reauction_debts_pending", 0)
@@ -7782,6 +7804,7 @@ def execute_monitoring_phase(
                     summary,
                     deps,
                     boundary="before_network_orderbook_prefetch",
+                    deadline_monotonic=position_deadline,
                 ):
                     network_prefetch_unavailable = True
                     summary["held_monitor_orderbook_prefetch_defer_reason"] = (
@@ -8073,6 +8096,7 @@ def execute_monitoring_phase(
                         summary,
                         deps,
                         boundary="day0_window_entered",
+                        deadline_monotonic=position_deadline,
                     )
 
             # Day0 hard facts are settlement/observation truth, not venue
@@ -8304,6 +8328,7 @@ def execute_monitoring_phase(
                 summary,
                 deps,
                 boundary="before_probability_refresh",
+                deadline_monotonic=position_deadline,
             )
             refresh_position_state = snapshot_refresh_state(pos)
             try:
@@ -9208,6 +9233,7 @@ def execute_monitoring_phase(
                 summary,
                 deps,
                 boundary="position_monitor",
+                deadline_monotonic=position_deadline,
             )
 
     _emit_portfolio_rotation_evaluation_status(
@@ -9221,6 +9247,7 @@ def execute_monitoring_phase(
         summary,
         deps,
         boundary="portfolio_rotation_evaluation_status",
+        deadline_monotonic=monitor_deadline,
     )
     return portfolio_dirty, tracker_dirty
 
