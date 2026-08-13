@@ -12500,6 +12500,71 @@ def test_held_monitor_local_books_publish_original_clock_for_global_sell(
     )
 
 
+def test_scoped_network_prefetch_preserves_unscoped_local_monitor_books(monkeypatch):
+    """A later network slice must not erase the full cycle's local books."""
+    from src.engine import cycle_runtime, monitor_refresh
+
+    local = _make_position(
+        trade_id="preserved-local",
+        condition_id="preserved-local-condition",
+        token_id="preserved-local-token",
+        direction="buy_yes",
+    )
+    network = _make_position(
+        trade_id="scoped-network",
+        condition_id="scoped-network-condition",
+        token_id="scoped-network-token",
+        direction="buy_yes",
+    )
+    local_book = {
+        "asset_id": local.token_id,
+        "bids": [{"price": "0.31", "size": "20"}],
+        "asks": [{"price": "0.33", "size": "20"}],
+    }
+    network_book = {
+        "asset_id": network.token_id,
+        "bids": [{"price": "0.21", "size": "20"}],
+        "asks": [{"price": "0.23", "size": "20"}],
+    }
+
+    class ScopedClob:
+        def get_orderbook_snapshots(self, token_ids):
+            assert token_ids == [network.token_id]
+            return {network.token_id: network_book}
+
+    clob = ScopedClob()
+    assert monitor_refresh.install_monitor_orderbook_prefetch(
+        clob,
+        {local.token_id: local_book},
+        attempted_token_ids={local.token_id},
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {},
+    )
+    deps = type(
+        "Deps",
+        (),
+        {"logger": type("Logger", (), {"warning": staticmethod(lambda *args: None)})()},
+    )()
+
+    cycle_runtime._prefetch_held_monitor_orderbooks(
+        None,
+        clob,
+        [network],
+        {},
+        now_utc=datetime.now(timezone.utc),
+        deps=deps,
+        preserve_existing=True,
+    )
+
+    assert monitor_refresh.prefetched_monitor_orderbook(clob, local.token_id) == local_book
+    assert monitor_refresh.prefetched_monitor_orderbook(clob, network.token_id) == network_book
+    assert monitor_refresh.monitor_orderbook_prefetch_attempted(clob, local.token_id)
+    assert monitor_refresh.monitor_orderbook_prefetch_attempted(clob, network.token_id)
+
+
 def test_monitor_global_sell_handoff_is_exact_and_does_not_extend_time():
     from src.engine import event_reactor_adapter, monitor_refresh
 

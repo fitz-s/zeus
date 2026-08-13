@@ -5013,6 +5013,7 @@ def _prefetch_held_monitor_orderbooks(
             clob,
             local_books,
             attempted_token_ids=attempted,
+            merge=preserve_existing,
         )
         summary["held_monitor_orderbook_prefetch_installed"] = installed
         summary["held_monitor_orderbooks_prefetched"] = (
@@ -5077,6 +5078,7 @@ def _prefetch_held_monitor_orderbooks(
         clob,
         books,
         attempted_token_ids=existing_attempted | set(missing_token_ids),
+        merge=preserve_existing,
     )
     summary["held_monitor_orderbook_prefetch_installed"] = installed
     summary["held_monitor_orderbooks_prefetched"] = len(books) if installed else 0

@@ -309,6 +309,7 @@ def install_monitor_orderbook_prefetch(
     books: dict[str, dict],
     *,
     attempted_token_ids=(),
+    merge: bool = False,
 ) -> bool:
     """Attach one-cycle batch books to the cycle-scoped CLOB client."""
 
@@ -322,6 +323,17 @@ def install_monitor_orderbook_prefetch(
         for value in attempted_token_ids
         if (token_id := str(value).strip())
     )
+    if merge:
+        current_books = getattr(clob, "__dict__", {}).get(
+            _MONITOR_PREFETCHED_ORDERBOOKS_ATTR
+        )
+        if isinstance(current_books, dict):
+            clean = {**current_books, **clean}
+        current_attempted = getattr(clob, "__dict__", {}).get(
+            _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR
+        )
+        if isinstance(current_attempted, frozenset):
+            attempted = current_attempted | attempted
     try:
         setattr(clob, _MONITOR_PREFETCHED_ORDERBOOKS_ATTR, clean)
         setattr(clob, _MONITOR_PREFETCH_ATTEMPTED_TOKENS_ATTR, attempted)
