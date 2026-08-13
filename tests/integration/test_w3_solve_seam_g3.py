@@ -16926,6 +16926,42 @@ def test_current_global_book_epoch_reduce_only_ignores_unheld_missing_side():
         )
 
 
+def test_reduce_only_token_rebind_keeps_unheld_incomplete_binding():
+    probability = _current_global_book_probability()
+    held_binding = probability.bindings[0]
+    incomplete_binding = replace(
+        probability.bindings[1],
+        yes_token_id=None,
+        no_token_id=None,
+    )
+    partial = universe.rebind_family_payoff_witness(
+        probability,
+        bindings=(
+            held_binding,
+            incomplete_binding,
+            *probability.bindings[2:],
+        ),
+    )
+
+    rebound = universe._rebind_probability_witness_tokens(
+        partial,
+        token_map_by_condition={},
+        required_token_ids=frozenset({held_binding.yes_token_id}),
+    )
+
+    assert rebound.bindings[0] == held_binding
+    assert rebound.bindings[1].yes_token_id is None
+    assert rebound.bindings[1].no_token_id is None
+    with pytest.raises(
+        ValueError,
+        match=f"GLOBAL_TOKEN_IDENTITY_INCOMPLETE:{incomplete_binding.condition_id}",
+    ):
+        universe._rebind_probability_witness_tokens(
+            partial,
+            token_map_by_condition={},
+        )
+
+
 def test_current_global_book_epoch_batches_snapshot_invalidation_truth():
     probability = _current_global_book_probability()
     conn = _global_book_metadata_conn(probability)

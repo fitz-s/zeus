@@ -1640,7 +1640,13 @@ def _rebind_probability_witness_tokens(
     witness: FamilyPayoffWitness,
     *,
     token_map_by_condition: Mapping[str, tuple[str, str]],
+    required_token_ids: frozenset[str] | None = None,
 ) -> FamilyPayoffWitness:
+    required_tokens = (
+        frozenset(str(token or "").strip() for token in required_token_ids)
+        if required_token_ids is not None
+        else None
+    )
     bindings: list[OutcomeTokenBinding] = []
     for binding in witness.bindings:
         current = token_map_by_condition.get(binding.condition_id)
@@ -1654,7 +1660,7 @@ def _rebind_probability_witness_tokens(
                 )
             yes = current_yes
             no = current_no
-        if not yes or not no:
+        if (not yes or not no) and required_tokens is None:
             raise ValueError(
                 f"GLOBAL_TOKEN_IDENTITY_INCOMPLETE:{binding.condition_id}"
             )
@@ -1662,11 +1668,24 @@ def _rebind_probability_witness_tokens(
             OutcomeTokenBinding(
                 bin_id=binding.bin_id,
                 condition_id=binding.condition_id,
-                yes_token_id=yes,
-                no_token_id=no,
+                yes_token_id=yes or None,
+                no_token_id=no or None,
             )
         )
     rebound = tuple(bindings)
+    if required_tokens is not None:
+        rebound_tokens = {
+            str(token or "").strip()
+            for binding in rebound
+            for token in (binding.yes_token_id, binding.no_token_id)
+            if str(token or "").strip()
+        }
+        missing_required = required_tokens.difference(rebound_tokens)
+        if missing_required:
+            raise ValueError(
+                "GLOBAL_REQUIRED_TOKEN_BINDING_MISSING:"
+                + ",".join(sorted(missing_required))
+            )
     return rebind_family_payoff_witness(witness, bindings=rebound)
 
 
@@ -2391,6 +2410,7 @@ def bind_current_global_probability_tokens(
         rebound[family_key] = _rebind_probability_witness_tokens(
             witness,
             token_map_by_condition=token_map,
+            required_token_ids=required_tokens,
         )
     return rebound
 
