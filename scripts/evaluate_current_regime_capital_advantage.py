@@ -44,6 +44,11 @@ from src.data.replacement_forecast_cycle_policy import (  # noqa: E402
 
 MIN_INDEPENDENT_FAMILY_DAYS = 30
 WINDOW_DAYS = 35.0
+GLOBAL_AUCTION_RECEIPT_MODES = (
+    "global_single_order_auction",
+    "global_single_order_auction_delta",
+    "global_single_order_auction_duplicate",
+)
 
 
 def _read_only(
@@ -85,8 +90,9 @@ def _read_only(
 def _receipt_revision_coverage(conn: sqlite3.Connection) -> dict[str, object]:
     row = conn.execute(
         "SELECT id,completed_at,artifact_json FROM decision_log "
-        "WHERE mode='global_single_order_auction' AND completed_at IS NOT NULL "
-        "ORDER BY id DESC LIMIT 1"
+        "WHERE mode IN (?,?,?) AND completed_at IS NOT NULL "
+        "ORDER BY id DESC LIMIT 1",
+        GLOBAL_AUCTION_RECEIPT_MODES,
     ).fetchone()
     if row is None:
         return {"ready": False, "reason": "global_auction_receipt_missing"}

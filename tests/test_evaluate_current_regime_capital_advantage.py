@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -84,6 +85,46 @@ def test_current_receipt_without_settled_capital_proof_fails():
     assert "INSUFFICIENT_CURRENT_REGIME_SETTLED_FAMILY_DAYS" in failures
     assert "AFTER_COST_DELTA_LOG_WEALTH_LCB_NOT_POSITIVE" in failures
     assert "EXACT_REVISION_LIVE_NET_CAPITAL_GAIN_NOT_POSITIVE" in failures
+
+
+def test_latest_delta_receipt_is_current_selection_evidence():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE decision_log ("
+        "id INTEGER PRIMARY KEY, mode TEXT, completed_at TEXT, artifact_json TEXT)"
+    )
+    summary = {
+        "global_selection_revision": (
+            evaluator.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        ),
+        "portfolio_wealth": {
+            "ledger_snapshot_id": "ledger",
+            "position_set_hash": "positions",
+            "wealth_floor_usd": "18",
+            "wealth_ceiling_usd": "22",
+            "spendable_cash_usd": "10",
+            "reservations_usd": "2",
+            "collateral_authority": "CHAIN",
+        },
+        "scope_family_coverage_complete": True,
+        "candidate_coverage_complete": True,
+        "held_position_coverage_complete": True,
+        "book_capture_freshness_complete": True,
+    }
+    conn.execute(
+        "INSERT INTO decision_log VALUES (1,?,?,?)",
+        (
+            "global_single_order_auction_delta",
+            "2026-08-13T00:00:00+00:00",
+            json.dumps({"summary": summary}),
+        ),
+    )
+
+    evidence = evaluator._receipt_revision_coverage(conn)
+
+    assert evidence["decision_log_id"] == 1
+    assert evidence["ready"] is True
 
 
 def test_only_complete_positive_exact_revision_evidence_passes():
