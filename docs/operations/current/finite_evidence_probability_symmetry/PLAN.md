@@ -4,6 +4,30 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-13 Capital evidence is independent by target date
+
+The capital evaluator called `(city, target_date, metric)` an independent
+family-day.  That can count several globally selected orders from the same
+target date as separate observations even though they share the same forecast
+issuance environment, model error, and broad weather regime.  The plan's
+minimum evidence unit is one target date, not one city-market cell.
+
+Settlement grading now keeps only the first valid complete-global-cut proof per
+target date.  The sample still records the selected city, metric, condition,
+side, cost, payoff, and exact probability semantics, but another selection on
+the same target date cannot increase the independent sample count.  This is a
+strict evidence correction only; it cannot admit an order, alter selection, or
+change held-position redecision.
+
+SCOPE is the observational current-regime admission evaluator.  DRAIN is one
+causally settled proof from a previously unseen target date.  RESET is the next
+distinct target date; another city or metric on an already-counted date does
+not reset the independence gate.  Acceptance requires an antibody with two
+different families on the same target date counting once, renamed target-date
+contract fields/reasons, and a current evaluator run that remains fail-closed
+until 30 distinct target dates and a positive after-cost delta-log-wealth lower
+bound exist.
+
 ## 2026-08-13 Capital proof retains every licensed current-evidence revision
 
 The live replacement authority admits two exact, non-interchangeable current-

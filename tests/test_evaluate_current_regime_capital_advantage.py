@@ -188,7 +188,7 @@ def test_current_receipt_without_settled_capital_proof_fails():
         shadows={
             "day0": {
                 "global_selection_revision_bound": False,
-                "independent_family_day_count": 0,
+                "independent_target_date_count": 0,
                 "delta_log_wealth_lcb95": None,
             }
         },
@@ -196,7 +196,7 @@ def test_current_receipt_without_settled_capital_proof_fails():
     )
 
     assert verdict == "FAIL"
-    assert "INSUFFICIENT_CURRENT_REGIME_SETTLED_FAMILY_DAYS" in failures
+    assert "INSUFFICIENT_CURRENT_REGIME_SETTLED_TARGET_DATES" in failures
     assert "AFTER_COST_DELTA_LOG_WEALTH_LCB_NOT_POSITIVE" in failures
     assert "INSUFFICIENT_EXACT_REVISION_LIVE_REALIZED_POSITIONS" in failures
     assert "EXACT_REVISION_LIVE_CAPITAL_WEIGHTED_RETURN_NOT_POSITIVE" in failures
@@ -208,7 +208,7 @@ def test_counterfactual_admission_does_not_require_impossible_prior_live_fills()
         shadows={
             "combined": {
                 "global_selection_revision_bound": True,
-                "independent_family_day_count": 30,
+                "independent_target_date_count": 30,
                 "delta_log_wealth_lcb95": 0.001,
             }
         },
@@ -540,7 +540,7 @@ def test_tampered_proof_payoff_is_rejected_by_hash():
         evaluator._summary_proof(sqlite3.connect(":memory:"), 1, summary)
 
 
-def test_counterfactual_evidence_counts_only_first_receipt_per_family_day():
+def test_counterfactual_evidence_counts_only_first_receipt_per_target_date():
     forecasts = _settlement_db()
     forecasts.execute(
         "INSERT INTO market_events VALUES (?,?,?,?,?,?)",
@@ -559,6 +559,23 @@ def test_counterfactual_evidence_counts_only_first_receipt_per_family_day():
             "VERIFIED",
         ),
     )
+    forecasts.execute(
+        "INSERT INTO market_events VALUES (?,?,?,?,?,?)",
+        ("condition-2", "New York", "2026-08-13", "high", 82, 83),
+    )
+    forecasts.execute(
+        "INSERT INTO settlement_outcomes VALUES (2,?,?,?,?,?,?,?,?)",
+        (
+            "New York",
+            "2026-08-13",
+            "high",
+            83,
+            "F",
+            "2026-08-13T20:00:00+00:00",
+            "2026-08-13T20:01:00+00:00",
+            "VERIFIED",
+        ),
+    )
     trades = sqlite3.connect(":memory:")
     trades.row_factory = sqlite3.Row
     trades.execute(
@@ -570,15 +587,19 @@ def test_counterfactual_evidence_counts_only_first_receipt_per_family_day():
         target_date="2026-08-13",
         condition_id="condition-1",
     )
-    artifact = json.dumps({"summary": summary})
-    for row_id in (1, 2):
+    other_summary = _proof_summary(
+        city="New York",
+        target_date="2026-08-13",
+        condition_id="condition-2",
+    )
+    for row_id, receipt in ((1, summary), (2, other_summary)):
         trades.execute(
             "INSERT INTO decision_log VALUES (?,?,?,?)",
             (
                 row_id,
                 "global_single_order_auction",
                 "2026-08-12T00:00:02+00:00",
-                artifact,
+                json.dumps({"summary": receipt}),
             ),
         )
 
@@ -588,9 +609,9 @@ def test_counterfactual_evidence_counts_only_first_receipt_per_family_day():
         as_of=evaluator.datetime.fromisoformat("2026-08-14T00:00:00+00:00"),
     )
 
-    assert evidence["independent_family_day_count"] == 1
+    assert evidence["independent_target_date_count"] == 1
     assert evidence["samples"][0]["decision_log_id"] == 1
-    assert evidence["rejection_counts"]["duplicate_family_day"] == 1
+    assert evidence["rejection_counts"]["duplicate_target_date"] == 1
     assert evidence["delta_log_wealth_lcb95"] is None
 
 
@@ -986,7 +1007,7 @@ def test_only_complete_positive_exact_revision_evidence_passes():
         shadows={
             "combined": {
                 "global_selection_revision_bound": True,
-                "independent_family_day_count": 30,
+                "independent_target_date_count": 30,
                 "delta_log_wealth_lcb95": 0.001,
             }
         },

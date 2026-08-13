@@ -54,7 +54,7 @@ from src.data.replacement_forecast_cycle_policy import (  # noqa: E402
     STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
 )
 
-MIN_INDEPENDENT_FAMILY_DAYS = 30
+MIN_INDEPENDENT_TARGET_DATES = 30
 MIN_EXACT_LIVE_REALIZED_POSITIONS = 30
 GLOBAL_HOLD_RECEIPT_SCAN_ROWS = 5_000
 WINDOW_DAYS = 35.0
@@ -617,7 +617,8 @@ def _realized_proof_sample(
         "proof_counterfactual_sha256": str(
             summary["proof_counterfactual_sha256"]
         ),
-        "family_day": [city, target_date, metric],
+        "family": [city, target_date, metric],
+        "independence_key": target_date,
         "condition_id": condition_id,
         "side": side,
         "execution_mode": execution_mode,
@@ -649,7 +650,7 @@ def _settled_global_counterfactual_evidence(
         (*GLOBAL_AUCTION_RECEIPT_MODES, cutoff, as_of.isoformat()),
     ).fetchall()
     samples: list[dict[str, object]] = []
-    seen_family_days: set[tuple[str, str, str]] = set()
+    seen_target_dates: set[str] = set()
     rejection_counts: dict[str, int] = {}
     for row in rows:
         try:
@@ -661,13 +662,13 @@ def _settled_global_counterfactual_evidence(
                 decision_log_id=int(row["id"]),
                 summary=summary,
             )
-            family_day = tuple(str(value) for value in sample["family_day"])
-            if family_day in seen_family_days:
-                rejection_counts["duplicate_family_day"] = (
-                    rejection_counts.get("duplicate_family_day", 0) + 1
+            target_date = str(sample["independence_key"])
+            if target_date in seen_target_dates:
+                rejection_counts["duplicate_target_date"] = (
+                    rejection_counts.get("duplicate_target_date", 0) + 1
                 )
                 continue
-            seen_family_days.add(family_day)
+            seen_target_dates.add(target_date)
             samples.append(sample)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             reason = str(exc) or type(exc).__name__
@@ -683,7 +684,7 @@ def _settled_global_counterfactual_evidence(
     return {
         "global_selection_revision_bound": True,
         "global_selection_revision": CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
-        "independent_family_day_count": len(samples),
+        "independent_target_date_count": len(samples),
         "settled_row_count": len(samples),
         "realized_after_cost_pnl_usd": str(
             sum(
@@ -698,7 +699,7 @@ def _settled_global_counterfactual_evidence(
         "delta_log_wealth_standard_error": standard_error,
         "delta_log_wealth_lcb95": lcb95,
         "lcb_method": "one-sided Student-t; conservative critical=1.699 (df=29 floor)",
-        "minimum_sample_gate": MIN_INDEPENDENT_FAMILY_DAYS,
+        "minimum_sample_gate": MIN_INDEPENDENT_TARGET_DATES,
         "rejection_counts": dict(sorted(rejection_counts.items())),
         "samples": samples,
     }
@@ -1378,12 +1379,12 @@ def _build_counterfactual_admission_verdict(
     if receipt.get("ready") is not True:
         failures.append("CURRENT_GLOBAL_SELECTION_RECEIPT_UNPROVEN")
     independent = sum(
-        int(row.get("independent_family_day_count") or 0)
+        int(row.get("independent_target_date_count") or 0)
         for row in shadows.values()
         if row.get("global_selection_revision_bound") is True
     )
-    if independent < MIN_INDEPENDENT_FAMILY_DAYS:
-        failures.append("INSUFFICIENT_CURRENT_REGIME_SETTLED_FAMILY_DAYS")
+    if independent < MIN_INDEPENDENT_TARGET_DATES:
+        failures.append("INSUFFICIENT_CURRENT_REGIME_SETTLED_TARGET_DATES")
     lcbs = [
         row.get("delta_log_wealth_lcb95")
         for row in shadows.values()
@@ -1526,7 +1527,7 @@ def evaluate(
         "contract": {
             "admission_requires_live_realized_positions": False,
             "goal_completion_requires_live_realized_positions": True,
-            "minimum_independent_family_days": MIN_INDEPENDENT_FAMILY_DAYS,
+            "minimum_independent_target_dates": MIN_INDEPENDENT_TARGET_DATES,
             "minimum_exact_live_realized_positions": (
                 MIN_EXACT_LIVE_REALIZED_POSITIONS
             ),
