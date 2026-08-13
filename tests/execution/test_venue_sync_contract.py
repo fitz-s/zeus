@@ -313,7 +313,7 @@ def test_capture_snapshot_preserves_point_order_timeout_as_unknown():
         snapshot.get_order("order-1")
 
 
-def test_complete_account_snapshot_eliminates_full_point_order_reads():
+def test_complete_account_snapshot_also_captures_authenticated_point_order_reads():
     from src.execution import venue_sync_contract as vsc
 
     open_order = {"orderID": "order-live", "status": "LIVE"}
@@ -327,8 +327,9 @@ def test_complete_account_snapshot_eliminates_full_point_order_reads():
                 {"open_orders": (open_order,), "trades": ()},
             )()
 
-        def get_order(self, _order_id):
-            raise AssertionError("complete account truth must eliminate N point reads")
+        def get_order(self, order_id, *, deadline_monotonic):
+            assert deadline_monotonic > time.monotonic()
+            return open_order if order_id == "order-live" else None
 
     snapshot = vsc.capture_venue_read_snapshot(
         Client(),

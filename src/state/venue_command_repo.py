@@ -3894,6 +3894,247 @@ def _point_order_has_live_data(point_order: object) -> bool:
     return any(point_order.get(key) not in (None, "") for key in _POINT_ORDER_LIVE_DATA_KEYS)
 
 
+def reconciled_increment_no_fill_proof(
+    conn: sqlite3.Connection,
+    command_id: str,
+) -> dict[str, str] | None:
+    """Reproduce the exact submit-certified existing-position increment identity."""
+
+    with _row_factory_as(conn, sqlite3.Row):
+        command = conn.execute(
+            """
+            SELECT command_id, position_id, snapshot_id, envelope_id, token_id,
+                   intent_kind, side, price, size, venue_order_id
+              FROM venue_commands
+             WHERE command_id = ?
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        submit_event = conn.execute(
+            """
+            SELECT payload_json
+              FROM venue_command_events
+             WHERE command_id = ?
+               AND event_type = 'SUBMIT_REQUESTED'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        current = conn.execute(
+            """
+            SELECT position_id, phase, shares, cost_basis_usd, order_id,
+                   direction, token_id, no_token_id, chain_state, chain_shares,
+                   chain_cost_basis_usd
+              FROM position_current
+             WHERE position_id = (
+                   SELECT position_id FROM venue_commands WHERE command_id = ?
+             )
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        envelope = conn.execute(
+            """
+            SELECT selected_outcome_token_id, side, price, size, order_type,
+                   post_only, condition_id
+              FROM venue_submission_envelopes
+             WHERE envelope_id = (
+                   SELECT envelope_id FROM venue_commands WHERE command_id = ?
+             )
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+        snapshot = conn.execute(
+            """
+            SELECT condition_id
+              FROM executable_market_snapshots
+             WHERE snapshot_id = (
+                   SELECT snapshot_id FROM venue_commands WHERE command_id = ?
+             )
+             LIMIT 1
+            """,
+            (command_id,),
+        ).fetchone()
+    if (
+        command is None
+        or submit_event is None
+        or current is None
+        or envelope is None
+        or snapshot is None
+    ):
+        return None
+    if (
+        str(command["intent_kind"] or "").upper() != "ENTRY"
+        or str(command["side"] or "").upper() != "BUY"
+        or not str(command["venue_order_id"] or "").strip()
+    ):
+        return None
+
+    submit_payload = _review_clearance_json_dict(submit_event["payload_json"])
+    capability = submit_payload.get("execution_capability")
+    if not isinstance(capability, dict):
+        return None
+    capability_body = dict(capability)
+    capability_id = str(capability_body.pop("capability_id", "") or "").strip()
+    expected_capability_id = hashlib.sha256(
+        json.dumps(
+            capability_body,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:32]
+    order_type = str(capability.get("order_type") or "").upper()
+    if (
+        capability.get("schema_version") != 1
+        or capability.get("action") != "ENTRY"
+        or capability.get("intent_kind") != "ENTRY"
+        or capability.get("mode") != "submit"
+        or capability.get("allowed") is not True
+        or str(capability.get("command_id") or "") != str(command["command_id"] or "")
+        or str(capability.get("token_id") or "") != str(command["token_id"] or "")
+        or str(capability.get("executable_snapshot_id") or "")
+        != str(command["snapshot_id"] or "")
+        or order_type not in {"GTC", "GTD"}
+        or str(submit_payload.get("order_type") or "").upper() != order_type
+        or capability_id != expected_capability_id
+    ):
+        return None
+
+    components = capability.get("components")
+    if not isinstance(components, list):
+        return None
+    named: dict[str, list[dict]] = {}
+    for component in components:
+        if not isinstance(component, dict):
+            return None
+        name = str(component.get("component") or "")
+        named.setdefault(name, []).append(component)
+    if (
+        not named
+        or any(not name or len(rows) != 1 for name, rows in named.items())
+        or any(component.get("allowed") is not True for component in components)
+    ):
+        return None
+    duplicate_rows = named.get("entry_duplicate_same_token", [])
+    wealth_rows = named.get("global_increment_wealth_binding", [])
+    if len(duplicate_rows) != 1 or len(wealth_rows) != 1:
+        return None
+    duplicate = duplicate_rows[0]
+    wealth = wealth_rows[0]
+    wealth_details = wealth.get("details")
+    if not isinstance(wealth_details, dict):
+        return None
+    wealth_expected = str(wealth_details.get("expected") or "").strip()
+    wealth_current = str(wealth_details.get("current") or "").strip()
+    generation = str(duplicate.get("increment_position_generation") or "").strip()
+    position_id = str(command["position_id"] or "").strip()
+    token_id = str(command["token_id"] or "").strip()
+    if (
+        duplicate.get("allowed") is not True
+        or duplicate.get("reason") != "allowed_reconciled_position_increment"
+        or str(duplicate.get("token_id") or "") != token_id
+        or str(duplicate.get("increment_position_id") or "") != position_id
+        or not generation
+        or wealth.get("allowed") is not True
+        or wealth.get("reason") != "allowed"
+        or not wealth_expected
+        or wealth_expected != wealth_current
+    ):
+        return None
+
+    phase = str(current["phase"] or "")
+    direction = str(current["direction"] or "")
+    selected_token = str(
+        current["no_token_id"] if direction == "buy_no" else current["token_id"]
+    ).strip()
+    shares = _decimal_or_none(current["shares"])
+    cost_basis = _decimal_or_none(current["cost_basis_usd"])
+    chain_shares = _decimal_or_none(current["chain_shares"])
+    chain_cost_basis = _decimal_or_none(current["chain_cost_basis_usd"])
+    current_order_id = str(current["order_id"] or "").strip()
+    condition_id = str(envelope["condition_id"] or "").strip()
+    snapshot_condition_id = str(snapshot["condition_id"] or "").strip()
+    from src.state.db import query_entry_execution_fill_aggregate
+
+    aggregate = query_entry_execution_fill_aggregate(
+        conn,
+        position_id,
+        strict=True,
+    )
+    fact_shares = _decimal_or_none(
+        (aggregate or {}).get("shares_filled") if aggregate else None
+    )
+    fact_cost = _decimal_or_none(
+        (aggregate or {}).get("filled_cost_basis_usd") if aggregate else None
+    )
+    generation_candidates = {
+        hashlib.sha256(
+            "\x1f".join(
+                (
+                    position_id,
+                    candidate_phase,
+                    current_order_id,
+                    str(current["shares"]),
+                    str(fact_cost),
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+        for candidate_phase in ("active", "day0_window")
+    }
+    if (
+        str(current["position_id"] or "") != position_id
+        or phase not in {"active", "day0_window"}
+        or direction not in {"buy_yes", "buy_no"}
+        or selected_token != token_id
+        or str(envelope["selected_outcome_token_id"] or "") != token_id
+        or str(envelope["side"] or "").upper() != "BUY"
+        or not _decimal_text_equal(envelope["price"], command["price"])
+        or not _decimal_text_equal(envelope["size"], command["size"])
+        or str(envelope["order_type"] or "").upper() != order_type
+        or int(envelope["post_only"] or 0) != 1
+        or not condition_id
+        or condition_id != snapshot_condition_id
+        or generation not in generation_candidates
+        or str(current["chain_state"] or "") != "synced"
+        or shares is None
+        or shares <= 0
+        or cost_basis is None
+        or cost_basis <= 0
+        or fact_shares is None
+        or fact_shares <= 0
+        or abs(shares - fact_shares) > Decimal("0.000000001")
+        or fact_cost is None
+        or fact_cost <= 0
+        or chain_shares is None
+        or chain_shares <= 0
+        or abs(shares - chain_shares) > Decimal("0.0001")
+        or chain_cost_basis is None
+        or chain_cost_basis <= 0
+        or abs(cost_basis - chain_cost_basis) > Decimal("0.0001")
+        or not current_order_id
+        or current_order_id == str(command["venue_order_id"] or "")
+    ):
+        return None
+    return {
+        "capability_id": capability_id,
+        "command_id": str(command["command_id"]),
+        "snapshot_id": str(command["snapshot_id"]),
+        "selected_token_id": token_id,
+        "order_type": order_type,
+        "increment_position_id": position_id,
+        "increment_position_generation": generation,
+        "wealth_binding": wealth_expected,
+        "current_phase": phase,
+        "current_chain_state": "synced",
+        "current_chain_shares": format(chain_shares, "f"),
+        "execution_fact_cost_basis_usd": format(fact_cost, "f"),
+        "current_position_order_id": current_order_id,
+    }
+
+
 def _validate_review_cancel_unknown_no_fill_payload(
     *,
     conn: sqlite3.Connection,
@@ -3958,7 +4199,8 @@ def _validate_review_cancel_unknown_no_fill_payload(
     with _row_factory_as(conn, sqlite3.Row):
         command = conn.execute(
             """
-            SELECT command_id, position_id, decision_id, market_id, token_id, side, price, size, created_at, venue_order_id
+            SELECT command_id, position_id, decision_id, market_id, token_id,
+                   side, price, size, created_at, venue_order_id
               FROM venue_commands
              WHERE command_id = ?
             """,
@@ -4020,17 +4262,28 @@ def _validate_review_cancel_unknown_no_fill_payload(
         and shares == Decimal("0")
         and cost_basis == Decimal("0")
     )
-    existing_position = (
-        phase in {"active", "day0_window", "pending_exit"}
-        and shares > 0
-        and cost_basis > 0
-        and str(current["order_id"] or "") != str(command["venue_order_id"] or "")
+    increment_proof = payload.get("existing_position_increment_proof")
+    persisted_increment = reconciled_increment_no_fill_proof(conn, command_id)
+    increment_matches = (
+        isinstance(increment_proof, dict)
+        and persisted_increment is not None
+        and increment_proof == persisted_increment
     )
     if already_canceled:
+        existing_position = phase in {"active", "day0_window", "pending_exit"} and shares > 0
         if not (zero_pending or existing_position):
             raise ValueError("already-canceled no-fill projection is bound to the command")
-    elif not zero_pending:
-        raise ValueError("cancel-unknown no-fill clearance requires zero-exposure projection")
+    elif not zero_pending and not increment_matches:
+        raise ValueError(
+            "cancel-unknown no-fill clearance requires zero exposure or a "
+            "submit-certified chain-synced increment"
+        )
+    if not already_canceled:
+        if increment_matches and not (
+            required_predicates.get("persisted_reconciled_position_increment") is True
+            and required_predicates.get("current_chain_synced_increment_exposure") is True
+        ):
+            raise ValueError("cancel-unknown increment predicates are missing")
     expected_event = "CANCEL_FAILED" if already_canceled else "CANCEL_REPLACE_BLOCKED"
     if latest_event is None or latest_event["event_type"] != expected_event:
         raise ValueError(f"cancel no-fill clearance requires latest {expected_event}")
@@ -4060,6 +4313,50 @@ def _validate_review_cancel_unknown_no_fill_payload(
         raise ValueError("cancel-unknown no-fill terminal order fact matched_size is invalid") from exc
     if _review_clearance_fact_count(conn, "venue_trade_facts", command_id) != 0:
         raise ValueError("cancel-unknown no-fill clearance found trade facts")
+    finding_id = payload.get("resolved_m5_local_orphan_finding_id")
+    unresolved_finding_count = 0
+    if _review_clearance_table_exists(conn, "exchange_reconcile_findings"):
+        unresolved_finding_count = int(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                  FROM exchange_reconcile_findings
+                 WHERE kind = 'local_orphan_order'
+                   AND subject_id = ?
+                   AND resolved_at IS NULL
+                """,
+                (str(command["venue_order_id"] or ""),),
+            ).fetchone()[0]
+        )
+    if finding_id is not None:
+        if not _review_clearance_table_exists(conn, "exchange_reconcile_findings"):
+            raise ValueError("cancel-unknown finding proof table is missing")
+        with _row_factory_as(conn, sqlite3.Row):
+            finding = conn.execute(
+                """
+                SELECT finding_id, kind, subject_id, resolved_at, resolution,
+                       resolved_by
+                  FROM exchange_reconcile_findings
+                 WHERE finding_id = ?
+                 LIMIT 1
+                """,
+                (finding_id,),
+            ).fetchone()
+        if (
+            finding is None
+            or str(finding["kind"] or "") != "local_orphan_order"
+            or str(finding["subject_id"] or "")
+            != str(command["venue_order_id"] or "")
+            or not str(finding["resolved_at"] or "").strip()
+            or not str(finding["resolution"] or "").startswith("command_recovery_")
+            or str(finding["resolved_by"] or "") != "src.execution.command_recovery"
+            or payload.get("resolved_m5_local_orphan_findings") != 1
+        ):
+            raise ValueError("cancel-unknown exact finding resolution proof is invalid")
+    elif payload.get("resolved_m5_local_orphan_findings") not in {0, None}:
+        raise ValueError("cancel-unknown finding count has no exact identity")
+    elif unresolved_finding_count != 0:
+        raise ValueError("cancel-unknown clearance left unresolved local orphan finding")
     venue_proof = payload.get("venue_absence_proof")
     if not isinstance(venue_proof, dict):
         raise ValueError("cancel-unknown no-fill clearance requires venue_absence_proof")
@@ -4091,6 +4388,13 @@ def _validate_review_cancel_unknown_no_fill_payload(
     for key in ("open_orders_checked", "trades_checked", "open_orders_query_complete", "trades_query_complete"):
         if venue_proof.get(key) is not True:
             raise ValueError(f"cancel-unknown no-fill clearance requires {key}=true")
+    if not already_canceled:
+        if venue_proof.get("point_order_query_complete") is not True:
+            raise ValueError(
+                "cancel-unknown no-fill clearance requires point_order_query_complete=true"
+            )
+        if not str(venue_proof.get("point_order_source") or "").strip():
+            raise ValueError("cancel-unknown no-fill clearance requires point_order_source")
     if not str(venue_proof.get("pagination_scope") or "").strip():
         raise ValueError("cancel-unknown no-fill clearance requires pagination_scope")
     if int(venue_proof.get("matching_open_order_count", -1)) != 0:

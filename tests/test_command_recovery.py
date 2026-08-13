@@ -64,6 +64,9 @@ def mock_client():
         open_orders=[],
         trades=[],
     )
+    client.get_order.authenticated_point_reads_are_complete = True
+    client.get_open_orders.venue_reads_are_complete = True
+    client.get_trades.venue_reads_are_complete = True
     return client
 
 
@@ -3885,6 +3888,130 @@ def _advance_to_cancel_unknown_review_required(conn, command_id="cmd-001", venue
             "requires_m5_reconcile": True,
             "semantic_cancel_status": "CANCEL_UNKNOWN",
         },
+    )
+
+
+def _certify_reconciled_increment_submit(
+    conn,
+    *,
+    command_id="cmd-001",
+    generation=None,
+):
+    command = conn.execute(
+        """
+        SELECT command_id, position_id, snapshot_id, token_id
+          FROM venue_commands
+         WHERE command_id = ?
+        """,
+        (command_id,),
+    ).fetchone()
+    event = conn.execute(
+        """
+        SELECT event_id, payload_json
+          FROM venue_command_events
+         WHERE command_id = ? AND event_type = 'SUBMIT_REQUESTED'
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (command_id,),
+    ).fetchone()
+    payload = json.loads(event["payload_json"])
+    capability = payload["execution_capability"]
+    capability.update(
+        {
+            "schema_version": 1,
+            "action": "ENTRY",
+            "intent_kind": "ENTRY",
+            "mode": "submit",
+            "allowed": True,
+            "command_id": command["command_id"],
+            "order_type": "GTC",
+            "token_id": command["token_id"],
+            "executable_snapshot_id": command["snapshot_id"],
+        }
+    )
+    if generation is None:
+        generation = hashlib.sha256(
+            "\x1f".join(
+                (
+                    command["position_id"],
+                    "active",
+                    "ord-prior-fill",
+                    "5.0",
+                    "1.5",
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+    capability["components"].extend(
+        [
+            {
+                "component": "entry_duplicate_same_token",
+                "allowed": True,
+                "reason": "allowed_reconciled_position_increment",
+                "token_id": command["token_id"],
+                "increment_position_id": command["position_id"],
+                "increment_position_generation": generation,
+            },
+            {
+                "component": "global_increment_wealth_binding",
+                "allowed": True,
+                "reason": "allowed",
+                "details": {"expected": "wealth-identity", "current": "wealth-identity"},
+            },
+        ]
+    )
+    capability_body = dict(capability)
+    capability_body.pop("capability_id", None)
+    capability["capability_id"] = hashlib.sha256(
+        json.dumps(capability_body, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()[:32]
+    payload["order_type"] = "GTC"
+    conn.execute(
+        "UPDATE venue_command_events SET payload_json = ? WHERE event_id = ?",
+        (json.dumps(payload, sort_keys=True), event["event_id"]),
+    )
+
+
+def _make_projection_reconciled_increment(
+    conn,
+    *,
+    command_id="cmd-001",
+    position_id="pos-001",
+    prior_order_id="ord-prior-fill",
+):
+    from src.state.db import log_execution_fact
+
+    command = conn.execute(
+        "SELECT token_id FROM venue_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'active', shares = 5, cost_basis_usd = 1.5,
+               entry_price = 0.3, chain_state = 'synced', chain_shares = 5,
+               chain_cost_basis_usd = 1.5, chain_avg_price = 0.3,
+               chain_seen_at = '2026-04-26T00:04:30Z',
+               order_id = ?, order_status = 'filled',
+               direction = 'buy_yes', token_id = ?
+         WHERE position_id = ?
+        """,
+        (prior_order_id, command["token_id"], position_id),
+    )
+    log_execution_fact(
+        conn,
+        intent_id=f"{position_id}:entry",
+        position_id=position_id,
+        decision_id="dec-prior-fill",
+        command_id="cmd-prior-fill",
+        order_role="entry",
+        posted_at="2026-04-25T23:59:00Z",
+        filled_at="2026-04-26T00:00:00Z",
+        submitted_price=0.3,
+        fill_price=0.3,
+        shares=5.0,
+        venue_status="FILLED",
+        terminal_exec_status="filled",
     )
 
 
@@ -9210,6 +9337,574 @@ class TestRecoveryResolutionTable:
         after_count, after_markets = count_unknown_side_effects(conn)
         assert after_count == 0
         assert after_markets == ()
+
+    def test_cancel_unknown_absent_certified_increment_preserves_existing_position(
+        self, conn, mock_client
+    ):
+        from src.execution.exchange_reconcile import list_unresolved_findings, record_finding
+
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=26, price=0.31)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-increment")
+        _seed_pending_entry_projection(conn, order_id="ord-increment")
+        _certify_reconciled_increment_submit(conn)
+        _make_projection_reconciled_increment(conn)
+        finding = record_finding(
+            conn,
+            kind="local_orphan_order",
+            subject_id="ord-increment",
+            context="ws_gap",
+            evidence={"reason": "local_open_order_absent_from_exchange_open_orders"},
+            recorded_at="2026-04-26T00:06:00Z",
+        )
+        before = dict(
+            conn.execute(
+                "SELECT * FROM position_current WHERE position_id = 'pos-001'"
+            ).fetchone()
+        )
+        before_position_events = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM position_events WHERE position_id='pos-001' ORDER BY sequence_no"
+            )
+        ]
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        assert dict(
+            conn.execute(
+                "SELECT * FROM position_current WHERE position_id = 'pos-001'"
+            ).fetchone()
+        ) == before
+        assert [
+            dict(row)
+            for row in conn.execute(
+                "SELECT * FROM position_events WHERE position_id='pos-001' ORDER BY sequence_no"
+            )
+        ] == before_position_events
+        payload = json.loads(_get_events(conn, "cmd-001")[-1]["payload_json"])
+        assert payload["required_predicates"]["persisted_reconciled_position_increment"] is True
+        assert payload["existing_position_increment_proof"]["current_chain_state"] == "synced"
+        assert payload["resolved_m5_local_orphan_finding_id"] == finding.finding_id
+        assert list_unresolved_findings(conn) == []
+        assert conn.execute(
+            """
+            SELECT COUNT(*) FROM position_events
+             WHERE position_id = 'pos-001' AND event_type = 'ENTRY_ORDER_VOIDED'
+            """
+        ).fetchone()[0] == 0
+        before_command_events = len(_get_events(conn, "cmd-001"))
+        before_order_facts = conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id='cmd-001'"
+        ).fetchone()[0]
+        replay = reconcile_unresolved_commands(conn, mock_client)
+        assert replay["advanced"] == 0
+        assert len(_get_events(conn, "cmd-001")) == before_command_events
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id='cmd-001'"
+        ).fetchone()[0] == before_order_facts
+
+    def test_cancel_unknown_terminal_certified_increment_preserves_existing_position(
+        self, conn, mock_client
+    ):
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=26, price=0.31)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-increment-terminal")
+        _seed_pending_entry_projection(conn, order_id="ord-increment-terminal")
+        _certify_reconciled_increment_submit(conn)
+        _make_projection_reconciled_increment(conn)
+        before = dict(
+            conn.execute(
+                """
+                SELECT phase, shares, cost_basis_usd, chain_state, chain_shares,
+                       order_id, order_status
+                  FROM position_current WHERE position_id = 'pos-001'
+                """
+            ).fetchone()
+        )
+        mock_client.get_order.return_value = {
+            "orderID": "ord-increment-terminal",
+            "status": "CANCELLED",
+            "matched_size": "0",
+        }
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        assert dict(
+            conn.execute(
+                """
+                SELECT phase, shares, cost_basis_usd, chain_state, chain_shares,
+                       order_id, order_status
+                  FROM position_current WHERE position_id = 'pos-001'
+                """
+            ).fetchone()
+        ) == before
+        payload = json.loads(_get_events(conn, "cmd-001")[-1]["payload_json"])
+        assert payload["required_predicates"]["venue_order_id_matches_point_read"] is True
+        assert payload["required_predicates"]["persisted_reconciled_position_increment"] is True
+
+    def test_cancel_unknown_increment_generation_uses_execution_fact_cost(
+        self, conn, mock_client
+    ):
+        """Projection cost drift must not replace submit-time fact authority."""
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=26, price=0.31)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-increment")
+        _seed_pending_entry_projection(conn, order_id="ord-increment")
+        _certify_reconciled_increment_submit(conn)
+        _make_projection_reconciled_increment(conn)
+        conn.execute(
+            "UPDATE position_current SET cost_basis_usd=1.49, "
+            "chain_cost_basis_usd=1.49 WHERE position_id='pos-001'"
+        )
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        assert reconcile_unresolved_commands(conn, mock_client)["advanced"] == 1
+        assert _get_state(conn, "cmd-001") == "EXPIRED"
+        payload = json.loads(_get_events(conn, "cmd-001")[-1]["payload_json"])
+        assert payload["existing_position_increment_proof"][
+            "execution_fact_cost_basis_usd"
+        ] == "1.5"
+
+    def test_cancel_unknown_increment_execution_fact_failure_is_not_silent(
+        self, conn, mock_client, monkeypatch
+    ):
+        """Canonical aggregate corruption must reach the recovery error surface."""
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=26, price=0.31)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-increment")
+        _seed_pending_entry_projection(conn, order_id="ord-increment")
+        _certify_reconciled_increment_submit(conn)
+        _make_projection_reconciled_increment(conn)
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+        from src.state import db as state_db
+
+        def fail_aggregate(*args, **kwargs):
+            raise RuntimeError("execution-fact-corrupt")
+
+        monkeypatch.setattr(
+            state_db,
+            "query_entry_execution_fill_aggregate",
+            fail_aggregate,
+        )
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["errors"] >= 1
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+        assert all(
+            row["event_type"] != "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+            for row in _get_events(conn, "cmd-001")
+        )
+
+    @pytest.mark.parametrize(
+        "forgery",
+        (
+            "finding_id",
+            "finding_omitted",
+            "finding_count",
+            "point_query_complete",
+            "point_source",
+            "increment_proof",
+            "terminal_fact",
+        ),
+    )
+    def test_cancel_unknown_increment_clearance_validator_rejects_forged_event(
+        self,
+        conn,
+        mock_client,
+        forgery,
+    ):
+        """The final append boundary must reject every forged proof identity."""
+        from src.execution.exchange_reconcile import record_finding
+        from src.state.venue_command_repo import append_event
+
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=26, price=0.31)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-increment")
+        _seed_pending_entry_projection(conn, order_id="ord-increment")
+        _certify_reconciled_increment_submit(conn)
+        _make_projection_reconciled_increment(conn)
+        record_finding(
+            conn,
+            kind="local_orphan_order",
+            subject_id="ord-increment",
+            context="ws_gap",
+            evidence={"reason": "local_open_order_absent_from_exchange_open_orders"},
+            recorded_at="2026-04-26T00:06:00Z",
+        )
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        assert reconcile_unresolved_commands(conn, mock_client)["advanced"] == 1
+        valid_event = _get_events(conn, "cmd-001")[-1]
+        assert valid_event["event_type"] == "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+        payload = json.loads(valid_event["payload_json"])
+
+        conn.execute(
+            "DELETE FROM venue_command_events WHERE event_id = ?",
+            (valid_event["event_id"],),
+        )
+        conn.execute(
+            "UPDATE venue_commands SET state = 'REVIEW_REQUIRED' WHERE command_id = 'cmd-001'"
+        )
+        before_count = conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = 'cmd-001'"
+        ).fetchone()[0]
+
+        if forgery == "finding_id":
+            payload["resolved_m5_local_orphan_finding_id"] = "forged-finding"
+        elif forgery == "finding_omitted":
+            payload.pop("resolved_m5_local_orphan_finding_id", None)
+            payload["resolved_m5_local_orphan_findings"] = 0
+            conn.execute(
+                "UPDATE exchange_reconcile_findings SET resolved_at=NULL, "
+                "resolution=NULL, resolved_by=NULL WHERE subject_id='ord-increment'"
+            )
+        elif forgery == "finding_count":
+            payload["resolved_m5_local_orphan_findings"] = 2
+        elif forgery == "point_query_complete":
+            payload["venue_absence_proof"]["point_order_query_complete"] = False
+        elif forgery == "point_source":
+            payload["venue_absence_proof"]["point_order_source"] = ""
+        elif forgery == "increment_proof":
+            payload["existing_position_increment_proof"]["capability_id"] = "forged"
+        elif forgery == "terminal_fact":
+            payload["terminal_order_fact_id"] = -1
+
+        with pytest.raises(ValueError):
+            append_event(
+                conn,
+                command_id="cmd-001",
+                event_type="REVIEW_CLEARED_NO_VENUE_EXPOSURE",
+                occurred_at="2026-04-26T00:09:00Z",
+                payload=payload,
+            )
+
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_command_events WHERE command_id = 'cmd-001'"
+        ).fetchone()[0] == before_count
+
+    @pytest.mark.parametrize(
+        "break_proof",
+        [
+            "capability_disallowed",
+            "token_mismatch",
+            "action_mismatch",
+            "snapshot_mismatch",
+            "order_type_mismatch",
+            "wealth_mismatch",
+            "capability_hash_mismatch",
+            "generation_mismatch",
+            "condition_mismatch",
+            "chain_not_synced",
+            "chain_share_mismatch",
+        ],
+    )
+    def test_cancel_unknown_absent_uncertified_increment_stays_review_required(
+        self, conn, mock_client, break_proof
+    ):
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=26, price=0.31)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-increment-bad")
+        _seed_pending_entry_projection(conn, order_id="ord-increment-bad")
+        _certify_reconciled_increment_submit(conn)
+        _make_projection_reconciled_increment(conn)
+        if break_proof == "condition_mismatch":
+            mismatched_snapshot_id = _ensure_snapshot(
+                conn,
+                token_id="tok-001",
+                snapshot_id="snap-other-condition",
+                condition_id="other-condition",
+                no_token_id="tok-001-no",
+                selected_outcome_token_id="tok-001",
+                outcome_label="YES",
+            )
+            conn.execute(
+                "UPDATE venue_commands SET snapshot_id=? WHERE command_id='cmd-001'",
+                (mismatched_snapshot_id,),
+            )
+            event = conn.execute(
+                "SELECT event_id,payload_json FROM venue_command_events "
+                "WHERE command_id='cmd-001' AND event_type='SUBMIT_REQUESTED'"
+            ).fetchone()
+            payload = json.loads(event["payload_json"])
+            capability = payload["execution_capability"]
+            capability["executable_snapshot_id"] = mismatched_snapshot_id
+            capability_body = dict(capability)
+            capability_body.pop("capability_id", None)
+            capability["capability_id"] = hashlib.sha256(
+                json.dumps(
+                    capability_body,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()[:32]
+            conn.execute(
+                "UPDATE venue_command_events SET payload_json=? WHERE event_id=?",
+                (json.dumps(payload, sort_keys=True), event["event_id"]),
+            )
+        elif break_proof == "chain_not_synced":
+            conn.execute(
+                "UPDATE position_current SET chain_state='exit_pending_missing' "
+                "WHERE position_id='pos-001'"
+            )
+        elif break_proof == "chain_share_mismatch":
+            conn.execute(
+                "UPDATE position_current SET chain_shares=4 "
+                "WHERE position_id='pos-001'"
+            )
+        else:
+            event = conn.execute(
+                """
+                SELECT event_id, payload_json FROM venue_command_events
+                 WHERE command_id='cmd-001' AND event_type='SUBMIT_REQUESTED'
+                """
+            ).fetchone()
+            payload = json.loads(event["payload_json"])
+            if break_proof == "capability_disallowed":
+                payload["execution_capability"]["allowed"] = False
+            elif break_proof == "token_mismatch":
+                payload["execution_capability"]["token_id"] = "other-token"
+            elif break_proof == "action_mismatch":
+                payload["execution_capability"]["action"] = "EXIT"
+            elif break_proof == "snapshot_mismatch":
+                payload["execution_capability"]["executable_snapshot_id"] = "other-snapshot"
+            elif break_proof == "order_type_mismatch":
+                payload["execution_capability"]["order_type"] = "FOK"
+            elif break_proof == "capability_hash_mismatch":
+                payload["execution_capability"]["capability_id"] = "0" * 32
+            elif break_proof == "generation_mismatch":
+                duplicate = next(
+                    component
+                    for component in payload["execution_capability"]["components"]
+                    if component.get("component") == "entry_duplicate_same_token"
+                )
+                duplicate["increment_position_generation"] = "0" * 64
+            else:
+                wealth = next(
+                    component
+                    for component in payload["execution_capability"]["components"]
+                    if component.get("component") == "global_increment_wealth_binding"
+                )
+                wealth["details"]["current"] = "other-wealth"
+            if break_proof not in {"capability_hash_mismatch"}:
+                capability = payload["execution_capability"]
+                capability_body = dict(capability)
+                capability_body.pop("capability_id", None)
+                capability["capability_id"] = hashlib.sha256(
+                    json.dumps(
+                        capability_body,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).hexdigest()[:32]
+            conn.execute(
+                "UPDATE venue_command_events SET payload_json=? WHERE event_id=?",
+                (json.dumps(payload, sort_keys=True), event["event_id"]),
+            )
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] == 0
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+
+    @pytest.mark.parametrize("incomplete_surface", ["point", "open_orders", "trades"])
+    def test_cancel_unknown_certified_increment_incomplete_reads_stay_review_required(
+        self, conn, mock_client, incomplete_surface
+    ):
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=26, price=0.31)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id="ord-increment-incomplete")
+        _seed_pending_entry_projection(conn, order_id="ord-increment-incomplete")
+        _certify_reconciled_increment_submit(conn)
+        _make_projection_reconciled_increment(conn)
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+        if incomplete_surface == "point":
+            mock_client.get_order.authenticated_point_reads_are_complete = False
+        elif incomplete_surface == "open_orders":
+            mock_client.get_open_orders.venue_reads_are_complete = False
+        else:
+            mock_client.get_trades.venue_reads_are_complete = False
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        summary = reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["advanced"] == 0
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+
+    @pytest.mark.parametrize("contradiction", ["open_order", "trade", "local_trade_fact"])
+    def test_cancel_unknown_certified_increment_positive_venue_fact_stays_review_required(
+        self, conn, mock_client, contradiction
+    ):
+        order_id = "ord-increment-positive"
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=26, price=0.31)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id=order_id)
+        _seed_pending_entry_projection(conn, order_id=order_id)
+        _certify_reconciled_increment_submit(conn)
+        _make_projection_reconciled_increment(conn)
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+        venue_fact = {
+            "id": order_id,
+            "orderID": order_id,
+            "taker_order_id": order_id,
+            "asset_id": "tok-001",
+            "side": "BUY",
+            "price": "0.31",
+            "original_size": "26",
+            "size": "26",
+            "status": "CONFIRMED",
+            "match_time": "2026-04-26T00:05:00Z",
+        }
+        if contradiction == "open_order":
+            mock_client.get_open_orders.return_value = [venue_fact]
+        elif contradiction == "trade":
+            mock_client.get_trades.return_value = [venue_fact]
+        else:
+            _append_confirmed_trade_fact(
+                conn,
+                order_id=order_id,
+                filled_size="1",
+                fill_price="0.31",
+            )
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        reconcile_unresolved_commands(conn, mock_client)
+
+        if contradiction == "trade":
+            assert _get_state(conn, "cmd-001") == "FILLED"
+        else:
+            assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+        assert all(
+            row["event_type"] != "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
+            for row in _get_events(conn, "cmd-001")
+        )
+
+    def test_cancel_unknown_certified_increment_ambiguous_finding_stays_review_required(
+        self, conn, mock_client
+    ):
+        from src.execution.exchange_reconcile import record_finding
+
+        order_id = "ord-increment-ambiguous"
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=26, price=0.31)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id=order_id)
+        _seed_pending_entry_projection(conn, order_id=order_id)
+        _certify_reconciled_increment_submit(conn)
+        _make_projection_reconciled_increment(conn)
+        for context in ("ws_gap", "periodic"):
+            record_finding(
+                conn,
+                kind="local_orphan_order",
+                subject_id=order_id,
+                context=context,
+                evidence={"reason": context},
+                recorded_at="2026-04-26T00:06:00Z",
+            )
+        before_facts = conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id='cmd-001'"
+        ).fetchone()[0]
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        from src.execution.command_recovery import reconcile_unresolved_commands
+
+        reconcile_unresolved_commands(conn, mock_client)
+
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id='cmd-001'"
+        ).fetchone()[0] == before_facts
+        assert conn.execute(
+            "SELECT COUNT(*) FROM exchange_reconcile_findings WHERE resolved_at IS NULL"
+        ).fetchone()[0] == 2
+
+    def test_cancel_unknown_certified_increment_clearance_failure_rolls_back_savepoint(
+        self, conn, mock_client, monkeypatch
+    ):
+        from src.execution import command_recovery
+        from src.execution.exchange_reconcile import record_finding
+
+        order_id = "ord-increment-rollback"
+        _insert(conn, intent_kind="ENTRY", side="BUY", size=26, price=0.31)
+        _advance_to_cancel_unknown_review_required(conn, venue_order_id=order_id)
+        _seed_pending_entry_projection(conn, order_id=order_id)
+        _certify_reconciled_increment_submit(conn)
+        _make_projection_reconciled_increment(conn)
+        finding = record_finding(
+            conn,
+            kind="local_orphan_order",
+            subject_id=order_id,
+            context="ws_gap",
+            evidence={"reason": "rollback-antibody"},
+            recorded_at="2026-04-26T00:06:00Z",
+        )
+        before_position = dict(
+            conn.execute(
+                "SELECT * FROM position_current WHERE position_id='pos-001'"
+            ).fetchone()
+        )
+        before_events = len(_get_events(conn, "cmd-001"))
+        before_facts = conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id='cmd-001'"
+        ).fetchone()[0]
+        real_append_event = command_recovery.append_event
+
+        def fail_clearance(*args, **kwargs):
+            if kwargs.get("event_type") == "REVIEW_CLEARED_NO_VENUE_EXPOSURE":
+                raise RuntimeError("injected clearance failure")
+            return real_append_event(*args, **kwargs)
+
+        monkeypatch.setattr(command_recovery, "append_event", fail_clearance)
+        mock_client.get_order.return_value = None
+        mock_client.get_open_orders.return_value = []
+        mock_client.get_trades.return_value = []
+
+        summary = command_recovery.reconcile_unresolved_commands(conn, mock_client)
+
+        assert summary["errors"] >= 1
+        assert _get_state(conn, "cmd-001") == "REVIEW_REQUIRED"
+        assert len(_get_events(conn, "cmd-001")) == before_events
+        assert conn.execute(
+            "SELECT COUNT(*) FROM venue_order_facts WHERE command_id='cmd-001'"
+        ).fetchone()[0] == before_facts
+        assert dict(
+            conn.execute(
+                "SELECT * FROM position_current WHERE position_id='pos-001'"
+            ).fetchone()
+        ) == before_position
+        assert conn.execute(
+            "SELECT resolved_at FROM exchange_reconcile_findings WHERE finding_id=?",
+            (finding.finding_id,),
+        ).fetchone()[0] is None
 
     def test_cancel_unknown_absence_cannot_overwrite_positive_order_fact(
         self, conn, mock_client
@@ -18224,12 +18919,13 @@ class TestRecoveryResolutionTable:
             "original_size": "8.25",
             "size_matched": "1.149423",
         }
-        # Scheduled live recovery derives exact order rows from its one complete
-        # account snapshot; it deliberately performs no separate point read.
+        # Scheduled live recovery captures both complete account truth and the
+        # exact authenticated point order under one shared deadline.
         mock_client.get_account_truth.return_value = SimpleNamespace(
             open_orders=[terminal_order],
             trades=[],
         )
+        mock_client.get_order.return_value = terminal_order
         mock_client.get_open_orders.return_value = []
         mock_client.get_trades.return_value = []
 
@@ -18350,7 +19046,7 @@ class TestRecoveryResolutionTable:
             _terminal_interrupt,
         )
         monkeypatch.setenv("ZEUS_LIVE_RECOVERY_DB_BUDGET_SECONDS", "0")
-        mock_client.get_order.side_effect = lambda order_id: {
+        mock_client.get_order.side_effect = lambda order_id, **_kwargs: {
             "orderID": order_id,
             "status": "CANCELED",
             "original_size": "14",

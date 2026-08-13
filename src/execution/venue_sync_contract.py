@@ -450,6 +450,7 @@ class VenueReadSnapshot:
         object.__setattr__(self, "_trades", list(trades) if trades is not None else None)
         object.__setattr__(self, "_idempotency", dict(idempotency))
         object.__setattr__(self, "_market_info", dict(market_info))
+        object.__setattr__(self, "_point_reads_complete", True)
 
     def get_open_orders(self):
         if self._open_orders is None:
@@ -488,6 +489,13 @@ class VenueReadSnapshot:
     def venue_reads_are_complete(self) -> bool:
         # Account surfaces were captured eagerly and fully; declare completeness
         # so absence-proof passes treat the snapshot as authoritative.
+        return True
+
+    @property
+    def authenticated_point_reads_are_complete(self) -> bool:
+        # Every requested identity was captured off-lock. Captured read errors
+        # replay as SnapshotMissError; only a successful exact read or the
+        # snapshot's authenticated absence sentinel can authorize APPLY.
         return True
 
     @property
@@ -576,53 +584,34 @@ def capture_venue_read_snapshot(
 
     orders: dict = {}
     requested_order_ids = {str(o) for o in order_ids if str(o).strip()}
-    if derive_orders_from_account_truth:
-        for order in open_orders:
-            raw = getattr(order, "raw", None)
-            order_id = (
-                getattr(order, "order_id", None)
-                or (
-                    raw.get("order_id")
-                    or raw.get("orderID")
-                    or raw.get("id")
-                    if isinstance(raw, Mapping)
-                    else None
-                )
-                or (
-                    order.get("order_id")
-                    or order.get("orderID")
-                    or order.get("id")
-                    if isinstance(order, Mapping)
-                    else None
-                )
-            )
-            if order_id is not None and str(order_id) in requested_order_ids:
-                orders[str(order_id)] = order
-        # get_account_truth completed all open-order and trade pages under one
-        # shared deadline. An ID absent from open orders is therefore not live;
-        # positive fills remain available through the same snapshot's trades.
+    get_order_source = next(
+        (
+            getattr(source, "get_order", None)
+            for source in venue_sources
+            if callable(getattr(source, "get_order", None))
+        ),
+        None,
+    )
+    if callable(get_order_source):
         for oid in requested_order_ids:
-            orders.setdefault(oid, None)
-    else:
-        get_order_source = next((getattr(source, "get_order", None) for source in venue_sources if callable(getattr(source, "get_order", None))), None)
-        if callable(get_order_source):
-            for oid in requested_order_ids:
-                try:
-                    orders[oid] = get_order_source(oid)
-                except VenueResponseShapeError as exc:
-                    logger.warning("venue_sync_contract: get_order(%s) failed during snapshot", oid, exc_info=True)
-                    # The pinned CLOB SDK returns an exact empty object when a
-                    # previously known order has been purged. Preserve every other
-                    # shape failure as unknown; only this observed get_order shape
-                    # is normalized to the wrapper's documented NOT_FOUND value.
-                    orders[oid] = (
-                        None
-                        if exc.endpoint == "get_order" and exc.raw == {}
-                        else _CapturedVenueReadFailure(exc)
+            try:
+                if derive_orders_from_account_truth:
+                    orders[oid] = get_order_source(
+                        oid,
+                        deadline_monotonic=account_deadline,
                     )
-                except Exception as exc:  # noqa: BLE001 — preserve timeout/auth/read failure.
-                    logger.warning("venue_sync_contract: get_order(%s) failed during snapshot", oid, exc_info=True)
-                    orders[oid] = _CapturedVenueReadFailure(exc)
+                else:
+                    orders[oid] = get_order_source(oid)
+            except VenueResponseShapeError as exc:
+                logger.warning("venue_sync_contract: get_order(%s) failed during snapshot", oid, exc_info=True)
+                orders[oid] = (
+                    None
+                    if exc.endpoint == "get_order" and exc.raw == {}
+                    else _CapturedVenueReadFailure(exc)
+                )
+            except Exception as exc:  # noqa: BLE001 — preserve timeout/auth/read failure.
+                logger.warning("venue_sync_contract: get_order(%s) failed during snapshot", oid, exc_info=True)
+                orders[oid] = _CapturedVenueReadFailure(exc)
 
     idempotency: dict = {}
     finder = next(

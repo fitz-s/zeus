@@ -73,6 +73,7 @@ from src.state.venue_command_repo import (
     append_event,
     append_order_fact,
     append_trade_fact,
+    reconciled_increment_no_fill_proof,
     UNRESOLVED_SIDE_EFFECT_STATES,
 )
 from src.state.write_coordinator import WriteLeaseTimeout
@@ -1019,18 +1020,23 @@ def _client_point_order_read(client, order_id: str) -> SimpleNamespace:
     explicitly declare the same complete point-read contract.
     """
 
+    declared_complete = False
     adapter_factory = getattr(client, "_ensure_v2_adapter", None)
     if callable(adapter_factory):
         source = adapter_factory()
         reader = getattr(source, "get_order", None)
-        authenticated = callable(reader)
+        authenticated = bool(
+            callable(reader)
+            and getattr(source, "authenticated_point_reads_are_complete", False)
+        )
     else:
         source = client
         reader = getattr(client, "get_order", None)
-        authenticated = bool(
+        declared_complete = bool(
             getattr(client, "authenticated_point_reads_are_complete", False)
             or getattr(reader, "authenticated_point_reads_are_complete", False)
         )
+        authenticated = declared_complete
     source_name = f"{source.__class__.__name__}.get_order"
     if not callable(reader) or not authenticated:
         return SimpleNamespace(
@@ -1051,6 +1057,15 @@ def _client_point_order_read(client, order_id: str) -> SimpleNamespace:
             source=f"{source_name}:authenticated_http_404",
             order_id=str(order_id),
             absence_reason="authenticated_order_404",
+        )
+    if value is None and declared_complete:
+        return SimpleNamespace(
+            point_order=None,
+            absent=True,
+            query_complete=True,
+            source=f"{source_name}:declared_authenticated_absence",
+            order_id=str(order_id),
+            absence_reason="declared_authenticated_order_absence",
         )
     payload = _venue_order_payload(value)
     if payload is None or str(_extract_order_id(payload) or "") != str(order_id):
@@ -14602,6 +14617,33 @@ def _resolve_m5_local_orphan_findings(
     return resolved
 
 
+def _exact_m5_local_orphan_finding_id(
+    conn: sqlite3.Connection,
+    *,
+    venue_order_id: str,
+) -> tuple[bool, str | None]:
+    """Return one exact unresolved finding identity, or reject ambiguity."""
+
+    if not _table_exists(conn, "exchange_reconcile_findings"):
+        return True, None
+    rows = conn.execute(
+        """
+        SELECT finding_id
+          FROM exchange_reconcile_findings
+         WHERE kind = 'local_orphan_order'
+           AND subject_id = ?
+           AND resolved_at IS NULL
+         ORDER BY recorded_at, finding_id
+        """,
+        (venue_order_id,),
+    ).fetchall()
+    if not rows:
+        return True, None
+    if len(rows) != 1:
+        return False, None
+    return True, str(_dict_row(rows[0])["finding_id"])
+
+
 def _resolve_m5_exchange_ghost_findings(
     conn: sqlite3.Connection,
     *,
@@ -18723,7 +18765,7 @@ def _review_required_cancel_unknown_live_order_recovery(
     if not venue_order_id:
         return "stayed"
     try:
-        raw_order = client.get_order(venue_order_id)
+        point_read = _client_point_order_read(client, venue_order_id)
     except Exception as exc:
         logger.warning(
             "recovery: review-required cancel-unknown point lookup for command %s "
@@ -18733,12 +18775,20 @@ def _review_required_cancel_unknown_live_order_recovery(
             exc,
         )
         return "error"
-    order = _venue_order_payload(raw_order)
+    if not point_read.query_complete:
+        logger.warning(
+            "recovery: review-required cancel-unknown point lookup for command %s "
+            "(venue_order_id=%s) was not authenticated-complete",
+            cmd.command_id,
+            venue_order_id,
+        )
+        return "stayed"
+    order = point_read.point_order
     point_order_no_live_record = _point_order_no_live_record(
         order,
         expected_order_id=venue_order_id,
     )
-    if order is None or point_order_no_live_record:
+    if point_read.absent or point_order_no_live_record:
         point_order_status = (
             str((order or {}).get("status") or (order or {}).get("state") or "NOT_FOUND")
             .upper()
@@ -18792,19 +18842,36 @@ def _review_required_cancel_unknown_live_order_recovery(
         )
         if partial_outcome != "not_applicable":
             return partial_outcome
-        if not _ensure_entry_projection_is_zero_exposure(
-            conn,
-            command=command,
-            order_id=venue_order_id,
+        matching_trades = _matching_trades_for_command(
+            client,
+            command,
+            trades=trade_read.items,
+        )
+        if not (
+            open_order_read.query_complete is True
+            and trade_read.query_complete is True
         ):
             logger.info(
                 "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
-                "(point order %s but entry projection is not zero-exposure pending)",
+                "(authenticated account scan incomplete)",
+                cmd.command_id,
+            )
+            return "stayed"
+        increment_evidence = reconciled_increment_no_fill_proof(conn, cmd.command_id)
+        zero_exposure_projection = _ensure_entry_projection_is_zero_exposure(
+            conn,
+            command=command,
+            order_id=venue_order_id,
+        )
+        if not zero_exposure_projection and increment_evidence is None:
+            logger.info(
+                "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
+                "(point order %s but projection is neither zero exposure nor a "
+                "submit-certified chain-synced increment)",
                 cmd.command_id,
                 "has no live record" if point_order_no_live_record else "absent",
             )
             return "stayed"
-        matching_trades = _matching_trades_for_command(client, command)
         if matching_open_orders:
             logger.info(
                 "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
@@ -18872,6 +18939,17 @@ def _review_required_cancel_unknown_live_order_recovery(
                 cmd.command_id,
             )
             return "stayed"
+        finding_identity_exact, finding_id = _exact_m5_local_orphan_finding_id(
+            conn,
+            venue_order_id=venue_order_id,
+        )
+        if not finding_identity_exact:
+            logger.info(
+                "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
+                "(local-orphan finding identity is ambiguous)",
+                cmd.command_id,
+            )
+            return "stayed"
         now = _now_iso()
         safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in cmd.command_id)
         sp_name = f"sp_cancel_unknown_no_live_exposure_{safe_command_id}"
@@ -18888,13 +18966,24 @@ def _review_required_cancel_unknown_live_order_recovery(
                 source_reason=source_reason,
                 venue_resp_present_for_terminal_state=False,
             )
+            locked_identity_exact, locked_finding_id = _exact_m5_local_orphan_finding_id(
+                conn,
+                venue_order_id=venue_order_id,
+            )
+            if not locked_identity_exact or locked_finding_id != finding_id:
+                raise RuntimeError("cancel-unknown local-orphan finding identity changed")
             resolved_findings = _resolve_m5_local_orphan_findings(
                 conn,
                 command_id=cmd.command_id,
                 venue_order_id=venue_order_id,
                 resolved_at=now,
                 resolution=resolution,
+                finding_id=finding_id,
             )
+            if finding_id is not None and resolved_findings != 1:
+                raise RuntimeError(
+                    f"cancel-unknown exact finding CAS failed for {finding_id}"
+                )
             point_order_presence_predicate = {
                 "point_order_no_live_record": True,
             } if point_order_no_live_record else {
@@ -18919,7 +19008,12 @@ def _review_required_cancel_unknown_live_order_recovery(
                     "no_trade_facts": True,
                     "no_matching_open_orders": True,
                     "no_matching_trades": True,
+                    "zero_exposure_projection": zero_exposure_projection,
+                    "persisted_reconciled_position_increment": increment_evidence is not None,
+                    "current_chain_synced_increment_exposure": increment_evidence is not None,
                 },
+                "existing_position_increment_proof": increment_evidence,
+                "resolved_m5_local_orphan_finding_id": finding_id,
                 "terminal_order_fact_id": fact_id,
                 "terminal_order_fact": fact_payload,
                 "resolved_m5_local_orphan_findings": resolved_findings,
@@ -18938,9 +19032,14 @@ def _review_required_cancel_unknown_live_order_recovery(
                     "time_window_end": now,
                     "open_orders_checked": True,
                     "trades_checked": True,
-                    "open_orders_query_complete": True,
-                    "trades_query_complete": True,
-                    "pagination_scope": "sdk_get_trades_returned_all_visible_user_trades",
+                    "point_order_query_complete": point_read.query_complete,
+                    "point_order_source": point_read.source,
+                    "point_order_absence_reason": point_read.absence_reason,
+                    "open_orders_query_complete": open_order_read.query_complete,
+                    "trades_query_complete": trade_read.query_complete,
+                    "pagination_scope": (
+                        f"{open_order_read.pagination_scope}|{trade_read.pagination_scope}"
+                    ),
                     "matching_open_order_count": 0,
                     "matching_trade_count": 0,
                     "matching_open_orders": [],
@@ -18966,21 +19065,22 @@ def _review_required_cancel_unknown_live_order_recovery(
                 occurred_at=now,
                 payload=payload,
             )
-            _append_entry_order_voided_projection(
-                conn,
-                command=command,
-                order_fact={
-                    **command,
-                    "order_fact_id": fact_id,
-                    "order_fact_state": "VENUE_WIPED",
-                    "order_fact_observed_at": now,
-                    "order_fact_venue_order_id": venue_order_id,
-                    "order_fact_remaining_size": "0",
-                    "order_fact_matched_size": "0",
-                    "order_fact_source": "REST",
-                },
-                occurred_at=now,
-            )
+            if increment_evidence is None:
+                _append_entry_order_voided_projection(
+                    conn,
+                    command=command,
+                    order_fact={
+                        **command,
+                        "order_fact_id": fact_id,
+                        "order_fact_state": "VENUE_WIPED",
+                        "order_fact_observed_at": now,
+                        "order_fact_venue_order_id": venue_order_id,
+                        "order_fact_remaining_size": "0",
+                        "order_fact_matched_size": "0",
+                        "order_fact_source": "REST",
+                    },
+                    occurred_at=now,
+                )
             conn.execute(f"RELEASE SAVEPOINT {sp_name}")
         except Exception:
             conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
@@ -19112,20 +19212,58 @@ def _review_required_cancel_unknown_live_order_recovery(
                     (cmd.command_id,),
                 ).fetchone()
             )
-            if not _ensure_entry_projection_is_zero_exposure(
-                conn,
-                command=command,
-                order_id=venue_order_id,
-            ):
+            try:
+                open_order_read = _client_read_items(client, "get_open_orders")
+                trade_read = _client_read_items(client, "get_trades")
+            except Exception as exc:
+                logger.warning(
+                    "recovery: command %s terminal no-fill account scan unavailable: %s",
+                    cmd.command_id,
+                    exc,
+                )
+                return "stayed"
+            if not (open_order_read.query_complete and trade_read.query_complete):
                 logger.info(
-                    "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
-                    "(terminal no-fill point order but entry projection is not zero-exposure pending)",
+                    "recovery: command %s terminal no-fill account scan incomplete",
                     cmd.command_id,
                 )
                 return "stayed"
-            matching_open_orders = _matching_open_orders_for_command(client, command)
-            matching_trades = _matching_trades_for_command(client, command)
+            increment_evidence = reconciled_increment_no_fill_proof(conn, cmd.command_id)
+            zero_exposure_projection = _ensure_entry_projection_is_zero_exposure(
+                conn,
+                command=command,
+                order_id=venue_order_id,
+            )
+            if not zero_exposure_projection and increment_evidence is None:
+                logger.info(
+                    "recovery: command %s REVIEW_REQUIRED cancel-unknown stayed "
+                    "(terminal no-fill projection is neither zero exposure nor a "
+                    "submit-certified chain-synced increment)",
+                    cmd.command_id,
+                )
+                return "stayed"
+            matching_open_orders = _matching_open_orders_for_command(
+                client,
+                command,
+                open_orders=open_order_read.items,
+            )
+            matching_trades = _matching_trades_for_command(
+                client,
+                command,
+                trades=trade_read.items,
+            )
             if not matching_open_orders and not matching_trades:
+                finding_identity_exact, finding_id = _exact_m5_local_orphan_finding_id(
+                    conn,
+                    venue_order_id=venue_order_id,
+                )
+                if not finding_identity_exact:
+                    logger.info(
+                        "recovery: command %s terminal no-fill local-orphan finding "
+                        "identity is ambiguous",
+                        cmd.command_id,
+                    )
+                    return "stayed"
                 now = _now_iso()
                 safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in cmd.command_id)
                 sp_name = f"sp_cancel_unknown_no_fill_{safe_command_id}"
@@ -19141,13 +19279,28 @@ def _review_required_cancel_unknown_live_order_recovery(
                         matching_trades=matching_trades,
                         source_reason="cancel_unknown_point_order_terminal_no_fill",
                     )
+                    locked_identity_exact, locked_finding_id = (
+                        _exact_m5_local_orphan_finding_id(
+                            conn,
+                            venue_order_id=venue_order_id,
+                        )
+                    )
+                    if not locked_identity_exact or locked_finding_id != finding_id:
+                        raise RuntimeError(
+                            "cancel-unknown local-orphan finding identity changed"
+                        )
                     resolved_findings = _resolve_m5_local_orphan_findings(
                         conn,
                         command_id=cmd.command_id,
                         venue_order_id=venue_order_id,
                         resolved_at=now,
                         resolution="command_recovery_terminal_no_fill",
+                        finding_id=finding_id,
                     )
+                    if finding_id is not None and resolved_findings != 1:
+                        raise RuntimeError(
+                            f"cancel-unknown exact finding CAS failed for {finding_id}"
+                        )
                     payload = {
                         "schema_version": 1,
                         "reason": "review_cleared_no_venue_exposure",
@@ -19167,10 +19320,14 @@ def _review_required_cancel_unknown_live_order_recovery(
                             "no_trade_facts": True,
                             "no_matching_open_orders": True,
                             "no_matching_trades": True,
+                            "persisted_reconciled_position_increment": increment_evidence is not None,
+                            "current_chain_synced_increment_exposure": increment_evidence is not None,
                         },
+                        "existing_position_increment_proof": increment_evidence,
                         "terminal_order_fact_id": fact_id,
                         "terminal_order_fact": fact_payload,
                         "resolved_m5_local_orphan_findings": resolved_findings,
+                        "resolved_m5_local_orphan_finding_id": finding_id,
                         "venue_absence_proof": {
                             "source": "authenticated_clob_user_read",
                             "owner_scope": "authenticated_funder",
@@ -19186,9 +19343,15 @@ def _review_required_cancel_unknown_live_order_recovery(
                             "time_window_end": now,
                             "open_orders_checked": True,
                             "trades_checked": True,
-                            "open_orders_query_complete": True,
-                            "trades_query_complete": True,
-                            "pagination_scope": "sdk_get_trades_returned_all_visible_user_trades",
+                            "point_order_query_complete": point_read.query_complete,
+                            "point_order_source": point_read.source,
+                            "point_order_absence_reason": point_read.absence_reason,
+                            "open_orders_query_complete": open_order_read.query_complete,
+                            "trades_query_complete": trade_read.query_complete,
+                            "pagination_scope": (
+                                f"{open_order_read.pagination_scope}|"
+                                f"{trade_read.pagination_scope}"
+                            ),
                             "matching_open_order_count": 0,
                             "matching_trade_count": 0,
                             "matching_open_orders": [],
@@ -19214,21 +19377,22 @@ def _review_required_cancel_unknown_live_order_recovery(
                         occurred_at=now,
                         payload=payload,
                     )
-                    _append_entry_order_voided_projection(
-                        conn,
-                        command=command,
-                        order_fact={
-                            **command,
-                            "order_fact_id": fact_id,
-                            "order_fact_state": fact_state,
-                            "order_fact_observed_at": now,
-                            "order_fact_venue_order_id": venue_order_id,
-                            "order_fact_remaining_size": "0",
-                            "order_fact_matched_size": "0",
-                            "order_fact_source": "REST",
-                        },
-                        occurred_at=now,
-                    )
+                    if increment_evidence is None:
+                        _append_entry_order_voided_projection(
+                            conn,
+                            command=command,
+                            order_fact={
+                                **command,
+                                "order_fact_id": fact_id,
+                                "order_fact_state": fact_state,
+                                "order_fact_observed_at": now,
+                                "order_fact_venue_order_id": venue_order_id,
+                                "order_fact_remaining_size": "0",
+                                "order_fact_matched_size": "0",
+                                "order_fact_source": "REST",
+                            },
+                            occurred_at=now,
+                        )
                     conn.execute(f"RELEASE SAVEPOINT {sp_name}")
                 except Exception:
                     conn.execute(f"ROLLBACK TO SAVEPOINT {sp_name}")
