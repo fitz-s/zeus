@@ -4,6 +4,23 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-13 Positive winner retains time for submit-time revalidation
+
+After actual admission matched the proof comparator, a Shenzhen BUY winner was
+selected with positive posterior-mean growth but spent about 26 seconds in its
+mandatory selected-family JIT revalidation.  The whole global cut had only 30
+seconds including scope, book, and solve, so the exact duplicate-order read was
+interrupted at the deadline and no venue command could be formed.
+
+The cut is now 45 seconds.  Existing cancellation still yields to pending held
+monitor or new hard Day0 authority; the book remains bounded by its separate
+180-second expiry.  SCOPE is one global auction invocation.  DRAIN is a selected
+winner completing JIT preflight and final actuation inside the enlarged cut.
+RESET is the next invocation or any cancellation/book expiry, which still ends
+the current cut without a venue side effect.  Acceptance requires the focused
+work-cut antibody, the global auction integration suite, exact-head restart,
+and a post-load command/venue receipt or an explicit current rejection reason.
+
 ## 2026-08-13 Current positive growth, not prior settlement, admits risk
 
 The statistical-entry gate required profitable settlement evidence from the

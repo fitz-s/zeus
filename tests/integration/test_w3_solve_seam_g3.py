@@ -20012,9 +20012,9 @@ def test_global_book_fake_future_stops_dispatch_at_201_584_deadline(monkeypatch)
     assert network_calls == []
 
 
-def test_global_work_cut_preserves_healthy_23_second_path_then_deadlines():
+def test_global_work_cut_reserves_selected_family_jit_then_deadlines():
     clock = [0.0]
-    assert era._GLOBAL_AUCTION_WORK_CUT_SECONDS == 30.0
+    assert era._GLOBAL_AUCTION_WORK_CUT_SECONDS == 45.0
     work_context = universe.WorkContext(
         deadline_monotonic=era._GLOBAL_AUCTION_WORK_CUT_SECONDS,
         monotonic=lambda: clock[0],
@@ -20025,12 +20025,12 @@ def test_global_work_cut_preserves_healthy_23_second_path_then_deadlines():
         stage="normal_book_request",
     ) == pytest.approx(8.0)
     clock[0] = 23.0
-    assert work_context.checkpoint("normal_publish") == pytest.approx(7.0)
+    assert work_context.checkpoint("normal_publish") == pytest.approx(22.0)
     assert work_context.clipped_timeout(
         8.0,
         stage="late_book_request",
-    ) == pytest.approx(7.0)
-    clock[0] = 30.0
+    ) == pytest.approx(8.0)
+    clock[0] = 45.0
     with pytest.raises(universe.WorkDeferred) as caught:
         work_context.checkpoint("deadline")
     assert caught.value.code is universe.WorkDeferredCode.DEADLINE

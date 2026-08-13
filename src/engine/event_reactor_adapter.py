@@ -341,7 +341,7 @@ from src.calibration.emos import (
     bin_probability_settlement as _bin_probability_settlement,
 )
 
-_GLOBAL_AUCTION_WORK_CUT_SECONDS = 30.0
+_GLOBAL_AUCTION_WORK_CUT_SECONDS = 45.0
 
 
 UTC = timezone.utc
@@ -8081,9 +8081,11 @@ def event_bound_live_adapter_from_trade_conn(
 
         global_work_context = WorkContext(
             # The periodic held-monitor handoff cadence is 30s and canonical
-            # monitor evidence is stale at 150s. A distinct work-cut contract
-            # preserves observed healthy 23s auctions without borrowing the
-            # per-request book timeout as whole-batch authority.
+            # monitor evidence is stale at 150s.  The cancellation probe still
+            # yields to pending monitor work, while a quiet cut gets enough
+            # time for the observed ~26s selected-family JIT revalidation after
+            # the global scope/book/solve stages.  Do not borrow the 180s book
+            # TTL as whole-batch authority.
             deadline_monotonic=(
                 global_batch_started + _GLOBAL_AUCTION_WORK_CUT_SECONDS
             ),
