@@ -1938,6 +1938,9 @@ files:
       materializes its newest probability identity under non-GREEN risk while its
       BUY lane remains frozen no-submit; degraded entry authority cannot consume
       the wake before continuous redecision has a durable carrier. The unpaged
+      entry-pause path may also advance a current carrier into the same global
+      cut solely to persist a schema-22 side-effect-free capital counterfactual;
+      actual BUY authority remains independently rejected at the adapter. The unpaged
       winner claim path threads the actual
       retained carrier through claimed-set coverage and actuation; transient
       finalization carries the exact claim generation so a late worker cannot

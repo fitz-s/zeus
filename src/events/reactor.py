@@ -722,6 +722,7 @@ def _paused_entry_wake_should_park(
     ) = None,
     allow_forecast_carrier_progress: bool = False,
     durable_exact_held_completion: bool = False,
+    allow_capital_proof_progress: bool = False,
 ) -> bool:
     """Park paused BUY work unless this wake has protected non-BUY progress."""
 
@@ -741,6 +742,14 @@ def _paused_entry_wake_should_park(
     if allow_forecast_carrier_progress:
         return False
     if durable_exact_held_completion:
+        return False
+    if allow_capital_proof_progress:
+        # SCOPE: admission-paused BUY carriers may enter only the existing
+        # adapter/global-batch cut, where actual BUY remains rejected and the
+        # schema-22 capital counterfactual has no actuator. DRAIN: each current
+        # carrier freezes one settlement-grade proof receipt. RESET: a passing
+        # capital evaluator clears the independent entry gate; disabling this
+        # flag restores queue parking without changing venue authority.
         return False
     if not held_sell_reauction_requests:
         return True
@@ -7748,6 +7757,7 @@ def run_edli_event_reactor_cycle(
         held_sell_request_exposure_provider=held_sell_request_exposure_provider,
         allow_forecast_carrier_progress=forecast_posterior_wake,
         durable_exact_held_completion=held_sell_completion_cycle,
+        allow_capital_proof_progress=True,
     ):
         if active_lock.acquire(blocking=False):
             try:
@@ -8586,6 +8596,7 @@ def run_edli_event_reactor_cycle(
                 durable_exact_held_completion=(
                     active_held_sell_completion_cycle
                 ),
+                allow_capital_proof_progress=True,
             ),
             final_intent_submit=submit_adapter,
             reject=lambda _event, _stage, _reason: None,

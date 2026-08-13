@@ -4432,6 +4432,9 @@ facts remain hard-fact actions. DRAIN is new immutable global-auction/shadow
 receipts plus later canonical settlement and execution facts. RESET is an exact
 revision-bound PASS artifact consumed at the existing pre-ranking policy seam;
 tests, model score, restart, or an older profitable cohort cannot reset it.
+An admission-paused BUY wake may enter the global cut only to freeze that
+venue-inert schema-22 counterfactual. The independent actual-BUY rejection
+remains active, so proof collection cannot call the venue actuator.
 
 Acceptance first requires the evaluator to reject worktree placeholder DBs,
 bind WORLD/TRADES/FORECASTS explicitly read-only, report the exact missing proof
@@ -4448,6 +4451,7 @@ Allowed files for this capital-proof lane are
 `tests/test_evaluate_current_regime_capital_advantage.py`,
 `architecture/script_manifest.yaml`, `architecture/test_topology.yaml`,
 `src/engine/global_batch_runtime.py`,
+`src/events/reactor.py`,
 `tests/integration/test_w3_solve_seam_g3.py`,
 `src/contracts/global_auction_receipt.py`, `src/contracts/AGENTS.md`,
 `src/events/day0_authority.py`, `tests/test_riskguard.py`,

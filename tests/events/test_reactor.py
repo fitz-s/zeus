@@ -984,6 +984,10 @@ def test_paused_entry_park_requires_exact_canonical_held_sell_work():
         pause_reason="operator",
         durable_exact_held_completion=True,
     ) is False
+    assert _paused_entry_wake_should_park(
+        pause_reason="operator",
+        allow_capital_proof_progress=True,
+    ) is False
 
 
 def test_paused_targeted_forecast_carrier_redecides_without_touching_ordinary_queue():
