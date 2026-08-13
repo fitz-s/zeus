@@ -71,9 +71,10 @@ therefore comes from two independent mechanisms, not from windowing alone:
      future SDK/venue surface that adds real windowing is honored for free.
 
 The watermark row is only written AFTER the whole batch's ``append_trade_fact``
-calls have succeeded (advance-after-persist): on any failure mid-cycle the
-connection is rolled back, nothing partial persists, and the next cycle
-retries the full scan from the unchanged watermark.
+calls have succeeded (advance-after-persist). Offline ``sync_fills`` remains one
+atomic transaction. The live writer commits bounded idempotent tranches so a
+MONITOR waiter can acquire between them; a later failure leaves the watermark
+unchanged and the next cycle safely replays the full scan.
 """
 from __future__ import annotations
 
@@ -107,6 +108,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_SOURCE = "polymarket_v2_get_trades"
 FILL_SYNC_DB_WRITE_LEASE_DEADLINE_MS = 1_000
 FILL_SYNC_DB_WRITE_MAX_HOLD_MS = 1_000
+FILL_SYNC_LIVE_TRANCHE_SIZE = 16
 
 _DISPOSITION_ZEUS_ATTRIBUTED = "ZEUS_ATTRIBUTED"
 _DISPOSITION_FOREIGN = "FOREIGN"
@@ -427,6 +429,8 @@ def _prepare_fill_sync(
 def _persist_prepared_fill_sync(
     conn: sqlite3.Connection,
     prepared: _PreparedFillSync,
+    *,
+    publish_watermark: bool = True,
 ) -> dict[str, Any]:
     """Atomically persist one immutable fill-sync cut on a caller-owned tx."""
 
@@ -551,17 +555,13 @@ def _persist_prepared_fill_sync(
                 )
             projected += int(projection.get("advanced", 0) or 0)
 
-    published_watermark = _advance_watermark(
-        conn,
-        source=prepared.source,
-        watermark_ts=prepared.observed.isoformat(),
-        cursor=None,
-        updated_at=prepared.observed.isoformat(),
-        coverage_note=(
-            f"full get_trades() scan; {prepared.raw_trade_count} trades observed, "
-            f"{appended} appended"
-        ),
-    )
+    published_watermark = None
+    if publish_watermark:
+        published_watermark = _publish_prepared_fill_sync_watermark(
+            conn,
+            prepared,
+            appended=appended,
+        )
 
     return {
         "source": prepared.source,
@@ -574,6 +574,55 @@ def _persist_prepared_fill_sync(
         "observation_skipped_idempotent": observation_skipped_idempotent,
         "projected": projected,
         "watermark_ts": published_watermark,
+    }
+
+
+def _publish_prepared_fill_sync_watermark(
+    conn: sqlite3.Connection,
+    prepared: _PreparedFillSync,
+    *,
+    appended: int,
+) -> str:
+    """Publish coverage only after every live tranche has committed."""
+
+    if not conn.in_transaction:
+        raise RuntimeError("fill synchronizer watermark requires an active transaction")
+    return _advance_watermark(
+        conn,
+        source=prepared.source,
+        watermark_ts=prepared.observed.isoformat(),
+        cursor=None,
+        updated_at=prepared.observed.isoformat(),
+        coverage_note=(
+            f"full get_trades() scan; {prepared.raw_trade_count} trades observed, "
+            f"{appended} appended"
+        ),
+    )
+
+
+def _merge_fill_sync_summaries(
+    prepared: _PreparedFillSync,
+    summaries: list[dict[str, Any]],
+    *,
+    watermark_ts: str,
+) -> dict[str, Any]:
+    additive = (
+        "appended",
+        "skipped_idempotent",
+        "foreign_fill_count",
+        "unattributable_count",
+        "observation_appended",
+        "observation_skipped_idempotent",
+        "projected",
+    )
+    return {
+        "source": prepared.source,
+        "trades_seen": prepared.raw_trade_count,
+        **{
+            key: sum(int(summary.get(key, 0) or 0) for summary in summaries)
+            for key in additive
+        },
+        "watermark_ts": watermark_ts,
     }
 
 
@@ -610,8 +659,12 @@ def _sync_fills_coordinated(
     *,
     source: str = DEFAULT_SOURCE,
     observed_at: datetime | str | None = None,
+    tranche_size: int = FILL_SYNC_LIVE_TRANCHE_SIZE,
 ) -> dict[str, Any]:
-    """Run live sync with venue I/O outside one unified TRADE write unit."""
+    """Run live sync with venue I/O outside bounded TRADE write units."""
+
+    if tranche_size < 1:
+        raise ValueError("fill synchronizer tranche_size must be positive")
 
     from src.state.db import get_trade_connection_read_only
     from src.state.write_coordinator import (
@@ -651,12 +704,45 @@ def _sync_fills_coordinated(
         if reader is not None:
             reader.close()
 
+    summaries: list[dict[str, Any]] = []
+    for offset in range(0, len(prepared.trades), tranche_size):
+        tranche = _PreparedFillSync(
+            source=prepared.source,
+            observed=prepared.observed,
+            raw_trade_count=prepared.raw_trade_count,
+            trades=prepared.trades[offset : offset + tranche_size],
+            recorded_observations=prepared.recorded_observations,
+            recorded_facts=prepared.recorded_facts,
+        )
+        with coordinator.transaction(
+            (DBIdentity.TRADE,),
+            owner="fill_synchronizer_tranche",
+            **transaction_kwargs,
+        ) as tx:
+            summaries.append(
+                _persist_prepared_fill_sync(
+                    tx.connection,
+                    tranche,
+                    publish_watermark=False,
+                )
+            )
+
+    appended = sum(int(summary.get("appended", 0) or 0) for summary in summaries)
     with coordinator.transaction(
         (DBIdentity.TRADE,),
-        owner="fill_synchronizer",
+        owner="fill_synchronizer_watermark",
         **transaction_kwargs,
     ) as tx:
-        return _persist_prepared_fill_sync(tx.connection, prepared)
+        watermark_ts = _publish_prepared_fill_sync_watermark(
+            tx.connection,
+            prepared,
+            appended=appended,
+        )
+    return _merge_fill_sync_summaries(
+        prepared,
+        summaries,
+        watermark_ts=watermark_ts,
+    )
 
 
 def fill_synchronizer_cycle() -> dict[str, Any]:
