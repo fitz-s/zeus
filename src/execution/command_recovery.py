@@ -26068,8 +26068,15 @@ def _restart_preflight_unresolved_commands(conn: sqlite3.Connection) -> list[dic
             continue
         command_id = str(row.get("command_id") or "")
         venue_order_id = str(row.get("venue_order_id") or "")
+        events = _command_events(conn, command_id)
+        if venue_order_id and (
+            _cancel_failed_already_canceled_payload(events) is not None
+            or _latest_cancel_unknown_payload(events) is not None
+        ):
+            rows.append(row)
+            continue
         latest_reason = _latest_review_required_payload(
-            _command_events(conn, command_id)
+            events
         ).get("reason")
         if latest_reason != "matched_submit_missing_trade_id" or not venue_order_id:
             continue

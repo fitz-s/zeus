@@ -72,7 +72,7 @@ from collections.abc import Mapping
 from typing import Callable, TypeVar
 
 from src.venue.polymarket_v2_adapter import IncompleteAccountTruthError
-from src.venue.response_contracts import VenueResponseShapeError
+from src.venue.response_contracts import VenueOrderNotFound, VenueResponseShapeError
 
 logger = logging.getLogger(__name__)
 
@@ -602,6 +602,8 @@ def capture_venue_read_snapshot(
                     )
                 else:
                     orders[oid] = get_order_source(oid)
+            except VenueOrderNotFound:
+                orders[oid] = None
             except VenueResponseShapeError as exc:
                 logger.warning("venue_sync_contract: get_order(%s) failed during snapshot", oid, exc_info=True)
                 orders[oid] = (

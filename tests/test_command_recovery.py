@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-12; last_reused=2026-08-12
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-13; last_reused=2026-08-13
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-08-12
+# Last reused/audited: 2026-08-13
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -8108,6 +8108,39 @@ class TestRecoveryResolutionTable:
             row["command_id"]
             for row in _restart_preflight_unresolved_commands(conn)
         ] == [command_id]
+
+    def test_restart_preflight_admits_capital_blocking_cancel_unknown_review(
+        self, conn
+    ):
+        from src.execution.command_recovery import (
+            _restart_preflight_unresolved_commands,
+        )
+        from src.state.venue_command_repo import append_event
+
+        command_id = "cmd-restart-cancel-unknown"
+        order_id = "ord-restart-cancel-unknown"
+        _insert(conn, command_id=command_id, size=26.0, price=0.31)
+        _advance_to_cancel_pending(
+            conn,
+            command_id=command_id,
+            venue_order_id=order_id,
+        )
+        append_event(
+            conn,
+            command_id=command_id,
+            event_type="CANCEL_REPLACE_BLOCKED",
+            occurred_at="2026-04-26T00:04:00Z",
+            payload={
+                "venue_order_id": order_id,
+                "reason": "post_cancel_unknown_possible_side_effect",
+                "semantic_cancel_status": "CANCEL_UNKNOWN",
+                "requires_m5_reconcile": True,
+            },
+        )
+
+        rows = _restart_preflight_unresolved_commands(conn)
+
+        assert [row["command_id"] for row in rows] == [command_id]
 
     def test_durable_confirmed_fact_recovers_matched_submit_without_venue_io(
         self, conn

@@ -6,7 +6,7 @@
 #   byte-identical reconciliation events vs the legacy long-connection path.
 # Reuse: Run when command_recovery orchestration, venue_sync_contract, or the
 #   scheduled _edli_command_recovery_cycle connection topology changes.
-# Last reused/audited: 2026-08-09
+# Last reused/audited: 2026-08-13
 # Authority basis: operator directive 2026-06-11 ("cleanest STRUCTURAL fix") +
 #   the dependency_db_locked live incident (riskguard DATA_DEGRADED since ~03:36Z).
 """Relationship tests for the three-phase venue/DB sync contract.
@@ -311,6 +311,23 @@ def test_capture_snapshot_preserves_point_order_timeout_as_unknown():
 
     with pytest.raises(vsc.SnapshotMissError, match="transient timeout"):
         snapshot.get_order("order-1")
+
+
+def test_capture_snapshot_preserves_authenticated_point_absence():
+    from src.execution import venue_sync_contract as vsc
+    from src.venue.response_contracts import VenueOrderNotFound
+
+    class Client:
+        def get_account_truth(self, *, deadline_monotonic):
+            assert deadline_monotonic > time.monotonic()
+            return type("Truth", (), {"open_orders": (), "trades": ()})()
+
+        def get_order(self, order_id):
+            raise VenueOrderNotFound(order_id)
+
+    snapshot = vsc.capture_venue_read_snapshot(Client(), order_ids=["order-1"])
+
+    assert snapshot.get_order("order-1") is None
 
 
 def test_complete_account_snapshot_also_captures_authenticated_point_order_reads():
