@@ -26,6 +26,8 @@ Without the harvester scheduled, this whole chain never fires in EDLI modes.
 from __future__ import annotations
 
 import sqlite3
+import time
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
@@ -612,6 +614,249 @@ def test_finalized_payout_drains_when_forecast_read_fails_without_hiding_family_
         {"truth": "trades.payout_observations", "condition_id": payout_condition},
         {"truth": "gamma_exact_held_event", "condition_id": ""},
     ]
+
+
+def test_settlement_redecision_skips_position_changed_while_waiting_for_writer(
+    trade_conn, forecasts_conn_with_verified_settlement, monkeypatch
+):
+    """Discovery never settles a position whose canonical version advanced."""
+    from src.execution import harvester as hv
+    from src.execution import harvester_pnl_resolver as resolver
+
+    portfolio, position = _winning_position()
+    trade_conn.execute(
+        """INSERT INTO position_current (
+               position_id, phase, city, target_date, temperature_metric, updated_at
+           ) VALUES (?, 'active', ?, ?, 'high', ?)""",
+        (position.trade_id, position.city, position.target_date, "before-writer"),
+    )
+    trade_conn.commit()
+    monkeypatch.setattr(
+        "src.state.portfolio.load_portfolio", lambda *args, **kwargs: portfolio
+    )
+    monkeypatch.setattr(
+        resolver, "_read_venue_resolved_settlement_rows", lambda *a, **kw: []
+    )
+    monkeypatch.setattr(resolver, "_is_canonical_trade_connection", lambda _c: True)
+
+    @contextmanager
+    def position_changes_before_writer(_conn, *, canonical):
+        assert canonical is True
+        trade_conn.execute(
+            """INSERT INTO position_events (
+                   event_id, position_id, event_version, sequence_no, event_type,
+                   occurred_at, phase_before, phase_after, source_module,
+                   payload_json, caused_by, env
+               ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, 'active', 'active',
+                         'tests.harvester_resolver', '{}', 'monitor_refresh', 'live')""",
+            (
+                "position-changed-before-writer",
+                position.trade_id,
+                "2026-08-13T14:50:00+00:00",
+            ),
+        )
+        trade_conn.commit()
+        trade_conn.execute("BEGIN IMMEDIATE")
+        yield time.monotonic() + 5
+
+    monkeypatch.setattr(
+        resolver, "_settlement_writer_transaction", position_changes_before_writer
+    )
+    settle = MagicMock()
+    monkeypatch.setattr(hv, "_settle_positions", settle)
+
+    result = resolver.resolve_pnl_for_settled_markets(
+        trade_conn, forecasts_conn_with_verified_settlement
+    )
+
+    assert result["status"] == "awaiting_truth_writer"
+    assert result["positions_settled"] == 0
+    settle.assert_not_called()
+
+
+def test_settlement_redecision_skips_family_when_canonical_sibling_is_not_hydrated(
+    trade_conn, forecasts_conn_with_verified_settlement, monkeypatch
+):
+    """A partial portfolio snapshot can never authorize a family settlement."""
+    from src.execution import harvester as hv
+    from src.execution import harvester_pnl_resolver as resolver
+
+    portfolio, position = _winning_position()
+    for position_id, condition_id in (
+        (position.trade_id, position.condition_id),
+        ("canonical-sibling", "canonical-sibling-condition"),
+    ):
+        trade_conn.execute(
+            """INSERT INTO position_current (
+                   position_id, phase, city, target_date, temperature_metric,
+                   condition_id, updated_at
+               ) VALUES (?, 'active', ?, ?, 'high', ?, ?)""",
+            (
+                position_id,
+                position.city,
+                position.target_date,
+                condition_id,
+                "before-writer",
+            ),
+        )
+    trade_conn.commit()
+    monkeypatch.setattr(
+        "src.state.portfolio.load_portfolio", lambda *args, **kwargs: portfolio
+    )
+    monkeypatch.setattr(
+        resolver, "_read_venue_resolved_settlement_rows", lambda *a, **kw: []
+    )
+    monkeypatch.setattr(resolver, "_is_canonical_trade_connection", lambda _c: True)
+
+    @contextmanager
+    def writer(_conn, *, canonical):
+        assert canonical is True
+        trade_conn.execute("BEGIN IMMEDIATE")
+        yield time.monotonic() + 5
+
+    monkeypatch.setattr(resolver, "_settlement_writer_transaction", writer)
+    settle = MagicMock()
+    monkeypatch.setattr(hv, "_settle_positions", settle)
+
+    result = resolver.resolve_pnl_for_settled_markets(
+        trade_conn, forecasts_conn_with_verified_settlement
+    )
+
+    assert result["status"] == "awaiting_truth_writer"
+    settle.assert_not_called()
+
+
+def test_settlement_writer_expired_admission_releases_lease(
+    trade_conn, monkeypatch
+):
+    from src.execution import harvester_pnl_resolver as resolver
+    from src.state import write_coordinator
+
+    events = []
+
+    @contextmanager
+    def lease(*_args, **_kwargs):
+        events.append("enter")
+        try:
+            yield type("Lease", (), {"acquired_at": time.monotonic() - 10})()
+        finally:
+            events.append("exit")
+
+    coordinator = MagicMock()
+    coordinator.lease.side_effect = lease
+    monkeypatch.setattr(
+        write_coordinator, "default_runtime_write_coordinator", lambda: coordinator
+    )
+
+    with pytest.raises(resolver._SettlementWriterDeadlineExceeded):
+        with resolver._settlement_writer_transaction(trade_conn, canonical=True):
+            pytest.fail("expired lease must not begin a SQLite transaction")
+
+    assert events == ["enter", "exit"]
+    assert not trade_conn.in_transaction
+
+
+def test_settlement_writer_busy_fails_fast_and_releases_lease(
+    tmp_path, monkeypatch
+):
+    """A non-cooperating SQLite writer cannot wedge the harvester for minutes."""
+    from src.execution import harvester_pnl_resolver as resolver
+    from src.state import write_coordinator
+
+    db_path = tmp_path / "trade-lock.db"
+    holder = sqlite3.connect(db_path)
+    contender = sqlite3.connect(db_path, timeout=30)
+    holder.execute("CREATE TABLE facts (value TEXT)")
+    holder.commit()
+    holder.execute("BEGIN IMMEDIATE")
+
+    lease_events = []
+
+    @contextmanager
+    def lease(*_args, **_kwargs):
+        lease_events.append("enter")
+        try:
+            yield type("Lease", (), {"acquired_at": time.monotonic()})()
+        finally:
+            lease_events.append("exit")
+
+    coordinator = MagicMock()
+    coordinator.lease.side_effect = lease
+    monkeypatch.setattr(resolver, "_is_canonical_trade_connection", lambda _c: True)
+    monkeypatch.setattr(
+        write_coordinator, "default_runtime_write_coordinator", lambda: coordinator
+    )
+
+    started = time.monotonic()
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        with resolver._settlement_writer_transaction(contender, canonical=True):
+            pytest.fail("writer transaction must not open behind a foreign lock")
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0
+    assert lease_events == ["enter", "exit"]
+    assert contender.execute("PRAGMA busy_timeout").fetchone()[0] == 30_000
+    assert not contender.in_transaction
+    holder.rollback()
+    holder.close()
+    contender.close()
+
+
+def test_settlement_writer_commits_before_releasing_lease_and_export(
+    trade_conn, forecasts_conn_with_verified_settlement, monkeypatch
+):
+    """The lease covers commit, while derived JSON runs only after release."""
+    from src.execution import harvester as hv
+    from src.execution import harvester_pnl_resolver as resolver
+
+    portfolio, _position = _winning_position()
+    monkeypatch.setattr(
+        "src.state.portfolio.load_portfolio", lambda *args, **kwargs: portfolio
+    )
+    monkeypatch.setattr(
+        resolver, "_read_venue_resolved_settlement_rows", lambda *a, **kw: []
+    )
+    events = []
+
+    @contextmanager
+    def writer(_conn, *, canonical):
+        assert canonical is False
+        events.append("lease_enter")
+        trade_conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield None
+        finally:
+            events.append("lease_exit")
+
+    monkeypatch.setattr(resolver, "_settlement_writer_transaction", writer)
+    monkeypatch.setattr(hv, "_settle_positions", lambda *a, **kw: 1)
+    monkeypatch.setattr(
+        "src.state.decision_chain.store_settlement_records", lambda *a, **kw: None
+    )
+    monkeypatch.setattr(
+        "src.state.portfolio.save_portfolio",
+        lambda *a, **kw: events.append("portfolio_export"),
+    )
+    monkeypatch.setattr(
+        "src.state.strategy_tracker.get_tracker", lambda: MagicMock()
+    )
+    monkeypatch.setattr(
+        "src.state.strategy_tracker.save_tracker",
+        lambda *a, **kw: events.append("tracker_export"),
+    )
+
+    result = resolver.resolve_pnl_for_settled_markets(
+        trade_conn, forecasts_conn_with_verified_settlement
+    )
+
+    assert result["positions_settled"] == 1
+    assert events == [
+        "lease_enter",
+        "lease_exit",
+        "portfolio_export",
+        "tracker_export",
+    ]
+    assert not trade_conn.in_transaction
 
 
 def test_exact_condition_no_settles_only_matching_position(trade_conn, monkeypatch):

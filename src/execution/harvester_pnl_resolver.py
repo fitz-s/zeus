@@ -24,11 +24,110 @@ from __future__ import annotations
 
 import copy
 import logging
+import sqlite3
+import time
+from contextlib import contextmanager, nullcontext
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 _FINALIZED_PAYOUT_SOURCE = "chain_rpc_finalized_v1"
 _TERMINAL_PAYOUT_STATES = frozenset({"RESOLVED_ZERO", "RESOLVED_NONZERO"})
+_SETTLEMENT_WRITE_BUDGET_MS = 5_000
+
+
+class _SettlementWriterDeadlineExceeded(TimeoutError):
+    pass
+
+
+def _is_canonical_trade_connection(trade_conn) -> bool:
+    """Return whether ``trade_conn`` owns the configured live trade DB."""
+    from src.state.db import _zeus_trade_db_path
+
+    main_path = next(
+        (
+            Path(str(row[2])).resolve(strict=False)
+            for row in trade_conn.execute("PRAGMA database_list").fetchall()
+            if str(row[1]) == "main" and str(row[2])
+        ),
+        None,
+    )
+    return main_path == _zeus_trade_db_path().resolve(strict=False)
+
+
+@contextmanager
+def _settlement_writer_transaction(trade_conn, *, canonical: bool):
+    """Acquire bounded live writer admission and own one fresh transaction."""
+    lease = nullcontext()
+    if canonical:
+        from src.state.db_writer_lock import WriteClass
+        from src.state.write_coordinator import (
+            DBIdentity,
+            WritePriority,
+            default_runtime_write_coordinator,
+        )
+
+        lease = default_runtime_write_coordinator().lease(
+            (DBIdentity.TRADE,),
+            owner="harvester_pnl_settlement",
+            write_class=WriteClass.LIVE,
+            priority=WritePriority.MONITOR,
+            deadline_ms=_SETTLEMENT_WRITE_BUDGET_MS,
+            max_hold_ms=_SETTLEMENT_WRITE_BUDGET_MS,
+        )
+
+    old_busy_timeout = int(trade_conn.execute("PRAGMA busy_timeout").fetchone()[0])
+    with lease as write_lease:
+        deadline_monotonic = (
+            write_lease.acquired_at + _SETTLEMENT_WRITE_BUDGET_MS / 1_000.0
+            if canonical
+            else None
+        )
+        if (
+            deadline_monotonic is not None
+            and time.monotonic() >= deadline_monotonic
+        ):
+            raise _SettlementWriterDeadlineExceeded(
+                "harvester settlement writer budget exhausted at admission"
+            )
+        progress_installed = False
+        try:
+            # A live busy_timeout of several minutes turns writer contention into
+            # false liveness.  Admission is bounded by the coordinator; SQLite
+            # must therefore reject a non-cooperating writer immediately.
+            trade_conn.execute("PRAGMA busy_timeout = 0")
+            if deadline_monotonic is not None:
+                trade_conn.set_progress_handler(
+                    lambda: int(time.monotonic() >= deadline_monotonic),
+                    1_000,
+                )
+                progress_installed = True
+            trade_conn.execute("BEGIN IMMEDIATE")
+            yield deadline_monotonic
+        except sqlite3.OperationalError as exc:
+            if (
+                deadline_monotonic is not None
+                and time.monotonic() >= deadline_monotonic
+            ):
+                raise _SettlementWriterDeadlineExceeded(
+                    "harvester settlement writer deadline expired"
+                ) from exc
+            raise
+        except BaseException:
+            if trade_conn.in_transaction:
+                trade_conn.rollback()
+            raise
+        finally:
+            if progress_installed:
+                trade_conn.set_progress_handler(None, 0)
+            if trade_conn.in_transaction:
+                trade_conn.rollback()
+            try:
+                trade_conn.execute(f"PRAGMA busy_timeout = {max(0, old_busy_timeout)}")
+            except Exception:
+                logger.exception(
+                    "harvester_pnl_resolver: failed to restore SQLite busy_timeout"
+                )
 
 
 def _row_value(row, key: str, index: int, default=None):
@@ -81,6 +180,102 @@ def _open_position_settlement_keys(trade_conn, portfolio) -> set[tuple[str, str,
         )
 
     return keys or _portfolio_settlement_keys(portfolio)
+
+
+def _canonical_position_versions(trade_conn, keys) -> dict[str, dict]:
+    """Fingerprint the complete canonical exposure set for settlement keys."""
+    key_list = sorted(keys)
+    if not key_list:
+        return {}
+    placeholders = ",".join("(?, ?, ?)" for _ in key_list)
+    params = [part for key in key_list for part in key]
+    rows = trade_conn.execute(
+        f"""WITH requested(city, target_date, temperature_metric) AS (
+                    VALUES {placeholders}
+                )
+                SELECT pc.*,
+                    (SELECT COUNT(*) FROM position_events pe
+                      WHERE pe.position_id = pc.position_id) AS event_count,
+                    (SELECT MAX(pe.sequence_no) FROM position_events pe
+                      WHERE pe.position_id = pc.position_id) AS max_event_sequence,
+                    (SELECT MAX(pe.occurred_at) FROM position_events pe
+                      WHERE pe.position_id = pc.position_id) AS max_event_time
+                  FROM position_current pc
+                  JOIN requested r
+                    ON r.city = pc.city
+                   AND r.target_date = pc.target_date
+                   AND r.temperature_metric = COALESCE(pc.temperature_metric, 'high')
+                 WHERE pc.phase IN ('active', 'day0_window', 'pending_exit',
+                                    'economically_closed')""",
+        params,
+    ).fetchall()
+    return {
+        str(_row_value(row, "position_id", 0, "") or ""): {
+            "city": str(_row_value(row, "city", 4, "") or ""),
+            "target_date": str(_row_value(row, "target_date", 6, "") or ""),
+            "temperature_metric": str(
+                _row_value(row, "temperature_metric", 30, "high") or "high"
+            ),
+            "condition_id": str(_row_value(row, "condition_id", 26, "") or ""),
+            "fingerprint": tuple(row),
+        }
+        for row in rows
+    }
+
+
+def _settlement_row_position_ids(row, portfolio) -> set[str]:
+    city = str(_row_value(row, "city", 0, "") or "")
+    target_date = str(_row_value(row, "target_date", 1, "") or "")
+    metric = str(_row_value(row, "temperature_metric", 4, "high") or "high")
+    scope = str(_row_value(row, "settlement_scope", 8, "family") or "family")
+    condition_id = str(_row_value(row, "condition_id", 9, "") or "")
+    return {
+        str(getattr(pos, "trade_id", "") or "").strip()
+        for pos in getattr(portfolio, "positions", []) or []
+        if str(getattr(pos, "city", "") or "") == city
+        and str(getattr(pos, "target_date", "") or "") == target_date
+        and str(getattr(pos, "temperature_metric", "high") or "high") == metric
+        and (
+            scope != "condition"
+            or str(getattr(pos, "condition_id", "") or "") == condition_id
+        )
+        and str(getattr(pos, "trade_id", "") or "").strip()
+    }
+
+
+def _row_targets_only_stable_positions(row, portfolio, stable_position_ids) -> bool:
+    target_ids = _settlement_row_position_ids(row, portfolio)
+    return bool(target_ids) and target_ids <= stable_position_ids
+
+
+def _canonical_row_position_ids(row, versions) -> set[str]:
+    city = str(_row_value(row, "city", 0, "") or "")
+    target_date = str(_row_value(row, "target_date", 1, "") or "")
+    metric = str(_row_value(row, "temperature_metric", 4, "high") or "high")
+    scope = str(_row_value(row, "settlement_scope", 8, "family") or "family")
+    condition_id = str(_row_value(row, "condition_id", 9, "") or "")
+    return {
+        position_id
+        for position_id, version in versions.items()
+        if version["city"] == city
+        and version["target_date"] == target_date
+        and version["temperature_metric"] == metric
+        and (scope != "condition" or version["condition_id"] == condition_id)
+    }
+
+
+def _canonical_row_is_stable(row, before_versions, current_versions) -> bool:
+    before_ids = _canonical_row_position_ids(row, before_versions)
+    current_ids = _canonical_row_position_ids(row, current_versions)
+    return (
+        bool(before_ids)
+        and before_ids == current_ids
+        and all(
+            before_versions[position_id]["fingerprint"]
+            == current_versions[position_id]["fingerprint"]
+            for position_id in before_ids
+        )
+    )
 
 
 def _read_verified_settlement_rows(forecasts_conn, keys: set[tuple[str, str, str]]):
@@ -452,11 +647,7 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
     # Import trading-side dependencies before reading settlements so the truth
     # query can be keyed by currently open inventory instead of a global recency
     # window that starves older-but-still-open positions during backlog catch-up.
-    from src.execution.harvester import _settle_positions
-    from src.state.decision_chain import SettlementRecord, store_settlement_records
-    from src.state.portfolio import load_portfolio, save_portfolio
-    from src.state.strategy_tracker import get_tracker, save_tracker
-    from src.state.canonical_write import commit_then_export
+    from src.state.portfolio import load_portfolio
 
     # Reuse the caller's connection. Opening a second trade connection here can
     # pin a read snapshot on one handle and later deadlock its write upgrade on
@@ -466,6 +657,12 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
         open_positions_only=True,
     )
     settlement_keys = _open_position_settlement_keys(trade_conn, portfolio)
+    canonical = _is_canonical_trade_connection(trade_conn)
+    position_versions = (
+        _canonical_position_versions(trade_conn, settlement_keys)
+        if canonical
+        else {}
+    )
 
     # Read settled rows from forecasts.settlement_outcomes (VERIFIED authority only).
     # W2 (2026-06-03): repointed from legacy settlements table to canonical settlement_outcomes.
@@ -499,61 +696,10 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
         settlement_keys - verified_keys,
     )
 
-    # End every discovery/read snapshot before requesting the WAL writer slot.
-    # A DEFERRED read transaction cannot be safely upgraded after another live
-    # writer advances the WAL (SQLITE_BUSY_SNAPSHOT ignores busy_timeout). Take
-    # write authority first, then re-read canonical exposure and finalized local
-    # payout truth inside that fresh transaction. No HTTP occurs after this line.
-    if trade_conn.in_transaction:
-        trade_conn.rollback()
-    trade_conn.execute("BEGIN IMMEDIATE")
-    portfolio = load_portfolio(
-        connection=trade_conn,
-        open_positions_only=True,
-    )
-    settlement_keys = _open_position_settlement_keys(trade_conn, portfolio)
-    verified_rows = [
-        row
-        for row in verified_rows
-        if (
-            str(_row_value(row, "city", 0, "") or ""),
-            str(_row_value(row, "target_date", 1, "") or ""),
-            str(_row_value(row, "temperature_metric", 4, "") or ""),
-        ) in settlement_keys
-    ]
-    payout_rows = _read_finalized_payout_settlement_rows(
-        trade_conn,
-        portfolio,
-        settlement_keys - verified_keys,
-    )
-    current_condition_ids = {
-        str(getattr(pos, "condition_id", "") or "").strip()
-        for pos in getattr(portfolio, "positions", []) or []
-    }
-    payout_condition_ids = {
-        str(row.get("condition_id") or "").strip() for row in payout_rows
-    }
-    venue_rows = [
-        row
-        for row in venue_rows
-        if (
-            str(row.get("settlement_scope") or "family") == "condition"
-            and str(row.get("condition_id") or "").strip() in current_condition_ids
-            and str(row.get("condition_id") or "").strip() not in payout_condition_ids
-        )
-        or (
-            str(row.get("settlement_scope") or "family") == "family"
-            and (
-                str(row.get("city") or ""),
-                str(row.get("target_date") or ""),
-                str(row.get("temperature_metric") or ""),
-            ) in settlement_keys
-        )
-    ]
     rows = [*verified_rows, *payout_rows, *venue_rows]
-
     if not rows:
-        trade_conn.rollback()
+        if trade_conn.in_transaction:
+            trade_conn.rollback()
         logger.debug(
             "harvester_pnl_resolver: no VERIFIED rows in forecasts.settlement_outcomes "
             "for open position keys; truth writer may not have run yet"
@@ -565,6 +711,154 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
             "decision_log_rows_written": 0,
             "errors": forecast_read_errors,
         }
+
+    # End every discovery/read snapshot before requesting the WAL writer slot.
+    # A DEFERRED read transaction cannot be safely upgraded after another live
+    # writer advances the WAL (SQLITE_BUSY_SNAPSHOT ignores busy_timeout). Take
+    # write authority first, then re-read canonical exposure and finalized local
+    # payout truth inside that fresh transaction. No HTTP occurs after this line.
+    if trade_conn.in_transaction:
+        trade_conn.rollback()
+    with _settlement_writer_transaction(trade_conn, canonical=canonical) as deadline_monotonic:
+        result, portfolio_settled, tracker_dirty, tracker = _apply_discovered_settlement_rows(
+            trade_conn,
+            portfolio=portfolio,
+            settlement_keys=settlement_keys,
+            position_versions=position_versions,
+            forecast_read_errors=forecast_read_errors,
+            verified_rows=verified_rows,
+            verified_keys=verified_keys,
+            venue_rows=venue_rows,
+            canonical=canonical,
+            deadline_monotonic=deadline_monotonic,
+        )
+    # Canonical DB commit precedes derived projections, but JSON I/O must not
+    # occupy the globally coordinated SQLite writer slot.
+    if portfolio_settled:
+        try:
+            from src.state.portfolio import save_portfolio
+
+            save_portfolio(portfolio, source="harvester_pnl_resolver")
+        except Exception:
+            logger.exception(
+                "harvester_pnl_resolver: portfolio projection export failed after DB commit"
+            )
+    if tracker_dirty:
+        try:
+            from src.state.strategy_tracker import save_tracker
+
+            save_tracker(tracker)
+        except Exception:
+            logger.exception(
+                "harvester_pnl_resolver: tracker projection export failed after DB commit"
+            )
+    return result
+
+
+def _apply_discovered_settlement_rows(
+    trade_conn,
+    *,
+    portfolio,
+    settlement_keys,
+    position_versions,
+    forecast_read_errors,
+    verified_rows,
+    verified_keys,
+    venue_rows,
+    canonical: bool,
+    deadline_monotonic: float | None,
+) -> tuple[dict, bool, bool, object | None]:
+    """Apply already-discovered truth while holding the bounded writer slot."""
+    from src.execution.harvester import _settle_positions
+    from src.state.canonical_write import commit_then_export
+    from src.state.decision_chain import SettlementRecord, store_settlement_records
+    from src.state.strategy_tracker import get_tracker
+
+    current_versions = (
+        _canonical_position_versions(trade_conn, settlement_keys)
+        if canonical
+        else {}
+    )
+    stable_position_ids = {
+        str(getattr(pos, "trade_id", "") or "").strip()
+        for pos in getattr(portfolio, "positions", []) or []
+        if str(getattr(pos, "trade_id", "") or "").strip()
+    }
+
+    def row_is_stable(row) -> bool:
+        if canonical:
+            return (
+                _canonical_row_is_stable(row, position_versions, current_versions)
+                and _canonical_row_position_ids(row, position_versions)
+                == _settlement_row_position_ids(row, portfolio)
+            )
+        return _row_targets_only_stable_positions(
+            row,
+            portfolio,
+            stable_position_ids,
+        )
+
+    verified_rows = [
+        row
+        for row in verified_rows
+        if row_is_stable(row)
+    ]
+    payout_rows = _read_finalized_payout_settlement_rows(
+        trade_conn,
+        portfolio,
+        settlement_keys - verified_keys,
+    )
+    payout_rows = [
+        row
+        for row in payout_rows
+        if row_is_stable(row)
+    ]
+    current_condition_ids = {
+        str(getattr(pos, "condition_id", "") or "").strip()
+        for pos in getattr(portfolio, "positions", []) or []
+    }
+    payout_condition_ids = {
+        str(row.get("condition_id") or "").strip() for row in payout_rows
+    }
+    venue_rows = [
+        row
+        for row in venue_rows
+        if row_is_stable(row)
+        and (
+            (
+                str(row.get("settlement_scope") or "family") == "condition"
+                and str(row.get("condition_id") or "").strip() in current_condition_ids
+                and str(row.get("condition_id") or "").strip() not in payout_condition_ids
+            )
+            or (
+                str(row.get("settlement_scope") or "family") == "family"
+                and (
+                    str(row.get("city") or ""),
+                    str(row.get("target_date") or ""),
+                    str(row.get("temperature_metric") or ""),
+                ) in settlement_keys
+            )
+        )
+    ]
+    rows = [*verified_rows, *payout_rows, *venue_rows]
+
+    if not rows:
+        logger.debug(
+            "harvester_pnl_resolver: no VERIFIED rows in forecasts.settlement_outcomes "
+            "for open position keys; truth writer may not have run yet"
+        )
+        return (
+            {
+                "status": "awaiting_truth_writer",
+                "open_position_keys_checked": len(settlement_keys),
+                "positions_settled": 0,
+                "decision_log_rows_written": 0,
+                "errors": forecast_read_errors,
+            },
+            False,
+            False,
+            None,
+        )
 
     settlement_records: list[SettlementRecord] = []
     tracker = get_tracker()
@@ -578,6 +872,10 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
     trade_conn.execute(f"SAVEPOINT {batch_savepoint}")
 
     for row_index, row in enumerate(rows):
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            raise _SettlementWriterDeadlineExceeded(
+                "harvester settlement writer deadline expired before row apply"
+            )
         city_name = _row_value(row, "city", 0, "")
         target_date = _row_value(row, "target_date", 1, "")
         market_slug = _row_value(row, "market_slug", 2, "")
@@ -717,37 +1015,26 @@ def resolve_pnl_for_settled_markets(trade_conn, forecasts_conn) -> dict:
     else:
         trade_conn.execute(f"RELEASE SAVEPOINT {batch_savepoint}")
 
-    # DT#1 / INV-17: DB commits first, then JSON exports.
-    _portfolio_settled = positions_settled > 0
-    _tracker_dirty = tracker_dirty
-
     def _db_op() -> None:
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            raise _SettlementWriterDeadlineExceeded(
+                "harvester settlement writer deadline expired before commit"
+            )
         trade_conn.commit()
 
-    def _export_portfolio() -> None:
-        if _portfolio_settled:
-            save_portfolio(portfolio, source="harvester_pnl_resolver")
+    commit_then_export(trade_conn, db_op=_db_op, json_exports=[])
 
-    def _export_tracker() -> None:
-        if _tracker_dirty:
-            save_tracker(tracker)
-
-    try:
-        commit_then_export(
-            trade_conn,
-            db_op=_db_op,
-            json_exports=[_export_portfolio, _export_tracker],
-        )
-    except Exception as exc:
-        logger.error("harvester_pnl_resolver: commit_then_export failed: %s", exc)
-        errors += 1
-
-    return {
-        "status": "ok",
-        "positions_settled": positions_settled,
-        "decision_log_rows_written": decision_log_rows_written,
-        "errors": errors,
-        "settlements_checked": len(rows),
-        "venue_resolutions_checked": len(venue_rows),
-        "open_position_keys_checked": len(settlement_keys),
-    }
+    return (
+        {
+            "status": "ok",
+            "positions_settled": positions_settled,
+            "decision_log_rows_written": decision_log_rows_written,
+            "errors": errors,
+            "settlements_checked": len(rows),
+            "venue_resolutions_checked": len(venue_rows),
+            "open_position_keys_checked": len(settlement_keys),
+        },
+        positions_settled > 0,
+        tracker_dirty,
+        tracker,
+    )
