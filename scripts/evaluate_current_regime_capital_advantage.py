@@ -55,6 +55,7 @@ from src.data.replacement_forecast_cycle_policy import (  # noqa: E402
 
 MIN_INDEPENDENT_FAMILY_DAYS = 30
 MIN_EXACT_LIVE_REALIZED_POSITIONS = 30
+GLOBAL_HOLD_RECEIPT_SCAN_ROWS = 5_000
 WINDOW_DAYS = 35.0
 GLOBAL_AUCTION_RECEIPT_MODES = (
     "global_single_order_auction",
@@ -1045,15 +1046,23 @@ def _held_to_binary_settlement_quality(
     latest_by_position: dict[str, dict[str, object]] = {}
     rejection_counts: dict[str, int] = {}
     cutoff = (as_of - timedelta(days=WINDOW_DAYS)).isoformat()
+    max_decision_log_id = int(
+        conn.execute("SELECT COALESCE(MAX(id),0) FROM decision_log").fetchone()[0]
+    )
+    minimum_decision_log_id = max(
+        0,
+        max_decision_log_id - GLOBAL_HOLD_RECEIPT_SCAN_ROWS,
+    )
     rows = conn.execute(
         "SELECT id,mode,artifact_json FROM decision_log "
-        "WHERE timestamp>=? "
+        "WHERE id>=? AND timestamp>=? "
         "AND mode IN (?,?,?) "
         "AND json_extract(artifact_json,'$.summary.schema_version')=22 "
         "AND json_extract(artifact_json,'$.summary.global_selection_revision')=? "
         "AND json_extract(artifact_json,'$.summary.holding_auction_coverage_zlib_b64') "
         "IS NOT NULL ORDER BY id",
         (
+            minimum_decision_log_id,
             cutoff,
             *GLOBAL_AUCTION_RECEIPT_MODES,
             CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
@@ -1212,6 +1221,8 @@ def _held_to_binary_settlement_quality(
         "held_to_zero_count": len(graded) - wins,
         "held_to_one_rate": round(wins / len(graded), 6) if graded else None,
         "awaiting_settlement_position_count": awaiting,
+        "receipt_scan_row_limit": GLOBAL_HOLD_RECEIPT_SCAN_ROWS,
+        "minimum_scanned_decision_log_id": minimum_decision_log_id,
         "rejection_counts": dict(sorted(rejection_counts.items())),
         "curve": sorted(graded, key=lambda row: (row["settled_at"], row["position_id"])),
     }
