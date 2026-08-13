@@ -31842,7 +31842,10 @@ class TestEdliAbsenceVenueCommandSync:
                 (seeded["aggregate_id"],),
             ).fetchone()["payload_json"]
         )
-        assert rejected_payload["proof_class"] == "venue_command_authenticated_absence_rejected"
+        assert (
+            rejected_payload["proof_class"]
+            == "venue_command_authenticated_absence_rejected"
+        )
         assert rejected_payload["safe_replay_permitted"] is True
 
 
@@ -31937,6 +31940,92 @@ def test_capital_blocker_count_includes_identity_bound_submits_and_unprojected_f
     )
 
     assert capital_blocking_command_count(conn) == 2
+
+
+def test_capital_blocker_count_prioritizes_terminal_exit_until_pnl_projection(conn):
+    from src.execution.command_recovery import (
+        capital_blocking_command_count,
+        reconcile_exit_pending_projections,
+    )
+
+    _insert(
+        conn,
+        command_id="cmd-capital-entry",
+        position_id="pos-capital-exit",
+        size=6.52,
+        price=0.25,
+    )
+    _advance_to_acked(
+        conn,
+        command_id="cmd-capital-entry",
+        venue_order_id="ord-capital-entry",
+    )
+    _seed_pending_entry_projection(
+        conn,
+        position_id="pos-capital-exit",
+        command_id="cmd-capital-entry",
+        order_id="ord-capital-entry",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'pending_exit', shares = 6.52, chain_shares = 0,
+               chain_state = 'chain_confirmed_zero', cost_basis_usd = 1.63,
+               entry_price = 0.25, order_status = 'sell_placed'
+         WHERE position_id = 'pos-capital-exit'
+        """
+    )
+    _seed_full_exit_intent(conn, position_id="pos-capital-exit", shares=6.52)
+    _insert(
+        conn,
+        command_id="cmd-capital-exit",
+        position_id="pos-capital-exit",
+        intent_kind="EXIT",
+        side="SELL",
+        size=6.52,
+        price=0.40,
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    _advance_to_acked(
+        conn,
+        command_id="cmd-capital-exit",
+        venue_order_id="ord-capital-exit",
+    )
+    conn.execute(
+        "UPDATE venue_commands SET state = 'FILLED' WHERE command_id = ?",
+        ("cmd-capital-exit",),
+    )
+    _append_trade_fact(
+        conn,
+        command_id="cmd-capital-exit",
+        order_id="ord-capital-exit",
+        trade_id="trade-capital-exit",
+        state="CONFIRMED",
+        filled_size="6.52",
+        fill_price="0.40",
+        observed_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+    assert capital_blocking_command_count(conn) == 1
+    assert reconcile_exit_pending_projections(conn) == {
+        "scanned": 1,
+        "advanced": 1,
+        "stayed": 0,
+        "errors": 0,
+    }
+    current = conn.execute(
+        """
+        SELECT phase, realized_pnl_usd, exit_price
+          FROM position_current
+         WHERE position_id = 'pos-capital-exit'
+        """
+    ).fetchone()
+    assert dict(current) == {
+        "phase": "economically_closed",
+        "realized_pnl_usd": pytest.approx(0.98),
+        "exit_price": pytest.approx(0.40),
+    }
+    assert capital_blocking_command_count(conn) == 0
 
 
 def test_live_tick_identity_bound_matched_exit_outruns_account_snapshot(

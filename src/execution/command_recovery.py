@@ -26347,6 +26347,80 @@ def _terminal_filled_entry_projection_blocker_count(
     return int(row[0] or 0) if row is not None else 0
 
 
+def _terminal_filled_exit_projection_blocker_count(
+    conn: sqlite3.Connection,
+) -> int:
+    """Count recent terminal EXIT fills not yet booked as released capital."""
+
+    required = {
+        "venue_commands",
+        "venue_trade_facts",
+        "position_current",
+        "position_events",
+        "execution_fact",
+    }
+    if not all(_table_exists(conn, table) for table in required):
+        return 0
+    # SCOPE: one recent terminal FILLED EXIT/SELL command with authenticated
+    # positive fill truth but incomplete command-bound economic-close truth.
+    # DRAIN: scheduled command recovery receives current-capital priority and
+    # runs exit_pending_projections. RESET: economically_closed position truth,
+    # EXIT_ORDER_FILLED, and a positive exit execution_fact all bind the command.
+    row = conn.execute(
+        """
+        SELECT COUNT(*)
+          FROM venue_commands cmd
+         WHERE cmd.intent_kind = 'EXIT'
+           AND UPPER(COALESCE(cmd.side, '')) = 'SELL'
+           AND cmd.state = 'FILLED'
+           AND COALESCE(cmd.venue_order_id, '') != ''
+           AND EXISTS (
+                SELECT 1
+                  FROM venue_trade_facts fact
+                 WHERE fact.command_id = cmd.command_id
+                   AND fact.venue_order_id = cmd.venue_order_id
+                   AND fact.state IN ('MATCHED', 'MINED', 'CONFIRMED')
+                   AND fact.source IN ('REST', 'WS_USER')
+                   AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+                   AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
+                   AND datetime(fact.observed_at) >= datetime('now', ?)
+           )
+           AND (
+                NOT EXISTS (
+                    SELECT 1
+                      FROM position_current pc
+                     WHERE pc.position_id = cmd.position_id
+                       AND pc.phase = 'economically_closed'
+                       AND pc.exit_price > 0
+                       AND pc.realized_pnl_usd IS NOT NULL
+                )
+                OR NOT EXISTS (
+                    SELECT 1
+                      FROM position_events event
+                     WHERE event.position_id = cmd.position_id
+                       AND event.event_type = 'EXIT_ORDER_FILLED'
+                       AND (
+                            event.command_id = cmd.command_id
+                            OR lower(COALESCE(event.order_id, '')) =
+                               lower(cmd.venue_order_id)
+                       )
+                )
+                OR NOT EXISTS (
+                    SELECT 1
+                      FROM execution_fact execution
+                     WHERE execution.position_id = cmd.position_id
+                       AND execution.command_id = cmd.command_id
+                       AND execution.order_role = 'exit'
+                       AND execution.filled_at IS NOT NULL
+                       AND execution.shares > 0
+                )
+           )
+        """,
+        (f"-{_TERMINAL_FILL_PROJECTION_PRIORITY_SECONDS} seconds",),
+    ).fetchone()
+    return int(row[0] or 0) if row is not None else 0
+
+
 def capital_blocking_command_count(conn: sqlite3.Connection) -> int:
     """Return exact unresolved venue side effects that freeze current capital."""
 
@@ -26366,7 +26440,10 @@ def capital_blocking_command_count(conn: sqlite3.Connection) -> int:
         ).fetchone()[0]
         or 0
     )
-    projection_count = _terminal_filled_entry_projection_blocker_count(conn)
+    projection_count = (
+        _terminal_filled_entry_projection_blocker_count(conn)
+        + _terminal_filled_exit_projection_blocker_count(conn)
+    )
     return cancel_count + inflight_submit_count + projection_count
 
 

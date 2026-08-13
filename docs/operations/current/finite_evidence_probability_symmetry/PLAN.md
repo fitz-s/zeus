@@ -4748,6 +4748,36 @@ fill into canonical position and execution truth.
 Allowed files remain `src/execution/command_recovery.py`,
 `tests/test_command_recovery.py`, and this plan.
 
+## 2026-08-13 Terminal exit fill is current-capital priority until PnL books
+
+The first executable post-guard auction selected and filled a Shenzhen
+immediate-taker SELL. Venue and chain truth showed 6.52 shares sold at 0.40 and
+zero remaining chain inventory, but canonical position truth remained
+`pending_exit` with the original shares/cost basis and no `EXIT_ORDER_FILLED`,
+exit `execution_fact`, or realized PnL. The scheduled recovery classifier gave
+priority only to unresolved cancels, in-flight submits, and terminal ENTRY
+projection debt; held-monitor debt therefore deferred this completed capital
+release indefinitely.
+
+A recent terminal EXIT fill is now the symmetric current-capital blocker until
+all three authorities agree: `position_current` is `economically_closed` with
+exit price and realized PnL, the exact command/order has `EXIT_ORDER_FILLED`,
+and a positive command-bound exit `execution_fact` exists. This changes only
+scheduler priority; the existing exact fill, full-exit-intent, lifecycle, and
+PnL projection laws remain the sole authority for closing the position.
+
+SCOPE is the exact recent FILLED EXIT/SELL command with bound positive REST or
+WS_USER fill truth and incomplete close projection. DRAIN is the next scheduled
+command-recovery turn running the existing `exit_pending_projections` pass.
+RESET is the three-authority close above; command state, chain zero, or cash
+proceeds alone cannot reset it. The one-hour priority window prevents old repair
+debt from monopolizing live capital I/O. Acceptance requires a blocker/reset
+antibody, focused recovery tests, live deployment, and canonical convergence of
+the observed Shenzhen exit including realized PnL.
+
+Allowed files remain `src/execution/command_recovery.py`,
+`tests/test_command_recovery.py`, and this plan.
+
 ## 2026-08-13 Corrected Day0 facts retain authorized raw provenance
 
 Post-deploy verification found one held Shenzhen position receiving fresh
