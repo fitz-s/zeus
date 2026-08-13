@@ -10969,6 +10969,43 @@ def test_global_book_prefetch_prunes_unknown_deterministic_bins_before_io():
     assert {row[1] for row in epoch.asset_states} == {"bin-exact"}
 
 
+def test_reduce_only_book_tokens_never_widen_incomplete_family_topology():
+    held_family = SimpleNamespace(
+        family_key="held-family",
+        bindings=(
+            SimpleNamespace(
+                bin_id="held-bin",
+                condition_id="held-condition",
+                yes_token_id="held-token",
+                no_token_id="held-no-token",
+            ),
+            SimpleNamespace(
+                bin_id="incomplete-non-held-bin",
+                condition_id="incomplete-condition",
+                yes_token_id="",
+                no_token_id="",
+            ),
+        ),
+    )
+    held_by_family = {
+        "held-family": {"held-token"},
+        "other-family": {"other-token"},
+    }
+    probability_slice = {"held-family": held_family}
+
+    assert era._global_book_prefetch_tokens(probability_slice) is None
+    assert era._global_reduce_only_book_tokens(
+        probability_slice,
+        held_by_family,
+        None,
+    ) == ("held-token",)
+    assert era._global_reduce_only_book_tokens(
+        probability_slice,
+        held_by_family,
+        ("other-token", "held-token", "held-token"),
+    ) == ("held-token",)
+
+
 def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
     trade = sqlite3.connect(":memory:")
     trade.executescript(

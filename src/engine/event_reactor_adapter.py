@@ -1435,6 +1435,33 @@ def _global_book_prefetch_tokens(
     )
 
 
+def _global_reduce_only_book_tokens(
+    probabilities: Mapping[str, object],
+    held_tokens_by_family: Mapping[str, set[str]],
+    tokens: Iterable[str] | None,
+) -> tuple[str, ...]:
+    """Keep reduce-only book I/O inside the exact held-token scope."""
+
+    scoped_held_tokens = {
+        str(token or "").strip()
+        for family_key in probabilities
+        for token in held_tokens_by_family.get(str(family_key), ())
+        if str(token or "").strip()
+    }
+    if tokens is None:
+        # An incomplete non-held bin makes the broad topology helper return
+        # None. In a reduce-only cut that cannot widen CLOB I/O to every bin:
+        # the exact held tokens remain the only authorized request scope.
+        return tuple(sorted(scoped_held_tokens))
+    return tuple(
+        dict.fromkeys(
+            clean
+            for raw_token in tokens
+            if (clean := str(raw_token or "").strip()) in scoped_held_tokens
+        )
+    )
+
+
 def _global_book_exact_retry_facts(
     missing_tokens: tuple[str, ...],
     retry_books: Mapping[str, Mapping[str, object]],
@@ -8760,11 +8787,18 @@ def event_bound_live_adapter_from_trade_conn(
             if _urgent_book_preemption("start"):
                 return probabilities, None
 
-            def _reduce_only_tokens(tokens):
+            def _reduce_only_tokens(tokens, probability_slice=None):
                 if tokens is None or reduce_only_book_tokens is None:
-                    return tokens
-                return tuple(
-                    token for token in tokens if token in reduce_only_book_tokens
+                    if reduce_only_book_tokens is None:
+                        return tokens
+                return _global_reduce_only_book_tokens(
+                    (
+                        probabilities
+                        if probability_slice is None
+                        else probability_slice
+                    ),
+                    held_tokens_by_family,
+                    tokens,
                 )
 
             def _missing_held_binding_families(
@@ -8848,7 +8882,8 @@ def event_bound_live_adapter_from_trade_conn(
                     None
                     if missing_held_binding_families
                     else _reduce_only_tokens(
-                        _global_book_prefetch_tokens(probability_slice)
+                        _global_book_prefetch_tokens(probability_slice),
+                        probability_slice,
                     )
                 )
                 if (
@@ -9089,7 +9124,7 @@ def event_bound_live_adapter_from_trade_conn(
                     )
                 if tokens is None:
                     tokens = token_hint
-                tokens = _reduce_only_tokens(tokens)
+                tokens = _reduce_only_tokens(tokens, probability_slice)
                 if tokens is None:
                     return None
                 projection_checked = captured_at is not None
@@ -9232,7 +9267,8 @@ def event_bound_live_adapter_from_trade_conn(
                             bound_probabilities,
                             book_metadata_by_key,
                             checked_at=prefetched[2],
-                        )
+                        ),
+                        bound_probabilities,
                     )
                     if prefetched is not None and prefetched[2] is not None
                     else None
@@ -9343,11 +9379,13 @@ def event_bound_live_adapter_from_trade_conn(
                         probability_slice,
                         book_metadata_by_key,
                         checked_at=datetime.now(UTC),
-                    )
+                    ),
+                    probability_slice,
                 )
                 if exact_tokens is None:
                     exact_tokens = _reduce_only_tokens(
-                        _global_book_prefetch_tokens(probability_slice)
+                        _global_book_prefetch_tokens(probability_slice),
+                        probability_slice,
                     )
                 if exact_tokens is None:
                     return None
