@@ -11637,6 +11637,28 @@ def test_main_orders_boot_command_recovery_before_reactor_registration() -> None
     assert boot_idx < reactor_idx < start_idx
 
 
+def test_main_monitor_cadence_is_prospective_of_hard_freshness_wall() -> None:
+    """Normal monitoring must be scheduled before hard-debt recovery is due."""
+
+    import inspect
+    import src.execution.exit_lifecycle as exit_module
+    import src.main as main_module
+
+    source = inspect.getsource(main_module.main)
+    interval = main_module.HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS
+    assert interval < main_module.HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS
+    assert exit_module._EXIT_MONITOR_INTERVAL_SECONDS == interval == 30.0
+    assert (
+        interval
+        < exit_module._MONITOR_CADENCE_GAP_SECONDS
+        < main_module.HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS
+    )
+    assert "seconds=HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS" in source
+    assert 'id="exit_monitor"' in source
+    assert "max_instances=1" in source
+    assert "coalesce=True" in source
+
+
 def test_command_recovery_runs_once_per_entry_decision_clock() -> None:
     """Persisted fill facts must clear ambiguity before the next auction."""
     import inspect

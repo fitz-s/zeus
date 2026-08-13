@@ -407,3 +407,31 @@
   sub-minimum or off-tick orders.  Targeted suites: adapter 204, solver 211,
   solve integration 470, fill simulator 20; compile and `git diff --check`
   clean.  Rollback is one B104 hot-fix commit.
+
+### 2026-08-13 — prospective held-position refresh cadence (B106)
+
+- **Observed defect:** the 30-second recovery detector waited until canonical
+  monitor evidence was already 150 seconds old before starting a bounded
+  75-second full-book pass.  Production therefore repeatedly crossed the
+  freshness wall even though recovery eventually drained the debt.
+- **Structural cause:** the normal full-book cadence was 120 seconds while one
+  bounded pass may consume 75 seconds.  Under interval scheduling, the next
+  successful pass could therefore begin roughly 120 seconds after the previous
+  start and finish near 195 seconds; a detector firing only at 150 seconds is
+  necessarily retrospective.
+- **Contract:** the normal full-book job runs every 30 seconds with
+  `max_instances=1` and coalescing.  A 75-second pass skips overlapping ticks,
+  then becomes eligible again at the next 30-second boundary instead of waiting
+  for the old 120-second boundary.  This is a prospective trigger improvement,
+  not by itself a proof of every per-position gap: fair position ordering and
+  incomplete passes still require production time-series validation.  The
+  separate canonical recovery worker remains reserved for actual stale/
+  missing/invalid probability evidence and does not become a permanent
+  pre-wall loop.  This improves monitor latency without changing entry/exit
+  economics.  The observability watchdog fires at 120 seconds: after a complete
+  75-second pass can finish, but before the 150-second hard-debt wall.
+- **Acceptance:** scheduler-registration and cadence constants agree at 30
+  seconds; the existing singleton/retry antibodies continue to prove hard-debt
+  recovery.  Production acceptance requires every current positive exposure to
+  remain below the 150-second probability+book freshness wall over more than
+  one full scheduler/pass horizon.  Rollback is one B106 hot-fix commit.

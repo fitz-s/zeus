@@ -11051,8 +11051,8 @@ def mark_settled(
 # src.main.
 # ---------------------------------------------------------------------------
 
-_EXIT_MONITOR_INTERVAL_SECONDS = 120.0
-_MONITOR_CADENCE_GAP_FACTOR = 2.0
+_EXIT_MONITOR_INTERVAL_SECONDS = 30.0
+_MONITOR_CADENCE_GAP_SECONDS = 120.0
 
 
 def _release_ws_gap_blocked_exit_retries_after_m5_clear(
@@ -11373,7 +11373,7 @@ def _check_monitor_cadence_watchdog(conn, summary: dict) -> dict | None:
     """
     if conn is None:
         return None
-    threshold_seconds = _EXIT_MONITOR_INTERVAL_SECONDS * _MONITOR_CADENCE_GAP_FACTOR
+    threshold_seconds = _MONITOR_CADENCE_GAP_SECONDS
     now = datetime.now(timezone.utc)
     try:
         from src.ops.monitor_cadence import (

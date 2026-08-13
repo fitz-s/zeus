@@ -9083,8 +9083,8 @@ def _edli_boot_settlement_redeem_recovery() -> None:
         )
 
 
-# FIX 2c (2026-06-20): monitor-cadence watchdog. exit_monitor runs on a 2-min
-# interval (see scheduler.add_job(..., minutes=2, id="exit_monitor")) and is the
+# FIX 2c (2026-06-20): monitor-cadence watchdog. exit_monitor runs on the
+# prospective held-monitor interval registered below and is the
 # sole writer of MONITOR_REFRESHED. The live book observed whole-book silences of
 # 8.8h and 11.8h (2026-06-18/19) during which belief AND the live bid collapsed
 # unobserved, killing the only realized reversal exit. The multi-hour cause is a
@@ -9092,7 +9092,7 @@ def _edli_boot_settlement_redeem_recovery() -> None:
 # code. What code CAN do is flag the gap on the first cycle after recovery: if
 # the newest MONITOR_REFRESHED is older than ~2× the interval, the cadence broke.
 # This is detection only; it does not (and must not) re-drive the schedule.
-# R4-b (2026-07-08): _EXIT_MONITOR_INTERVAL_SECONDS, _MONITOR_CADENCE_GAP_FACTOR,
+# R4-b (2026-07-08): held-monitor cadence watchdog constants,
 # _check_monitor_cadence_watchdog moved to src.execution.exit_lifecycle
 # (single caller was _exit_monitor_cycle, also moved there).
 
@@ -10042,7 +10042,7 @@ def main():
     scheduler.add_job(
         _exit_monitor_cycle,
         "interval",
-        minutes=2,
+        seconds=HELD_POSITION_MONITOR_RECOVERY_INTERVAL_SECONDS,
         id="exit_monitor",
         next_run_time=_utc_run_time_after(HELD_POSITION_MONITOR_FIRST_DELAY_SECONDS),
         max_instances=1,
