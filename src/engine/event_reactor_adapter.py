@@ -6964,36 +6964,6 @@ def _day0_unresolved_entry_probability_rejection_reason(
     return None
 
 
-def _unproven_statistical_maker_fill_rejection_reason(
-    candidate: object,
-    *,
-    day0_payoff_truth: object,
-) -> str | None:
-    """Keep contingent statistical BUY fills outside executable proof."""
-
-    if str(getattr(candidate, "action", "BUY") or "BUY").strip().upper() != "BUY":
-        return None
-    truth = str(day0_payoff_truth or "").strip().lower()
-    if truth in {
-        Day0PayoffTruth.LOCKED.value,
-        Day0PayoffTruth.REFUTED.value,
-    }:
-        return None
-    execution_mode = str(
-        getattr(candidate, "execution_mode", "TAKER_LIMIT") or "TAKER_LIMIT"
-    ).strip().upper()
-    if execution_mode == "TAKER_LIMIT":
-        return None
-    if execution_mode == "MAKER_REST":
-        # SCOPE: statistical risk-increasing BUY maker proposals only. DRAIN:
-        # current full-depth taker proposals continue through the same global
-        # objective while maker fill/path evidence accumulates independently.
-        # RESET: a named causal maker-fill validation may replace this guard;
-        # changing health, q, config, or process state cannot clear it.
-        return "GLOBAL_STATISTICAL_BUY_MAKER_FILL_ADVANTAGE_UNPROVEN"
-    return "GLOBAL_STATISTICAL_BUY_EXECUTION_MODE_INVALID"
-
-
 def event_bound_live_adapter_from_trade_conn(
     trade_conn: sqlite3.Connection,
     *,
@@ -10371,14 +10341,6 @@ def event_bound_live_adapter_from_trade_conn(
             )
             if day0_probability_reason is not None:
                 return day0_probability_reason
-            maker_fill_reason = (
-                _unproven_statistical_maker_fill_rejection_reason(
-                    candidate,
-                    day0_payoff_truth=day0_payoff_truth,
-                )
-            )
-            if maker_fill_reason is not None:
-                return maker_fill_reason
             try:
                 strategy_key = _event_bound_strategy_key(
                     event_type=event_type,

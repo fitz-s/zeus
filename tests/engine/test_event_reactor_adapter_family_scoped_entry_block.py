@@ -194,56 +194,18 @@ def test_day0_entry_containment_preserves_hard_facts_and_non_day0_candidates():
     ) is None
 
 
-def test_statistical_maker_buy_cannot_supply_immediate_execution_proof():
-    reason = era._unproven_statistical_maker_fill_rejection_reason(
-        SimpleNamespace(action="BUY", execution_mode="MAKER_REST"),
-        day0_payoff_truth=None,
-    )
-
-    assert reason == "GLOBAL_STATISTICAL_BUY_MAKER_FILL_ADVANTAGE_UNPROVEN"
-
-
-def test_statistical_taker_and_hard_fact_maker_remain_comparable():
-    assert era._unproven_statistical_maker_fill_rejection_reason(
-        SimpleNamespace(action="BUY", execution_mode="TAKER_LIMIT"),
-        day0_payoff_truth=None,
-    ) is None
-    assert era._unproven_statistical_maker_fill_rejection_reason(
-        SimpleNamespace(action="BUY", execution_mode="MAKER_REST"),
-        day0_payoff_truth="locked",
-    ) is None
-    assert era._unproven_statistical_maker_fill_rejection_reason(
-        SimpleNamespace(action="SELL", execution_mode="MAKER_REST"),
-        day0_payoff_truth=None,
-    ) is None
-
-
-def test_maker_fill_gate_applies_to_actual_and_proof_selection():
+def test_current_statistical_buy_modes_reach_strategy_and_capital_checks():
     import inspect
 
     source = inspect.getsource(era.event_bound_live_adapter_from_trade_conn)
-    maker_at = source.index(
-        "_unproven_statistical_maker_fill_rejection_reason("
-    )
-    strategy_at = source.index("_event_bound_strategy_key(", maker_at)
-
-    assert maker_at < strategy_at
-
-
-def test_current_statistical_taker_reaches_strategy_and_capital_checks():
-    import inspect
-
-    source = inspect.getsource(era.event_bound_live_adapter_from_trade_conn)
-    maker_at = source.index(
-        "_unproven_statistical_maker_fill_rejection_reason("
-    )
-    strategy_at = source.index("_event_bound_strategy_key(", maker_at)
+    strategy_at = source.index("_event_bound_strategy_key(")
     capital_at = source.index(
         "_global_current_entry_feasibility_rejection_reason(",
-        maker_at,
+        strategy_at,
     )
 
-    assert maker_at < strategy_at < capital_at
+    assert strategy_at < capital_at
+    assert "GLOBAL_STATISTICAL_BUY_MAKER_FILL_ADVANTAGE_UNPROVEN" not in source
     assert (
         "GLOBAL_CURRENT_REGIME_SETTLEMENT_GRADED_CAPITAL_ADVANTAGE_UNPROVEN"
         not in source
@@ -254,6 +216,85 @@ def test_current_statistical_taker_reaches_strategy_and_capital_checks():
     assert era._day0_unresolved_entry_probability_rejection_reason(
         day0_payoff_truth=None,
     ) is None
+
+
+def test_current_statistical_maker_reaches_capital_policy(monkeypatch):
+    from src.engine import global_batch_runtime
+
+    captured = {}
+
+    def fake_prepare(_event, **_kwargs):
+        return SimpleNamespace(
+            probability_witness=SimpleNamespace(
+                family_key=FAMILY_A,
+                witness_identity="current-statistical-q",
+            ),
+            day0_payoff_truth_by_bin_side=(),
+            candidate_seeds=(),
+        )
+
+    def fake_process(events, **kwargs):
+        receipt = kwargs["prepare_event"](events[0], NOW)
+        assert receipt.prepared_global_family is not None
+        captured["reason"] = kwargs["candidate_policy_rejection_resolver"](
+            SimpleNamespace(
+                action="BUY",
+                execution_mode="MAKER_REST",
+                family_key=FAMILY_A,
+                bin_id="bin-a",
+                side="YES",
+            )
+        )
+        return SimpleNamespace(events=tuple(events), winner_event_id=None, receipts={})
+
+    monkeypatch.setattr(
+        era,
+        "_prepare_current_global_probability_family",
+        fake_prepare,
+    )
+    monkeypatch.setattr(
+        era,
+        "_entry_global_submit_suppression_reason",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        era,
+        "_edli_forecast_lane_phase_evidence",
+        lambda **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(era, "_forecast_lane_phase_admits", lambda _evidence: True)
+    monkeypatch.setattr(era, "_event_bound_strategy_key", lambda **_kwargs: "test")
+
+    def capital_policy(candidate, **_kwargs):
+        captured["candidate"] = candidate
+        return None
+
+    monkeypatch.setattr(
+        era,
+        "_global_current_entry_feasibility_rejection_reason",
+        capital_policy,
+    )
+    monkeypatch.setattr(
+        global_batch_runtime,
+        "process_current_global_batch",
+        fake_process,
+    )
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        sqlite3.connect(":memory:"),
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=sqlite3.connect(":memory:"),
+        topology_conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
+        auction_capital_authority=SimpleNamespace(),
+    )
+
+    adapter.process_global_batch(
+        (_make_event(city="Dallas", target_date="2026-07-25", metric="high"),),
+        NOW,
+    )
+
+    assert captured["reason"] is None
+    assert captured["candidate"].execution_mode == "MAKER_REST"
 
 
 def test_unresolved_day0_containment_precedes_strategy_and_capital_checks():

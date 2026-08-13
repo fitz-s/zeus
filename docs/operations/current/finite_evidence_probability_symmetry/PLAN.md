@@ -4,6 +4,36 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-13 Current witnessed maker competes on capital growth
+
+The global auction already constructs a candidate-bound
+`CurrentMakerFillWitness` from causally closed actual maker outcomes, binds it
+to the current book epoch, passive limit, rest deadline, and selection-time
+cut, and scores every zero/partial/full-fill outcome on the same
+posterior-mean expected-log-growth axis as taker, SELL, HOLD, and CASH. The
+entry policy nevertheless rejected every statistical `MAKER_REST` BUY before
+that economics ran. This duplicated the typed witness contract and made a
+currently executable capital-efficient order infeasible solely because its
+fill is contingent.
+
+The blanket statistical-maker veto is removed. A maker BUY is still admitted
+only when the solver has validated its complete current witness and when the
+exact token already owns at least one venue-minimum SELL lot. The latter
+constraint remains mandatory: a first maker partial fill can otherwise create
+exposure below the legal exit size and defeat probability-reversal exit. An
+unwitnessed, stale, mismatched, unseeded, non-positive, or JIT-superseded maker
+still cannot win or submit.
+
+SCOPE is statistical `MAKER_REST` BUYs that already satisfy both typed current
+fill authority and exitability seed law. DRAIN is the next complete global
+BUY/SELL/HOLD/CASH comparison and, for a winner, exact-mode JIT revalidation.
+RESET is every new q/book/wealth/fill-witness cut; no earlier maker winner or
+fill distribution carries forward. Acceptance requires the adapter to contain
+no statistical-maker blanket veto, the existing witness tamper/expiry,
+partial-fill economics, and unseeded-maker antibodies to remain green, exact
+live reload, and a current auction receipt showing either a positive witnessed
+maker submission or the next exact current economic rejection.
+
 ## 2026-08-13 Positive winner retains time for submit-time revalidation
 
 After actual admission matched the proof comparator, a Shenzhen BUY winner was
@@ -34,8 +64,9 @@ Statistical immediate-taker BUYs now enter the same live feasible set as their
 proof comparison.  They still require current licensed probability semantics,
 source freshness, exact executable book and fees, pre-cliff liquidation depth,
 strategy policy, Fractional Kelly sizing, capital/risk limits, and submit-time
-JIT reproduction.  Unresolved Day0 probability and unproved maker fills remain
-blocked.  A negative or absent expected-growth winner still selects CASH; this
+JIT reproduction.  Unresolved Day0 probability, unwitnessed maker fills, and
+maker entries without a venue-legal exit seed remain blocked.  A negative or
+absent expected-growth winner still selects CASH; this
 change does not create a minimum-order quota.
 
 SCOPE is the removed bankroll-wide settlement-history veto only.  DRAIN is the
