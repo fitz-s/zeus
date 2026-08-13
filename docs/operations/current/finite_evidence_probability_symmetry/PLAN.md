@@ -4,6 +4,33 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-13 Partial exits retire sold capital from every auction authority
+
+An authenticated Miami SELL reduced the current open position to 0.00857 shares
+and $0.002399599 cost, while the chain API retained the original $1.4499 lot
+`initialValue`.  Position-level exit and PnL authority already used the reduced
+open-fill economics, but global wealth took the maximum of fill, chain, and
+projection costs, while the DB-backed family selector preferred chain cost.
+Both therefore re-committed sold capital and could suppress or distort the next
+positive-growth order.
+
+Fill authority now governs cost selection at both consumers: a verified trade
+fill uses current open-fill cost/shares; a balance-only rescue uses chain
+economics; legacy unknown authority retains the conservative fallback.  SCOPE
+is global wealth and same-family selection after a partial SELL.  DRAIN is the
+next complete global cut reading the reduced canonical open lot.  RESET is each
+new authenticated entry/exit fill or chain observation.  Acceptance requires
+stale full-lot chain cost to be ignored for a verified residual while the
+existing pre-fill chain-lag antibody still charges the complete newer fill.
+
+The same widened SELL integration suite exposed a final-boundary scope defect
+in the preceding deadline hotfix: `_submit_current_global_sell` referenced the
+adapter closure's held deadline even though it is also a module-level direct
+boundary.  Every direct global SELL therefore failed before venue actuation
+with `NameError`.  The caller now passes the exact terminal reason explicitly;
+ordinary epochs retain `GLOBAL_REAUCTION_EPOCH_EXPIRED`, while a request-bound
+deadline retains `HELD_SELL_DEADLINE_EXPIRED` without hidden closure state.
+
 ## 2026-08-13 Terminal incremental fills remain canonical recovery debt
 
 The first live 1/8-Kelly cut produced four venue-confirmed entries.  The Miami

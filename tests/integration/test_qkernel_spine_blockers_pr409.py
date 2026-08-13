@@ -1421,6 +1421,59 @@ def test_selection_exposure_reads_chain_backed_db_without_portfolio_provider():
         assert exposure[bin_id] == pytest.approx(21.27)
 
 
+def test_selection_exposure_uses_open_fill_cost_after_partial_exit():
+    """Fill authority must not reintroduce a sold full-lot chain initialValue."""
+    import sqlite3
+
+    family, _bins = _three_bin_family()
+    proofs = _proofs_for(
+        family,
+        yes_asks=[0.25, 0.30, 0.25, 0.20],
+        no_asks=[0.75, 0.70, 0.75, 0.80],
+        q_by_bin=[0.20, 0.35, 0.30, 0.15],
+        q_lcb_by_bin=[0.12, 0.20, 0.18, 0.08],
+    )
+    bin_by_condition = {
+        proof.candidate.condition_id: era._candidate_bin_id(proof)
+        for proof in proofs
+    }
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE position_current (
+            condition_id TEXT, direction TEXT, phase TEXT, chain_state TEXT,
+            chain_shares REAL, chain_cost_basis_usd REAL,
+            shares REAL, cost_basis_usd REAL, size_usd REAL,
+            fill_authority TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO position_current VALUES (
+            'cond-1', 'buy_no', 'active', 'synced',
+            0.00857, 1.4499, 0.00857, 0.002399599, 0.002399599,
+            'venue_confirmed_full'
+        )
+        """
+    )
+
+    exposure = era._family_existing_exposure_for_selection_by_bin_id(
+        proofs=proofs,
+        portfolio_state_provider=None,
+        held_position_conn=conn,
+        family=family,
+    )
+
+    own_bin = bin_by_condition["cond-1"]
+    assert own_bin not in exposure
+    assert exposure[utility_ranker.OUTSIDE_OUTCOME] == pytest.approx(0.002399599)
+    for cond, bin_id in bin_by_condition.items():
+        if cond != "cond-1":
+            assert exposure[bin_id] == pytest.approx(0.002399599)
+
+
 def test_opportunity_book_receipt_records_selection_exposure():
     """The live receipt must prove which family exposure shaped qkernel selection."""
 

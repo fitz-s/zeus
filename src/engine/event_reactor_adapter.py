@@ -7102,6 +7102,12 @@ def event_bound_live_adapter_from_trade_conn(
             preflight_only=preflight_only,
             preflight_receipt=preflight_receipt,
             final_authority_deadline=final_authority_deadline,
+            final_deadline_expired_reason=(
+                "HELD_SELL_DEADLINE_EXPIRED"
+                if held_completion_deadline is not None
+                and final_authority_deadline == held_completion_deadline
+                else "GLOBAL_REAUCTION_EPOCH_EXPIRED"
+            ),
             hard_authority_cancelled=hard_authority_cancelled,
             global_claimed_at=_global_claim_generations.get(event.event_id),
             global_claim_attempt_count=_global_claim_attempt_counts.get(
@@ -12622,6 +12628,7 @@ def _submit_current_global_sell(
     preflight_only: bool,
     preflight_receipt: EventSubmissionReceipt | None,
     final_authority_deadline: datetime | None = None,
+    final_deadline_expired_reason: str = "GLOBAL_REAUCTION_EPOCH_EXPIRED",
     hard_authority_cancelled: Callable[[], bool] | None = None,
     global_claimed_at: str | None = None,
     global_claim_attempt_count: int | None = None,
@@ -13170,12 +13177,7 @@ def _submit_current_global_sell(
             final_block = _global_final_actuation_block_reason(
                 deadline=final_authority_deadline,
                 hard_authority_cancelled=hard_authority_cancelled,
-                deadline_expired_reason=(
-                    "HELD_SELL_DEADLINE_EXPIRED"
-                    if held_completion_deadline is not None
-                    and final_authority_deadline == held_completion_deadline
-                    else "GLOBAL_REAUCTION_EPOCH_EXPIRED"
-                ),
+                deadline_expired_reason=final_deadline_expired_reason,
             )
             if final_block is not None:
                 return _global_sell_receipt(
@@ -13198,12 +13200,7 @@ def _submit_current_global_sell(
             final_block = _global_final_actuation_block_reason(
                 deadline=final_authority_deadline,
                 hard_authority_cancelled=hard_authority_cancelled,
-                deadline_expired_reason=(
-                    "HELD_SELL_DEADLINE_EXPIRED"
-                    if held_completion_deadline is not None
-                    and final_authority_deadline == held_completion_deadline
-                    else "GLOBAL_REAUCTION_EPOCH_EXPIRED"
-                ),
+                deadline_expired_reason=final_deadline_expired_reason,
             )
             if final_block is not None:
                 return _global_sell_receipt(
@@ -31376,6 +31373,11 @@ def _family_existing_exposure_for_selection_by_bin_id(
 
     if held_position_conn is not None:
         try:
+            from src.state.portfolio import (
+                FILL_AUTHORITY_VENUE_POSITION_OBSERVED,
+                FILL_GRADE_FILL_AUTHORITIES,
+            )
+
             columns = _position_current_columns(held_position_conn)
             required_columns = {"condition_id", "direction"}
             missing_required = sorted(required_columns - columns)
@@ -31397,6 +31399,11 @@ def _family_existing_exposure_for_selection_by_bin_id(
                 raise RuntimeError("position_current exposure columns missing")
             condition_placeholders = ",".join("?" for _ in bin_id_by_condition)
             direction_select = "direction"
+            fill_authority_select = (
+                "fill_authority"
+                if "fill_authority" in columns
+                else "NULL AS fill_authority"
+            )
             chain_cost_select = (
                 "chain_cost_basis_usd"
                 if "chain_cost_basis_usd" in columns
@@ -31438,7 +31445,7 @@ def _family_existing_exposure_for_selection_by_bin_id(
                 scope_params.extend([family_city, family_target_date, family_metric])
             rows = held_position_conn.execute(
                 f"""
-                SELECT condition_id, {direction_select},
+                SELECT condition_id, {direction_select}, {fill_authority_select},
                        {chain_cost_select}, {cost_select}, {size_select},
                        {city_select}, {target_date_select}, {metric_select}
                   FROM position_current
@@ -31452,27 +31459,29 @@ def _family_existing_exposure_for_selection_by_bin_id(
                 try:
                     condition_id = str(row["condition_id"] or "")
                     direction_raw = row["direction"]
+                    fill_authority = str(row["fill_authority"] or "")
                     row_city = row["city"]
                     row_target_date = row["target_date"]
                     row_metric = row["temperature_metric"]
-                    committed = (
-                        _optional_float(row["chain_cost_basis_usd"])
-                        or _optional_float(row["cost_basis_usd"])
-                        or _optional_float(row["size_usd"])
-                        or 0.0
-                    )
+                    chain_cost = _optional_float(row["chain_cost_basis_usd"])
+                    open_cost = _optional_float(row["cost_basis_usd"])
+                    submitted_cost = _optional_float(row["size_usd"])
                 except Exception:
                     condition_id = str(row[0] or "")
                     direction_raw = row[1]
-                    row_city = row[5] if len(row) > 5 else None
-                    row_target_date = row[6] if len(row) > 6 else None
-                    row_metric = row[7] if len(row) > 7 else None
-                    committed = (
-                        _optional_float(row[2])
-                        or _optional_float(row[3])
-                        or _optional_float(row[4])
-                        or 0.0
-                    )
+                    fill_authority = str(row[2] or "")
+                    chain_cost = _optional_float(row[3])
+                    open_cost = _optional_float(row[4])
+                    submitted_cost = _optional_float(row[5])
+                    row_city = row[6] if len(row) > 6 else None
+                    row_target_date = row[7] if len(row) > 7 else None
+                    row_metric = row[8] if len(row) > 8 else None
+                if fill_authority in FILL_GRADE_FILL_AUTHORITIES:
+                    committed = open_cost or submitted_cost or chain_cost or 0.0
+                elif fill_authority == FILL_AUTHORITY_VENUE_POSITION_OBSERVED:
+                    committed = chain_cost or open_cost or submitted_cost or 0.0
+                else:
+                    committed = chain_cost or open_cost or submitted_cost or 0.0
                 if condition_id not in bin_id_by_condition and _is_same_weather_family(
                     city=row_city,
                     target_date=row_target_date,

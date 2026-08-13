@@ -21305,6 +21305,46 @@ def test_verified_fill_cost_consumes_family_budget_before_chain_balance_catches_
     assert family.committed_capital_usd == Decimal("21.896")
 
 
+def test_verified_partial_exit_ignores_stale_full_lot_chain_cost():
+    """A sold fill slice cannot remain committed through stale chain initialValue."""
+
+    position = SimpleNamespace(
+        trade_id="partial-exit-dust",
+        position_id="partial-exit-dust",
+        condition_id="condition-a",
+        direction="buy_no",
+        token_id="yes-a",
+        no_token_id="no-a",
+        shares=Decimal("0.00857"),
+        effective_shares=Decimal("0.00857"),
+        chain_shares=Decimal("0.00857"),
+        cost_basis_usd=Decimal("0.002399599"),
+        size_usd=Decimal("0.002399599"),
+        effective_cost_basis_usd=Decimal("0.002399599"),
+        chain_cost_basis_usd=Decimal("1.4499"),
+        entry_price=Decimal("0.279999883"),
+        chain_state="synced",
+        chain_verified_at="2026-08-13T17:06:20+00:00",
+        fill_authority="venue_confirmed_full",
+        state="entered",
+    )
+    at = _dt.datetime(2026, 8, 13, 17, 6, 21, tzinfo=_dt.timezone.utc)
+    conn = _wealth_test_conn(captured_at=at, ctf={"no-a": 8_570})
+    wealth = current_portfolio_wealth_witness(
+        conn,
+        decision_at_utc=at,
+        max_age=_dt.timedelta(seconds=10),
+        portfolio_state=PortfolioState(
+            positions=[position],
+            authority="canonical_db",
+            authority_scope="runtime_exposure",
+        ),
+    )
+
+    assert wealth.native_holdings_micro == (("no-a", 8_570),)
+    assert wealth.native_commitments_micro == (("no-a", 2_400),)
+
+
 def test_global_selection_counts_open_entry_without_granting_sell_inventory():
     """A durable BUY commitment consumes Kelly target before chain projection."""
 
@@ -32365,6 +32405,27 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     assert era._global_preflight_block_status(blocked.reason) == "CANDIDATE_BLOCKED"
     assert exits == []
     Clob.ctf_units = 10 * 1_000_000
+    expired = era._submit_current_global_sell(
+        event,
+        decision_time=at,
+        global_actuation=actuation,
+        trade_conn=conn,
+        global_claim_conn=global_claim_conn,
+        forecast_conn=object(),
+        topology_conn=object(),
+        calibration_conn=object(),
+        preflight_only=False,
+        preflight_receipt=preflight,
+        final_authority_deadline=_dt.datetime.now(_dt.timezone.utc)
+        - _dt.timedelta(seconds=1),
+        final_deadline_expired_reason="HELD_SELL_DEADLINE_EXPIRED",
+        hard_authority_cancelled=lambda: False,
+        global_claimed_at=global_claimed_at,
+        global_claim_attempt_count=global_claim_attempt_count,
+    )
+    assert expired.reason == "HELD_SELL_DEADLINE_EXPIRED"
+    assert expired.venue_call_started is False
+    assert exits == []
     receipt = era._submit_current_global_sell(
         event,
         decision_time=at,

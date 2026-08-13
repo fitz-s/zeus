@@ -3680,24 +3680,55 @@ def current_portfolio_wealth_witness(
                     (f"position_claim:{position_id}", token, micro)
                 )
             try:
-                cost = max(
-                    Decimal(
-                        str(
-                            getattr(position, name, 0)
-                            or 0
+                if has_verified_trade_fill(position):
+                    # A partial SELL makes the current open fill slice smaller
+                    # than the immutable entry fill.  The chain API may retain
+                    # the original lot's initialValue after the exact token
+                    # balance has already shrunk; that historical value is not
+                    # current committed capital.
+                    cost = next(
+                        (
+                            value
+                            for name in (
+                                "effective_cost_basis_usd",
+                                "cost_basis_usd",
+                                "size_usd",
+                                "chain_cost_basis_usd",
+                            )
+                            if (
+                                value := Decimal(
+                                    str(getattr(position, name, 0) or 0)
+                                )
+                            ) > 0
+                        ),
+                        Decimal("0"),
+                    )
+                    basis_shares = next(
+                        (
+                            value
+                            for name in ("effective_shares", "shares", "chain_shares")
+                            if (
+                                value := Decimal(
+                                    str(getattr(position, name, 0) or 0)
+                                )
+                            ) > 0
+                        ),
+                        Decimal("0"),
+                    )
+                else:
+                    cost = max(
+                        Decimal(str(getattr(position, name, 0) or 0))
+                        for name in (
+                            "effective_cost_basis_usd",
+                            "chain_cost_basis_usd",
+                            "cost_basis_usd",
+                            "size_usd",
                         )
                     )
-                    for name in (
-                        "effective_cost_basis_usd",
-                        "chain_cost_basis_usd",
-                        "cost_basis_usd",
-                        "size_usd",
+                    basis_shares = max(
+                        Decimal(str(getattr(position, name, 0) or 0))
+                        for name in ("effective_shares", "chain_shares", "shares")
                     )
-                )
-                basis_shares = max(
-                    Decimal(str(getattr(position, name, 0) or 0))
-                    for name in ("effective_shares", "chain_shares", "shares")
-                )
                 if cost <= 0:
                     price = max(
                         Decimal(str(getattr(position, name, 0) or 0))
