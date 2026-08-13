@@ -9435,6 +9435,18 @@ def _durable_held_position_monitor_recovery_cycle() -> bool:
             "HELD_POSITION_MONITOR_RECOVERY_INCOMPLETE:"
             f"overdue={remaining_overdue}:future={remaining_future}"
         )
+    # The recovery attempt may lose the reactor handoff to an already-running
+    # urgent monitor.  That timeout arms periodic fairness debt, but the urgent
+    # owner can still satisfy the same current-capital obligation before this
+    # exact post-attempt read.  Once canonical evidence proves every held
+    # position fresh, retaining the concurrency debt would make each reserved
+    # global auction cancel itself forever even though there is no monitor work
+    # left to drain.
+    # SCOPE: the completed recovery obligation for the current held book only.
+    # DRAIN: this exact canonical post-attempt read proves zero blocking stale
+    # or future monitor evidence. RESET: a later periodic handoff timeout or
+    # newly overdue canonical position arms its own fresh debt.
+    _periodic_held_position_monitor_fairness_debt.clear()
     _held_position_monitor_canonical_debt.clear()
     return True
 

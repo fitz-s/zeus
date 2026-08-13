@@ -4,6 +4,25 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-13 Fresh canonical coverage discharges stale auction fairness debt
+
+A recovery full-book monitor can time out waiting for the reactor while an
+already-running urgent held monitor independently refreshes every current
+position.  The timeout arms periodic fairness debt, but recovery previously
+cleared only canonical cadence debt after its final DB read proved the entire
+held book fresh.  The leftover concurrency debt then cancelled every reserved
+global auction before selection, creating a no-order ratchet after the monitor
+obligation had already been satisfied.
+
+Recovery now clears periodic fairness debt together with canonical debt only
+after the exact post-attempt canonical read proves zero blocking-stale and zero
+future monitor evidence.  SCOPE is the completed recovery obligation for the
+current held book.  DRAIN is that exact canonical clean read.  RESET is a later
+periodic handoff timeout or newly overdue held position, either of which arms a
+new debt from current truth.  Acceptance requires an antibody where recovery
+starts stale with fairness debt armed, ends canonically fresh, releases the
+auction, and a live global cut reaches a terminal current winner/CASH result.
+
 ## 2026-08-13 Canonical monitor never waits for a lease while holding SQLite
 
 Current runtime evidence showed a three-process lock-order cycle on the live

@@ -10740,16 +10740,21 @@ def test_durable_monitor_recovery_requires_canonical_refresh_after_retry(
         "_exit_monitor_cycle",
         lambda **kwargs: calls.append(("monitor", kwargs)) or True,
     )
+    main_module._periodic_held_position_monitor_fairness_debt.set()
 
-    assert (
-        main_module._durable_held_position_monitor_recovery_cycle.__wrapped__()
-        is True
-    )
-    assert calls == [
-        "close",
-        ("monitor", {"recovery_full_book": True}),
-        "close",
-    ]
+    try:
+        assert (
+            main_module._durable_held_position_monitor_recovery_cycle.__wrapped__()
+            is True
+        )
+        assert calls == [
+            "close",
+            ("monitor", {"recovery_full_book": True}),
+            "close",
+        ]
+        assert not main_module._periodic_held_position_monitor_fairness_debt.is_set()
+    finally:
+        main_module._periodic_held_position_monitor_fairness_debt.clear()
 
 
 def test_durable_monitor_recovery_arms_fairness_debt_when_reactor_stays_busy(
