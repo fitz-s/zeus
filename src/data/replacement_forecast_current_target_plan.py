@@ -272,6 +272,16 @@ def _cycle_at_or_after(candidate: str, floor: str | None) -> bool:
     return candidate_dt >= floor_dt
 
 
+def _utc_instant(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
 def _path_from_metadata_path(
     path_text: object,
     *,
@@ -789,11 +799,7 @@ def _latest_authorized_day0_fact(
         def optional_column(name: str) -> str:
             return name if name in instant_columns else f"NULL AS {name}"
 
-        availability_clause = (
-            "AND imported_at <= ?"
-            if "imported_at" in instant_columns
-            else "AND 0 = 1"
-        )
+        availability_clause = "" if "imported_at" in instant_columns else "AND 0 = 1"
         time_geometry_clause = " ".join(
             clause
             for column, clause in (
@@ -811,11 +817,7 @@ def _latest_authorized_day0_fact(
         query_params: tuple[object, ...] = (
             city,
             target_date,
-            decision_utc.isoformat(),
-            decision_utc.isoformat(),
         )
-        if "imported_at" in instant_columns:
-            query_params += (decision_utc.isoformat(),)
         station_identity_clause = ""
         if expected_station and "station_id" in instant_columns:
             station_identity_clause = (
@@ -875,8 +877,6 @@ def _latest_authorized_day0_fact(
                  WHERE city = ?
                    AND target_date = ?
                    AND substr(local_timestamp, 1, 10) = target_date
-                   AND utc_timestamp <= ?
-                   AND datetime({observation_fact_time_sql}) <= datetime(?)
                    {availability_clause}
                    {time_geometry_clause}
                    {station_identity_clause}
@@ -905,6 +905,7 @@ def _latest_authorized_day0_fact(
                    AND {extreme_col} IS NOT NULL
             )
             SELECT observed_extreme_native,
+                   utc_timestamp,
                    observation_fact_time AS observation_time,
                    (SELECT COUNT(*) FROM authorized) AS sample_count,
                    source AS observation_source,
@@ -925,6 +926,18 @@ def _latest_authorized_day0_fact(
         # own the writer-validated digest of the canonical extreme.
         for row in instant_rows:
             if not row["observation_time"] or row["observed_extreme_native"] is None:
+                continue
+            utc_clock = _utc_instant(row["utc_timestamp"])
+            fact_clock = _utc_instant(row["observation_time"])
+            available_clock = _utc_instant(row["observation_available_at"])
+            if (
+                utc_clock is None
+                or fact_clock is None
+                or available_clock is None
+                or utc_clock > decision_utc
+                or fact_clock > decision_utc
+                or available_clock > decision_utc
+            ):
                 continue
             facts.append(
                 {
@@ -1365,23 +1378,40 @@ def _latest_authorized_day0_fact(
                         channel = str(
                             ledger_fact.get("observation_source") or ""
                         ).strip().lower()
-                        matching_projection = [
+                        try:
+                            ledger_clock = datetime.fromisoformat(
+                                str(ledger_fact.get("observation_time") or "").replace(
+                                    "Z", "+00:00"
+                                )
+                            ).astimezone(timezone.utc)
+                        except (TypeError, ValueError):
+                            continue
+                        exact_projection = [
                             fact
                             for fact in projected_facts
-                            if str(
+                            if str(fact.get("source") or "")
+                            == "durable_observation_instants"
+                            and str(
                                 fact.get("observation_source") or ""
                             ).strip().lower()
                             == channel
+                            and str(fact.get("station_id") or "").strip().upper()
+                            == expected_station
+                            and str(fact.get("unit") or "").strip().upper()
+                            == expected_unit
                             and float(fact.get("observed_extreme_native"))
                             == float(ledger_fact["observed_extreme_native"])
                             and str(fact.get("raw_payload_sha256") or "").strip()
+                            and _utc_instant(fact.get("observation_time"))
+                            == ledger_clock
                         ]
-                        if matching_projection:
+                        if exact_projection:
                             ledger_fact["raw_payload_sha256"] = max(
-                                matching_projection,
-                                key=lambda fact: str(
-                                    fact.get("observation_available_at") or ""
-                                ),
+                                exact_projection,
+                                key=lambda fact: _utc_instant(
+                                    fact.get("observation_available_at")
+                                )
+                                or datetime.min.replace(tzinfo=timezone.utc),
                             )["raw_payload_sha256"]
                     facts = [
                         fact

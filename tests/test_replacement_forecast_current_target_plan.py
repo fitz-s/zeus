@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import src.data.replacement_forecast_current_target_plan as current_target_plan
 from src.data.replacement_forecast_current_target_plan import (
     _day0_observation_lag_reason,
@@ -638,7 +640,10 @@ def test_day0_global_fact_preserves_canonical_digest_across_ledger_duplicate() -
     conn.close()
 
 
-def test_day0_global_fact_binds_corrected_ledger_frontier_to_exact_canonical_digest() -> None:
+@pytest.mark.parametrize("temperature_metric", ("high", "low"))
+def test_day0_global_fact_binds_corrected_ledger_frontier_to_exact_canonical_digest(
+    temperature_metric: str,
+) -> None:
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(
@@ -660,11 +665,17 @@ def test_day0_global_fact_binds_corrected_ledger_frontier_to_exact_canonical_dig
     )
     old_digest = "a" * 64
     current_digest = "c" * 64
+    if temperature_metric == "high":
+        old_extrema = (30.0, 20.0)
+        current_extrema = (29.0, 20.0)
+    else:
+        old_extrema = (35.0, 28.0)
+        current_extrema = (35.0, 29.0)
     rows = (
         (
             "Shenzhen", "2026-08-14", "wu_icao_history", "ZGSZ", "C",
             "2026-08-13T17:19:18+00:00", "2026-08-14T00:00:00+08:00",
-            "2026-08-13T16:00:00+00:00", 30.0, 30.0, "VERIFIED", 1,
+            "2026-08-13T16:00:00+00:00", *old_extrema, "VERIFIED", 1,
             "OK", "historical_hourly", None,
             json.dumps(
                 {
@@ -676,7 +687,7 @@ def test_day0_global_fact_binds_corrected_ledger_frontier_to_exact_canonical_dig
         (
             "Shenzhen", "2026-08-14", "wu_icao_history", "ZGSZ", "C",
             "2026-08-13T18:15:50+00:00", "2026-08-14T02:00:00+08:00",
-            "2026-08-13T18:00:00+00:00", 29.0, 29.0, "VERIFIED", 1,
+            "2026-08-13T18:00:00Z", *current_extrema, "VERIFIED", 1,
             "OK", "historical_hourly", None,
             json.dumps(
                 {
@@ -696,6 +707,32 @@ def test_day0_global_fact_binds_corrected_ledger_frontier_to_exact_canonical_dig
         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         rows,
+    )
+    conn.executemany(
+        """
+        INSERT INTO observation_instants (
+            city, target_date, source, station_id, temp_unit, imported_at,
+            local_timestamp, utc_timestamp, running_max, running_min,
+            authority, training_allowed, causality_status, source_role,
+            raw_response, provenance_json
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            (
+                "Shenzhen", "2026-08-14", "wu_icao_history", "ZGSZ", "C",
+                "2026-08-13T18:20:00+00:00", "2026-08-14T02:00:00+08:00",
+                "2026-08-13T18:00:00+00:00", *current_extrema, "VERIFIED", 1,
+                "RETRACTED", "historical_hourly", None,
+                json.dumps({"payload_hash": f"sha256:{'b' * 64}"}),
+            ),
+            (
+                "Shenzhen", "2026-08-14", "wu_icao_history", "ZGSZ", "C",
+                "2026-08-13T17:45:00-01:00", "2026-08-14T02:00:00+08:00",
+                "2026-08-13T18:00:00+00:00", *current_extrema, "VERIFIED", 1,
+                "OK", "historical_hourly", None,
+                json.dumps({"payload_hash": f"sha256:{'d' * 64}"}),
+            ),
+        ),
     )
     conn.executemany(
         "INSERT INTO observation_prints VALUES (?,?,?,?,?,?,?,?)",
@@ -722,7 +759,7 @@ def test_day0_global_fact_binds_corrected_ledger_frontier_to_exact_canonical_dig
         conn,
         city="Shenzhen",
         target_date="2026-08-14",
-        temperature_metric="high",
+        temperature_metric=temperature_metric,
         decision_time=datetime(2026, 8, 13, 18, 30, tzinfo=timezone.utc),
         require_settlement_channel=True,
     )
@@ -731,6 +768,173 @@ def test_day0_global_fact_binds_corrected_ledger_frontier_to_exact_canonical_dig
     assert fact["observed_extreme_native"] == 29.0
     assert fact["observation_time"] == "2026-08-13T18:00:00+00:00"
     assert fact["raw_payload_sha256"] == current_digest
+    conn.close()
+
+
+def test_day0_global_fact_leaves_digest_absent_for_legacy_instant_schema() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, source TEXT, station_id TEXT,
+            temp_unit TEXT, imported_at TEXT, local_timestamp TEXT,
+            utc_timestamp TEXT, running_max REAL, running_min REAL,
+            authority TEXT, training_allowed INTEGER, causality_status TEXT,
+            source_role TEXT
+        );
+        CREATE TABLE observation_prints (
+            city TEXT, station_id TEXT, source_channel TEXT,
+            publish_ts_utc TEXT, value_native REAL, unit TEXT,
+            fetched_at_utc TEXT, raw_report TEXT
+        );
+        INSERT INTO observation_instants VALUES (
+            'Shenzhen', '2026-08-14', 'wu_icao_history', 'ZGSZ', 'C',
+            '2026-08-13T18:15:50+00:00', '2026-08-14T02:00:00+08:00',
+            '2026-08-13T18:00:00+00:00', 29.0, 29.0,
+            'VERIFIED', 1, 'OK', 'historical_hourly'
+        );
+        INSERT INTO observation_prints VALUES (
+            'Shenzhen', 'ZGSZ', 'wu_icao_history',
+            '2026-08-13T18:00:00+00:00', 29.0, 'C',
+            '2026-08-13T18:15:50+00:00', NULL
+        );
+        """
+    )
+
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Shenzhen",
+        target_date="2026-08-14",
+        temperature_metric="high",
+        decision_time=datetime(2026, 8, 13, 18, 30, tzinfo=timezone.utc),
+        require_settlement_channel=True,
+    )
+
+    assert fact is not None
+    assert fact["raw_payload_sha256"] == ""
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    (
+        "instant_utc",
+        "instant_imported_at",
+        "latest_raw_ts",
+        "print_time",
+        "is_ambiguous",
+        "is_missing",
+    ),
+    (
+        (
+            "2026-08-13T18:00:00.900000+00:00",
+            "2026-08-13T18:15:00+00:00",
+            None,
+            "2026-08-13T18:00:00.100000+00:00",
+            0,
+            0,
+        ),
+        (
+            "2026-08-13T18:00:00.100000+00:00",
+            "2026-08-13T18:30:00.200000+00:00",
+            None,
+            "2026-08-13T18:00:00.100000+00:00",
+            0,
+            0,
+        ),
+        (
+            "2026-08-13T18:31:00+00:00",
+            "2026-08-13T18:15:00+00:00",
+            "2026-08-13T18:00:00+00:00",
+            "2026-08-13T18:00:00+00:00",
+            0,
+            0,
+        ),
+        (
+            "2026-08-13T18:00:00+00:00",
+            "2026-08-13T18:15:00+00:00",
+            None,
+            "2026-08-13T18:00:00+00:00",
+            1,
+            0,
+        ),
+        (
+            "2026-08-13T18:00:00+00:00",
+            "2026-08-13T18:15:00+00:00",
+            None,
+            "2026-08-13T18:00:00+00:00",
+            0,
+            1,
+        ),
+    ),
+)
+def test_day0_global_fact_rejects_nonexact_or_future_digest_row(
+    instant_utc: str,
+    instant_imported_at: str,
+    latest_raw_ts: str | None,
+    print_time: str,
+    is_ambiguous: int,
+    is_missing: int,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, source TEXT, station_id TEXT,
+            temp_unit TEXT, imported_at TEXT, local_timestamp TEXT,
+            utc_timestamp TEXT, running_max REAL, running_min REAL,
+            authority TEXT, training_allowed INTEGER, causality_status TEXT,
+            source_role TEXT, raw_response TEXT, provenance_json TEXT,
+            is_ambiguous_local_hour INTEGER, is_missing_local_hour INTEGER
+        );
+        CREATE TABLE observation_prints (
+            city TEXT, station_id TEXT, source_channel TEXT,
+            publish_ts_utc TEXT, value_native REAL, unit TEXT,
+            fetched_at_utc TEXT, raw_report TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "Shenzhen", "2026-08-14", "wu_icao_history", "ZGSZ", "C",
+            instant_imported_at, "2026-08-14T02:00:00+08:00",
+            instant_utc, 29.0, 29.0, "VERIFIED", 1, "OK",
+            "historical_hourly", None,
+            json.dumps(
+                {
+                    "payload_hash": f"sha256:{'f' * 64}",
+                    **({"latest_raw_ts": latest_raw_ts} if latest_raw_ts else {}),
+                }
+            ),
+            is_ambiguous,
+            is_missing,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO observation_prints VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "Shenzhen", "ZGSZ", "wu_icao_history",
+            print_time, 29.0, "C",
+            "2026-08-13T18:15:50+00:00", None,
+        ),
+    )
+
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Shenzhen",
+        target_date="2026-08-14",
+        temperature_metric="high",
+        decision_time=datetime(
+            2026, 8, 13, 18, 30, 0, 100_000, tzinfo=timezone.utc
+        ),
+        require_settlement_channel=True,
+    )
+
+    assert fact is not None
+    assert fact["observation_time"] == print_time
+    assert fact["raw_payload_sha256"] == ""
     conn.close()
 
 
