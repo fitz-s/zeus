@@ -5721,6 +5721,38 @@ class TestAuthenticatedEntryTradeFactProjection:
             ).fetchone()[0]
             == 1
         )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'pending_exit',
+                   shares = 5.0,
+                   cost_basis_usd = 2.0,
+                   entry_price = 0.4
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        )
+        assert reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=refill_command,
+        ) == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        repaired = conn.execute(
+            """
+            SELECT phase, shares, cost_basis_usd
+              FROM position_current
+             WHERE position_id = ?
+            """,
+            (position_id,),
+        ).fetchone()
+        assert dict(repaired) == {
+            "phase": "pending_exit",
+            "shares": 15.0,
+            "cost_basis_usd": 6.9,
+        }
+        assert reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=refill_command,
+        ) == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
 
     @pytest.mark.parametrize(
         ("filled_size", "fill_price"),

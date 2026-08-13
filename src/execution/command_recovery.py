@@ -23619,7 +23619,9 @@ def _authenticated_entry_trade_fact_candidates(
            AND COALESCE(cmd.venue_order_id, '') != ''
            AND (
                 pc.position_id IS NULL
-                OR pc.phase IN ('pending_entry', 'active', 'day0_window')
+                OR pc.phase IN (
+                    'pending_entry', 'active', 'day0_window', 'pending_exit'
+                )
            )
            AND EXISTS (
                 SELECT 1
@@ -23808,7 +23810,7 @@ def _authenticated_entry_fill_projection_complete(
 
     event = conn.execute(
         """
-        SELECT 1
+        SELECT sequence_no
           FROM position_events
          WHERE position_id = ?
            AND event_type = 'ENTRY_ORDER_FILLED'
@@ -23844,8 +23846,80 @@ def _authenticated_entry_fill_projection_complete(
             abs(shares - filled_size) <= tolerance
             and abs(price - fill_price) <= tolerance
         ):
-            return True
-    return False
+            break
+    else:
+        return False
+
+    later_reduction = conn.execute(
+        """
+        SELECT 1
+          FROM position_events
+         WHERE position_id = ?
+           AND sequence_no > ?
+           AND (
+                event_type = 'EXIT_ORDER_FILLED'
+                OR (
+                    json_valid(payload_json)
+                    AND json_extract(payload_json, '$.semantic_event')
+                        = 'CAPITAL_REDUCTION_FILLED'
+                )
+           )
+         LIMIT 1
+        """,
+        (position_id, int(event["sequence_no"])),
+    ).fetchone()
+    if later_reduction is not None:
+        return True
+
+    current = conn.execute(
+        """
+        SELECT phase, shares, cost_basis_usd,
+               chain_shares, chain_cost_basis_usd
+          FROM position_current
+         WHERE position_id = ?
+         LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
+    if current is None or str(current["phase"] or "") not in {
+        "pending_entry",
+        "active",
+        "day0_window",
+        "pending_exit",
+    }:
+        return False
+
+    from src.state.db import query_entry_execution_fill_aggregate
+
+    aggregate = query_entry_execution_fill_aggregate(
+        conn,
+        position_id,
+        strict=True,
+    )
+    if aggregate is None:
+        return False
+    projected_shares = _decimal_or_none(current["shares"]) or Decimal("0")
+    projected_cost = _decimal_or_none(current["cost_basis_usd"]) or Decimal("0")
+    aggregate_shares = (
+        _decimal_or_none(aggregate.get("shares_filled")) or Decimal("0")
+    )
+    aggregate_cost = (
+        _decimal_or_none(aggregate.get("filled_cost_basis_usd")) or Decimal("0")
+    )
+    if (
+        abs(projected_shares - aggregate_shares) <= _POSITION_PROJECTION_TOLERANCE
+        and abs(projected_cost - aggregate_cost) <= _POSITION_PROJECTION_TOLERANCE
+    ):
+        return True
+
+    chain_shares = _decimal_or_none(current["chain_shares"]) or Decimal("0")
+    chain_cost = _decimal_or_none(current["chain_cost_basis_usd"]) or Decimal("0")
+    return bool(
+        projected_shares > aggregate_shares
+        and projected_cost > aggregate_cost
+        and chain_shares >= projected_shares - _POSITION_PROJECTION_TOLERANCE
+        and chain_cost >= projected_cost - _POSITION_PROJECTION_TOLERANCE
+    )
 
 
 def _reconcile_authenticated_entry_trade_fact(
