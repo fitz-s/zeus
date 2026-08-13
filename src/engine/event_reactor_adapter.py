@@ -1884,7 +1884,7 @@ def _global_book_receipt_token_pairs(
             compressed_b64,
         ) = receipt_row
         if (
-            schema_version not in {12, 13, 14, 15, 16, 17, 18, 19, 20, 21}
+            schema_version not in {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22}
             or coverage_status != "COMPLETE"
             or coverage_complete != 1
             or encoding != "zlib+base64+canonical-json-v1"
@@ -1909,7 +1909,7 @@ def _global_book_receipt_token_pairs(
             continue
         if hashlib.sha256(encoded).hexdigest() != expected_hash:
             continue
-        fields = current_fields if schema_version == 21 else legacy_fields
+        fields = current_fields if schema_version in {21, 22} else legacy_fields
         if (
             not isinstance(payload, dict)
             or tuple(payload.get("fields") or ()) != fields
@@ -1925,7 +1925,7 @@ def _global_book_receipt_token_pairs(
             if not isinstance(raw_row, (list, tuple)) or len(raw_row) != len(fields):
                 valid = False
                 break
-            if schema_version == 21 and (
+            if schema_version in {21, 22} and (
                 type(raw_row[-1]) is not str
                 or raw_row[-1] not in {"False", "True"}
             ):

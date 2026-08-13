@@ -83,6 +83,15 @@ from src.state.collateral_ledger import COLLATERAL_SNAPSHOT_MAX_AGE_SECONDS
 _GLOBAL_AUCTION_WRITE_FALLBACK_DEADLINE_MS = 1_000
 _GLOBAL_AUCTION_WRITE_MAX_HOLD_MS = 500
 
+# Capital proof must bind settlements and fills to the exact comparison law
+# that selected one action across the complete executable universe.  Increment
+# this identity whenever the common comparison, feasible-set construction, or
+# sizing semantics change; old receipts remain facts but cannot license the new
+# law.
+CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION = (
+    "global_single_order_posterior_mean_expected_growth_v1"
+)
+
 
 class _GlobalArtifactCommitRevoked(RuntimeError):
     """A receipt lost current authority before its durable commit."""
@@ -3605,7 +3614,10 @@ def _store_global_auction_receipt(
         )
     )
     receipt = {
-        "schema_version": 21,
+        "schema_version": 22,
+        "global_selection_revision": (
+            CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+        ),
         "selection_epoch_identity": selection_epoch_identity,
         "selection_cut_at_utc": selection_cut_at_utc.isoformat(),
         "decision_at_utc": decision_at_utc.isoformat(),
@@ -3654,6 +3666,29 @@ def _store_global_auction_receipt(
         "wealth_economic_identity": str(
             getattr(wealth_witness, "economic_identity", "") or ""
         ),
+        "portfolio_wealth": {
+            "ledger_snapshot_id": str(
+                getattr(wealth_witness, "ledger_snapshot_id", "") or ""
+            ),
+            "position_set_hash": str(
+                getattr(wealth_witness, "position_set_hash", "") or ""
+            ),
+            "wealth_floor_usd": str(
+                getattr(wealth_witness, "wealth_floor_usd", "")
+            ),
+            "wealth_ceiling_usd": str(
+                getattr(wealth_witness, "wealth_ceiling_usd", "")
+            ),
+            "spendable_cash_usd": str(
+                getattr(wealth_witness, "spendable_cash_usd", "")
+            ),
+            "reservations_usd": str(
+                getattr(wealth_witness, "reservations_usd", "")
+            ),
+            "collateral_authority": str(
+                getattr(wealth_witness, "collateral_authority", "") or ""
+            ),
+        },
         "strategy_capital_allocation": (
             _strategy_capital_allocation_receipt(wealth_witness)
         ),

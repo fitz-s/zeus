@@ -3852,3 +3852,15 @@ test_metadata:
       capture_enabled and fires only for in-scope target dates.
     created: 2026-06-08
     last_reused_or_audited: 2026-06-08
+
+  tests/test_evaluate_current_regime_capital_advantage.py:
+    cohort: law_antibody
+    trust: trusted
+    authority_docs:
+      - docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
+    notes: >
+      Current-regime capital evaluator fails closed on placeholder DBs,
+      incomplete exact-revision settlement evidence, non-positive delta-log-
+      wealth lower bounds, and non-positive exact-revision live net PnL.
+    created: 2026-08-12
+    last_reused_or_audited: 2026-08-12

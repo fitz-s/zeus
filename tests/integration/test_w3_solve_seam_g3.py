@@ -209,6 +209,26 @@ def _test_strategy_allocation(*, basis="20", cash="10", committed="0"):
     )
 
 
+def _test_receipt_wealth_witness(
+    *,
+    witness_identity: str,
+    economic_identity: str,
+    allocation=None,
+):
+    return SimpleNamespace(
+        witness_identity=witness_identity,
+        economic_identity=economic_identity,
+        ledger_snapshot_id="ledger-test",
+        position_set_hash="positions-test",
+        wealth_floor_usd=Decimal("18"),
+        wealth_ceiling_usd=Decimal("22"),
+        spendable_cash_usd=Decimal("10"),
+        reservations_usd=Decimal("2"),
+        collateral_authority="TEST_CHAIN",
+        strategy_capital_allocation=allocation or _test_strategy_allocation(),
+    )
+
+
 def _test_global_auction_receipt_ref(
     *,
     candidate_id: str,
@@ -719,6 +739,12 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             witness_identity="wealth-current",
             economic_identity="wealth-economics-current",
             ledger_snapshot_id="ledger-current",
+            position_set_hash="positions-current",
+            wealth_floor_usd=Decimal("18"),
+            wealth_ceiling_usd=Decimal("22"),
+            spendable_cash_usd=Decimal("10"),
+            reservations_usd=Decimal("2"),
+            collateral_authority="CHAIN",
             strategy_capital_allocation=receipt_allocation,
         ),
         fractional_kelly_multiplier=Decimal("0.25"),
@@ -782,7 +808,19 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
     artifact = json.loads(row["artifact_json"])
     summary = artifact["summary"]
     assert row["mode"] == "global_single_order_auction"
-    assert summary["schema_version"] == 21
+    assert summary["schema_version"] == 22
+    assert summary["global_selection_revision"] == (
+        global_batch_runtime.CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION
+    )
+    assert summary["portfolio_wealth"] == {
+        "ledger_snapshot_id": "ledger-current",
+        "position_set_hash": "positions-current",
+        "wealth_floor_usd": "18",
+        "wealth_ceiling_usd": "22",
+        "spendable_cash_usd": "10",
+        "reservations_usd": "2",
+        "collateral_authority": "CHAIN",
+    }
     assert summary["winner_event_id"] == "event-buy"
     assert summary["winner_candidate_id"] == "buy-repaired"
     assert summary["winner_actuation_identity"] == receipt_actuation_identity
@@ -1235,10 +1273,9 @@ def test_global_auction_receipt_persists_complete_buy_sell_hold_cash_comparison(
             book_epoch_identity="book-current",
             book_asset_count=2,
             book_asset_states=book_asset_states,
-            wealth_witness=SimpleNamespace(
+            wealth_witness=_test_receipt_wealth_witness(
                 witness_identity="wealth-current",
                 economic_identity="wealth-economics-current",
-                strategy_capital_allocation=_test_strategy_allocation(),
             ),
             fractional_kelly_multiplier=Decimal("0.25"),
         )
@@ -2113,10 +2150,9 @@ def test_global_auction_receipt_preserves_book_states_with_zero_evaluations():
                 "False",
             ),
         ),
-        wealth_witness=SimpleNamespace(
+        wealth_witness=_test_receipt_wealth_witness(
             witness_identity="wealth-empty-current",
             economic_identity="wealth-economics-empty-current",
-            strategy_capital_allocation=_test_strategy_allocation(),
         ),
         fractional_kelly_multiplier=Decimal("0.25"),
         book_captured_at_utc=at,
@@ -2228,10 +2264,9 @@ def test_global_auction_receipt_reuses_unchanged_heavy_no_trade_payload(
             book_epoch_identity=f"book-{suffix}",
             book_asset_count=len(families),
             book_asset_states=current_book_states,
-            wealth_witness=SimpleNamespace(
+            wealth_witness=_test_receipt_wealth_witness(
                 witness_identity=f"wealth-{suffix}",
                 economic_identity="wealth-economics-current",
-                strategy_capital_allocation=_test_strategy_allocation(),
             ),
             fractional_kelly_multiplier=Decimal("0.25"),
             book_captured_at_utc=at,
@@ -2719,10 +2754,9 @@ def test_global_auction_receipt_bounded_delta_chain_write_amplification(
             book_epoch_identity=f"book-{suffix}",
             book_asset_count=len(families),
             book_asset_states=states,
-            wealth_witness=SimpleNamespace(
+            wealth_witness=_test_receipt_wealth_witness(
                 witness_identity=f"wealth-{suffix}",
                 economic_identity="wealth-current",
-                strategy_capital_allocation=_test_strategy_allocation(),
             ),
             fractional_kelly_multiplier=Decimal("0.25"),
             book_captured_at_utc=at,
@@ -3114,10 +3148,9 @@ def test_global_auction_payload_cache_rejects_rolled_back_row_id_reuse(
             book_epoch_identity=f"book-{suffix}",
             book_asset_count=None,
             book_asset_states=(),
-            wealth_witness=SimpleNamespace(
+            wealth_witness=_test_receipt_wealth_witness(
                 witness_identity=f"wealth-{suffix}",
                 economic_identity="wealth-current",
-                strategy_capital_allocation=_test_strategy_allocation(),
             ),
             fractional_kelly_multiplier=Decimal("0.25"),
         )
@@ -10989,11 +11022,9 @@ def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
         book_epoch_identity="book-schema-16",
         book_asset_count=0,
         book_asset_states=book_states,
-        wealth_witness=SimpleNamespace(
+        wealth_witness=_test_receipt_wealth_witness(
             witness_identity="wealth-schema-16",
             economic_identity="wealth-economic-schema-16",
-            ledger_snapshot_id="ledger-schema-16",
-            strategy_capital_allocation=_test_strategy_allocation(),
         ),
         fractional_kelly_multiplier=Decimal("0.25"),
         book_captured_at_utc=at,
@@ -11005,7 +11036,7 @@ def test_speculative_topology_fills_snapshot_gap_from_complete_receipt():
             (row_id,),
         ).fetchone()[0]
     )["summary"]
-    assert stored["schema_version"] == 21
+    assert stored["schema_version"] == 22
     probabilities = {
         "family": SimpleNamespace(
             family_key="family",

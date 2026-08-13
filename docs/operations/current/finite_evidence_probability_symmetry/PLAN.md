@@ -4357,3 +4357,53 @@ antibody that emits no aggregate `ENTRY_ORDER_VOIDED`.
 
 Allowed files for this hot-fix are `src/execution/command_recovery.py`,
 `tests/test_command_recovery.py`, and this plan.
+
+## 2026-08-12 Current-regime capital advantage is the statistical entry license
+
+The last month of chain outcomes is net negative, and forward reconstruction
+found statistical entries whose decision probability collapsed after fill.
+Current probability and an executable quote are inputs to a trade, not proof
+that the selected trade has positive after-cost capital value. Historical
+calibrators, mixed probability revisions, and the existing per-target-date
+market-relative shadow rule cannot license the current global single-order
+auction.
+
+Statistical BUY admission therefore remains fail-closed until one durable,
+read-only evaluator proves the exact current probability-semantics revision and
+exact current global-selection revision on strictly later VERIFIED settlements.
+The independent unit is one target date; the evaluator must use frozen
+decision-time executable cost/fill and portfolio wealth, require complete
+scope/book/held coverage, and require both a positive one-sided 95% lower bound
+of after-cost delta-log-wealth versus CASH over at least 30 independent dates
+and positive real on-chain net P&L for the identical revision window. Missing,
+mixed, stale, or incomplete evidence is a FAIL artifact, never an identity
+fallback or permission to trade.
+
+SCOPE is every statistical BUY proposal; monotone LOCKED/REFUTED Day0 payoff
+facts remain hard-fact actions. DRAIN is new immutable global-auction/shadow
+receipts plus later canonical settlement and execution facts. RESET is an exact
+revision-bound PASS artifact consumed at the existing pre-ranking policy seam;
+tests, model score, restart, or an older profitable cohort cannot reset it.
+
+Acceptance first requires the evaluator to reject worktree placeholder DBs,
+bind WORLD/TRADES/FORECASTS explicitly read-only, report the exact missing proof
+dimensions, and emit a deterministic non-authority artifact. The forward
+receipt writer must then freeze selection-law revision, complete-auction
+identity, decision-time total wealth/endowment, chosen action, executable cost,
+fees, and family/date identity before settlement. Only after at least 30 causal
+settlements and positive real net capital may the policy seam admit statistical
+BUYs. Until then post-deploy evidence must show zero new ENTRY commands and no
+held SELL chosen with non-positive expected objective.
+
+Allowed files for this capital-proof lane are
+`scripts/evaluate_current_regime_capital_advantage.py`,
+`tests/test_evaluate_current_regime_capital_advantage.py`,
+`architecture/script_manifest.yaml`, `architecture/test_topology.yaml`,
+`src/engine/global_batch_runtime.py`,
+`tests/integration/test_w3_solve_seam_g3.py`,
+`src/contracts/global_auction_receipt.py`, `src/contracts/AGENTS.md`,
+`src/events/day0_authority.py`, `tests/test_riskguard.py`,
+`src/engine/event_reactor_adapter.py`,
+`src/control/live_health.py`, `tests/test_live_safety_invariants.py`,
+`tests/engine/test_event_reactor_adapter_family_scoped_entry_block.py`, and
+this plan.

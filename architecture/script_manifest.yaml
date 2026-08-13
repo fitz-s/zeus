@@ -334,6 +334,23 @@ scripts:
     required_helpers: [src.riskguard.riskguard._day0_live_realized_capital_curve, src.riskguard.riskguard._qkernel_live_realized_capital_curve, src.state.db.get_trade_connection_read_only]
     required_tests: [tests/test_riskguard.py]
     notes: "Forward-only current-law capital proof. Requires an explicit UTC --since boundary; realized gain needs canonical filled entry plus terminal exit/settlement facts and complete chain-order-fact coverage. Marks, model EV, commands without fills, and pre-cohort history never prove gain."
+  evaluate_current_regime_capital_advantage.py:
+    class: evidence_report_writer
+    dangerous_if_run: false
+    dry_run_default: false
+    apply_flag: implicit
+    target_db: null
+    read_targets: [state/zeus-world.db, state/zeus-forecasts.db, state/zeus_trades.db]
+    write_targets: [state/current_regime_capital_advantage.json, stdout]
+    authority_scope: current_regime_capital_advantage_evidence_only
+    reuse_when: "Evaluate exact-revision strictly causal settlement and live fill evidence against the global capital-gain completion contract."
+    do_not_use_when: "Never treat a FAIL, stale, mixed-revision, partial-coverage, or observation-only artifact as order authority."
+    canonical_command: "PYTHONPATH=. python3 scripts/evaluate_current_regime_capital_advantage.py --trades state/zeus_trades.db --forecasts state/zeus-forecasts.db --artifact state/current_regime_capital_advantage.json"
+    external_inputs: []
+    promotion_barrier: "Only an exact-revision PASS may be consumed by a separate reviewed admission seam; this script never submits orders or writes canonical DB truth."
+    required_helpers: [src.riskguard.riskguard._day0_live_realized_capital_curve, src.riskguard.riskguard._qkernel_live_realized_capital_curve, src.riskguard.riskguard._settled_market_relative_alpha_shadow_rows]
+    required_tests: [tests/test_evaluate_current_regime_capital_advantage.py, tests/test_riskguard.py]
+    unguarded_write_rationale: "Reads all canonical DBs through SQLite mode=ro and atomically writes only the declared non-authority JSON evidence artifact."
   audit_replay_fidelity.py: {class: read_only_evidence}
   audit_time_semantics.py: {class: read_only_evidence}
   automation_analysis.py: {class: read_only_evidence}

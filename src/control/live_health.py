@@ -6296,11 +6296,11 @@ def _latest_global_auction_candidate_counts(
                 "winner_actuation_identity",
             )
         )
-        if winner_identity_present and schema_version != 21:
+        if winner_identity_present and schema_version not in {21, 22}:
             # Schema 17-20 receipts remain readable as no-trade telemetry only;
             # a winner identity on those rows is not an actionable receipt.
             return invalid("WINNER_SCHEMA_VERSION")
-        if schema_version == 21:
+        if schema_version in {21, 22}:
             try:
                 expected_execution_binding_hash = (
                     global_auction_execution_binding_hash(summary)
@@ -6361,7 +6361,7 @@ def _latest_global_auction_candidate_counts(
             expected_schema_versions = {
                 "zlib+base64+canonical-json-v11": {17, 18},
                 "zlib+base64+canonical-json-v12": {19, 20},
-                "zlib+base64+canonical-json-v13": {21},
+                "zlib+base64+canonical-json-v13": {21, 22},
             }[candidate_encoding]
             if schema_version not in expected_schema_versions:
                 return invalid("SCHEMA_VERSION_CONTRACT")

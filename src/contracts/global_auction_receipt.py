@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 import re
 from typing import Any, Mapping
 
 
-GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION = 21
+GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION = 22
+GLOBAL_AUCTION_RECEIPT_SUPPORTED_SCHEMA_VERSIONS = frozenset({21, 22})
 GLOBAL_AUCTION_RECEIPT_MODES = frozenset(
     {
         "global_single_order_auction",
@@ -19,6 +21,7 @@ GLOBAL_AUCTION_RECEIPT_MODES = frozenset(
     }
 )
 _EXECUTION_BINDING_VERSION = "global-auction-execution-binding-v1"
+_EXECUTION_BINDING_VERSION_V22 = "global-auction-execution-binding-v2"
 _ARTIFACT_SUMMARY_HASH_FIELD = "artifact_summary_hash"
 _HEX_64 = re.compile(r"[0-9a-f]{64}")
 _EXECUTION_BINDING_FIELDS = (
@@ -40,6 +43,10 @@ _EXECUTION_BINDING_FIELDS = (
     "candidate_evaluations_sha256",
     "buy_minimum_marketable_repairs_sha256",
     "holding_auction_coverage_sha256",
+)
+_EXECUTION_BINDING_V22_FIELDS = _EXECUTION_BINDING_FIELDS + (
+    "global_selection_revision",
+    "portfolio_wealth",
 )
 _EXECUTION_BINDING_TEXT_FIELDS = (
     "selection_epoch_identity",
@@ -96,12 +103,59 @@ def _required_timestamp(value: object, field: str) -> str:
     return text
 
 
+def _assert_v22_capital_fields(summary: Mapping[str, Any]) -> None:
+    _required_text(
+        summary.get("global_selection_revision"),
+        "global_selection_revision",
+    )
+    wealth = summary.get("portfolio_wealth")
+    if not isinstance(wealth, Mapping):
+        raise ValueError("GLOBAL_AUCTION_RECEIPT_PORTFOLIO_WEALTH_MISSING")
+    for field in (
+        "ledger_snapshot_id",
+        "position_set_hash",
+        "collateral_authority",
+    ):
+        _required_text(wealth.get(field), f"portfolio_wealth_{field}")
+    values: dict[str, Decimal] = {}
+    for field in (
+        "wealth_floor_usd",
+        "wealth_ceiling_usd",
+        "spendable_cash_usd",
+        "reservations_usd",
+    ):
+        text = _required_text(wealth.get(field), f"portfolio_wealth_{field}")
+        try:
+            value = Decimal(text)
+        except InvalidOperation as exc:
+            raise ValueError(
+                f"GLOBAL_AUCTION_RECEIPT_PORTFOLIO_WEALTH_{field.upper()}_INVALID"
+            ) from exc
+        if not value.is_finite():
+            raise ValueError(
+                f"GLOBAL_AUCTION_RECEIPT_PORTFOLIO_WEALTH_{field.upper()}_INVALID"
+            )
+        values[field] = value
+    if values["wealth_floor_usd"] <= 0:
+        raise ValueError(
+            "GLOBAL_AUCTION_RECEIPT_PORTFOLIO_WEALTH_FLOOR_INVALID"
+        )
+    if values["wealth_ceiling_usd"] < values["wealth_floor_usd"]:
+        raise ValueError(
+            "GLOBAL_AUCTION_RECEIPT_PORTFOLIO_WEALTH_BOUNDS_INVALID"
+        )
+    if values["spendable_cash_usd"] < 0 or values["reservations_usd"] < 0:
+        raise ValueError(
+            "GLOBAL_AUCTION_RECEIPT_PORTFOLIO_WEALTH_CAPITAL_INVALID"
+        )
+
+
 def _assert_execution_binding_fields(summary: Mapping[str, Any]) -> None:
     schema_version = summary.get("schema_version")
     if (
         isinstance(schema_version, bool)
         or not isinstance(schema_version, int)
-        or schema_version != GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION
+        or schema_version not in GLOBAL_AUCTION_RECEIPT_SUPPORTED_SCHEMA_VERSIONS
     ):
         raise ValueError("GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION_INVALID")
     for field in _EXECUTION_BINDING_TEXT_FIELDS:
@@ -120,6 +174,8 @@ def _assert_execution_binding_fields(summary: Mapping[str, Any]) -> None:
         raise ValueError("GLOBAL_AUCTION_RECEIPT_DECISION_TIME_PRECEDES_CUT")
     for field in _EXECUTION_BINDING_HASH_FIELDS:
         _hash_text(summary.get(field), field)
+    if schema_version == 22:
+        _assert_v22_capital_fields(summary)
     winners = tuple(
         str(summary.get(field) or "").strip()
         for field in _EXECUTION_BINDING_WINNER_FIELDS
@@ -132,8 +188,18 @@ def global_auction_execution_binding_hash(summary: Mapping[str, Any]) -> str:
     """Hash the complete compact-row witness that binds a winner to its cut."""
 
     _assert_execution_binding_fields(summary)
-    payload = {field: summary[field] for field in _EXECUTION_BINDING_FIELDS}
-    payload["binding_version"] = _EXECUTION_BINDING_VERSION
+    schema_version = summary["schema_version"]
+    fields = (
+        _EXECUTION_BINDING_V22_FIELDS
+        if schema_version == 22
+        else _EXECUTION_BINDING_FIELDS
+    )
+    payload = {field: summary[field] for field in fields}
+    payload["binding_version"] = (
+        _EXECUTION_BINDING_VERSION_V22
+        if schema_version == 22
+        else _EXECUTION_BINDING_VERSION
+    )
     encoded = json.dumps(
         payload,
         sort_keys=True,
@@ -203,7 +269,7 @@ class GlobalAuctionReceiptRef:
             raise ValueError("GLOBAL_AUCTION_RECEIPT_DECISION_LOG_ID_INVALID")
         if self.decision_log_mode not in GLOBAL_AUCTION_RECEIPT_MODES:
             raise ValueError("GLOBAL_AUCTION_RECEIPT_DECISION_LOG_MODE_INVALID")
-        if self.schema_version != GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION:
+        if self.schema_version not in GLOBAL_AUCTION_RECEIPT_SUPPORTED_SCHEMA_VERSIONS:
             raise ValueError("GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION_INVALID")
         _hash_text(self.receipt_hash, "receipt_hash")
         _hash_text(self.execution_binding_hash, "execution_binding_hash")
