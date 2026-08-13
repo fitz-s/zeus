@@ -859,7 +859,7 @@ def _latest_authorized_day0_fact(
             else:
                 source_identity_clause = "LOWER(COALESCE(source, '')) = ?"
                 query_params += (f"ogimet_metar_{expected_station.lower()}",)
-        row = conn.execute(
+        instant_rows = conn.execute(
             f"""
             WITH authorized AS (
                 SELECT CAST({extreme_col} AS REAL) AS observed_extreme_native,
@@ -913,14 +913,19 @@ def _latest_authorized_day0_fact(
                    raw_response,
                    provenance_json,
                    COALESCE(imported_at, utc_timestamp) AS observation_available_at
-              FROM authorized
+             FROM authorized
              ORDER BY {instant_order},
                       source DESC
-             LIMIT 1
             """,
             query_params,
-        ).fetchone()
-        if row is not None and row["observation_time"] and row["observed_extreme_native"] is not None:
+        ).fetchall()
+        # Keep every bounded local-day projection available until the
+        # append-only print ledger has canonicalized corrections below. A
+        # single SQL extreme can be retracted, while a later plateau row can
+        # own the writer-validated digest of the canonical extreme.
+        for row in instant_rows:
+            if not row["observation_time"] or row["observed_extreme_native"] is None:
+                continue
             facts.append(
                 {
                     "observed_extreme_native": float(row["observed_extreme_native"]),
@@ -1360,42 +1365,6 @@ def _latest_authorized_day0_fact(
                         channel = str(
                             ledger_fact.get("observation_source") or ""
                         ).strip().lower()
-                        if "observation_instants" in _table_names(conn):
-                            digest_row = conn.execute(
-                                f"""
-                                SELECT raw_response, provenance_json
-                                  FROM observation_instants
-                                 WHERE city = ?
-                                   AND target_date = ?
-                                   AND LOWER(COALESCE(source, '')) = ?
-                                   AND UPPER(COALESCE(station_id, '')) = ?
-                                   AND UPPER(COALESCE(temp_unit, '')) = ?
-                                   AND {_OBSERVATION_FACT_TIME_SQL} = ?
-                                   AND CAST({extreme_col} AS REAL) = ?
-                                   AND imported_at <= ?
-                                 ORDER BY imported_at DESC
-                                 LIMIT 1
-                                """,
-                                (
-                                    city,
-                                    target_date,
-                                    channel,
-                                    expected_station,
-                                    expected_unit,
-                                    str(ledger_fact.get("observation_time") or ""),
-                                    float(ledger_fact["observed_extreme_native"]),
-                                    decision_utc.isoformat(),
-                                ),
-                            ).fetchone()
-                            if digest_row is not None:
-                                ledger_fact["raw_payload_sha256"] = (
-                                    _persisted_payload_sha256(
-                                        digest_row["raw_response"],
-                                        digest_row["provenance_json"],
-                                    )
-                                )
-                        if str(ledger_fact.get("raw_payload_sha256") or "").strip():
-                            continue
                         matching_projection = [
                             fact
                             for fact in projected_facts

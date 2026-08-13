@@ -4719,6 +4719,38 @@ antibody that emits no aggregate `ENTRY_ORDER_VOIDED`.
 Allowed files for this hot-fix are `src/execution/command_recovery.py`,
 `tests/test_command_recovery.py`, and this plan.
 
+## 2026-08-13 Corrected Day0 facts retain authorized raw provenance
+
+Post-deploy verification found one held Shenzhen position receiving fresh
+monitor cycles but no current probability. The exact reason was
+`GLOBAL_DAY0_RAW_PROVENANCE_MISSING`: the append-only WU print ledger correctly
+canonicalized a same-clock 30C -> 29C correction, while the authorized
+`observation_instants` query retained only the SQL maximum 30C projection. A
+later authorized 29C projection owned a writer-validated provider digest, but
+was discarded before the ledger could transfer that exact digest to its
+canonical 29C fact.
+
+The reader retains all authorized, decision-causal local-day instant
+projections until the existing ledger correction reduction runs. Same-channel
+projections are still replaced by the canonical ledger fact; they contribute
+only an exact persisted digest when source and extreme match. No digest is
+invented, no alternate source is substituted, and a retracted extreme cannot
+win through the projection set. A direct digest lookup that did not reproduce
+the existing authority predicates is removed.
+
+SCOPE is the exact city, target date, metric, authorized source channel, and
+decision time read. DRAIN is the next held-monitor or global-decision refresh,
+which rereads the canonical DB and rebuilds the current fact. RESET requires a
+canonical ledger extreme plus a matching authorized persisted digest; process
+liveness, a different source, or an old extreme cannot reset the provenance
+gate. Acceptance requires the exact Shenzhen correction antibody, the focused
+Day0 suite, live deployment, Shenzhen current probability freshness, automatic
+restart-guard clearance, and resumed global order decisions.
+
+Allowed files for this hot-fix are
+`src/data/replacement_forecast_current_target_plan.py` and this plan. The
+already-landed Shenzhen correction antibody is reused unchanged.
+
 ## 2026-08-13 Selected global BUY uses its mandatory JIT book
 
 After entry resumed, the complete auction selected a Paris LOW NO
