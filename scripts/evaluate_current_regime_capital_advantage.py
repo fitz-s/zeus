@@ -13,6 +13,7 @@ order.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import math
@@ -21,6 +22,7 @@ import sqlite3
 import statistics
 import sys
 import time
+import zlib
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -1032,6 +1034,180 @@ def _globally_selected_exit_quality(
     }
 
 
+def _held_to_binary_settlement_quality(
+    conn: sqlite3.Connection,
+    forecasts: sqlite3.Connection,
+) -> dict[str, object]:
+    """Grade schema-22 globally compared HOLD decisions at binary settlement."""
+
+    latest_by_position: dict[str, dict[str, object]] = {}
+    rejection_counts: dict[str, int] = {}
+    rows = conn.execute(
+        "SELECT id,mode,artifact_json FROM decision_log "
+        "WHERE json_extract(artifact_json,'$.summary.schema_version')=22 "
+        "AND json_extract(artifact_json,'$.summary.global_selection_revision')=? "
+        "AND json_extract(artifact_json,'$.summary.holding_auction_coverage_zlib_b64') "
+        "IS NOT NULL ORDER BY id",
+        (CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,),
+    ).fetchall()
+    for decision_log_id, mode, artifact_json in rows:
+        try:
+            artifact = json.loads(str(artifact_json or ""))
+            summary = artifact["summary"]
+            if not isinstance(summary, Mapping):
+                raise ValueError("global summary unavailable")
+            assert_global_auction_summary_integrity(summary)
+            compressed = base64.b64decode(
+                str(summary["holding_auction_coverage_zlib_b64"]),
+                validate=True,
+            )
+            raw = zlib.decompress(compressed)
+            if hashlib.sha256(raw).hexdigest() != str(
+                summary["holding_auction_coverage_sha256"]
+            ):
+                raise ValueError("holding coverage hash mismatch")
+            coverage = json.loads(raw)
+            if not isinstance(coverage, list):
+                raise ValueError("holding coverage is not a list")
+            winner_candidate_id = str(
+                summary.get("winner_candidate_id") or ""
+            ).strip()
+            for item in coverage:
+                if not isinstance(item, Mapping) or item.get("status") != "EVALUATED":
+                    continue
+                position_id = str(item.get("position_id") or "").strip()
+                candidate_ids = {
+                    str(value or "").strip()
+                    for value in item.get("candidate_ids") or ()
+                    if str(value or "").strip()
+                }
+                decision_at = _parse_aware(item.get("decision_at_utc"))
+                if not position_id or not candidate_ids:
+                    raise ValueError("evaluated holding identity incomplete")
+                if winner_candidate_id in candidate_ids:
+                    continue
+                prior = latest_by_position.get(position_id)
+                if prior is None or decision_at > prior["decision_at"]:
+                    latest_by_position[position_id] = {
+                        "decision_at": decision_at,
+                        "decision_log_id": int(decision_log_id),
+                        "decision_log_mode": str(mode),
+                        "receipt_hash": str(summary.get("receipt_hash") or ""),
+                        "selection_epoch_identity": str(
+                            summary.get("selection_epoch_identity") or ""
+                        ),
+                        "held_shares": float(item.get("held_shares")),
+                        "side": str(item.get("side") or "").strip().upper(),
+                        "condition_id": str(
+                            item.get("condition_id") or ""
+                        ).strip(),
+                        "candidate_ids": sorted(candidate_ids),
+                    }
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+            zlib.error,
+        ) as exc:
+            reason = str(exc) or type(exc).__name__
+            rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+
+    graded: list[dict[str, object]] = []
+    awaiting = 0
+    for position_id, hold in latest_by_position.items():
+        position = conn.execute(
+            "SELECT phase,city,target_date,temperature_metric,condition_id,shares,"
+            "settled_at FROM position_current WHERE position_id=?",
+            (position_id,),
+        ).fetchone()
+        if position is None or str(position[0]) != "settled" or not position[6]:
+            awaiting += 1
+            continue
+        decision_at = hold["decision_at"]
+        settled_at = _parse_aware(position[6])
+        if not decision_at < settled_at:
+            continue
+        if conn.execute(
+            "SELECT 1 FROM position_events WHERE position_id=? "
+            "AND event_type='EXIT_ORDER_FILLED' AND datetime(occurred_at)>datetime(?) "
+            "LIMIT 1",
+            (position_id, decision_at.isoformat()),
+        ).fetchone():
+            continue
+        shares = float(position[5])
+        if (
+            not math.isfinite(shares)
+            or shares <= 0.0
+            or abs(shares - float(hold["held_shares"])) > 1e-6
+        ):
+            continue
+        city = str(position[1] or "").strip()
+        target_date = str(position[2] or "").strip()
+        metric = str(position[3] or "").strip().lower()
+        condition_id = str(position[4] or "").strip()
+        if condition_id != hold["condition_id"] or hold["side"] not in {"YES", "NO"}:
+            continue
+        try:
+            settlement = _verified_settlement(
+                forecasts,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                decision_at=decision_at,
+            )
+            condition_yes = _condition_resolved_yes(
+                forecasts,
+                condition_id=condition_id,
+                city=city,
+                target_date=target_date,
+                metric=metric,
+                settlement_value=_decimal(
+                    settlement["settlement_value"], "settlement_value"
+                ),
+                settlement_unit=str(settlement["settlement_unit"]),
+            )
+        except (TypeError, ValueError):
+            continue
+        token_won = condition_yes if hold["side"] == "YES" else not condition_yes
+        graded.append(
+            {
+                "position_id": position_id,
+                "city": city,
+                "target_date": target_date,
+                "metric": metric,
+                "condition_id": condition_id,
+                "held_outcome": hold["side"],
+                "held_shares": shares,
+                "hold_decision_at": decision_at.isoformat(),
+                "settled_at": settled_at.isoformat(),
+                "binary_payoff": 1 if token_won else 0,
+                "settlement_payoff_usd": round(shares if token_won else 0.0, 6),
+                "result": "HELD_TO_ONE" if token_won else "HELD_TO_ZERO",
+                "global_auction_decision_log_id": hold["decision_log_id"],
+                "global_auction_receipt_hash": hold["receipt_hash"],
+                "global_selection_epoch_identity": hold[
+                    "selection_epoch_identity"
+                ],
+                "evaluated_sell_candidate_ids": hold["candidate_ids"],
+            }
+        )
+    wins = sum(row["result"] == "HELD_TO_ONE" for row in graded)
+    return {
+        "artifact_role": "GLOBAL_HOLD_DECISION_TO_VERIFIED_BINARY_SETTLEMENT",
+        "contributes_to_admission": False,
+        "status": "graded" if graded else "awaiting_exact_settled_hold_decisions",
+        "global_selection_revision": CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+        "settlement_graded_hold_count": len(graded),
+        "held_to_one_count": wins,
+        "held_to_zero_count": len(graded) - wins,
+        "held_to_one_rate": round(wins / len(graded), 6) if graded else None,
+        "awaiting_settlement_position_count": awaiting,
+        "rejection_counts": dict(sorted(rejection_counts.items())),
+        "curve": sorted(graded, key=lambda row: (row["settled_at"], row["position_id"])),
+    }
+
+
 def _build_verdict(
     *,
     receipt: dict[str, object],
@@ -1146,6 +1322,10 @@ def evaluate(
             raw_live_curves,
             as_of=as_of,
         )
+        held_settlement_quality = _held_to_binary_settlement_quality(
+            trades,
+            forecasts,
+        )
     finally:
         forecasts.close()
         trades.close()
@@ -1186,6 +1366,7 @@ def evaluate(
         "settled_counterfactuals": shadows,
         "live_realized_capital": live_curves,
         "globally_selected_exit_quality": selected_exit_quality,
+        "globally_compared_hold_settlement_quality": held_settlement_quality,
     }
 
 

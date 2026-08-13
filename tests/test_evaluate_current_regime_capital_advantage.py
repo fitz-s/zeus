@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import sqlite3
+import zlib
 from datetime import datetime, timezone
 
 import pytest
@@ -679,6 +681,93 @@ def test_executable_bid_vwap_requires_full_size_depth():
         json.dumps({"bids": [["0.50", "2"]]}),
         5,
     ) is None
+
+
+def test_globally_compared_hold_is_graded_at_verified_binary_settlement():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,artifact_json TEXT);"
+        "CREATE TABLE position_current (position_id TEXT,phase TEXT,city TEXT,"
+        "target_date TEXT,temperature_metric TEXT,condition_id TEXT,shares REAL,"
+        "settled_at TEXT);"
+        "CREATE TABLE position_events (position_id TEXT,event_type TEXT,occurred_at TEXT);"
+    )
+    coverage = [
+        {
+            "position_id": "position-hold",
+            "status": "EVALUATED",
+            "candidate_ids": ["sell-candidate"],
+            "decision_at_utc": "2026-08-13T00:00:00+00:00",
+            "held_shares": "5",
+            "side": "YES",
+            "condition_id": "condition-1",
+        }
+    ]
+    raw_coverage = evaluator._canonical_json_bytes(coverage)
+    summary = _proof_summary(
+        city="Chicago",
+        target_date="2026-08-13",
+        condition_id="condition-1",
+    )
+    summary["holding_auction_coverage_zlib_b64"] = base64.b64encode(
+        zlib.compress(raw_coverage)
+    ).decode("ascii")
+    summary["holding_auction_coverage_sha256"] = evaluator.hashlib.sha256(
+        raw_coverage
+    ).hexdigest()
+    summary["execution_binding_hash"] = global_auction_execution_binding_hash(
+        summary
+    )
+    summary["artifact_summary_hash"] = global_auction_artifact_summary_hash(
+        summary
+    )
+    conn.execute(
+        "INSERT INTO decision_log VALUES (1,?,?)",
+        ("global_single_order_auction", json.dumps({"summary": summary})),
+    )
+    conn.execute(
+        "INSERT INTO position_current VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "position-hold",
+            "settled",
+            "Chicago",
+            "2026-08-13",
+            "high",
+            "condition-1",
+            5.0,
+            "2026-08-14T00:00:02+00:00",
+        ),
+    )
+    forecasts = _settlement_db()
+    forecasts.execute(
+        "INSERT INTO market_events VALUES (?,?,?,?,?,?)",
+        ("condition-1", "Chicago", "2026-08-13", "high", 80, 81),
+    )
+    forecasts.execute(
+        "INSERT INTO settlement_outcomes VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            1,
+            "Chicago",
+            "2026-08-13",
+            "high",
+            80,
+            "F",
+            "2026-08-14T00:00:00+00:00",
+            "2026-08-14T00:00:01+00:00",
+            "VERIFIED",
+        ),
+    )
+
+    evidence = evaluator._held_to_binary_settlement_quality(conn, forecasts)
+
+    assert evidence["status"] == "graded"
+    assert evidence["settlement_graded_hold_count"] == 1
+    assert evidence["held_to_one_count"] == 1
+    assert evidence["held_to_zero_count"] == 0
+    assert evidence["curve"][0]["result"] == "HELD_TO_ONE"
+    assert evidence["curve"][0]["settlement_payoff_usd"] == 5.0
+    assert evidence["curve"][0]["global_auction_decision_log_id"] == 1
 
 
 def test_only_complete_positive_exact_revision_evidence_passes():
