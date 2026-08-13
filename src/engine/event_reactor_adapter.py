@@ -14106,7 +14106,11 @@ def _global_preflight_entry_jit_receipt(
         limit = Decimal(str(getattr(decision, "limit_price", "0") or "0"))
         if shares <= 0:
             raise ValueError("GLOBAL_BUY_JIT_SELECTED_SIZE_INVALID")
-        from src.solve.solver import current_precliff_liquidation_capacity
+        from src.solve.solver import (
+            DeterministicBinPayoffWitness,
+            ExpectedBuyTerminalWealthCertificate,
+            current_precliff_liquidation_capacity,
+        )
 
         execution_mode = str(
             getattr(candidate, "execution_mode", "") or ""
@@ -14121,17 +14125,76 @@ def _global_preflight_entry_jit_receipt(
             is True
         )
         expected_terminal = getattr(decision, "expected_terminal_wealth", None)
+        witness = getattr(global_actuation, "probability_witness", None)
+        binding = None
+        if isinstance(witness, DeterministicBinPayoffWitness):
+            binding = next(
+                (
+                    item
+                    for item in witness.bindings
+                    if item.bin_id == str(getattr(candidate, "bin_id", "") or "")
+                ),
+                None,
+            )
+        side = str(getattr(candidate, "side", "") or "").upper()
+        expected_token = (
+            binding.yes_token_id
+            if binding is not None and side == "YES"
+            else binding.no_token_id
+            if binding is not None and side == "NO"
+            else None
+        )
+        exact_yes_payoff = (
+            witness.exact_yes_payoff(binding.bin_id)
+            if isinstance(witness, DeterministicBinPayoffWitness)
+            and binding is not None
+            else None
+        )
+        exact_held_payoff = (
+            exact_yes_payoff == 1
+            if side == "YES"
+            else exact_yes_payoff == 0
+            if side == "NO"
+            else False
+        )
+        witness_fresh = (
+            isinstance(witness, DeterministicBinPayoffWitness)
+            and witness.captured_at_utc <= mode_checked_at
+            and mode_checked_at <= witness.captured_at_utc + witness.max_age
+        )
+        typed_exact_payoff_binding = (
+            isinstance(witness, DeterministicBinPayoffWitness)
+            and binding is not None
+            and witness_fresh
+            and witness.family_key == str(getattr(candidate, "family_key", "") or "")
+            and witness.resolution_identity
+            == str(getattr(candidate, "resolution_identity", "") or "")
+            and witness.witness_identity
+            == str(getattr(candidate, "probability_witness_identity", "") or "")
+            and binding.condition_id
+            == str(getattr(candidate, "condition_id", "") or "")
+            and expected_token == str(getattr(candidate, "token_id", "") or "")
+            and str(getattr(current_candidate, "family_key", "") or "")
+            == witness.family_key
+            and str(getattr(current_candidate, "bin_id", "") or "")
+            == binding.bin_id
+            and str(getattr(current_candidate, "condition_id", "") or "")
+            == binding.condition_id
+            and str(getattr(current_candidate, "token_id", "") or "")
+            == expected_token
+            and str(getattr(current_candidate, "side", "") or "").upper() == side
+            and str(
+                getattr(current_candidate, "probability_witness_identity", "") or ""
+            )
+            == witness.witness_identity
+            and exact_held_payoff
+        )
         exact_payoff_decision = (
             str(getattr(decision, "capital_action_mode", "") or "")
             == "SETTLEMENT_LOCKED_BUY"
-            and float(
-                getattr(expected_terminal, "win_probability_mean", float("nan"))
-            )
-            == 1.0
-            and float(
-                getattr(expected_terminal, "loss_probability_mean", float("nan"))
-            )
-            == 0.0
+            and isinstance(expected_terminal, ExpectedBuyTerminalWealthCertificate)
+            and expected_terminal.win_probability_mean == 1.0
+            and expected_terminal.loss_probability_mean == 0.0
         )
         liquidation_capacity = current_precliff_liquidation_capacity(
             current_candidate.native_bid_levels
@@ -14140,6 +14203,7 @@ def _global_preflight_entry_jit_receipt(
             not (
                 execution_mode == "TAKER_LIMIT"
                 and settlement_locked_exact_payoff
+                and typed_exact_payoff_binding
                 and exact_payoff_decision
             )
             and liquidation_capacity + Decimal("1e-9") < shares
