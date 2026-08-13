@@ -59,17 +59,17 @@ def _cfg(kelly_multiplier, max_correlated_pct):
 
 # ── Exact governed live fraction ─────────────────────────────────────────────
 
-def test_governed_fraction_accepts_exactly_one_over_32():
+def test_governed_fraction_accepts_exactly_one_over_8():
     from src.main import assert_kelly_multiplier_matches_governed_fraction
 
     assert_kelly_multiplier_matches_governed_fraction(
-        _cfg(kelly_multiplier=1.0 / 32.0, max_correlated_pct=0.25)
+        _cfg(kelly_multiplier=1.0 / 8.0, max_correlated_pct=0.25)
     )
 
 
 @pytest.mark.parametrize(
     "value",
-    [0.25, 0.02, float("nan"), float("inf"), "0.03125", "not-a-number", True],
+    [0.25, 0.03125, float("nan"), float("inf"), "0.125", "not-a-number", True],
 )
 def test_governed_fraction_rejects_drift(value):
     from src.main import assert_kelly_multiplier_matches_governed_fraction
@@ -83,13 +83,13 @@ def test_governed_fraction_rejects_drift(value):
 def test_governed_fraction_rejects_missing_value():
     from src.main import assert_kelly_multiplier_matches_governed_fraction
 
-    cfg = _cfg(kelly_multiplier=1.0 / 32.0, max_correlated_pct=0.25)
+    cfg = _cfg(kelly_multiplier=1.0 / 8.0, max_correlated_pct=0.25)
     del cfg["sizing"]["kelly_multiplier"]
     with pytest.raises(RuntimeError, match="KELLY_MULT_GOVERNANCE_MISMATCH"):
         assert_kelly_multiplier_matches_governed_fraction(cfg)
 
 
-@pytest.mark.parametrize("value", ["0.03125", "not-a-number", True])
+@pytest.mark.parametrize("value", ["0.125", "not-a-number", True])
 def test_boot_guard_reports_malformed_governed_fraction(value):
     from src.main import _run_boot_guards
 
@@ -109,7 +109,7 @@ def test_governed_fraction_is_registered_in_boot_guards():
     )
     names = {r[0]: r for r in results}
     assert names["kelly_mult_governed_fraction"][1] is False
-    assert "required=0.03125 (1/32)" in names["kelly_mult_governed_fraction"][2]
+    assert "required=0.125 (1/8)" in names["kelly_mult_governed_fraction"][2]
 
 
 # ── The boot guard fires when kelly_multiplier > max_correlated_pct ──────────

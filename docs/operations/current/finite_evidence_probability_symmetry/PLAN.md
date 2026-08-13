@@ -4,6 +4,34 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-13 Governed 1/8 Kelly removes artificial capital starvation
+
+Current complete global cuts found a positive posterior-mean London 32C YES
+maker proposal at 0.12, but rejected its minimum executable addition solely as
+`FRACTIONAL_KELLY_TARGET_REACHED`: the existing $3.03 holding already exceeded
+the governed 1/32 target even though the proposal's current q mean was about
+0.242 and its expected EV was positive.  With roughly $545 capital basis and a
+full binary-Kelly fraction near 0.139, 1/32 constrained the family to roughly
+$2.37 while leaving nearly all spendable capital idle.  That is an artificial
+no-order outcome, not a global capital optimum.
+
+The governed live fraction is retuned to 1/8.  At the same decision-time truth,
+the target is roughly $9.46, permitting about $6.43 of additional exposure
+before ordinary depth, correlated-payoff, portfolio, city, and single-position
+limits.  This is a fourfold increase over 1/32 but still one half of the 1/4
+correlated ceiling and far below full Kelly; posterior confidence bounds remain
+diagnostic while posterior mean continues to own expected-log-growth ranking.
+
+SCOPE is live Fractional Kelly sizing for every otherwise admissible proposal.
+DRAIN is the next complete global cut under a freshly loaded 1/8 config, followed
+by candidate-specific submit-time q/book/wealth reproduction.  RESET is every
+new global cut and JIT preflight; moved price, probability, depth, risk, or
+capital can reduce the target or select CASH.  Acceptance requires the exact
+governed-value and correlated-ceiling antibodies, exact live reload, a current
+auction receipt carrying `fractional_kelly_multiplier=0.125`, and either an
+actual positive-growth venue order/fill or a precise non-artificial current
+economic rejection.
+
 ## 2026-08-13 Fresh canonical coverage discharges stale auction fairness debt
 
 A recovery full-book monitor can time out waiting for the reactor while an
