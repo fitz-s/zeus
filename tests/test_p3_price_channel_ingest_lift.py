@@ -871,6 +871,59 @@ def test_unsettled_schema22_exit_token_stays_market_channel_priority():
     assert _edli_held_position_priority_token_ids(conn) == {"sold-current"}
 
 
+def test_global_exit_audit_appends_only_full_depth_buy_projection():
+    from src.ingest.price_channel_ingest import (
+        _edli_append_global_exit_audit_quote_evidence,
+    )
+    from src.state.schema.execution_feasibility_evidence_schema import ensure_table
+
+    conn = sqlite3.connect(":memory:")
+    ensure_table(conn)
+    base = (
+        "evidence-1",
+        "event-1",
+        "condition-1",
+        "sold-token",
+        "YES",
+        "2026-08-13T08:44:00+00:00",
+        "book-1",
+        0.42,
+        0.45,
+        "2026-08-13T08:44:00+00:00",
+        1,
+    )
+    conn.execute(
+        "INSERT INTO execution_feasibility_latest ("
+        "evidence_id,event_id,condition_id,token_id,outcome_label,direction,"
+        "quote_seen_at,book_hash_before,best_bid_before,best_ask_before,"
+        "depth_before_json,created_at,schema_version) VALUES (?,?,?,?,?,'buy_yes',"
+        "?,?,?,?,?,?,?)",
+        (*base[:5], *base[5:9], '{"bids":[["0.42","5"]],"asks":[]}', *base[9:]),
+    )
+    conn.execute(
+        "INSERT INTO execution_feasibility_latest ("
+        "evidence_id,event_id,condition_id,token_id,outcome_label,direction,"
+        "quote_seen_at,book_hash_before,best_bid_before,best_ask_before,"
+        "depth_before_json,created_at,schema_version) VALUES ("
+        "'evidence-2','event-1','condition-1','sold-token','YES','sell_yes',"
+        "'2026-08-13T08:44:00+00:00','book-1',0.42,0.45,NULL,"
+        "'2026-08-13T08:44:00+00:00',1)"
+    )
+
+    assert _edli_append_global_exit_audit_quote_evidence(
+        conn, {"sold-token"}
+    ) == 1
+    assert conn.execute(
+        "SELECT token_id,direction,depth_before_json "
+        "FROM execution_feasibility_evidence"
+    ).fetchall() == [
+        ("sold-token", "buy_yes", '{"bids":[["0.42","5"]],"asks":[]}')
+    ]
+    assert _edli_append_global_exit_audit_quote_evidence(
+        conn, {"sold-token"}
+    ) == 0
+
+
 def test_open_rest_tokens_are_market_channel_seed_priority():
     from src.ingest.price_channel_ingest import _edli_open_rest_priority_token_ids
 

@@ -2578,6 +2578,41 @@ def _edli_unsettled_global_exit_audit_token_ids(trade_conn) -> set[str]:
     }
 
 
+def _edli_append_global_exit_audit_quote_evidence(
+    trade_conn,
+    token_ids: set[str],
+) -> int:
+    """Append the latest full-depth quote only for unsettled schema-22 exits."""
+
+    tokens = sorted(
+        token for value in token_ids
+        if (token := str(value or "").strip()) not in {"", "None"}
+    )
+    if trade_conn is None or not tokens:
+        return 0
+    placeholders = ",".join("?" for _ in tokens)
+    before = trade_conn.total_changes
+    trade_conn.execute(
+        f"""
+        INSERT OR IGNORE INTO execution_feasibility_evidence (
+            evidence_id, event_id, condition_id, token_id, outcome_label,
+            direction, quote_seen_at, book_hash_before, best_bid_before,
+            best_ask_before, depth_before_json, created_at, schema_version
+        )
+        SELECT evidence_id, event_id, condition_id, token_id, outcome_label,
+               direction, quote_seen_at, book_hash_before, best_bid_before,
+               best_ask_before, depth_before_json, created_at, schema_version
+          FROM execution_feasibility_latest
+         WHERE token_id IN ({placeholders})
+           AND direction IN ('buy_yes','buy_no')
+           AND depth_before_json IS NOT NULL
+           AND depth_before_json != ''
+        """,
+        tokens,
+    )
+    return trade_conn.total_changes - before
+
+
 def _edli_held_position_priority_token_ids(trade_conn) -> set[str]:
     """Tokens for open local/chain exposure that need immediate quote evidence.
 
@@ -3231,6 +3266,9 @@ def _edli_refresh_held_position_quote_evidence(
     trade_read = get_trade_connection(write_class=None)
     try:
         held_token_ids = _edli_held_position_priority_token_ids(trade_read)
+        exit_audit_token_ids = _edli_unsettled_global_exit_audit_token_ids(
+            trade_read
+        )
         if not held_token_ids:
             return {"held_priority_token_ids": 0, "held_quote_refresh_events": 0}
         checked_at = datetime.now(timezone.utc)
@@ -3397,12 +3435,30 @@ def _edli_refresh_held_position_quote_evidence(
                 deadline_monotonic=deadline,
                 past_end_exit_refresh=True,
             )
+        audit_rows = 0
+        if exit_audit_token_ids.intersection(token_metadata):
+            with _edli_price_channel_trade_write_gate(
+                owner="price_channel_global_exit_audit",
+                priority="background_recovery",
+                deadline_ms=PRICE_CHANNEL_HELD_QUOTE_DB_WRITE_LEASE_DEADLINE_MS,
+                deadline_monotonic=deadline,
+                on_enter=lambda: _bound_held_quote_sqlite_wait(
+                    conn,
+                    deadline_monotonic=deadline,
+                ),
+            ):
+                audit_rows = _edli_append_global_exit_audit_quote_evidence(
+                    conn,
+                    exit_audit_token_ids.intersection(token_metadata),
+                )
+                conn.commit()
         elapsed_seconds = max(0.0, time.monotonic() - started_monotonic)
         result = {
             "held_priority_token_ids": len(held_token_ids),
             "held_token_metadata": len(token_metadata),
             "held_quote_refresh_ws_covered_tokens": ws_covered_tokens,
             "held_quote_refresh_events": int(written),
+            "global_exit_audit_quote_rows": audit_rows,
             "held_quote_refresh_selected_tokens": len(selected_held_token_ids),
             "held_quote_refresh_metadata_scanned_tokens": len(scanned_held_token_ids),
             "held_quote_refresh_metadata_missing_tokens": len(metadata_missing_token_ids),
