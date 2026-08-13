@@ -3222,6 +3222,64 @@ def test_exact_held_restart_proof_rejects_legacy_global_auction_receipt(tmp_path
     conn.close()
 
 
+def test_exact_held_restart_proof_does_not_accept_superset_receipt(monkeypatch):
+    from src.ops import monitor_cadence
+
+    summary = {
+        "schema_version": 21,
+        "candidate_coverage_complete": True,
+        "scope_family_coverage_complete": True,
+        "candidate_evaluation_count": 1,
+        "full_scope_family_count": 1,
+        "held_position_coverage_complete": True,
+        "held_position_expected_count": 2,
+        "held_position_evaluated_count": 0,
+        "held_position_excluded_count": 2,
+        "decision_at_utc": "2026-08-13T00:00:01+00:00",
+    }
+
+    class FakeConn:
+        class Cursor(list):
+            def fetchall(self):
+                return self
+
+        def execute(self, *_args, **_kwargs):
+            return self.Cursor([
+                {
+                    "id": 1,
+                    "mode": "global_single_order_auction",
+                    "started_at": "2026-08-13T00:00:00+00:00",
+                    "completed_at": "2026-08-13T00:00:01+00:00",
+                    "artifact_json": json.dumps(
+                        {
+                            "completed_at": "2026-08-13T00:00:01+00:00",
+                            "summary": summary,
+                        }
+                    ),
+                }
+            ])
+
+    monkeypatch.setattr(
+        "src.contracts.global_auction_receipt.assert_global_auction_summary_integrity",
+        lambda _summary: None,
+    )
+    monkeypatch.setattr(
+        "src.control.live_health._current_global_auction_holding_payload",
+        lambda _conn, _summary: [
+            {"position_id": "current", "status": "EXCLUDED"},
+            {"position_id": "closed-after-receipt", "status": "EXCLUDED"},
+        ],
+    )
+    assert monitor_cadence.latest_complete_global_auction_receipt(
+        FakeConn(),
+        completed_not_before=datetime.fromisoformat(
+            "2026-08-13T00:00:00+00:00"
+        ),
+        require_held_coverage_count=1,
+        require_held_position_ids=("current",),
+    ) is None
+
+
 def test_deploy_live_review_management_does_not_replace_monitor_refresh(
     monkeypatch, tmp_path
 ):
