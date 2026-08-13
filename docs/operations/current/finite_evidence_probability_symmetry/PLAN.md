@@ -4704,6 +4704,28 @@ historical single-market cancel debt to leave the reactor runnable and yield to
 monitor debt, systemic and unclassified debt to retain the global fence, and
 the handoff to clear after success or exception.
 
+Post-deploy evidence showed that recovery yielding was necessary but not
+sufficient. The replayable EDLI reactor still ran a reduce-only auction on
+every wake while all 26 held obligations lacked current monitor authority. It
+repeatedly occupied orchestration, trade-DB, and forecast-DB work long enough
+for the monitor's 5-second preparation and 2.5-second artifact-HWM cuts to be
+interrupted. The same 25-family HWM read completed 25/25 in under one second on
+the canonical read-only DB when isolated, so this is scheduler priority debt,
+not evidence that current probability is intrinsically unavailable.
+
+Canonical held-monitor debt now defers the replayable EDLI auction completely,
+not merely its BUY side. A reduce-only comparison cannot be executable when
+the current q/book authorities required to rank SELL/HOLD/CASH are precisely
+the missing monitor facts. SCOPE is only an EDLI auction while exact canonical
+monitor debt exists; settlement, command recovery classification, collateral,
+and the dedicated monitor lane remain live. DRAIN is the bounded 30-second
+monitor-recovery cadence and full-book current redecision. RESET requires a
+canonical clean coverage read; elapsed time, a process heartbeat, or a
+reduce-only receipt cannot reset it. Acceptance requires reactor deferral under
+canonical debt, normal admission after exact reset, a ready 25-family HWM cut,
+new MONITOR_REFRESHED coverage for the held book, and only then restart-guard
+release and a fresh global auction.
+
 The Seoul reconstruction also exposed a separate authority contradiction in
 ENTRY recovery. An authenticated canonical order fact already recorded
 `matched_size=11.627905`, while a later incomplete account read found no local

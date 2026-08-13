@@ -555,18 +555,20 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     ):
         monitor_block_reason = _held_position_monitor_entry_block_reason()
         if monitor_block_reason is not None:
-            # SCOPE: BUY authority inside the next global auction while any
-            # current held exposure lacks canonical redecision authority.
-            # SELL/HOLD/CASH comparison must keep running; the cycle wrapper
-            # passes this exact reason as entry_submit_block_reason. DRAIN:
-            # monitor recovery owns the writer lane and refreshes the full
-            # held book. RESET: a canonical clean read clears this event and
-            # the next cycle may admit BUY again.
+            # SCOPE: one replayable EDLI auction while current held exposure
+            # lacks canonical redecision authority. A reduce-only auction is
+            # not useful authority when the q/book inputs needed to compare
+            # SELL/HOLD/CASH are exactly the overdue monitor debt, and it must
+            # not interrupt the monitor's bounded DB/network cut. DRAIN: the
+            # dedicated monitor recovery cadence owns the current-capital lane
+            # and refreshes the full held book. RESET: a canonical clean read
+            # clears this event and the next auction re-enters normally.
             logger.warning(
-                "edli_event_reactor retaining reduce-only auction: canonical "
-                "held-position monitor debt blocks BUY (%s)",
+                "edli_event_reactor deferred: canonical held-position monitor "
+                "debt owns current-capital redecision (%s)",
                 monitor_block_reason,
             )
+            return True
         else:
             _held_position_monitor_canonical_debt.clear()
 

@@ -11214,7 +11214,7 @@ def test_monitor_bootstrap_allows_reduce_only_reactor_while_coverage_is_missing(
     assert bootstrap_complete.is_set() is False
 
 
-def test_canonical_monitor_debt_blocks_buy_without_deferring_reactor(
+def test_canonical_monitor_debt_defers_reactor_until_current_capital_refresh(
     monkeypatch,
 ) -> None:
     import src.main as main_module
@@ -11239,7 +11239,7 @@ def test_canonical_monitor_debt_blocks_buy_without_deferring_reactor(
         lambda: "held_position_monitor_cadence_overdue",
     )
 
-    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
     assert canonical_debt.is_set() is True
 
     monkeypatch.setattr(
