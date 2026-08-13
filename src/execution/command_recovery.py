@@ -42,7 +42,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from collections.abc import Collection, Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
@@ -84,6 +84,27 @@ from src.venue.response_contracts import (
 
 logger = logging.getLogger(__name__)
 _RECOVERY_MONITOR_PREEMPTION = threading.local()
+
+
+@dataclass(frozen=True)
+class CapitalBlockingCommandScope:
+    """Exact scope of venue debt that receives current-capital priority."""
+
+    total_count: int
+    scoped_markets: tuple[str, ...]
+    unscopeable_count: int
+    projection_count: int
+
+    def requires_global_handoff(self, *, systemic_market_count_limit: int) -> bool:
+        if systemic_market_count_limit < 1:
+            raise ValueError("systemic_market_count_limit must be >= 1")
+        if self.total_count <= 0:
+            return False
+        return bool(
+            self.projection_count > 0
+            or self.unscopeable_count > 0
+            or len(self.scoped_markets) >= systemic_market_count_limit
+        )
 
 
 class TerminalExitHeldTokenMismatch(RuntimeError):
@@ -26495,30 +26516,60 @@ def _terminal_filled_exit_projection_blocker_count(
     return int(row[0] or 0) if row is not None else 0
 
 
-def capital_blocking_command_count(conn: sqlite3.Connection) -> int:
-    """Return exact unresolved venue side effects that freeze current capital."""
+def capital_blocking_command_scope(
+    conn: sqlite3.Connection,
+) -> CapitalBlockingCommandScope:
+    """Return the scope lattice for exact current-capital recovery debt.
 
-    cancel_count = len(_capital_blocking_cancel_commands(conn))
-    if not _table_exists(conn, "venue_commands"):
-        return cancel_count
-    inflight_submit_count = int(
-        conn.execute(
-            """
-            SELECT COUNT(*)
-              FROM venue_commands
-             WHERE state = ?
-               AND intent_kind IN ('ENTRY', 'EXIT')
-               AND COALESCE(venue_order_id, '') != ''
-            """,
-            (CommandState.SUBMITTING.value,),
-        ).fetchone()[0]
-        or 0
-    )
+    Projection debt remains global because canonical wealth has not absorbed a
+    confirmed fill. Venue-command debt may remain isolated when every blocker
+    names one market; the caller applies the allocator's configured systemic
+    market threshold.
+    """
+
+    command_rows = list(_capital_blocking_cancel_commands(conn))
+    if _table_exists(conn, "venue_commands"):
+        command_rows.extend(
+            _dict_row(row)
+            for row in conn.execute(
+                """
+                SELECT command_id, market_id
+                  FROM venue_commands
+                 WHERE state = ?
+                   AND intent_kind IN ('ENTRY', 'EXIT')
+                   AND COALESCE(venue_order_id, '') != ''
+                """,
+                (CommandState.SUBMITTING.value,),
+            ).fetchall()
+        )
     projection_count = (
         _terminal_filled_entry_projection_blocker_count(conn)
         + _terminal_filled_exit_projection_blocker_count(conn)
     )
-    return cancel_count + inflight_submit_count + projection_count
+    scoped_markets = tuple(
+        sorted(
+            {
+                str(row.get("market_id") or "").strip()
+                for row in command_rows
+                if str(row.get("market_id") or "").strip()
+            }
+        )
+    )
+    unscopeable_count = sum(
+        1 for row in command_rows if not str(row.get("market_id") or "").strip()
+    )
+    return CapitalBlockingCommandScope(
+        total_count=len(command_rows) + projection_count,
+        scoped_markets=scoped_markets,
+        unscopeable_count=unscopeable_count,
+        projection_count=projection_count,
+    )
+
+
+def capital_blocking_command_count(conn: sqlite3.Connection) -> int:
+    """Return exact unresolved venue side effects that freeze current capital."""
+
+    return capital_blocking_command_scope(conn).total_count
 
 
 def _identity_bound_submitting_candidates(

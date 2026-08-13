@@ -32060,6 +32060,65 @@ def test_capital_blocker_count_prioritizes_terminal_exit_until_pnl_projection(co
     assert capital_blocking_command_count(conn) == 0
 
 
+def test_single_market_capital_blocker_is_scoped_not_global(conn, monkeypatch):
+    """One named-market cancel debt must not freeze unrelated auctions."""
+    import src.execution.command_recovery as recovery
+
+    monkeypatch.setattr(
+        recovery,
+        "_capital_blocking_cancel_commands",
+        lambda _conn: [{"command_id": "cancel-a", "market_id": "market-a"}],
+    )
+    monkeypatch.setattr(
+        recovery, "_terminal_filled_entry_projection_blocker_count", lambda _conn: 0
+    )
+    monkeypatch.setattr(
+        recovery, "_terminal_filled_exit_projection_blocker_count", lambda _conn: 0
+    )
+    scope = recovery.capital_blocking_command_scope(conn)
+
+    assert scope.total_count == 1
+    assert scope.scoped_markets == ("market-a",)
+    assert scope.unscopeable_count == 0
+    assert scope.projection_count == 0
+    assert scope.requires_global_handoff(systemic_market_count_limit=2) is False
+
+
+@pytest.mark.parametrize(
+    ("cancel_rows", "projection_count"),
+    (
+        ([{"command_id": "unknown", "market_id": ""}], 0),
+        (
+            [
+                {"command_id": "a", "market_id": "market-a"},
+                {"command_id": "b", "market_id": "market-b"},
+            ],
+            0,
+        ),
+        ([], 1),
+    ),
+)
+def test_systemic_or_unclassified_capital_debt_requires_global_handoff(
+    conn, monkeypatch, cancel_rows, projection_count
+):
+    import src.execution.command_recovery as recovery
+
+    monkeypatch.setattr(
+        recovery, "_capital_blocking_cancel_commands", lambda _conn: cancel_rows
+    )
+    monkeypatch.setattr(
+        recovery,
+        "_terminal_filled_entry_projection_blocker_count",
+        lambda _conn: projection_count,
+    )
+    monkeypatch.setattr(
+        recovery, "_terminal_filled_exit_projection_blocker_count", lambda _conn: 0
+    )
+    scope = recovery.capital_blocking_command_scope(conn)
+
+    assert scope.requires_global_handoff(systemic_market_count_limit=2) is True
+
+
 def test_live_tick_identity_bound_matched_exit_outruns_account_snapshot(
     tmp_path,
     monkeypatch,

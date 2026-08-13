@@ -4681,6 +4681,27 @@ not replay the old quote or certificate, and malformed or `>1` values remain
 global command-ownership proof, fresh-auction debt creation, and a `>1`
 counterexample that remains fail-closed.
 
+The 2026-08-13 live no-order reconstruction exposed a scheduler scope
+contradiction after the allocator scope lattice had already recovered.  One
+`REVIEW_REQUIRED` cancel-unknown command was exactly bound to market `3535393`;
+the allocator correctly isolated that market and left every unrelated family
+entry-eligible, but the scheduled command-recovery wrapper still raised a
+process-global reactor handoff for every nonzero capital-blocker count.  Its
+account-wide venue snapshot repeatedly exhausted the recovery deadline, so the
+handoff suppressed the global auction without resolving the scoped debt.
+Recovery admission must use the same scope lattice: a scoped unknown keeps its
+own market isolated and recovery continues concurrently through short DB units;
+only a systemic/unscopeable unknown, or capital debt not represented by the
+unknown-side-effect classifier (for example an incomplete confirmed-fill
+projection), may reserve the global reactor handoff.  SCOPE is the affected
+market for classified scoped unknowns and global only for systemic/unclassified
+capital ambiguity.  DRAIN remains scheduled venue recovery plus current wealth
+revalidation.  RESET is the exact command/projection recovery fact; classifier
+failure remains global fail-closed.  Acceptance requires the historical
+single-market cancel debt to leave the reactor runnable, systemic and
+unclassified debt to retain the global fence, and the handoff to clear after
+success or exception.
+
 The Seoul reconstruction also exposed a separate authority contradiction in
 ENTRY recovery. An authenticated canonical order fact already recorded
 `matched_size=11.627905`, while a later incomplete account read found no local

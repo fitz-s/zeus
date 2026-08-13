@@ -7115,6 +7115,7 @@ def _edli_command_recovery_cycle() -> None:
     if _defer_for_held_position_monitor("edli_command_recovery"):
         return
     from src.execution.command_recovery import (
+        capital_blocking_command_scope,
         capital_blocking_command_count,
         reconcile_unresolved_commands,
         scheduled_recovery_budget_seconds,
@@ -7125,10 +7126,13 @@ def _edli_command_recovery_cycle() -> None:
         _time.monotonic() + scheduled_recovery_budget_seconds()
     )
     capital_blockers = 0
+    capital_scope = None
     try:
         trade_conn = get_trade_connection_read_only()
         try:
             capital_blockers = capital_blocking_command_count(trade_conn)
+            if capital_blockers > 0:
+                capital_scope = capital_blocking_command_scope(trade_conn)
         finally:
             trade_conn.close()
     except Exception as exc:  # noqa: BLE001 - recovery still runs fail-closed.
@@ -7137,6 +7141,25 @@ def _edli_command_recovery_cycle() -> None:
             "continuing without reactor handoff: %r",
             exc,
         )
+    global_capital_handoff = capital_blockers > 0
+    if capital_scope is not None:
+        try:
+            from src.risk_allocator import load_cap_policy
+
+            global_capital_handoff = (
+                capital_scope.total_count != capital_blockers
+                or capital_scope.requires_global_handoff(
+                    systemic_market_count_limit=(
+                        load_cap_policy().systemic_market_count_limit
+                    )
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - scope ambiguity stays global.
+            logger.warning(
+                "edli_command_recovery: capital scope classification failed; "
+                "retaining global reactor handoff: %r",
+                exc,
+            )
     if capital_blockers <= 0 and (
         _held_position_monitor_active.is_set()
         or _held_position_monitor_canonical_debt.is_set()
@@ -7155,16 +7178,23 @@ def _edli_command_recovery_cycle() -> None:
             "current-capital I/O priority"
         )
         return
-    if capital_blockers:
+    if global_capital_handoff:
         _capital_recovery_handoff_pending.set()
         logger.info(
             "edli_command_recovery: reserving reactor handoff for %d "
             "capital-blocking venue side effects",
             capital_blockers,
         )
+    elif capital_blockers:
+        logger.info(
+            "edli_command_recovery: scoped capital recovery remains concurrent "
+            "with global auction blockers=%d markets=%s",
+            capital_blockers,
+            list(capital_scope.scoped_markets) if capital_scope is not None else [],
+        )
     reactor_fence_acquired = False
     try:
-        if capital_blockers:
+        if global_capital_handoff:
             drain_budget = min(
                 _CAPITAL_RECOVERY_REACTOR_DRAIN_SECONDS,
                 max(0.0, invocation_deadline - _time.monotonic()),
