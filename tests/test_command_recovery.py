@@ -5569,6 +5569,159 @@ class TestAuthenticatedEntryTradeFactProjection:
             (position_id, order_id),
         ).fetchone()[0] == 1
 
+    def test_partial_control_fold_does_not_mask_missing_increment_projection(
+        self,
+        conn,
+    ):
+        """WS control facts cannot stand in for owned incremental exposure."""
+        from src.execution.command_recovery import (
+            reconcile_authenticated_entry_trade_facts,
+        )
+        from src.state.venue_command_repo import append_event
+
+        position_id = "pos-authenticated-partial-increment"
+        token_id = "tok-authenticated-partial-increment"
+        seed_command = "cmd-authenticated-partial-seed"
+        seed_order = "ord-authenticated-partial-seed"
+        _insert(
+            conn,
+            command_id=seed_command,
+            position_id=position_id,
+            decision_id="dec-authenticated-partial-seed",
+            token_id=token_id,
+            size=5.0,
+            price=0.40,
+        )
+        _advance_to_acked(conn, command_id=seed_command, venue_order_id=seed_order)
+        _seed_pending_entry_projection(
+            conn,
+            position_id=position_id,
+            command_id=seed_command,
+            order_id=seed_order,
+            token_id=token_id,
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=seed_command,
+            order_id=seed_order,
+            trade_id="trade-authenticated-partial-seed",
+            filled_size="5",
+            fill_price="0.40",
+        )
+        assert reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=seed_command,
+        ) == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+
+        refill_command = "cmd-authenticated-partial-refill"
+        refill_order = "ord-authenticated-partial-refill"
+        _insert(
+            conn,
+            command_id=refill_command,
+            position_id=position_id,
+            decision_id="dec-authenticated-partial-refill",
+            token_id=token_id,
+            size=20.0,
+            price=0.50,
+            created_at="2026-04-26T00:02:00Z",
+        )
+        _advance_to_acked(
+            conn,
+            command_id=refill_command,
+            venue_order_id=refill_order,
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id=refill_command,
+            order_id=refill_order,
+            trade_id="trade-authenticated-partial-refill",
+            filled_size="10",
+            fill_price="0.49",
+        )
+        _append_order_fact(
+            conn,
+            command_id=refill_command,
+            order_id=refill_order,
+            state="PARTIALLY_MATCHED",
+            matched_size="10",
+            remaining_size="10",
+        )
+        append_event(
+            conn,
+            command_id=refill_command,
+            event_type="PARTIAL_FILL_OBSERVED",
+            occurred_at="2026-04-26T00:06:00Z",
+            payload={
+                "venue_order_id": refill_order,
+                "filled_size": "10",
+                "fill_price": "0.49",
+            },
+        )
+        assert _get_state(conn, refill_command) == "PARTIAL"
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM position_events WHERE command_id = ?",
+                (refill_command,),
+            ).fetchone()[0]
+            == 0
+        )
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM execution_fact WHERE command_id = ?",
+                (refill_command,),
+            ).fetchone()[0]
+            == 0
+        )
+
+        assert reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=refill_command,
+        ) == {"scanned": 1, "advanced": 1, "stayed": 0, "errors": 0}
+        current = conn.execute(
+            "SELECT shares, cost_basis_usd FROM position_current WHERE position_id = ?",
+            (position_id,),
+        ).fetchone()
+        assert Decimal(str(current["shares"])) == Decimal("15")
+        assert Decimal(str(current["cost_basis_usd"])) == Decimal("6.9")
+        execution = conn.execute(
+            """
+            SELECT shares, fill_price, venue_status, terminal_exec_status
+              FROM execution_fact
+             WHERE position_id = ? AND command_id = ? AND order_role = 'entry'
+            """,
+            (position_id, refill_command),
+        ).fetchone()
+        assert dict(execution) == {
+            "shares": 10.0,
+            "fill_price": 0.49,
+            "venue_status": "PARTIAL",
+            "terminal_exec_status": "partial",
+        }
+        assert (
+            conn.execute(
+                """
+            SELECT COUNT(*)
+              FROM position_events
+             WHERE position_id = ?
+               AND command_id = ?
+               AND event_type = 'ENTRY_ORDER_FILLED'
+            """,
+                (position_id, refill_command),
+            ).fetchone()[0]
+            == 1
+        )
+        assert reconcile_authenticated_entry_trade_facts(
+            conn,
+            command_id=refill_command,
+        ) == {"scanned": 1, "advanced": 0, "stayed": 1, "errors": 0}
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM position_events WHERE command_id = ?",
+                (refill_command,),
+            ).fetchone()[0]
+            == 1
+        )
+
     @pytest.mark.parametrize(
         ("filled_size", "fill_price"),
         (("10", "0.51"), ("10.02", "0.40")),

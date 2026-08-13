@@ -23790,7 +23790,62 @@ def _latest_order_fact_matched_size(
         """,
         (command_id, venue_order_id),
     ).fetchone()
-    return _decimal_or_none(_dict_row(row).get("matched_size") if row else None) or Decimal("0")
+    return _decimal_or_none(
+        _dict_row(row).get("matched_size") if row else None
+    ) or Decimal("0")
+
+
+def _authenticated_entry_fill_projection_complete(
+    conn: sqlite3.Connection,
+    *,
+    command_id: str,
+    position_id: str,
+    venue_order_id: str,
+    filled_size: Decimal,
+    fill_price: Decimal,
+) -> bool:
+    """Return whether one command's cumulative fill is canonical end to end."""
+
+    event = conn.execute(
+        """
+        SELECT 1
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'ENTRY_ORDER_FILLED'
+           AND (
+                command_id = ?
+                OR lower(COALESCE(order_id, '')) = lower(?)
+           )
+         LIMIT 1
+        """,
+        (position_id, command_id, venue_order_id),
+    ).fetchone()
+    if event is None:
+        return False
+    rows = conn.execute(
+        """
+        SELECT shares, fill_price
+          FROM execution_fact
+         WHERE position_id = ?
+           AND command_id = ?
+           AND order_role = 'entry'
+           AND filled_at IS NOT NULL
+           AND voided_at IS NULL
+           AND shares > 0
+           AND fill_price > 0
+        """,
+        (position_id, command_id),
+    ).fetchall()
+    tolerance = Decimal("0.000001")
+    for row in rows:
+        shares = _decimal_or_none(row["shares"]) or Decimal("0")
+        price = _decimal_or_none(row["fill_price"]) or Decimal("0")
+        if (
+            abs(shares - filled_size) <= tolerance
+            and abs(price - fill_price) <= tolerance
+        ):
+            return True
+    return False
 
 
 def _reconcile_authenticated_entry_trade_fact(
@@ -23850,13 +23905,28 @@ def _reconcile_authenticated_entry_trade_fact(
         )
     command_state = str(command.get("state") or "")
     already_filled = command_state == CommandState.FILLED.value
-    if (
+    partial_control_fold_complete = bool(
         command_state == CommandState.PARTIAL.value
         and _latest_order_fact_matched_size(
             conn,
             command_id=command_id,
             venue_order_id=venue_order_id,
-        ) >= filled - Decimal("0.000001")
+        )
+        >= filled - Decimal("0.000001")
+    )
+    # SCOPE: this exact PARTIAL ENTRY command and its authenticated cumulative
+    # fill. DRAIN: the next command-recovery pass projects the same confirmed
+    # trade facts without replaying the already-durable control fold. RESET:
+    # the command-bound ENTRY_ORDER_FILLED event and execution_fact reproduce
+    # the cumulative size and price; PARTIAL state/order facts alone cannot
+    # claim owned wealth.
+    if partial_control_fold_complete and _authenticated_entry_fill_projection_complete(
+        conn,
+        command_id=command_id,
+        position_id=str(command.get("position_id") or ""),
+        venue_order_id=venue_order_id,
+        filled_size=filled,
+        fill_price=fill_price,
     ):
         return "stayed"
 
@@ -23983,7 +24053,7 @@ def _reconcile_authenticated_entry_trade_fact(
                     "source_fill_time_valid": True,
                 },
             }
-        if not already_filled:
+        if not already_filled and not partial_control_fold_complete:
             append_order_fact(
                 conn,
                 venue_order_id=venue_order_id,

@@ -4719,6 +4719,35 @@ antibody that emits no aggregate `ENTRY_ORDER_VOIDED`.
 Allowed files for this hot-fix are `src/execution/command_recovery.py`,
 `tests/test_command_recovery.py`, and this plan.
 
+## 2026-08-13 Partial fill control state cannot impersonate owned wealth
+
+Live venue truth then exposed the non-terminal twin: Wellington had a confirmed
+10-share ENTRY fill and a `PARTIAL` command/order fact, while its canonical
+position still contained only the prior lot and the new command had neither an
+`ENTRY_ORDER_FILLED` event nor an `execution_fact`. WS ingestion had advanced
+the control fold before scheduled recovery; recovery treated that control fold
+as if it also proved the position projection and skipped the command forever.
+
+An authenticated cumulative partial fill is absorbed only when the exact
+command-bound position event and execution fact reproduce its cumulative shares
+and weighted fill price. When `PARTIAL` state and the matched-size order fact are
+already durable but those capital authorities are absent or stale, recovery
+reuses the control fold and runs only the canonical projection. This prevents a
+duplicate command transition while making the actual acquired exposure visible
+to monitoring, exit selection, risk, and PnL attribution.
+
+SCOPE is the exact PARTIAL ENTRY command/order and its authenticated confirmed
+cumulative fill. DRAIN is the next scheduled authenticated-entry recovery pass.
+RESET requires the command-bound `ENTRY_ORDER_FILLED` event and positive
+`execution_fact` to reproduce cumulative fill size and price; command state and
+matched-size order facts alone never reset the debt. Acceptance requires an
+incremental-position race antibody, idempotent second recovery, focused command
+recovery tests, live deployment, and convergence of the observed Wellington
+fill into canonical position and execution truth.
+
+Allowed files remain `src/execution/command_recovery.py`,
+`tests/test_command_recovery.py`, and this plan.
+
 ## 2026-08-13 Corrected Day0 facts retain authorized raw provenance
 
 Post-deploy verification found one held Shenzhen position receiving fresh
