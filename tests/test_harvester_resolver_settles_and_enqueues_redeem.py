@@ -891,7 +891,15 @@ def test_exact_condition_no_settles_only_matching_position(trade_conn, monkeypat
 
     settled_calls = []
 
-    def _mark_settled(_portfolio, trade_id, settlement_price, reason):
+    def _mark_settled(
+        _portfolio,
+        trade_id,
+        settlement_price,
+        reason,
+        *,
+        audit_conn=None,
+    ):
+        assert audit_conn is trade_conn
         settled_calls.append((trade_id, settlement_price, reason))
         closed = MagicMock()
         closed.trade_id = trade_id

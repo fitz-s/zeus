@@ -2671,6 +2671,8 @@ def compute_settlement_close(
     trade_id: str,
     settlement_price: float,
     exit_reason: str = "SETTLEMENT",
+    *,
+    audit_conn: sqlite3.Connection | None = None,
 ) -> Optional[Position]:
     """Finalize settlement and remove the position from active runtime truth."""
 
@@ -2693,7 +2695,7 @@ def compute_settlement_close(
         if not was_economically_closed:
             pos.exit_price = settlement_price
             pos.pnl = _compute_realized_pnl(pos, settlement_price)
-            _track_exit(state, pos)
+            _track_exit(state, pos, audit_conn=audit_conn)
         closed = pos
 
     return closed
@@ -2732,7 +2734,11 @@ def mark_admin_closed(
 
 
 def void_position(
-    state: PortfolioState, trade_id: str, reason: str,
+    state: PortfolioState,
+    trade_id: str,
+    reason: str,
+    *,
+    audit_conn: sqlite3.Connection | None = None,
 ) -> Optional[Position]:
     """Close with pnl=0 when real exit price is unknown. L3.
 
@@ -2751,7 +2757,7 @@ def void_position(
             pos.exit_price = 0.0
             pos.pnl = 0.0
             pos.last_exit_at = datetime.now(timezone.utc).isoformat()
-            _track_exit(state, pos)
+            _track_exit(state, pos, audit_conn=audit_conn)
             return pos
     return None
 
@@ -2785,7 +2791,12 @@ def _project_d6_field(pos: "Position", field_name: str, chain_value: float, fill
     return chain_value
 
 
-def _track_exit(state: PortfolioState, pos: Position) -> None:
+def _track_exit(
+    state: PortfolioState,
+    pos: Position,
+    *,
+    audit_conn: sqlite3.Connection | None = None,
+) -> None:
     """Track exit for reentry/cooldown checks AND replay auditability.
 
     CRITICAL: All fields required by equity/report replay consumers must be
@@ -2856,7 +2867,14 @@ def _track_exit(state: PortfolioState, pos: Position) -> None:
         "exited_at": pos.last_exit_at,
     })
 
-    if state.audit_logging_enabled:
+    if state.audit_logging_enabled and audit_conn is not None:
+        from src.state.db import log_trade_exit
+
+        # The caller owns this transaction. Settlement already holds the
+        # canonical writer slot, so opening another trade connection here would
+        # wait on our own BEGIN IMMEDIATE and starve held-position monitoring.
+        log_trade_exit(audit_conn, pos)
+    elif state.audit_logging_enabled:
         conn = None
         try:
             from src.state.db import get_trade_connection_with_world, log_trade_exit

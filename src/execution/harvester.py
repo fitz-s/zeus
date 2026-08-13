@@ -2849,7 +2849,12 @@ def _settle_positions(
                 pos.trade_id,
                 pos.direction,
             )
-            closed = void_position(portfolio, pos.trade_id, "SETTLED_UNKNOWN_DIRECTION")
+            closed = void_position(
+                portfolio,
+                pos.trade_id,
+                "SETTLED_UNKNOWN_DIRECTION",
+                audit_conn=conn,
+            )
             if closed is not None and strategy_tracker is not None:
                 strategy_tracker.record_exit(closed)
             settled += 1
@@ -2957,7 +2962,13 @@ def _settle_positions(
             conn.execute("RELEASE SAVEPOINT partial_exit_settlement_economics")
 
         from src.execution.exit_lifecycle import mark_settled
-        closed = mark_settled(portfolio, pos.trade_id, settlement_price, "SETTLEMENT")
+        closed = mark_settled(
+            portfolio,
+            pos.trade_id,
+            settlement_price,
+            "SETTLEMENT",
+            audit_conn=conn,
+        )
         residual_pnl = Decimal(str(shares)) * Decimal(str(exit_price)) - Decimal(
             str(settlement_cost_basis)
         )

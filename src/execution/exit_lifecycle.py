@@ -11020,6 +11020,8 @@ def mark_settled(
     trade_id: str,
     settlement_price: float,
     exit_reason: str = "SETTLEMENT",
+    *,
+    audit_conn: sqlite3.Connection | None = None,
 ) -> Optional[Position]:
     """Single canonical entry point for settlement-driven position close.
 
@@ -11028,7 +11030,13 @@ def mark_settled(
     Covers buy_yes/buy_no settlements. Void/unknown-direction
     positions are handled separately by void_position.
     """
-    closed = compute_settlement_close(portfolio, trade_id, settlement_price, exit_reason)
+    closed = compute_settlement_close(
+        portfolio,
+        trade_id,
+        settlement_price,
+        exit_reason,
+        audit_conn=audit_conn,
+    )
     if closed is not None:
         logger.info(
             "EXIT_LIFECYCLE mark_settled %s: price=%.4f reason=%s",

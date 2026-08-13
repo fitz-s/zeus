@@ -299,7 +299,13 @@ def test_settle_positions_closes_losing_retry_pending_position(monkeypatch):
     )
 
     assert settled == 1
-    mark_settled.assert_called_once_with(portfolio, pos.trade_id, 0.0, "SETTLEMENT")
+    mark_settled.assert_called_once_with(
+        portfolio,
+        pos.trade_id,
+        0.0,
+        "SETTLEMENT",
+        audit_conn=conn,
+    )
     assert len(records) == 1
     assert records[0].outcome == 0
     assert records[0].pnl == -3.6
