@@ -8238,13 +8238,14 @@ def test_command_recovery_yields_trade_db_to_overdue_held_monitor(monkeypatch) -
     assert calls == []
 
 
-def test_capital_cancel_recovery_keeps_priority_during_held_monitor(monkeypatch) -> None:
-    """Exact unresolved cancel capital remains a recovery exception."""
+def test_scoped_capital_recovery_yields_to_held_monitor(monkeypatch) -> None:
+    """An isolated market may not starve global held-capital truth."""
     import threading
 
     import src.execution.command_recovery as command_recovery
     import src.main as main_module
     import src.state.db as state_db
+    from src.execution.command_recovery import CapitalBlockingCommandScope
 
     class FakeConn:
         def close(self) -> None:
@@ -8271,9 +8272,73 @@ def test_capital_cancel_recovery_keeps_priority_during_held_monitor(monkeypatch)
     )
     monkeypatch.setattr(
         command_recovery,
+        "capital_blocking_command_scope",
+        lambda _conn: CapitalBlockingCommandScope(
+            total_count=1,
+            scoped_markets=("market-a",),
+            unscopeable_count=0,
+            projection_count=0,
+        ),
+    )
+    monkeypatch.setattr(
+        command_recovery,
         "reconcile_unresolved_commands",
         lambda **kwargs: calls.append(str(kwargs.get("scope")))
         or {"scanned": 1, "advanced": 0},
+    )
+
+    main_module._edli_command_recovery_cycle.__wrapped__()
+
+    assert calls == []
+
+
+def test_systemic_capital_recovery_keeps_priority_during_held_monitor(monkeypatch) -> None:
+    """Systemic unresolved capital still outranks monitor cadence repair."""
+    import threading
+
+    import src.execution.command_recovery as command_recovery
+    import src.main as main_module
+    import src.state.db as state_db
+    from src.execution.command_recovery import CapitalBlockingCommandScope
+
+    class FakeConn:
+        def close(self) -> None:
+            return None
+
+    calls: list[str] = []
+    monitor_active = threading.Event()
+    monitor_active.set()
+    monkeypatch.setattr(main_module, "get_mode", lambda: "live")
+    monkeypatch.setattr(main_module, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main_module, "_held_position_monitor_active", monitor_active)
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_debt",
+        threading.Event(),
+    )
+    monkeypatch.setattr(main_module, "_edli_command_recovery_full_bucket", lambda: 17)
+    monkeypatch.setattr(main_module, "_EDLI_COMMAND_RECOVERY_LAST_FULL_BUCKET", 17)
+    monkeypatch.setattr(state_db, "get_trade_connection_read_only", FakeConn)
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_count",
+        lambda _conn: 2,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "capital_blocking_command_scope",
+        lambda _conn: CapitalBlockingCommandScope(
+            total_count=2,
+            scoped_markets=("market-a", "market-b"),
+            unscopeable_count=0,
+            projection_count=0,
+        ),
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_unresolved_commands",
+        lambda **kwargs: calls.append(str(kwargs.get("scope")))
+        or {"scanned": 2, "advanced": 0},
     )
 
     main_module._edli_command_recovery_cycle.__wrapped__()

@@ -4690,17 +4690,19 @@ process-global reactor handoff for every nonzero capital-blocker count.  Its
 account-wide venue snapshot repeatedly exhausted the recovery deadline, so the
 handoff suppressed the global auction without resolving the scoped debt.
 Recovery admission must use the same scope lattice: a scoped unknown keeps its
-own market isolated and recovery continues concurrently through short DB units;
-only a systemic/unscopeable unknown, or capital debt not represented by the
+own market isolated, never reserves the global reactor handoff, and yields its
+account/DB work while canonical held-position monitor debt exists. Only a
+systemic/unscopeable unknown, or capital debt not represented by the
 unknown-side-effect classifier (for example an incomplete confirmed-fill
-projection), may reserve the global reactor handoff.  SCOPE is the affected
-market for classified scoped unknowns and global only for systemic/unclassified
-capital ambiguity.  DRAIN remains scheduled venue recovery plus current wealth
-revalidation.  RESET is the exact command/projection recovery fact; classifier
-failure remains global fail-closed.  Acceptance requires the historical
-single-market cancel debt to leave the reactor runnable, systemic and
-unclassified debt to retain the global fence, and the handoff to clear after
-success or exception.
+projection), may reserve the global reactor handoff and retain recovery I/O
+priority. SCOPE is the affected market for classified scoped unknowns and
+global only for systemic/unclassified capital ambiguity. DRAIN is first the
+current held-capital monitor, then the next scheduled venue recovery plus
+current wealth revalidation. RESET is the exact command/projection recovery
+fact; classifier failure remains global fail-closed. Acceptance requires the
+historical single-market cancel debt to leave the reactor runnable and yield to
+monitor debt, systemic and unclassified debt to retain the global fence, and
+the handoff to clear after success or exception.
 
 The Seoul reconstruction also exposed a separate authority contradiction in
 ENTRY recovery. An authenticated canonical order fact already recorded

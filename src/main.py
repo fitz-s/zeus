@@ -7160,19 +7160,18 @@ def _edli_command_recovery_cycle() -> None:
                 "retaining global reactor handoff: %r",
                 exc,
             )
-    if capital_blockers <= 0 and (
+    if not global_capital_handoff and (
         _held_position_monitor_active.is_set()
         or _held_position_monitor_canonical_debt.is_set()
     ):
-        # SCOPE: only a recovery tick with no exact capital-blocking venue side
-        # effect. A known-order SUBMITTING command may already be filled and is
-        # current capital until exact point truth advances it.
+        # SCOPE: a recovery tick with no systemic or unscopeable capital
+        # ambiguity. Exact single-market debt is already isolated from every
+        # other family and may wait for current held-capital truth.
         # DRAIN: the active/overdue held monitor gets uncontended trade-DB I/O
         # and writes current MONITOR_REFRESHED evidence. RESET: its completion
         # clears the active claim and canonical fresh coverage clears the debt;
-        # the next 60-second recovery tick resumes. Exact cancel recovery keeps
-        # authority because unresolved side effects can themselves strand
-        # current capital.
+        # the next 60-second recovery tick resumes. Systemic, unscopeable, or
+        # incomplete confirmed-fill projection debt retains recovery priority.
         logger.info(
             "edli_command_recovery deferred: held-position monitor owns "
             "current-capital I/O priority"
