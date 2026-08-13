@@ -158,6 +158,13 @@ FORECAST_LIVE_SAFE_CYCLE_POLL_SECONDS = 5 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SECONDS = 10 * 60
 FORECAST_LIVE_SOURCE_HEALTH_SOURCE_IDS = frozenset({"ecmwf_open_data"})
 _CURRENT_SOURCE_CYCLE_STATUSES = frozenset({"SUCCESS"})
+_OPENDATA_WAKE_ACKED_SOURCE_RUN_IDS: set[str] = set()
+_OPENDATA_WAKE_TERMINAL_STATUSES = frozenset(
+    {
+        "CYCLE_ADVANCE_TRIGGER",
+        "OPENDATA_CYCLE_ADVANCE_NO_ELIGIBLE_SCOPES",
+    }
+)
 # Why SUCCESS-only: ECMWF Open Data disseminates a cycle incrementally over ~10h.
 # A PARTIAL journal at T+8h means more steps may still publish; treating it as
 # "already journaled" would lock the daemon out of those later steps and force
@@ -829,6 +836,7 @@ def _run_opendata_track_if_due(
                 "track": track,
                 "source_run_id": current_metadata.get("source_run_id"),
                 "scheduled_for": current_metadata.get("scheduled_for"),
+                "snapshots_inserted": current_metadata.get("rows_written"),
                 "selection": identity.get("metadata"),
                 "journal": current_metadata,
             }
@@ -921,9 +929,14 @@ def _enqueue_committed_opendata_cycle_advance_reseeds(
 
 def _commit_opendata_result_and_wake(conn, result: dict) -> dict:
     conn.commit()
+    source_run_id = str(result.get("source_run_id") or "").strip()
+    if source_run_id in _OPENDATA_WAKE_ACKED_SOURCE_RUN_IDS:
+        return result
     report = _enqueue_committed_opendata_cycle_advance_reseeds(conn, result)
     if report is None:
         return result
+    if str(report.get("status") or "") in _OPENDATA_WAKE_TERMINAL_STATUSES:
+        _OPENDATA_WAKE_ACKED_SOURCE_RUN_IDS.add(source_run_id)
     return {**result, "cycle_advance_reseed": report}
 
 
