@@ -2,7 +2,7 @@
 # Last reused/audited: 2026-08-12
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z4.yaml
 #                  + 2026-05-13 collateral_ledger singleton lifecycle remediation
-#                  + 2026-05-17 / 2026-06-17 live collateral DB lock remediation
+#                  + 2026-05-17 / 2026-06-17 / 2026-08-12 live collateral DB lock remediation
 """R3 Z4 collateral ledger for pUSD, CTF inventory, and reservations.
 
 pUSD is BUY collateral. CTF outcome tokens are SELL inventory. This module
@@ -251,6 +251,7 @@ class CollateralLedger:
         conn: sqlite3.Connection | None = None,
         *,
         db_path: str | Path | None = None,
+        initialize_schema: bool = True,
     ) -> None:
         """Initialize a ledger backed by a sqlite3 connection.
 
@@ -263,6 +264,9 @@ class CollateralLedger:
           connections per DB operation. Use for process-wide singletons published
           via ``configure_global_ledger`` — survives transient caller-conn
           lifecycles without holding a live trade-DB connection between calls.
+        - ``initialize_schema=False``: require an already-migrated schema through
+          a read-only validation. Use in recurring daemon cycles after pre-flight
+          so construction does not compete for the SQLite writer merely to run DDL.
 
         Authority basis: 2026-06-17 live redecision repair. The 2026-05-13
         singleton fix correctly stopped transient caller-conn poisoning, but did
@@ -282,20 +286,26 @@ class CollateralLedger:
         self._db_path: Path | None = None
         if db_path is not None:
             # Path-backed singleton: no persistent sqlite connection survives
-            # between calls. A short schema touch here validates the DB and keeps
-            # init idempotent without parking a file handle in the daemon.
+            # between calls. Bootstrap callers may initialize schema once; hot
+            # recurring paths validate the migrated shape read-only instead.
             self._db_path = Path(db_path)
             self._owns_conn = True
             self._conn = None
-            with self._connection_scope(
-                write=True,
-                owner="collateral_schema_init",
-            ) as init_conn:
-                init_collateral_schema(init_conn)
+            if initialize_schema:
+                with self._connection_scope(
+                    write=True,
+                    owner="collateral_schema_init",
+                ) as init_conn:
+                    init_collateral_schema(init_conn)
+            else:
+                _assert_initialized_collateral_schema_path(self._db_path)
         else:
             self._conn = conn
             if self._conn is not None:
-                init_collateral_schema(self._conn)
+                if initialize_schema:
+                    init_collateral_schema(self._conn)
+                else:
+                    _assert_initialized_collateral_schema(self._conn)
 
     def close(self) -> None:
         """Close the underlying connection iff the ledger owns it.
@@ -1079,6 +1089,44 @@ def init_collateral_schema(conn: sqlite3.Connection) -> None:
     # caller's lock-wait contract so collateral initialization does not turn a
     # live writer into an immediate "database is locked" failure surface.
     _apply_busy_timeout(conn, busy_ms)
+
+
+def _assert_initialized_collateral_schema(conn: sqlite3.Connection) -> None:
+    required = {
+        "collateral_ledger_snapshots",
+        "collateral_reservations",
+        "collateral_unsettled_proceeds",
+    }
+    present = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?,?,?)",
+            tuple(sorted(required)),
+        )
+    }
+    if present != required:
+        raise RuntimeError(
+            "COLLATERAL_LEDGER_SCHEMA_NOT_INITIALIZED:missing="
+            + ",".join(sorted(required - present))
+        )
+    reservation_columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(collateral_reservations)")
+    }
+    if "converted_amount" not in reservation_columns:
+        raise RuntimeError(
+            "COLLATERAL_LEDGER_SCHEMA_NOT_INITIALIZED:missing="
+            "collateral_reservations.converted_amount"
+        )
+
+
+def _assert_initialized_collateral_schema_path(db_path: Path) -> None:
+    uri = f"{db_path.resolve(strict=False).as_uri()}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=0.25)
+    try:
+        _assert_initialized_collateral_schema(conn)
+    finally:
+        conn.close()
 
 
 def configure_global_ledger(ledger: CollateralLedger | None) -> None:

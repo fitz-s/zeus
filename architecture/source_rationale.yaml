@@ -2611,7 +2611,7 @@ files:
   src/state/collateral_ledger.py:
     zone: K2_runtime
     authority_role: collateral_runtime_truth
-    why: R3 Z4 pUSD/CTF collateral snapshot and reservation ledger; separates buy collateral from sell inventory, blocks double commitment, and exposes snapshot-level assertions shared by claim-time preflight and command-time CAS. `buy_preflight_in_transaction` reuses the initialized caller transaction without schema DDL or implicit commit, preserving atomic pre-SDK rollback.
+    why: R3 Z4 pUSD/CTF collateral snapshot and reservation ledger; separates buy collateral from sell inventory, blocks double commitment, and exposes snapshot-level assertions shared by claim-time preflight and command-time CAS. `buy_preflight_in_transaction` reuses the initialized caller transaction without schema DDL or implicit commit, preserving atomic pre-SDK rollback. Recurring daemons may require the pre-migrated schema through a read-only construction check so hot snapshot cycles never acquire the canonical writer merely to repeat idempotent DDL; missing tables or the converted-amount migration still fail closed before network work.
     downstream:
     - src/execution/executor.py
     - src/execution/harvester.py
@@ -3267,7 +3267,7 @@ files:
   src/execution/post_trade_capital.py:
     zone: K2_runtime
     authority_role: post_trade_capital_lifecycle_lane
-    why: P4 post-trade capital lane; owns chain-sync READ, settlement harvester, redeem/wrap state-machine pollers, and preserves no sell-order submission in this process. Its cold-process pUSD heartbeat prefers one authoritative chain batch for balance plus both allowances, then uses the existing bounded CLOB fallback without weakening DEGRADED fail-closed semantics.
+    why: P4 post-trade capital lane; owns chain-sync READ, settlement harvester, redeem/wrap state-machine pollers, and preserves no sell-order submission in this process. Its cold-process pUSD heartbeat prefers one authoritative chain batch for balance plus both allowances, then uses the existing bounded CLOB fallback without weakening DEGRADED fail-closed semantics. Each recurring refresh validates the already-migrated collateral schema read-only rather than contending for the global SQLite writer with repeated DDL, then persists only the new current snapshot/head facts.
     downstream:
     - src/ingest/post_trade_capital_daemon.py
   src/ingest/post_trade_capital_daemon.py:

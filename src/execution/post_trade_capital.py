@@ -244,7 +244,13 @@ def collateral_snapshot_refresh_cycle() -> None:
     from src.state.collateral_ledger import CollateralLedger
     from src.state.db import _zeus_trade_db_path
 
-    ledger = CollateralLedger(db_path=_zeus_trade_db_path())
+    # Daemon pre-flight/migrations own schema readiness. Re-running idempotent
+    # DDL on every 30-second refresh still needs the global SQLite writer and
+    # can starve the very snapshot append this job exists to publish.
+    ledger = CollateralLedger(
+        db_path=_zeus_trade_db_path(),
+        initialize_schema=False,
+    )
     deadline_seconds = _post_trade_collateral_deadline_seconds()
 
     def _read():

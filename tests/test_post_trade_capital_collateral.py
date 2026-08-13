@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# Lifecycle: created=2026-07-28; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Lifecycle: created=2026-07-28; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: Protect deadline-bounded, single-batch authoritative collateral refresh.
 # Reuse: Run when collateral chain reads, timeout isolation, or wallet-head writes change.
 
@@ -19,6 +19,9 @@ def test_post_trade_collateral_refresh_publishes_pusd_without_ctf_enumeration(
     from src.execution import post_trade_capital
 
     db_path = tmp_path / "trades.db"
+    from src.state.collateral_ledger import CollateralLedger
+
+    CollateralLedger(db_path=db_path).close()
     calls = {"pusd": 0, "full": 0}
 
     class _Adapter:
@@ -93,6 +96,9 @@ def test_post_trade_collateral_timeout_does_not_exit_or_publish_fake_snapshot(
     from src.runtime import timeout_guard as timeout_guard_module
 
     db_path = tmp_path / "trades.db"
+    from src.state.collateral_ledger import CollateralLedger
+
+    CollateralLedger(db_path=db_path).close()
     exit_calls = []
 
     def _timeout(*_args, **_kwargs):
@@ -123,6 +129,9 @@ def test_post_trade_collateral_refresh_dual_writes_wallet_balance_head(
     from src.execution import post_trade_capital
 
     db_path = tmp_path / "trades.db"
+    from src.state.collateral_ledger import CollateralLedger
+
+    CollateralLedger(db_path=db_path).close()
 
     class _Adapter:
         funder_address = "0xFUNDER"
@@ -187,6 +196,9 @@ def test_post_trade_collateral_refresh_prefers_one_chain_batch(
     from src.execution import post_trade_capital
 
     db_path = tmp_path / "trades.db"
+    from src.state.collateral_ledger import CollateralLedger
+
+    CollateralLedger(db_path=db_path).close()
     calls = {"chain": 0, "clob": 0}
 
     class _Adapter:
@@ -256,6 +268,9 @@ def test_post_trade_collateral_timeout_worker_cannot_persist_after_deadline(
     from src.execution import post_trade_capital
 
     db_path = tmp_path / "trades.db"
+    from src.state.collateral_ledger import CollateralLedger
+
+    CollateralLedger(db_path=db_path).close()
     release = threading.Event()
 
     class _Adapter:
@@ -318,6 +333,9 @@ def test_post_trade_collateral_refresh_second_cycle_overwrites_head_in_place(
     from src.execution import post_trade_capital
 
     db_path = tmp_path / "trades.db"
+    from src.state.collateral_ledger import CollateralLedger
+
+    CollateralLedger(db_path=db_path).close()
     balances = {"value": 5_000_000}
 
     class _Adapter:
@@ -384,6 +402,9 @@ def test_post_trade_collateral_refresh_head_upsert_failure_does_not_break_cycle(
     from src.execution import post_trade_capital
 
     db_path = tmp_path / "trades.db"
+    from src.state.collateral_ledger import CollateralLedger
+
+    CollateralLedger(db_path=db_path).close()
 
     class _Adapter:
         funder_address = "0xFUNDER"

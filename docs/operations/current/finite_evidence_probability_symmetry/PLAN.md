@@ -4459,3 +4459,39 @@ Allowed files for this capital-proof lane are
 `src/control/live_health.py`, `tests/test_live_safety_invariants.py`,
 `tests/engine/test_event_reactor_adapter_family_scoped_entry_block.py`, and
 this plan.
+
+### Current collateral refresh must not consume its own writer budget
+
+After the proof-only global cut was allowed to run under the statistical-entry
+pause, live reconstruction reached the next genuine current-truth gate:
+`CURRENT_WEALTH_COLLATERAL_EXPIRED`. The dedicated 30-second capital sidecar
+was alive, but every refresh constructed a path-backed `CollateralLedger` that
+re-ran schema DDL before the chain read. Under canonical trade-DB contention,
+that incidental `collateral_schema_init` writer lease timed out, so no fresh
+snapshot could be published and the global comparison never received current
+wealth.
+
+Recurring refresh construction now validates the already-migrated collateral
+schema through a read-only SQLite connection and performs no DDL. Process
+bootstrap and migrations retain the existing schema-initialization path. A
+missing required table or `collateral_reservations.converted_amount` remains a
+hard failure before external reads; no stale snapshot or fallback wealth is
+substituted.
+
+SCOPE is the current collateral-snapshot refresh cycle. DRAIN is the next
+sidecar cycle reading current chain/venue collateral and persisting its bounded
+snapshot/head DML under the ordinary writer lease. RESET is a new successfully
+committed snapshot with its own capture time; process liveness, an old balance,
+or schema validation alone cannot reset freshness debt. The independent
+statistical-BUY proof gate remains closed.
+
+The additional allowed files are `src/state/collateral_ledger.py`,
+`src/execution/post_trade_capital.py`,
+`tests/test_collateral_ledger_global_path_backed.py`,
+`tests/test_post_trade_capital_collateral.py`,
+`tests/test_p4_post_trade_capital_lift.py`,
+`architecture/source_rationale.yaml`, `architecture/test_topology.yaml`, and
+this plan. Acceptance requires construction-without-DDL and missing-schema
+antibodies, the focused collateral suites, live sidecar restart on the exact
+landed SHA, a newly committed current collateral snapshot, and a subsequent
+global proof receipt or the next exact fail-closed reason.

@@ -1,11 +1,11 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-07-26
+# Last reused or audited: 2026-08-12
 # Reuse: Run when post-trade-capital process recovery, poller ownership, or launchd liveness changes.
 # Authority basis: docs/reference/design_system_decomposition_plan.md
 #   §4.3 (Post-Trade Capital Lifecycle), §6 (P4 row + co-location decision),
 #   §7 (I3 P4->riskguard/P1 no-back-coupling + commit-before-HTTP; I4 ingest->P4),
 #   §8 Step 2 (split chain-sync READ from exit-SUBMIT), §9 (regression-unconstructable).
-# Lifecycle: created=2026-06-08; last_reviewed=2026-07-26; last_reused=2026-07-26
+# Lifecycle: created=2026-06-08; last_reviewed=2026-08-12; last_reused=2026-08-12
 # Purpose: RELATIONSHIP TESTS for process-topology refactor STEP P4 — lift the
 #   post-trade capital lifecycle (settlement P&L resolve -> redeem -> wrap +
 #   chain-sync READ phase) OUT of the order daemon into its own process.
@@ -853,6 +853,9 @@ def test_collateral_degraded_snapshot_is_scheduler_failure(monkeypatch, tmp_path
 
     monkeypatch.setattr("src.state.db._zeus_trade_db_path", lambda: tmp_path / "trades.db")
     monkeypatch.setattr("src.data.polymarket_client.PolymarketClient", _Client)
+    from src.state.collateral_ledger import CollateralLedger
+
+    CollateralLedger(db_path=tmp_path / "trades.db").close()
 
     with pytest.raises(
         post_trade_capital.CollateralSnapshotDegraded,

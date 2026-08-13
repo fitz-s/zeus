@@ -1,8 +1,9 @@
 # Created: 2026-05-13
-# Last reused/audited: 2026-05-15
+# Last reused/audited: 2026-08-12
 # Authority basis: docs/operations/task_2026-04-26_ultimate_plan/r3/slice_cards/Z4.yaml
 #                  + 2026-05-13 collateral_ledger singleton lifecycle remediation
 #                  + 2026-06-17 path-backed short-connection live repair
+#                  + 2026-08-12 recurring refresh DDL excision
 """Relationship test for CollateralLedger global singleton DB-path lifecycle.
 
 The R3 Z4 contract is that `configure_global_ledger(...)` installs a
@@ -71,6 +72,42 @@ def test_global_ledger_snapshot_survives_caller_conn_close(tmp_path: Path) -> No
             assert snap.authority_tier in {"CHAIN", "VENUE", "DEGRADED"}
     finally:
         configure_global_ledger(None)
+
+
+def test_preinitialized_path_mode_is_read_only_at_construction(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from src.state import collateral_ledger as ledger_module
+
+    db_path = tmp_path / "trades.db"
+    seed = sqlite3.connect(db_path)
+    try:
+        init_collateral_schema(seed)
+        seed.commit()
+    finally:
+        seed.close()
+
+    monkeypatch.setattr(
+        ledger_module,
+        "init_collateral_schema",
+        lambda _conn: (_ for _ in ()).throw(
+            AssertionError("preinitialized mode must not run schema DDL")
+        ),
+    )
+
+    ledger = CollateralLedger(db_path=db_path, initialize_schema=False)
+    assert ledger.snapshot().authority_tier == "DEGRADED"
+
+
+def test_preinitialized_path_mode_fails_closed_when_schema_is_missing(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "trades.db"
+    sqlite3.connect(db_path).close()
+
+    with pytest.raises(RuntimeError, match="SCHEMA_NOT_INITIALIZED"):
+        CollateralLedger(db_path=db_path, initialize_schema=False)
 
 
 def test_global_ledger_snapshot_survives_after_transient_caller_conn_pattern(
