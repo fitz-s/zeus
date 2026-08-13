@@ -200,6 +200,22 @@ def test_current_receipt_without_settled_capital_proof_fails():
     assert "EXACT_REVISION_LIVE_CAPITAL_WEIGHTED_RETURN_NOT_POSITIVE" in failures
 
 
+def test_counterfactual_admission_does_not_require_impossible_prior_live_fills():
+    verdict, failures = evaluator._build_counterfactual_admission_verdict(
+        receipt={"ready": True},
+        shadows={
+            "combined": {
+                "global_selection_revision_bound": True,
+                "independent_family_day_count": 30,
+                "delta_log_wealth_lcb95": 0.001,
+            }
+        },
+    )
+
+    assert verdict == "PASS"
+    assert failures == []
+
+
 def test_latest_delta_receipt_is_current_selection_evidence():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row

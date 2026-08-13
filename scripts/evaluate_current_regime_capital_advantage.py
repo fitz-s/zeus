@@ -1364,11 +1364,10 @@ def _held_to_binary_settlement_quality(
     }
 
 
-def _build_verdict(
+def _build_counterfactual_admission_verdict(
     *,
     receipt: dict[str, object],
     shadows: dict[str, dict[str, object]],
-    live_curves: dict[str, dict[str, object]],
 ) -> tuple[str, list[str]]:
     failures: list[str] = []
     if receipt.get("ready") is not True:
@@ -1390,6 +1389,19 @@ def _build_verdict(
         for value in lcbs
     ):
         failures.append("AFTER_COST_DELTA_LOG_WEALTH_LCB_NOT_POSITIVE")
+    return ("PASS" if not failures else "FAIL", failures)
+
+
+def _build_verdict(
+    *,
+    receipt: dict[str, object],
+    shadows: dict[str, dict[str, object]],
+    live_curves: dict[str, dict[str, object]],
+) -> tuple[str, list[str]]:
+    _, failures = _build_counterfactual_admission_verdict(
+        receipt=receipt,
+        shadows=shadows,
+    )
     exact_live = [
         row for row in live_curves.values()
         if row.get("selection_revision_bound") is True
@@ -1491,14 +1503,24 @@ def evaluate(
         shadows=shadows,
         live_curves=live_curves,
     )
+    admission_verdict, admission_failures = (
+        _build_counterfactual_admission_verdict(
+            receipt=receipt,
+            shadows=shadows,
+        )
+    )
     return {
         "schema_version": 1,
         "artifact_role": "OBSERVATIONAL_EVIDENCE_NOT_ORDER_AUTHORITY",
         "evaluated_at": as_of.isoformat(),
         "verdict": verdict,
-        "admission_eligible": verdict == "PASS",
+        "admission_eligible": admission_verdict == "PASS",
+        "admission_verdict": admission_verdict,
+        "admission_failures": admission_failures,
         "failures": failures,
         "contract": {
+            "admission_requires_live_realized_positions": False,
+            "goal_completion_requires_live_realized_positions": True,
             "minimum_independent_family_days": MIN_INDEPENDENT_FAMILY_DAYS,
             "minimum_exact_live_realized_positions": (
                 MIN_EXACT_LIVE_REALIZED_POSITIONS
@@ -1559,6 +1581,10 @@ def main() -> int:
             "evaluated_at": as_of.isoformat(),
             "verdict": "FAIL",
             "admission_eligible": False,
+            "admission_verdict": "FAIL",
+            "admission_failures": [
+                f"CAPITAL_TRUTH_UNAVAILABLE:{type(exc).__name__}:{exc}"
+            ],
             "failures": [f"CAPITAL_TRUTH_UNAVAILABLE:{type(exc).__name__}:{exc}"],
         }
     _atomic_write(args.artifact, artifact)
