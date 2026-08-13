@@ -608,18 +608,17 @@ def prove_deploy_live_restart_guard(
         loaded_sha = _read_loaded_sha()
         runtime_green = loaded_sha == witness.expected_sha
 
-        from src.ops.monitor_cadence import collect_monitor_cadence_evidence
+        from src.ops.monitor_cadence import (
+            collect_monitor_restart_proof,
+        )
 
         trade_conn = get_trade_connection_read_only()
         try:
-            monitor = collect_monitor_cadence_evidence(
+            monitor = collect_monitor_restart_proof(
                 trade_conn,
                 now=now_utc,
-                min_occurred_at=issued_dt,
+                completed_not_before=issued_dt,
                 max_age_seconds=_DEPLOY_LIVE_RESTART_GUARD_MAX_MONITOR_AGE_SECONDS,
-                strict_future=True,
-                monitor_refreshed_only=True,
-                require_fresh_inputs=True,
                 sample_limit=5,
             )
         finally:
@@ -634,10 +633,7 @@ def prove_deploy_live_restart_guard(
             )
         finally:
             world_conn.close()
-        monitor_green = (
-            int(monitor.get("future_monitor_event_count") or 0) == 0
-            and int(monitor.get("stale_or_missing_position_count") or 0) == 0
-        )
+        monitor_green = bool(monitor.get("green"))
         queue_green = bool(queue.get("green"))
         green = (
             runtime_green
@@ -648,7 +644,10 @@ def prove_deploy_live_restart_guard(
             "green": green,
             "witness": witness.as_dict(),
             "runtime": {"loaded_sha": loaded_sha, "expected_sha": witness.expected_sha, "green": runtime_green},
-            "monitor": {**monitor, "green": monitor_green},
+            "monitor": {
+                **monitor,
+                "green": monitor_green,
+            },
             "queue": {**queue, "green": queue_green},
         }
     except Exception as exc:
@@ -679,6 +678,18 @@ def reset_deploy_live_restart_guard(
         if current != witness:
             conn.rollback()
             return {"status": "noop", "reason": "restart_guard_invocation_mismatch"}
+        fresh_proof = prove_deploy_live_restart_guard(witness)
+        if (
+            fresh_proof.get("green") is not True
+            or fresh_proof.get("witness") != witness.as_dict()
+            or fresh_proof.get("monitor", {}).get("monitor_scope_identity")
+            != proof.get("monitor", {}).get("monitor_scope_identity")
+        ):
+            conn.rollback()
+            return {
+                "status": "refused",
+                "reason": "restart_guard_proof_superseded",
+            }
         result = expire_control_override(
             conn,
             override_id=witness.override_id,

@@ -3153,35 +3153,16 @@ def test_deploy_live_quote_only_monitor_staleness_requires_complete_held_auction
     assert ok is False
     assert "complete_post_start_held_auction_receipt=missing" in detail
 
-    receipt_at = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        """
-        INSERT INTO decision_log (
-            id, mode, started_at, completed_at, artifact_json
-        ) VALUES (1, 'global_single_order_auction', ?, ?, ?)
-        """,
-        (
-            receipt_at,
-            receipt_at,
-            json.dumps(
-                {
-                    "completed_at": receipt_at,
-                    "summary": {
-                        "candidate_coverage_complete": True,
-                        "scope_family_coverage_complete": True,
-                        "candidate_evaluation_count": 1,
-                        "full_scope_family_count": 1,
-                        "held_position_coverage_complete": True,
-                        "held_position_expected_count": 1,
-                        "held_position_evaluated_count": 0,
-                        "held_position_excluded_count": 1,
-                    },
-                }
-            ),
+    conn.close()
+    monkeypatch.setattr(
+        dl,
+        "_latest_complete_global_auction_receipt",
+        lambda *_args, **kwargs: (
+            (1, 1, 1)
+            if kwargs.get("require_held_position_ids") == ("pos-1",)
+            else None
         ),
     )
-    conn.commit()
-    conn.close()
 
     ok, detail = dl._wait_for_post_start_monitor_cadence(
         launched_after=launched,
@@ -3191,6 +3172,54 @@ def test_deploy_live_quote_only_monitor_staleness_requires_complete_held_auction
     assert ok is True
     assert "quote_only_positions=1" in detail
     assert "held_auction_receipt=1" in detail
+
+
+def test_exact_held_restart_proof_rejects_legacy_global_auction_receipt(tmp_path):
+    from src.ops.monitor_cadence import latest_complete_global_auction_receipt
+
+    trade_db = tmp_path / "zeus_trades.db"
+    conn = sqlite3.connect(trade_db)
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE decision_log (
+            id INTEGER PRIMARY KEY,
+            mode TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            artifact_json TEXT
+        )
+        """
+    )
+    now = datetime.now(timezone.utc)
+    conn.execute(
+        "INSERT INTO decision_log VALUES (1, 'global_single_order_auction', ?, NULL, ?)",
+        (
+            now.isoformat(),
+            json.dumps(
+                {
+                    "summary": {
+                        "schema_version": 20,
+                        "candidate_coverage_complete": True,
+                        "scope_family_coverage_complete": True,
+                        "candidate_evaluation_count": 1,
+                        "full_scope_family_count": 1,
+                        "held_position_coverage_complete": True,
+                        "held_position_expected_count": 1,
+                        "held_position_evaluated_count": 0,
+                        "held_position_excluded_count": 1,
+                    }
+                }
+            ),
+        ),
+    )
+    assert latest_complete_global_auction_receipt(
+        conn,
+        completed_not_before=now - timedelta(seconds=1),
+        require_held_coverage_count=1,
+        require_held_position_ids=("pos-1",),
+    ) is None
+    conn.close()
 
 
 def test_deploy_live_review_management_does_not_replace_monitor_refresh(

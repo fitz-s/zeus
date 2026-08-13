@@ -268,6 +268,9 @@ def collect_monitor_cadence_evidence(
     return {
         "open_position_count": open_count,
         "monitored_position_count": open_count,
+        "monitored_position_ids": sorted(
+            str(row["position_id"]) for row in monitored_rows
+        ),
         "fresh_position_count": fresh_count,
         "stale_or_missing_position_count": len(stale_or_missing),
         "stale_or_missing_positions": stale_or_missing[:sample_limit],
@@ -326,6 +329,183 @@ def monitor_cadence_blocking_evidence(
         ),
         "quote_only_stale_positions": list(evidence["quote_only_stale_positions"]),
     }
+
+
+def latest_complete_global_auction_receipt(
+    conn: sqlite3.Connection,
+    *,
+    completed_not_before: datetime,
+    require_held_coverage_count: int = 0,
+    require_held_position_ids: tuple[str, ...] = (),
+) -> tuple[int, int, int] | None:
+    """Return a complete current-cut auction proving held redecision coverage."""
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, mode, started_at, completed_at, artifact_json
+              FROM decision_log
+             WHERE mode IN (
+                'global_single_order_auction',
+                'global_single_order_auction_delta',
+                'global_single_order_auction_duplicate'
+             )
+             ORDER BY id DESC
+             LIMIT 8
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    for row in rows:
+        try:
+            from src.contracts.global_auction_receipt import (
+                GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION,
+                assert_global_auction_summary_integrity,
+            )
+
+            artifact = json.loads(row["artifact_json"] or "{}")
+            summary = artifact.get("summary") or {}
+            required_position_ids = frozenset(require_held_position_ids)
+            if required_position_ids:
+                if summary.get("schema_version") != GLOBAL_AUCTION_RECEIPT_SCHEMA_VERSION:
+                    continue
+                assert_global_auction_summary_integrity(summary)
+                row_completed_at = _parse_iso_utc(row["completed_at"])
+                artifact_completed_at = _parse_iso_utc(artifact.get("completed_at"))
+                decision_at = _parse_iso_utc(summary.get("decision_at_utc"))
+                if (
+                    row_completed_at is None
+                    or artifact_completed_at is None
+                    or decision_at is None
+                    or row_completed_at != artifact_completed_at
+                    or row_completed_at != decision_at
+                ):
+                    continue
+                completed_at = row_completed_at
+            else:
+                completed_at = _parse_iso_utc(
+                    artifact.get("completed_at")
+                    or row["completed_at"]
+                    or row["started_at"]
+                )
+            candidate_count = int(summary.get("candidate_evaluation_count") or 0)
+            scope_count = int(summary.get("full_scope_family_count") or 0)
+            held_expected_count = int(summary.get("held_position_expected_count") or 0)
+            held_accounted_count = int(
+                summary.get("held_position_evaluated_count") or 0
+            ) + int(summary.get("held_position_excluded_count") or 0)
+            if required_position_ids:
+                from src.control.live_health import (
+                    _current_global_auction_holding_payload,
+                )
+
+                holding_payload = _current_global_auction_holding_payload(
+                    conn,
+                    summary,
+                )
+                receipt_position_ids = tuple(
+                    str(item.get("position_id") or "").strip()
+                    for item in holding_payload
+                )
+                if (
+                    any(not position_id for position_id in receipt_position_ids)
+                    or len(set(receipt_position_ids)) != len(receipt_position_ids)
+                    or not required_position_ids.issubset(receipt_position_ids)
+                    or len(receipt_position_ids) != held_expected_count
+                    or sum(
+                        item.get("status") == "EVALUATED"
+                        for item in holding_payload
+                    )
+                    != int(summary.get("held_position_evaluated_count") or 0)
+                    or sum(
+                        item.get("status") == "EXCLUDED"
+                        for item in holding_payload
+                    )
+                    != int(summary.get("held_position_excluded_count") or 0)
+                ):
+                    continue
+        except Exception:  # noqa: BLE001 - malformed receipts fail closed.
+            continue
+        if (
+            completed_at is not None
+            and completed_at >= completed_not_before
+            and summary.get("candidate_coverage_complete") is True
+            and summary.get("scope_family_coverage_complete") is True
+            and candidate_count > 0
+            and scope_count > 0
+            and (
+                require_held_coverage_count <= 0
+                or (
+                    summary.get("held_position_coverage_complete") is True
+                    and held_expected_count >= require_held_coverage_count
+                    and held_accounted_count >= held_expected_count
+                )
+            )
+        ):
+            return int(row["id"]), candidate_count, scope_count
+    return None
+
+
+def collect_monitor_restart_proof(
+    conn: sqlite3.Connection,
+    *,
+    now: datetime,
+    completed_not_before: datetime,
+    max_age_seconds: float | None = None,
+    sample_limit: int = 5,
+) -> dict[str, Any]:
+    """Prove current held cadence and exact auction coverage in one DB snapshot."""
+
+    owns_transaction = not bool(getattr(conn, "in_transaction", False))
+    if owns_transaction:
+        conn.execute("BEGIN")
+    try:
+        monitor = collect_monitor_cadence_evidence(
+            conn,
+            now=now,
+            min_occurred_at=completed_not_before,
+            max_age_seconds=max_age_seconds,
+            strict_future=True,
+            monitor_refreshed_only=True,
+            require_fresh_inputs=True,
+            sample_limit=sample_limit,
+        )
+        groups = monitor_cadence_blocking_evidence(monitor)
+        open_count = int(monitor.get("open_position_count") or 0)
+        held_ids = tuple(
+            str(value or "").strip()
+            for value in monitor.get("monitored_position_ids", ())
+        )
+        identity_complete = (
+            len(held_ids) == open_count
+            and all(held_ids)
+            and len(set(held_ids)) == len(held_ids)
+        )
+        quote_only_count = int(groups["quote_only_stale_position_count"])
+        receipt = None
+        if quote_only_count > 0 and identity_complete:
+            receipt = latest_complete_global_auction_receipt(
+                conn,
+                completed_not_before=completed_not_before,
+                require_held_coverage_count=open_count,
+                require_held_position_ids=held_ids,
+            )
+        green = (
+            identity_complete
+            and int(monitor.get("future_monitor_event_count") or 0) == 0
+            and int(groups["blocking_stale_position_count"]) == 0
+            and (quote_only_count == 0 or receipt is not None)
+        )
+        return {
+            **monitor,
+            **groups,
+            "complete_held_auction_receipt": receipt,
+            "monitor_scope_identity": held_ids,
+            "green": green,
+        }
+    finally:
+        if owns_transaction and bool(getattr(conn, "in_transaction", False)):
+            conn.rollback()
 
 
 def count_current_monitor_obligations(

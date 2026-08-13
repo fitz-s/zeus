@@ -713,6 +713,8 @@ def test_precedence_skip_logs_warning(caplog):
 
 def _mock_restart_guard_proof_inputs(monkeypatch, *, loaded_sha: str):
     class ReadOnlyConnection:
+        in_transaction = True
+
         def close(self):
             return None
 
@@ -727,6 +729,7 @@ def _mock_restart_guard_proof_inputs(monkeypatch, *, loaded_sha: str):
         "collect_monitor_cadence_evidence",
         lambda _conn, **_kwargs: {
             "open_position_count": 1,
+            "monitored_position_ids": ["healthy-pos"],
             "fresh_position_count": 1,
             "stale_or_missing_position_count": 0,
             "future_monitor_event_count": 0,
@@ -859,6 +862,81 @@ def test_restart_guard_proof_refuses_sha_monitor_or_queue_debt(monkeypatch):
             "green": False,
         },
     )
+    assert cp.prove_deploy_live_restart_guard(witness)["green"] is False
+
+
+def test_restart_guard_ignores_quote_only_debt_but_blocks_decision_debt(monkeypatch):
+    expected_sha = "f" * 40
+    witness = cp.arm_deploy_live_restart_guard(
+        expected_sha,
+        issued_at="2026-08-08T00:00:00+00:00",
+    )["witness"]
+    _mock_restart_guard_proof_inputs(monkeypatch, loaded_sha=expected_sha)
+    monkeypatch.setattr(
+        cp,
+        "_restart_guard_queue_evidence",
+        lambda *_args, **_kwargs: {
+            "stale_processing": False,
+            "claimable_pending": True,
+            "post_issued_progress": True,
+            "green": True,
+        },
+    )
+    import src.ops.monitor_cadence as monitor_cadence
+
+    evidence = {
+        "open_position_count": 1,
+        "monitored_position_ids": ["quote-only"],
+        "stale_or_missing_position_count": 1,
+        "stale_or_missing_positions": [{"position_id": "quote-only"}],
+        "quote_only_stale_position_count": 1,
+        "quote_only_stale_positions": [{"position_id": "quote-only"}],
+        "blocking_stale_position_count": 0,
+        "blocking_stale_positions": [],
+        "future_monitor_event_count": 0,
+    }
+    monkeypatch.setattr(
+        monitor_cadence,
+        "collect_monitor_cadence_evidence",
+        lambda _conn, **_kwargs: evidence,
+    )
+    receipt_kwargs = {}
+
+    def complete_receipt(_conn, **kwargs):
+        receipt_kwargs.update(kwargs)
+        return (7, 42, 4)
+
+    monkeypatch.setattr(
+        monitor_cadence,
+        "latest_complete_global_auction_receipt",
+        complete_receipt,
+    )
+    proof = cp.prove_deploy_live_restart_guard(witness)
+    assert proof["green"] is True
+    assert proof["monitor"]["quote_only_stale_position_count"] == 1
+    assert proof["monitor"]["blocking_stale_position_count"] == 0
+    assert proof["monitor"]["complete_held_auction_receipt"] == (7, 42, 4)
+    assert receipt_kwargs["require_held_position_ids"] == ("quote-only",)
+
+    evidence.pop("monitored_position_ids")
+    assert cp.prove_deploy_live_restart_guard(witness)["green"] is False
+    evidence["monitored_position_ids"] = ["quote-only"]
+
+    monkeypatch.setattr(
+        monitor_cadence,
+        "latest_complete_global_auction_receipt",
+        lambda _conn, **_kwargs: None,
+    )
+    assert cp.prove_deploy_live_restart_guard(witness)["green"] is False
+
+    monkeypatch.setattr(
+        monitor_cadence,
+        "latest_complete_global_auction_receipt",
+        lambda _conn, **_kwargs: (8, 42, 4),
+    )
+
+    evidence["blocking_stale_position_count"] = 1
+    evidence["blocking_stale_positions"] = [{"position_id": "decision-stale"}]
     assert cp.prove_deploy_live_restart_guard(witness)["green"] is False
 
 

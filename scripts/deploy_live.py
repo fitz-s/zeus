@@ -609,16 +609,28 @@ def _wait_for_post_start_monitor_cadence(
                     stale_or_missing = list(
                         cadence_groups["blocking_stale_positions"]
                     )
+                    held_position_ids = tuple(
+                        str(value or "").strip()
+                        for value in cadence.get("monitored_position_ids", ())
+                    )
+                    identity_complete = (
+                        len(held_position_ids) == open_count
+                        and all(held_position_ids)
+                        and len(set(held_position_ids)) == len(held_position_ids)
+                    )
                     auction_receipt = (
                         _latest_complete_global_auction_receipt(
                             trade_db,
                             launched_floor=launched_floor,
                             require_held_coverage_count=open_count,
+                            require_held_position_ids=held_position_ids,
                         )
-                        if blocking_count == 0 and quote_only_count > 0
+                        if identity_complete
+                        and blocking_count == 0
+                        and quote_only_count > 0
                         else None
                     )
-                    if blocking_count == 0 and (
+                    if identity_complete and blocking_count == 0 and (
                         quote_only_count == 0 or auction_receipt is not None
                     ):
                         auction_detail = ""
@@ -1110,61 +1122,28 @@ def _latest_complete_global_auction_receipt(
     *,
     launched_floor: datetime,
     require_held_coverage_count: int = 0,
+    require_held_position_ids: tuple[str, ...] = (),
 ) -> tuple[int, int, int] | None:
     """Return a post-launch complete auction as direct reactor progress proof."""
 
     if not trade_db.exists():
         return None
     try:
+        from src.ops.monitor_cadence import latest_complete_global_auction_receipt
+
         conn = sqlite3.connect(f"file:{trade_db}?mode=ro", uri=True, timeout=2.0)
         conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            SELECT id, started_at, completed_at, artifact_json
-              FROM decision_log
-             WHERE mode = 'global_single_order_auction'
-             ORDER BY id DESC
-             LIMIT 8
-            """
-        ).fetchall()
-        conn.close()
+        try:
+            return latest_complete_global_auction_receipt(
+                conn,
+                completed_not_before=launched_floor,
+                require_held_coverage_count=require_held_coverage_count,
+                require_held_position_ids=require_held_position_ids,
+            )
+        finally:
+            conn.close()
     except Exception:
         return None
-    for row in rows:
-        try:
-            artifact = json.loads(row["artifact_json"] or "{}")
-            summary = artifact.get("summary") or {}
-            completed_at = _parse_iso_utc(
-                artifact.get("completed_at") or row["completed_at"] or row["started_at"]
-            )
-            candidate_count = int(summary.get("candidate_evaluation_count") or 0)
-            scope_count = int(summary.get("full_scope_family_count") or 0)
-            held_expected_count = int(
-                summary.get("held_position_expected_count") or 0
-            )
-            held_accounted_count = int(
-                summary.get("held_position_evaluated_count") or 0
-            ) + int(summary.get("held_position_excluded_count") or 0)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        if (
-            completed_at is not None
-            and completed_at >= launched_floor
-            and summary.get("candidate_coverage_complete") is True
-            and summary.get("scope_family_coverage_complete") is True
-            and candidate_count > 0
-            and scope_count > 0
-            and (
-                require_held_coverage_count <= 0
-                or (
-                    summary.get("held_position_coverage_complete") is True
-                    and held_expected_count >= require_held_coverage_count
-                    and held_accounted_count >= held_expected_count
-                )
-            )
-        ):
-            return int(row["id"]), candidate_count, scope_count
-    return None
 
 
 def _stop_label(label: str) -> tuple[bool, str]:
