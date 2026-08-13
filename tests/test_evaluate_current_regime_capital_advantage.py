@@ -470,7 +470,8 @@ def test_exact_global_exit_is_ungraded_until_settlement_then_compared_with_hold(
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(
-        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,artifact_json TEXT);"
+        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,timestamp TEXT,"
+        "artifact_json TEXT);"
         "CREATE TABLE venue_commands (command_id TEXT,position_id TEXT,"
         "intent_kind TEXT,created_at TEXT,state TEXT,token_id TEXT,envelope_id TEXT);"
         "CREATE TABLE position_events (event_id TEXT,position_id TEXT,"
@@ -514,8 +515,12 @@ def test_exact_global_exit_is_ungraded_until_settlement_then_compared_with_hold(
         summary
     )
     conn.execute(
-        "INSERT INTO decision_log VALUES (1,?,?)",
-        ("global_single_order_auction", json.dumps({"summary": summary})),
+        "INSERT INTO decision_log VALUES (1,?,?,?)",
+        (
+            "global_single_order_auction",
+            "2026-08-13T00:00:00+00:00",
+            json.dumps({"summary": summary}),
+        ),
     )
     receipt = GlobalAuctionReceiptRef(
         decision_log_id=1,
@@ -687,7 +692,8 @@ def test_globally_compared_hold_is_graded_at_verified_binary_settlement():
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript(
-        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,artifact_json TEXT);"
+        "CREATE TABLE decision_log (id INTEGER PRIMARY KEY,mode TEXT,timestamp TEXT,"
+        "artifact_json TEXT);"
         "CREATE TABLE position_current (position_id TEXT,phase TEXT,city TEXT,"
         "target_date TEXT,temperature_metric TEXT,condition_id TEXT,shares REAL,"
         "settled_at TEXT);"
@@ -723,8 +729,12 @@ def test_globally_compared_hold_is_graded_at_verified_binary_settlement():
         summary
     )
     conn.execute(
-        "INSERT INTO decision_log VALUES (1,?,?)",
-        ("global_single_order_auction", json.dumps({"summary": summary})),
+        "INSERT INTO decision_log VALUES (1,?,?,?)",
+        (
+            "global_single_order_auction",
+            "2026-08-13T00:00:00+00:00",
+            json.dumps({"summary": summary}),
+        ),
     )
     conn.execute(
         "INSERT INTO position_current VALUES (?,?,?,?,?,?,?,?)",
@@ -759,7 +769,11 @@ def test_globally_compared_hold_is_graded_at_verified_binary_settlement():
         ),
     )
 
-    evidence = evaluator._held_to_binary_settlement_quality(conn, forecasts)
+    evidence = evaluator._held_to_binary_settlement_quality(
+        conn,
+        forecasts,
+        as_of=datetime(2026, 8, 14, 1, tzinfo=timezone.utc),
+    )
 
     assert evidence["status"] == "graded"
     assert evidence["settlement_graded_hold_count"] == 1

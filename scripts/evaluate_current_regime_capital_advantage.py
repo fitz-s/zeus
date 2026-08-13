@@ -1037,18 +1037,27 @@ def _globally_selected_exit_quality(
 def _held_to_binary_settlement_quality(
     conn: sqlite3.Connection,
     forecasts: sqlite3.Connection,
+    *,
+    as_of: datetime,
 ) -> dict[str, object]:
     """Grade schema-22 globally compared HOLD decisions at binary settlement."""
 
     latest_by_position: dict[str, dict[str, object]] = {}
     rejection_counts: dict[str, int] = {}
+    cutoff = (as_of - timedelta(days=WINDOW_DAYS)).isoformat()
     rows = conn.execute(
         "SELECT id,mode,artifact_json FROM decision_log "
-        "WHERE json_extract(artifact_json,'$.summary.schema_version')=22 "
+        "WHERE timestamp>=? "
+        "AND mode IN (?,?,?) "
+        "AND json_extract(artifact_json,'$.summary.schema_version')=22 "
         "AND json_extract(artifact_json,'$.summary.global_selection_revision')=? "
         "AND json_extract(artifact_json,'$.summary.holding_auction_coverage_zlib_b64') "
         "IS NOT NULL ORDER BY id",
-        (CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,),
+        (
+            cutoff,
+            *GLOBAL_AUCTION_RECEIPT_MODES,
+            CURRENT_GLOBAL_CAPITAL_SELECTION_REVISION,
+        ),
     ).fetchall()
     for decision_log_id, mode, artifact_json in rows:
         try:
@@ -1325,6 +1334,7 @@ def evaluate(
         held_settlement_quality = _held_to_binary_settlement_quality(
             trades,
             forecasts,
+            as_of=as_of,
         )
     finally:
         forecasts.close()
