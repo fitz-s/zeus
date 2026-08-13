@@ -4782,6 +4782,37 @@ new-order submissions or their exact current winner rejection.
 Allowed files for this hot-fix are `src/ops/monitor_cadence.py`,
 `tests/test_ops_scripts_smoke.py`, and this plan.
 
+## 2026-08-13 Day0 digest identity uses the extreme source clock
+
+The exact-clock provenance hardening repaired Shenzhen but exposed a distinct
+OGIMET hourly-bucket identity in the held Tel Aviv 33C NO position. Its
+canonical ledger high is 34C at 10:20Z, its latest source frontier is 17:50Z,
+and the authorized hourly projection explicitly records
+`hour_max_raw_ts=10:20Z`, `latest_raw_ts=10:50Z`, plus the validated bucket
+payload digest. Matching the digest to the frontier clock 17:50Z incorrectly
+made valid current probability unavailable.
+
+Projected facts now retain the writer's metric-specific extreme source clock
+(`hour_max_raw_ts` or `hour_min_raw_ts`, otherwise the existing fact clock).
+Ledger facts retain the canonical best print's source clock separately from
+their latest frontier observation clock. Digest inheritance requires exact
+source, station, unit, value, and extreme source clock equality. Frontier time
+still advances freshness across a plateau; it no longer impersonates the
+physical extreme's provenance identity.
+
+SCOPE is the exact authorized city/date/metric/source extreme used by a current
+Day0 probability. DRAIN is the next monitor/global-decision refresh. RESET
+requires a writer-validated digest on the projection whose extreme source clock
+matches the canonical ledger print; same value at a different clock, a
+different source, or a future/unavailable row cannot reset provenance debt.
+Acceptance requires the OGIMET peak/frontier antibody, the full focused Day0
+suite, live DB replay for Tel Aviv, deployment, fresh probability for
+`b065ae33-f9f`, proof-driven restart-guard reset, and resumed global auction.
+
+Allowed files for this hot-fix are
+`src/data/replacement_forecast_current_target_plan.py`,
+`tests/test_replacement_forecast_current_target_plan.py`, and this plan.
+
 ## 2026-08-13 Selected global BUY uses its mandatory JIT book
 
 After entry resumed, the complete auction selected a Paris LOW NO

@@ -77,6 +77,27 @@ def _persisted_payload_sha256(
     return payload_hash
 
 
+def _persisted_extreme_source_time(
+    provenance_json: object,
+    *,
+    metric: str,
+    fallback: object,
+) -> str:
+    """Return the writer's exact source clock for this projected extreme."""
+
+    if isinstance(provenance_json, str) and provenance_json:
+        try:
+            provenance = json.loads(provenance_json)
+        except (TypeError, ValueError):
+            provenance = None
+        if isinstance(provenance, Mapping):
+            key = "hour_min_raw_ts" if metric == "low" else "hour_max_raw_ts"
+            source_time = provenance.get(key)
+            if _utc_instant(source_time) is not None:
+                return str(source_time)
+    return str(fallback or "")
+
+
 @dataclass(frozen=True)
 class ReplacementForecastCurrentTargetPlanRow:
     city: str
@@ -951,6 +972,11 @@ def _latest_authorized_day0_fact(
                     "observation_available_at": str(
                         row["observation_available_at"] or row["observation_time"]
                     ),
+                    "extreme_source_time": _persisted_extreme_source_time(
+                        row["provenance_json"],
+                        metric=metric,
+                        fallback=row["observation_time"],
+                    ),
                     "raw_payload_sha256": _persisted_payload_sha256(
                         row["raw_response"],
                         row["provenance_json"],
@@ -1329,18 +1355,25 @@ def _latest_authorized_day0_fact(
                 ledger_facts: list[dict[str, object]] = []
                 for channel in sorted({key[0] for key in canonical_prints}):
                     channel_prints = [
-                        value
-                        for (candidate_channel, _source_clock), value in canonical_prints.items()
+                        (source_clock, value)
+                        for (candidate_channel, source_clock), value in canonical_prints.items()
                         if candidate_channel == channel
                     ]
                     if not channel_prints:
                         continue
-                    best = (min if metric == "low" else max)(
-                        channel_prints,
-                        key=lambda item: (item[2], item[0], item[1]),
+                    best_value = (min if metric == "low" else max)(
+                        value[2] for _source_clock, value in channel_prints
+                    )
+                    best_clock, best = max(
+                        (
+                            item
+                            for item in channel_prints
+                            if item[1][2] == best_value
+                        ),
+                        key=lambda item: (item[0], item[1][0], item[1][1]),
                     )
                     frontier = max(
-                        channel_prints,
+                        (value for _source_clock, value in channel_prints),
                         key=lambda item: (item[0], item[1]),
                     )
                     ledger_facts.append(
@@ -1353,6 +1386,7 @@ def _latest_authorized_day0_fact(
                             "station_id": expected_station or "",
                             "unit": expected_unit,
                             "observation_available_at": str(frontier[1]),
+                            "extreme_source_time": str(best_clock),
                             "raw_payload_sha256": _raw_payload_sha256(
                                 str(best[3] or "")
                             ),
@@ -1380,7 +1414,7 @@ def _latest_authorized_day0_fact(
                         ).strip().lower()
                         try:
                             ledger_clock = datetime.fromisoformat(
-                                str(ledger_fact.get("observation_time") or "").replace(
+                                str(ledger_fact.get("extreme_source_time") or "").replace(
                                     "Z", "+00:00"
                                 )
                             ).astimezone(timezone.utc)
@@ -1402,7 +1436,7 @@ def _latest_authorized_day0_fact(
                             and float(fact.get("observed_extreme_native"))
                             == float(ledger_fact["observed_extreme_native"])
                             and str(fact.get("raw_payload_sha256") or "").strip()
-                            and _utc_instant(fact.get("observation_time"))
+                            and _utc_instant(fact.get("extreme_source_time"))
                             == ledger_clock
                         ]
                         if exact_projection:

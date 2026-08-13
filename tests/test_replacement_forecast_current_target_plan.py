@@ -816,6 +816,74 @@ def test_day0_global_fact_leaves_digest_absent_for_legacy_instant_schema() -> No
     conn.close()
 
 
+def test_day0_global_fact_binds_hour_bucket_digest_by_extreme_source_clock() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, source TEXT, station_id TEXT,
+            temp_unit TEXT, imported_at TEXT, local_timestamp TEXT,
+            utc_timestamp TEXT, running_max REAL, running_min REAL,
+            authority TEXT, training_allowed INTEGER, causality_status TEXT,
+            source_role TEXT, raw_response TEXT, provenance_json TEXT
+        );
+        CREATE TABLE observation_prints (
+            city TEXT, station_id TEXT, source_channel TEXT,
+            publish_ts_utc TEXT, value_native REAL, unit TEXT,
+            fetched_at_utc TEXT, raw_report TEXT
+        );
+        """
+    )
+    digest = "e" * 64
+    conn.execute(
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "Tel Aviv", "2026-08-13", "ogimet_metar_llbg", "LLBG", "C",
+            "2026-08-13T10:58:25+00:00", "2026-08-13T13:00:00+03:00",
+            "2026-08-13T10:00:00+00:00", 34.0, 33.0, "VERIFIED", 1,
+            "OK", "historical_hourly", None,
+            json.dumps(
+                {
+                    "hour_max_raw_ts": "2026-08-13T10:20:00+00:00",
+                    "latest_raw_ts": "2026-08-13T10:50:00+00:00",
+                    "payload_hash": f"sha256:{digest}",
+                }
+            ),
+        ),
+    )
+    conn.executemany(
+        "INSERT INTO observation_prints VALUES (?,?,?,?,?,?,?,?)",
+        (
+            (
+                "Tel Aviv", "LLBG", "ogimet_metar_llbg",
+                "2026-08-13T10:20:00+00:00", 34.0, "C",
+                "2026-08-13T10:58:25+00:00", None,
+            ),
+            (
+                "Tel Aviv", "LLBG", "ogimet_metar_llbg",
+                "2026-08-13T17:50:00+00:00", 29.0, "C",
+                "2026-08-13T18:16:47+00:00", None,
+            ),
+        ),
+    )
+
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Tel Aviv",
+        target_date="2026-08-13",
+        temperature_metric="high",
+        decision_time=datetime(2026, 8, 13, 18, 30, tzinfo=timezone.utc),
+        require_settlement_channel=True,
+    )
+
+    assert fact is not None
+    assert fact["observed_extreme_native"] == 34.0
+    assert fact["observation_time"] == "2026-08-13T17:50:00+00:00"
+    assert fact["raw_payload_sha256"] == digest
+    conn.close()
+
+
 @pytest.mark.parametrize(
     (
         "instant_utc",
