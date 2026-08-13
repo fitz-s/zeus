@@ -4,6 +4,28 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-13 Capital proof exposes confidence-cost amplification readiness
+
+Posterior-mean expected growth is the common comparison axis for fixed BUY,
+SELL, HOLD, and CASH proposals.  A positive mean winner does not by itself show
+that increasing risk is robust to the current probability uncertainty.  The
+proof-only winner therefore also freezes the selected-side lower-tail
+probability confidence bound, exact fee-inclusive cost per share, and their
+margin.  A non-positive margin is explicitly `BLOCKED`; a positive margin says
+only that this diagnostic passed and still requires every ordinary admission,
+risk, depth, Kelly, and submit-time truth check.
+
+The confidence bound remains evidence, never a relabeled fixed-action expected
+payoff and never a second selection objective.  SELL winners are capital-
+release actions, so the entry-cost amplification diagnostic is explicitly not
+applicable.  SCOPE is side-effect-free capital-proof telemetry only.  DRAIN is
+the next complete global cut, which recomputes the diagnostic from the exact
+probability witness and selected all-in cost.  RESET is any fresh q/book/wealth
+cut or a different winner; no prior positive margin carries forward.  Acceptance
+requires an antibody where a positive posterior-mean BUY has a negative
+confidence-cost margin, remains the proof winner, and is stamped blocked without
+changing selection or venue-submit counts.
+
 ## 2026-08-13 Capital evidence is independent by target date
 
 The capital evaluator called `(city, target_date, metric)` an independent

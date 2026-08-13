@@ -1327,6 +1327,33 @@ def family_payoff_point_q(
     return yes if side == "YES" else 1.0 - yes
 
 
+def family_payoff_q_lcb(
+    witness: FamilyPayoffWitness,
+    *,
+    bin_id: str,
+    side: Literal["YES", "NO"],
+    payoff_q_lcb_cap: float | None = None,
+) -> float | None:
+    """Project the solver's selected-side lower-tail confidence evidence."""
+
+    samples = family_payoff_q_samples(witness, bin_id=bin_id, side=side)
+    if samples is None:
+        return None
+    q_lcb = _lower_cvar(
+        np.asarray(samples, dtype=np.float64),
+        np.ones(samples.size, dtype=np.float64),
+        float(witness.band_alpha),
+    )
+    if payoff_q_lcb_cap is not None:
+        cap = float(payoff_q_lcb_cap)
+        if not math.isfinite(cap) or not 0.0 <= cap <= 1.0:
+            raise ValueError("payoff q lower-bound cap must be finite in [0, 1]")
+        q_lcb = min(q_lcb, cap)
+    if not math.isfinite(q_lcb) or not 0.0 <= q_lcb <= 1.0:
+        raise ValueError("selected-side q lower bound must be finite in [0, 1]")
+    return q_lcb
+
+
 def rebind_family_payoff_witness(
     witness: FamilyPayoffWitness,
     *,

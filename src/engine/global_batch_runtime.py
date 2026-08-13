@@ -75,6 +75,7 @@ from src.solve.solver import (
     current_maker_fill_witness_identity,
     executable_curve_identity,
     family_payoff_point_q,
+    family_payoff_q_lcb,
     family_payoff_q_samples,
     maker_fill_candidate_binding_identity,
     passive_buy_proposal_curve,
@@ -5637,6 +5638,9 @@ def _capital_proof_counterfactual_receipt(
     wealth_witness: object,
     family_context_by_key: Mapping[str, Mapping[str, str]],
     probability_semantics_by_family: Mapping[str, str],
+    probability_witnesses: Mapping[str, object],
+    payoff_q_lcb_by_candidate: Mapping[tuple[str, str, str, str], float]
+    | None,
     venue_submit_count_before: int,
     venue_submit_count_after: int,
 ) -> dict[str, object]:
@@ -5674,9 +5678,77 @@ def _capital_proof_counterfactual_receipt(
             raise ValueError(
                 "GLOBAL_CAPITAL_PROOF_COUNTERFACTUAL_WINNER_EVALUATION_MISSING"
             )
+        action = str(getattr(candidate, "action", "BUY") or "BUY").upper()
+        amplification_diagnostic: dict[str, object] = {
+            "role": "DIAGNOSTIC_ONLY_NOT_SELECTION_OR_SUBMIT_AUTHORITY",
+            "probability_functional": "SELECTED_SIDE_LOWER_TAIL_CVAR",
+        }
+        if action == "SELL":
+            amplification_diagnostic.update(
+                {
+                    "readiness": "NOT_APPLICABLE_CAPITAL_RELEASE",
+                    "confidence_cost_margin_positive": None,
+                }
+            )
+        else:
+            side = str(getattr(candidate, "side", "") or "").upper()
+            bin_id = str(getattr(candidate, "bin_id", "") or "")
+            token_id = str(getattr(candidate, "token_id", "") or "")
+            witness = probability_witnesses.get(family_key)
+            cap = (payoff_q_lcb_by_candidate or {}).get(
+                (family_key, bin_id, side, token_id)
+            )
+            q_mean = (
+                family_payoff_point_q(witness, bin_id=bin_id, side=side)
+                if witness is not None and side in {"YES", "NO"}
+                else None
+            )
+            q_lcb = (
+                family_payoff_q_lcb(
+                    witness,
+                    bin_id=bin_id,
+                    side=side,
+                    payoff_q_lcb_cap=cap,
+                )
+                if witness is not None and side in {"YES", "NO"}
+                else None
+            )
+            shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
+            cost = Decimal(str(getattr(decision, "cost_usd", "0") or "0"))
+            if q_mean is None or q_lcb is None or shares <= 0 or cost < 0:
+                amplification_diagnostic.update(
+                    {
+                        "readiness": "BLOCKED_DIAGNOSTIC_UNAVAILABLE",
+                        "confidence_cost_margin_positive": None,
+                    }
+                )
+            else:
+                unit_cost = float(cost / shares)
+                margin = float(q_lcb) - unit_cost
+                margin_positive = margin > 0.0
+                amplification_diagnostic.update(
+                    {
+                        "readiness": (
+                            "CONFIDENCE_COST_POSITIVE_REQUIRES_FULL_ADMISSION"
+                            if margin_positive
+                            else "BLOCKED_CONFIDENCE_COST_MARGIN_NON_POSITIVE"
+                        ),
+                        "selected_side_q_mean": float(q_mean),
+                        "selected_side_q_lcb_confidence": float(q_lcb),
+                        "payoff_q_lcb_cap_applied": (
+                            float(cap) if cap is not None else None
+                        ),
+                        "all_in_cost_usd_per_share": unit_cost,
+                        "confidence_cost_margin_per_share": margin,
+                        "confidence_cost_margin_positive": margin_positive,
+                        "probability_witness_identity": str(
+                            getattr(witness, "witness_identity", "") or ""
+                        ),
+                    }
+                )
         winner = {
             "candidate_id": candidate_id,
-            "action": str(getattr(candidate, "action", "BUY") or "BUY").upper(),
+            "action": action,
             "family_key": family_key,
             "city": str(context.get("city") or ""),
             "target_date": str(context.get("target_date") or ""),
@@ -5705,6 +5777,9 @@ def _capital_proof_counterfactual_receipt(
                 str(getattr(decision, "cash_proceeds_usd"))
                 if getattr(decision, "cash_proceeds_usd", None) is not None
                 else None
+            ),
+            "confidence_cost_amplification_diagnostic": (
+                amplification_diagnostic
             ),
             "evaluation": winner_evaluation,
         }
@@ -7282,6 +7357,8 @@ def process_current_global_batch(
                         )
                         for family_key, witness in attempt_probabilities.items()
                     },
+                    probability_witnesses=attempt_probabilities,
+                    payoff_q_lcb_by_candidate=payoff_q_lcb_by_candidate,
                     venue_submit_count_before=int(proof_submit_count_before),
                     venue_submit_count_after=int(proof_submit_count_after),
                 )

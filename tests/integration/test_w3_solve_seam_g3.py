@@ -1346,6 +1346,8 @@ def test_capital_proof_counterfactual_rejects_any_venue_side_effect():
         ),
         "family_context_by_key": {},
         "probability_semantics_by_family": {},
+        "probability_witnesses": {},
+        "payoff_q_lcb_by_candidate": None,
         "venue_submit_count_before": 3,
         "venue_submit_count_after": 4,
     }
@@ -1356,6 +1358,119 @@ def test_capital_proof_counterfactual_rejects_any_venue_side_effect():
         global_batch_runtime._capital_proof_counterfactual_receipt(
             selected, **kwargs
         )
+
+
+def test_capital_proof_blocks_amplification_when_confidence_cost_margin_is_negative():
+    @dataclass(frozen=True)
+    class Evaluation:
+        candidate_id: str
+
+    at = _dt.datetime(2026, 8, 12, 1, 0, tzinfo=_dt.timezone.utc)
+    bindings = (
+        OutcomeTokenBinding(
+            bin_id="34C",
+            condition_id="condition-34",
+            yes_token_id="yes-34",
+            no_token_id="no-34",
+        ),
+        OutcomeTokenBinding(
+            bin_id="other",
+            condition_id="condition-other",
+            yes_token_id="yes-other",
+            no_token_id="no-other",
+        ),
+    )
+    samples = np.tile(np.asarray(((0.30, 0.70),)), (400, 1))
+    samples[:20] = np.asarray((0.08, 0.92))
+    witness_fields = {
+        "family_key": "family-buy",
+        "bindings": bindings,
+        "q_version": "current-q",
+        "resolution_identity": "resolution",
+        "topology_identity": "topology",
+        "posterior_identity_hash": "posterior",
+        "source_truth_identity": "source",
+        "authority_certificate_hash": "certificate",
+        "band_alpha": 0.05,
+        "band_basis": "current-evidence",
+        "yes_point_q": np.asarray((0.30, 0.70)),
+        "yes_q_samples": samples,
+        "captured_at_utc": at,
+    }
+    probability = JointOutcomeProbabilityWitness(
+        **witness_fields,
+        max_age=_dt.timedelta(minutes=3),
+        witness_identity=joint_probability_witness_identity(**witness_fields),
+    )
+    selected = SimpleNamespace(
+        decision=SimpleNamespace(
+            candidate=SimpleNamespace(
+                candidate_id="proof-buy",
+                family_key="family-buy",
+                action="BUY",
+                bin_id="34C",
+                condition_id="condition-34",
+                side="YES",
+                token_id="yes-34",
+            ),
+            expected_growth=None,
+            candidate_evaluations=(Evaluation("proof-buy"),),
+            shares=Decimal("40"),
+            cost_usd=Decimal("4"),
+            limit_price=Decimal("0.09"),
+            max_spend_usd=Decimal("4"),
+            cash_proceeds_usd=Decimal("0"),
+            candidate_input_count=1,
+            no_trade_reason=None,
+        )
+    )
+
+    receipt = global_batch_runtime._capital_proof_counterfactual_receipt(
+        selected,
+        selection_epoch_identity="epoch",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+        probability_manifest=(("family-buy", probability.witness_identity),),
+        full_scope_identity="scope",
+        book_epoch_identity="book",
+        wealth_witness=SimpleNamespace(
+            witness_identity="wealth",
+            economic_identity="wealth-economics",
+        ),
+        family_context_by_key={
+            "family-buy": {
+                "city": "Taipei",
+                "target_date": "2026-08-14",
+                "metric": "high",
+            }
+        },
+        probability_semantics_by_family={
+            "family-buy": "stale_ensemble_absolute_disagreement_v2"
+        },
+        probability_witnesses={"family-buy": probability},
+        payoff_q_lcb_by_candidate=None,
+        venue_submit_count_before=3,
+        venue_submit_count_after=3,
+    )
+
+    diagnostic = receipt["winner"][
+        "confidence_cost_amplification_diagnostic"
+    ]
+    assert receipt["winner"]["candidate_id"] == "proof-buy"
+    assert diagnostic == {
+        "role": "DIAGNOSTIC_ONLY_NOT_SELECTION_OR_SUBMIT_AUTHORITY",
+        "probability_functional": "SELECTED_SIDE_LOWER_TAIL_CVAR",
+        "readiness": "BLOCKED_CONFIDENCE_COST_MARGIN_NON_POSITIVE",
+        "selected_side_q_mean": pytest.approx(0.30),
+        "selected_side_q_lcb_confidence": pytest.approx(0.08),
+        "payoff_q_lcb_cap_applied": None,
+        "all_in_cost_usd_per_share": pytest.approx(0.10),
+        "confidence_cost_margin_per_share": pytest.approx(-0.02),
+        "confidence_cost_margin_positive": False,
+        "probability_witness_identity": probability.witness_identity,
+    }
+    assert receipt["venue_submit_count_before"] == 3
+    assert receipt["venue_submit_count_after"] == 3
 
 
 def test_book_native_side_receipt_requires_current_neg_risk_state_shape():
