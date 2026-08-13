@@ -1364,6 +1364,15 @@ def test_capital_proof_blocks_amplification_when_confidence_cost_margin_is_negat
     @dataclass(frozen=True)
     class Evaluation:
         candidate_id: str
+        family_key: str = ""
+        bin_id: str = ""
+        condition_id: str = ""
+        side: str = ""
+        token_id: str = ""
+        action: str = ""
+        execution_mode: str = ""
+        rejection_reason: str | None = None
+        buy_rejection_economics: dict[str, object] | None = None
 
     at = _dt.datetime(2026, 8, 12, 1, 0, tzinfo=_dt.timezone.utc)
     bindings = (
@@ -1414,7 +1423,32 @@ def test_capital_proof_blocks_amplification_when_confidence_cost_margin_is_negat
                 token_id="yes-34",
             ),
             expected_growth=None,
-            candidate_evaluations=(Evaluation("proof-buy"),),
+            candidate_evaluations=(
+                Evaluation("proof-buy"),
+                Evaluation(
+                    candidate_id="other-family-frontier",
+                    family_key="other-family",
+                    bin_id="other-bin",
+                    condition_id="other-condition",
+                    side="YES",
+                    token_id="other-token",
+                    action="BUY",
+                    execution_mode="TAKER_LIMIT",
+                    rejection_reason="NON_POSITIVE_EXPECTED_OBJECTIVE",
+                    buy_rejection_economics={
+                        "probability_basis": "POSTERIOR_PREDICTIVE_MEAN",
+                        "probe_kind": "MINIMUM_MARKETABLE",
+                        "probe_shares": "5",
+                        "probe_cost_usd": "4",
+                        "probe_limit_price": "0.80",
+                        "probe_expected_fill_price_before_fee": "0.80",
+                        "probe_expected_delta_log_wealth": -0.001,
+                        "probe_expected_log_growth_per_hour": -0.0001,
+                        "probe_expected_ev_usd": -0.5,
+                        "probe_expected_capital_efficiency": -0.00025,
+                    },
+                ),
+            ),
             shares=Decimal("40"),
             cost_usd=Decimal("4"),
             limit_price=Decimal("0.09"),
@@ -1457,6 +1491,8 @@ def test_capital_proof_blocks_amplification_when_confidence_cost_margin_is_negat
         "confidence_cost_amplification_diagnostic"
     ]
     assert receipt["winner"]["candidate_id"] == "proof-buy"
+    assert receipt["winner"]["family_key"] == "family-buy"
+    assert receipt["winner"]["city"] == "Taipei"
     assert diagnostic == {
         "role": "DIAGNOSTIC_ONLY_NOT_SELECTION_OR_SUBMIT_AUTHORITY",
         "probability_functional": "SELECTED_SIDE_LOWER_TAIL_CVAR",

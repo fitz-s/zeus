@@ -5653,8 +5653,8 @@ def _capital_proof_counterfactual_receipt(
         raise ValueError("GLOBAL_CAPITAL_PROOF_COUNTERFACTUAL_DECISION_MISSING")
     candidate = getattr(decision, "candidate", None)
     growth = getattr(decision, "expected_growth", None)
-    family_key = str(getattr(candidate, "family_key", "") or "")
-    context = dict(family_context_by_key.get(family_key, {}))
+    winner_family_key = str(getattr(candidate, "family_key", "") or "")
+    winner_context = dict(family_context_by_key.get(winner_family_key, {}))
     evaluations = tuple(
         asdict(row)
         for row in tuple(getattr(decision, "candidate_evaluations", ()) or ())
@@ -5768,20 +5768,20 @@ def _capital_proof_counterfactual_receipt(
         ):
             continue
         candidate_id = str(evaluation.get("candidate_id") or "")
-        family_key = str(evaluation.get("family_key") or "")
+        evaluation_family_key = str(evaluation.get("family_key") or "")
         bin_id = str(evaluation.get("bin_id") or "")
         side = str(evaluation.get("side") or "").upper()
         token_id = str(evaluation.get("token_id") or "")
-        context = dict(family_context_by_key.get(family_key, {}))
+        context = dict(family_context_by_key.get(evaluation_family_key, {}))
         frontier = {
             "role": "NEAREST_REJECTED_EXECUTABLE_BUY_NOT_ORDER_AUTHORITY",
             "candidate_id": candidate_id,
-            "family_key": family_key,
+            "family_key": evaluation_family_key,
             "city": str(context.get("city") or ""),
             "target_date": str(context.get("target_date") or ""),
             "metric": str(context.get("metric") or ""),
             "probability_semantics_revision": str(
-                probability_semantics_by_family.get(family_key) or ""
+                probability_semantics_by_family.get(evaluation_family_key) or ""
             ),
             "bin_id": bin_id,
             "condition_id": str(evaluation.get("condition_id") or ""),
@@ -5810,7 +5810,7 @@ def _capital_proof_counterfactual_receipt(
             "probe_expected_capital_efficiency": capital_efficiency,
             "confidence_cost_amplification_diagnostic": (
                 confidence_cost_diagnostic(
-                    family_key=family_key,
+                    family_key=evaluation_family_key,
                     bin_id=bin_id,
                     side=side,
                     token_id=token_id,
@@ -5867,7 +5867,7 @@ def _capital_proof_counterfactual_receipt(
             shares = Decimal(str(getattr(decision, "shares", "0") or "0"))
             cost = Decimal(str(getattr(decision, "cost_usd", "0") or "0"))
             amplification_diagnostic = confidence_cost_diagnostic(
-                family_key=family_key,
+                family_key=winner_family_key,
                 bin_id=bin_id,
                 side=side,
                 token_id=token_id,
@@ -5877,12 +5877,12 @@ def _capital_proof_counterfactual_receipt(
         winner = {
             "candidate_id": candidate_id,
             "action": action,
-            "family_key": family_key,
-            "city": str(context.get("city") or ""),
-            "target_date": str(context.get("target_date") or ""),
-            "metric": str(context.get("metric") or ""),
+            "family_key": winner_family_key,
+            "city": str(winner_context.get("city") or ""),
+            "target_date": str(winner_context.get("target_date") or ""),
+            "metric": str(winner_context.get("metric") or ""),
             "probability_semantics_revision": str(
-                probability_semantics_by_family.get(family_key) or ""
+                probability_semantics_by_family.get(winner_family_key) or ""
             ),
             "bin_id": str(getattr(candidate, "bin_id", "") or ""),
             "condition_id": str(getattr(candidate, "condition_id", "") or ""),

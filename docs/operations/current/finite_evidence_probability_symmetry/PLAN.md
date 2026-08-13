@@ -4,6 +4,22 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-13 Capital proof winner identity is isolated from frontier telemetry
+
+The proof receipt scans rejected BUY frontiers before serializing its winner.
+That scan reused the winner's local `family_key` and `context` variables, so a
+frontier from another family could relabel the winner and make its exact q
+diagnostic unavailable.  Selection itself was unchanged, but the receipt could
+not prove which current probability witness owned the apparent positive order.
+
+Winner identity and context are now frozen before the frontier scan; every
+frontier uses its own scoped identity.  SCOPE is proof-only receipt telemetry.
+DRAIN is the next complete global cut under the loaded fix.  RESET is every new
+cut, which recomputes both identities from the selected candidate and current
+evaluation set.  Acceptance requires a winner plus a later rejected frontier
+from a different family, with the winner retaining its own family, city, q,
+and confidence-cost diagnostic.
+
 ## 2026-08-13 Capital proof exposes confidence-cost amplification readiness
 
 Posterior-mean expected growth is the common comparison axis for fixed BUY,
