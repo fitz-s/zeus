@@ -1360,6 +1360,42 @@ def _latest_authorized_day0_fact(
                         channel = str(
                             ledger_fact.get("observation_source") or ""
                         ).strip().lower()
+                        if "observation_instants" in _table_names(conn):
+                            digest_row = conn.execute(
+                                f"""
+                                SELECT raw_response, provenance_json
+                                  FROM observation_instants
+                                 WHERE city = ?
+                                   AND target_date = ?
+                                   AND LOWER(COALESCE(source, '')) = ?
+                                   AND UPPER(COALESCE(station_id, '')) = ?
+                                   AND UPPER(COALESCE(temp_unit, '')) = ?
+                                   AND {_OBSERVATION_FACT_TIME_SQL} = ?
+                                   AND CAST({extreme_col} AS REAL) = ?
+                                   AND imported_at <= ?
+                                 ORDER BY imported_at DESC
+                                 LIMIT 1
+                                """,
+                                (
+                                    city,
+                                    target_date,
+                                    channel,
+                                    expected_station,
+                                    expected_unit,
+                                    str(ledger_fact.get("observation_time") or ""),
+                                    float(ledger_fact["observed_extreme_native"]),
+                                    decision_utc.isoformat(),
+                                ),
+                            ).fetchone()
+                            if digest_row is not None:
+                                ledger_fact["raw_payload_sha256"] = (
+                                    _persisted_payload_sha256(
+                                        digest_row["raw_response"],
+                                        digest_row["provenance_json"],
+                                    )
+                                )
+                        if str(ledger_fact.get("raw_payload_sha256") or "").strip():
+                            continue
                         matching_projection = [
                             fact
                             for fact in projected_facts
