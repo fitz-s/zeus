@@ -934,7 +934,7 @@ def _latest_authorized_day0_fact(
                    temp_unit,
                    raw_response,
                    provenance_json,
-                   COALESCE(imported_at, utc_timestamp) AS observation_available_at
+                   imported_at AS observation_available_at
              FROM authorized
              ORDER BY {instant_order},
                       source DESC
@@ -1220,9 +1220,9 @@ def _latest_authorized_day0_fact(
                       FROM observation_prints
                      WHERE city = ?
                        AND source_channel IN ({placeholders})
-                       AND publish_ts_utc >= ?
-                       AND publish_ts_utc < ?
-                       AND publish_ts_utc <= ?
+                       AND julianday(publish_ts_utc) >= julianday(?)
+                       AND julianday(publish_ts_utc) < julianday(?)
+                       AND julianday(publish_ts_utc) <= julianday(?)
                        AND julianday(fetched_at_utc) <= julianday(?)
                     """,
                     (
@@ -1307,6 +1307,17 @@ def _latest_authorized_day0_fact(
                         continue
                     publish_ts = str(print_row["publish_ts_utc"])
                     fetched_at = str(print_row["fetched_at_utc"])
+                    publish_clock = _utc_instant(publish_ts)
+                    fetched_clock = _utc_instant(fetched_at)
+                    if (
+                        publish_clock is None
+                        or fetched_clock is None
+                        or publish_clock < local_day_start_utc
+                        or publish_clock >= local_day_end_utc
+                        or publish_clock > decision_utc
+                        or fetched_clock > decision_utc
+                    ):
+                        continue
                     source_clock = publish_ts
                     if channel == FAST_OBS_SOURCE_ID:
                         try:
@@ -1324,6 +1335,15 @@ def _latest_authorized_day0_fact(
                                     ).isoformat()
                         except (TypeError, ValueError, OSError, OverflowError):
                             pass
+                    source_clock_utc = _utc_instant(source_clock)
+                    if (
+                        source_clock_utc is None
+                        or source_clock_utc < local_day_start_utc
+                        or source_clock_utc >= local_day_end_utc
+                        or source_clock_utc > decision_utc
+                    ):
+                        continue
+                    source_clock = source_clock_utc.isoformat()
                     canonical_publish_ts = publish_ts
                     canonical_fetched_at = fetched_at
                     version_identity = (channel, source_clock, float(value))
@@ -1412,13 +1432,13 @@ def _latest_authorized_day0_fact(
                         channel = str(
                             ledger_fact.get("observation_source") or ""
                         ).strip().lower()
-                        try:
-                            ledger_clock = datetime.fromisoformat(
-                                str(ledger_fact.get("extreme_source_time") or "").replace(
-                                    "Z", "+00:00"
-                                )
-                            ).astimezone(timezone.utc)
-                        except (TypeError, ValueError):
+                        ledger_extreme_clock = _utc_instant(
+                            ledger_fact.get("extreme_source_time")
+                        )
+                        ledger_available_clock = _utc_instant(
+                            ledger_fact.get("observation_available_at")
+                        )
+                        if ledger_extreme_clock is None or ledger_available_clock is None:
                             continue
                         exact_projection = [
                             fact
@@ -1433,11 +1453,15 @@ def _latest_authorized_day0_fact(
                             == expected_station
                             and str(fact.get("unit") or "").strip().upper()
                             == expected_unit
-                            and float(fact.get("observed_extreme_native"))
-                            == float(ledger_fact["observed_extreme_native"])
                             and str(fact.get("raw_payload_sha256") or "").strip()
-                            and _utc_instant(fact.get("extreme_source_time"))
-                            == ledger_clock
+                            and (
+                                _utc_instant(fact.get("extreme_source_time"))
+                                == ledger_extreme_clock
+                                or _utc_instant(
+                                    fact.get("observation_available_at")
+                                )
+                                == ledger_available_clock
+                            )
                         ]
                         if exact_projection:
                             ledger_fact["raw_payload_sha256"] = max(

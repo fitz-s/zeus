@@ -62,7 +62,7 @@ def test_day0_observation_hwm_invalidates_older_conditioning() -> None:
             "wu_icao_history",
             "LFPB",
             "C",
-            "2026-07-10T11:05:00+00:00",
+            "2026-07-10T11:06:00+00:00",
             "2026-07-10T13:00:00+02:00",
             "2026-07-10T11:00:00+00:00",
             32.0,
@@ -598,7 +598,7 @@ def test_day0_global_fact_preserves_canonical_digest_across_ledger_duplicate() -
             "wu_icao_history",
             "LFPB",
             "C",
-            "2026-07-10T11:05:00+00:00",
+            "2026-07-10T11:06:00+00:00",
             "2026-07-10T13:00:00+02:00",
             "2026-07-10T11:00:00+00:00",
             32.0,
@@ -1003,6 +1003,153 @@ def test_day0_global_fact_rejects_nonexact_or_future_digest_row(
     assert fact is not None
     assert fact["observation_time"] == print_time
     assert fact["raw_payload_sha256"] == ""
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("publish_ts", "fetched_at"),
+    (
+        ("2026-08-13T18:00:00", "2026-08-13T18:15:00+00:00"),
+        ("2026-08-13T17:00:00-05:00", "2026-08-13T18:15:00+00:00"),
+        ("2026-08-13T18:30:00.900000+00:00", "2026-08-13T18:15:00+00:00"),
+        ("2026-08-13T18:00:00.100000+00:00", "2026-08-13T18:30:00.200000+00:00"),
+    ),
+)
+def test_day0_global_fact_rejects_noncausal_ledger_clocks(
+    publish_ts: str,
+    fetched_at: str,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE observation_prints (
+            city TEXT, station_id TEXT, source_channel TEXT,
+            publish_ts_utc TEXT, value_native REAL, unit TEXT,
+            fetched_at_utc TEXT, raw_report TEXT
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO observation_prints VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "Shenzhen", "ZGSZ", "wu_icao_history", publish_ts, 29.0, "C",
+            fetched_at, None,
+        ),
+    )
+
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Shenzhen",
+        target_date="2026-08-14",
+        temperature_metric="high",
+        decision_time=datetime(
+            2026, 8, 13, 18, 30, 0, 100_000, tzinfo=timezone.utc
+        ),
+        require_settlement_channel=True,
+    )
+
+    assert fact is None
+    conn.close()
+
+
+def test_day0_global_fact_rejects_missing_import_clock() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.executescript(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, source TEXT, station_id TEXT,
+            temp_unit TEXT, imported_at TEXT, local_timestamp TEXT,
+            utc_timestamp TEXT, running_max REAL, running_min REAL,
+            authority TEXT, training_allowed INTEGER, causality_status TEXT,
+            source_role TEXT, raw_response TEXT, provenance_json TEXT
+        );
+        INSERT INTO observation_instants VALUES (
+            'Shenzhen', '2026-08-14', 'wu_icao_history', 'ZGSZ', 'C', NULL,
+            '2026-08-14T02:00:00+08:00', '2026-08-13T18:00:00+00:00',
+            29.0, 29.0, 'VERIFIED', 1, 'OK', 'historical_hourly', NULL,
+            '{"payload_hash":"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"}'
+        );
+        """
+    )
+
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Shenzhen",
+        target_date="2026-08-14",
+        temperature_metric="high",
+        decision_time=datetime(2026, 8, 13, 18, 30, tzinfo=timezone.utc),
+        require_settlement_channel=True,
+    )
+
+    assert fact is None
+    conn.close()
+
+
+def test_day0_global_fact_binds_fetch_digest_when_hour_bucket_differs_from_day_extreme() -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    digest = "e" * 64
+    conn.executescript(
+        """
+        CREATE TABLE observation_instants (
+            city TEXT, target_date TEXT, source TEXT, station_id TEXT,
+            temp_unit TEXT, imported_at TEXT, local_timestamp TEXT,
+            utc_timestamp TEXT, running_max REAL, running_min REAL,
+            authority TEXT, training_allowed INTEGER, causality_status TEXT,
+            source_role TEXT, raw_response TEXT, provenance_json TEXT
+        );
+        CREATE TABLE observation_prints (
+            city TEXT, station_id TEXT, source_channel TEXT,
+            publish_ts_utc TEXT, value_native REAL, unit TEXT,
+            fetched_at_utc TEXT, raw_report TEXT
+        );
+        """
+    )
+    fetched_at = "2026-08-13T18:16:47.048270+00:00"
+    conn.execute(
+        "INSERT INTO observation_instants VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            "Tel Aviv", "2026-08-13", "ogimet_metar_llbg", "LLBG", "C",
+            fetched_at, "2026-08-13T20:00:00+03:00",
+            "2026-08-13T17:00:00+00:00", 29.0, 29.0, "VERIFIED", 1,
+            "OK", "historical_hourly", None,
+            json.dumps(
+                {
+                    "latest_raw_ts": "2026-08-13T17:50:00+00:00",
+                    "payload_hash": f"sha256:{digest}",
+                }
+            ),
+        ),
+    )
+    conn.executemany(
+        "INSERT INTO observation_prints VALUES (?,?,?,?,?,?,?,?)",
+        (
+            (
+                "Tel Aviv", "LLBG", "ogimet_metar_llbg",
+                "2026-08-13T10:50:00+00:00", 34.0, "C", fetched_at, None,
+            ),
+            (
+                "Tel Aviv", "LLBG", "ogimet_metar_llbg",
+                "2026-08-13T17:50:00+00:00", 29.0, "C", fetched_at, None,
+            ),
+        ),
+    )
+
+    fact = _latest_authorized_day0_fact(
+        conn,
+        city="Tel Aviv",
+        target_date="2026-08-13",
+        temperature_metric="high",
+        decision_time=datetime(2026, 8, 13, 19, tzinfo=timezone.utc),
+        require_settlement_channel=True,
+    )
+
+    assert fact is not None
+    assert fact["observed_extreme_native"] == 34.0
+    assert fact["observation_time"] == "2026-08-13T17:50:00+00:00"
+    assert fact["raw_payload_sha256"] == digest
     conn.close()
 
 
