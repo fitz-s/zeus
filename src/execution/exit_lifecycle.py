@@ -11683,17 +11683,12 @@ def run_exit_monitor_cycle(
             conn,
             preparation_deadline_monotonic,
         ) as ensure_preparation_live:
-            # FIX 2c (2026-06-20): detect a lapsed MONITOR_REFRESHED cadence
-            # on the first cycle after recovery. Detection only.
-            if target_families is None:
-                ensure_preparation_live()
-                try:
-                    _check_monitor_cadence_watchdog(conn, summary)
-                except Exception as _wd_exc:  # noqa: BLE001
-                    logger.warning(
-                        "exit_monitor: cadence watchdog failed (non-fatal): %s",
-                        _wd_exc,
-                    )
+            # Cadence detection is owned by the independent durable recovery
+            # lane in ``src.main``.  Re-reading the same event history here put
+            # optional diagnosis ahead of portfolio/allocator preparation: on
+            # an I/O-contended canonical DB it could consume this whole claim
+            # and prevent every held position from reaching redecision.  Keep
+            # the actuation prerequisite tranche free of diagnostic reads.
             ensure_preparation_live()
             portfolio = load_portfolio(
                 open_positions_only=True,

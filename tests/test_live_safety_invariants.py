@@ -20637,6 +20637,86 @@ def test_exit_monitor_db_bootstrap_uses_preparation_cutoff(monkeypatch):
     assert not active.is_set()
 
 
+def test_exit_monitor_preparation_never_spends_claim_on_cadence_diagnosis(
+    monkeypatch,
+):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    from src.engine import cycle_runner
+    from src.execution import exit_lifecycle
+    from src.observability import scheduler_health, status_summary
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+    from src.state import canonical_write, decision_chain
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    active = threading.Event()
+    completed = []
+    watchdog_calls = []
+    portfolio = SimpleNamespace(
+        positions=[],
+        daily_baseline_total=0.0,
+        bankroll=0.0,
+    )
+
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(
+        cycle_runner,
+        "get_connection",
+        lambda *, deadline_monotonic: conn,
+    )
+    monkeypatch.setattr(cycle_runner, "load_portfolio", lambda **_kwargs: portfolio)
+    monkeypatch.setattr(cycle_runner, "get_tracker", lambda: object())
+    monkeypatch.setattr(decision_chain, "store_artifact", lambda *_args: 1)
+    monkeypatch.setattr(
+        cycle_runner,
+        "_execute_monitoring_phase",
+        lambda *_args, **_kwargs: (False, False),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_refresh_global_allocator_for_held_position_monitor",
+        lambda *_args: {"configured": False},
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_check_monitor_cadence_watchdog",
+        lambda *_args: watchdog_calls.append(True),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_held_monitor_clob_client",
+        lambda: nullcontext(object()),
+    )
+    monkeypatch.setattr(
+        canonical_write,
+        "commit_then_export",
+        lambda _conn, *, db_op, json_exports: db_op(),
+    )
+    monkeypatch.setattr(status_summary, "write_cycle_pulse", lambda _summary: None)
+    monkeypatch.setattr(
+        scheduler_health,
+        "_write_scheduler_health",
+        lambda *_args, **_kwargs: None,
+    )
+
+    result = exit_lifecycle.run_exit_monitor_cycle(
+        held_position_monitor_active=active,
+        mark_held_position_monitor_complete=lambda: (
+            active.clear(),
+            completed.append(True),
+        ),
+        monitor_deadline_monotonic=time.monotonic() + 75.0,
+    )
+
+    assert result is True
+    assert watchdog_calls == []
+    assert completed == [True]
+    assert not active.is_set()
+
+
 def test_allocator_retry_release_stops_between_positions_at_monitor_deadline(
     monkeypatch,
 ):
