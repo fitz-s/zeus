@@ -3609,6 +3609,7 @@ class _CandidateProof:
     # canonical path. Observability only — never gates selection.
     posterior_id: int | None = None
     probability_authority: str | None = None
+    probability_semantics_revision: str | None = None
     # FIX C (mode-consistent EV; incident 0b5c305e26524042 / operator directive
     # 2026-06-10): the per-candidate maker/taker mode decision and BOTH EVs travel
     # on the proof so the receipt/settlement loop can recalibrate p_fill_maker and
@@ -5887,6 +5888,9 @@ def _global_current_entry_feasibility_rejection_reason(
                 strategy_block = _entry_strategy_policy_blocks_live_submit(
                     strategy_policy_conn,
                     normalized_strategy,
+                    probability_semantics_revision=(
+                        "__GLOBAL_CANDIDATE_SCOPE_UNRESOLVED__"
+                    ),
                 )
             else:
                 if normalized_strategy not in strategy_policy_cache:
@@ -5894,6 +5898,9 @@ def _global_current_entry_feasibility_rejection_reason(
                         _entry_strategy_policy_blocks_live_submit(
                             strategy_policy_conn,
                             normalized_strategy,
+                            probability_semantics_revision=(
+                                "__GLOBAL_CANDIDATE_SCOPE_UNRESOLVED__"
+                            ),
                         )
                     )
                 strategy_block = strategy_policy_cache[normalized_strategy]
@@ -6874,6 +6881,8 @@ def _entry_pause_blocks_live_submit(conn: sqlite3.Connection | None) -> str | No
 def _entry_strategy_policy_blocks_live_submit(
     conn: sqlite3.Connection | None,
     strategy_key: str | None,
+    *,
+    probability_semantics_revision: str | None = None,
 ) -> str | None:
     """Re-read per-strategy authority at the final EDLI submit boundary."""
 
@@ -6893,6 +6902,15 @@ def _entry_strategy_policy_blocks_live_submit(
             conn,
             strategy,
             datetime.now(timezone.utc),
+            **(
+                {
+                    "probability_semantics_revision": (
+                        probability_semantics_revision
+                    )
+                }
+                if probability_semantics_revision
+                else {}
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - unreadable control authority blocks submit
         return f"STRATEGY_POLICY_UNAVAILABLE:{strategy}:{type(exc).__name__}"
@@ -7418,6 +7436,9 @@ def event_bound_live_adapter_from_trade_conn(
                 strategy_policy_reason = _entry_strategy_policy_blocks_live_submit(
                     build_conn,
                     no_submit_receipt.strategy_key,
+                    probability_semantics_revision=(
+                        no_submit_receipt.probability_semantics_revision
+                    ),
                 )
                 if strategy_policy_reason is not None:
                     _abort_family_rebalance_entry_payloads_after_no_submit(
@@ -18618,6 +18639,9 @@ def _build_event_bound_no_submit_receipt_core(
             "replacement_no_bound_certificate": _json_finite(
                 proof.replacement_no_bound_certificate
             ),
+            "probability_semantics_revision": (
+                proof.probability_semantics_revision
+            ),
             "q_source": proof.q_source,  # #120 calibrator provenance
             # B3 authority stamp must ride the receipt round-trip alongside q_source:
             # qkernel_spine_bridge preserves q_source as the probability-track label
@@ -19203,6 +19227,9 @@ def _event_submission_receipt_from_typed_receipt_payload(
         ),
         posterior_id=_optional_int(raw_receipt.get("posterior_id")),  # H2_E2E
         probability_authority=raw_receipt.get("probability_authority"),  # H2_E2E
+        probability_semantics_revision=raw_receipt.get(
+            "probability_semantics_revision"
+        ),
         strategy_key=raw_receipt.get("strategy_key"),
         opportunity_book=raw_receipt.get("opportunity_book"),
         replacement_forecast=raw_receipt.get("replacement_forecast"),
@@ -21899,6 +21926,9 @@ def _actionable_payload_from_receipt(
         "replacement_no_bound_certificate": _json_finite(
             receipt.replacement_no_bound_certificate
         ),
+        "probability_semantics_revision": (
+            receipt.probability_semantics_revision
+        ),
         "posterior_id": receipt.posterior_id,
         "probability_authority": receipt.probability_authority,
         "c_fee_adjusted": receipt.c_fee_adjusted,
@@ -22070,6 +22100,9 @@ def _live_decision_audit_payload(
         "settlement_coverage_status": receipt.settlement_coverage_status,
         "replacement_no_bound_certificate": _json_finite(
             receipt.replacement_no_bound_certificate
+        ),
+        "probability_semantics_revision": (
+            receipt.probability_semantics_revision
         ),
         "q_live": receipt.q_live,
         "q_lcb_5pct": receipt.q_lcb_5pct,
@@ -22603,6 +22636,9 @@ def _pre_submit_revalidation_payload_from_final_intent(
         "settlement_coverage_status": payload.get("settlement_coverage_status"),
         "replacement_no_bound_certificate": payload.get(
             "replacement_no_bound_certificate"
+        ),
+        "probability_semantics_revision": payload.get(
+            "probability_semantics_revision"
         ),
         "posterior_id": payload.get("posterior_id"),
         "probability_authority": payload.get("probability_authority"),
@@ -27488,7 +27524,17 @@ def _strategy_policy_selection_rejection_reason(
             )
         from src.riskguard.policy import resolve_strategy_policy
 
-        policy = resolve_strategy_policy(strategy_policy_conn, strategy_key, policy_now)
+        probability_revision = _proof_probability_semantics_revision(proof)
+        policy = resolve_strategy_policy(
+            strategy_policy_conn,
+            strategy_key,
+            policy_now,
+            **(
+                {"probability_semantics_revision": probability_revision}
+                if probability_revision
+                else {}
+            ),
+        )
     except Exception as exc:  # noqa: BLE001
         return f"STRATEGY_POLICY_UNAVAILABLE:{type(exc).__name__}"
 
@@ -27499,6 +27545,23 @@ def _strategy_policy_selection_rejection_reason(
     if policy.exit_only:
         return f"STRATEGY_POLICY_EXIT_ONLY:{strategy_key}:sources={sources}"
     return None
+
+
+def _proof_probability_semantics_revision(proof: _CandidateProof) -> str | None:
+    """Return the exact probability-law revision bound to one candidate."""
+
+    revision = str(
+        getattr(proof, "probability_semantics_revision", None) or ""
+    ).strip()
+    if revision:
+        return revision
+    certificate = getattr(proof, "replacement_no_bound_certificate", None)
+    if not isinstance(certificate, Mapping):
+        return None
+    revision = str(
+        certificate.get("probability_semantics_revision") or ""
+    ).strip()
+    return revision or None
 
 
 def _strategy_policy_has_selection_gate(sources: tuple[str, ...]) -> bool:
@@ -29500,6 +29563,15 @@ def _generate_candidate_proofs(
                     # typed column / FK to forecast_posteriors(posterior_id).
                     posterior_id=_optional_int(probability_evidence.get("posterior_id")),
                     probability_authority=probability_evidence.get("probability_authority"),
+                    probability_semantics_revision=(
+                        str(
+                            probability_evidence.get(
+                                "probability_semantics_revision"
+                            )
+                            or ""
+                        ).strip()
+                        or None
+                    ),
                     # FIX C: the mode decision + BOTH EVs ride the proof to the
                     # receipt (settlement-loop recalibration provenance).
                     execution_mode_intent=proof_execution_mode_intent,
@@ -32640,6 +32712,17 @@ def _replacement_no_bound_authority(
     q_lcb_basis = str(provenance.get("q_lcb_basis") or "").strip()
     q_ucb_role = str(provenance.get("q_ucb_json_role") or "").strip()
     samples_hash = str(provenance.get("q_bootstrap_samples_hash") or "").strip()
+    fusion = provenance.get("bayes_precision_fusion")
+    current_shape = (
+        fusion.get("current_evidence_shape")
+        if isinstance(fusion, Mapping)
+        else None
+    )
+    probability_semantics_revision = str(
+        current_shape.get("semantics_revision")
+        if isinstance(current_shape, Mapping)
+        else ""
+    ).strip()
     bin_topology = provenance.get("bin_topology")
     bootstrap_draws = provenance.get("q_lcb_bootstrap_draws")
     if isinstance(posterior_id, bool) or isinstance(bootstrap_draws, bool):
@@ -32678,7 +32761,7 @@ def _replacement_no_bound_authority(
         q_lcb=q_lcb,
         q_ucb=q_ucb,
     )
-    return {
+    authority = {
         "posterior_id": posterior_id,
         "posterior_identity_hash": identity_hash,
         "family_id": family_id,
@@ -32690,6 +32773,11 @@ def _replacement_no_bound_authority(
         "joint_samples_hash": samples_hash,
         "canonical_bound_hash": canonical_bound_hash,
     }
+    if probability_semantics_revision:
+        authority["probability_semantics_revision"] = (
+            probability_semantics_revision
+        )
+    return authority
 
 
 def _replacement_calibration_payload_from_credential(
@@ -36116,6 +36204,14 @@ def _replacement_authority_probability_and_fdr_proof(
         replacement_bundle,
         posterior_identity_hash=posterior_identity_hash,
     )
+    if replacement_no_bound_authority is None:
+        raise ValueError("REPLACEMENT_PROBABILITY_SEMANTICS_AUTHORITY_MISSING")
+    probability_semantics_revision = str(
+        replacement_no_bound_authority.get("probability_semantics_revision")
+        or ""
+    ).strip()
+    if not probability_semantics_revision:
+        raise ValueError("REPLACEMENT_PROBABILITY_SEMANTICS_AUTHORITY_MISSING")
     joint_samples_key = "_edli_spine_served_joint_q_samples_by_condition"
     joint_samples_reason_key = "_edli_spine_joint_q_samples_unavailable_reason"
     joint_samples_requested = payload.get("_edli_global_auction_prepare") is True
@@ -36353,6 +36449,7 @@ def _replacement_authority_probability_and_fdr_proof(
         "posterior_id": str(replacement_bundle.posterior_id),
         "posterior_identity_hash": posterior_identity_hash,
         "replacement_no_bound_authority": replacement_no_bound_authority,
+        "probability_semantics_revision": probability_semantics_revision,
         "replacement_product_id": replacement_bundle.product_id,
         "p_cal_vector_hash": _probability_vector_hash(
             q_by_condition[str(candidate.condition_id or "")]

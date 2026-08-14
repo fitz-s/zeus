@@ -227,6 +227,8 @@ def _receipt_json(receipt: EventSubmissionReceipt) -> str:
         payload.pop("posterior_id", None)
     if payload.get("probability_authority") is None:
         payload.pop("probability_authority", None)
+    if payload.get("probability_semantics_revision") is None:
+        payload.pop("probability_semantics_revision", None)
     # same_bin_yes_posterior: omit when None so legacy / buy-YES / canonical receipts
     # that never carried the YES-bin posterior keep byte-identical receipt_json (and
     # therefore receipt_hash). Present (set) only on buy-NO receipts whose proof

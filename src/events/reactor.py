@@ -589,6 +589,10 @@ class EventSubmissionReceipt:
     # so existing-row hashes stay byte-stable).
     posterior_id: int | None = None
     probability_authority: str | None = None
+    # Immutable probability-law revision that produced this candidate's q.
+    # RiskGuard scopes statistical evidence to this identity at selection and
+    # submit; None remains fail-closed for a revision-scoped automated gate.
+    probability_semantics_revision: str | None = None
     # P0 mode-authority (operator review 2026-06-10): the selected proof's maker/taker
     # execution_mode_intent and its maker limit price are FIRST-CLASS receipt fields, not
     # opportunity-book decoration. They are PROVEN through submit recapture under that

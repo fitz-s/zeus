@@ -3708,19 +3708,25 @@ def _brier_probability_cohort_keys(row: dict) -> tuple[str, ...]:
         owner = f"law:{decision_law_id}"
     else:
         return ()
-    revisions = tuple(
-        sorted(
-            str(revision).strip()
-            for revision in (row.get("probability_semantics_revisions") or ())
-            if str(revision).strip()
-        )
-    )
+    revisions = _probability_semantics_revisions(row)
     revision_identity = ",".join(revisions) if revisions else "unstamped"
     keys = [f"{owner}:probability_semantics:{revision_identity}"]
     mechanism = _probability_mechanism_key(row)
     if mechanism is not None:
         keys.append(f"mechanism:{mechanism}")
     return tuple(keys)
+
+
+def _probability_semantics_revisions(row: Mapping[str, object]) -> tuple[str, ...]:
+    """Return the exact immutable probability-law revisions on one fill."""
+
+    return tuple(
+        sorted(
+            str(revision).strip()
+            for revision in (row.get("probability_semantics_revisions") or ())
+            if str(revision).strip()
+        )
+    )
 
 
 def _brier_evidence_ready_rows(rows: list[dict]) -> list[dict]:
@@ -3758,7 +3764,7 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
     global YELLOW because there is no safe strategy-local enforcement target.
     """
 
-    buckets: dict[str, dict[str, object]] = {}
+    buckets: dict[str, dict[str, dict[str, object]]] = {}
     mechanism_buckets: dict[str, dict[str, object]] = {}
     unclassified_count = 0
     for row in rows:
@@ -3775,7 +3781,15 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
         else:
             unclassified_count += 1
             continue
-        bucket = buckets.setdefault(bucket_key, {"p": [], "o": []})
+        revisions = _probability_semantics_revisions(row)
+        revision_identity = ",".join(revisions) if revisions else "unstamped"
+        cohort_key = (
+            f"strategy:{bucket_key}:probability_semantics:{revision_identity}"
+        )
+        bucket = buckets.setdefault(bucket_key, {}).setdefault(
+            cohort_key,
+            {"p": [], "o": [], "revisions": revisions},
+        )
         bucket["p"].append(float(row["p_posterior"]))  # type: ignore[index, union-attr]
         bucket["o"].append(int(row["outcome"]))  # type: ignore[index, union-attr]
         mechanism_key = _probability_mechanism_key(row)
@@ -3791,36 +3805,89 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
 
     by_strategy: dict[str, dict[str, object]] = {}
     degraded: dict[str, dict[str, object]] = {}
-    for strategy, bucket in sorted(buckets.items()):
-        p_values = list(bucket["p"])  # type: ignore[index]
-        outcomes = list(bucket["o"])  # type: ignore[index]
-        score = brier_score(p_values, outcomes)
-        level = evaluate_brier(score, thresholds)
-        sample_size = len(p_values)
-        payload = {
-            "sample_size": sample_size,
-            "brier": round(float(score), 6),
-            "level": level.value,
+    for strategy, cohort_buckets in sorted(buckets.items()):
+        cohort_payloads: dict[str, dict[str, object]] = {}
+        all_p: list[float] = []
+        all_o: list[int] = []
+        degraded_cohorts: list[dict[str, object]] = []
+        for cohort_key, bucket in sorted(cohort_buckets.items()):
+            p_values = list(bucket["p"])  # type: ignore[index]
+            outcomes = list(bucket["o"])  # type: ignore[index]
+            all_p.extend(p_values)
+            all_o.extend(outcomes)
+            score = brier_score(p_values, outcomes)
+            level = evaluate_brier(score, thresholds)
+            sample_size = len(p_values)
+            cohort_payload: dict[str, object] = {
+                "sample_size": sample_size,
+                "brier": round(float(score), 6),
+                "level": level.value,
+                "cohort": cohort_key,
+            }
+            revisions = tuple(bucket.get("revisions") or ())
+            if revisions:
+                cohort_payload["probability_semantics_revisions"] = list(revisions)
+            if sample_size < _STRATEGY_BRIER_MIN_SAMPLE:
+                cohort_payload["level"] = RiskLevel.GREEN.value
+                cohort_payload["thin_sample_no_verdict"] = True
+            elif level != RiskLevel.GREEN:
+                degraded_cohorts.append(cohort_payload)
+            cohort_payloads[cohort_key] = cohort_payload
+
+        aggregate_score = brier_score(all_p, all_o) if all_p else 0.0
+        aggregate_payload: dict[str, object] = {
+            "sample_size": len(all_p),
+            "brier": round(float(aggregate_score), 6),
+            "level": RiskLevel.GREEN.value,
+            "cohorts": cohort_payloads,
         }
-        # Minimum-evidence floor (2026-07-05): a per-strategy Brier verdict
-        # below n=10 is statistically empty — one confident settled loss
-        # scores far above any threshold (p=0.79 loss -> (0.79-0)^2 = 0.6241)
-        # and would gate a whole lane on a single coin flip (live
-        # incident: forecast_qkernel_entry gated RED on n=1 while its
-        # candidates showed the book's best positive edges). Thin strategies
-        # stay in by_strategy for observability but never enter
-        # degraded_strategies; portfolio-level Brier (which pools them) and
-        # the loss gates still bind. Same attribute-don't-convict principle
-        # as ORANGE/execution localization; K3's coverage min_n=30 is the
-        # calibration-lane analogue.
-        if sample_size < _STRATEGY_BRIER_MIN_SAMPLE:
-            payload["level"] = RiskLevel.GREEN.value
-            payload["thin_sample_no_verdict"] = True
-            by_strategy[strategy] = payload
-            continue
-        by_strategy[strategy] = payload
-        if level != RiskLevel.GREEN:
-            degraded[strategy] = payload
+        if degraded_cohorts:
+            degraded_cohort_keys = {
+                str(payload["cohort"]) for payload in degraded_cohorts
+            }
+            degraded_levels = [
+                RiskLevel(str(payload["level"])) for payload in degraded_cohorts
+            ]
+            degraded_level = overall_level(*degraded_levels)
+            degraded_p = [
+                value
+                for cohort_key, bucket in cohort_buckets.items()
+                if cohort_key in degraded_cohort_keys
+                for value in bucket["p"]  # type: ignore[index]
+            ]
+            degraded_o = [
+                value
+                for cohort_key, bucket in cohort_buckets.items()
+                if cohort_key in degraded_cohort_keys
+                for value in bucket["o"]  # type: ignore[index]
+            ]
+            revisions = sorted(
+                {
+                    str(revision)
+                    for payload in degraded_cohorts
+                    for revision in payload.get(
+                        "probability_semantics_revisions", []
+                    )
+                }
+            )
+            degraded_payload: dict[str, object] = {
+                "sample_size": len(degraded_p),
+                "brier": round(float(brier_score(degraded_p, degraded_o)), 6),
+                "level": degraded_level.value,
+                "cohorts": [str(payload["cohort"]) for payload in degraded_cohorts],
+            }
+            if len(degraded_cohorts) == 1:
+                degraded_payload["cohort"] = degraded_cohorts[0]["cohort"]
+            if revisions:
+                degraded_payload["probability_semantics_revisions"] = revisions
+            degraded[strategy] = degraded_payload
+            aggregate_payload["level"] = degraded_level.value
+        elif all_p and all(
+            bool(payload.get("thin_sample_no_verdict"))
+            for payload in cohort_payloads.values()
+        ):
+            aggregate_payload["thin_sample_no_verdict"] = True
+        by_strategy[strategy] = aggregate_payload
 
     by_mechanism: dict[str, dict[str, object]] = {}
     for mechanism, bucket in sorted(mechanism_buckets.items()):
@@ -3877,6 +3944,7 @@ def _sync_riskguard_strategy_gate_actions(
     conn: sqlite3.Connection,
     recommended_strategy_gate_reasons: dict[str, list[str]],
     *,
+    probability_semantics_scopes: Mapping[str, set[str]] | None = None,
     issued_at: str,
 ) -> dict[str, int | str]:
     if not _table_exists(conn, "risk_actions"):
@@ -3888,7 +3956,22 @@ def _sync_riskguard_strategy_gate_actions(
         }
 
     recommended = {
-        strategy: "|".join(sorted(reasons))
+        strategy: (
+            "|".join(sorted(reasons)),
+            json.dumps(
+                {
+                    "gate": True,
+                    "probability_semantics_revisions": sorted(
+                        (probability_semantics_scopes or {}).get(strategy, set())
+                    ),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if (probability_semantics_scopes or {}).get(strategy)
+            and all(reason.startswith("brier_degraded(") for reason in reasons)
+            else "true",
+        )
         for strategy, reasons in sorted(recommended_strategy_gate_reasons.items())
     }
 
@@ -3904,7 +3987,7 @@ def _sync_riskguard_strategy_gate_actions(
     existing_by_strategy = {str(row["strategy_key"]): str(row["action_id"]) for row in existing_rows}
     expired_count = 0
 
-    for strategy, reason in recommended.items():
+    for strategy, (reason, value) in recommended.items():
         action_id = existing_by_strategy.get(strategy, f"riskguard:gate:{strategy}")
         conn.execute(
             """
@@ -3919,7 +4002,7 @@ def _sync_riskguard_strategy_gate_actions(
                 source,
                 precedence,
                 status
-            ) VALUES (?, ?, 'gate', 'true', ?, NULL, ?, 'riskguard', 50, 'active')
+            ) VALUES (?, ?, 'gate', ?, ?, NULL, ?, 'riskguard', 50, 'active')
             ON CONFLICT(action_id) DO UPDATE SET
                 strategy_key = excluded.strategy_key,
                 value = excluded.value,
@@ -3929,7 +4012,7 @@ def _sync_riskguard_strategy_gate_actions(
                 precedence = excluded.precedence,
                 status = 'active'
             """,
-            (action_id, strategy, issued_at, reason),
+            (action_id, strategy, value, issued_at, reason),
         )
 
     for strategy, action_id in existing_by_strategy.items():
@@ -4041,6 +4124,7 @@ def _refresh_riskguard_auxiliary_bookkeeping(
     zeus_conn: sqlite3.Connection,
     *,
     recommended_strategy_gate_reasons: dict[str, list[str]],
+    recommended_strategy_gate_scopes: Mapping[str, set[str]] | None = None,
     now: str,
     position_view: dict | None = None,
 ) -> tuple[dict, dict, dict]:
@@ -4083,6 +4167,7 @@ def _refresh_riskguard_auxiliary_bookkeeping(
         durable_action_status = _sync_riskguard_strategy_gate_actions(
             zeus_conn,
             recommended_strategy_gate_reasons,
+            probability_semantics_scopes=recommended_strategy_gate_scopes,
             issued_at=now,
         )
         strategy_health_refresh = refresh_strategy_health(
@@ -4811,6 +4896,7 @@ def _tick_once() -> RiskLevel:
         execution_observed = int(execution_overall.get("terminal_observed", 0) or 0)
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
+        recommended_strategy_gate_scopes: dict[str, set[str]] = {}
         # Historical/shadow alpha evidence is learning telemetry. It never
         # becomes a durable strategy admission action; current probability
         # semantics and executable expected growth remain the live authority.
@@ -4839,7 +4925,18 @@ def _tick_once() -> RiskLevel:
             for strategy, payload in sorted(degraded_brier_strategies.items()):
                 if not isinstance(payload, dict):
                     continue
-                cohort = payload.get("cohort")
+                revisions = {
+                    str(revision).strip()
+                    for revision in payload.get(
+                        "probability_semantics_revisions", []
+                    )
+                    if str(revision).strip()
+                }
+                if revisions:
+                    recommended_strategy_gate_scopes.setdefault(
+                        str(strategy), set()
+                    ).update(revisions)
+                cohort = payload.get("cohort") if revisions else None
                 cohort_suffix = f",cohort={cohort}" if cohort else ""
                 _append_reason(
                     recommended_strategy_gate_reasons,
@@ -4957,6 +5054,7 @@ def _tick_once() -> RiskLevel:
         ) = _refresh_riskguard_auxiliary_bookkeeping(
             zeus_conn,
             recommended_strategy_gate_reasons=recommended_strategy_gate_reasons,
+            recommended_strategy_gate_scopes=recommended_strategy_gate_scopes,
             now=now,
             position_view=portfolio_truth.get("_strategy_health_position_view"),
         )

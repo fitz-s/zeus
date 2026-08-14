@@ -4128,6 +4128,42 @@ class TestStrategyBrierMinSampleContinued:
         )
         assert breakdown["degraded_strategies"] == {}
 
+    def test_degraded_probability_cohort_does_not_convict_green_revision(self):
+        old_revision = (
+            riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        )
+        current_revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        rows = [
+            {
+                "strategy": "forecast_qkernel_entry",
+                "decision_law_id": "predicted_bin_ev_v1",
+                "probability_semantics_revisions": (old_revision,),
+                "p_posterior": 0.8,
+                "outcome": 0,
+            }
+            for _ in range(10)
+        ] + [
+            {
+                "strategy": "forecast_qkernel_entry",
+                "decision_law_id": "predicted_bin_ev_v1",
+                "probability_semantics_revisions": (current_revision,),
+                "p_posterior": 0.8,
+                "outcome": 1,
+            }
+            for _ in range(10)
+        ]
+
+        ready = riskguard_module._brier_evidence_ready_rows(rows)
+        breakdown = riskguard_module._strategy_brier_breakdown(
+            ready,
+            {"brier_yellow": 0.25, "brier_orange": 0.30, "brier_red": 0.35},
+        )
+        degraded = breakdown["degraded_strategies"]["forecast_qkernel_entry"]
+
+        assert degraded["sample_size"] == 10
+        assert degraded["probability_semantics_revisions"] == [old_revision]
+        assert current_revision not in degraded["probability_semantics_revisions"]
+
     def test_heterogeneous_thin_probability_laws_do_not_form_portfolio_verdict(
         self,
         monkeypatch,
@@ -6026,6 +6062,55 @@ class TestRiskGuardExecutionQualityLocalization:
 
 
 class TestStrategyPolicyResolver:
+    def test_riskguard_emits_probability_scoped_brier_gate(self):
+        conn = _policy_conn()
+        revision = (
+            riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        )
+
+        status = riskguard_module._sync_riskguard_strategy_gate_actions(
+            conn,
+            {
+                "forecast_qkernel_entry": [
+                    "brier_degraded(level=YELLOW,n=16,brier=0.270822)"
+                ]
+            },
+            probability_semantics_scopes={
+                "forecast_qkernel_entry": {revision}
+            },
+            issued_at="2026-08-13T01:29:58+00:00",
+        )
+        row = conn.execute(
+            "SELECT value FROM risk_actions WHERE action_id = ?",
+            ("riskguard:gate:forecast_qkernel_entry",),
+        ).fetchone()
+
+        assert status["emitted_count"] == 1
+        assert json.loads(row["value"]) == {
+            "gate": True,
+            "probability_semantics_revisions": [revision],
+        }
+
+        riskguard_module._sync_riskguard_strategy_gate_actions(
+            conn,
+            {
+                "forecast_qkernel_entry": [
+                    "brier_degraded(level=YELLOW,n=16,brier=0.270822)",
+                    "loss_streak=3",
+                ]
+            },
+            probability_semantics_scopes={
+                "forecast_qkernel_entry": {revision}
+            },
+            issued_at="2026-08-13T01:30:58+00:00",
+        )
+        row = conn.execute(
+            "SELECT value FROM risk_actions WHERE action_id = ?",
+            ("riskguard:gate:forecast_qkernel_entry",),
+        ).fetchone()
+        assert row["value"] == "true"
+        conn.close()
+
     def test_resolve_strategy_policy_defaults_without_rows(self, monkeypatch):
         _neutralize_hard_safety(monkeypatch)
         conn = _policy_conn()
@@ -6082,6 +6167,54 @@ class TestStrategyPolicyResolver:
         assert center_buy.gated is True
         assert "risk_action:gate" in center_buy.sources
         assert opening_inertia.gated is False
+        conn.close()
+
+    def test_probability_scoped_risk_gate_blocks_only_matching_revision(
+        self, monkeypatch,
+    ):
+        _neutralize_hard_safety(monkeypatch)
+        conn = _policy_conn()
+        now = datetime(2026, 4, 3, 17, 0, tzinfo=timezone.utc)
+        old_revision = (
+            riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        )
+        current_revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        _insert_risk_action(
+            conn,
+            action_id="ra-gate-old-q",
+            strategy_key="forecast_qkernel_entry",
+            action_type="gate",
+            value=json.dumps(
+                {
+                    "gate": True,
+                    "probability_semantics_revisions": [old_revision],
+                }
+            ),
+            issued_at=(now - timedelta(minutes=5)).isoformat(),
+            effective_until=(now + timedelta(hours=1)).isoformat(),
+        )
+
+        old = policy_module.resolve_strategy_policy(
+            conn,
+            "forecast_qkernel_entry",
+            now,
+            probability_semantics_revision=old_revision,
+        )
+        current = policy_module.resolve_strategy_policy(
+            conn,
+            "forecast_qkernel_entry",
+            now,
+            probability_semantics_revision=current_revision,
+        )
+        unknown = policy_module.resolve_strategy_policy(
+            conn,
+            "forecast_qkernel_entry",
+            now,
+        )
+
+        assert old.gated is True
+        assert current.gated is False
+        assert unknown.gated is True
         conn.close()
 
     def test_resolve_strategy_policy_shrinks_only_one_strategy_allocation(self, monkeypatch):

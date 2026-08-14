@@ -183,9 +183,13 @@ def test_receipt_json_omits_posterior_when_none_keeps_hash_stable() -> None:
     legacy_json = json.loads(_receipt_json(legacy))
     assert "same_bin_yes_posterior" not in legacy_json
 
-    carrying = _money_path_clean_buy_no_receipt(same_bin_yes_posterior=_SHANGHAI_YES_Q)
+    carrying = _money_path_clean_buy_no_receipt(
+        same_bin_yes_posterior=_SHANGHAI_YES_Q,
+        probability_semantics_revision="current_evidence_v4",
+    )
     carrying_json = json.loads(_receipt_json(carrying))
     assert carrying_json["same_bin_yes_posterior"] == _SHANGHAI_YES_Q
+    assert carrying_json["probability_semantics_revision"] == "current_evidence_v4"
 
 
 def test_receipt_projection_round_trips_posterior_through_raw_receipt() -> None:
@@ -222,6 +226,7 @@ def test_receipt_projection_round_trips_posterior_through_raw_receipt() -> None:
             "schema": "replacement_native_no_bound_v1",
             "certificate_hash": "a" * 64,
         },
+        "probability_semantics_revision": "current_evidence_v4",
         "reason": "event_bound_final_intent_no_submit",
     }
     receipt = _event_submission_receipt_from_typed_receipt_payload(raw_receipt, _Evt())
@@ -232,3 +237,4 @@ def test_receipt_projection_round_trips_posterior_through_raw_receipt() -> None:
     assert receipt.replacement_no_bound_certificate == raw_receipt[
         "replacement_no_bound_certificate"
     ]
+    assert receipt.probability_semantics_revision == "current_evidence_v4"

@@ -2712,8 +2712,8 @@ def test_global_current_entry_feasibility_rechecks_mutable_strategy_policy(
     )
     calls = []
 
-    def current_policy_block(conn, strategy_key):
-        calls.append((conn, strategy_key))
+    def current_policy_block(conn, strategy_key, **kwargs):
+        calls.append((conn, strategy_key, kwargs))
         return (
             "STRATEGY_POLICY_GATED:"
             f"{strategy_key}:sources=risk_action:gate"
@@ -2738,7 +2738,17 @@ def test_global_current_entry_feasibility_rechecks_mutable_strategy_policy(
             "settlement_capture:sources=risk_action:gate"
         )
 
-    assert calls == [(conn, "settlement_capture")]
+    assert calls == [
+        (
+            conn,
+            "settlement_capture",
+            {
+                "probability_semantics_revision": (
+                    "__GLOBAL_CANDIDATE_SCOPE_UNRESOLVED__"
+                )
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
@@ -3097,6 +3107,7 @@ def test_actionable_payload_preserves_sealed_global_execution_economics(
         direction=direction,
         candidate_bin_id="bin-1",
         q_source="replacement_0_1",
+        probability_semantics_revision="current_evidence_v4",
         selection_authority_applied="qkernel_spine",
         q_live=0.70,
         q_lcb_5pct=0.60,
@@ -3115,6 +3126,7 @@ def test_actionable_payload_preserves_sealed_global_execution_economics(
     assert payload["qkernel_execution_economics"] == cert
     assert payload["global_auction_receipt"] == cert["global_auction_receipt"]
     assert payload["_edli_q_source"] == "replacement_0_1"
+    assert payload["probability_semantics_revision"] == "current_evidence_v4"
     with pytest.raises(
         ValueError,
         match=(

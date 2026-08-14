@@ -1311,6 +1311,75 @@ class TestLiveOrderCommandSplit:
         assert component["reason"] == "authority_schema_missing"
         assert component["details"]["risk_actions_ready"] is False
 
+    def test_submit_strategy_policy_uses_exact_probability_revision(
+        self,
+        mem_conn,
+    ):
+        from src.execution.executor import (
+            _entry_strategy_policy_submit_component,
+        )
+
+        intent = _make_entry_intent(mem_conn)
+        old_revision = "stale_ensemble_absolute_disagreement_v2"
+        current_revision = "current_evidence_v4"
+        now = datetime.now(timezone.utc)
+        mem_conn.execute(
+            """
+            INSERT INTO risk_actions (
+                action_id, strategy_key, action_type, value, issued_at,
+                effective_until, reason, source, precedence, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "risk-action-old-probability-law",
+                "center_buy",
+                "gate",
+                json.dumps(
+                    {
+                        "gate": True,
+                        "probability_semantics_revisions": [old_revision],
+                    }
+                ),
+                (now - timedelta(seconds=1)).isoformat(),
+                (now + timedelta(hours=1)).isoformat(),
+                "old probability law degraded",
+                "riskguard",
+                10,
+                "active",
+            ),
+        )
+
+        current = _entry_strategy_policy_submit_component(
+            mem_conn,
+            intent,
+            {
+                "strategy_key": "center_buy",
+                "probability_semantics_revision": current_revision,
+            },
+            checked_at=now,
+        )
+        old = _entry_strategy_policy_submit_component(
+            mem_conn,
+            intent,
+            {
+                "strategy_key": "center_buy",
+                "probability_semantics_revision": old_revision,
+            },
+            checked_at=now,
+        )
+        missing = _entry_strategy_policy_submit_component(
+            mem_conn,
+            intent,
+            {"strategy_key": "center_buy"},
+            checked_at=now,
+        )
+
+        assert current["allowed"] is True
+        assert old["allowed"] is False
+        assert old["reason"] == "gated"
+        assert missing["allowed"] is False
+
+
     def test_entry_submit_requested_persists_execution_capability_proof(self, mem_conn, monkeypatch):
         """Entry SUBMIT_REQUESTED carries one pre-submit capability proof."""
         import json

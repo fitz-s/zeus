@@ -944,6 +944,11 @@ def test_replacement_builder_binds_raw_complement_and_served_shrink() -> None:
         q_lcb=_REPLACEMENT_Q_LCB,
         provenance_json={
             "bin_topology": _REPLACEMENT_TOPOLOGY,
+            "bayes_precision_fusion": {
+                "current_evidence_shape": {
+                    "semantics_revision": "current_evidence_test_v1",
+                },
+            },
             "q_ucb_json_role": "fused_center_bootstrap_ucb",
             "q_bootstrap_samples_hash": "3" * 64,
             "replacement_q_mode": "FUSED_NORMAL_FULL",
@@ -972,6 +977,7 @@ def test_replacement_builder_binds_raw_complement_and_served_shrink() -> None:
         no_q_lcb=0.60,
     )
     assert certificate is not None
+    assert certificate["probability_semantics_revision"] == "current_evidence_test_v1"
     assert certificate["side_q_lcb_raw"] == 0.62
     assert certificate["side_q_lcb_served"] == 0.60
     assert certificate["coverage_shrink_applied"] is True

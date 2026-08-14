@@ -1790,10 +1790,22 @@ def _entry_strategy_policy_submit_component(
     from src.riskguard.policy import resolve_strategy_policy
 
     try:
+        probability_revision = (
+            str(
+                actionable_payload.get("probability_semantics_revision") or ""
+            ).strip()
+            if isinstance(actionable_payload, Mapping)
+            else ""
+        )
         policy = resolve_strategy_policy(
             conn,
             strategy_key,
             checked_at or datetime.now(timezone.utc),
+            **(
+                {"probability_semantics_revision": probability_revision}
+                if probability_revision
+                else {}
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - authority loss blocks venue submit
         return _capability_component(
