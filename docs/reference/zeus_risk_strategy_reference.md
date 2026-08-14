@@ -181,7 +181,7 @@ posture, executable-price, and max-exposure gates.
 
 The generic function default remains `base=0.25` for explicit offline/test
 callers. Live callers always pass the active operator setting, which is governed
-at exactly `1/8 = 0.125`; boot fails closed if that value drifts. The factors
+at exactly `1/32 = 0.03125`; boot fails closed if that value drifts. The factors
 below then reduce that supplied base multiplicatively:
 
 | Factor | Condition | Multiplier |
@@ -208,21 +208,21 @@ handle the exception (typically by skipping the trade).
 
 ```
 Inputs: p_posterior=0.65, entry_price=0.50 (VWMP, fee_adjusted),
-        bankroll=$10,000, base=0.125
+        bankroll=$10,000, base=0.03125
 
 f* = (0.65 - 0.50) / (1 - 0.50) = 0.30
 
-dynamic_kelly_mult(base=0.125, ci_width=0.12, lead_days=4,
+dynamic_kelly_mult(base=0.03125, ci_width=0.12, lead_days=4,
                    rolling_win_rate_20=0.52, portfolio_heat=0.15,
                    drawdown_pct=0.05, max_drawdown=0.20):
-  ci_width=0.12 > 0.10        → × 0.7  = 0.0875
+  ci_width=0.12 > 0.10        → × 0.7  = 0.021875
   ci_width=0.12 < 0.15        → no additional
-  lead_days=4 ≥ 3 and < 5     → × 0.8  = 0.07
-  win_rate=0.52 ≥ 0.45        → × 1.0  = 0.07
-  heat=0.15 ≤ 0.40            → × 1.0  = 0.07
-  drawdown=0.05/0.20 = 0.25   → × 0.75 = 0.0525
+  lead_days=4 ≥ 3 and < 5     → × 0.8  = 0.0175
+  win_rate=0.52 ≥ 0.45        → × 1.0  = 0.0175
+  heat=0.15 ≤ 0.40            → × 1.0  = 0.0175
+  drawdown=0.05/0.20 = 0.25   → × 0.75 = 0.013125
 
-Position = 0.30 × 0.0525 × $10,000 = $157.50
+Position = 0.30 × 0.013125 × $10,000 = $39.375
 
 Downstream exposure gates may reject or throttle the entry, but `kelly_size()`
 does not apply a per-trade hard cap.
