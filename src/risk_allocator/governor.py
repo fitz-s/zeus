@@ -822,7 +822,10 @@ def load_position_lots(conn: Any) -> tuple[ExposureLot, ...]:
         covered_position_ids = (
             current_position_ids | _load_closed_position_ids(read_conn)
         )
-        rows = _load_legacy_position_lot_rows(read_conn)
+        rows = _load_legacy_position_lot_rows(
+            read_conn,
+            covered_position_ids=covered_position_ids,
+        )
     lots: list[ExposureLot] = []
     for row in rows:
         row_map = _row_mapping(row)
@@ -893,7 +896,11 @@ def _load_closed_position_ids(conn: Any) -> set[str]:
     }
 
 
-def _load_legacy_position_lot_rows(conn: Any) -> list[Mapping[str, Any]]:
+def _load_legacy_position_lot_rows(
+    conn: Any,
+    *,
+    covered_position_ids: set[str] | None = None,
+) -> list[Mapping[str, Any]]:
     if not _has_table(conn, "position_lots"):
         return []
     has_commands = _has_table(conn, "venue_commands")
@@ -923,6 +930,26 @@ def _load_legacy_position_lot_rows(conn: Any) -> list[Mapping[str, Any]]:
         else "LEFT JOIN (SELECT NULL AS command_id, NULL AS market_id, NULL AS token_id, NULL AS decision_id) cmd ON 0"
     )
     command_provenance_predicate = "AND cmd.command_id IS NOT NULL" if has_commands else ""
+    state_index = (
+        " INDEXED BY idx_position_lots_state"
+        if _has_index(conn, "idx_position_lots_state")
+        else ""
+    )
+    covered = sorted(
+        str(position_id)
+        for position_id in (covered_position_ids or set())
+        if str(position_id)
+    )
+    covered_predicate = ""
+    params: list[object] = []
+    if covered and has_commands:
+        # One JSON parameter keeps statement shape and SQLite bind count
+        # bounded as terminal position history grows.  The compatibility lane
+        # must scale with unresolved lots, not with every settled position.
+        covered_predicate = (
+            "AND cmd.position_id NOT IN (SELECT value FROM json_each(?))"
+        )
+        params.append(json.dumps(covered, separators=(",", ":")))
     return list(
         conn.execute(
             f"""
@@ -938,14 +965,7 @@ def _load_legacy_position_lot_rows(conn: Any) -> list[Mapping[str, Any]]:
               COALESCE(cmd.token_id, CAST(lot.position_id AS TEXT)) AS token_id,
               COALESCE(cmd.decision_id, cmd.market_id, CAST(lot.position_id AS TEXT)) AS event_id,
               {runtime_position_expr}
-            FROM position_lots lot
-            JOIN (
-              SELECT position_id, MAX(local_sequence) AS max_sequence
-              FROM position_lots
-              GROUP BY position_id
-            ) latest
-              ON latest.position_id = lot.position_id
-             AND latest.max_sequence = lot.local_sequence
+            FROM position_lots lot{state_index}
             {command_join}
             WHERE lot.state IN (
               'OPTIMISTIC_EXPOSURE',
@@ -953,8 +973,16 @@ def _load_legacy_position_lot_rows(conn: Any) -> list[Mapping[str, Any]]:
               'EXIT_PENDING'
             )
               {command_provenance_predicate}
+              {covered_predicate}
+              AND NOT EXISTS (
+                  SELECT 1
+                    FROM position_lots newer
+                   WHERE newer.position_id = lot.position_id
+                     AND newer.local_sequence > lot.local_sequence
+              )
             ORDER BY lot.position_id, lot.lot_id
-            """
+            """,
+            params,
         ).fetchall()
     )
 
@@ -1055,7 +1083,14 @@ def _load_current_position_exposure_rows(conn: Any) -> list[Mapping[str, Any]]:
             ORDER BY pc.position_id
             """
         ).fetchall()
-    lot_states = _load_latest_command_lot_states(conn)
+    lot_states = _load_latest_command_lot_states(
+        conn,
+        {
+            str(_row_mapping(row).get("position_id") or "")
+            for row in rows
+            if str(_row_mapping(row).get("position_id") or "")
+        },
+    )
     authority_costs = _load_current_position_authority_costs(conn)
     return [
         {
@@ -1072,27 +1107,32 @@ def _load_current_position_exposure_rows(conn: Any) -> list[Mapping[str, Any]]:
     ]
 
 
-def _load_latest_command_lot_states(conn: Any) -> dict[str, str]:
+def _load_latest_command_lot_states(
+    conn: Any,
+    runtime_position_ids: set[str],
+) -> dict[str, str]:
     if not _has_table(conn, "position_lots"):
         return {}
     if not _has_table(conn, "venue_commands"):
+        return {}
+    if not runtime_position_ids:
         return {}
     lot_order = (
         "COALESCE(lot.captured_at, ''), lot.lot_id"
         if _has_column(conn, "position_lots", "captured_at")
         else "lot.lot_id"
     )
+    state_index = (
+        " INDEXED BY idx_position_lots_state"
+        if _has_index(conn, "idx_position_lots_state")
+        else ""
+    )
+    position_ids = sorted(runtime_position_ids)
+    placeholders = ",".join("?" for _ in position_ids)
     rows = conn.execute(
         f"""
         SELECT cmd.position_id AS runtime_position_id, lot.state
-          FROM position_lots lot
-          JOIN (
-                SELECT position_id, MAX(local_sequence) AS max_sequence
-                  FROM position_lots
-                 GROUP BY position_id
-          ) latest
-            ON latest.position_id = lot.position_id
-           AND latest.max_sequence = lot.local_sequence
+          FROM position_lots lot{state_index}
           JOIN venue_commands cmd
             ON cmd.command_id = lot.source_command_id
          WHERE lot.state IN (
@@ -1100,8 +1140,16 @@ def _load_latest_command_lot_states(conn: Any) -> dict[str, str]:
              'CONFIRMED_EXPOSURE',
              'EXIT_PENDING'
          )
+           AND cmd.position_id IN ({placeholders})
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM position_lots newer
+                WHERE newer.position_id = lot.position_id
+                  AND newer.local_sequence > lot.local_sequence
+           )
          ORDER BY {lot_order}
-        """
+        """,
+        position_ids,
     ).fetchall()
     return {
         str(_row_mapping(row).get("runtime_position_id") or ""): str(
@@ -1285,6 +1333,17 @@ def _has_column(conn: Any, table: str, column: str) -> bool:
         if str(mapping.get("name") or "") == column:
             return True
     return False
+
+
+def _has_index(conn: Any, index: str) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name=? LIMIT 1",
+            (index,),
+        ).fetchone()
+    except Exception:
+        return False
+    return row is not None
 
 
 def _latest_review_required_reason(conn: Any, command_id: str) -> str:
