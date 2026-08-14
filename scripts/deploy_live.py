@@ -1554,12 +1554,20 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
             append_confirmed_trade_facts_to_edli,
             append_rest_filled_orphan_trade_facts_to_edli,
         )
+        from src.ingest.price_channel_ingest import (
+            _edli_trade_fact_bridge_candidates_read_only,
+        )
 
         recovery_deadline_monotonic = time.monotonic() + 60.0
         summary = reconcile_unresolved_commands(
             scope='restart_preflight',
             deadline_monotonic=recovery_deadline_monotonic,
         )
+        (
+            confirmed_candidates,
+            rest_orphan_candidates,
+            absorbed_fill_aggregate_ids,
+        ) = _edli_trade_fact_bridge_candidates_read_only()
         bridge_conn = get_world_connection_with_trades_required(write_class='live')
         try:
             bridge_deadline_monotonic = time.monotonic() + 15.0
@@ -1570,10 +1578,16 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
             )
             try:
                 summary['confirmed_fill_bridge_appended'] = append_confirmed_trade_facts_to_edli(
-                    bridge_conn
+                    bridge_conn,
+                    candidates=confirmed_candidates,
+                    absorbed_fill_aggregate_ids=absorbed_fill_aggregate_ids,
                 )
                 summary['rest_fill_orphan_bridge_appended'] = (
-                    append_rest_filled_orphan_trade_facts_to_edli(bridge_conn)
+                    append_rest_filled_orphan_trade_facts_to_edli(
+                        bridge_conn,
+                        candidates=rest_orphan_candidates,
+                        absorbed_fill_aggregate_ids=(),
+                    )
                 )
                 bridge_conn.commit()
             except sqlite3.OperationalError as exc:
