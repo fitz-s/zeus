@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-13
+# Last reused/audited: 2026-08-14
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -14725,6 +14725,12 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             "SELECTION_SCOPE_EMPTY:execution_price:input=1:"
             "classes=EXECUTION_PRICE_MISSING=0",
             "BATCH_BLOCKED",
+        ),
+        (
+            "GLOBAL_ACTUATION_PREPARE_FAILED:"
+            "SELECTION_SCOPE_EMPTY:live_selection:input=1:"
+            "classes=STRATEGY_POLICY_GATED=1",
+            "PROBABILITY_SUPERSEDED",
         ),
         (
             "GLOBAL_ACTUATION_PREPARE_FAILED:"

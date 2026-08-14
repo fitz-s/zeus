@@ -13488,6 +13488,19 @@ def _global_preflight_block_status(reason: str) -> str:
         # family cache before this classification and rebuilds one complete
         # current q/book/wealth auction without venue I/O.
         return "PROBABILITY_SUPERSEDED"
+    if reason == (
+        "GLOBAL_ACTUATION_PREPARE_FAILED:"
+        "SELECTION_SCOPE_EMPTY:live_selection:input=1:"
+        "classes=STRATEGY_POLICY_GATED=1"
+    ):
+        # Selection admitted a candidate whose exact probability-semantics
+        # revision is now strategy-gated. It cannot keep the stale winner at
+        # the head of every cut while current-revision candidates go unseen.
+        # SCOPE: the selected candidate's probability revision. DRAIN: evict
+        # its probability cache and rebuild the complete BUY/SELL/HOLD/CASH
+        # cut once. RESET: a fresh policy lookup admits only current eligible
+        # revisions; repeated drift remains fail-closed at the reauction cap.
+        return "PROBABILITY_SUPERSEDED"
     if reason.startswith(
         "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
         "GLOBAL_BUY_JIT_MAKER_WITNESS_SUPERSEDED:"
