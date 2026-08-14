@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-08-12
+# Last reused/audited: 2026-08-14
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -2714,6 +2714,8 @@ def test_global_current_entry_feasibility_rechecks_mutable_strategy_policy(
 
     def current_policy_block(conn, strategy_key, **kwargs):
         calls.append((conn, strategy_key, kwargs))
+        if kwargs["probability_semantics_revision"] == "current-v4":
+            return None
         return (
             "STRATEGY_POLICY_GATED:"
             f"{strategy_key}:sources=risk_action:gate"
@@ -2731,6 +2733,7 @@ def test_global_current_entry_feasibility_rechecks_mutable_strategy_policy(
         assert era._global_current_entry_feasibility_rejection_reason(
             candidate,
             strategy_key="settlement_capture",
+            probability_semantics_revision="stale-v2",
             strategy_policy_conn=conn,
             strategy_policy_cache=cache,
         ) == (
@@ -2738,17 +2741,67 @@ def test_global_current_entry_feasibility_rechecks_mutable_strategy_policy(
             "settlement_capture:sources=risk_action:gate"
         )
 
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate,
+        strategy_key="settlement_capture",
+        probability_semantics_revision="current-v4",
+        strategy_policy_conn=conn,
+        strategy_policy_cache=cache,
+    ) is None
+
     assert calls == [
         (
             conn,
             "settlement_capture",
-            {
-                "probability_semantics_revision": (
-                    "__GLOBAL_CANDIDATE_SCOPE_UNRESOLVED__"
-                )
-            },
-        )
+            {"probability_semantics_revision": "stale-v2"},
+        ),
+        (
+            conn,
+            "settlement_capture",
+            {"probability_semantics_revision": "current-v4"},
+        ),
     ]
+
+
+def test_prepared_global_probability_revision_is_bound_to_exact_posterior():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        "CREATE TABLE forecast_posteriors ("
+        "posterior_id INTEGER PRIMARY KEY,"
+        "posterior_identity_hash TEXT NOT NULL,"
+        "provenance_json TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO forecast_posteriors VALUES (?,?,?)",
+        (
+            7,
+            "posterior-current",
+            json.dumps(
+                {
+                    "bayes_precision_fusion": {
+                        "current_evidence_shape": {
+                            "semantics_revision": "current-v4"
+                        }
+                    }
+                }
+            ),
+        ),
+    )
+    prepared = SimpleNamespace(
+        posterior_id=7,
+        probability_witness=SimpleNamespace(
+            q_version="forecast-q",
+            posterior_identity_hash="posterior-current",
+        ),
+    )
+
+    assert (
+        era._prepared_global_probability_semantics_revision(prepared, conn)
+        == "current-v4"
+    )
+    prepared.probability_witness.posterior_identity_hash = "posterior-other"
+    assert era._prepared_global_probability_semantics_revision(prepared, conn) is None
+    conn.close()
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))

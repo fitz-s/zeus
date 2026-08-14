@@ -250,6 +250,7 @@ from src.engine.event_bound_final_intent import (
 from src.data import replacement_input_hwm as _replacement_input_hwm
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    _current_evidence_shape,
     current_evidence_shape_semantics_mismatch,
 )
 from src.strategy.live_inference.source_clock_city_weights import (
@@ -5809,8 +5810,9 @@ def _global_current_entry_feasibility_rejection_reason(
     candidate: object,
     *,
     strategy_key: str | None = None,
+    probability_semantics_revision: str | None = None,
     strategy_policy_conn: sqlite3.Connection | None = None,
-    strategy_policy_cache: dict[str, str | None] | None = None,
+    strategy_policy_cache: dict[tuple[str, str], str | None] | None = None,
 ) -> str | None:
     """Reject BUY execution proposals that current policy cannot execute.
 
@@ -5884,26 +5886,27 @@ def _global_current_entry_feasibility_rejection_reason(
     normalized_strategy = str(strategy_key or "").strip()
     if normalized_strategy:
         if strategy_policy_conn is not None:
+            candidate_revision = (
+                str(probability_semantics_revision or "").strip()
+                or "__GLOBAL_CANDIDATE_SCOPE_UNRESOLVED__"
+            )
+            policy_cache_key = (normalized_strategy, candidate_revision)
             if strategy_policy_cache is None:
                 strategy_block = _entry_strategy_policy_blocks_live_submit(
                     strategy_policy_conn,
                     normalized_strategy,
-                    probability_semantics_revision=(
-                        "__GLOBAL_CANDIDATE_SCOPE_UNRESOLVED__"
-                    ),
+                    probability_semantics_revision=candidate_revision,
                 )
             else:
-                if normalized_strategy not in strategy_policy_cache:
-                    strategy_policy_cache[normalized_strategy] = (
+                if policy_cache_key not in strategy_policy_cache:
+                    strategy_policy_cache[policy_cache_key] = (
                         _entry_strategy_policy_blocks_live_submit(
                             strategy_policy_conn,
                             normalized_strategy,
-                            probability_semantics_revision=(
-                                "__GLOBAL_CANDIDATE_SCOPE_UNRESOLVED__"
-                            ),
+                            probability_semantics_revision=candidate_revision,
                         )
                     )
-                strategy_block = strategy_policy_cache[normalized_strategy]
+                strategy_block = strategy_policy_cache[policy_cache_key]
             if strategy_block is not None:
                 return strategy_block
         floors = _event_bound_strategy_live_quality_floors(normalized_strategy)
@@ -6924,6 +6927,46 @@ def _entry_strategy_policy_blocks_live_submit(
     return None
 
 
+def _prepared_global_probability_semantics_revision(
+    prepared: object,
+    forecast_conn: sqlite3.Connection,
+) -> str | None:
+    """Resolve the exact probability-law revision before global BUY ranking."""
+
+    witness = getattr(prepared, "probability_witness", None)
+    from src.events.day0_authority import day0_probability_semantics_revision
+
+    day0_revision = day0_probability_semantics_revision(
+        getattr(witness, "q_version", None)
+    )
+    if day0_revision is not None:
+        return day0_revision
+    posterior_id = getattr(prepared, "posterior_id", None)
+    posterior_identity_hash = str(
+        getattr(witness, "posterior_identity_hash", "") or ""
+    ).strip()
+    if (
+        isinstance(posterior_id, bool)
+        or not isinstance(posterior_id, int)
+        or posterior_id <= 0
+        or not posterior_identity_hash
+    ):
+        return None
+    try:
+        row = forecast_conn.execute(
+            "SELECT provenance_json FROM forecast_posteriors "
+            "WHERE posterior_id = ? AND posterior_identity_hash = ?",
+            (posterior_id, posterior_identity_hash),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    shape = _current_evidence_shape(row[0]) if row is not None else None
+    revision = str(
+        shape.get("semantics_revision") if shape is not None else ""
+    ).strip()
+    return revision or None
+
+
 
 def edli_trade_score_gate(event: OpportunityEvent) -> bool:
     """TradeScore is generated inside the event-bound no-submit adapter.
@@ -7053,6 +7096,7 @@ def event_bound_live_adapter_from_trade_conn(
         str,
         tuple[str, str, dict[tuple[str, str], str | None]],
     ] = {}
+    _global_entry_probability_revision_by_family: dict[str, str | None] = {}
     _global_claim_generations: Mapping[str, str] = {}
     _global_claim_attempt_counts: Mapping[str, int] = {}
     exact_completion_sell_keys = frozenset(
@@ -7201,6 +7245,12 @@ def event_bound_live_adapter_from_trade_conn(
                 or ""
             ).strip(),
             day0_truth_by_bin_side,
+        )
+        _global_entry_probability_revision_by_family[family_key] = (
+            _prepared_global_probability_semantics_revision(
+                prepared,
+                forecast_conn,
+            )
         )
         return EventSubmissionReceipt(
             False,
@@ -10379,7 +10429,7 @@ def event_bound_live_adapter_from_trade_conn(
                 correlation_key=_global_candidate_correlation_key(candidate),
             )
 
-        strategy_policy_cache: dict[str, str | None] = {}
+        strategy_policy_cache: dict[tuple[str, str], str | None] = {}
 
         def _current_entry_candidate_policy(
             candidate,
@@ -10447,6 +10497,9 @@ def event_bound_live_adapter_from_trade_conn(
             return _global_current_entry_feasibility_rejection_reason(
                 candidate,
                 strategy_key=strategy_key,
+                probability_semantics_revision=(
+                    _global_entry_probability_revision_by_family.get(family_key)
+                ),
                 strategy_policy_conn=trade_conn,
                 strategy_policy_cache=strategy_policy_cache,
             )
