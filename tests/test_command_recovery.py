@@ -32167,6 +32167,92 @@ def test_capital_blocker_count_prioritizes_terminal_exit_until_pnl_projection(co
     assert capital_blocking_command_count(conn) == 0
 
 
+def test_capital_blocker_excludes_completed_partial_exit_with_live_residual(conn):
+    from src.execution.command_recovery import (
+        _recorded_exit_fill_projection_candidates,
+        capital_blocking_command_scope,
+    )
+    from src.state.db import log_execution_fact
+
+    _insert(
+        conn,
+        command_id="cmd-partial-capital-entry",
+        position_id="pos-partial-capital-exit",
+        size=12.0,
+        price=0.09,
+    )
+    _advance_to_acked(
+        conn,
+        command_id="cmd-partial-capital-entry",
+        venue_order_id="ord-partial-capital-entry",
+    )
+    _seed_pending_entry_projection(
+        conn,
+        position_id="pos-partial-capital-exit",
+        command_id="cmd-partial-capital-entry",
+        order_id="ord-partial-capital-entry",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'day0_window', shares = 5.0, chain_shares = 5.0,
+               chain_state = 'synced', cost_basis_usd = 0.45,
+               chain_cost_basis_usd = 0.45, entry_price = 0.09,
+               realized_pnl_usd = 0.21
+         WHERE position_id = 'pos-partial-capital-exit'
+        """
+    )
+    _insert(
+        conn,
+        command_id="cmd-partial-capital-exit",
+        position_id="pos-partial-capital-exit",
+        intent_kind="EXIT",
+        side="SELL",
+        size=7.0,
+        price=0.12,
+        created_at=datetime.now(timezone.utc).isoformat(),
+    )
+    _advance_to_acked(
+        conn,
+        command_id="cmd-partial-capital-exit",
+        venue_order_id="ord-partial-capital-exit",
+    )
+    conn.execute(
+        "UPDATE venue_commands SET state = 'FILLED' WHERE command_id = ?",
+        ("cmd-partial-capital-exit",),
+    )
+    observed_at = datetime.now(timezone.utc).isoformat()
+    _append_trade_fact(
+        conn,
+        command_id="cmd-partial-capital-exit",
+        order_id="ord-partial-capital-exit",
+        trade_id="trade-partial-capital-exit",
+        state="CONFIRMED",
+        filled_size="7.0",
+        fill_price="0.12",
+        observed_at=observed_at,
+    )
+    log_execution_fact(
+        conn,
+        intent_id="pos-partial-capital-exit:exit",
+        position_id="pos-partial-capital-exit",
+        decision_id="exit:pos-partial-capital-exit",
+        command_id="cmd-partial-capital-exit",
+        order_role="exit",
+        filled_at=observed_at,
+        fill_price=0.12,
+        shares=7.0,
+        venue_status="FILLED",
+        terminal_exec_status="CONFIRMED",
+    )
+
+    scope = capital_blocking_command_scope(conn)
+
+    assert not _recorded_exit_fill_projection_candidates(conn)
+    assert scope.total_count == 0
+    assert scope.projection_count == 0
+
+
 def test_single_market_capital_blocker_is_scoped_not_global(conn, monkeypatch):
     """One named-market cancel debt must not freeze unrelated auctions."""
     import src.execution.command_recovery as recovery

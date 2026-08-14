@@ -26522,8 +26522,10 @@ def _terminal_filled_exit_projection_blocker_count(
     }
     if not all(_table_exists(conn, table) for table in required):
         return 0
-    # SCOPE: one recent terminal FILLED EXIT/SELL command with authenticated
-    # positive fill truth but incomplete command-bound economic-close truth.
+    # SCOPE: one recent terminal FILLED full EXIT/SELL command with authenticated
+    # positive fill truth but incomplete command-bound economic-close truth. A
+    # completed partial capital reduction leaves a smaller live position and is
+    # not an economic-close projection obligation.
     # DRAIN: scheduled command recovery receives current-capital priority and
     # runs exit_pending_projections. RESET: economically_closed position truth,
     # EXIT_ORDER_FILLED, and a positive exit execution_fact all bind the command.
@@ -26545,6 +26547,42 @@ def _terminal_filled_exit_projection_blocker_count(
                    AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
                    AND CAST(COALESCE(fact.fill_price, '0') AS REAL) > 0
                    AND datetime(fact.observed_at) >= datetime('now', ?)
+           )
+           AND (
+                NOT EXISTS (
+                    SELECT 1
+                      FROM position_current known
+                     WHERE known.position_id = cmd.position_id
+                )
+                OR EXISTS (
+                    SELECT 1
+                      FROM position_current projection
+                     WHERE projection.position_id = cmd.position_id
+                       AND (
+                            projection.phase = 'economically_closed'
+                            OR (
+                                projection.phase IN (
+                                    'active', 'day0_window', 'pending_exit'
+                                )
+                                AND (
+                                    (
+                                        CAST(cmd.size AS REAL) =
+                                            CAST(projection.shares AS REAL)
+                                        AND CAST(cmd.size AS REAL) =
+                                            CAST(projection.chain_shares AS REAL)
+                                    )
+                                    OR (
+                                        LOWER(COALESCE(
+                                            projection.chain_state, ''
+                                        )) = 'chain_confirmed_zero'
+                                        AND CAST(COALESCE(
+                                            projection.chain_shares, '0'
+                                        ) AS REAL) = 0
+                                    )
+                                )
+                            )
+                       )
+                )
            )
            AND (
                 NOT EXISTS (
