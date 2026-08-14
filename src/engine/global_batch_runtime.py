@@ -6629,6 +6629,14 @@ def process_current_global_batch(
             if probe_inflight_buy_ambiguity(scope_trade_conn):
                 raise ValueError("CURRENT_WEALTH_INFLIGHT_BUY_AMBIGUOUS")
             held_families = _current_held_weather_families(scope_trade_conn)
+        held_family_keys = frozenset(
+            weather_family_id(
+                city=city,
+                target_date=target_date,
+                metric=metric,
+            )
+            for city, target_date, metric in held_families
+        )
         scope_at = current_time()
         proof_buy_candidates_enabled = (
             proof_candidate_policy_rejection_resolver is not None
@@ -6641,20 +6649,19 @@ def process_current_global_batch(
             return reject("GLOBAL_AUCTION_NO_REDUCE_ONLY_FAMILY")
         restricted_families = None
         if restrict_to_family_keys is not None:
-            held_family_keys = frozenset(
-                weather_family_id(
-                    city=city,
-                    target_date=target_date,
-                    metric=metric,
-                )
-                for city, target_date, metric in held_families
-            )
             if (
                 not buy_candidates_enabled
-                and held_family_keys != restrict_to_family_keys
+                and not restrict_to_family_keys.issubset(held_family_keys)
             ):
                 return reject("GLOBAL_AUCTION_RESTRICTED_CARRIER_MISSING")
-            carrier_families: set[tuple[str, str, str]] = set()
+            carrier_families: set[tuple[str, str, str]] = {
+                family
+                for family in held_families
+                if weather_family_id(
+                    city=family[0], target_date=family[1], metric=family[2]
+                )
+                in restrict_to_family_keys
+            }
             carrier_family_keys: set[str] = set()
             for event in event_tuple:
                 payload = payload_reader(event)
@@ -6712,7 +6719,11 @@ def process_current_global_batch(
                     held_families=held_families,
                     missing_held_families=missing_held_families,
                     restrict_to_families=(
-                        held_families
+                        (
+                            held_families
+                            if restrict_to_family_keys == held_family_keys
+                            else (restricted_families or held_families)
+                        )
                         if not buy_candidates_enabled
                         and not proof_buy_candidates_enabled
                         else (restricted_families or None)
@@ -6779,8 +6790,10 @@ def process_current_global_batch(
                 )
                 for city, target_date, metric in held_families
             )
-            decision_family_keys = current_restricted_family_keys.union(
-                held_family_keys
+            decision_family_keys = (
+                current_restricted_family_keys
+                if not buy_candidates_enabled and not proof_buy_candidates_enabled
+                else current_restricted_family_keys.union(held_family_keys)
             )
             decision_scope = current_global_auction_scope_from_events(
                 tuple(
@@ -6806,10 +6819,15 @@ def process_current_global_batch(
                 )
                 for city, target_date, metric in held_families
             )
+            reduce_only_family_keys = (
+                restrict_to_family_keys
+                if restrict_to_family_keys is not None
+                else held_family_keys
+            )
             reduce_only_events = tuple(
                 event
                 for family_key, event in full_scope.events_by_family
-                if family_key in held_family_keys
+                if family_key in reduce_only_family_keys
             )
             if not reduce_only_events:
                 return reject("GLOBAL_AUCTION_NO_REDUCE_ONLY_FAMILY")

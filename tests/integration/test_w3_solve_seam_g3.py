@@ -9113,6 +9113,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         completion_reserved=False,
         fairness_reserved=False,
         completion_sell_keys=frozenset(),
+        completion_requests=(),
     ):
         return era.event_bound_live_adapter_from_trade_conn(
             trade,
@@ -9127,6 +9128,7 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
             selection_completion_fairness_reserved=fairness_reserved,
             selection_completion_reserved=completion_reserved,
             selection_completion_sell_keys=completion_sell_keys,
+            held_sell_reauction_requests=completion_requests,
         )
 
     adapter = make_adapter()
@@ -9174,15 +9176,30 @@ def test_live_adapter_routes_each_global_truth_to_its_owner(monkeypatch, event_f
         _dt.datetime(2026, 7, 10, 8, 11, tzinfo=_dt.timezone.utc),
     )
     assert captured["buy_candidates_enabled"] is True
+    exact_request = SimpleNamespace(
+        schema_version=4,
+        position_id="position-nyc",
+        held_token_id="token-nyc",
+        family=("NYC", "2026-07-11", "high"),
+        completion_deadline_at="2026-07-10T08:12:30+00:00",
+    )
     reserved_adapter = make_adapter(
         completion_reserved=True,
         completion_sell_keys=frozenset({("position-nyc", "token-nyc")}),
+        completion_requests=(exact_request,),
     )
     reserved_adapter.process_global_batch(
         (event,),
         _dt.datetime(2026, 7, 10, 8, 12, tzinfo=_dt.timezone.utc),
     )
     assert captured["buy_candidates_enabled"] is False
+    assert captured["restrict_to_family_keys"] == frozenset(
+        {
+            era.weather_family_id(
+                city="NYC", target_date="2026-07-11", metric="high"
+            )
+        }
+    )
     exact_completion_policy = captured["candidate_policy_rejection_resolver"]
     assert exact_completion_policy(
         SimpleNamespace(
@@ -23967,27 +23984,40 @@ def test_global_batch_reduce_only_prefilters_scan_prepare_and_book_scope(
         buy_candidates_enabled=False,
         restrict_to_family_keys=held_family_keys,
     )
+    exact_request_family_keys = frozenset(
+        {family_by_event_id[held_events[0].event_id]}
+    )
+    reduce_only_exact_request = run(
+        events=(),
+        buy_candidates_enabled=False,
+        restrict_to_family_keys=exact_request_family_keys,
+    )
     buy_enabled = run(events=(held_events[0],), buy_candidates_enabled=True)
 
     assert reduce_only_partial_carrier.winner_event_id is None
     assert reduce_only_zero_carrier.winner_event_id is None
+    assert reduce_only_exact_request.winner_event_id is None
     assert buy_enabled.winner_event_id is None
     assert scan_seen == [
         (4, held_families),
         (4, held_families),
+        (1, frozenset({held_families[0]})),
         (142, None),
     ]
     assert prepared_seen == [
         held_family_keys,
         held_family_keys,
+        exact_request_family_keys,
         frozenset(all_scope.family_keys),
     ]
     assert book_seen == [
         held_family_keys,
         held_family_keys,
+        exact_request_family_keys,
         frozenset(all_scope.family_keys),
     ]
     assert candidate_policy_seen == [
+        ("GLOBAL_BUY_CANDIDATES_DISABLED", None),
         ("GLOBAL_BUY_CANDIDATES_DISABLED", None),
         ("GLOBAL_BUY_CANDIDATES_DISABLED", None),
         (None, None),

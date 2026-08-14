@@ -7066,6 +7066,44 @@ def event_bound_live_adapter_from_trade_conn(
         raise ValueError("GLOBAL_EXACT_HELD_COMPLETION_SCOPE_INVALID")
     if exact_completion_sell_keys and not selection_completion_reserved:
         raise ValueError("GLOBAL_EXACT_HELD_COMPLETION_SCOPE_UNRESERVED")
+    exact_completion_family_keys: frozenset[str] | None = None
+    if (
+        selection_completion_reserved
+        and exact_completion_sell_keys
+        and held_sell_reauction_requests
+    ):
+        request_sell_keys: set[tuple[str, str]] = set()
+        request_family_keys: set[str] = set()
+        for request in held_sell_reauction_requests:
+            position_id = str(getattr(request, "position_id", "") or "").strip()
+            token_id = str(getattr(request, "held_token_id", "") or "").strip()
+            raw_family = getattr(request, "family", ())
+            if (
+                int(getattr(request, "schema_version", 1) or 1) != 4
+                or not position_id
+                or not token_id
+                or not isinstance(raw_family, tuple)
+                or len(raw_family) != 3
+            ):
+                raise ValueError("GLOBAL_EXACT_HELD_COMPLETION_REQUEST_INVALID")
+            city, target_date, metric = (
+                str(raw_family[0] or "").strip(),
+                str(raw_family[1] or "").strip(),
+                str(raw_family[2] or "").strip().lower(),
+            )
+            if not city or not target_date or metric not in {"high", "low"}:
+                raise ValueError("GLOBAL_EXACT_HELD_COMPLETION_FAMILY_INVALID")
+            request_sell_keys.add((position_id, token_id))
+            request_family_keys.add(
+                weather_family_id(
+                    city=city,
+                    target_date=target_date,
+                    metric=metric,
+                )
+            )
+        if request_sell_keys != exact_completion_sell_keys:
+            raise ValueError("GLOBAL_EXACT_HELD_COMPLETION_REQUEST_SCOPE_MISMATCH")
+        exact_completion_family_keys = frozenset(request_family_keys)
     from src.runtime.reactor_wake import (
         reactor_urgent_wake_identity,
         reactor_urgent_wake_reason,
@@ -10492,11 +10530,11 @@ def event_bound_live_adapter_from_trade_conn(
                 selection_cancelled=_day0_selection_cancelled,
                 final_actuation_cancelled=_hard_day0_authority_cancelled,
                 held_sell_reauction_requests=held_sell_reauction_requests,
-                # Delta facts narrow refresh I/O, never the economic feasible set.
-                # Actual BUY remains disabled above during an entry pause, while
-                # the proof-only solve needs the complete universe to avoid a
-                # self-referential held-family sample.
-                restrict_to_family_keys=None,
+                # Ordinary proof-only entry evaluation remains global. An exact
+                # held-SELL completion instead owns only the requested actions:
+                # portfolio wealth still carries every holding, while unrelated
+                # speculative families cannot consume its bounded exit deadline.
+                restrict_to_family_keys=exact_completion_family_keys,
             )
             logging.getLogger(__name__).debug(
                 "global probability family cache: hits=%d ineligible_hits=%d "
