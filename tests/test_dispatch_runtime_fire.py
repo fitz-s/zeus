@@ -93,6 +93,11 @@ POSITIVE_ENFORCEMENT_TRIGGERS: dict[str, dict[str, Any]] = {
         "tool_name": "Bash",
         "tool_input": {"command": "gh pr comment 123 --body 'thanks for the fix'"},
     },
+    "raw_worktree_creation_guard": {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git worktree add /tmp/zeus-raw-tree blocked-topic"},
+    },
     "worktree_create_advisor": {
         "hook_event_name": "WorktreeCreate",
         "tool_input": {"path": "/tmp/synthetic-trigger", "branch": "synth"},
@@ -139,8 +144,12 @@ def _load_settings_dispatch_invocations() -> dict[str, list[tuple[str, str]]]:
                 cmd = h.get("command", "") or ""
                 if "dispatch.py" not in cmd:
                     continue
-                hook_id = cmd.split("dispatch.py")[-1].strip().split()[0]
-                result.setdefault(hook_id, []).append((event, matcher))
+                args = cmd.split("dispatch.py", 1)[1].strip().split()
+                if not args:
+                    continue
+                hook_ids = args[1:] if args[0] == "--multi" else args[:1]
+                for hook_id in hook_ids:
+                    result.setdefault(hook_id, []).append((event, matcher))
     return result
 
 
@@ -498,6 +507,50 @@ def test_f5_positive_enforcement_hooks_that_should_advise_do_advise():
         "Hooks silently returned None on payloads that SHOULD trigger their "
         "advisory (the 'forgot to fire' failure mode):\n" + "\n".join(failures)
     )
+
+
+def test_raw_worktree_creation_guard_blocks_zeus_but_not_read_or_closeout() -> None:
+    """Agents cannot create a Zeus tree through Bash, without blocking hygiene."""
+    create = _invoke_dispatch(
+        "raw_worktree_creation_guard",
+        {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "git worktree add /tmp/zeus-raw-tree blocked-topic"},
+        },
+    )
+    assert create.returncode == 2
+    assert "BLOCKED [raw_worktree_creation_guard]" in create.stderr
+
+    for command in ("git worktree list", "git worktree remove /tmp/zeus-raw-tree"):
+        result = _invoke_dispatch(
+            "raw_worktree_creation_guard",
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": command},
+            },
+        )
+        assert result.returncode == 0, f"{command}: {result.stderr}"
+
+
+def test_raw_worktree_creation_guard_allows_other_repositories(tmp_path: Path) -> None:
+    """The Zeus policy must not deny an unrelated repository's worktree command."""
+    subprocess.run(["git", "init", str(tmp_path)], check=True, capture_output=True, text=True)
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": f"git -C {tmp_path} worktree add {tmp_path}/child topic"},
+    }
+    result = subprocess.run(
+        ["python3", str(DISPATCH_PATH), "raw_worktree_creation_guard"],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        timeout=HOOK_TIMEOUT_SEC,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_e2e_real_dispatch_invocation_for_pretooluse_bash():

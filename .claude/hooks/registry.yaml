@@ -6,7 +6,7 @@
 schema_version: 1
 metadata:
   charter_version: 2.0.0
-  catalog_size: 21
+  catalog_size: 22
   sunset_default: 90d
 
 hooks:
@@ -66,6 +66,20 @@ hooks:
       - branch_mutating_git_in_main_tree
     severity: BLOCKING
     sunset_date: 2026-08-06
+    telemetry:
+      ritual_signal_emitted: true
+
+  - id: raw_worktree_creation_guard
+    event: PreToolUse
+    matcher: Bash
+    intent: >
+      BLOCK raw `git worktree add` when the command targets the Zeus Git
+      repository. Codex-managed task provisioning does not use this shell
+      command, while list/remove commands and other repositories remain allowed.
+    blocked_when:
+      - raw_git_worktree_add_in_zeus_repository
+    severity: BLOCKING
+    sunset_date: 2026-11-14
     telemetry:
       ritual_signal_emitted: true
 
@@ -197,7 +211,7 @@ hooks:
 
   - id: live_tree_write_guard
     event: PreToolUse
-    matcher: "Edit|Write|MultiEdit|NotebookEdit|apply_patch"
+    matcher: "Edit|Write|MultiEdit|NotebookEdit"
     intent: >
       BLOCK agent file writes whose target resolves inside the live main checkout
       (/Users/leofitz/zeus). Linked worktrees are explicitly allowed, including
@@ -208,6 +222,7 @@ hooks:
       - agent_write_targets_live_checkout
       - codex_apply_patch_target_unknown_from_live_checkout
     severity: BLOCKING
+    sunset_date: 2026-11-14
     telemetry:
       ritual_signal_emitted: true
     owner_module: .claude/hooks/dispatch.py

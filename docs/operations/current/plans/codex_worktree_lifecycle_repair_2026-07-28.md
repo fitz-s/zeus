@@ -35,9 +35,9 @@ Active, pinned, and permanent worktrees stay protected by Codex.
 
 ## Implementation
 
-- Remove unsupported `WorktreeCreate` and `WorktreeRemove` entries from the
-  project Codex hook configuration so the repository no longer claims a
-  lifecycle it cannot enforce.
+- Keep `WorktreeCreate` and `WorktreeRemove` protocol-safe and advisory-only;
+  raw `git worktree add` in the Claude/OMX Bash path is rejected before it can
+  create a Zeus native tree outside the host-managed lifecycle.
 - Make the existing manual hygiene/post-merge advisor compare against `live`,
   fail closed when PR status is unavailable, and give the same snapshot-aware
   closeout advice for Codex-managed paths.
@@ -60,6 +60,8 @@ Active, pinned, and permanent worktrees stay protected by Codex.
   checkout; its branch and any open PR remain available.
 - A new Codex-managed worktree cannot cause more than two completed,
   unpinned, non-permanent worktrees to be retained by the app.
+- An agent Bash command cannot create a Zeus worktree with raw `git worktree
+  add`, while inspection, native closeout, and other repositories remain usable.
 - Active, pinned, permanent, dirty, and open-PR work are never deleted by this
   repair.
 - The project hook file parses as JSON and contains no unsupported worktree

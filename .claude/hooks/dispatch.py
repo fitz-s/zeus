@@ -1670,6 +1670,59 @@ def _run_advisory_check_maintree_git_state_guard(
     return _BLOCK_SENTINEL
 
 
+def _run_advisory_check_raw_worktree_creation_guard(
+    payload: dict[str, Any],
+) -> str | None:
+    """BLOCK raw ``git worktree add`` for the Zeus repository.
+
+    Codex-managed task provisioning is host-owned and does not invoke a shell
+    ``git worktree add`` command.  This gate closes the separate Claude/OMX
+    Bash path that could manufacture native trees outside that lifecycle.
+    It deliberately permits inspection, closeout, and other repositories.
+    """
+    command = _command_from_payload(payload)
+    if not command:
+        return None
+
+    import re
+
+    seg = _git_subcmd_at_command_position(command, ("worktree",))
+    if not seg:
+        return None
+    git_opts = seg.group(1) or ""
+    worktree_args = seg.group(3) or ""
+    if not re.match(r"\s+add(?:\s|$)", worktree_args):
+        return None
+
+    c_match = re.search(r"-C\s+(\S+)", git_opts)
+    target_dir = Path(c_match.group(1).strip("'\"")).resolve() if c_match else Path.cwd().resolve()
+    try:
+        common = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=target_dir,
+        )
+        common_dir = Path(common.stdout.strip())
+        if not common_dir.is_absolute():
+            common_dir = (target_dir / common_dir).resolve()
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+    if common.returncode != 0 or common_dir != (_MAIN_TREE / ".git"):
+        return None
+
+    print(
+        "BLOCKED [raw_worktree_creation_guard]: agents must not run raw `git "
+        "worktree add` for Zeus. Use ordinary Codex-managed task provisioning; "
+        "it does not require an operator approval prompt. Exceptional manual "
+        "worktrees are operator-owned, not agent-created shell worktrees.",
+        file=sys.stderr,
+    )
+    return _BLOCK_SENTINEL
+
+
 # ---------------------------------------------------------------------------
 # Edge-claim guard — an UNSUPPORTED POSITIVE conclusion is worth a reminder,
 # not a suppressed null result (fixed 2026-07-28; replaces the deleted
@@ -1933,6 +1986,7 @@ _ADVISORY_HANDLERS: dict[str, Any] = {
     "secrets_scan": _run_advisory_check_secrets_scan,
     "cotenant_staging_guard": _run_advisory_check_cotenant_staging_guard,
     "maintree_git_state_guard": _run_advisory_check_maintree_git_state_guard,
+    "raw_worktree_creation_guard": _run_advisory_check_raw_worktree_creation_guard,
     "live_tree_write_guard": _run_advisory_check_live_tree_write_guard,
     "pre_checkout_uncommitted_overlap": _run_advisory_check_pre_checkout_uncommitted_overlap,
     "pr_create_loc_accumulation": _run_advisory_check_pr_create_loc_accumulation,
