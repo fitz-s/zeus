@@ -2484,7 +2484,7 @@ def test_global_buy_generation_omits_untyped_maker_sibling():
     )
 
 
-@pytest.mark.parametrize("bid_price", ("0.04", "0.05"))
+@pytest.mark.parametrize("bid_price", ("0.01", "0.04"))
 def test_global_taker_buy_requires_current_precliff_liquidation_depth(bid_price):
     candidate = _global_candidate(
         candidate_id="taker-born-unexitable",
@@ -2519,7 +2519,7 @@ def test_global_taker_buy_size_does_not_exceed_current_precliff_liquidation_dept
     candidate = replace(
         candidate,
         native_bid_levels=(
-            BookLevel(price=Decimal("0.05"), size=Decimal("100")),
+            BookLevel(price=Decimal("0.05"), size=Decimal("30")),
             BookLevel(price=Decimal("0.06"), size=Decimal("25")),
         ),
     )
@@ -2527,7 +2527,7 @@ def test_global_taker_buy_size_does_not_exceed_current_precliff_liquidation_dept
     decision = _global_select((candidate,), cap="5")
 
     assert decision.candidate is candidate
-    assert Decimal("20") <= decision.shares <= Decimal("25")
+    assert Decimal("20") <= decision.shares <= Decimal("55")
 
 
 def test_statistical_candidate_cannot_forge_exact_payoff_settlement_lock():
@@ -2542,7 +2542,7 @@ def test_statistical_candidate_cannot_forge_exact_payoff_settlement_lock():
     candidate = replace(
         candidate,
         native_bid_levels=(
-            BookLevel(price=Decimal("0.05"), size=Decimal("100")),
+            BookLevel(price=Decimal("0.04"), size=Decimal("100")),
         ),
         settlement_locked_exact_payoff=True,
     )
@@ -2636,7 +2636,7 @@ def test_exact_payoff_taker_can_lock_to_settlement_without_exit_depth(
     assert decision.expected_terminal_wealth.win_probability_mean == 1.0
 
 
-def test_current_precliff_capacity_counts_actionable_depth_above_floor():
+def test_current_precliff_capacity_counts_actionable_depth_from_inclusive_floor():
     levels = (
         BookLevel(price=Decimal("0.05"), size=Decimal("100")),
         BookLevel(price=Decimal("0.0501"), size=Decimal("2")),
@@ -2648,7 +2648,7 @@ def test_current_precliff_capacity_counts_actionable_depth_above_floor():
         SimpleNamespace(price=Decimal("NaN"), size=Decimal("100")),
     )
 
-    assert S.current_precliff_liquidation_capacity(levels) == Decimal("12")
+    assert S.current_precliff_liquidation_capacity(levels) == Decimal("112")
 
 
 def test_current_maker_buy_witness_can_win_on_exact_partial_distribution():

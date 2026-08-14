@@ -393,7 +393,7 @@ def current_precliff_liquidation_capacity(
             Decimal(level.size)
             for level in native_bid_levels
             if Decimal(level.price).is_finite()
-            and Decimal(level.price) > LIVE_ORDER_MIN_UNIT_PRICE
+            and Decimal(level.price) >= LIVE_ORDER_MIN_UNIT_PRICE
             and Decimal(level.price) <= Decimal("1")
             and Decimal(level.size).is_finite()
             and Decimal(level.size) > 0

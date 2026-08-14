@@ -15262,7 +15262,7 @@ def test_global_preflight_jit_rejects_buy_that_lost_precliff_liquidation_depth(
         resolution_identity="resolution-a",
         neg_risk=False,
         native_bid_levels=(
-            BookLevel(price=Decimal("0.05"), size=Decimal("100")),
+            BookLevel(price=Decimal("0.04"), size=Decimal("100")),
         ),
         **maker_terms,
     )
@@ -15301,7 +15301,7 @@ def test_global_preflight_jit_rejects_buy_that_lost_precliff_liquidation_depth(
         book_quote_provider=lambda token_id: {
             "asset_id": token_id,
             "hash": "jit-book-a",
-            "bids": [{"price": "0.05", "size": "100"}],
+            "bids": [{"price": "0.04", "size": "100"}],
             "asks": [{"price": "0.07", "size": "100"}],
         },
     )
@@ -15349,7 +15349,7 @@ def test_global_preflight_jit_rejects_untyped_exact_payoff_bypass(
         resolution_identity="resolution-a",
         neg_risk=False,
         native_bid_levels=(
-            BookLevel(price=Decimal("0.05"), size=Decimal("100")),
+            BookLevel(price=Decimal("0.04"), size=Decimal("100")),
         ),
         settlement_locked_exact_payoff=True,
     )
@@ -15389,7 +15389,7 @@ def test_global_preflight_jit_rejects_untyped_exact_payoff_bypass(
         book_quote_provider=lambda token_id: {
             "asset_id": token_id,
             "hash": "jit-book-a",
-            "bids": [{"price": "0.05", "size": "100"}],
+            "bids": [{"price": "0.04", "size": "100"}],
             "asks": [{"price": "0.80", "size": "100"}],
         },
     )
@@ -15477,7 +15477,7 @@ def test_global_preflight_jit_requires_typed_fresh_exact_payoff_bypass(
         executable_cost_curve=selected_curve,
         resolution_identity="resolution-a",
         neg_risk=False,
-        native_bid_levels=(BookLevel(price=Decimal("0.05"), size=Decimal("100")),),
+        native_bid_levels=(BookLevel(price=Decimal("0.04"), size=Decimal("100")),),
         settlement_locked_exact_payoff=True,
     )
     expected_terminal = ExpectedBuyTerminalWealthCertificate(
@@ -15525,7 +15525,7 @@ def test_global_preflight_jit_requires_typed_fresh_exact_payoff_bypass(
         book_quote_provider=lambda requested_token: {
             "asset_id": requested_token,
             "hash": "jit-book-a",
-            "bids": [{"price": "0.05", "size": "100"}],
+            "bids": [{"price": "0.04", "size": "100"}],
             "asks": [{"price": "0.80", "size": "100"}],
         },
         checked_at_utc=at + _dt.timedelta(seconds=witness_age_seconds),
@@ -15614,7 +15614,7 @@ def test_global_preflight_jit_rejects_rebound_resolution_forgery(
         executable_cost_curve=curve,
         resolution_identity="resolution-a",
         neg_risk=False,
-        native_bid_levels=(BookLevel(price=Decimal("0.05"), size=Decimal("100")),),
+        native_bid_levels=(BookLevel(price=Decimal("0.04"), size=Decimal("100")),),
         settlement_locked_exact_payoff=True,
     )
     rebound = replace(
@@ -15650,7 +15650,7 @@ def test_global_preflight_jit_rejects_rebound_resolution_forgery(
     )
     raw_book = {
         "asset_id": token_id,
-        "bids": [{"price": "0.05", "size": "100"}],
+        "bids": [{"price": "0.04", "size": "100"}],
         "asks": [{"price": "0.80", "size": "100"}],
     }
     authority = replace(
