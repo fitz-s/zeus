@@ -49,6 +49,50 @@ def test_gate_scans_arbitrary_executable_script(tmp_path: Path) -> None:
     assert any(item.startswith("scripts/new_runtime_tool.py:") for item in violations(tmp_path))
 
 
+def test_gate_can_scope_a_pr_to_changed_paths_without_hiding_new_violations(
+    tmp_path: Path,
+) -> None:
+    """A pre-existing violation cannot block unrelated work, but a new one cannot pass."""
+    baseline = tmp_path / "src" / "baseline.py"
+    changed = tmp_path / "src" / "changed.py"
+    baseline.parent.mkdir(parents=True)
+    baseline.write_text("mode = 'shadow_veto_only'\n", encoding="utf-8")
+    changed.write_text("value = 1\n", encoding="utf-8")
+
+    assert not violations(tmp_path, only_paths={Path("src/changed.py")})
+
+    changed.write_text("mode = 'shadow_veto_only'\n", encoding="utf-8")
+    assert any(
+        item.startswith("src/changed.py:")
+        for item in violations(tmp_path, only_paths={Path("src/changed.py")})
+    )
+
+
+def test_scoped_gate_follows_a_new_live_import_into_an_excluded_subtree(
+    tmp_path: Path,
+) -> None:
+    """A changed live import cannot resurrect a baseline alternate module."""
+    main = tmp_path / "src" / "main.py"
+    alternate = tmp_path / "docs" / "archive" / "alternate.py"
+    main.parent.mkdir(parents=True)
+    alternate.parent.mkdir(parents=True)
+    main.write_text("from docs.archive import alternate\n", encoding="utf-8")
+    alternate.write_text("mode = 'shadow_veto_only'\n", encoding="utf-8")
+
+    assert any(
+        item.startswith("docs/archive/alternate.py:")
+        for item in violations(tmp_path, only_paths={Path("src/main.py")})
+    )
+
+
+def test_scoped_gate_ignores_non_runtime_changed_paths(tmp_path: Path) -> None:
+    test_source = tmp_path / "tests" / "fixture.py"
+    test_source.parent.mkdir(parents=True)
+    test_source.write_text("mode = 'shadow_veto_only'\n", encoding="utf-8")
+
+    assert not violations(tmp_path, only_paths={Path("tests/fixture.py")})
+
+
 def test_gate_scans_history_named_live_module(tmp_path: Path) -> None:
     source = tmp_path / "src" / "history" / "bad.py"
     source.parent.mkdir(parents=True)

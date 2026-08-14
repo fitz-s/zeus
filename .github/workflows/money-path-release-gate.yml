@@ -23,6 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -41,7 +43,15 @@ jobs:
         run: python scripts/check_schema_fingerprint.py
 
       - name: Prove one live implementation
-        run: python scripts/check_single_live_semantics.py
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -n "$BASE_SHA" ] && [ "$BASE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            git cat-file -e "$BASE_SHA^{commit}"
+            python scripts/check_single_live_semantics.py --changed-since "$BASE_SHA"
+          else
+            python scripts/check_single_live_semantics.py
+          fi
 
       - name: Run executable money-path antibodies
         run: |

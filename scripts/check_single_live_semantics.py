@@ -9,6 +9,7 @@ import argparse
 import ast
 import plistlib
 import re
+import subprocess
 from pathlib import Path
 from xml.parsers.expat import ExpatError
 
@@ -121,11 +122,24 @@ _CONCEPT_TOKENS = (
 
 
 def violations(
-    root: Path = ROOT, *, include_external_symlinks: bool = True
+    root: Path = ROOT,
+    *,
+    include_external_symlinks: bool = True,
+    only_paths: set[Path] | None = None,
 ) -> list[str]:
     out: list[str] = []
-    paths = _scan_paths(root)
-    paths.update(_live_reachable_excluded_python_paths(root, paths))
+    if only_paths is None:
+        paths = _scan_paths(root)
+        paths.update(_live_reachable_excluded_python_paths(root, paths))
+    else:
+        paths = set()
+        for relative in only_paths:
+            if relative.is_absolute() or ".." in relative.parts:
+                continue
+            path = root / relative
+            if path.is_file() and _is_scanned_path(relative):
+                paths.add(path)
+        paths.update(_live_reachable_excluded_python_paths(root, paths))
     for path in paths:
         if not path.is_file():
             continue
@@ -195,6 +209,27 @@ def violations(
     return sorted(set(out))
 
 
+def changed_paths_since(base: str, root: Path = ROOT) -> set[Path]:
+    """Return files introduced or modified since ``base`` by merge-base diff.
+
+    PR admission must reject a newly introduced alternate runtime but must not
+    block unrelated work because the base already carries an independently
+    tracked violation.  The full-tree ``violations()`` audit remains available
+    for remediation and manual dispatch.
+    """
+    result = subprocess.run(
+        ["git", "diff", "--name-only", "--diff-filter=ACMR", f"{base}...HEAD"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "git diff failed"
+        raise RuntimeError(f"cannot establish single-live semantics base {base!r}: {detail}")
+    return {Path(line) for line in result.stdout.splitlines() if line.strip()}
+
+
 def _identifier_concept_violations(source: str) -> list[str]:
     try:
         tree = ast.parse(source)
@@ -254,6 +289,16 @@ def _scan_paths(root: Path) -> set[Path]:
                     paths.add(path)
     paths.update(root / name for name in SCAN_FILES)
     return paths
+
+
+def _is_scanned_path(rel: Path) -> bool:
+    """Whether a relative path is in the gate's executable/current-doc scope."""
+    if rel in SCAN_FILES or _is_excluded_subtree(rel):
+        return True
+    return any(
+        rel == Path(scan_root) or Path(scan_root) in rel.parents
+        for scan_root in SCAN_ROOTS
+    )
 
 
 def _is_excluded_subtree(rel: Path) -> bool:
@@ -991,8 +1036,18 @@ def _contains_live_alternate_concept(token: str, value: str) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.parse_args()
-    found = violations()
+    parser.add_argument(
+        "--changed-since",
+        metavar="BASE",
+        help="scan only files added or modified since BASE; fail closed if BASE is unavailable",
+    )
+    args = parser.parse_args()
+    try:
+        only_paths = changed_paths_since(args.changed_since) if args.changed_since else None
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        print(f"single-live semantics: {exc}")
+        return 2
+    found = violations(only_paths=only_paths)
     if found:
         print("\n".join(found))
         return 1

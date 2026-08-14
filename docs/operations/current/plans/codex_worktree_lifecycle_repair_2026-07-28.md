@@ -53,6 +53,11 @@ Active, pinned, and permanent worktrees stay protected by Codex.
 - Add a regression test that rejects reintroducing those unsupported hook events.
 - Remove automatic worktree-local sentinel writes and regression-test that the
   advisor uses `live`, never `origin/main`, as its branch baseline.
+- Scope the required single-live-semantics PR gate to files changed from the
+  GitHub base SHA. SCOPE is the PR/push delta; DRAIN is a separate full-tree
+  audit/remediation of base violations; RESET is the next base-relative change.
+  Missing base evidence fails closed rather than falling back to an unscoped
+  scan that blocks unrelated work.
 
 ## Acceptance
 
@@ -62,6 +67,8 @@ Active, pinned, and permanent worktrees stay protected by Codex.
   unpinned, non-permanent worktrees to be retained by the app.
 - An agent Bash command cannot create a Zeus worktree with raw `git worktree
   add`, while inspection, native closeout, and other repositories remain usable.
+- A pre-existing single-live violation cannot block an unrelated PR, while a
+  newly changed file containing that violation remains a required-check failure.
 - Active, pinned, permanent, dirty, and open-PR work are never deleted by this
   repair.
 - The project hook file parses as JSON and contains no unsupported worktree
