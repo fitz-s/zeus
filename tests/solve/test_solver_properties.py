@@ -1,6 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-13
-# Lifecycle: created=2026-07-03; last_reviewed=2026-08-13; last_reused=2026-08-13
+# Last reused/audited: 2026-08-14
+# Lifecycle: created=2026-07-03; last_reviewed=2026-08-14; last_reused=2026-08-14
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
 
