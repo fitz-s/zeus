@@ -1158,8 +1158,63 @@ def _stop_label(label: str) -> tuple[bool, str]:
         timeout=20.0,
     )
     if stop.returncode == 0:
+        if not _wait_for_launchctl_unloaded(label):
+            return False, f"FAILED stop {label}: service still loaded after bootout"
         return True, f"stopped {label}"
     return False, f"FAILED stop {label}: rc={stop.returncode} {stop.stderr.strip()}"
+
+
+def _run_restart_recovery_with_quiesced_prerequisites(
+    labels: list[str],
+    prerequisite_labels: list[str],
+    *,
+    expected_sha: str,
+) -> tuple[bool, str]:
+    """Give canonical restart recovery an exclusive writer interval.
+
+    Live prerequisites are recurring DB writers.  Merely stopping the order
+    daemon leaves recovery racing those sidecars for SQLite's single writer.
+    Quiesce the already-verified prerequisites, run recovery, then restore and
+    re-verify every sidecar before returning.  Restoration is unconditional:
+    recovery failure keeps trading stopped, not the source/data mesh.
+    """
+
+    details: list[str] = []
+    quiesced: list[str] = []
+    quiesce_ok = True
+    for label in prerequisite_labels:
+        ok, detail = _stop_label(label)
+        details.append(detail)
+        if ok:
+            quiesced.append(label)
+        else:
+            quiesce_ok = False
+            break
+
+    if quiesce_ok:
+        recovery_ok, recovery_detail = _run_restart_recovery_if_needed(labels)
+    else:
+        recovery_ok = False
+        recovery_detail = "live restart recovery not run: prerequisite quiesce failed"
+    details.append(recovery_detail)
+
+    restore_started_at = datetime.now(timezone.utc)
+    restore_ok = True
+    for label in quiesced:
+        ok, detail = _launch_or_restart_label(label)
+        details.append(detail)
+        if not ok:
+            restore_ok = False
+    if restore_ok:
+        identity_ok, identity_detail = _wait_for_prerequisite_code_identity(
+            quiesced,
+            expected_sha=expected_sha,
+            launched_after=restore_started_at,
+        )
+        details.append(identity_detail)
+        restore_ok = identity_ok
+
+    return recovery_ok and restore_ok, "\n".join(details)
 
 
 def _runtime_status_summary() -> dict:
@@ -1987,7 +2042,16 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
                 print(detail, file=sys.stderr)
                 return 1
 
-    recovery_ok, recovery_detail = _run_restart_recovery_if_needed(labels)
+    if includes_live_trading:
+        recovery_ok, recovery_detail = (
+            _run_restart_recovery_with_quiesced_prerequisites(
+                labels,
+                preflight_prerequisite_labels,
+                expected_sha=expected_live_sha,
+            )
+        )
+    else:
+        recovery_ok, recovery_detail = _run_restart_recovery_if_needed(labels)
     if not recovery_ok:
         print("REFUSING to restart — live restart recovery is not green:")
         print(recovery_detail)

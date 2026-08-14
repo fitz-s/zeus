@@ -4507,7 +4507,10 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
         ("prerequisite", preflight_prerequisites),
         ("stop", dl.LIVE_TRADING_LABEL),
         ("stop", heartbeat_supervisor),
+        *[("stop", label) for label in preflight_prerequisites],
         ("recovery", tuple(expanded_labels)),
+        *[("launch", label) for label in preflight_prerequisites],
+        ("prerequisite", preflight_prerequisites),
         ("preflight", tuple(expanded_labels)),
         ("launch", dl.LIVE_TRADING_LABEL),
         ("verify", "cccccccc"),
@@ -4556,11 +4559,19 @@ def test_deploy_live_projection_recovery_failure_leaves_daemons_stopped(monkeypa
     monkeypatch.setattr(dl, "_live_restart_exclusive_lock", contextlib.nullcontext)
 
     assert dl.main(["restart", "live-trading"]) == 1
-    assert stops == [dl.LIVE_TRADING_LABEL, dl.DAEMONS["venue-heartbeat"]]
-    assert launches == [
+    prerequisites = [
         label
         for label in dl.LIVE_TRADING_PREREQUISITE_LABELS
         if label != dl.DAEMONS["venue-heartbeat"]
+    ]
+    assert stops == [
+        dl.LIVE_TRADING_LABEL,
+        dl.DAEMONS["venue-heartbeat"],
+        *prerequisites,
+    ]
+    assert launches == [
+        *prerequisites,
+        *prerequisites,
     ]
 
 
@@ -5054,7 +5065,10 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
         ("prerequisite", preflight_prerequisites),
         ("stop", dl.LIVE_TRADING_LABEL),
         ("stop", heartbeat_supervisor),
+        *[("stop", label) for label in preflight_prerequisites],
         ("recovery", tuple(expanded_labels)),
+        *[("launch", label) for label in preflight_prerequisites],
+        ("prerequisite", preflight_prerequisites),
         ("preflight", tuple(expanded_labels)),
     ]
     err = capsys.readouterr().err
