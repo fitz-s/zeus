@@ -13184,10 +13184,12 @@ def test_polymarket_book_http_phases_are_clamped_to_remaining_budget(monkeypatch
     assert request_timeout.pool == pytest.approx(0.2)
 
 
-def test_held_book_worker_receives_only_ids_and_returns_public_books(monkeypatch):
+def test_held_book_worker_chunks_large_scope_within_one_deadline(monkeypatch):
     from src.data import polymarket_client as pm
 
     calls = []
+    clock = [0.0]
+    token_ids = [f"held-token-{index}" for index in range(35)]
 
     class ReadOnlyClient:
         def __init__(self, *, public_http_timeout, public_request_priority):
@@ -13203,7 +13205,11 @@ def test_held_book_worker_receives_only_ids_and_returns_public_books(monkeypatch
 
         def get_orderbook_snapshots(self, token_ids, *, timeout):
             calls.append(("books", list(token_ids), timeout))
-            return {token_ids[0]: {"asset_id": token_ids[0], "bids": [], "asks": []}}
+            clock[0] += 0.1
+            return {
+                token_id: {"asset_id": token_id, "bids": [], "asks": []}
+                for token_id in token_ids
+            }
 
     class Send:
         def __init__(self):
@@ -13216,23 +13222,23 @@ def test_held_book_worker_receives_only_ids_and_returns_public_books(monkeypatch
             return None
 
     monkeypatch.setattr(pm, "PolymarketClient", ReadOnlyClient)
+    monkeypatch.setattr(pm.time, "monotonic", lambda: clock[0])
     send = Send()
-    pm._held_orderbook_read_worker(send, ["held-token"], 0.5)
+    pm._held_orderbook_read_worker(send, token_ids, 1.0, 8)
 
-    assert calls == [
-        ("init", 0.5, 20),
-        ("books", ["held-token"], 0.5),
+    assert calls[0] == ("init", 1.0, 20)
+    book_calls = calls[1:]
+    assert [len(call[1]) for call in book_calls] == [8, 8, 8, 8, 3]
+    assert [call[2] for call in book_calls] == pytest.approx(
+        [1.0, 0.9, 0.8, 0.7, 0.6]
+    )
+    assert all(len(call[1]) <= pm._HELD_ORDERBOOK_CHUNK_SIZE for call in book_calls)
+    events = [json.loads(message) for message in send.messages]
+    assert [event["type"] for event in events] == [
+        *(event for _ in book_calls for event in ("chunk_started", "chunk_complete")),
+        "terminal",
     ]
-    assert json.loads(send.messages[0]) == {
-        "status": "ok",
-        "books": {
-            "held-token": {
-                "asset_id": "held-token",
-                "bids": [],
-                "asks": [],
-            }
-        },
-    }
+    assert events[-1] == {"type": "terminal", "terminal_reason": "complete"}
 
 
 def test_held_book_hard_deadline_terminates_and_reaps_hung_reader(monkeypatch):
@@ -13320,23 +13326,37 @@ def test_held_book_hard_deadline_never_extends_insufficient_budget(monkeypatch):
 def test_held_book_hard_deadline_accepts_only_requested_book_objects(monkeypatch):
     from src.data import polymarket_client as pm
 
-    payload = json.dumps(
-        {
-            "status": "ok",
-            "books": {
-                "held-token": {"asset_id": "held-token", "bids": [], "asks": []},
-                "unexpected-token": {"asset_id": "unexpected-token"},
-                "invalid-token": ["not", "a", "book"],
-            },
-        }
-    )
+    payloads = [
+        json.dumps(
+            {
+                "type": "chunk_started",
+                "token_ids": ["held-token", "invalid-token"],
+            }
+        ),
+        json.dumps(
+            {
+                "type": "chunk_complete",
+                "token_ids": ["held-token", "invalid-token"],
+                # Normal books without a server timestamp use the trusted
+                # parent receive clock and remain eligible for this cycle.
+                "books": {
+                    "held-token": {"asset_id": "held-token", "bids": [], "asks": []},
+                    "unexpected-token": {"asset_id": "unexpected-token"},
+                    "invalid-token": ["not", "a", "book"],
+                },
+            }
+        ),
+        json.dumps(
+            {"type": "terminal", "terminal_reason": "complete"}
+        ),
+    ]
 
     class Receive:
         def poll(self, _timeout):
-            return True
+            return bool(payloads)
 
         def recv(self):
-            return payload
+            return payloads.pop(0)
 
         def close(self):
             return None
@@ -13379,12 +13399,169 @@ def test_held_book_hard_deadline_accepts_only_requested_book_objects(monkeypatch
     )
     clob = pm.PolymarketClient(public_http_timeout=2.0)
 
-    assert clob.get_held_orderbook_snapshots_hard_deadline(
+    result = clob.get_held_orderbook_snapshots_hard_deadline(
         ["held-token", "invalid-token"],
         timeout_seconds=0.5,
-    ) == {
+    )
+    assert result == {
         "held-token": {"asset_id": "held-token", "bids": [], "asks": []}
     }
+    assert result.captured_at is not None
+    assert result.captured_at_by_token == {"held-token": result.captured_at}
+    assert result.terminal_reason == "invalid_book_progress"
+
+
+def test_held_book_partial_progress_survives_later_chunk_timeout(monkeypatch):
+    from src.data import polymarket_client as pm
+
+    payloads = [
+        {"type": "chunk_started", "token_ids": ["A"]},
+        {
+            "type": "chunk_complete",
+            "token_ids": ["A"],
+            "books": {"A": {"asset_id": "A", "bids": [], "asks": []}},
+        },
+        {"type": "chunk_started", "token_ids": ["B"]},
+        {
+            "type": "chunk_complete",
+            "token_ids": ["B"],
+            "books": {"B": {"asset_id": "B", "bids": [], "asks": []}},
+        },
+        {"type": "chunk_started", "token_ids": ["C"]},
+    ]
+
+    class Receive:
+        def poll(self, _timeout):
+            return bool(payloads)
+
+        def recv(self):
+            return json.dumps(payloads.pop(0))
+
+        def close(self):
+            return None
+
+    class Send:
+        def close(self):
+            return None
+
+    class Process:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.alive = False
+
+        def start(self):
+            self.alive = True
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.alive = False
+
+        def kill(self):
+            self.alive = False
+
+        def join(self, timeout=None):
+            return None
+
+    class Context:
+        def Pipe(self, *, duplex):
+            assert duplex is False
+            return Receive(), Send()
+
+        def Process(self, **kwargs):
+            self.process = Process(**kwargs)
+            return self.process
+
+    context = Context()
+    monkeypatch.setattr(pm.multiprocessing, "get_context", lambda _mode: context)
+
+    result = pm.PolymarketClient().get_held_orderbook_snapshots_hard_deadline(
+        ["A", "B", "C", "D"],
+        timeout_seconds=0.5,
+    )
+
+    assert set(result) == {"A", "B"}
+    assert result.attempted_token_ids == frozenset({"A", "B", "C"})
+    assert result.unattempted_token_ids == frozenset({"D"})
+    assert result.terminal_reason == "deadline_exceeded"
+    assert result.captured_at_by_token["A"] <= result.captured_at_by_token["B"]
+    assert result.captured_at == result.captured_at_by_token["A"]
+    assert context.process.kwargs["args"][3] == pm._HELD_ORDERBOOK_CHUNK_SIZE == 8
+
+
+def test_held_book_stale_server_timestamp_is_not_executable(monkeypatch):
+    from src.data import polymarket_client as pm
+
+    payloads = [
+        json.dumps({"type": "chunk_started", "token_ids": ["stale"]}),
+        json.dumps(
+            {
+                "type": "chunk_complete",
+                "token_ids": ["stale"],
+                "books": {
+                    "stale": {
+                        "asset_id": "stale",
+                        "timestamp": "1",
+                        "bids": [],
+                        "asks": [],
+                    }
+                },
+            }
+        ),
+        json.dumps({"type": "terminal", "terminal_reason": "complete"}),
+    ]
+
+    class Receive:
+        def poll(self, _timeout):
+            return bool(payloads)
+
+        def recv(self):
+            return payloads.pop(0)
+
+        def close(self):
+            return None
+
+    class End:
+        def close(self):
+            return None
+
+    class Process:
+        def __init__(self, **_kwargs):
+            return None
+
+        def start(self):
+            return None
+
+        def is_alive(self):
+            return False
+
+        def terminate(self):
+            pytest.fail("completed child must not be terminated")
+
+        def kill(self):
+            pytest.fail("completed child must not be killed")
+
+        def join(self, timeout=None):
+            return None
+
+    class Context:
+        def Pipe(self, *, duplex):
+            assert duplex is False
+            return Receive(), End()
+
+        def Process(self, **kwargs):
+            return Process(**kwargs)
+
+    monkeypatch.setattr(pm.multiprocessing, "get_context", lambda _mode: Context())
+    result = pm.PolymarketClient().get_held_orderbook_snapshots_hard_deadline(
+        ["stale"],
+        timeout_seconds=0.5,
+    )
+
+    assert result == {}
+    assert result.terminal_reason == "invalid_book_progress"
+    assert result.captured_at is None
 
 
 def test_monitoring_batch_transport_failure_recovers_one_without_singular_fanout(
@@ -13517,6 +13694,123 @@ def test_monitoring_batch_transport_failure_recovers_one_without_singular_fanout
     assert not recovered_summary.get(
         "held_monitor_orderbook_prefetch_transport_failed", False
     )
+
+
+def test_monitoring_partial_batch_fallback_targets_only_missing_token(monkeypatch):
+    """Completed chunks execute; the one bounded recovery belongs to the gap."""
+    from src.data.polymarket_client import (
+        HeldOrderbookReadResult,
+        PolymarketClient,
+    )
+    from src.engine import cycle_runtime, monitor_refresh
+
+    positions = [
+        _make_position(
+            trade_id=f"partial-progress-{token_id}",
+            token_id=token_id,
+            direction="buy_yes",
+            state="holding",
+            chain_state="synced",
+        )
+        for token_id in ("A", "C")
+    ]
+    books = {
+        token_id: {
+            "asset_id": token_id,
+            "bids": [{"price": "0.40", "size": "20"}],
+            "asks": [{"price": "0.42", "size": "20"}],
+        }
+        for token_id in ("A", "C")
+    }
+    calls: list[tuple[str, ...]] = []
+    captured_at = datetime.now(timezone.utc)
+    clob = PolymarketClient(public_http_timeout=2.0)
+
+    def bounded_books(token_ids, *, timeout_seconds):
+        assert timeout_seconds > 0.0
+        calls.append(tuple(token_ids))
+        if len(token_ids) > 1:
+            assert set(token_ids) == {"A", "C"}
+            return HeldOrderbookReadResult(
+                {"A": books["A"]},
+                attempted_token_ids=token_ids,
+                terminal_reason="deadline_exceeded",
+                captured_at=captured_at,
+                captured_at_by_token={"A": captured_at},
+            )
+        assert token_ids == ["C"]
+        return HeldOrderbookReadResult(
+            {"C": books["C"]},
+            attempted_token_ids=token_ids,
+            terminal_reason="complete",
+            captured_at=captured_at,
+            captured_at_by_token={"C": captured_at},
+        )
+
+    monkeypatch.setattr(
+        clob,
+        "get_held_orderbook_snapshots_hard_deadline",
+        bounded_books,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_held_position_monitor_primary_reservation",
+        lambda count, _budget: (count, 0.0),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_held_position_monitor_reservation_count",
+        lambda count: count,
+    )
+
+    refreshed: list[str] = []
+
+    def refresh(_conn, current_clob, position):
+        assert monitor_refresh.monitor_quote_refresh(
+            _conn,
+            current_clob,
+            position,
+        ) is not None
+        refreshed.append(position.token_id)
+        return _monitor_test_edge_context(position)
+
+    monkeypatch.setattr(monitor_refresh, "refresh_position", refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda self, _ctx: ExitDecision(False, "CI_OVERLAP_HOLD"),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: True,
+    )
+
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        clob,
+        _make_portfolio(*positions),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("partial_progress_missing_only"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=20.0,
+    )
+
+    assert calls == [("A", "C"), ("C",)]
+    assert refreshed == ["A", "C"]
+    assert summary["held_monitor_batch_failure_singular_recovered_position"] == (
+        "partial-progress-C"
+    )
+    assert summary["held_monitor_batch_failure_singular_recovered"] == 1
+    assert summary.get("held_monitor_positions_deferred_for_orderbook_gap", 0) == 0
 
 
 def test_monitoring_failed_singular_recovery_does_not_fan_out(monkeypatch):

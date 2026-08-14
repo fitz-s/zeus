@@ -27,7 +27,7 @@ import warnings
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional, TypedDict
 
 import httpx
 
@@ -37,6 +37,7 @@ from src.data.polymarket_request_governor import (
     polymarket_request_governor,
 )
 from src.contracts.executable_market_snapshot import (
+    FRESHNESS_WINDOW_DEFAULT,
     MarketSnapshotMismatchError,
     canonicalize_fee_details,
     fee_rate_fraction_from_details,
@@ -62,41 +63,127 @@ PRESUBMIT_JIT_CLOB_HTTP_LIMITS = httpx.Limits(max_keepalive_connections=4, max_c
 # value is the already-canonicalized details dict.
 _FEE_RATE_CACHE: dict[str, tuple[dict[str, Any], datetime]] = {}
 _FEE_RATE_TTL_SECONDS = 1800.0
+_HELD_ORDERBOOK_CHUNK_SIZE = 8
+
+
+class HeldOrderbookReadResult(dict[str, dict]):
+    """Partial held-book result that remains mapping-compatible for callers."""
+
+    attempted_token_ids: frozenset[str]
+    unattempted_token_ids: frozenset[str]
+    terminal_reason: str
+    captured_at: datetime | None
+    captured_at_by_token: dict[str, datetime]
+
+    def __init__(
+        self,
+        books: dict[str, dict],
+        *,
+        attempted_token_ids=(),
+        unattempted_token_ids=(),
+        terminal_reason: str,
+        captured_at: datetime | None,
+        captured_at_by_token: dict[str, datetime] | None = None,
+    ) -> None:
+        super().__init__(books)
+        self.attempted_token_ids = frozenset(
+            str(token_id) for token_id in attempted_token_ids
+        )
+        self.unattempted_token_ids = frozenset(
+            str(token_id) for token_id in unattempted_token_ids
+        )
+        self.terminal_reason = str(terminal_reason)
+        self.captured_at = captured_at
+        self.captured_at_by_token = dict(captured_at_by_token or {})
+
+
+class _HeldOrderbookChunkStarted(TypedDict):
+    type: Literal["chunk_started"]
+    token_ids: list[str]
+
+
+class _HeldOrderbookChunkComplete(TypedDict):
+    type: Literal["chunk_complete"]
+    token_ids: list[str]
+    books: dict[str, dict]
+
+
+class _HeldOrderbookTerminal(TypedDict):
+    type: Literal["terminal"]
+    terminal_reason: str
+
+
+def _send_held_orderbook_event(send_conn, event: dict[str, object]) -> None:
+    send_conn.send(json.dumps(event, separators=(",", ":")))
+
+
+def _parse_held_book_timestamp(value: object) -> datetime | None:
+    if value in (None, ""):
+        return None
+    try:
+        if isinstance(value, (int, float)) or str(value).strip().replace(
+            ".", "", 1
+        ).isdigit():
+            numeric = float(value)
+            if numeric > 10_000_000_000:
+                numeric /= 1_000.0
+            return datetime.fromtimestamp(numeric, tz=timezone.utc)
+        parsed = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except (OSError, OverflowError, TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 def _held_orderbook_read_worker(
     send_conn,
     token_ids: list[str],
     timeout_seconds: float,
+    chunk_size: int,
 ) -> None:
-    """Read only the supplied public books in a killable child process."""
+    """Read bounded public-book chunks and publish each completed chunk."""
 
     try:
+        deadline = time.monotonic() + float(timeout_seconds)
         with PolymarketClient(
             public_http_timeout=timeout_seconds,
             public_request_priority=RequestPriority.HELD_REDUCE_ONLY,
         ) as client:
-            books = client.get_orderbook_snapshots(
-                token_ids,
-                timeout=timeout_seconds,
-            )
-        send_conn.send(
-            json.dumps(
-                {"status": "ok", "books": books},
-                separators=(",", ":"),
-            )
-        )
+            for offset in range(0, len(token_ids), max(1, int(chunk_size))):
+                chunk = token_ids[offset : offset + max(1, int(chunk_size))]
+                started: _HeldOrderbookChunkStarted = {
+                    "type": "chunk_started",
+                    "token_ids": chunk,
+                }
+                _send_held_orderbook_event(send_conn, started)
+                remaining = deadline - time.monotonic()
+                if remaining < 0.01:
+                    terminal: _HeldOrderbookTerminal = {
+                        "type": "terminal",
+                        "terminal_reason": "deadline_exceeded",
+                    }
+                    _send_held_orderbook_event(send_conn, terminal)
+                    return
+                books = client.get_orderbook_snapshots(chunk, timeout=remaining)
+                complete: _HeldOrderbookChunkComplete = {
+                    "type": "chunk_complete",
+                    "token_ids": chunk,
+                    "books": books,
+                }
+                _send_held_orderbook_event(send_conn, complete)
+        terminal = {
+            "type": "terminal",
+            "terminal_reason": "complete",
+        }
+        _send_held_orderbook_event(send_conn, terminal)
     except BaseException as exc:  # noqa: BLE001 - process boundary reports failure.
         try:
-            send_conn.send(
-                json.dumps(
-                    {
-                        "status": "error",
-                        "error": f"{type(exc).__name__}: {exc}",
-                    },
-                    separators=(",", ":"),
-                )
-            )
+            terminal = {
+                "type": "terminal",
+                "terminal_reason": f"worker_error:{type(exc).__name__}:{exc}",
+            }
+            _send_held_orderbook_event(send_conn, terminal)
         except BaseException:
             pass
     finally:
@@ -780,7 +867,7 @@ class PolymarketClient:
         token_ids: list[str],
         *,
         timeout_seconds: float,
-    ) -> dict[str, dict]:
+    ) -> HeldOrderbookReadResult:
         """Isolate public held-book network reads in a terminable child.
 
         The child receives token IDs only, opens no DB, and has no submitted
@@ -805,13 +892,23 @@ class PolymarketClient:
             )
         )
         if not wanted:
-            return {}
+            return HeldOrderbookReadResult(
+                {},
+                terminal_reason="complete",
+                captured_at=None,
+            )
         timeout = float(timeout_seconds)
         if not math.isfinite(timeout) or timeout < 0.01:
             raise TimeoutError(
                 "held orderbook batch has insufficient remaining deadline"
             )
         deadline = time.monotonic() + timeout
+        books: dict[str, dict] = {}
+        attempted: set[str] = set()
+        captured_at_by_token: dict[str, datetime] = {}
+        terminal_reason = "deadline_exceeded"
+        invalid_book_progress = False
+        completed_chunks = 0
 
         def _remaining() -> float:
             return max(0.0, deadline - time.monotonic())
@@ -832,7 +929,7 @@ class PolymarketClient:
         receive_conn, send_conn = context.Pipe(duplex=False)
         process = context.Process(
             target=_held_orderbook_read_worker,
-            args=(send_conn, wanted, timeout),
+            args=(send_conn, wanted, timeout, _HELD_ORDERBOOK_CHUNK_SIZE),
             name="zeus-held-orderbook-read",
             daemon=True,
         )
@@ -840,36 +937,97 @@ class PolymarketClient:
             process.start()
             send_conn.close()
             cleanup_reserve = min(0.5, timeout / 4.0)
-            poll_budget = max(0.0, _remaining() - cleanup_reserve)
-            if poll_budget <= 0.0 or not receive_conn.poll(poll_budget):
-                _stop_and_reap(process)
-                raise TimeoutError(
-                    "held orderbook batch exceeded "
-                    f"{timeout:.2f}s child-read budget"
-                )
-            try:
-                message = json.loads(receive_conn.recv())
-            except (EOFError, TypeError, ValueError, json.JSONDecodeError) as exc:
-                raise RuntimeError(
-                    f"held orderbook worker returned no usable result: {exc}"
-                ) from exc
+            while True:
+                poll_budget = max(0.0, _remaining() - cleanup_reserve)
+                if poll_budget <= 0.0 or not receive_conn.poll(poll_budget):
+                    terminal_reason = "deadline_exceeded"
+                    break
+                try:
+                    message = json.loads(receive_conn.recv())
+                except (EOFError, TypeError, ValueError, json.JSONDecodeError):
+                    terminal_reason = "invalid_ipc"
+                    break
+                if not isinstance(message, dict):
+                    terminal_reason = "invalid_ipc"
+                    break
+                event_type = message.get("type")
+                event_tokens = [
+                    token_id
+                    for value in message.get("token_ids", ())
+                    if (token_id := str(value).strip()) in wanted
+                ]
+                if event_type == "chunk_started":
+                    if not event_tokens:
+                        terminal_reason = "invalid_ipc"
+                        break
+                    attempted.update(event_tokens)
+                    continue
+                if event_type == "chunk_complete":
+                    progress_at = datetime.now(timezone.utc)
+                    completed_chunks += 1
+                    attempted.update(event_tokens)
+                    raw_books = message.get("books")
+                    if not isinstance(raw_books, dict):
+                        terminal_reason = "invalid_ipc"
+                        break
+                    for raw_token_id, raw_book in raw_books.items():
+                        token_id = str(raw_token_id).strip()
+                        if token_id not in event_tokens or not isinstance(raw_book, dict):
+                            invalid_book_progress = True
+                            continue
+                        asset_id = str(
+                            raw_book.get("asset_id")
+                            or raw_book.get("assetId")
+                            or raw_book.get("token_id")
+                            or ""
+                        ).strip()
+                        raw_source_at = raw_book.get("timestamp")
+                        source_at = _parse_held_book_timestamp(raw_source_at)
+                        if asset_id != token_id:
+                            invalid_book_progress = True
+                            continue
+                        if raw_source_at not in (None, "") and (
+                            source_at is None
+                            or source_at > progress_at
+                            or progress_at - source_at > FRESHNESS_WINDOW_DEFAULT
+                        ):
+                            invalid_book_progress = True
+                            continue
+                        books[token_id] = raw_book
+                        captured_at_by_token[token_id] = progress_at
+                    continue
+                if event_type == "terminal":
+                    terminal_reason = str(
+                        message.get("terminal_reason") or "invalid_terminal"
+                    )
+                    break
+                terminal_reason = "invalid_ipc"
+                break
             process.join(timeout=min(0.25, _remaining()))
             _stop_and_reap(process)
-            if not isinstance(message, dict) or message.get("status") != "ok":
-                detail = (
-                    message.get("error")
-                    if isinstance(message, dict)
-                    else "invalid result"
+            if terminal_reason == "complete" and invalid_book_progress:
+                terminal_reason = "invalid_book_progress"
+            if not books and completed_chunks == 0:
+                if terminal_reason == "deadline_exceeded":
+                    raise TimeoutError(
+                        "held orderbook batch exceeded "
+                        f"{timeout:.2f}s child-read budget"
+                    )
+                raise RuntimeError(
+                    f"held orderbook worker failed: {terminal_reason}"
                 )
-                raise RuntimeError(f"held orderbook worker failed: {detail}")
-            books = message.get("books")
-            if not isinstance(books, dict):
-                raise RuntimeError("held orderbook worker returned non-object books")
-            return {
-                str(token_id): book
-                for token_id, book in books.items()
-                if str(token_id) in wanted and isinstance(book, dict)
-            }
+            return HeldOrderbookReadResult(
+                books,
+                attempted_token_ids=attempted,
+                unattempted_token_ids=set(wanted) - attempted,
+                terminal_reason=terminal_reason,
+                captured_at=(
+                    min(captured_at_by_token.values())
+                    if captured_at_by_token
+                    else None
+                ),
+                captured_at_by_token=captured_at_by_token,
+            )
         finally:
             receive_conn.close()
             try:

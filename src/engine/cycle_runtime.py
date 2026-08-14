@@ -5064,14 +5064,22 @@ def _prefetch_held_monitor_orderbooks(
         )
         return frozenset(missing_token_ids if installed else token_ids)
     batch_transport_failed = False
+    network_attempted_token_ids = set(missing_token_ids)
+    network_unattempted_token_ids: set[str] = set()
+    network_terminal_reason = "complete"
+    network_captured_at: datetime | None = None
+    typed_network_result = False
+    from src.data.polymarket_client import (
+        HeldOrderbookReadResult,
+        PolymarketClient,
+    )
+
     try:
         if deadline_monotonic is not None:
             remaining = float(deadline_monotonic) - time.monotonic()
             if remaining <= 0.0:
                 raise TimeoutError("held monitor orderbook deadline elapsed")
-            from src.data.polymarket_client import PolymarketClient
-
-            network_books = (
+            network_result = (
                 clob.get_held_orderbook_snapshots_hard_deadline(
                     missing_token_ids,
                     timeout_seconds=remaining,
@@ -5079,10 +5087,41 @@ def _prefetch_held_monitor_orderbooks(
                 if isinstance(clob, PolymarketClient)
                 else getter(missing_token_ids)
             )
+            # A prior bounded singular read may have populated this cycle's
+            # cache while the shared batch was being scheduled. Preserve it.
+            if isinstance(network_result, dict):
+                for token_id in missing_token_ids:
+                    if token_id in network_result:
+                        continue
+                    cached = prefetched_monitor_orderbook(clob, token_id)
+                    if cached is not None:
+                        network_result[token_id] = cached
         else:
-            network_books = getter(missing_token_ids)
+            network_result = getter(missing_token_ids)
+        if isinstance(network_result, HeldOrderbookReadResult):
+            typed_network_result = True
+            network_books = dict(network_result)
+            network_attempted_token_ids = set(network_result.attempted_token_ids)
+            network_unattempted_token_ids = set(
+                network_result.unattempted_token_ids
+            )
+            network_terminal_reason = network_result.terminal_reason
+            network_captured_at = network_result.captured_at
+            if network_terminal_reason != "complete":
+                batch_transport_failed = True
+                summary["held_monitor_orderbook_prefetch_error"] = (
+                    network_terminal_reason
+                )[:500]
+                deps.logger.warning(
+                    "held monitor bounded orderbook prefetch ended with %s; "
+                    "installing completed chunks and deferring only gaps",
+                    network_terminal_reason,
+                )
+        else:
+            network_books = network_result
     except Exception as exc:  # noqa: BLE001 - one failed batch must not fan out.
         batch_transport_failed = True
+        network_terminal_reason = f"batch_error:{type(exc).__name__}"
         summary["held_monitor_orderbook_prefetch_error"] = str(exc)[:500]
         network_books = {}
         deps.logger.warning(
@@ -5093,6 +5132,8 @@ def _prefetch_held_monitor_orderbooks(
     else:
         if not isinstance(network_books, dict):
             exc = TypeError("batch orderbook response must be a mapping")
+            batch_transport_failed = True
+            network_terminal_reason = "invalid_batch_response"
             summary["held_monitor_orderbook_prefetch_error"] = str(exc)[:500]
             network_books = {}
             deps.logger.warning(
@@ -5103,9 +5144,38 @@ def _prefetch_held_monitor_orderbooks(
     summary["held_monitor_orderbook_prefetch_transport_failed"] = (
         batch_transport_failed
     )
+    network_deferred_token_ids = (
+        set(missing_token_ids) - set(network_books)
+        if typed_network_result or batch_transport_failed
+        else set()
+    )
+    summary["held_monitor_orderbook_prefetch_partial_progress"] = bool(
+        typed_network_result
+        and network_books
+        and network_terminal_reason != "complete"
+    )
+    summary["held_monitor_orderbook_prefetch_attempted_token_ids"] = [
+        token_id
+        for token_id in missing_token_ids
+        if token_id in network_attempted_token_ids
+    ]
+    summary["held_monitor_orderbook_prefetch_unattempted_token_ids"] = [
+        token_id
+        for token_id in missing_token_ids
+        if token_id in network_unattempted_token_ids
+    ]
+    summary["held_monitor_orderbook_prefetch_deferred_token_ids"] = [
+        token_id
+        for token_id in missing_token_ids
+        if token_id in network_deferred_token_ids
+    ]
+    summary["held_monitor_orderbook_prefetch_terminal_reason"] = (
+        network_terminal_reason
+    )
     books = {**local_books, **network_books}
     publish_books = {**fresh_local_books, **network_books}
-    network_captured_at = datetime.now(timezone.utc) if network_books else None
+    if network_books and network_captured_at is None:
+        network_captured_at = datetime.now(timezone.utc)
     publish_capture_times = [*local_capture_times]
     if network_captured_at is not None:
         publish_capture_times.append(network_captured_at)
@@ -5120,12 +5190,12 @@ def _prefetch_held_monitor_orderbooks(
     installed = install_monitor_orderbook_prefetch(
         clob,
         books,
-        attempted_token_ids=existing_attempted | set(missing_token_ids),
+        attempted_token_ids=existing_attempted | network_attempted_token_ids,
         merge=preserve_existing,
     )
     summary["held_monitor_orderbook_prefetch_installed"] = installed
     summary["held_monitor_orderbooks_prefetched"] = len(books) if installed else 0
-    return frozenset(missing_token_ids if installed else token_ids)
+    return frozenset(network_deferred_token_ids if installed else token_ids)
 
 
 def _mark_held_monitor_orderbook_attempted(
@@ -7359,6 +7429,8 @@ def execute_monitoring_phase(
     network_prefetch_unavailable = False
     network_prefetch_batch_transport_failed = False
     network_prefetch_batch_failed = False
+    network_prefetch_partial_progress = False
+    network_prefetch_deferred_token_ids: set[str] = set()
     network_prefetch_singular_fallback_attempted = False
     network_prefetch_singular_fallback_position_id = None
     durable_debt_network_attempted = False
@@ -7808,7 +7880,32 @@ def execute_monitoring_phase(
             # turn into an unbounded gap: refresh_position retains its own
             # current/fresh single-token deadline path.
             network_book_tokens = frozenset()
+        if (
+            network_prefetch_batch_failed
+            and not network_prefetch_partial_progress
+            and network_prefetch_singular_fallback_attempted
+            and network_prefetch_singular_fallback_position_id != id(pos)
+        ):
+            summary["held_monitor_positions_deferred_for_orderbook_gap"] = (
+                summary.get("held_monitor_positions_deferred_for_orderbook_gap", 0)
+                + 1
+            )
+            continue
         if held_token_id in network_book_tokens and not local_dead_bin_deadline_rescue:
+            if network_prefetch_started:
+                if network_prefetch_partial_progress or network_prefetch_batch_failed:
+                    network_prefetch_unavailable = (
+                        held_token_id in network_prefetch_deferred_token_ids
+                    )
+                if network_prefetch_singular_fallback_position_id == id(pos):
+                    network_prefetch_unavailable = False
+                if (
+                    network_prefetch_batch_failed
+                    and not network_prefetch_partial_progress
+                ):
+                    network_prefetch_unavailable = (
+                        network_prefetch_singular_fallback_position_id != id(pos)
+                    )
             if network_prefetch_unavailable:
                 summary["held_monitor_positions_deferred_for_orderbook_gap"] = (
                     summary.get(
@@ -7865,6 +7962,21 @@ def execute_monitoring_phase(
                     preserve_existing=True,
                     deadline_monotonic=auxiliary_deadline,
                 )
+                network_prefetch_deferred_token_ids = set(
+                    network_prefetch.get(
+                        "held_monitor_orderbook_prefetch_deferred_token_ids",
+                        (),
+                    )
+                )
+                network_prefetch_partial_progress = bool(
+                    network_prefetch.get(
+                        "held_monitor_orderbook_prefetch_partial_progress",
+                        False,
+                    )
+                )
+                network_prefetch_unavailable = (
+                    held_token_id in network_prefetch_deferred_token_ids
+                )
                 network_prefetch_deadline_exhausted = (
                     time.monotonic() >= auxiliary_deadline
                 )
@@ -7891,7 +8003,11 @@ def execute_monitoring_phase(
                         summary[
                             "held_monitor_orderbook_prefetch_transport_failed"
                         ] = True
-                    network_prefetch_unavailable = True
+                    network_prefetch_unavailable = (
+                        held_token_id in network_prefetch_deferred_token_ids
+                        if network_prefetch_partial_progress
+                        else True
+                    )
                     summary["held_monitor_orderbook_prefetch_defer_reason"] = (
                         "ORDERBOOK_BATCH_UNAVAILABLE"
                     )
@@ -7934,66 +8050,97 @@ def execute_monitoring_phase(
                             "MONITOR_DEADLINE_EXPIRED_DURING_BATCH_PREFETCH"
                         )
                         break
-                if network_prefetch_unavailable:
-                    if (
-                        network_prefetch_batch_failed
-                        and not network_prefetch_singular_fallback_attempted
-                        and held_token_id
-                        and time.monotonic() < monitor_deadline
-                    ):
-                        # A failed shared batch is not evidence that this held token
-                        # lacks a current book.  Spend at most one already-bounded
-                        # singular read so one transport failure cannot blind the
-                        # whole held book, while retaining anti-storm deferral for
-                        # every other gap until the next fair monitor pass.
-                        previous_deadline = getattr(
-                            pos,
-                            _HELD_MONITOR_DEADLINE_ATTR,
-                            None,
+                if (
+                    network_prefetch_batch_failed
+                    and not network_prefetch_singular_fallback_attempted
+                    and network_prefetch_deferred_token_ids
+                    and time.monotonic() < monitor_deadline
+                ):
+                    # Recover only the first actual gap. Completed chunk books
+                    # remain installed and never consume the one singular retry.
+                    fallback_pos = (
+                        next(
+                            position
+                            for position in network_positions
+                            if _position_held_token_id(position)
+                            in network_prefetch_deferred_token_ids
                         )
-                        network_prefetch_singular_fallback_attempted = True
-                        if admitted_statistical_position:
-                            # The failed shared batch owns its auxiliary clock;
-                            # it cannot arrive with an already-expired child
-                            # deadline and thereby suppress the bounded
-                            # singular quote recovery of an admitted q tranche.
-                            position_deadline = min(
-                                monitor_deadline,
-                                time.monotonic()
-                                + HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
-                            )
-                        setattr(pos, _HELD_MONITOR_DEADLINE_ATTR, position_deadline)
-                        try:
-                            fallback_quote = monitor_quote_refresh(
-                                conn,
-                                clob,
-                                pos,
-                                retry_after_prefetch=True,
-                            )
-                        finally:
-                            if previous_deadline is None:
-                                try:
-                                    delattr(pos, _HELD_MONITOR_DEADLINE_ATTR)
-                                except AttributeError:
-                                    pass
-                            else:
-                                setattr(
-                                    pos,
+                        if network_prefetch_partial_progress
+                        else pos
+                    )
+                    fallback_token_id = _position_held_token_id(fallback_pos)
+                    previous_deadline = getattr(
+                        fallback_pos,
+                        _HELD_MONITOR_DEADLINE_ATTR,
+                        None,
+                    )
+                    network_prefetch_singular_fallback_attempted = True
+                    fallback_deadline = position_deadline
+                    if id(fallback_pos) in selected_coverage_position_ids:
+                        fallback_deadline = min(
+                            monitor_deadline,
+                            time.monotonic()
+                            + HELD_MONITOR_PRIMARY_BELIEF_READ_MAX_SECONDS,
+                        )
+                    setattr(
+                        fallback_pos,
+                        _HELD_MONITOR_DEADLINE_ATTR,
+                        fallback_deadline,
+                    )
+                    try:
+                        fallback_quote = monitor_quote_refresh(
+                            conn,
+                            clob,
+                            fallback_pos,
+                            retry_after_prefetch=True,
+                        )
+                    finally:
+                        if previous_deadline is None:
+                            try:
+                                delattr(
+                                    fallback_pos,
                                     _HELD_MONITOR_DEADLINE_ATTR,
-                                    previous_deadline,
                                 )
-                        if fallback_quote is not None:
-                            network_prefetch_singular_fallback_position_id = id(pos)
-                            summary[
-                                "held_monitor_batch_failure_singular_recovered_position"
-                            ] = str(getattr(pos, "trade_id", "") or "")
-                            summary[
-                                "held_monitor_batch_failure_singular_recovered"
-                            ] = 1
+                            except AttributeError:
+                                pass
                         else:
-                            summary[
-                                "held_monitor_batch_failure_singular_unavailable"
-                            ] = 1
+                            setattr(
+                                fallback_pos,
+                                _HELD_MONITOR_DEADLINE_ATTR,
+                                previous_deadline,
+                            )
+                    if fallback_quote is not None:
+                        network_prefetch_deferred_token_ids.discard(
+                            fallback_token_id
+                        )
+                        if network_prefetch_partial_progress:
+                            network_prefetch_unavailable = (
+                                held_token_id
+                                in network_prefetch_deferred_token_ids
+                            )
+                        network_prefetch_singular_fallback_position_id = id(
+                            fallback_pos
+                        )
+                        summary[
+                            "held_monitor_batch_failure_singular_recovered_position"
+                        ] = str(getattr(fallback_pos, "trade_id", "") or "")
+                        summary[
+                            "held_monitor_batch_failure_singular_recovered"
+                        ] = 1
+                    else:
+                        summary[
+                            "held_monitor_batch_failure_singular_unavailable"
+                        ] = 1
+                    network_prefetch_unavailable = (
+                        held_token_id in network_prefetch_deferred_token_ids
+                    )
+                if (
+                    network_prefetch_batch_failed
+                    and not network_prefetch_partial_progress
+                    and durable_debt_network_attempted
+                ):
+                    network_prefetch_unavailable = True
+                if network_prefetch_unavailable:
                     if network_prefetch_singular_fallback_position_id != id(pos):
                         summary["held_monitor_positions_deferred_for_orderbook_gap"] = (
                             summary.get(
