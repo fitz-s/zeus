@@ -215,6 +215,40 @@ def _capital_recovery_db_budget_seconds() -> float:
     return min(value, 5.0)
 
 
+def _recorded_exit_fill_projection_candidates(conn: sqlite3.Connection) -> bool:
+    """Return whether durable confirmed SELL truth still has an open projection."""
+
+    required = ("venue_trade_facts", "venue_commands", "position_current")
+    if not all(_table_exists(conn, table) for table in required):
+        return False
+    return conn.execute(
+        """
+        SELECT 1
+          FROM venue_trade_facts fact
+          JOIN venue_commands command
+            ON command.command_id = fact.command_id
+          JOIN position_current position
+            ON position.position_id = command.position_id
+         WHERE UPPER(COALESCE(fact.state, '')) = 'CONFIRMED'
+           AND CAST(COALESCE(fact.filled_size, '0') AS REAL) > 0
+           AND UPPER(COALESCE(command.intent_kind, '')) = 'EXIT'
+           AND UPPER(COALESCE(command.side, '')) = 'SELL'
+           AND position.phase IN ('active', 'day0_window', 'pending_exit')
+           AND (
+                (
+                    CAST(command.size AS REAL) = CAST(position.shares AS REAL)
+                    AND CAST(command.size AS REAL) = CAST(position.chain_shares AS REAL)
+                )
+                OR (
+                    LOWER(COALESCE(position.chain_state, '')) = 'chain_confirmed_zero'
+                    AND CAST(COALESCE(position.chain_shares, '0') AS REAL) = 0
+                )
+           )
+         LIMIT 1
+        """
+    ).fetchone() is not None
+
+
 def _identity_bound_rotation_slot() -> int:
     """Return a crash-stable wall-clock slot for bounded candidate rotation."""
 
@@ -27535,6 +27569,9 @@ def _reconcile_passes_short_conn(
             identity_submit_candidates, identity_submit_deferred = (
                 _identity_bound_submitting_candidates(conn)
             )
+            exit_fill_projection_open = _recorded_exit_fill_projection_candidates(
+                conn
+            )
             cancel_candidates = _capital_blocking_cancel_commands(conn)
             terminal_candidates = _terminal_point_order_candidates(conn)
             terminal_fact_candidates = _latest_terminal_order_fact_candidates(conn)
@@ -27594,6 +27631,36 @@ def _reconcile_passes_short_conn(
                     obligation_states,
                 ).fetchone()
             )
+        exit_fill_result = None
+        if exit_fill_projection_open:
+            # A confirmed EXIT fill is already executable capital truth.
+            # Project it before the cumulative maintenance budget starts:
+            # otherwise an older broad repair can consume every live tick and
+            # leave a sold position falsely exposed indefinitely.
+            exit_fill_deadline = _capital_deadline()
+            exit_fill_conn_factory = _capital_apply_conn_factory(
+                exit_fill_deadline
+            )
+            exit_fill_result = _run_capital_pass(
+                "recorded_exit_fill_projection_fast",
+                lambda: run_db_only_pass(
+                    lambda conn: _exchange_reconcile.reconcile_recorded_exit_fill_projections(
+                        conn,
+                        observed_at=started_at,
+                    ),
+                    conn_factory=exit_fill_conn_factory,
+                    label="recovery.recorded_exit_fill_projection_fast",
+                ),
+                deadline_monotonic=exit_fill_deadline,
+            )
+            if exit_fill_result is not None:
+                _accumulate(
+                    summary,
+                    "recorded_exit_fill_projection_fast",
+                    exit_fill_result,
+                    advanced_key="projected",
+                    fold_stayed=False,
+                )
         preexisting_terminal_result = None
         if terminal_fact_candidates:
             # User/REST ingest can persist VENUE_WIPED before this sweep reads
@@ -27757,14 +27824,16 @@ def _reconcile_passes_short_conn(
             # Do not let unrelated cancel/terminal candidates re-enter the
             # account-wide snapshot or historical point sweep after it.
             return (
-                preexisting_terminal_result
+                exit_fill_result
+                or preexisting_terminal_result
                 or identity_result
                 or terminal_late_fill_result
                 or preexisting_obligation_result
             )
         if not cancel_candidates and not terminal_candidates and not partial_candidates:
             return (
-                preexisting_terminal_result
+                exit_fill_result
+                or preexisting_terminal_result
                 or stale_terminal_finding_result
                 or terminal_late_fill_result
                 or preexisting_obligation_result
@@ -27911,7 +27980,8 @@ def _reconcile_passes_short_conn(
                     terminal_result,
                 )
         return (
-            preexisting_terminal_result
+            exit_fill_result
+            or preexisting_terminal_result
             or stale_terminal_finding_result
             or terminal_late_fill_result
             or preexisting_obligation_result

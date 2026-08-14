@@ -1910,6 +1910,92 @@ def test_live_tick_db_budget_defers_remaining_passes(monkeypatch):
     }
 
 
+def test_live_tick_projects_confirmed_exit_before_general_budget_defer(monkeypatch):
+    from src.execution import command_recovery
+    from src.execution import venue_sync_contract
+
+    calls = []
+    now = [0.0]
+
+    def _conn_factory():
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _project_exit(_conn, **_kwargs):
+        calls.append("recorded_exit_fill_projection_fast")
+        return {"scanned": 1, "projected": 1, "stayed": 0, "errors": 0}
+
+    def _later_maintenance(_conn):
+        calls.append("review_required_matched_submit_trade_fact")
+        now[0] = 1.0
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(venue_sync_contract, "default_trade_conn_factory", _conn_factory)
+    monkeypatch.setattr(command_recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        command_recovery,
+        "_recorded_exit_fill_projection_candidates",
+        lambda _conn: True,
+    )
+    monkeypatch.setattr(
+        command_recovery._exchange_reconcile,
+        "reconcile_recorded_exit_fill_projections",
+        _project_exit,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "reconcile_review_required_matched_submit_trade_facts",
+        _later_maintenance,
+    )
+
+    summary = {"scanned": 0, "advanced": 0, "stayed": 0, "errors": 0}
+    command_recovery._reconcile_passes_short_conn(
+        MagicMock(),
+        summary,
+        "2026-08-14T14:30:54+00:00",
+        scope="live_tick",
+    )
+
+    assert calls == [
+        "recorded_exit_fill_projection_fast",
+        "review_required_matched_submit_trade_fact",
+    ]
+    assert summary["recorded_exit_fill_projection_fast"]["projected"] == 1
+    assert summary["db_budget_deferred"] is True
+    assert summary["db_budget_deferred_at"] == "review_required_matched_submit_trade_fact"
+
+
+def test_recorded_exit_projection_candidate_excludes_completed_partial_reduction():
+    from src.execution import command_recovery
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(
+        """
+        CREATE TABLE venue_trade_facts (
+            command_id TEXT, state TEXT, filled_size TEXT
+        );
+        CREATE TABLE venue_commands (
+            command_id TEXT, position_id TEXT, intent_kind TEXT,
+            side TEXT, size REAL
+        );
+        CREATE TABLE position_current (
+            position_id TEXT, phase TEXT, shares REAL, chain_shares REAL,
+            chain_state TEXT
+        );
+        INSERT INTO venue_trade_facts VALUES ('cmd', 'CONFIRMED', '6.92');
+        INSERT INTO venue_commands VALUES ('cmd', 'pos', 'EXIT', 'SELL', 11.08);
+        INSERT INTO position_current
+        VALUES ('pos', 'day0_window', 6.92, 6.92, 'synced');
+        """
+    )
+
+    assert not command_recovery._recorded_exit_fill_projection_candidates(conn)
+
+    conn.execute("UPDATE venue_commands SET size = 6.92 WHERE command_id = 'cmd'")
+    assert command_recovery._recorded_exit_fill_projection_candidates(conn)
+
+
 def test_live_tick_recovers_fill_provenance_before_maintenance_budget_defer(
     monkeypatch,
 ):
