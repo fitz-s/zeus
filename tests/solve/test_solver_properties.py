@@ -2652,7 +2652,7 @@ def test_current_precliff_capacity_counts_actionable_depth_from_inclusive_floor(
         SimpleNamespace(price=Decimal("NaN"), size=Decimal("100")),
     )
 
-    assert S.current_precliff_liquidation_capacity(levels) == Decimal("112")
+    assert S.current_precliff_liquidation_capacity(levels) == Decimal("105")
 
 
 def test_current_maker_buy_witness_can_win_on_exact_partial_distribution():
@@ -3745,9 +3745,7 @@ def test_global_sell_generation_rejects_bids_below_live_price_band(
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_single_order_sell_uses_above_band_counterparty_bid(side):
-    from src.execution.exit_lifecycle import GlobalSellExecutionAuthority
-
+def test_global_single_order_sell_rejects_above_band_counterparty_bid(side):
     seed = _global_candidate(
         candidate_id=f"sell-favorable-above-band-{side}",
         family=f"sell-favorable-above-band-{side}-family",
@@ -3783,34 +3781,7 @@ def test_global_single_order_sell_uses_above_band_counterparty_bid(side):
         neg_risk=False,
     )
 
-    assert candidate is not None
-    assert candidate.execution_mode == "TAKER_LIMIT"
-    assert candidate.economic_sell_curve.levels == curve.levels
-
-    selected = _global_sell_candidate(
-        candidate_id=f"sell-selected-above-band-{side}",
-        family=f"sell-selected-above-band-{side}-family",
-        side=side,
-        held_q=0.20,
-        bids=(("0.999", "10"),),
-        shares="10",
-    )
-    decision = _global_select((selected,))
-
-    assert decision.candidate is selected
-    assert decision.expected_fill_price_before_fee == Decimal("0.999")
-
-    authority = object.__new__(GlobalSellExecutionAuthority)
-    object.__setattr__(authority, "actuation", SimpleNamespace(decision=decision))
-    object.__setattr__(
-        authority,
-        "jit_candidate",
-        SimpleNamespace(
-            execution_mode="TAKER_LIMIT",
-            executable_sell_curve=selected.executable_sell_curve,
-        ),
-    )
-    assert authority.limit_price() == Decimal("0.95")
+    assert candidate is None
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
@@ -3833,20 +3804,20 @@ def test_global_single_order_sell_holds_certain_winner_despite_high_bid(side):
     }
 
 
-def test_global_single_order_sell_maps_above_band_quote_to_legal_submit_floor():
+def test_global_single_order_sell_does_not_legalize_above_band_quote():
     assert S._live_sell_limit_price(
         Decimal("0.98"),
         Decimal("0.94"),
         Decimal("0.02"),
-    ) == Decimal("0.94")
+    ) is None
     assert S._live_sell_limit_price(
         Decimal("0.98"),
         Decimal("0.98"),
         Decimal("0.01"),
-    ) == Decimal("0.95")
+    ) is None
 
 
-def test_global_single_order_sell_high_bid_has_taker_price_improvement():
+def test_global_single_order_sell_high_bid_is_not_execution_authority():
     curve = S.ExecutableSellCurve(
         token_id="sell-high-bid-wide-tick-token",
         side="YES",
@@ -3867,26 +3838,20 @@ def test_global_single_order_sell_high_bid_has_taker_price_improvement():
         capacity=Decimal("10"),
     )
 
-    assert proposal is not None
+    assert proposal is None
     assert mode == "TAKER_LIMIT"
-    assert proposal.levels == curve.levels
-    assert S._live_sell_limit_price(
-        proposal.levels[0].price,
-        proposal.levels[-1].price,
-        proposal.min_tick,
-    ) == Decimal("0.94")
 
 
-def test_precliff_liquidation_capacity_includes_above_band_bids():
+def test_precliff_liquidation_capacity_excludes_above_band_bids():
     assert S.current_precliff_liquidation_capacity(
         (
             BookLevel(price=Decimal("0.999"), size=Decimal("20")),
             BookLevel(price=Decimal("0.95"), size=Decimal("7")),
         )
-    ) == Decimal("27")
+    ) == Decimal("7")
 
 
-def test_exact_one_sell_bid_is_consumed_with_one_tick_economic_haircut():
+def test_exact_one_sell_bid_is_not_execution_authority():
     curve = S.ExecutableSellCurve(
         token_id="sell-exact-one-token",
         side="YES",
@@ -3904,15 +3869,14 @@ def test_exact_one_sell_bid_is_consumed_with_one_tick_economic_haircut():
         capacity=Decimal("10"),
     )
 
-    assert proposal is not None
+    assert proposal is None
     assert mode == "TAKER_LIMIT"
     assert curve.levels[0].price == Decimal("1")
-    assert proposal.levels[0].price == Decimal("0.999")
     assert S._live_sell_limit_price(
         curve.levels[0].price,
-        proposal.levels[-1].price,
+        curve.levels[0].price,
         curve.min_tick,
-    ) == Decimal("0.95")
+    ) is None
 
 
 def test_global_single_order_sell_legal_depth_is_tick_aligned_without_clamping():

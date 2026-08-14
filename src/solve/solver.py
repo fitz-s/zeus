@@ -132,13 +132,6 @@ def _live_unit_price_in_band(value: Decimal) -> bool:
     )
 
 
-def _live_sell_counterparty_bid(value: Decimal) -> bool:
-    return (
-        value.is_finite()
-        and LIVE_ORDER_MIN_UNIT_PRICE <= value <= Decimal("1")
-    )
-
-
 def _live_sell_limit_price(
     best_bid: Decimal,
     deepest_bid: Decimal,
@@ -147,13 +140,12 @@ def _live_sell_limit_price(
     """Map executable counterparty bids to a legal submitted SELL floor."""
 
     if (
-        not _live_sell_counterparty_bid(best_bid)
-        or not _live_sell_counterparty_bid(deepest_bid)
+        not _live_unit_price_in_band(best_bid)
+        or not _live_unit_price_in_band(deepest_bid)
         or deepest_bid > best_bid
     ):
         return None
-    submitted_floor = min(deepest_bid, LIVE_ORDER_MAX_UNIT_PRICE)
-    aligned = (submitted_floor / min_tick).to_integral_value(
+    aligned = (deepest_bid / min_tick).to_integral_value(
         rounding=ROUND_FLOOR
     ) * min_tick
     return aligned if _live_unit_price_in_band(aligned) else None
@@ -394,7 +386,7 @@ def current_precliff_liquidation_capacity(
             for level in native_bid_levels
             if Decimal(level.price).is_finite()
             and Decimal(level.price) >= LIVE_ORDER_MIN_UNIT_PRICE
-            and Decimal(level.price) <= Decimal("1")
+            and Decimal(level.price) <= LIVE_ORDER_MAX_UNIT_PRICE
             and Decimal(level.size).is_finite()
             and Decimal(level.size) > 0
         ),
@@ -607,22 +599,13 @@ def marketable_sell_proposal_curve(
     levels: list[BidBookLevel] = []
     for level in curve.levels:
         if (
-            not _live_sell_counterparty_bid(Decimal(level.price))
+            not _live_unit_price_in_band(Decimal(level.price))
             or remaining <= 0
         ):
             break
         take = min(remaining, Decimal(level.size))
         if take > 0:
-            # Exact-one is executable counterparty truth, but valuing it as a
-            # literally zero-risk release makes the common finite capital-
-            # efficiency axis undefined. Haircut only that boundary quote by
-            # one current venue tick for economic scoring; the unmodified raw
-            # curve remains the JIT/executor authority and can still fill the
-            # independently legal submitted floor at 1.0.
-            economic_price = min(
-                Decimal(level.price),
-                Decimal("1") - Decimal(curve.min_tick),
-            )
+            economic_price = Decimal(level.price)
             if economic_price < LIVE_ORDER_MIN_UNIT_PRICE:
                 break
             levels.append(BidBookLevel(price=economic_price, size=take))

@@ -2031,8 +2031,6 @@ class TestExecutor:
         ("best_bid", "min_tick", "expected_limit"),
         (
             ("0.94", "0.01", "0.94"),
-            ("0.999", "0.001", "0.95"),
-            ("1.0", "0.001", "0.95"),
         ),
     )
     @pytest.mark.parametrize(
@@ -2317,7 +2315,10 @@ class TestExecutor:
         assert "live_order_unit_price_out_of_bounds" in str(result.reason)
         assert after == before
 
-    def test_execute_exit_order_rejects_bid_outside_probability_domain_before_persistence(self):
+    @pytest.mark.parametrize("best_bid", [0.951, 0.999, 1.0, 1.001])
+    def test_execute_exit_order_rejects_bid_outside_absolute_band_before_persistence(
+        self, best_bid
+    ):
         before = _TEST_CONN.execute("SELECT COUNT(*) FROM venue_commands").fetchone()[0]
         token_id = "yes-token-out-of-band-best-bid"
 
@@ -2327,7 +2328,7 @@ class TestExecutor:
                 token_id=token_id,
                 shares=12.0,
                 current_price=0.95,
-                best_bid=1.001,
+                best_bid=best_bid,
                 exact_limit_price=0.95,
                 **_snapshot_kwargs(
                     token_id,
