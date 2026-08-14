@@ -23279,6 +23279,18 @@ def _review_required_cancel_failed_already_canceled_no_fill_recovery(
     if not (zero_pending or existing_position or existing_exit):
         return "stayed"
 
+    finding_identity_exact, finding_id = _exact_m5_local_orphan_finding_id(
+        conn,
+        venue_order_id=venue_order_id,
+    )
+    if not finding_identity_exact:
+        logger.info(
+            "recovery: command %s REVIEW_REQUIRED already-canceled stayed "
+            "(local-orphan finding identity is ambiguous)",
+            cmd.command_id,
+        )
+        return "stayed"
+
     now = _now_iso()
     intent_name = str(cmd.intent_kind.value).lower()
     safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in cmd.command_id)
@@ -23296,6 +23308,24 @@ def _review_required_cancel_failed_already_canceled_no_fill_recovery(
             source_reason=fact_source_reason,
             venue_resp_present_for_terminal_state=venue_resp_present_for_terminal_state,
         )
+        locked_identity_exact, locked_finding_id = _exact_m5_local_orphan_finding_id(
+            conn,
+            venue_order_id=venue_order_id,
+        )
+        if not locked_identity_exact or locked_finding_id != finding_id:
+            raise RuntimeError("already-canceled local-orphan finding identity changed")
+        resolved_findings = _resolve_m5_local_orphan_findings(
+            conn,
+            command_id=cmd.command_id,
+            venue_order_id=venue_order_id,
+            resolved_at=now,
+            resolution="command_recovery_already_canceled_terminal_no_fill",
+            finding_id=finding_id,
+        )
+        if finding_id is not None and resolved_findings != 1:
+            raise RuntimeError(
+                f"already-canceled exact finding CAS failed for {finding_id}"
+            )
         if existing_exit:
             released = _release_exit_after_terminal_no_fill(
                 conn,
@@ -23346,6 +23376,8 @@ def _review_required_cancel_failed_already_canceled_no_fill_recovery(
             },
             "terminal_order_fact_id": fact_id,
             "terminal_order_fact": fact_payload,
+            "resolved_m5_local_orphan_finding_id": finding_id,
+            "resolved_m5_local_orphan_findings": resolved_findings,
             "venue_absence_proof": {
                 "source": "authenticated_clob_user_read",
                 "owner_scope": "authenticated_funder",

@@ -17326,6 +17326,16 @@ class TestRecoveryResolutionTable:
                 },
             },
         )
+        from src.execution.exchange_reconcile import record_finding
+
+        finding = record_finding(
+            conn,
+            kind="local_orphan_order",
+            subject_id="ord-unfilled-increment",
+            context="ws_gap",
+            evidence={"reason": "local_open_order_absent_from_exchange_open_orders"},
+            recorded_at="2026-04-26T00:08:01Z",
+        )
         mock_client.get_order.return_value = {
             "orderID": "ord-unfilled-increment",
             "status": "CANCELED",
@@ -17345,6 +17355,17 @@ class TestRecoveryResolutionTable:
         assert event["event_type"] == "REVIEW_CLEARED_NO_VENUE_EXPOSURE"
         payload = json.loads(event["payload_json"])
         assert payload["proof_class"] == "cancel_failed_already_canceled_terminal_no_fill"
+        assert payload["resolved_m5_local_orphan_finding_id"] == finding.finding_id
+        assert payload["resolved_m5_local_orphan_findings"] == 1
+        resolved = conn.execute(
+            "SELECT resolution, resolved_by FROM exchange_reconcile_findings "
+            "WHERE finding_id = ?",
+            (finding.finding_id,),
+        ).fetchone()
+        assert dict(resolved) == {
+            "resolution": "command_recovery_already_canceled_terminal_no_fill",
+            "resolved_by": "src.execution.command_recovery",
+        }
         fact = conn.execute(
             "SELECT state, matched_size FROM venue_order_facts "
             "WHERE command_id = 'cmd-001' ORDER BY local_sequence DESC LIMIT 1"
