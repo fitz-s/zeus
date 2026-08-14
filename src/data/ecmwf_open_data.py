@@ -1,5 +1,5 @@
 # Created: prior; restructured 2026-05-01
-# Last reused or audited: 2026-05-15
+# Last reused or audited: 2026-08-14
 # Authority basis: architect D1 (ECMWF throttle), AGENTS.md money path
 #   Prior: PLAN docs/operations/task_2026-05-11_ecmwf_download_replacement/PLAN.md
 #   ECMWF Open Data has ~6-8h latency (vs. TIGGE's 48h public embargo) so it
@@ -56,7 +56,7 @@ import hashlib
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -313,6 +313,27 @@ _PER_STEP_RETRY_AFTER: int = int(os.environ.get("ZEUS_ECMWF_PER_STEP_RETRY_AFTER
 _RETRYABLE_HTTP: frozenset[int] = frozenset({500, 502, 503, 504, 408, 429})
 
 
+def _remaining_step_timeout(deadline: float | None) -> float:
+    """Return the request timeout remaining inside one step-owned deadline."""
+
+    if deadline is None:
+        return float(_PER_STEP_TIMEOUT_SECONDS)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise requests.Timeout("STEP_DEADLINE_EXCEEDED")
+    return max(0.001, min(float(_PER_STEP_TIMEOUT_SECONDS), remaining))
+
+
+def _sleep_step_retry(deadline: float) -> bool:
+    """Sleep only inside the step budget; false means retries are exhausted by time."""
+
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return False
+    time.sleep(min(float(_PER_STEP_RETRY_AFTER), remaining))
+    return time.monotonic() < deadline
+
+
 def _is_ecmwf_download_url(url: str) -> bool:
     return (
         "ecmwf-forecasts" in url
@@ -354,7 +375,12 @@ def _http_error_for_response(response: requests.Response, message: str) -> reque
     return err
 
 
-def _resolve_index_parts(client: Any, result: Any) -> list[tuple[str, tuple[tuple[int, int], ...]]]:
+def _resolve_index_parts(
+    client: Any,
+    result: Any,
+    *,
+    deadline: float | None = None,
+) -> list[tuple[str, tuple[tuple[int, int], ...]]]:
     """Resolve ECMWF ``.index`` parts without multiurl's 120-second retry loop."""
 
     for_index = getattr(result, "for_index", {}) or {}
@@ -369,7 +395,7 @@ def _resolve_index_parts(client: Any, result: Any) -> list[tuple[str, tuple[tupl
         response = client.session.get(
             index_url,
             stream=True,
-            timeout=_PER_STEP_TIMEOUT_SECONDS,
+            timeout=_remaining_step_timeout(deadline),
             verify=verify,
         )
         try:
@@ -377,6 +403,7 @@ def _resolve_index_parts(client: Any, result: Any) -> list[tuple[str, tuple[tupl
                 response.raise_for_status()
             parts: list[tuple[int, int]] = []
             for raw_line in response.iter_lines():
+                _remaining_step_timeout(deadline)
                 if not raw_line:
                     continue
                 line = json.loads(raw_line)
@@ -394,7 +421,13 @@ def _resolve_index_parts(client: Any, result: Any) -> list[tuple[str, tuple[tupl
     return resolved
 
 
-def _retrieve_step_with_controlled_ranges(client: Any, *, target: Path, **kwargs: Any) -> Any:
+def _retrieve_step_with_controlled_ranges(
+    client: Any,
+    *,
+    target: Path,
+    _deadline: float | None = None,
+    **kwargs: Any,
+) -> Any:
     """Retrieve one indexed OpenData step with Zeus-owned single Range GETs.
 
     ecmwf-opendata's default ``Client.retrieve`` delegates indexed GRIB assembly
@@ -411,7 +444,7 @@ def _retrieve_step_with_controlled_ranges(client: Any, *, target: Path, **kwargs
 
     client.session = _RateLimitedSession()
     result = client._get_urls(target=str(target), use_index=False, **kwargs)
-    indexed_parts = _resolve_index_parts(client, result)
+    indexed_parts = _resolve_index_parts(client, result, deadline=_deadline)
     if indexed_parts:
         result.urls = indexed_parts
 
@@ -432,7 +465,7 @@ def _retrieve_step_with_controlled_ranges(client: Any, *, target: Path, **kwargs
                         url,
                         stream=True,
                         headers={"Range": f"bytes={offset}-{end}"},
-                        timeout=_PER_STEP_TIMEOUT_SECONDS,
+                        timeout=_remaining_step_timeout(_deadline),
                         verify=verify,
                     )
                     try:
@@ -444,6 +477,7 @@ def _retrieve_step_with_controlled_ranges(client: Any, *, target: Path, **kwargs
                                 f"Expected HTTP 206 for range GET, got {response.status_code}",
                             )
                         for chunk in response.iter_content(chunk_size=1024 * 1024):
+                            _remaining_step_timeout(_deadline)
                             if chunk:
                                 out.write(chunk)
                                 bytes_written += len(chunk)
@@ -455,13 +489,14 @@ def _retrieve_step_with_controlled_ranges(client: Any, *, target: Path, **kwargs
                 response = session.get(
                     item,
                     stream=True,
-                    timeout=_PER_STEP_TIMEOUT_SECONDS,
+                    timeout=_remaining_step_timeout(_deadline),
                     verify=verify,
                 )
                 try:
                     if response.status_code != 200:
                         response.raise_for_status()
                     for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        _remaining_step_timeout(_deadline)
                         if chunk:
                             out.write(chunk)
                             bytes_written += len(chunk)
@@ -1345,8 +1380,11 @@ def _fetch_one_step(
     from ecmwf.opendata import Client  # imported here: conda env only on main interpreter
 
     last_err: str | None = None
+    deadline = time.monotonic() + float(_PER_STEP_TIMEOUT_SECONDS)
     for mirror in mirrors:
         for attempt in range(_PER_STEP_MAX_RETRIES):
+            if time.monotonic() >= deadline:
+                return ("FAILED", "STEP_DEADLINE_EXCEEDED")
             try:
                 client = Client(source=mirror)
                 pf_partial = partial.with_suffix(".pf.partial")
@@ -1360,6 +1398,7 @@ def _fetch_one_step(
                     step=[step],
                     param=[param],
                     target=pf_partial,
+                    _deadline=deadline,
                 )
                 try:
                     _retrieve_step_with_controlled_ranges(
@@ -1371,6 +1410,7 @@ def _fetch_one_step(
                         step=[step],
                         param=[param],
                         target=cf_partial,
+                        _deadline=deadline,
                     )
                 except ValueError as exc:
                     if "Cannot find index entries matching" not in str(exc):
@@ -1384,6 +1424,7 @@ def _fetch_one_step(
                         step=[step],
                         param=[param],
                         target=cf_partial,
+                        _deadline=deadline,
                     )
                 with partial.open("wb") as out:
                     out.write(cf_partial.read_bytes())
@@ -1401,15 +1442,17 @@ def _fetch_one_step(
                     return ("NOT_RELEASED", None)
                 if code in _RETRYABLE_HTTP:
                     last_err = f"HTTP_{code}_mirror_{mirror}_attempt_{attempt}"
-                    if attempt + 1 < _PER_STEP_MAX_RETRIES:
-                        time.sleep(_PER_STEP_RETRY_AFTER)
+                    if attempt + 1 < _PER_STEP_MAX_RETRIES and not _sleep_step_retry(deadline):
+                        return ("FAILED", "STEP_DEADLINE_EXCEEDED")
                     continue
                 last_err = f"HTTP_{code}_mirror_{mirror}"
                 break   # non-retryable; try next mirror
             except (requests.ConnectionError, requests.Timeout) as exc:
                 last_err = f"NET_{type(exc).__name__}_mirror_{mirror}_attempt_{attempt}"
-                if attempt + 1 < _PER_STEP_MAX_RETRIES:
-                    time.sleep(_PER_STEP_RETRY_AFTER)
+                if time.monotonic() >= deadline:
+                    return ("FAILED", "STEP_DEADLINE_EXCEEDED")
+                if attempt + 1 < _PER_STEP_MAX_RETRIES and not _sleep_step_retry(deadline):
+                    return ("FAILED", "STEP_DEADLINE_EXCEEDED")
                 continue
             except OSError as exc:
                 # disk/path errors during atomic rename or partial-file write
@@ -1674,9 +1717,10 @@ def collect_open_ens_cycle(
         # constant; no call-site kwarg (antibody: makes per-step parallelism
         # category structurally module-owned, not caller-configured).
         # Single-writer antibody: fetch_fn does HTTP only; no SQLite writes.
-        # Do not submit the entire step grid at once: a single hung SDK fetch
-        # must fail its batch after _PER_STEP_TIMEOUT_SECONDS instead of making
-        # as_completed wait timeout * len(tasks) before live readiness can move.
+        # Do not submit the entire step grid at once. Each real worker owns one
+        # total deadline across requests, retries, and mirrors; the batch must
+        # wait for that bounded result instead of inventing a second timeout and
+        # abandoning a still-running HTTP thread.
         tasks = [(s, cfg["open_data_param"]) for s in STEP_HOURS]
         results: dict[int, tuple[str, Any]] = {}
         # M5-COLLECTION-CLOCK: fetch_started = the real wall-clock immediately before the first
@@ -1684,8 +1728,7 @@ def collect_open_ens_cycle(
         _fetch_started_at = datetime.now(timezone.utc)
         for offset in range(0, len(tasks), _DOWNLOAD_MAX_WORKERS):
             batch = tasks[offset:offset + _DOWNLOAD_MAX_WORKERS]
-            ex = ThreadPoolExecutor(max_workers=len(batch))
-            try:
+            with ThreadPoolExecutor(max_workers=len(batch)) as ex:
                 fut2step = {
                     ex.submit(
                         fetch_fn,
@@ -1698,19 +1741,11 @@ def collect_open_ens_cycle(
                     ): s
                     for s, p in batch
                 }
-                done, not_done = wait(fut2step, timeout=_PER_STEP_TIMEOUT_SECONDS)
-                for fut in done:
-                    step = fut2step[fut]
+                for fut, step in fut2step.items():
                     try:
                         results[step] = fut.result()
                     except Exception as exc:  # noqa: BLE001
                         results[step] = ("FAILED", f"UNCAUGHT_{type(exc).__name__}: {exc}")
-                for fut in not_done:
-                    step = fut2step[fut]
-                    fut.cancel()
-                    results[step] = ("FAILED", "STEP_TIMEOUT")
-            finally:
-                ex.shutdown(wait=False, cancel_futures=True)
 
         # M5-COLLECTION-CLOCK: fetch_finished = the real wall-clock once every batch future has
         # resolved (bytes received, timed out, or failed) — the moment the download phase ends.
