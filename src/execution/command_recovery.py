@@ -10132,7 +10132,7 @@ def _append_exit_filled_projection(
     # realized_pnl_usd is booked NULL forever. Compute it via the single
     # shared close-economics formula (src.state.close_economics) using the
     # same close-share count set as "shares" below.
-    from src.state.close_economics import compute_realized_pnl_usd
+    from src.execution.exit_lifecycle import _cumulative_close_realized_pnl
 
     current_shares = _positive_decimal_or_none(current.get("shares"))
     current_cost_basis = _decimal_or_none(current.get("cost_basis_usd"))
@@ -10170,11 +10170,13 @@ def _append_exit_filled_projection(
         filled_cost_basis = entry_price_guard * filled_size
     else:
         filled_cost_basis = Decimal("0")
-    realized_pnl = compute_realized_pnl_usd(
-        shares=float(filled_size),
-        exit_price=float(fill_price),
-        cost_basis_usd=float(filled_cost_basis),
-        entry_price=float(entry_price_guard) if entry_price_guard is not None else 0.0,
+    realized_pnl = _cumulative_close_realized_pnl(
+        conn,
+        position_id=position_id,
+        shares=filled_size,
+        exit_price=fill_price,
+        cost_basis_usd=filled_cost_basis,
+        entry_price=entry_price_guard if entry_price_guard is not None else 0,
     )
 
     position = SimpleNamespace(

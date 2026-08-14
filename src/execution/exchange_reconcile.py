@@ -6313,7 +6313,7 @@ def _ensure_exit_fill_position_event(
     # (src.state.close_economics) so this SimpleNamespace stand-in carries a
     # "pnl" attribute -- without it, _settled_economics_value(position, "pnl")
     # returns None and realized_pnl_usd is booked NULL forever.
-    from src.state.close_economics import compute_realized_pnl_usd
+    from src.execution.exit_lifecycle import _cumulative_close_realized_pnl
 
     current_shares = _positive_decimal_or_none(current.get("shares"))
     current_cost_basis = _positive_decimal_or_none(current.get("cost_basis_usd"))
@@ -6331,11 +6331,13 @@ def _ensure_exit_fill_position_event(
         filled_cost_basis = entry_price_guard * shares_dec
     else:
         filled_cost_basis = Decimal("0")
-    realized_pnl = compute_realized_pnl_usd(
-        shares=float(shares_dec),
-        exit_price=float(exit_price_dec),
-        cost_basis_usd=float(filled_cost_basis),
-        entry_price=float(entry_price_guard) if entry_price_guard is not None else 0.0,
+    realized_pnl = _cumulative_close_realized_pnl(
+        conn,
+        position_id=position_id,
+        shares=shares_dec,
+        exit_price=exit_price_dec,
+        cost_basis_usd=filled_cost_basis,
+        entry_price=entry_price_guard if entry_price_guard is not None else 0,
     )
     position = SimpleNamespace(
         **{

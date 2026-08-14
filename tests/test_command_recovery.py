@@ -14092,8 +14092,8 @@ class TestRecoveryResolutionTable:
             }
         ]
 
-    def test_live_tick_projects_recorded_matched_full_exit(self, tmp_path, monkeypatch):
-        """A durable full EXIT match must not wait for the full recovery sweep."""
+    def test_live_tick_full_exit_preserves_prior_partial_realized_pnl(self, tmp_path, monkeypatch):
+        """A recovered terminal fill must add every exact earlier reduction."""
         from src.execution import command_recovery, venue_sync_contract
         from src.state.collateral_ledger import init_collateral_schema
         from src.state.db import init_schema, init_schema_trade_only
@@ -14105,29 +14105,67 @@ class TestRecoveryResolutionTable:
         init_schema(seed)
         init_schema_trade_only(seed)
         init_collateral_schema(seed)
-        _insert(seed, command_id="cmd-entry", position_id="pos-001", size=8.25, price=0.56)
+        _insert(seed, command_id="cmd-entry", position_id="pos-001", size=22, price=0.30)
         _advance_to_acked(seed, command_id="cmd-entry", venue_order_id="ord-entry")
         _seed_pending_entry_projection(seed, command_id="cmd-entry", order_id="ord-entry")
         seed.execute(
             """
             UPDATE position_current
                SET phase = 'day0_window',
-                   shares = 8.25,
-                   chain_shares = 8.25,
-                   cost_basis_usd = 4.62,
-                   entry_price = 0.56,
+                   shares = 17,
+                   chain_shares = 17,
+                   cost_basis_usd = 5.177272727272728,
+                   entry_price = 0.30454545454545456,
+                   realized_pnl_usd = 1.4272727272727272,
                    order_status = 'filled'
              WHERE position_id = 'pos-001'
             """
         )
-        _seed_full_exit_intent(seed, position_id="pos-001", shares=8.25)
+        sequence_no = seed.execute(
+            "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
+            "WHERE position_id = 'pos-001'"
+        ).fetchone()[0]
+        seed.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key, order_id,
+                caused_by, source_module, payload_json, env
+            ) VALUES (
+                'pos-001:partial-exit:prior', 'pos-001', 1, ?,
+                'MONITOR_REFRESHED', '2026-04-26T00:03:00Z',
+                'day0_window', 'day0_window', 'opening_inertia',
+                'ord-prior-partial', 'partial_exit_fill',
+                'src.execution.exit_lifecycle', ?, 'live'
+            )
+            """,
+            (
+                sequence_no,
+                json.dumps(
+                    {
+                        "economic_fill_identity": "trade:prior-partial",
+                        "economic_fill_cumulative_shares": "5",
+                        "economic_fill_cumulative_notional_usd": "2.95",
+                        "filled_shares": "5",
+                        "filled_notional_usd": "2.95",
+                        "allocated_cost_basis_usd": "1.5227272727272728",
+                        "realized_pnl_delta_usd": "1.4272727272727272",
+                        "cumulative_realized_pnl_usd": "1.4272727272727272",
+                        "remaining_shares": "17",
+                        "remaining_cost_basis_usd": "5.177272727272728",
+                    },
+                    sort_keys=True,
+                ),
+            ),
+        )
+        _seed_full_exit_intent(seed, position_id="pos-001", shares=17)
         _insert(
             seed,
             command_id="cmd-exit",
             position_id="pos-001",
             intent_kind="EXIT",
             side="SELL",
-            size=8.25,
+            size=17,
             price=0.95,
             token_id="tok-001",
             created_at="2026-04-26T00:04:30Z",
@@ -14139,8 +14177,8 @@ class TestRecoveryResolutionTable:
             order_id="ord-exit",
             trade_id="0xexitfill",
             state="MATCHED",
-            filled_size="8.25",
-            fill_price="0.95",
+            filled_size="17",
+            fill_price="0.999",
             tx_hash="0xexitfill",
         )
         append_order_fact(
@@ -14149,7 +14187,7 @@ class TestRecoveryResolutionTable:
             command_id="cmd-exit",
             state="MATCHED",
             remaining_size="0",
-            matched_size="8.25",
+            matched_size="17",
             source="REST",
             observed_at="2026-04-26T00:05:00Z",
             venue_timestamp="2026-04-26T00:05:00Z",
@@ -14159,8 +14197,8 @@ class TestRecoveryResolutionTable:
                     "orderID": "ord-exit",
                     "status": "matched",
                     "side": "SELL",
-                    "makingAmount": "8.25",
-                    "takingAmount": "7.8375",
+                    "makingAmount": "17",
+                    "takingAmount": "16.983",
                     "transactionsHashes": ["0xexitfill"],
                 }
             },
@@ -14172,8 +14210,8 @@ class TestRecoveryResolutionTable:
             occurred_at="2026-04-26T00:05:00Z",
             payload={
                 "venue_order_id": "ord-exit",
-                "filled_size": "8.25",
-                "fill_price": "0.95",
+                "filled_size": "17",
+                "fill_price": "0.999",
                 "trade_id": "0xexitfill",
             },
         )
@@ -14249,8 +14287,8 @@ class TestRecoveryResolutionTable:
         assert dict(current) == {
             "phase": "economically_closed",
             "order_status": "sell_filled",
-            "exit_price": pytest.approx(0.95),
-            "realized_pnl_usd": pytest.approx(3.22),
+            "exit_price": pytest.approx(0.999),
+            "realized_pnl_usd": pytest.approx(13.23),
         }
         assert dict(event) == {
             "event_type": "EXIT_ORDER_FILLED",

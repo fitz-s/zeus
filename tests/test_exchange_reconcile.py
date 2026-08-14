@@ -5523,6 +5523,43 @@ def test_chain_zero_authenticated_full_exit_closes_stale_residual_once(
         """,
         (city, direction, yes_token, no_token, order_id, NOW.isoformat(), position_id),
     )
+    sequence_no = conn.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
+        "WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key, order_id,
+            caused_by, source_module, payload_json, env
+        ) VALUES (?, ?, 1, ?, 'MONITOR_REFRESHED', ?, 'pending_exit',
+                  'pending_exit', 'opening_inertia', 'ord-prior-partial',
+                  'partial_exit_fill', 'src.execution.exit_lifecycle', ?, 'live')
+        """,
+        (
+            f"{position_id}:partial-exit:prior",
+            position_id,
+            sequence_no,
+            NOW.isoformat(),
+            json.dumps(
+                {
+                    "economic_fill_identity": f"trade:{position_id}:prior",
+                    "economic_fill_cumulative_shares": "5",
+                    "economic_fill_cumulative_notional_usd": "3",
+                    "filled_shares": "5",
+                    "filled_notional_usd": "3",
+                    "allocated_cost_basis_usd": "1.75",
+                    "realized_pnl_delta_usd": "1.25",
+                    "cumulative_realized_pnl_usd": "1.25",
+                    "remaining_shares": "20",
+                    "remaining_cost_basis_usd": "12",
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
     seed_command(
         conn,
         command_id=command_id,
@@ -5626,7 +5663,7 @@ def test_chain_zero_authenticated_full_exit_closes_stale_residual_once(
         "chain_shares": 0.0,
         # 20 residual shares at $0.60 imply $36 immutable close cost; the
         # deliberately absurd chain cost basis is not exit-cost authority.
-        "realized_pnl_usd": -20.0,
+        "realized_pnl_usd": -18.75,
     }
     fact = conn.execute(
         "SELECT shares, fill_price FROM execution_fact WHERE intent_id = ?",
@@ -5636,6 +5673,34 @@ def test_chain_zero_authenticated_full_exit_closes_stale_residual_once(
         "shares": 60.0,
         "fill_price": pytest.approx(float(Decimal("0.2666666666666666666666666667"))),
     }
+    assert conn.execute(
+        """
+        SELECT COUNT(*) FROM position_events
+         WHERE position_id = ? AND event_type = 'EXIT_ORDER_FILLED' AND order_id = ?
+        """,
+        (position_id, order_id),
+    ).fetchone()[0] == 1
+
+    # Replay must repair an already-closed projection that carries the old
+    # terminal-leg-only value; it must not append a second close event.
+    conn.execute(
+        "UPDATE position_current SET realized_pnl_usd = -20 WHERE position_id = ?",
+        (position_id,),
+    )
+    assert _ensure_exit_fill_position_event(
+        conn,
+        command=command,
+        venue_order_id=order_id,
+        filled_size=str(target),
+        fill_price="0.30",
+        observed_at=NOW,
+        command_event="FILL_CONFIRMED",
+    )
+    repaired = conn.execute(
+        "SELECT realized_pnl_usd FROM position_current WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()
+    assert repaired["realized_pnl_usd"] == pytest.approx(-18.75)
     assert conn.execute(
         """
         SELECT COUNT(*) FROM position_events

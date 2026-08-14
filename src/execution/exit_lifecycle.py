@@ -6342,6 +6342,14 @@ def _execute_live_exit(
                 phase_before = _canonical_phase_before_for_economic_close(position)
                 closed = compute_economic_close(portfolio, position.trade_id, actual_price, exit_context.exit_reason)
                 if closed is not None:
+                    closed.pnl = _cumulative_close_realized_pnl(
+                        conn,
+                        position_id=position.trade_id,
+                        shares=position.effective_shares,
+                        exit_price=actual_price,
+                        cost_basis_usd=position.effective_cost_basis_usd,
+                        entry_price=position.entry_price,
+                    )
                     closed.exit_state = "sell_filled"
                     _dual_write_canonical_economic_close_if_available(
                         conn,
@@ -7871,6 +7879,36 @@ def _recorded_reduction_realized_pnl(
     return partial_exit_realized_pnl_fold(conn, position_id)
 
 
+def _cumulative_close_realized_pnl(
+    conn: sqlite3.Connection | None,
+    *,
+    position_id: str,
+    shares: object,
+    exit_price: object,
+    cost_basis_usd: object,
+    entry_price: object,
+) -> float:
+    """Grade one terminal leg together with every exact prior reduction."""
+
+    from src.state.close_economics import compute_realized_pnl_usd
+
+    prior_realized = _recorded_reduction_realized_pnl(
+        conn,
+        position_id=position_id,
+    )
+    # The shared close formula rounds once at the canonical terminal boundary.
+    # Subtracting already-realized economics from the remaining basis is
+    # algebraically equivalent to adding it after the terminal leg, without
+    # first rounding that leg and fabricating a cent of drift.
+    cumulative_cost_basis = Decimal(str(cost_basis_usd)) - prior_realized
+    return compute_realized_pnl_usd(
+        shares=float(shares),
+        exit_price=float(exit_price),
+        cost_basis_usd=float(cumulative_cost_basis),
+        entry_price=float(entry_price),
+    )
+
+
 def _complete_intentional_position_reduction(
     position: Position,
     *,
@@ -8691,6 +8729,14 @@ def _close_pending_exit_from_trade_fact(
     if closed is None:
         return None
 
+    closed.pnl = _cumulative_close_realized_pnl(
+        conn,
+        position_id=position.trade_id,
+        shares=position.effective_shares,
+        exit_price=fill_price,
+        cost_basis_usd=position.effective_cost_basis_usd,
+        entry_price=position.entry_price,
+    )
     closed.exit_state = "sell_filled"
     closed.order_status = "sell_filled"
     closed.last_exit_order_id = order_id
@@ -9207,6 +9253,14 @@ def check_pending_exits(
             filled_shares = float(pos.effective_shares)
             closed = compute_economic_close(portfolio, pos.trade_id, actual_price, exit_reason)
             if closed is not None:
+                closed.pnl = _cumulative_close_realized_pnl(
+                    conn,
+                    position_id=pos.trade_id,
+                    shares=pos.effective_shares,
+                    exit_price=actual_price,
+                    cost_basis_usd=pos.effective_cost_basis_usd,
+                    entry_price=pos.entry_price,
+                )
                 closed.exit_state = "sell_filled"
                 _dual_write_canonical_economic_close_if_available(
                     conn,
