@@ -117,6 +117,7 @@ _CONFIRMED_POSITION_FACT_STATES = frozenset({"CONFIRMED"})
 _OPTIMISTIC_POSITION_FACT_STATES = frozenset({"MATCHED", "MINED"})
 _POSITION_DRIFT_ABS_TOLERANCE = Decimal("0.0001")
 _POSITION_API_VISIBILITY_FLOOR = Decimal("0.01")
+_TRADE_PRICE_WIRE_ABS_TOLERANCE = Decimal("0.00000001")
 _ENTRY_FILL_PROJECTION_PHASES = frozenset(
     {"pending_entry", "active", "day0_window", "pending_exit"}
 )
@@ -3169,6 +3170,27 @@ def _record_position_drift_findings(
                 resolved_at=observed_at,
             )
             continue
+        # SCOPE: only an exchange-absent token whose positive residual is
+        # reproduced by both the confirmed journal and chain, and is smaller
+        # than a fresh executable snapshot's minimum order. DRAIN: resolve the
+        # accounting finding while the real residual stays in position_current
+        # for monitoring/settlement. RESET: any missing/stale witness, size
+        # disagreement, or newly executable residual stops matching this branch.
+        if _chain_confirmed_non_executable_dust(
+            conn,
+            token_id=token,
+            exchange_size=exchange_size,
+            confirmed_wallet_size=confirmed_wallet_size,
+            chain_confirmed_size=_chain_confirmed_size,
+            observed_at=observed_at,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_chain_confirmed_non_executable_dust",
+                resolved_at=observed_at,
+            )
+            continue
         if closed_position_size > Decimal("0") and _position_size_matches(
             exchange_size,
             expected_wallet_size,
@@ -3769,6 +3791,21 @@ def _resolve_position_drift_tokens_from_current_truth(
                 resolved_at=observed_at,
             )
             continue
+        if _chain_confirmed_non_executable_dust(
+            conn,
+            token_id=token,
+            exchange_size=exchange_size,
+            confirmed_wallet_size=confirmed_wallet_size,
+            chain_confirmed_size=_chain_confirmed_size,
+            observed_at=observed_at,
+        ):
+            _resolve_open_position_drift_findings(
+                conn,
+                token,
+                resolution="position_drift_chain_confirmed_non_executable_dust",
+                resolved_at=observed_at,
+            )
+            continue
         if closed_position_size > Decimal("0") and _position_size_matches(
             exchange_size,
             expected_wallet_size,
@@ -3907,6 +3944,67 @@ def _resolve_position_drift_tokens_from_current_truth(
 
 def _position_size_matches(left: Decimal, right: Decimal) -> bool:
     return abs(left - right) <= _POSITION_DRIFT_ABS_TOLERANCE
+
+
+def _chain_confirmed_non_executable_dust(
+    conn: sqlite3.Connection,
+    *,
+    token_id: str,
+    exchange_size: Decimal,
+    confirmed_wallet_size: Decimal,
+    chain_confirmed_size: Decimal,
+    observed_at: datetime,
+) -> bool:
+    """Recognize exact, real exposure that is too small for a venue order."""
+
+    if (
+        exchange_size > Decimal("0")
+        or confirmed_wallet_size <= Decimal("0")
+        or chain_confirmed_size <= Decimal("0")
+        or not _position_size_matches(
+            confirmed_wallet_size,
+            chain_confirmed_size,
+        )
+    ):
+        return False
+    try:
+        row = conn.execute(
+            """
+            SELECT pc.chain_shares, snapshot.min_order_size
+              FROM position_current pc
+              JOIN executable_market_snapshot_latest latest
+                ON latest.condition_id = pc.condition_id
+               AND latest.selected_outcome_token_id = ?
+              JOIN executable_market_snapshots snapshot
+                ON snapshot.snapshot_id = latest.snapshot_id
+             WHERE (pc.token_id = ? OR pc.no_token_id = ?)
+               AND pc.phase IN ('active', 'day0_window', 'pending_exit')
+               AND pc.chain_state = 'synced'
+               AND julianday(latest.freshness_deadline) >= julianday(?)
+             ORDER BY julianday(latest.captured_at) DESC
+             LIMIT 1
+            """,
+            (
+                token_id,
+                token_id,
+                token_id,
+                observed_at.isoformat(),
+            ),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    if row is None:
+        return False
+    try:
+        projected_chain_size = _decimal(row["chain_shares"])
+        min_order_size = _decimal(row["min_order_size"])
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    return (
+        min_order_size > Decimal("0")
+        and _position_size_matches(projected_chain_size, chain_confirmed_size)
+        and confirmed_wallet_size < min_order_size
+    )
 
 
 def _nonnegative_wallet_size(value: Decimal) -> Decimal:
@@ -6860,13 +6958,29 @@ def _same_trade_fill_economics(
 ) -> bool:
     return (
         _same_decimal_value(fact.get("filled_size"), filled_size)
-        and _same_decimal_value(fact.get("fill_price"), fill_price)
+        and _same_decimal_value_with_abs_tolerance(
+            fact.get("fill_price"),
+            fill_price,
+            tolerance=_TRADE_PRICE_WIRE_ABS_TOLERANCE,
+        )
     )
 
 
 def _same_decimal_value(left: Any, right: Any) -> bool:
     try:
         return _decimal(left) == _decimal(right)
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def _same_decimal_value_with_abs_tolerance(
+    left: Any,
+    right: Any,
+    *,
+    tolerance: Decimal,
+) -> bool:
+    try:
+        return abs(_decimal(left) - _decimal(right)) <= tolerance
     except (InvalidOperation, ValueError):
         return False
 

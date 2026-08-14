@@ -7184,6 +7184,47 @@ def test_trade_lifecycle_regression_after_confirmed_becomes_finding_not_downgrad
     assert conn.execute("SELECT state FROM venue_commands WHERE command_id = 'cmd-m5'").fetchone()["state"] == "FILLED"
 
 
+def test_confirmed_trade_wire_price_noise_is_same_economics(conn):
+    from src.execution.exchange_reconcile import run_reconcile_sweep
+
+    seed_command(conn, size=9.536229, price=0.70)
+    first = trade(
+        trade_id="trade-wire-price-noise",
+        order_id="ord-m5",
+        size="9.536229",
+        price="0.6899999989513675",
+        fill_price="0.6899999989513675",
+        status="CONFIRMED",
+    )
+    assert run_reconcile_sweep(
+        FakeM5Adapter(trades=[first], positions=[position(size="9.536229")]),
+        conn,
+        context="periodic",
+        observed_at=NOW,
+    ) == []
+
+    second = trade(
+        trade_id="trade-wire-price-noise",
+        order_id="ord-m5",
+        size="9.536229",
+        price="0.69",
+        fill_price="0.69",
+        status="CONFIRMED",
+    )
+    result = run_reconcile_sweep(
+        FakeM5Adapter(trades=[second], positions=[position(size="9.536229")]),
+        conn,
+        context="periodic",
+        observed_at=NOW + timedelta(seconds=1),
+    )
+
+    assert result == []
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_trade_facts "
+        "WHERE trade_id = 'trade-wire-price-noise'"
+    ).fetchone()[0] == 1
+
+
 def test_trade_lifecycle_forward_transition_requires_stable_fill_economics(conn):
     from src.execution.exchange_reconcile import run_reconcile_sweep
 
@@ -8035,6 +8076,102 @@ def test_position_drift_visibility_floor_does_not_hide_material_drift(conn):
     position_findings = [finding for finding in result if finding.kind == "position_drift"]
     assert [finding.subject_id for finding in position_findings] == [token]
     assert '"confirmed_journal_size":"0.0101"' in position_findings[0].evidence_json
+
+
+def test_position_drift_absorbs_chain_confirmed_non_executable_dust(conn):
+    from src.execution.exchange_reconcile import record_finding, run_reconcile_sweep
+
+    token = "chain-confirmed-non-executable-dust-token"
+    _ensure_snapshot(
+        conn,
+        token_id=token,
+        snapshot_id=f"snap-{token}",
+        min_order_size=Decimal("5"),
+    )
+    seed_command(
+        conn,
+        command_id="cmd-chain-dust",
+        venue_order_id="ord-chain-dust",
+        position_id="pos-chain-dust",
+        token_id=token,
+        size=9.536229,
+        price=0.69,
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-chain-dust",
+        venue_order_id="ord-chain-dust",
+        token_id=token,
+        trade_id="trade-chain-dust",
+        size="9.536229",
+        fill_price="0.69",
+        state="CONFIRMED",
+    )
+    seed_command(
+        conn,
+        command_id="cmd-chain-dust-exit",
+        venue_order_id="ord-chain-dust-exit",
+        position_id="pos-chain-dust",
+        token_id=token,
+        side="SELL",
+        size=9.52,
+        price=0.95,
+    )
+    append_trade_fact(
+        conn,
+        command_id="cmd-chain-dust-exit",
+        venue_order_id="ord-chain-dust-exit",
+        token_id=token,
+        trade_id="trade-chain-dust-exit",
+        size="9.52",
+        fill_price="0.98",
+        state="CONFIRMED",
+    )
+    seed_position_baseline(
+        conn,
+        position_id="pos-chain-dust",
+        order_id="ord-chain-dust",
+    )
+    conn.execute(
+        """
+        UPDATE position_current
+           SET phase = 'day0_window',
+               chain_state = 'synced',
+               chain_shares = 0.016229,
+               shares = 0.016229,
+               token_id = ?,
+               condition_id = 'condition-m5',
+               updated_at = ?
+         WHERE position_id = 'pos-chain-dust'
+        """,
+        (token, NOW.isoformat()),
+    )
+    stale = record_finding(
+        conn,
+        kind="position_drift",
+        subject_id=token,
+        context="ws_gap",
+        evidence={"reason": "stale_chain_dust_probe"},
+        recorded_at=NOW - timedelta(minutes=1),
+    )
+
+    result = run_reconcile_sweep(
+        FakeM5Adapter(positions=[]),
+        conn,
+        context="ws_gap",
+        observed_at=NOW,
+    )
+
+    assert not any(finding.kind == "position_drift" for finding in result)
+    resolved = conn.execute(
+        "SELECT resolution, resolved_by FROM exchange_reconcile_findings "
+        "WHERE finding_id = ?",
+        (stale.finding_id,),
+    ).fetchone()
+    assert dict(resolved) == {
+        "resolution": "position_drift_chain_confirmed_non_executable_dust",
+        "resolved_by": "src.execution.exchange_reconcile",
+    }
 
 
 def test_fresh_reconcile_snapshot_captures_typed_point_order_absence():
