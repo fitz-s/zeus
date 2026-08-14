@@ -272,3 +272,11 @@ evidence/topology_v_next_shadow/archive/*.jsonl.gz
 .agents/skills.disabled/
 # Codex CLI local config — leaks operator-local absolute paths (untracked 2026-07-28)
 .codex/
+
+# Root-local generated agent/runtime scratch.
+/.codegraph/
+/-
+/=
+/:memory:.cutover-lease
+/docs/evidence/
+/docs/rebuild/
