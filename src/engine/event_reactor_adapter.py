@@ -5813,6 +5813,7 @@ def _global_current_entry_feasibility_rejection_reason(
     probability_semantics_revision: str | None = None,
     strategy_policy_conn: sqlite3.Connection | None = None,
     strategy_policy_cache: dict[tuple[str, str], str | None] | None = None,
+    observe_through_automated_risk_gate: bool = False,
 ) -> str | None:
     """Reject BUY execution proposals that current policy cannot execute.
 
@@ -5899,6 +5900,20 @@ def _global_current_entry_feasibility_rejection_reason(
                         )
                     )
                 strategy_block = strategy_policy_cache[policy_cache_key]
+            if (
+                observe_through_automated_risk_gate
+                and strategy_block is not None
+                and strategy_block.startswith("STRATEGY_POLICY_GATED:")
+                and "risk_action:gate"
+                in strategy_block.partition("sources=")[2].split(",")
+            ):
+                # The proof solve is side-effect-free and shares the exact live
+                # q/book/wealth cut.  Let it expose the economic frontier hidden
+                # by an automated performance gate without weakening live
+                # selection.  A restrictive manual gate never carries the
+                # risk_action source because it locks the field first, so it
+                # remains authoritative here.
+                strategy_block = None
             if strategy_block is not None:
                 return strategy_block
         floors = _event_bound_strategy_live_quality_floors(normalized_strategy)
@@ -10443,9 +10458,11 @@ def event_bound_live_adapter_from_trade_conn(
                     return "GLOBAL_EXACT_HELD_COMPLETION_OTHER_POSITION"
                 return None
             # The proof solve has no actuator and therefore may ignore only
-            # bankroll-wide admission state whose own recovery needs current
-            # economic evidence. Candidate-local data/source/strategy/risk/
-            # price/capital laws below remain identical to live selection.
+            # admission state whose own recovery needs current economic
+            # evidence. Candidate-local data/source/price/capital laws and
+            # restrictive manual strategy controls remain identical to live
+            # selection; the feasibility helper also exposes economics behind
+            # an automated performance gate only in this proof solve.
             if entry_submit_suppression_reason is not None and not proof_only:
                 return entry_submit_suppression_reason
             family_block_reason = _entry_family_blocked_candidate_reason(
@@ -10494,6 +10511,7 @@ def event_bound_live_adapter_from_trade_conn(
                 ),
                 strategy_policy_conn=trade_conn,
                 strategy_policy_cache=strategy_policy_cache,
+                observe_through_automated_risk_gate=proof_only,
             )
 
         try:

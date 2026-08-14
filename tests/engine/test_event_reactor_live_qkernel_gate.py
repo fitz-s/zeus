@@ -2770,6 +2770,53 @@ def test_global_current_entry_feasibility_rechecks_mutable_strategy_policy(
     ]
 
 
+def test_global_current_entry_feasibility_proof_observes_through_only_automated_gate(
+    monkeypatch,
+):
+    candidate = SimpleNamespace(
+        action="BUY",
+        side="YES",
+        executable_cost_curve=SimpleNamespace(
+            levels=(SimpleNamespace(price=Decimal("0.30")),)
+        ),
+        native_bid_levels=(SimpleNamespace(price=Decimal("0.29")),),
+    )
+    reason = [
+        "STRATEGY_POLICY_GATED:forecast_qkernel_entry:"
+        "sources=manual_override:gate,risk_action:gate"
+    ]
+
+    monkeypatch.setattr(
+        era,
+        "_entry_strategy_policy_blocks_live_submit",
+        lambda *_args, **_kwargs: reason[0],
+    )
+
+    kwargs = {
+        "strategy_key": "forecast_qkernel_entry",
+        "probability_semantics_revision": "stale-v2",
+        "strategy_policy_conn": object(),
+    }
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate, **kwargs
+    ) == reason[0]
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate,
+        **kwargs,
+        observe_through_automated_risk_gate=True,
+    ) is None
+
+    reason[0] = (
+        "STRATEGY_POLICY_GATED:forecast_qkernel_entry:"
+        "sources=manual_override:gate"
+    )
+    assert era._global_current_entry_feasibility_rejection_reason(
+        candidate,
+        **kwargs,
+        observe_through_automated_risk_gate=True,
+    ) == reason[0]
+
+
 def test_prepared_global_probability_revision_is_bound_to_exact_posterior():
     conn = sqlite3.connect(":memory:")
     conn.execute(
