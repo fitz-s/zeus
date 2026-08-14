@@ -12704,9 +12704,66 @@ def _review_required_terminal_fak_partial_exit_projection_matches(
     shares = _decimal_or_none(current.get("shares"))
     chain_shares = _decimal_or_none(current.get("chain_shares"))
     expected_residual = requested - filled
+    fill_seen = _parse_ts(fill_observed_at)
+    bound_projected_residual = None
+    expected_fill_identity_prefix = (
+        "economic-fill:v2:"
+        f"{str(command.get('command_id') or '')}:"
+        f"{str(command.get('venue_order_id') or '')}:"
+    )
+    for event_row in conn.execute(
+        """
+        SELECT occurred_at, payload_json
+          FROM position_events
+         WHERE position_id = ?
+           AND order_id = ?
+           AND event_type = 'MONITOR_REFRESHED'
+           AND json_extract(payload_json, '$.economic_fill_identity') IS NOT NULL
+         ORDER BY sequence_no DESC
+         LIMIT 16
+        """,
+        (
+            position_id,
+            str(command.get("venue_order_id") or ""),
+        ),
+    ).fetchall():
+        event = _dict_row(event_row)
+        payload = _json_dict(event.get("payload_json"))
+        identity = str(payload.get("economic_fill_identity") or "")
+        projected_fill = _positive_decimal_or_none(
+            payload.get("economic_fill_cumulative_shares")
+        )
+        projected_residual = _positive_decimal_or_none(
+            payload.get("remaining_shares")
+        )
+        event_seen = _parse_ts(event.get("occurred_at"))
+        if (
+            identity.startswith(expected_fill_identity_prefix)
+            and projected_fill == filled
+            and projected_residual is not None
+            and event_seen is not None
+            and fill_seen is not None
+            and event_seen >= fill_seen
+        ):
+            bound_projected_residual = projected_residual
+            break
     tolerance = Decimal("0.011")
     chain_seen = _parse_ts(current.get("chain_seen_at"))
-    fill_seen = _parse_ts(fill_observed_at)
+    residual_matches = bool(
+        shares is not None
+        and chain_shares is not None
+        and (
+            (
+                abs(shares - expected_residual) <= tolerance
+                and abs(chain_shares - expected_residual) <= tolerance
+            )
+            or (
+                bound_projected_residual is not None
+                and abs(shares - bound_projected_residual) <= tolerance
+                and abs(chain_shares - bound_projected_residual) <= tolerance
+            )
+        )
+    )
     return bool(
         shares is not None
         and chain_shares is not None
@@ -12714,8 +12771,7 @@ def _review_required_terminal_fak_partial_exit_projection_matches(
         and fill_seen is not None
         and chain_seen > fill_seen
         and shares > 0
-        and abs(shares - expected_residual) <= tolerance
-        and abs(chain_shares - expected_residual) <= tolerance
+        and residual_matches
     )
 
 
@@ -13091,7 +13147,7 @@ def _clear_review_required_terminal_fak_partial_exit(
         ] = True
     else:
         terminal_payload["required_predicates"][
-            "synced_chain_residual_matches_unfilled_size"
+            "synced_chain_residual_matches_post_fill_position"
         ] = True
     safe_command_id = "".join(ch if ch.isalnum() else "_" for ch in command_id)
     sp_name = f"sp_terminal_fak_partial_exit_{safe_command_id}"

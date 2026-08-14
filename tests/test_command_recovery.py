@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-13; last_reused=2026-08-13
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-14; last_reused=2026-08-14
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-08-13
+# Last reused/audited: 2026-08-14
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -17913,20 +17913,23 @@ class TestRecoveryResolutionTable:
             "filled_size",
             "command_order_type",
             "point_order_type",
+            "bound_projected_residual",
             "expected_state",
         ),
         (
-            (4.0, 4.0, "2026-04-26T00:09:00Z", "6", "2", "FAK", "FAK", "EXPIRED"),
-            (4.0, 4.0, "2026-04-26T00:09:00Z", "6", "2", "FAK", None, "REVIEW_REQUIRED"),
-            (4.0, 4.0, "2026-04-26T00:07:00Z", "6", "2", "FAK", "FAK", "EXPIRED"),
-            (0.017, 0.017, "2026-04-26T00:09:00Z", "5.99", "5.99", "FAK", "FAK", "EXPIRED"),
-            (0.017, 0.017, "2026-04-26T00:09:00Z", "5.995", "5.995", "FAK", "FAK", "REVIEW_REQUIRED"),
-            (0.02, 0.02, "2026-04-26T00:09:00Z", "5.98", "5.98", "FAK", "FAK", "REVIEW_REQUIRED"),
-            (4.0, 4.0, "2026-04-26T00:05:00Z", "6", "2", "FAK", "FAK", "REVIEW_REQUIRED"),
-            (4.0, 4.0, "2026-04-26T00:04:00Z", "6", "2", "FAK", "FAK", "REVIEW_REQUIRED"),
-            (4.0, 5.0, "2026-04-26T00:09:00Z", "6", "2", "FAK", "FAK", "REVIEW_REQUIRED"),
-            (4.0, 4.0, "2026-04-26T00:09:00Z", "6", "2", "GTC", "GTC", "REVIEW_REQUIRED"),
-            (4.0, 4.0, "2026-04-26T00:09:00Z", "6", "2", "GTC", "FAK", "REVIEW_REQUIRED"),
+            (4.0, 4.0, "2026-04-26T00:09:00Z", "6", "2", "FAK", "FAK", None, "EXPIRED"),
+            (6.0, 6.0, "2026-04-26T00:09:00Z", "6", "2", "FAK", "FAK", "6", "EXPIRED"),
+            (6.0, 6.0, "2026-04-26T00:09:00Z", "6", "2", "FAK", "FAK", "5", "REVIEW_REQUIRED"),
+            (4.0, 4.0, "2026-04-26T00:09:00Z", "6", "2", "FAK", None, None, "REVIEW_REQUIRED"),
+            (4.0, 4.0, "2026-04-26T00:07:00Z", "6", "2", "FAK", "FAK", None, "EXPIRED"),
+            (0.017, 0.017, "2026-04-26T00:09:00Z", "5.99", "5.99", "FAK", "FAK", None, "EXPIRED"),
+            (0.017, 0.017, "2026-04-26T00:09:00Z", "5.995", "5.995", "FAK", "FAK", None, "REVIEW_REQUIRED"),
+            (0.02, 0.02, "2026-04-26T00:09:00Z", "5.98", "5.98", "FAK", "FAK", None, "REVIEW_REQUIRED"),
+            (4.0, 4.0, "2026-04-26T00:05:00Z", "6", "2", "FAK", "FAK", None, "REVIEW_REQUIRED"),
+            (4.0, 4.0, "2026-04-26T00:04:00Z", "6", "2", "FAK", "FAK", None, "REVIEW_REQUIRED"),
+            (4.0, 5.0, "2026-04-26T00:09:00Z", "6", "2", "FAK", "FAK", None, "REVIEW_REQUIRED"),
+            (4.0, 4.0, "2026-04-26T00:09:00Z", "6", "2", "GTC", "GTC", None, "REVIEW_REQUIRED"),
+            (4.0, 4.0, "2026-04-26T00:09:00Z", "6", "2", "GTC", "FAK", None, "REVIEW_REQUIRED"),
         ),
     )
     def test_terminal_fak_partial_exit_review_releases_only_exact_chain_residual(
@@ -17939,6 +17942,7 @@ class TestRecoveryResolutionTable:
         filled_size,
         command_order_type,
         point_order_type,
+        bound_projected_residual,
         expected_state,
     ):
         """A dead FAK order cannot block reauction after exact partial truth."""
@@ -18037,6 +18041,39 @@ class TestRecoveryResolutionTable:
                 "fill_price": "0.46",
             },
         )
+        if bound_projected_residual is not None:
+            sequence_no = conn.execute(
+                "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
+                "WHERE position_id = 'pos-001'"
+            ).fetchone()[0]
+            conn.execute(
+                """
+                INSERT INTO position_events (
+                    event_id, position_id, event_version, sequence_no, event_type,
+                    occurred_at, phase_before, phase_after, strategy_key,
+                    order_id, command_id, source_module, env, payload_json
+                ) VALUES (?, 'pos-001', 1, ?, 'MONITOR_REFRESHED',
+                          '2026-04-26T00:06:00Z', 'day0_window', 'day0_window',
+                          'opening_inertia', 'ord-exit-partial', 'cmd-exit',
+                          'tests.test_command_recovery', 'live', ?)
+                """,
+                (
+                    f"pos-001:bound-partial-exit:{sequence_no}",
+                    sequence_no,
+                    json.dumps(
+                        {
+                            "economic_fill_identity": (
+                                "economic-fill:v2:cmd-exit:"
+                                "ord-exit-partial:trade-exit-partial"
+                            ),
+                            "economic_fill_cumulative_shares": filled_size,
+                            "filled_shares": filled_size,
+                            "remaining_shares": bound_projected_residual,
+                        },
+                        sort_keys=True,
+                    ),
+                ),
+            )
         _append_order_fact(
             conn,
             command_id="cmd-exit",
