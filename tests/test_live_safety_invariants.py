@@ -21113,6 +21113,140 @@ def test_global_sell_debt_drain_stops_after_first_attempt_exhausts_deadline(
     assert summary["global_sell_snapshot_reauction_debts_pending"] == 2
 
 
+def test_global_sell_debt_reuses_newer_committed_monitor_cut_before_refresh(
+    monkeypatch,
+):
+    """A committed newer q/book cut must fit the one-second debt publish lane."""
+    from src.engine import cycle_runtime
+    from src.execution import exit_lifecycle
+
+    position = _make_position(
+        trade_id="committed-cut-global-sell-debt",
+        token_id="committed-cut-global-sell-token",
+        direction="buy_yes",
+        state="pending_exit",
+        chain_state="synced",
+    )
+    position.exit_state = "retry_pending"
+    position._held_sell_reauction_obligation = {
+        "schema_version": 4,
+        "position_id": position.trade_id,
+        "held_token_id": position.token_id,
+        "armed_at": "2026-08-14T11:43:00+00:00",
+        "probability_observed_at": "2026-08-14T11:43:00+00:00",
+        "bid_observed_at": "2026-08-14T11:43:00+00:00",
+    }
+    probability_identity = "newer-committed-probability-content"
+    monitor_payload = {
+        "last_monitor_prob_is_fresh": True,
+        "last_monitor_market_price_is_fresh": True,
+        "last_monitor_best_bid": 0.41,
+        "monitor_probability_receipt": {
+            "probability_content_identity": probability_identity,
+        },
+    }
+
+    class MonitorRows:
+        def fetchall(self):
+            return [
+                (
+                    9,
+                    "2026-08-14T11:44:00+00:00",
+                    json.dumps(monitor_payload),
+                )
+            ]
+
+    class Conn:
+        in_transaction = False
+
+        def execute(self, sql, _params=()):
+            assert "event_type = 'MONITOR_REFRESHED'" in sql
+            return MonitorRows()
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "classify_global_sell_snapshot_reauction_debt",
+        lambda *_args, **_kwargs: (
+            exit_lifecycle.GlobalSellSnapshotReauctionDebtStatus.DEBT
+        ),
+    )
+
+    def recover(current, *, requester, **_kwargs):
+        return requester(current, True)
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "recover_global_sell_snapshot_reauction_debt",
+        recover,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_monitoring_phase_positions",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_portfolio_rotation_evaluation_status",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.engine.monitor_refresh.refresh_position",
+        lambda *_args, **_kwargs: pytest.fail(
+            "newer committed q/book cut must not repeat synchronous refresh"
+        ),
+    )
+    requests = []
+
+    def request_global_auction_completion(**kwargs):
+        requests.append(kwargs)
+        fields = {
+            "request_id": "request-new-cut",
+            "material_identity": "material-new-cut",
+            "attempt_identity": "attempt-new-cut",
+            "scope_identity": "scope-new-cut",
+            "generation": "generation-new-cut",
+            "position_id": kwargs["position_id"],
+            "family": kwargs["family"],
+            "held_token_id": kwargs["held_token_id"],
+            "probability_content_identity": kwargs[
+                "probability_content_identity"
+            ],
+            "probability_observed_at": kwargs["probability_observed_at"],
+            "held_best_bid": kwargs["held_best_bid"],
+            "bid_observed_at": kwargs["bid_observed_at"],
+            "book_state": kwargs["book_state"],
+            "schema_version": kwargs["schema_version"],
+            "completion_deadline_at": kwargs["completion_deadline_at"],
+        }
+        return True, SimpleNamespace(**fields)
+
+    monkeypatch.setattr(
+        "src.events.reactor.request_global_auction_completion",
+        request_global_auction_completion,
+    )
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        Conn(),
+        object(),
+        PortfolioState(positions=[position]),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_committed_cut_global_sell_debt"),
+        run_exit_preflight=False,
+        held_position_monitor_budget_seconds=6.0,
+    )
+
+    assert len(requests) == 1
+    assert requests[0]["probability_content_identity"] == probability_identity
+    assert requests[0]["held_best_bid"] == 0.41
+    assert requests[0]["probability_observed_at"] == (
+        "2026-08-14T11:44:00+00:00"
+    )
+    assert summary["global_sell_snapshot_reauction_debts_recovered"] == 1
+
+
 def test_decision_log_406128_global_retry_snapshot_is_memory_only(monkeypatch):
     """Preflight rollback snapshot must not issue a debt-classification read."""
     from src.engine import cycle_runtime

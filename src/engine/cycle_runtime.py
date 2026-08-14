@@ -6407,7 +6407,87 @@ def execute_monitoring_phase(
 
             obligation = getattr(position, "_held_sell_reauction_obligation", {})
             obligation = obligation if isinstance(obligation, dict) else {}
-            if force_new_generation:
+            def load_canonical_monitor_cut() -> tuple[str, dict[str, object]]:
+                if not force_new_generation or conn is None:
+                    return "", {}
+                try:
+                    monitor_rows = conn.execute(
+                        """
+                        SELECT sequence_no, occurred_at, payload_json
+                          FROM position_events
+                         WHERE position_id = ?
+                           AND event_type = 'MONITOR_REFRESHED'
+                         ORDER BY julianday(occurred_at) DESC, sequence_no DESC
+                         LIMIT 16
+                        """,
+                        (
+                            str(
+                                getattr(position, "position_id", "")
+                                or getattr(position, "trade_id", "")
+                                or ""
+                            ),
+                        ),
+                    ).fetchall()
+                    monitor_row = max(
+                        (
+                            row
+                            for row in monitor_rows
+                            if _parse_utc_timestamp(row[1]) is not None
+                        ),
+                        key=lambda row: (
+                            _parse_utc_timestamp(row[1]),
+                            int(row[0]),
+                        ),
+                        default=None,
+                    )
+                    if monitor_row is not None:
+                        monitor_at = str(monitor_row[1] or "")
+                        decoded = json.loads(str(monitor_row[2] or "{}"))
+                        if isinstance(decoded, dict):
+                            return monitor_at, decoded
+                except (sqlite3.Error, TypeError, json.JSONDecodeError):
+                    pass
+                return "", {}
+
+            canonical_monitor_at, canonical_monitor_payload = (
+                load_canonical_monitor_cut()
+            )
+            canonical_receipt = canonical_monitor_payload.get(
+                "day0_monitor_probability_receipt"
+            ) or canonical_monitor_payload.get("monitor_probability_receipt")
+            canonical_probability_content_identity = (
+                _monitor_probability_content_identity(canonical_receipt)
+            )
+            canonical_monitor_clock = _parse_utc_timestamp(canonical_monitor_at)
+            obligation_clocks = tuple(
+                clock
+                for clock in (
+                    _parse_utc_timestamp(str(obligation.get(field) or ""))
+                    for field in (
+                        "armed_at",
+                        "probability_observed_at",
+                        "bid_observed_at",
+                    )
+                )
+                if clock is not None
+            )
+            canonical_advances_obligation = bool(
+                canonical_monitor_clock is not None
+                and (
+                    not obligation_clocks
+                    or canonical_monitor_clock > max(obligation_clocks)
+                )
+                and canonical_probability_content_identity
+                and canonical_monitor_payload.get("last_monitor_prob_is_fresh")
+                is True
+                and canonical_monitor_payload.get(
+                    "last_monitor_market_price_is_fresh"
+                )
+                is True
+                and canonical_monitor_payload.get("last_monitor_best_bid")
+                is not None
+            )
+            if force_new_generation and not canonical_advances_obligation:
                 if time.monotonic() >= request_deadline:
                     raise TimeoutError(
                         "GLOBAL_SELL_REAUCTION_AUXILIARY_DEADLINE_EXPIRED"
@@ -6454,46 +6534,18 @@ def execute_monitoring_phase(
                     raise ValueError(
                         "GLOBAL_SELL_REAUCTION_CURRENT_MONITOR_WITNESS_UNAVAILABLE"
                     )
-            canonical_monitor_at = ""
-            canonical_monitor_payload: dict[str, object] = {}
-            if force_new_generation and conn is not None:
-                try:
-                    monitor_rows = conn.execute(
-                        """
-                        SELECT sequence_no, occurred_at, payload_json
-                          FROM position_events
-                         WHERE position_id = ?
-                           AND event_type = 'MONITOR_REFRESHED'
-                         ORDER BY julianday(occurred_at) DESC, sequence_no DESC
-                         LIMIT 16
-                        """,
-                        (
-                            str(
-                                getattr(position, "position_id", "")
-                                or getattr(position, "trade_id", "")
-                                or ""
-                            ),
-                        ),
-                    ).fetchall()
-                    monitor_row = max(
-                        (
-                            row
-                            for row in monitor_rows
-                            if _parse_utc_timestamp(row[1]) is not None
-                        ),
-                        key=lambda row: (
-                            _parse_utc_timestamp(row[1]),
-                            int(row[0]),
-                        ),
-                        default=None,
-                    )
-                    if monitor_row is not None:
-                        canonical_monitor_at = str(monitor_row[1] or "")
-                        decoded = json.loads(str(monitor_row[2] or "{}"))
-                        if isinstance(decoded, dict):
-                            canonical_monitor_payload = decoded
-                except (sqlite3.Error, TypeError, json.JSONDecodeError):
-                    canonical_monitor_payload = {}
+                canonical_monitor_at, canonical_monitor_payload = (
+                    load_canonical_monitor_cut()
+                )
+                canonical_receipt = canonical_monitor_payload.get(
+                    "day0_monitor_probability_receipt"
+                ) or canonical_monitor_payload.get("monitor_probability_receipt")
+                canonical_probability_content_identity = (
+                    _monitor_probability_content_identity(canonical_receipt)
+                )
+                canonical_monitor_clock = _parse_utc_timestamp(
+                    canonical_monitor_at
+                )
             held_token_id = str(
                 obligation.get("held_token_id")
                 or _position_held_token_id(position)
@@ -6516,16 +6568,9 @@ def execute_monitoring_phase(
                 )
                 or ""
             ).strip()
-            canonical_receipt = canonical_monitor_payload.get(
-                "day0_monitor_probability_receipt"
-            ) or canonical_monitor_payload.get("monitor_probability_receipt")
-            canonical_probability_content_identity = (
-                _monitor_probability_content_identity(canonical_receipt)
-            )
             runtime_monitor_at = str(
                 getattr(position, "last_monitor_at", "") or ""
             ).strip()
-            canonical_monitor_clock = _parse_utc_timestamp(canonical_monitor_at)
             runtime_monitor_clock = _parse_utc_timestamp(runtime_monitor_at)
             canonical_is_current = bool(
                 canonical_monitor_clock is not None
