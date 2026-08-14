@@ -568,6 +568,10 @@ def _append_verified_settlement_event(
     pnl: float,
     outcome: int,
     sequence_no: int,
+    settlement_authority: str = "VERIFIED",
+    settlement_truth_source: str = "world.settlements",
+    settlement_source: str = "WU",
+    include_settlement_value: bool = True,
 ) -> None:
     from src.engine.lifecycle_events import build_settlement_canonical_write
     from src.state.db import append_many_and_project
@@ -602,12 +606,16 @@ def _append_verified_settlement_event(
         outcome=outcome,
         sequence_no=sequence_no,
         phase_before="pending_exit",
-        settlement_authority="VERIFIED",
-        settlement_truth_source="world.settlements",
+        settlement_authority=settlement_authority,
+        settlement_truth_source=settlement_truth_source,
         settlement_market_slug=f"nyc-high-{position_id}",
         settlement_temperature_metric="high",
-        settlement_source="WU",
-        settlement_value=40.0 if outcome == 1 else 42.0,
+        settlement_source=settlement_source,
+        settlement_value=(
+            (40.0 if outcome == 1 else 42.0)
+            if include_settlement_value
+            else None
+        ),
     )
     append_many_and_project(conn, events, projection)
 
@@ -7351,6 +7359,39 @@ def test_refresh_strategy_health_records_rows_from_lawful_surfaces():
     assert row["edge_compression_flag"] == 1
     assert snapshot["status"] == "fresh"
     assert snapshot["stale_strategy_keys"] == []
+
+
+def test_refresh_strategy_health_counts_venue_payout_without_physical_value():
+    conn = _policy_conn()
+    as_of = "2026-04-04T12:00:00+00:00"
+    _append_verified_settlement_event(
+        conn,
+        position_id="venue-resolved-loss",
+        strategy_key="center_buy",
+        settled_at="2026-04-03T12:00:00+00:00",
+        pnl=-8.0,
+        outcome=0,
+        sequence_no=1,
+        settlement_authority="VENUE_RESOLVED",
+        settlement_truth_source="gamma_exact_held_event",
+        settlement_source="polymarket_gamma",
+        include_settlement_value=False,
+    )
+
+    result = refresh_strategy_health(conn, as_of=as_of)
+    row = conn.execute(
+        """
+        SELECT settled_trades_30d, realized_pnl_30d, win_rate_30d
+        FROM strategy_health
+        WHERE strategy_key = 'center_buy' AND as_of = ?
+        """,
+        (as_of,),
+    ).fetchone()
+
+    assert result["status"] == "refreshed_degraded"
+    assert row["settled_trades_30d"] == 1
+    assert row["realized_pnl_30d"] == pytest.approx(-8.0)
+    assert row["win_rate_30d"] == pytest.approx(0.0)
 
 
 def test_refresh_strategy_health_reuses_supplied_position_view(monkeypatch):

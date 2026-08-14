@@ -6,7 +6,7 @@ and emits durable risk actions into zeus.db when the canonical table exists.
 Graduated response: GREEN → YELLOW → ORANGE → RED.
 
 # Created: (pre-audit)
-# Last reused or audited: 2026-07-08
+# Last reused or audited: 2026-08-14
 # Authority basis: connection-leak audit 2026-05-10 — 51 open zeus-world.db-wal
 #   handles observed on PID 18538. Root cause: tick() and tick_with_portfolio()
 #   opened zeus_conn / risk_conn without try/finally, so any exception in the
@@ -63,6 +63,7 @@ from src.state.db import (
     query_portfolio_loader_view,
     query_strategy_health_snapshot,
     refresh_strategy_health,
+    settlement_economic_ready,
 )
 from src.state.fill_dedup import canonical_trade_fact_cte
 from src.state.portfolio import (
@@ -4667,11 +4668,7 @@ def _tick_once() -> RiskLevel:
             # temperature. That row is complete for P&L/risk, but remains excluded
             # from physical calibration through metric_ready=False. Only a malformed
             # economic row may actuate settlement_quality and freeze new entries.
-            required_missing = tuple(row.get("required_missing_fields") or ())
-            economic_ready = (
-                authority_level != "durable_event_malformed"
-                and not required_missing
-            )
+            economic_ready = settlement_economic_ready(row)
             if economic_ready:
                 settlement_economic_ready_rows.append(row)
             else:

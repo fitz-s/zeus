@@ -1,5 +1,5 @@
 # Created: prior to 2026-04-26
-# Last reused or audited: 2026-07-31
+# Last reused or audited: 2026-08-14
 # Authority basis: Zeus DB schema + world_write_mutex CATEGORY ANTIBODY.
 #   2026-06-08 thepath/audit-realign Fitz #5 lock-CATEGORY kill: _apply_busy_timeout
 #   helper + SQL-level PRAGMA busy_timeout in _connect()/get_connection() so a
@@ -32,6 +32,7 @@ import queue
 import sqlite3
 import threading
 import time
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -11135,6 +11136,22 @@ def _settlement_probability_outcome_ready(normalized: dict) -> bool:
     )
 
 
+def settlement_economic_ready(normalized: Mapping[str, object]) -> bool:
+    """Whether a canonical settlement proves final position economics.
+
+    Venue payout truth can prove outcome and P&L before the physical
+    temperature source publishes its final value.  Keep that economic truth
+    distinct from ``metric_ready``, which remains the stricter physical-
+    settlement/calibration contract.
+    """
+
+    return (
+        str(normalized.get("authority_level") or "")
+        != "durable_event_malformed"
+        and not tuple(normalized.get("required_missing_fields") or ())
+    )
+
+
 
 
 def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
@@ -11489,7 +11506,7 @@ def refresh_strategy_health(
     for settlement_row in settlement_rows:
         if settlement_row.get("is_degraded", False):
             settlement_degraded_rows += 1
-        if not settlement_row.get("metric_ready", False):
+        if not settlement_economic_ready(settlement_row):
             continue
         settled_at = str(settlement_row.get("settled_at") or "")
         settled_at_dt = _parse_iso_timestamp(settled_at)
