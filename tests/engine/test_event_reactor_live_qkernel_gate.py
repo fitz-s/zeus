@@ -2380,6 +2380,7 @@ def test_global_taker_action_fresh_revalidation_never_downgrades_to_maker():
         fresh_best_bid=0.01,
         fresh_best_ask=0.10,
         tick_size=0.01,
+        taker_fee_rate=0.05,
         decision_time=datetime(2026, 7, 22, 9, 0, tzinfo=timezone.utc),
     ) == "TAKER"
 
@@ -2389,6 +2390,7 @@ def test_global_taker_action_fresh_revalidation_never_downgrades_to_maker():
         fresh_best_bid=0.59,
         fresh_best_ask=0.60,
         tick_size=0.01,
+        taker_fee_rate=0.05,
         decision_time=datetime(2026, 7, 22, 9, 0, tzinfo=timezone.utc),
     ) == "NO_TRADE"
 
@@ -2433,6 +2435,7 @@ def test_global_maker_action_fresh_revalidation_never_upgrades_to_taker():
         fresh_best_bid=0.46,
         fresh_best_ask=0.52,
         tick_size=0.001,
+        taker_fee_rate=0.05,
         decision_time=datetime(2026, 7, 22, 9, 0, tzinfo=timezone.utc),
     ) == "MAKER"
 
@@ -2447,6 +2450,7 @@ def test_global_maker_action_fresh_revalidation_never_upgrades_to_taker():
         fresh_best_bid=0.46,
         fresh_best_ask=0.52,
         tick_size=0.001,
+        taker_fee_rate=0.05,
         decision_time=datetime(2026, 7, 22, 9, 0, tzinfo=timezone.utc),
     ) == "NO_TRADE"
 
@@ -2482,6 +2486,7 @@ def test_global_mean_taker_accepts_only_price_improvement_over_certified_cost():
         fresh_best_bid=0.26,
         fresh_best_ask=0.29,
         tick_size=0.01,
+        taker_fee_rate=0.05,
         decision_time=at,
     ) == "TAKER"
 
@@ -2491,6 +2496,7 @@ def test_global_mean_taker_accepts_only_price_improvement_over_certified_cost():
         fresh_best_bid=0.26,
         fresh_best_ask=0.30,
         tick_size=0.01,
+        taker_fee_rate=0.05,
         decision_time=at,
     ) == "NO_TRADE"
 
@@ -2513,6 +2519,7 @@ def test_global_current_fresh_mode_does_not_reapply_selection_curse():
         fresh_best_bid=0.09,
         fresh_best_ask=0.10,
         tick_size=0.01,
+        taker_fee_rate=0.05,
         decision_time=datetime(2026, 7, 22, 9, 0, tzinfo=timezone.utc),
     )
 
@@ -2805,7 +2812,7 @@ def test_prepared_global_probability_revision_is_bound_to_exact_posterior():
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_taker_candidate_requires_measurable_tight_spread(side):
+def test_global_taker_candidate_requires_measurable_bid_not_tight_spread(side):
     def candidate(bids):
         return SimpleNamespace(
             action="BUY",
@@ -2823,10 +2830,7 @@ def test_global_taker_candidate_requires_measurable_tight_spread(side):
     ) is None
     assert era._global_current_entry_feasibility_rejection_reason(
         candidate(("0.02",))
-    ) == (
-        "GLOBAL_ENTRY_TAKER_INADMISSIBLE:"
-        "TAKER_FORBIDDEN_RELATIVE_SPREAD:spread=0.8571:max=0.25"
-    )
+    ) is None
     assert era._global_current_entry_feasibility_rejection_reason(
         candidate(())
     ) == "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"

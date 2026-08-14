@@ -5820,9 +5820,12 @@ def _global_current_entry_feasibility_rejection_reason(
     depth, robust utility, Kelly, wealth, and caps.  The strategy registry owns
     the narrower domain license: a BUY below its declared native entry-price
     floor is not part of that strategy's feasible set. Taker and passive-rest
-    proposals are distinct auction assets: spread admissibility applies only to
-    the former, while the latter must carry its own non-crossing price and
-    fill/no-fill economics. SELL compares against HOLD and does not consume BUY
+    proposals are distinct auction assets: the former carries exact executable
+    ask/depth/fee economics, while the latter carries its own non-crossing price
+    and fill/no-fill economics. A measurable taker bid is required for exact
+    liquidation capacity, but relative spread is not an eligibility wall: the
+    solver already compares the exact executable ask, fees, q, FDR, Kelly, and
+    expected log growth. SELL compares against HOLD and does not consume BUY
     authority.
     """
 
@@ -5863,17 +5866,6 @@ def _global_current_entry_feasibility_rejection_reason(
             return "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
         if not best_bid.is_finite() or not Decimal("0") < best_bid < Decimal("1"):
             return "GLOBAL_ENTRY_FEASIBILITY_BID_INVALID"
-        from src.strategy.live_inference.mode_consistent_ev import (
-            taker_spread_guard_reason,
-        )
-
-        taker_rejection = taker_spread_guard_reason(
-            float(best_bid),
-            float(best_ask),
-            max_relative_spread=_taker_max_relative_spread(),
-        )
-        if taker_rejection is not None:
-            return f"GLOBAL_ENTRY_TAKER_INADMISSIBLE:{taker_rejection}"
     elif execution_mode == "MAKER_REST":
         try:
             assert_live_order_unit_price(proposal_price)
