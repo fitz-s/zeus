@@ -774,23 +774,42 @@ def _current_global_market_authority(
             or clob_archived is not False
         ):
             raise ValueError("invalid CLOB tradeability")
-        clob_tick = _required_decimal_fact(
-            (raw_clob_market,),
-            ("tick_size", "min_tick_size", "minimum_tick_size", "minTickSize"),
+        current_tick_names = ("tick_size", "min_tick_size", "minTickSize")
+        current_min_order_names = ("min_order_size", "minOrderSize")
+        current_tick = _required_decimal_fact(
+            (dict(raw_book),), current_tick_names
         )
-        clob_min_order = _required_decimal_fact(
-            (raw_clob_market,),
+        current_min_order = _required_decimal_fact(
+            (dict(raw_book),),
             ("min_order_size", "minimum_order_size", "minOrderSize"),
+        )
+        clob_tick = (
+            _required_decimal_fact((raw_clob_market,), current_tick_names)
+            if any(
+                raw_clob_market.get(name) not in (None, "")
+                for name in current_tick_names
+            )
+            else None
+        )
+        clob_min_order = (
+            _required_decimal_fact((raw_clob_market,), current_min_order_names)
+            if any(
+                raw_clob_market.get(name) not in (None, "")
+                for name in current_min_order_names
+            )
+            else None
         )
         clob_neg_risk = _required_bool_fact(
             (raw_clob_market,), ("neg_risk", "negRisk", "negative_risk")
         )
         if (
-            clob_tick != min_tick
-            or clob_min_order != min_order_size
+            current_tick != min_tick
+            or current_min_order != min_order_size
+            or (clob_tick is not None and clob_tick != current_tick)
+            or (clob_min_order is not None and clob_min_order != current_min_order)
             or clob_neg_risk != neg_risk
         ):
-            raise ValueError("Gamma/CLOB market rules conflict")
+            raise ValueError("Gamma/CLOB/book market rules conflict")
         details = fee_details_from_gamma_fee_schedule(
             market.get("feeSchedule") or market.get("fee_schedule"),
             source="global_current_gamma_fee_schedule",

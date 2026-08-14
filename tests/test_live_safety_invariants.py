@@ -11549,6 +11549,10 @@ def test_global_buy_jit_gamma_metadata_fails_closed(name, mutate, reason):
             {"min_order_size": "2"},
             "METADATA_INVALID",
         ),
+        (
+            {"tick_size": "0.02"},
+            "METADATA_INVALID",
+        ),
     ),
 )
 def test_global_jit_authority_rejects_current_clob_market_conflicts(
@@ -11581,6 +11585,65 @@ def test_global_jit_authority_rejects_current_clob_market_conflicts(
             ),
             clob_market_get=lambda *_args, **_kwargs: current_clob,
             raw_book=_global_jit_book("yes-buy"),
+            captured_at_utc=datetime.now(timezone.utc),
+            timeout=1.0,
+        )
+
+
+def test_global_jit_authority_uses_current_book_rules_when_clob_omits_duplicates():
+    """The live CLOB endpoint may omit rules already carried by its raw book."""
+    from src.engine import event_reactor_adapter as adapter
+
+    gamma_market = {
+        "conditionId": "condition-buy",
+        "active": True,
+        "closed": False,
+        "acceptingOrders": True,
+        "enableOrderBook": True,
+        "clobTokenIds": ["yes-buy", "no-buy"],
+        "orderPriceMinTickSize": "0.001",
+        "orderMinSize": "1",
+        "negRisk": False,
+        "feeSchedule": {"exponent": 1, "rate": 0.05, "takerOnly": True},
+    }
+    clob_market = _global_jit_clob_market(
+        "condition-buy", "yes-buy", "no-buy"
+    )
+    clob_market.pop("tick_size")
+    clob_market.pop("min_order_size")
+    clob_market["minimum_tick_size"] = "0.01"
+    clob_market["minimum_order_size"] = "1"
+    raw_book = _global_jit_book("yes-buy")
+    raw_book["tick_size"] = "0.001"
+
+    authority = adapter._current_global_market_authority(
+        condition_id="condition-buy",
+        token_id="yes-buy",
+        side="YES",
+        gamma_get=lambda *_args, **_kwargs: SimpleNamespace(
+            status_code=200, json=lambda: [gamma_market]
+        ),
+        clob_market_get=lambda *_args, **_kwargs: clob_market,
+        raw_book=raw_book,
+        captured_at_utc=datetime.now(timezone.utc),
+        timeout=1.0,
+    )
+
+    assert authority.snapshot.min_tick_size == Decimal("0.001")
+    assert authority.snapshot.min_order_size == Decimal("1")
+
+    conflicting_book = dict(raw_book)
+    conflicting_book["min_order_size"] = "2"
+    with pytest.raises(ValueError, match="METADATA_INVALID"):
+        adapter._current_global_market_authority(
+            condition_id="condition-buy",
+            token_id="yes-buy",
+            side="YES",
+            gamma_get=lambda *_args, **_kwargs: SimpleNamespace(
+                status_code=200, json=lambda: [gamma_market]
+            ),
+            clob_market_get=lambda *_args, **_kwargs: clob_market,
+            raw_book=conflicting_book,
             captured_at_utc=datetime.now(timezone.utc),
             timeout=1.0,
         )
