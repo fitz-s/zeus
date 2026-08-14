@@ -1,5 +1,5 @@
 # Created: 2026-04-17
-# Last reused/audited: 2026-07-24
+# Last reused/audited: 2026-08-14
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 """B070 tests: control_overrides event-sourced refactor.
 
@@ -361,6 +361,73 @@ class TestExpire:
         assert gate["reason_code"] == "riskguard_action"
         assert gate["gated_by"] == "auto:riskguard"
         assert gate["reason_snapshot"]["action_id"] == "riskguard:gate:opening_inertia"
+
+    def test_probability_scoped_risk_gate_is_not_widened_to_strategy_gate(self):
+        conn = _memory_conn()
+        conn.execute(
+            """
+            INSERT INTO risk_actions (
+                action_id, strategy_key, action_type, value, issued_at,
+                effective_until, reason, source, precedence, status
+            ) VALUES (
+                'riskguard:gate:forecast_qkernel_entry',
+                'forecast_qkernel_entry', 'gate',
+                '{"gate":true,"probability_semantics_revisions":["old_revision"]}',
+                '2026-04-17T12:00:00+00:00', NULL,
+                'revision-scoped brier degradation', 'riskguard', 50, 'active'
+            )
+            """
+        )
+
+        state = query_control_override_state(
+            conn, now="2026-04-17T14:00:00+00:00"
+        )
+
+        assert state["status"] == "ok"
+        assert "forecast_qkernel_entry" not in state["strategy_gates"]
+
+    def test_structured_strategy_wide_risk_gate_remains_blocking(self):
+        conn = _memory_conn()
+        conn.execute(
+            """
+            INSERT INTO risk_actions (
+                action_id, strategy_key, action_type, value, issued_at,
+                effective_until, reason, source, precedence, status
+            ) VALUES (
+                'riskguard:gate:opening_inertia', 'opening_inertia', 'gate',
+                '{"gate":true}', '2026-04-17T12:00:00+00:00', NULL,
+                'strategy-wide degradation', 'riskguard', 50, 'active'
+            )
+            """
+        )
+
+        state = query_control_override_state(
+            conn, now="2026-04-17T14:00:00+00:00"
+        )
+
+        assert state["strategy_gates"]["opening_inertia"]["enabled"] is False
+
+    def test_malformed_probability_scoped_risk_gate_fails_closed(self):
+        conn = _memory_conn()
+        conn.execute(
+            """
+            INSERT INTO risk_actions (
+                action_id, strategy_key, action_type, value, issued_at,
+                effective_until, reason, source, precedence, status
+            ) VALUES (
+                'riskguard:gate:forecast_qkernel_entry',
+                'forecast_qkernel_entry', 'gate',
+                '{"gate":true,"probability_semantics_revisions":[]}',
+                '2026-04-17T12:00:00+00:00', NULL,
+                'malformed revision scope', 'riskguard', 50, 'active'
+            )
+            """
+        )
+
+        with pytest.raises(ValueError, match="empty risk gate revision scope"):
+            query_control_override_state(
+                conn, now="2026-04-17T14:00:00+00:00"
+            )
 
 
 class TestAppendOnlyEnforcement:

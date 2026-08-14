@@ -13092,10 +13092,18 @@ def query_control_override_state(
             target_key = str(row["strategy_key"] or "")
             if not target_key:
                 continue
+            strategy_wide_gate = _parse_strategy_wide_risk_gate(
+                str(row["value"] or "")
+            )
+            if strategy_wide_gate is None:
+                # A probability-revision-scoped risk action is enforced by the
+                # revision-aware strategy policy at selection and submit.  This
+                # strategy-only projection cannot widen it to every revision.
+                continue
             issued_at = str(row["issued_at"] or "")
             parsed_issued_at = _parse_iso_timestamp(issued_at)
             decision = {
-                "enabled": not _parse_boolish_text(str(row["value"] or "")),
+                "enabled": not strategy_wide_gate,
                 "reason_code": "riskguard_action",
                 "reason_snapshot": {
                     "action_id": str(row["action_id"] or ""),
@@ -13214,6 +13222,37 @@ def _parse_boolish_text(raw: str) -> bool:
     if isinstance(payload, dict) and payload.get("paused") is True:
         return True
     raise ValueError(f"unsupported boolish value in DB: {raw!r}")
+
+
+def _parse_strategy_wide_risk_gate(raw: str) -> bool | None:
+    """Return a strategy-wide gate, or ``None`` for an exact revision scope.
+
+    ``risk_actions`` may carry a structured probability-semantics scope.  The
+    control-plane projection has no probability revision identity, so only the
+    revision-aware strategy policy may consume that shape.  Malformed scopes
+    remain errors so authority loss still fails closed.
+    """
+
+    text = str(raw).strip()
+    if not text.startswith("{"):
+        return _parse_boolish_text(text)
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"unsupported risk gate value in DB: {raw!r}") from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("gate"), bool):
+        raise ValueError(f"unsupported risk gate value in DB: {raw!r}")
+    revisions = payload.get("probability_semantics_revisions")
+    if revisions is None:
+        return bool(payload["gate"])
+    if not isinstance(revisions, list):
+        raise ValueError(f"unsupported risk gate revision scope in DB: {raw!r}")
+    cleaned = tuple(
+        str(value).strip() for value in revisions if str(value).strip()
+    )
+    if not cleaned:
+        raise ValueError(f"empty risk gate revision scope in DB: {raw!r}")
+    return None
 
 
 def _finite_float_or_zero(value) -> float:
