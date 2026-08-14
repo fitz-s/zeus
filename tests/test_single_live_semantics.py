@@ -444,6 +444,16 @@ def test_ci_trigger_surface_covers_scanner_surface() -> None:
     assert "paths:" not in workflow
 
 
+def test_ci_scopes_full_runtime_antibodies_to_runtime_changes() -> None:
+    workflow = Path(".github/workflows/money-path-release-gate.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "id: runtime_antibody_scope" in workflow
+    assert "^(src/|config/|deploy/)" in workflow
+    assert "steps.runtime_antibody_scope.outputs.full" in workflow
+
+
 def test_gate_rejects_resurrected_inactive_lane(tmp_path: Path) -> None:
     source = tmp_path / "src"
     source.mkdir()

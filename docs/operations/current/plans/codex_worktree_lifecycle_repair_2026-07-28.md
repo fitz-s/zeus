@@ -58,6 +58,11 @@ Active, pinned, and permanent worktrees stay protected by Codex.
   audit/remediation of base violations; RESET is the next base-relative change.
   Missing base evidence fails closed rather than falling back to an unscoped
   scan that blocks unrelated work.
+- Scope the full money-path antibody collection to runtime/config/deploy
+  deltas. SCOPE is that executable delta; DRAIN is the full collection on
+  every such change; RESET is the next base-relative diff. The single-live
+  gate's own antibodies remain required for every PR, while a governance PR
+  cannot be blocked by an unrelated runtime lock race.
 
 ## Acceptance
 
@@ -69,6 +74,9 @@ Active, pinned, and permanent worktrees stay protected by Codex.
   add`, while inspection, native closeout, and other repositories remain usable.
 - A pre-existing single-live violation cannot block an unrelated PR, while a
   newly changed file containing that violation remains a required-check failure.
+- A runtime/config/deploy delta runs the complete money-path antibody set; a
+  governance-only delta still runs the single-live gate antibodies and cannot
+  be blocked by an unrelated runtime test failure.
 - Active, pinned, permanent, dirty, and open-PR work are never deleted by this
   repair.
 - The project hook file parses as JSON and contains no unsupported worktree

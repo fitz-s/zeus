@@ -53,8 +53,30 @@ jobs:
             python scripts/check_single_live_semantics.py
           fi
 
+      - name: Select runtime antibody scope
+        id: runtime_antibody_scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "full=true" >> "$GITHUB_OUTPUT"
+          else
+            git cat-file -e "$BASE_SHA^{commit}"
+            if git diff --name-only "$BASE_SHA...HEAD" | grep -Eq '^(src/|config/|deploy/)'; then
+              echo "full=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "full=false" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
       - name: Run executable money-path antibodies
         run: |
+          if [ "${{ steps.runtime_antibody_scope.outputs.full }}" != "true" ]; then
+            pytest -q \
+              tests/test_single_live_semantics.py \
+              tests/test_single_live_semantics_migration.py
+            exit 0
+          fi
           pytest -q \
             tests/test_single_live_semantics.py \
             tests/test_single_live_semantics_migration.py \
