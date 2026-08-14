@@ -1,8 +1,8 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-08-12
+# Last reused/audited: 2026-08-14
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-08-12; last_reused=2026-08-12
+# Lifecycle: created=2026-03-30; last_reviewed=2026-08-14; last_reused=2026-08-14
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
@@ -6216,6 +6216,187 @@ class TestStrategyPolicyResolver:
         assert current.gated is False
         assert unknown.gated is True
         conn.close()
+
+    def test_permissive_manual_gate_cannot_waive_matching_revision_risk_gate(
+        self, monkeypatch,
+    ):
+        _neutralize_hard_safety(monkeypatch)
+        conn = _policy_conn()
+        now = datetime(2026, 8, 14, 12, 30, tzinfo=timezone.utc)
+        old_revision = (
+            riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        )
+        current_revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        _insert_control_override(
+            conn,
+            override_id="restore-ordinary-entry-eligibility",
+            target_type="strategy",
+            target_key="forecast_qkernel_entry",
+            action_type="gate",
+            value="false",
+            issued_at=(now - timedelta(minutes=10)).isoformat(),
+            effective_until=(now + timedelta(hours=1)).isoformat(),
+            precedence=1000,
+        )
+        _insert_risk_action(
+            conn,
+            action_id="gate-stale-q-revision",
+            strategy_key="forecast_qkernel_entry",
+            action_type="gate",
+            value=json.dumps(
+                {
+                    "gate": True,
+                    "probability_semantics_revisions": [old_revision],
+                }
+            ),
+            issued_at=(now - timedelta(minutes=5)).isoformat(),
+            effective_until=(now + timedelta(hours=1)).isoformat(),
+            precedence=10,
+        )
+
+        old = policy_module.resolve_strategy_policy(
+            conn,
+            "forecast_qkernel_entry",
+            now,
+            probability_semantics_revision=old_revision,
+        )
+        current = policy_module.resolve_strategy_policy(
+            conn,
+            "forecast_qkernel_entry",
+            now,
+            probability_semantics_revision=current_revision,
+        )
+
+        assert old.gated is True
+        assert old.sources == ["manual_override:gate", "risk_action:gate"]
+        assert current.gated is False
+        assert current.sources == ["manual_override:gate"]
+        conn.close()
+
+    def test_open_rest_revalidates_its_exact_certificate_revision(
+        self, monkeypatch, tmp_path,
+    ):
+        from src.events.reactor import _edli_policy_blocked_open_rest_commands
+
+        _neutralize_hard_safety(monkeypatch)
+        now = datetime(2026, 8, 14, 12, 30, tzinfo=timezone.utc)
+        old_revision = (
+            riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        )
+        current_revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        trade_path = tmp_path / "zeus_trades.db"
+        world_path = tmp_path / "zeus-world.db"
+        trade_conn = sqlite3.connect(trade_path)
+        trade_conn.row_factory = sqlite3.Row
+        trade_conn.executescript(
+            """
+            CREATE TABLE venue_commands (command_id TEXT PRIMARY KEY, position_id TEXT);
+            CREATE TABLE position_current (position_id TEXT PRIMARY KEY, strategy_key TEXT);
+            CREATE TABLE position_decision_attribution (
+                command_id TEXT PRIMARY KEY, decision_certificate_hash TEXT
+            );
+            CREATE TABLE risk_actions (
+                action_id TEXT PRIMARY KEY, strategy_key TEXT, action_type TEXT,
+                value TEXT, issued_at TEXT, effective_until TEXT, precedence INTEGER,
+                status TEXT
+            );
+            """
+        )
+        world_conn = sqlite3.connect(world_path)
+        world_conn.executescript(
+            """
+            CREATE TABLE decision_certificates (
+                certificate_hash TEXT PRIMARY KEY, payload_json TEXT
+            );
+            CREATE TABLE control_overrides (
+                override_id TEXT PRIMARY KEY, target_type TEXT, target_key TEXT,
+                action_type TEXT, value TEXT, issued_at TEXT, effective_until TEXT,
+                precedence INTEGER
+            );
+            """
+        )
+        trade_conn.execute("INSERT INTO venue_commands VALUES ('rest-1', 'position-1')")
+        trade_conn.execute(
+            "INSERT INTO position_current VALUES ('position-1', 'forecast_qkernel_entry')"
+        )
+        trade_conn.execute(
+            "INSERT INTO position_decision_attribution VALUES ('rest-1', 'cert-1')"
+        )
+        trade_conn.execute(
+            "INSERT INTO risk_actions VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "gate-stale-q-revision",
+                "forecast_qkernel_entry",
+                "gate",
+                json.dumps(
+                    {
+                        "gate": True,
+                        "probability_semantics_revisions": [old_revision],
+                    }
+                ),
+                (now - timedelta(minutes=5)).isoformat(),
+                (now + timedelta(hours=1)).isoformat(),
+                10,
+                "active",
+            ),
+        )
+        world_conn.execute(
+            "INSERT INTO decision_certificates VALUES (?, ?)",
+            (
+                "cert-1",
+                json.dumps(
+                    {
+                        "strategy_key": "forecast_qkernel_entry",
+                        "probability_semantics_revision": old_revision,
+                    }
+                ),
+            ),
+        )
+        world_conn.execute(
+            "INSERT INTO control_overrides VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "restore-ordinary-entry-eligibility",
+                "strategy",
+                "forecast_qkernel_entry",
+                "gate",
+                "false",
+                (now - timedelta(minutes=10)).isoformat(),
+                (now + timedelta(hours=1)).isoformat(),
+                1000,
+            ),
+        )
+        trade_conn.commit()
+        world_conn.commit()
+        world_conn.close()
+        trade_conn.execute("ATTACH DATABASE ? AS world", (str(world_path),))
+        rest = SimpleNamespace(command_id="rest-1")
+
+        blocked = _edli_policy_blocked_open_rest_commands(
+            trade_conn,
+            [rest],
+            decision_time=now,
+        )
+        assert blocked == {"rest-1": "STRATEGY_POLICY_GATED"}
+
+        trade_conn.execute(
+            "UPDATE world.decision_certificates SET payload_json = ? WHERE certificate_hash = ?",
+            (
+                json.dumps(
+                    {
+                        "strategy_key": "forecast_qkernel_entry",
+                        "probability_semantics_revision": current_revision,
+                    }
+                ),
+                "cert-1",
+            ),
+        )
+        allowed = _edli_policy_blocked_open_rest_commands(
+            trade_conn,
+            [rest],
+            decision_time=now,
+        )
+        assert allowed == {}
+        trade_conn.close()
 
     def test_resolve_strategy_policy_shrinks_only_one_strategy_allocation(self, monkeypatch):
         _neutralize_hard_safety(monkeypatch)

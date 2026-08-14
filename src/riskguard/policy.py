@@ -77,7 +77,13 @@ def resolve_strategy_policy(
                     logger.info("policy: manual_override gate skipped — field locked by higher-priority source")
                     continue
                 gated = _parse_boolish(row["value"])
-                locked_fields.add("gated")
+                # A permissive operator gate restores ordinary eligibility; it
+                # is not an implicit waiver of a narrower, evidence-scoped
+                # automated safety gate.  Only a restrictive manual gate owns
+                # the deny field.  This keeps policy composition monotone:
+                # permissions cannot erase a still-active loss cohort.
+                if gated:
+                    locked_fields.add("gated")
             elif action_type == "allocation_multiplier":
                 if "allocation_multiplier" in locked_fields:
                     logger.info("policy: manual_override allocation_multiplier skipped — field locked by higher-priority source")

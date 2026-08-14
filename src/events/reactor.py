@@ -11875,6 +11875,151 @@ def _edli_open_maker_rests_for_screen(trade_conn, world_conn, *, beliefs=None) -
     return out
 
 
+def _edli_policy_blocked_open_rest_commands(
+    trade_conn,
+    open_rests,
+    *,
+    decision_time,
+) -> dict[str, str]:
+    """Return open ENTRY rests whose immutable evidence is no longer admissible.
+
+    A resting BUY is still an unexecuted capital decision.  Its original
+    certificate therefore must remain allowed by the current strategy policy;
+    otherwise a gate that correctly blocks a fresh submit would leave the same
+    stale decision live on the venue.  The caller supplies a trade-main
+    connection with canonical ``world`` attached so risk actions, manual
+    controls, and certificate payloads are read in one snapshot.
+
+    SCOPE: one exact open ENTRY command.  DRAIN: the continuous redecision
+    screen cancels it through the durable cancel journal before quote refresh.
+    RESET: a newly certified command whose exact probability revision is allowed
+    by current policy is absent from this result and may enter through the normal
+    fresh-certificate scan.
+    """
+
+    command_ids = sorted(
+        {
+            str(getattr(rest, "command_id", "") or "").strip()
+            for rest in open_rests
+            if str(getattr(rest, "command_id", "") or "").strip()
+        }
+    )
+    if not command_ids:
+        return {}
+
+    required = {
+        "venue_commands",
+        "position_current",
+        "position_decision_attribution",
+        "risk_actions",
+    }
+    main_tables = {
+        str(row[0])
+        for row in trade_conn.execute(
+            "SELECT name FROM main.sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    world_tables = {
+        str(row[0])
+        for row in trade_conn.execute(
+            "SELECT name FROM world.sqlite_master WHERE type IN ('table','view')"
+        ).fetchall()
+    }
+    if not required.issubset(main_tables) or not {
+        "decision_certificates",
+        "control_overrides",
+    }.issubset(world_tables):
+        return {command_id: "ENTRY_POLICY_AUTHORITY_UNAVAILABLE" for command_id in command_ids}
+
+    placeholders = ",".join("?" for _ in command_ids)
+    rows = trade_conn.execute(
+        f"""
+        SELECT vc.command_id,
+               pc.strategy_key,
+               pda.decision_certificate_hash,
+               dc.payload_json
+          FROM main.venue_commands vc
+          LEFT JOIN main.position_current pc
+            ON pc.position_id = vc.position_id
+          LEFT JOIN main.position_decision_attribution pda
+            ON pda.command_id = vc.command_id
+          LEFT JOIN world.decision_certificates dc
+            ON lower(dc.certificate_hash) = lower(pda.decision_certificate_hash)
+         WHERE vc.command_id IN ({placeholders})
+        """,
+        tuple(command_ids),
+    ).fetchall()
+    rows_by_command = {str(row[0] or ""): row for row in rows}
+
+    from src.riskguard.policy import resolve_strategy_policy
+
+    blocked: dict[str, str] = {}
+    for command_id in command_ids:
+        row = rows_by_command.get(command_id)
+        if row is None or not row[2] or not row[3]:
+            blocked[command_id] = "ENTRY_DECISION_CERTIFICATE_UNAVAILABLE"
+            continue
+        try:
+            payload = json.loads(str(row[3]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            blocked[command_id] = "ENTRY_DECISION_CERTIFICATE_INVALID"
+            continue
+        if not isinstance(payload, dict):
+            blocked[command_id] = "ENTRY_DECISION_CERTIFICATE_INVALID"
+            continue
+        strategy_key = str(payload.get("strategy_key") or row[1] or "").strip()
+        revision = str(payload.get("probability_semantics_revision") or "").strip()
+        if not strategy_key or not revision:
+            blocked[command_id] = "ENTRY_POLICY_IDENTITY_MISSING"
+            continue
+        try:
+            policy = resolve_strategy_policy(
+                trade_conn,
+                strategy_key,
+                decision_time,
+                probability_semantics_revision=revision,
+            )
+        except Exception:  # noqa: BLE001 - authority loss pulls unfilled BUY risk
+            blocked[command_id] = "ENTRY_POLICY_AUTHORITY_UNAVAILABLE"
+            continue
+        if policy.gated:
+            blocked[command_id] = "STRATEGY_POLICY_GATED"
+        elif policy.exit_only:
+            blocked[command_id] = "STRATEGY_POLICY_EXIT_ONLY"
+    return blocked
+
+
+def _edli_cancel_rest_pulls(rest_pulls) -> int:
+    """Cancel screened maker rests through the one durable cancel journal."""
+
+    if not rest_pulls:
+        return 0
+    from src.data.polymarket_client import PolymarketClient
+    from src.execution.venue_cancel_journal import run_persisted_cancels_for_expired_rests
+    from src.state.db import get_trade_connection
+
+    to_cancel = [
+        {
+            "command_id": rest.command_id,
+            "venue_order_id": rest.venue_order_id,
+            "created_at": rest.created_at,
+            "fact_state": rest.fact_state,
+            "matched_size": rest.matched_size,
+            "min_order_size": rest.min_order_size,
+            "cancel_reason": decision.reason,
+            "cancel_action": decision.action,
+            "cancel_detail": decision.detail,
+        }
+        for rest, decision in rest_pulls
+    ]
+    stats = run_persisted_cancels_for_expired_rests(
+        to_cancel,
+        PolymarketClient(),
+        conn_factory=lambda: get_trade_connection(write_class="live"),
+    )
+    return int(stats.get("cancelled", 0) or 0)
+
+
 def _edli_family_key_from_belief(belief: Any) -> tuple[str, str, str] | None:
     key = (
         str(getattr(belief, "city", "") or "").strip(),
@@ -12967,6 +13112,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             _all_latest_beliefs,
             entry_substrate_refresh_scope,
             filter_redecisions_with_spine_members,
+            RepriceDecision,
             screen_entry_redecisions,
             screened_family_keys,
             screen_resting_orders,
@@ -12975,6 +13121,7 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         from src.state.db import (
             get_world_connection_read_only,
             get_trade_connection_read_only,
+            get_trade_connection_with_world_required,
             get_world_connection,
             get_forecasts_connection_read_only,
         )
@@ -12988,7 +13135,9 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
 
         # 1) ENTRY screen + rest screen on RO connections (pure read, no HTTP).
         world_ro = get_world_connection_read_only()
-        trade_ro = get_trade_connection_read_only()
+        trade_ro = get_trade_connection_with_world_required(write_class=None)
+        trade_ro.execute("PRAGMA query_only=ON")
+        policy_rest_pulls = []
         try:
             all_beliefs = _all_latest_beliefs(
                 world_ro,
@@ -13064,6 +13213,30 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 open_rests=open_rests,
                 decision_time=received_at,
             )
+            policy_blocks = _edli_policy_blocked_open_rest_commands(
+                trade_ro,
+                open_rests,
+                decision_time=now,
+            )
+            policy_rest_pulls = [
+                (
+                    rest,
+                    RepriceDecision(
+                        family_id=rest.family_id,
+                        bin_label=rest.bin_label,
+                        side=rest.side,
+                        action="CANCEL_REPLACE",
+                        reason=policy_blocks[rest.command_id],
+                    ),
+                )
+                for rest in open_rests
+                if rest.command_id in policy_blocks
+            ]
+            if policy_blocks:
+                rest_pulls = [
+                    pair for pair in rest_pulls
+                    if pair[0].command_id not in policy_blocks
+                ]
             entry_condition_scope = _edli_redecision_condition_scope(entry_redecisions, beliefs)
             open_rest_condition_scope = _edli_open_rest_condition_scope(
                 open_rests,
@@ -13079,6 +13252,14 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                 trade_ro.close()
             except Exception:  # noqa: BLE001
                 pass
+
+        # Policy-invalid rests are executable stale decisions, not quote-driven
+        # reprices.  Cancel them before any confirmation refresh or world-write
+        # contention can defer the venue side effect.  A later allowed revision
+        # re-enters through the ordinary fresh certificate path.
+        policy_cancelled = 0
+        if policy_rest_pulls and get_mode() == "live":
+            policy_cancelled = _edli_cancel_rest_pulls(policy_rest_pulls)
 
         # A rest-pull family must also re-decide (cancel + re-decide at fresh price). Add its
         # family key to the re-emit restriction so the reactor re-certifies it; the cancel itself
@@ -13404,11 +13585,14 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
             _log.info(
                 "edli_redecision_screen: entry_candidates=%d entry_spine_confirmed=%d "
                 "entry_families=0 rest_pulls=%d "
+                "policy_rest_pulls=%d policy_rests_cancelled=%d "
                 "held_monitor_families=%d held_reemit_families=0 families_reemitted=0 "
                 "events_emitted=0 rests_cancelled=0 expired_unadmitted=%d reason=no_screened_families",
                 len(redecisions),
                 len(entry_redecisions),
                 len(rest_pulls),
+                len(policy_rest_pulls),
+                policy_cancelled,
                 len(held_families),
                 expired_unadmitted,
             )
@@ -13582,33 +13766,18 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
         #    venue call site). The next reactor cycle re-decides the re-emitted family at fresh price.
         cancelled = 0
         if rest_pulls and get_mode() == "live":
-            from src.data.polymarket_client import PolymarketClient
-            from src.execution.venue_cancel_journal import run_persisted_cancels_for_expired_rests
-            from src.state.db import get_trade_connection
-
-            to_cancel = [
-                {"command_id": rest.command_id, "venue_order_id": rest.venue_order_id,
-                 "created_at": rest.created_at, "fact_state": rest.fact_state,
-                 "matched_size": rest.matched_size, "min_order_size": rest.min_order_size,
-                 "cancel_reason": decision.reason,
-                 "cancel_action": decision.action, "cancel_detail": decision.detail}
-                for rest, decision in rest_pulls
-            ]
-            cstats = run_persisted_cancels_for_expired_rests(
-                to_cancel,
-                PolymarketClient(),
-                conn_factory=lambda: get_trade_connection(write_class="live"),
-            )
-            cancelled = cstats.get("cancelled", 0)
+            cancelled = _edli_cancel_rest_pulls(rest_pulls)
 
         _log.info(
             "edli_redecision_screen: entry_candidates=%d entry_spine_confirmed=%d "
             "entry_families=%d rest_pulls=%d "
+            "policy_rest_pulls=%d policy_rests_cancelled=%d "
             "held_monitor_families=%d held_reemit_families=%d families_reemitted=%d "
             "pending_redecision_families=%d suppressed_existing_pending=%d "
             "events_emitted=%d rests_cancelled=%d expired_unadmitted=%d "
             "expired_stale_pending=%d expired_rest_pull_blockers=%d",
-            len(redecisions), len(entry_redecisions), len(family_keys), len(rest_pulls), len(held_families),
+            len(redecisions), len(entry_redecisions), len(family_keys), len(rest_pulls),
+            len(policy_rest_pulls), policy_cancelled, len(held_families),
             len(held_reemit_families),
             len(all_families),
             len(pending_families),
