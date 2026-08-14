@@ -1675,12 +1675,14 @@ def _run_restart_recovery_if_needed(labels: list[str]) -> tuple[bool, str]:
         )
     except Exception as exc:  # noqa: BLE001
         return False, f"live restart recovery could not run: {exc}"
-    output = (res.stdout or res.stderr or "").strip()
-    tail = "\n".join(output.splitlines()[-40:]) if output else "<no output>"
+    stdout = (res.stdout or "").strip()
+    stderr = (res.stderr or "").strip()
+    diagnostic = "\n".join(part for part in (stderr, stdout) if part)
+    tail = "\n".join(diagnostic.splitlines()[-80:]) if diagnostic else "<no output>"
     if res.returncode != 0:
         return False, f"live restart recovery failed rc={res.returncode}:\n{tail}"
     try:
-        summary = json.loads(output.splitlines()[-1])
+        summary = json.loads(stdout.splitlines()[-1])
     except Exception:
         summary = {}
     return True, f"live restart recovery passed: {json.dumps(summary, sort_keys=True)}"

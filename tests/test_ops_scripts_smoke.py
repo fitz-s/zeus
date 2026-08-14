@@ -2522,6 +2522,31 @@ def test_deploy_live_trading_restart_runs_recovery(monkeypatch, tmp_path):
     )
 
 
+def test_deploy_live_restart_recovery_failure_preserves_stderr(monkeypatch, tmp_path):
+    dl = _load("deploy_live_restart_recovery_stderr", "deploy_live.py")
+    dl.LIVE_REPO = str(tmp_path)
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+
+    def _fake_run(cmd, **kwargs):
+        import subprocess
+
+        return subprocess.CompletedProcess(
+            cmd,
+            1,
+            '{"advanced": 0, "errors": 1, "scope": "restart_preflight"}\n',
+            "recovery: command exact-id raised RuntimeError: exact failure\n",
+        )
+
+    monkeypatch.setattr(dl.subprocess, "run", _fake_run)
+
+    ok, detail = dl._run_restart_recovery_if_needed(["com.zeus.live-trading"])
+
+    assert ok is False
+    assert "command exact-id" in detail
+    assert "exact failure" in detail
+    assert '"errors": 1' in detail
+
+
 def _restart_trade_schema_fixture(tmp_path, *, include_reason=True, include_ledger=True):
     tmp_path.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(tmp_path / "zeus_trades.db")
