@@ -2479,13 +2479,11 @@ def test_global_buy_generation_omits_untyped_maker_sibling():
 
     assert len(proposals) == 1
     assert proposals[0].execution_mode == "TAKER_LIMIT"
-    assert proposals[0].eligibility_reason == (
-        "CURRENT_PRECLIFF_LIQUIDATION_CAPACITY_MISSING"
-    )
+    assert proposals[0].eligibility_reason is None
 
 
 @pytest.mark.parametrize("bid_price", ("0.01", "0.04"))
-def test_global_taker_buy_requires_current_precliff_liquidation_depth(bid_price):
+def test_global_taker_buy_can_commit_to_settlement_without_exit_depth(bid_price):
     candidate = _global_candidate(
         candidate_id="taker-born-unexitable",
         family="taker-born-unexitable-family",
@@ -2503,11 +2501,15 @@ def test_global_taker_buy_requires_current_precliff_liquidation_depth(bid_price)
 
     decision = _global_select((candidate,), cap="5")
 
-    assert decision.candidate is None
-    assert decision.rejection_reasons[candidate.candidate_id] == "DEPTH_INFEASIBLE"
+    assert decision.candidate is candidate
+    assert decision.capital_action_mode == "SETTLEMENT_LOCKED_BUY"
+    assert decision.expected_growth is not None
+    assert decision.expected_growth.expected_ev_usd > 0.0
+    assert decision.capital_lock_hours is not None
+    assert decision.capital_lock_hours > 0.0
 
 
-def test_global_taker_buy_size_does_not_exceed_current_precliff_liquidation_depth():
+def test_global_taker_buy_size_uses_buy_depth_not_current_exit_depth():
     candidate = _global_candidate(
         candidate_id="taker-repairable-prefix",
         family="taker-repairable-prefix-family",
@@ -2527,7 +2529,7 @@ def test_global_taker_buy_size_does_not_exceed_current_precliff_liquidation_dept
     decision = _global_select((candidate,), cap="5")
 
     assert decision.candidate is candidate
-    assert Decimal("20") <= decision.shares <= Decimal("55")
+    assert decision.shares > Decimal("55")
 
 
 def test_statistical_candidate_cannot_forge_exact_payoff_settlement_lock():
@@ -2550,7 +2552,9 @@ def test_statistical_candidate_cannot_forge_exact_payoff_settlement_lock():
     decision = _global_select((candidate,), cap="5")
 
     assert decision.candidate is None
-    assert decision.rejection_reasons[candidate.candidate_id] == "DEPTH_INFEASIBLE"
+    assert decision.rejection_reasons[candidate.candidate_id] == (
+        "DETERMINISTIC_PAYOFF_NOT_PROVED"
+    )
 
 
 @pytest.mark.parametrize(

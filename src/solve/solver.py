@@ -2182,13 +2182,6 @@ def global_candidates_from_native(
         exact_yes_payoff if native.side == "YES" else 1 - exact_yes_payoff
     ) == 1
     taker_eligibility_reason = eligibility_reason
-    if (
-        taker_eligibility_reason is None
-        and not settlement_locked_exact_payoff
-        and current_precliff_liquidation_capacity(bids)
-        < Decimal(curve.min_order_size)
-    ):
-        taker_eligibility_reason = "CURRENT_PRECLIFF_LIQUIDATION_CAPACITY_MISSING"
     common = dict(
         family_key=probability_witness.family_key,
         bin_id=binding.bin_id,
@@ -5378,15 +5371,6 @@ def _score_global_single_order(
         candidate.economic_cost_curve,
         spend_limit_usd=optimization_limit,
     )
-    if (
-        candidate.execution_mode == "TAKER_LIMIT"
-        and not settlement_locked_exact_payoff
-    ):
-        liquidation_capacity = current_precliff_liquidation_capacity(
-            candidate.native_bid_levels
-        )
-        capacity_max_shares = min(capacity_max_shares, liquidation_capacity)
-        raw_max_shares = min(raw_max_shares, liquidation_capacity)
     raw_min_shares = _single_order_min_marketable_shares(
         candidate.economic_cost_curve
     )
@@ -7143,6 +7127,24 @@ def select_global_single_order(
                 current_probability,
                 decision_at_utc=decision_at_utc,
             )
+        if (
+            reason is None
+            and isinstance(candidate, GlobalSingleOrderCandidate)
+            and candidate.settlement_locked_exact_payoff
+            and (
+                not isinstance(
+                    probability_witness,
+                    DeterministicBinPayoffWitness,
+                )
+                or family_payoff_point_q(
+                    probability_witness,
+                    bin_id=candidate.bin_id,
+                    side=candidate.side,
+                )
+                != 1.0
+            )
+        ):
+            reason = "DETERMINISTIC_PAYOFF_NOT_PROVED"
         if (
             reason is None
             and isinstance(candidate, GlobalSingleOrderCandidate)

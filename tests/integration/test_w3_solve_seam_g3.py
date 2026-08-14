@@ -15206,7 +15206,7 @@ def test_global_preflight_jit_worse_curve_replaces_and_reauctions(monkeypatch):
 
 @pytest.mark.parametrize("execution_mode", ("TAKER_LIMIT", "MAKER_REST"))
 @pytest.mark.parametrize("side", ("YES", "NO"))
-def test_global_preflight_jit_rejects_buy_that_lost_precliff_liquidation_depth(
+def test_global_preflight_jit_allows_settlement_hold_but_maker_requires_exit_depth(
     monkeypatch,
     execution_mode,
     side,
@@ -15283,6 +15283,24 @@ def test_global_preflight_jit_rejects_buy_that_lost_precliff_liquidation_depth(
                 else Decimal("0.07")
             ),
             shares=Decimal("20"),
+            capital_action_mode=(
+                "CONTINGENT_MAKER_REST_BUY"
+                if execution_mode == "MAKER_REST"
+                else "SETTLEMENT_LOCKED_BUY"
+            ),
+            expected_terminal_wealth=ExpectedBuyTerminalWealthCertificate(
+                probability_basis="POSTERIOR_PREDICTIVE_MEAN",
+                win_probability_mean=0.9,
+                loss_probability_mean=0.1,
+                loss_payoff_usd=Decimal("-1.4"),
+                win_payoff_usd=Decimal("18.6"),
+                wealth_after_loss_usd=Decimal("98.6"),
+                wealth_after_win_usd=Decimal("118.6"),
+                expected_delta_log_wealth=(
+                    0.1 * math.log(0.986) + 0.9 * math.log(1.186)
+                ),
+                expected_ev_usd=16.6,
+            ),
         ),
     )
     _install_global_jit_market_authority_fetches(
@@ -15294,7 +15312,7 @@ def test_global_preflight_jit_rejects_buy_that_lost_precliff_liquidation_depth(
         min_order_size="5",
     )
 
-    rejected = era._global_preflight_entry_jit_receipt(
+    checked = era._global_preflight_entry_jit_receipt(
         event,
         receipt,
         global_actuation=actuation,
@@ -15306,11 +15324,14 @@ def test_global_preflight_jit_rejects_buy_that_lost_precliff_liquidation_depth(
         },
     )
 
-    assert rejected.proof_accepted is False
-    assert rejected.reason.startswith(
-        "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
-        "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
-    )
+    assert checked.proof_accepted is (execution_mode == "TAKER_LIMIT")
+    if execution_mode == "TAKER_LIMIT":
+        assert isinstance(checked.global_jit_candidate, era._GlobalJitHandoff)
+    else:
+        assert checked.reason.startswith(
+            "GLOBAL_ACTUATION_MARKET_AUTHORITY_SUPERSEDED:"
+            "GLOBAL_BUY_JIT_PRECLIFF_LIQUIDATION_CAPACITY_INFEASIBLE:"
+        )
 
 
 @pytest.mark.parametrize("win_q", (1.0, 0.9))
