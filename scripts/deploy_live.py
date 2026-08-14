@@ -1931,6 +1931,54 @@ def cmd_restart(args: argparse.Namespace) -> int:
         return 1
 
 
+def _restore_paused_live_monitoring_after_failed_restart(
+    *,
+    post_live_labels: list[str],
+    expected_sha: str,
+) -> tuple[bool, str]:
+    """Restore held-capital monitoring without clearing the restart pause.
+
+    Recovery and preflight failures must block new entries, but they must not
+    strand already-held capital without ``src.main`` or its independent
+    launchd watchdog.  Start both services, then prove the loaded process and
+    held-position monitor advance.  The durable deploy guard remains armed;
+    only the fully verified success path may clear it.
+    """
+
+    details: list[str] = []
+    launched_after = datetime.now(timezone.utc)
+    live_ok, live_detail = _launch_or_restart_label(LIVE_TRADING_LABEL)
+    details.append(live_detail)
+
+    watchdog_ok = True
+    for label in post_live_labels:
+        ok, detail = _launch_or_restart_label(label)
+        details.append(detail)
+        watchdog_ok = watchdog_ok and ok
+
+    runtime_ok = False
+    monitor_ok = False
+    if live_ok:
+        runtime_ok, runtime_detail = _wait_for_live_runtime_fresh(
+            expected_sha=expected_sha,
+            launched_after=launched_after,
+        )
+        details.append(runtime_detail)
+        if runtime_ok:
+            monitor_ok, monitor_detail = _wait_for_post_start_monitor_cadence(
+                launched_after=launched_after,
+            )
+            details.append(monitor_detail)
+
+    restored = live_ok and watchdog_ok and runtime_ok and monitor_ok
+    posture = (
+        "paused live monitoring restored"
+        if restored
+        else "paused live monitoring restoration incomplete"
+    )
+    return restored, f"{posture}; deploy entry guard remains armed:\n" + "\n".join(details)
+
+
 def _cmd_restart_locked(args: argparse.Namespace) -> int:
     target = args.daemon
     labels = _restart_labels_for_target(target)
@@ -2058,7 +2106,16 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         print("REFUSING to restart — live restart recovery is not green:")
         print(recovery_detail)
         if includes_live_trading:
-            print("live-trading left stopped; fix restart recovery blockers before starting it.", file=sys.stderr)
+            restored, restore_detail = _restore_paused_live_monitoring_after_failed_restart(
+                post_live_labels=post_live_labels,
+                expected_sha=expected_live_sha,
+            )
+            print(restore_detail, file=sys.stderr)
+            if not restored:
+                print(
+                    "held-capital monitoring restoration failed; entry pause remains armed",
+                    file=sys.stderr,
+                )
         return 1
     print(recovery_detail)
 
@@ -2067,7 +2124,16 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         print("REFUSING to restart — live restart preflight is not green:")
         print(preflight_detail)
         if includes_live_trading:
-            print("live-trading left stopped; fix preflight blockers before starting it.", file=sys.stderr)
+            restored, restore_detail = _restore_paused_live_monitoring_after_failed_restart(
+                post_live_labels=post_live_labels,
+                expected_sha=expected_live_sha,
+            )
+            print(restore_detail, file=sys.stderr)
+            if not restored:
+                print(
+                    "held-capital monitoring restoration failed; entry pause remains armed",
+                    file=sys.stderr,
+                )
         return 1
     print(preflight_detail)
 
@@ -2127,6 +2193,11 @@ def _cmd_restart_locked(args: argparse.Namespace) -> int:
         else:
             rc_all = 1
             print(detail, file=sys.stderr)
+            _, restore_detail = _restore_paused_live_monitoring_after_failed_restart(
+                post_live_labels=post_live_labels,
+                expected_sha=expected_live_sha,
+            )
+            print(restore_detail, file=sys.stderr)
     return rc_all
 
 

@@ -4548,7 +4548,9 @@ def test_deploy_live_live_restart_runs_recovery_before_preflight(monkeypatch, ca
     assert "live restart preflight passed" in capsys.readouterr().out
 
 
-def test_deploy_live_projection_recovery_failure_leaves_daemons_stopped(monkeypatch):
+def test_deploy_live_projection_recovery_failure_restores_paused_monitoring(
+    monkeypatch,
+):
     dl = _load("deploy_live_projection_recovery_failure", "deploy_live.py")
     stops: list[str] = []
     launches: list[str] = []
@@ -4581,6 +4583,16 @@ def test_deploy_live_projection_recovery_failure_leaves_daemons_stopped(monkeypa
         "_wait_for_prerequisite_code_identity",
         lambda labels, **kwargs: (True, "prerequisites verified"),
     )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_live_runtime_fresh",
+        lambda **_kwargs: (True, "runtime verified"),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_post_start_monitor_cadence",
+        lambda **_kwargs: (True, "held monitor verified"),
+    )
     monkeypatch.setattr(dl, "_live_restart_exclusive_lock", contextlib.nullcontext)
 
     assert dl.main(["restart", "live-trading"]) == 1
@@ -4597,6 +4609,8 @@ def test_deploy_live_projection_recovery_failure_leaves_daemons_stopped(monkeypa
     assert launches == [
         *prerequisites,
         *prerequisites,
+        dl.LIVE_TRADING_LABEL,
+        dl.DAEMONS["venue-heartbeat"],
     ]
 
 
@@ -5030,11 +5044,15 @@ def test_deploy_live_all_restarts_sidecars_before_live_preflight(monkeypatch):
     }
 
 
-def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
+def test_deploy_live_preflight_failure_restores_paused_held_monitoring(
+    monkeypatch,
+    capsys,
+):
     dl = _load("deploy_live_restart_preflight_failure", "deploy_live.py")
     calls = []
 
     monkeypatch.setattr(dl, "_gate", lambda allow_dirty, allow_unpushed=False: (True, []))
+    monkeypatch.setattr(dl, "head_sha", lambda short=True: "d" * 40)
     monkeypatch.setattr(dl, "_launchctl_service_loaded", lambda label: True)
     monkeypatch.setattr(
         dl,
@@ -5073,6 +5091,22 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
         "_live_restart_exclusive_lock",
         contextlib.nullcontext,
     )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_live_runtime_fresh",
+        lambda **kwargs: (
+            calls.append(("verify", kwargs["expected_sha"][:8]))
+            or (True, "runtime verified")
+        ),
+    )
+    monkeypatch.setattr(
+        dl,
+        "_wait_for_post_start_monitor_cadence",
+        lambda **_kwargs: (
+            calls.append(("monitor", "paused-recovery"))
+            or (True, "held monitor verified")
+        ),
+    )
 
     rc = dl.main(["restart", "live-trading"])
 
@@ -5095,9 +5129,15 @@ def test_deploy_live_preflight_failure_leaves_live_stopped(monkeypatch, capsys):
         *[("launch", label) for label in preflight_prerequisites],
         ("prerequisite", preflight_prerequisites),
         ("preflight", tuple(expanded_labels)),
+        ("launch", dl.LIVE_TRADING_LABEL),
+        ("launch", heartbeat_supervisor),
+        ("verify", "dddddddd"),
+        ("monitor", "paused-recovery"),
     ]
     err = capsys.readouterr().err
-    assert "live-trading left stopped" in err
+    assert "paused live monitoring restored" in err
+    assert "deploy entry guard remains armed" in err
+    assert "live-trading left stopped" not in err
 
 
 def test_deploy_live_restart_lock_excludes_watchdog_shared_lease(
