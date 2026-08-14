@@ -18189,6 +18189,10 @@ class TestRecoveryResolutionTable:
                 "matched_size": filled_size,
                 "remaining_size": "0",
             }
+            expired_payload = json.loads(_get_events(conn, "cmd-exit")[-1]["payload_json"])
+            assert Decimal(expired_payload["chain_residual_size"]) == Decimal(
+                str(projected_shares)
+            )
         else:
             assert summary["advanced"] == 0
             assert reason == (

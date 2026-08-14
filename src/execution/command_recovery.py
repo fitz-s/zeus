@@ -13110,11 +13110,18 @@ def _clear_review_required_terminal_fak_partial_exit(
     ):
         return False
     position_row = conn.execute(
-        "SELECT phase FROM position_current WHERE position_id = ? LIMIT 1",
+        "SELECT phase, shares FROM position_current WHERE position_id = ? LIMIT 1",
         (str(command.get("position_id") or ""),),
     ).fetchone()
     position_phase = str(position_row[0] or "") if position_row is not None else ""
     terminal_position = position_phase in {"settled", "economically_closed"}
+    chain_residual_size = (
+        requested - filled
+        if terminal_position or position_row is None
+        else _positive_decimal_or_none(position_row[1])
+    )
+    if chain_residual_size is None:
+        return False
 
     observed_at = str(trade_summary.get("observed_at") or _now_iso())
     terminal_payload = {
@@ -13209,7 +13216,7 @@ def _clear_review_required_terminal_fak_partial_exit(
                 "terminal_order_fact_id": fact_id,
                 "filled_size": _decimal_text(filled),
                 "remaining_size": "0",
-                "chain_residual_size": _decimal_text(requested - filled),
+                "chain_residual_size": _decimal_text(chain_residual_size),
             },
         )
         conn.execute(f"RELEASE SAVEPOINT {sp_name}")
