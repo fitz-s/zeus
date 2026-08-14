@@ -8193,8 +8193,19 @@ def _complete_intentional_position_reduction(
     released_position: Position | None = None
     raw_state = getattr(position, "state", "")
     state_name = str(getattr(raw_state, "value", raw_state) or "")
-    should_release = state_name == "pending_exit" or bool(
-        str(getattr(position, "exit_state", "") or "")
+    # A historical reduction fact may be replayed while a later, unrelated
+    # exit is pending. Release only for new economics or confirmation of the
+    # still-owned order; otherwise the old fill creates an
+    # intent/reject/release loop on every monitor pass.
+    same_exit_order = (
+        bool(order_id)
+        and str(getattr(position, "last_exit_order_id", "") or "") == order_id
+    )
+    should_release = (
+        newly_filled > Decimal("1e-9") or bool(batch_slices) or same_exit_order
+    ) and (
+        state_name == "pending_exit"
+        or bool(str(getattr(position, "exit_state", "") or ""))
     )
     if release_after_fill and should_release:
         released_position = copy.deepcopy(staged_fill_position)

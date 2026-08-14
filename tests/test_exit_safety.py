@@ -1,6 +1,6 @@
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-08
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-08; last_reused=2026-08-08
+# Last reused/audited: 2026-08-14
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-14; last_reused=2026-08-14
 # Authority basis: docs/operations/current/finite_evidence_probability_symmetry/PLAN.md
 # Purpose: Lock R3 M4 cancel/replace exit mutex, typed cancel outcomes, replacement gates, and CTF preflight.
 # Reuse: Run when exit_safety, executor exit submit, exit_lifecycle cancel retry, venue command transitions, or collateral sell preflight changes.
@@ -1564,6 +1564,35 @@ def test_madrid_partial_exit_realized_pnl_is_canonical_and_settlement_adds_resid
         status="MATCHED",
         conn=conn,
     ) == Decimal("0")
+    release_count = conn.execute(
+        "SELECT COUNT(*) FROM position_events "
+        "WHERE position_id = ? AND caused_by = 'capital_reduction_filled'",
+        (position.trade_id,),
+    ).fetchone()[0]
+    position.state = "pending_exit"
+    position.pre_exit_state = "holding"
+    position.exit_state = "retry_pending"
+    position.order_status = "retry_pending"
+    position.exit_reason = "DAY0_HARD_FACT_BIN_DEAD"
+    position.last_exit_error = "exit_no_executable_bid"
+    position.next_exit_retry_at = "2026-07-16T12:00:00+00:00"
+    assert exit_lifecycle._complete_intentional_position_reduction(
+        position,
+        intended_shares=Decimal("6"),
+        confirmed_filled_shares=Decimal("2.5"),
+        fill_price=0.60,
+        order_id="ord-capital-reduction",
+        status="CONFIRMED",
+        conn=conn,
+    ) == Decimal("0")
+    assert position.state == "pending_exit"
+    assert position.exit_state == "retry_pending"
+    assert position.last_exit_error == "exit_no_executable_bid"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events "
+        "WHERE position_id = ? AND caused_by = 'capital_reduction_filled'",
+        (position.trade_id,),
+    ).fetchone()[0] == release_count
     assert conn.execute(
         "SELECT COUNT(*) FROM position_events "
         "WHERE position_id = ? AND caused_by = 'partial_exit_fill'",
