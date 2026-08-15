@@ -1,5 +1,5 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-08-12
+# Last reused/audited: 2026-08-15
 # Authority basis: IOC forward-port (Fix C: allowed_discovery_modes_inverse) — 2026-05-23
 """Heavy runtime helpers extracted from cycle_runner.
 
@@ -38,6 +38,10 @@ from src.contracts.execution_intent import (
 )
 from src.contracts.position_truth import (
     has_current_money_risk_chain_state,
+)
+from src.contracts.venue_submission_envelope import (
+    LIVE_ORDER_MAX_UNIT_PRICE,
+    LIVE_ORDER_MIN_UNIT_PRICE,
 )
 from src.engine.time_context import lead_hours_to_date_start, lead_hours_to_settlement_close
 from src.state.lifecycle_manager import (
@@ -5701,6 +5705,22 @@ def _monitor_probability_content_identity(receipt: object) -> str:
     return str(receipt.get("probability_content_identity") or "").strip()
 
 
+def _live_order_quote_is_executable(value: float) -> bool:
+    """Classify a held SELL quote against the durable live-order price band.
+
+    SCOPE: only the current held-token book in one reauction request.
+    DRAIN: every monitor or recovery refresh reclassifies the newest exact bid.
+    RESET: the next finite in-band bid immediately restores EXECUTABLE state.
+    """
+
+    return (
+        math.isfinite(value)
+        and LIVE_ORDER_MIN_UNIT_PRICE
+        <= Decimal(str(value))
+        <= LIVE_ORDER_MAX_UNIT_PRICE
+    )
+
+
 def _monitor_global_sell_request_context(position, exit_context) -> dict[str, object]:
     """Bind a monitor SELL to exact q/book evidence or request reactor refresh.
 
@@ -5754,10 +5774,10 @@ def _monitor_global_sell_request_context(position, exit_context) -> dict[str, ob
             held_best_bid = None
             book_state = "UNKNOWN"
         else:
-            if not math.isfinite(held_best_bid) or not 0.0 <= held_best_bid <= 1.0:
+            if not math.isfinite(held_best_bid):
                 held_best_bid = None
                 book_state = "UNKNOWN"
-            elif held_best_bid < 0.05:
+            elif not _live_order_quote_is_executable(held_best_bid):
                 book_state = "NO_EXECUTABLE_BOOK"
             elif not bid_observed_at:
                 book_state = "STALE"
@@ -6624,7 +6644,7 @@ def execute_monitoring_phase(
                 book_state = (
                     "EXECUTABLE"
                     if current_bid is not None
-                    and 0.05 <= current_bid <= 1.0
+                    and _live_order_quote_is_executable(current_bid)
                     else "NO_EXECUTABLE_BOOK"
                 )
             else:

@@ -1,9 +1,9 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-08-12; last_reused=2026-08-12
+# Lifecycle: created=2026-03-31; last_reviewed=2026-08-15; last_reused=2026-08-15
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-08-13
-# Authority basis: finite-evidence single-q global SELL ownership; 7-day capital-loop audit
+# Last reused/audited: 2026-08-15
+# Authority basis: finite-evidence single-q global SELL ownership; price-band parity hot-fix
 """Live safety invariant tests: relationship tests, not function tests.
 
 These verify cross-module relationships that prevent ghost positions,
@@ -7322,6 +7322,8 @@ def test_market_authority_refresh_extends_delta_scope_but_preserves_full_refresh
         ("invalid", "2026-08-12T05:53:52+00:00", None, "UNKNOWN"),
         (float("nan"), "2026-08-12T05:53:52+00:00", None, "UNKNOWN"),
         (0.03, "2026-08-12T05:53:52+00:00", 0.03, "NO_EXECUTABLE_BOOK"),
+        (0.97, "2026-08-12T05:53:52+00:00", 0.97, "NO_EXECUTABLE_BOOK"),
+        (0.95, "2026-08-12T05:53:52+00:00", 0.95, "EXECUTABLE"),
         (0.31, "", 0.31, "STALE"),
         (0.31, "2026-08-12T05:53:52+00:00", 0.31, "EXECUTABLE"),
     ),
@@ -7562,18 +7564,75 @@ def test_same_global_sell_attempt_cannot_slide_its_deadline():
         "canonical_newer",
         "canonical_probability_identity",
         "append_later_sequence_with_older_clock",
+        "runtime_bid",
+        "canonical_bid",
         "expected_probability_identity",
         "expected_bid",
         "expected_observed_at",
+        "expected_book_state",
     ),
     (
-        (False, "", False, "q-current", 0.31, "2026-08-08T18:01:00+00:00"),
-        (True, "q-canonical", False, "q-canonical", 0.27, "2026-08-08T18:02:00"),
-        (True, "", False, None, None, None),
-        (True, "q-canonical", True, "q-canonical", 0.27, "2026-08-08T18:02:00"),
+        (
+            False,
+            "",
+            False,
+            0.31,
+            None,
+            "q-current",
+            0.31,
+            "2026-08-08T18:01:00+00:00",
+            "EXECUTABLE",
+        ),
+        (
+            True,
+            "q-canonical-band",
+            False,
+            0.31,
+            0.97,
+            "q-canonical-band",
+            0.97,
+            "2026-08-08T18:02:00",
+            "NO_EXECUTABLE_BOOK",
+        ),
+        (
+            True,
+            "q-canonical-band",
+            False,
+            0.31,
+            0.95,
+            "q-canonical-band",
+            0.95,
+            "2026-08-08T18:02:00",
+            "EXECUTABLE",
+        ),
+        (
+            True,
+            "q-canonical",
+            False,
+            0.31,
+            0.27,
+            "q-canonical",
+            0.27,
+            "2026-08-08T18:02:00",
+            "EXECUTABLE",
+        ),
+        (True, "", False, 0.31, 0.27, None, None, None, None),
+        (
+            True,
+            "q-canonical",
+            True,
+            0.31,
+            0.27,
+            "q-canonical",
+            0.27,
+            "2026-08-08T18:02:00",
+            "EXECUTABLE",
+        ),
     ),
     ids=(
         "runtime-cut-newer",
+        "canonical-cut-out-of-band-high-is-not-executable",
+        "canonical-cut-upper-bound-remains-executable",
         "canonical-cut-newer-naive-clock",
         "newest-canonical-cut-missing-q-fails-closed",
         "newest-causal-clock-beats-later-sequence",
@@ -7585,9 +7644,12 @@ def test_expired_global_sell_debt_refreshes_q_and_book_before_reauction(
     canonical_newer,
     canonical_probability_identity,
     append_later_sequence_with_older_clock,
+    runtime_bid,
+    canonical_bid,
     expected_probability_identity,
     expected_bid,
     expected_observed_at,
+    expected_book_state,
 ):
     """Deadline recovery is a fresh decision, not a replay of its old witness."""
     from src.engine import cycle_runtime, monitor_refresh
@@ -7680,7 +7742,7 @@ def test_expired_global_sell_debt_refreshes_q_and_book_before_reauction(
         refreshed.last_monitor_prob_is_fresh = True
         refreshed.last_monitor_market_price = 0.31
         refreshed.last_monitor_market_price_is_fresh = True
-        refreshed.last_monitor_best_bid = 0.31
+        refreshed.last_monitor_best_bid = runtime_bid
         refreshed.last_monitor_at = "2026-08-08T18:01:00+00:00"
         refreshed._monitor_probability_receipt = {
             "probability_content_identity": "q-current",
@@ -7706,7 +7768,7 @@ def test_expired_global_sell_debt_refreshes_q_and_book_before_reauction(
                     "tests/test_live_safety_invariants",
                     json.dumps(
                         {
-                            "last_monitor_best_bid": 0.27,
+                            "last_monitor_best_bid": canonical_bid,
                             "monitor_probability_receipt": {
                                 "probability_content_identity": (
                                     canonical_probability_identity
@@ -7806,6 +7868,7 @@ def test_expired_global_sell_debt_refreshes_q_and_book_before_reauction(
     )
     assert published[0]["held_best_bid"] == pytest.approx(expected_bid)
     assert published[0]["bid_observed_at"] == expected_observed_at
+    assert published[0]["book_state"] == expected_book_state
     assert summary["global_sell_snapshot_reauction_debts_recovered"] == 1
     payload = json.loads(
         conn.execute(
@@ -7817,6 +7880,9 @@ def test_expired_global_sell_debt_refreshes_q_and_book_before_reauction(
     assert payload["global_sell_reauction_status"] == "durable_wake_reserved"
     assert payload["held_sell_reauction_obligation"]["attempt_identity"] == (
         "attempt-current"
+    )
+    assert payload["held_sell_reauction_obligation"]["book_state"] == (
+        expected_book_state
     )
     conn.close()
 

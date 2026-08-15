@@ -435,3 +435,19 @@
   recovery.  Production acceptance requires every current positive exposure to
   remain below the 150-second probability+book freshness wall over more than
   one full scheduler/pass horizon.  Rollback is one B106 hot-fix commit.
+
+### 2026-08-15 — held-SELL request price-band parity hot-fix
+
+- **Observed defect:** initial monitor and force-new-generation recovery request
+  seams treated a fresh bid above `0.95` as executable even though the final
+  global auction correctly rejects that quote under the durable live-order law.
+- **Contract:** both seams use `LIVE_ORDER_MIN_UNIT_PRICE` and
+  `LIVE_ORDER_MAX_UNIT_PRICE`; a finite out-of-band bid remains evidence but is
+  `NO_EXECUTABLE_BOOK`, while inclusive boundary quotes remain executable.
+  Continued monitoring reclassifies each fresh quote, so a later in-band bid
+  immediately returns to redecision.  Probability and exit economics do not
+  change.
+- **Acceptance:** relationship antibodies prove `0.97` is never executable and
+  `0.95` remains executable at both seams; targeted pytest, `py_compile`, Ruff,
+  planning-lock, and `git diff --check` pass.  Rollback is one hot-fix commit;
+  this worktree does not deploy it.
