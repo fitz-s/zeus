@@ -1587,7 +1587,11 @@ class TestRiskEvaluation:
 
 
 class TestRiskGuardSettlementSource:
-    def test_tick_reuses_single_authoritative_settlement_scan(self, monkeypatch, tmp_path):
+    def test_tick_separates_bounded_quality_scan_from_complete_realized_window(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
         _init_empty_canonical_portfolio_schema(zeus_db)
@@ -1601,11 +1605,23 @@ class TestRiskGuardSettlementSource:
             realized_pnl=0.0,
         )
         _patch_riskguard_bankroll(monkeypatch)
-        calls: list[int | None] = []
+        calls: list[tuple[int | None, str | None]] = []
 
         def _query_authoritative_settlement_rows(conn, limit=50, **kwargs):  # noqa: ANN001, ARG001
-            calls.append(limit)
-            return []
+            calls.append((limit, kwargs.get("not_before")))
+            if kwargs.get("not_before") is None:
+                return []
+            settled_at = datetime.now(timezone.utc).isoformat()
+            return [
+                {
+                    "pnl": -1.0,
+                    "settled_at": settled_at,
+                    "authority_level": "durable_event",
+                    "required_missing_fields": [],
+                    "strategy": "center_buy",
+                }
+                for _ in range(60)
+            ]
 
         monkeypatch.setattr(
             riskguard_module,
@@ -1616,7 +1632,24 @@ class TestRiskGuardSettlementSource:
         level = riskguard_module.tick()
 
         assert level == RiskLevel.GREEN
-        assert calls == [riskguard_module.RISKGUARD_BRIER_SCAN_LIMIT]
+        assert calls[0] == (riskguard_module.RISKGUARD_BRIER_SCAN_LIMIT, None)
+        assert calls[1][0] is None
+        cutoff = datetime.fromisoformat(str(calls[1][1]))
+        expected = (
+            datetime.now(timezone.utc)
+            - riskguard_module.RISKGUARD_REALIZED_TELEMETRY_WINDOW
+        )
+        assert abs((cutoff - expected).total_seconds()) < 5
+        conn = get_connection(risk_db)
+        row = conn.execute(
+            "SELECT details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        details = json.loads(row["details_json"])
+        assert details["weekly_loss_reference"]["settlement_count"] == 60
+        assert details["weekly_loss_reference"]["realized_pnl_window"] == pytest.approx(
+            -60.0
+        )
 
     def test_tick_floors_fresh_green_to_data_degraded_when_dependency_db_metrics_lock(self, monkeypatch, tmp_path):
         """Relationship (AGENTS.md iron #6 — FAIL CONSERVATIVE): a metric DB lock

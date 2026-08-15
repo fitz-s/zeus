@@ -6,7 +6,7 @@ and emits durable risk actions into zeus.db when the canonical table exists.
 Graduated response: GREEN → YELLOW → ORANGE → RED.
 
 # Created: (pre-audit)
-# Last reused or audited: 2026-08-14
+# Last reused or audited: 2026-08-15
 # Authority basis: connection-leak audit 2026-05-10 — 51 open zeus-world.db-wal
 #   handles observed on PID 18538. Root cause: tick() and tick_with_portfolio()
 #   opened zeus_conn / risk_conn without try/finally, so any exception in the
@@ -78,6 +78,7 @@ from src.state.portfolio import (
 
 RISKGUARD_SETTLEMENT_LIMIT = 50
 RISKGUARD_BRIER_SCAN_LIMIT = 200
+RISKGUARD_REALIZED_TELEMETRY_WINDOW = timedelta(days=7)
 from src.state.portfolio_loader_policy import choose_portfolio_truth_source
 from src.state.strategy_tracker import load_tracker
 from src.contracts.freshness_registry import FreshnessLevel, registry as _freshness_registry
@@ -4629,6 +4630,13 @@ def _tick_once() -> RiskLevel:
             zeus_conn,
             limit=max(RISKGUARD_SETTLEMENT_LIMIT, RISKGUARD_BRIER_SCAN_LIMIT),
         )
+        realized_settlement_rows = query_authoritative_settlement_rows(
+            zeus_conn,
+            limit=None,
+            not_before=(
+                datetime.now(timezone.utc) - RISKGUARD_REALIZED_TELEMETRY_WINDOW
+            ).isoformat(),
+        )
         settlement_scan_rows = _bind_brier_probability_identities(
             zeus_conn,
             settlement_scan_rows,
@@ -4684,7 +4692,7 @@ def _tick_once() -> RiskLevel:
 
         realized_exits, realized_truth_source, realized_degraded = _current_mode_realized_exits(
             zeus_conn,
-            settlement_rows=settlement_rows,
+            settlement_rows=realized_settlement_rows,
         )
         portfolio = replace(portfolio, recent_exits=realized_exits)
 
@@ -5247,7 +5255,7 @@ def _tick_once() -> RiskLevel:
         weekly_loss_snapshot = _realized_window_loss_telemetry(
             realized_exits,
             now=now,
-            lookback=timedelta(days=7),
+            lookback=RISKGUARD_REALIZED_TELEMETRY_WINDOW,
             degraded=realized_degraded,
             source=loss_source,
         )
