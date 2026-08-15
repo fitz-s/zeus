@@ -1910,9 +1910,11 @@ def _position_from_projection_row(row: dict, *, current_mode: str) -> Position:
 
 
 def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]:
+    from src.state.db import settlement_economic_ready
+
     exits: list[dict] = []
     for row in rows:
-        if not row.get("metric_ready", False):
+        if not settlement_economic_ready(row):
             continue
         pnl = row.get("pnl")
         if pnl is None:

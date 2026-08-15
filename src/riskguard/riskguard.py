@@ -1177,7 +1177,7 @@ def _component_breakdown(
 def _canonical_recent_exits_from_settlement_rows(rows: list[dict]) -> list[dict]:
     exits: list[dict] = []
     for row in rows:
-        if not row.get("metric_ready", False):
+        if not settlement_economic_ready(row):
             continue
         pnl = row.get("pnl")
         if pnl is None:

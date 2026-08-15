@@ -1,8 +1,8 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-08-14
-# Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix.
+# Last reused/audited: 2026-08-15
+# Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix; 2026-08-15 economic-settlement trailing-loss hotfix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-08-14; last_reused=2026-08-14
+# Lifecycle: created=2026-03-30; last_reviewed=2026-08-15; last_reused=2026-08-15
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
@@ -654,43 +654,47 @@ def _insert_execution_fact(
     )
 
 
-def test_riskguard_recent_exits_skip_settlement_rows_without_metric_authority():
+def test_riskguard_recent_exits_use_economic_not_metric_readiness():
     rows = [
         {
             "city": "NYC",
-            "range_label": "legacy-bin",
+            "range_label": "economic-only-bin",
             "target_date": "2026-04-01",
             "direction": "buy_yes",
             "exit_reason": "SETTLEMENT",
             "settled_at": "2026-04-01T23:00:00Z",
-            "pnl": 99.0,
+            "pnl": -3.5,
             "metric_ready": False,
-            "settlement_authority": "LEGACY_UNKNOWN",
+            "settlement_authority": "VENUE_RESOLVED",
+            "authority_level": "durable_event",
+            "required_missing_fields": [],
         },
         {
             "city": "NYC",
-            "range_label": "39-40°F",
+            "range_label": "malformed-bin",
             "target_date": "2026-04-01",
             "direction": "buy_yes",
             "exit_reason": "SETTLEMENT",
-            "settled_at": "2026-04-02T00:00:00Z",
-            "pnl": 4.2,
+            "settled_at": "2026-04-01T23:30:00Z",
+            "pnl": 99.0,
             "metric_ready": True,
             "settlement_authority": "VERIFIED",
+            "authority_level": "durable_event_malformed",
+            "required_missing_fields": ["trade_id"],
         },
     ]
 
     assert riskguard_module._canonical_recent_exits_from_settlement_rows(rows) == [
         {
             "city": "NYC",
-            "bin_label": "39-40°F",
+            "bin_label": "economic-only-bin",
             "target_date": "2026-04-01",
             "direction": "buy_yes",
             "token_id": "",
             "no_token_id": "",
             "exit_reason": "SETTLEMENT",
-            "exited_at": "2026-04-02T00:00:00Z",
-            "pnl": 4.2,
+            "exited_at": "2026-04-01T23:00:00Z",
+            "pnl": -3.5,
             "strategy_key": "",
             "loss_eligible": True,
             "loss_exclusion_reason": "",
@@ -779,7 +783,7 @@ def test_current_mode_realized_exits_prefers_verified_settlements_over_outcome_f
     assert [exit_row["pnl"] for exit_row in exits] == [4.25]
 
 
-def test_current_mode_realized_exits_blocks_degraded_settlement_rows_without_outcome_fact_fallback():
+def test_current_mode_realized_exits_blocks_malformed_economic_rows_without_outcome_fact_fallback():
     conn = _policy_conn()
     _insert_outcome_fact(
         conn,
@@ -801,6 +805,8 @@ def test_current_mode_realized_exits_blocks_degraded_settlement_rows_without_out
             "metric_ready": False,
             "is_degraded": True,
             "settlement_authority": "LEGACY_UNKNOWN",
+            "authority_level": "durable_event_malformed",
+            "required_missing_fields": ["trade_id"],
         }
     ]
 
@@ -7094,11 +7100,12 @@ class TestStrategyPolicyResolver:
         assert details["settlement_authority_levels"]["durable_event"] == 1
         assert details["settlement_authority_levels"]["durable_event_malformed"] == 1
 
-    def test_venue_payout_without_physical_value_does_not_freeze_entries(
+    def test_venue_payout_updates_loss_telemetry_without_physical_metric_or_actuation(
         self, monkeypatch, tmp_path
     ):
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
+        settled_at = datetime.now(timezone.utc).isoformat()
 
         def _fake_get_connection(path=None, **_kwargs):
             if path == riskguard_module.RISK_DB_PATH:
@@ -7106,6 +7113,7 @@ class TestStrategyPolicyResolver:
             return get_connection(zeus_db)
 
         _init_empty_canonical_portfolio_schema(zeus_db)
+        _patch_riskguard_bankroll(monkeypatch)
         monkeypatch.setattr(riskguard_module, "get_connection", _fake_get_connection)
         monkeypatch.setattr(
             riskguard_module,
@@ -7117,10 +7125,18 @@ class TestStrategyPolicyResolver:
             "query_authoritative_settlement_rows",
             lambda conn, limit=50, **kwargs: [
                 {
+                    "city": "NYC",
+                    "range_label": "39-40°F",
+                    "target_date": "2026-08-15",
+                    "direction": "buy_yes",
+                    "exit_reason": "SETTLEMENT",
+                    "settled_at": settled_at,
                     "p_posterior": 0.99,
                     "outcome": 1,
-                    "pnl": 0.01,
+                    "pnl": -2.5,
                     "source": "position_events",
+                    "strategy": "center_buy",
+                    "position_origin": "zeus_decision",
                     "authority_level": "durable_event",
                     "is_degraded": True,
                     "degraded_reason": "missing_payload_fields:settlement_value",
@@ -7146,6 +7162,17 @@ class TestStrategyPolicyResolver:
         assert details["settlement_contract_incomplete_count"] == 1
         assert details["settlement_degraded_row_count"] == 0
         assert details["settlement_metric_ready_count"] == 0
+        assert details["settlement_sample_size"] == 0
+        assert details["brier_actuating_sample_size"] == 0
+        assert details["trailing_loss_decision_role"] == "record_only"
+        assert details["daily_loss_level"] == "GREEN"
+        assert details["weekly_loss_level"] == "GREEN"
+        assert details["daily_loss"] == pytest.approx(2.5)
+        assert details["weekly_loss"] == pytest.approx(2.5)
+        assert details["daily_loss_reference"]["settlement_count"] == 1
+        assert details["weekly_loss_reference"]["settlement_count"] == 1
+        assert details["daily_loss_reference"]["realized_pnl_window"] == pytest.approx(-2.5)
+        assert details["weekly_loss_reference"]["realized_pnl_window"] == pytest.approx(-2.5)
 
     def test_tick_fails_closed_when_only_malformed_settlement_rows_exist(self, monkeypatch, tmp_path):
         zeus_db = tmp_path / "zeus.db"

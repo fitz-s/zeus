@@ -1,8 +1,9 @@
 """Runtime guard and live-cycle wiring tests."""
-# Lifecycle: created=2026-04-28; last_reviewed=2026-08-12; last_reused=2026-08-12
+# Lifecycle: created=2026-04-28; last_reviewed=2026-08-15; last_reused=2026-08-15
 # Created: 2026-04-28
-# Last reused/audited: 2026-08-12
+# Last reused/audited: 2026-08-15
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; task_2026-04-28_contamination_remediation Batch G; Phase 1B ENS snapshot persistence; Phase 1D forecast source policy; PR #56 MarketPhaseEvidence sidecar propagation; Wave26 explicit position env authority; task.md B3 exit executable snapshot identity; docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P1-2 cluster projection; docs/archive/2026-Q2/task_2026-05-22_crosscheck_valid_window/CROSSCHECK_VALID_WINDOW_PLAN.md.
+#                  2026-08-15 economic-ready recent-exit hotfix.
 # Purpose: Lock runtime guard and live-cycle wiring contracts.
 # Reuse: Run for runtime guard, live-only cleanup, and cycle wiring changes.
 
@@ -9467,12 +9468,12 @@ def test_load_portfolio_reads_recent_exits_from_authoritative_settlement_rows(tm
         "exit_price": 1.0,
         "pnl": 4.2,
         "exit_reason": "SETTLEMENT",
-        "settlement_authority": "VERIFIED",
-        "settlement_truth_source": "world.settlements",
+        "settlement_authority": "VENUE_RESOLVED",
+        "settlement_truth_source": "gamma_exact_held_event",
         "settlement_market_slug": "nyc-high-2026-04-01",
         "settlement_temperature_metric": "high",
-        "settlement_source": "WU",
-        "settlement_value": 40.0,
+        "settlement_source": "GAMMA",
+        "settlement_value": None,
     }
     conn.execute(
         """
@@ -9544,45 +9545,49 @@ def test_load_portfolio_reads_recent_exits_from_authoritative_settlement_rows(tm
     }]
 
 
-def test_recent_exits_skip_settlement_rows_without_metric_authority():
+def test_recent_exits_use_economic_not_metric_readiness():
     from src.state.portfolio import _canonical_recent_exits_from_settlement_rows
 
     rows = [
         {
             "city": "NYC",
-            "range_label": "legacy-bin",
+            "range_label": "economic-only-bin",
             "target_date": "2026-04-01",
             "direction": "buy_yes",
             "exit_reason": "SETTLEMENT",
             "settled_at": "2026-04-01T23:00:00Z",
-            "pnl": 99.0,
+            "pnl": -3.5,
             "metric_ready": False,
-            "settlement_authority": "LEGACY_UNKNOWN",
+            "settlement_authority": "VENUE_RESOLVED",
+            "authority_level": "durable_event",
+            "required_missing_fields": [],
         },
         {
             "city": "NYC",
-            "range_label": "39-40°F",
+            "range_label": "malformed-bin",
             "target_date": "2026-04-01",
             "direction": "buy_yes",
             "exit_reason": "SETTLEMENT",
-            "settled_at": "2026-04-02T00:00:00Z",
-            "pnl": 4.2,
+            "settled_at": "2026-04-01T23:30:00Z",
+            "pnl": 99.0,
             "metric_ready": True,
             "settlement_authority": "VERIFIED",
+            "authority_level": "durable_event_malformed",
+            "required_missing_fields": ["trade_id"],
         },
     ]
 
     assert _canonical_recent_exits_from_settlement_rows(rows) == [
         {
             "city": "NYC",
-            "bin_label": "39-40°F",
+            "bin_label": "economic-only-bin",
             "target_date": "2026-04-01",
             "direction": "buy_yes",
             "token_id": "",
             "no_token_id": "",
             "exit_reason": "SETTLEMENT",
-            "exited_at": "2026-04-02T00:00:00Z",
-            "pnl": 4.2,
+            "exited_at": "2026-04-01T23:00:00Z",
+            "pnl": -3.5,
         }
     ]
 
