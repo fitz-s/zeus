@@ -6,7 +6,7 @@ and emits durable risk actions into zeus.db when the canonical table exists.
 Graduated response: GREEN → YELLOW → ORANGE → RED.
 
 # Created: (pre-audit)
-# Last reused or audited: 2026-08-15
+# Last reused or audited: 2026-08-16
 # Authority basis: connection-leak audit 2026-05-10 — 51 open zeus-world.db-wal
 #   handles observed on PID 18538. Root cause: tick() and tick_with_portfolio()
 #   opened zeus_conn / risk_conn without try/finally, so any exception in the
@@ -1813,6 +1813,10 @@ def _bind_qkernel_probability_semantics(
     """
 
     output = [dict(row) for row in rows]
+    accepted_revisions = {
+        CURRENT_EVIDENCE_SEMANTICS_REVISION,
+        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+    }
     qkernel_rows = [
         row
         for row in output
@@ -1825,6 +1829,7 @@ def _bind_qkernel_probability_semantics(
     ]
     status: dict[str, object] = {
         "status": "not_applicable",
+        "licensed_revisions": sorted(accepted_revisions),
         "strategy_candidate_count": len(qkernel_rows),
         "current_count": sum(
             row.get("probability_semantics_ready") is True for row in qkernel_rows
@@ -1901,10 +1906,6 @@ def _bind_qkernel_probability_semantics(
             conn.close()
 
     version_lineage: dict[str, tuple[str, str]] = {}
-    accepted_revisions = {
-        CURRENT_EVIDENCE_SEMANTICS_REVISION,
-        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
-    }
     for q_version in versions:
         provenance = provenance_by_version.get(q_version)
         shape = _current_evidence_shape(provenance)
@@ -2398,10 +2399,13 @@ def _settled_market_relative_alpha_shadow_rows(
     )
 
     if strategy_key == "day0_nowcast_entry":
-        expected_revision = DAY0_PROBABILITY_SEMANTICS_REVISION
+        expected_revisions = {DAY0_PROBABILITY_SEMANTICS_REVISION}
         expected_source_status = "current_day0_probability_authority"
     elif strategy_key == "forecast_qkernel_entry":
-        expected_revision = CURRENT_EVIDENCE_SEMANTICS_REVISION
+        expected_revisions = {
+            CURRENT_EVIDENCE_SEMANTICS_REVISION,
+            STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+        }
         expected_source_status = "current_qkernel_probability_authority"
     else:
         raise ValueError("market-relative alpha shadow strategy is not canonical")
@@ -2521,7 +2525,7 @@ def _settled_market_relative_alpha_shadow_rows(
                 "earliest_complete_global_cut_max_positive_q_minus_"
                 "fee_adjusted_min_order_cost_per_target_date_v2"
             )
-            or revision != expected_revision
+            or revision not in expected_revisions
             or not revision_identity_ready
             or side not in {"YES", "NO"}
             or any(
@@ -2647,7 +2651,10 @@ def _settled_market_relative_alpha_shadow_rows(
         current_certificates = []
         for row in certificates:
             revisions = current_revisions.get(str(row["regret_event_id"]))
-            if revisions != (expected_revision,):
+            certificate_revision = str(
+                row["envelope"].get("probability_semantics_revision") or ""
+            )
+            if revisions != (certificate_revision,):
                 block("probability_semantics_not_current")
                 continue
             row["probability_semantics_revisions"] = revisions
@@ -2655,7 +2662,9 @@ def _settled_market_relative_alpha_shadow_rows(
         certificates = current_certificates
     else:
         for row in certificates:
-            row["probability_semantics_revisions"] = (expected_revision,)
+            row["probability_semantics_revisions"] = (
+                str(row["envelope"]["probability_semantics_revision"]),
+            )
     status["certificate_ready_count"] = len(certificates)
     if not certificates:
         status["blocked_reasons"] = blocked
@@ -3615,13 +3624,13 @@ def _market_relative_alpha_gate_reason(
     *,
     required_evalue: float,
 ) -> str | None:
-    """Return the current revision's missing capital-proof gate reason.
+    """Return the licensed revisions' missing capital-proof gate reason.
 
-    SCOPE: only the strategy and exact probability-semantics revision named by
+    SCOPE: only the strategy and exact probability-semantics revisions named by
     ``semantics_binding``. DRAIN: settled, walk-forward model-vs-market capital
-    evidence is refreshed every RiskGuard tick. RESET: the reason disappears
-    when the current decision law and revision attain the required e-value and
-    positive realized-capital proof; a new revision starts its own cohort.
+    evidence is refreshed every RiskGuard tick. RESET: a revision disappears
+    from the reason when it attains the required e-value and positive realized-
+    capital proof; a new revision starts its own cohort.
     """
 
     if semantics_binding.get("status") != "ok":
@@ -3629,6 +3638,20 @@ def _market_relative_alpha_gate_reason(
     current_revision = str(
         semantics_binding.get("current_revision") or ""
     ).strip()
+    licensed_revisions = tuple(
+        sorted(
+            {
+                str(revision).strip()
+                for revision in (
+                    semantics_binding.get("licensed_revisions") or ()
+                )
+                if str(revision).strip()
+            }
+        )
+    )
+    target_revisions = (
+        (current_revision,) if current_revision else licensed_revisions
+    )
     cohorts = [
         cohort
         for cohort in (causal_alpha_evidence.get("cohorts") or [])
@@ -3636,9 +3659,45 @@ def _market_relative_alpha_gate_reason(
         and cohort.get("decision_law_id")
         == "executable_min_order_capital_gain_v2"
         and (
-            not current_revision
-            or current_revision
-            in {
+            not target_revisions
+            or bool(
+                set(target_revisions).intersection(
+                    {
+                        str(revision).strip()
+                        for revision in cohort.get(
+                            "probability_semantics_revisions", []
+                        )
+                        if str(revision).strip()
+                    }
+                )
+            )
+        )
+    ]
+    validated_revisions = {
+        str(revision).strip()
+        for cohort in cohorts
+        if cohort.get("validated") is True
+        for revision in cohort.get("probability_semantics_revisions", [])
+        if str(revision).strip()
+    }
+    unproven_revisions = tuple(
+        revision
+        for revision in target_revisions
+        if revision not in validated_revisions
+    )
+    if target_revisions and not unproven_revisions:
+        return None
+    if not target_revisions and any(
+        cohort.get("validated") is True for cohort in cohorts
+    ):
+        return None
+    relevant_revisions = set(unproven_revisions)
+    relevant_cohorts = [
+        cohort
+        for cohort in cohorts
+        if not relevant_revisions
+        or relevant_revisions.intersection(
+            {
                 str(revision).strip()
                 for revision in cohort.get(
                     "probability_semantics_revisions", []
@@ -3647,15 +3706,12 @@ def _market_relative_alpha_gate_reason(
             }
         )
     ]
-    shadow_validated = any(cohort.get("validated") is True for cohort in cohorts)
-    if shadow_validated:
-        return None
     strongest = (
         max(
-            cohorts,
+            relevant_cohorts,
             key=lambda cohort: float(cohort["model_over_market_evalue"]),
         )
-        if cohorts
+        if relevant_cohorts
         else None
     )
     model_evalue = (
@@ -3670,8 +3726,13 @@ def _market_relative_alpha_gate_reason(
     )
     current_status = (
         "rejected"
-        if any(cohort.get("rejected") is True for cohort in cohorts)
-        else ("inconclusive" if cohorts else "no_evidence")
+        if any(cohort.get("rejected") is True for cohort in relevant_cohorts)
+        else ("inconclusive" if relevant_cohorts else "no_evidence")
+    )
+    revision_label = (
+        ",".join(unproven_revisions)
+        if unproven_revisions
+        else semantics_binding.get("current_revision")
     )
     return (
         "market_relative_alpha_unproven("
@@ -3680,9 +3741,46 @@ def _market_relative_alpha_gate_reason(
         f"required={required_evalue},"
         f"clusters={clusters},"
         "law=executable_min_order_capital_gain_v2,"
-        f"revision={semantics_binding.get('current_revision')}"
+        f"revision={revision_label}"
         ")"
     )
+
+
+def _market_relative_alpha_unproven_revisions(
+    semantics_binding: Mapping[str, object],
+    causal_alpha_evidence: Mapping[str, object],
+) -> tuple[str, ...]:
+    """Return only licensed probability revisions still lacking capital proof."""
+
+    current_revision = str(
+        semantics_binding.get("current_revision") or ""
+    ).strip()
+    revisions = (
+        (current_revision,)
+        if current_revision
+        else tuple(
+            sorted(
+                {
+                    str(revision).strip()
+                    for revision in (
+                        semantics_binding.get("licensed_revisions") or ()
+                    )
+                    if str(revision).strip()
+                }
+            )
+        )
+    )
+    validated = {
+        str(revision).strip()
+        for cohort in (causal_alpha_evidence.get("cohorts") or [])
+        if isinstance(cohort, Mapping)
+        and cohort.get("decision_law_id")
+        == "executable_min_order_capital_gain_v2"
+        and cohort.get("validated") is True
+        for revision in cohort.get("probability_semantics_revisions", [])
+        if str(revision).strip()
+    }
+    return tuple(revision for revision in revisions if revision not in validated)
 
 
 # Below this many settled observations a per-strategy Brier score is noise,
@@ -4765,6 +4863,12 @@ def _tick_once() -> RiskLevel:
                 required_evalue=market_relative_alpha_evalue,
             )
         )
+        qkernel_market_relative_alpha_gate_revisions = (
+            _market_relative_alpha_unproven_revisions(
+                probability_semantics_binding,
+                qkernel_market_relative_alpha_gate_evidence,
+            )
+        )
         qkernel_live_realized_capital_curve = (
             _qkernel_live_realized_capital_curve(
                 zeus_conn,
@@ -4797,6 +4901,12 @@ def _tick_once() -> RiskLevel:
                 day0_probability_semantics_binding,
                 day0_market_relative_alpha_evidence,
                 required_evalue=market_relative_alpha_evalue,
+            )
+        )
+        day0_market_relative_alpha_gate_revisions = (
+            _market_relative_alpha_unproven_revisions(
+                day0_probability_semantics_binding,
+                day0_market_relative_alpha_evidence,
             )
         )
         day0_market_relative_alpha_gate_required = (
@@ -4963,16 +5073,18 @@ def _tick_once() -> RiskLevel:
                 "forecast_qkernel_entry",
                 "probability_semantics_authority_unavailable",
             )
-        for strategy, binding, reason in (
+        for strategy, binding, reason, alpha_gate_revisions in (
             (
                 "forecast_qkernel_entry",
                 probability_semantics_binding,
                 qkernel_market_relative_alpha_gate_reason,
+                qkernel_market_relative_alpha_gate_revisions,
             ),
             (
                 "day0_nowcast_entry",
                 day0_probability_semantics_binding,
                 day0_market_relative_alpha_observation,
+                day0_market_relative_alpha_gate_revisions,
             ),
         ):
             if reason is None:
@@ -4982,11 +5094,15 @@ def _tick_once() -> RiskLevel:
                 strategy,
                 reason,
             )
-            revision = str(binding.get("current_revision") or "").strip()
-            if revision:
+            revisions = {
+                str(revision).strip()
+                for revision in alpha_gate_revisions
+                if str(revision).strip()
+            }
+            if revisions:
                 recommended_strategy_gate_scopes.setdefault(
                     strategy, set()
-                ).add(revision)
+                ).update(revisions)
         degraded_brier_strategies = brier_verdict_breakdown.get(
             "degraded_strategies", {}
         )

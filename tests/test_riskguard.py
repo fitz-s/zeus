@@ -1,8 +1,8 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-08-15
+# Last reused/audited: 2026-08-16
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix; 2026-08-15 economic-settlement trailing-loss hotfix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-08-15; last_reused=2026-08-15
+# Lifecycle: created=2026-03-30; last_reviewed=2026-08-16; last_reused=2026-08-16
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
@@ -1416,6 +1416,10 @@ class TestMetrics:
         )
         assert status == {
             "status": "ok",
+            "licensed_revisions": [
+                riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+            ],
             "strategy_candidate_count": 7,
             "current_count": 2,
             "superseded_count": 2,
@@ -5411,6 +5415,48 @@ class TestQkernelMarketRelativeAlphaEvidence:
             f"revision={DAY0_PROBABILITY_SEMANTICS_REVISION})"
         )
 
+    def test_qkernel_alpha_gate_scopes_only_unproven_licensed_revision(self):
+        current = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        stale = (
+            riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        )
+        binding = {
+            "status": "ok",
+            "licensed_revisions": [current, stale],
+        }
+        evidence = {
+            "cohorts": [
+                {
+                    "decision_law_id": "executable_min_order_capital_gain_v2",
+                    "probability_semantics_revisions": [current],
+                    "model_over_market_evalue": 12.0,
+                    "independent_cluster_count": 3,
+                    "validated": True,
+                    "rejected": False,
+                },
+                {
+                    "decision_law_id": "executable_min_order_capital_gain_v2",
+                    "probability_semantics_revisions": [stale],
+                    "model_over_market_evalue": 2.0,
+                    "independent_cluster_count": 1,
+                    "validated": False,
+                    "rejected": False,
+                },
+            ]
+        }
+
+        reason = riskguard_module._market_relative_alpha_gate_reason(
+            binding,
+            evidence,
+            required_evalue=10.0,
+        )
+
+        assert f"revision={stale})" in reason
+        assert riskguard_module._market_relative_alpha_unproven_revisions(
+            binding,
+            evidence,
+        ) == (stale,)
+
     def test_superseded_accuracy_cohort_cannot_unlock_capital_gain_law(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
@@ -5666,9 +5712,27 @@ class TestQkernelMarketRelativeAlphaEvidence:
         ]
         conn.close()
 
+    @pytest.mark.parametrize(
+        ("revision", "shape_lag_hours", "stale_shape_reused"),
+        (
+            (
+                riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                0.0,
+                False,
+            ),
+            (
+                riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+                6.0,
+                True,
+            ),
+        ),
+    )
     def test_qkernel_shadow_requires_current_semantics_and_verified_settlement(
         self,
         tmp_path,
+        revision,
+        shape_lag_hours,
+        stale_shape_reused,
     ):
         from src.state.schema.no_trade_regret_events_schema import ensure_table
         from src.strategy.live_inference.no_trade_regret import (
@@ -5677,7 +5741,6 @@ class TestQkernelMarketRelativeAlphaEvidence:
         )
 
         decision_at = datetime(2026, 8, 10, 16, tzinfo=timezone.utc)
-        revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
         envelope = {
             "schema_version": 2,
             "strategy_key": "forecast_qkernel_entry",
@@ -5803,8 +5866,8 @@ class TestQkernelMarketRelativeAlphaEvidence:
                             "current_evidence_shape": {
                                 "semantics_revision": revision,
                                 "translation_applied": False,
-                                "shape_lag_hours": 0.0,
-                                "stale_shape_reused": False,
+                                "shape_lag_hours": shape_lag_hours,
+                                "stale_shape_reused": stale_shape_reused,
                             }
                         }
                     }

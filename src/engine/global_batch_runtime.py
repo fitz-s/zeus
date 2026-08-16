@@ -5162,7 +5162,11 @@ def _market_relative_alpha_shadow_events(
             probability_ready = bool(
                 q_version
                 and posterior_identity_hash
-                and revision == CURRENT_EVIDENCE_SEMANTICS_REVISION
+                and revision
+                in {
+                    CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                    STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+                }
             )
             source_status = "current_qkernel_probability_authority"
             shadow_reason = _QKERNEL_ALPHA_SHADOW_REASON
@@ -5279,7 +5283,11 @@ def _market_relative_alpha_shadow_events(
                 ),
             ),
         }
-        cluster = f"{strategy_key}:{target_date}"
+        # Probability revisions are separately settled/graded regimes.  A
+        # same-date v4 witness must not suppress the stale-shape cohort (or the
+        # reverse), otherwise an accepted live revision has no DRAIN path for
+        # its own performance gate.
+        cluster = f"{strategy_key}:{revision}:{target_date}"
         incumbent = selected_by_cluster.get(cluster)
         if incumbent is None or (
             candidate["claimed_edge"], candidate["tie_break"]

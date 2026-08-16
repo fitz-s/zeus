@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-14
+# Last reused/audited: 2026-08-16
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -34209,20 +34209,30 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
         qkernel_semantics_by_posterior=semantics_by_posterior,
         strategy_keys=("forecast_qkernel_entry",),
     )
-    assert len(qkernel_events) == 1
-    qkernel_envelope = json.loads(qkernel_events[0].envelope_json)
-    assert qkernel_envelope["strategy_key"] == "forecast_qkernel_entry"
-    assert qkernel_envelope["probability_semantics_revision"] == (
-        global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION
+    assert len(qkernel_events) == 2
+    qkernel_envelopes = [
+        json.loads(event.envelope_json) for event in qkernel_events
+    ]
+    assert {
+        envelope["probability_semantics_revision"]
+        for envelope in qkernel_envelopes
+    } == {
+        global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION,
+        global_batch_runtime.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+    }
+    assert all(
+        envelope["strategy_key"] == "forecast_qkernel_entry"
+        for envelope in qkernel_envelopes
     )
-    assert qkernel_events[0].rejection_reason == (
-        "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
+    assert all(
+        event.rejection_reason
+        == "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
+        and event.event_id.startswith(
+            "market-relative-alpha-shadow-v3-current-semantics:"
+        )
+        for event in qkernel_events
     )
-    assert qkernel_events[0].event_id.startswith(
-        "market-relative-alpha-shadow-v3-current-semantics:"
-    )
-    assert (
-        global_batch_runtime._market_relative_alpha_shadow_events(
+    stale_events = global_batch_runtime._market_relative_alpha_shadow_events(
             selected=SimpleNamespace(
                 decision=SimpleNamespace(
                     candidate_evaluations=qkernel_evaluations
@@ -34253,8 +34263,12 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
                 for family_key in (family_a, family_b)
             },
             strategy_keys=("forecast_qkernel_entry",),
-        )
-        == ()
+    )
+    assert len(stale_events) == 1
+    assert json.loads(stale_events[0].envelope_json)[
+        "probability_semantics_revision"
+    ] == (
+        global_batch_runtime.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
     )
     missing_posterior_witnesses = {
         family_key: SimpleNamespace(
@@ -34314,7 +34328,7 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
     )
     assert conn.execute(
         "SELECT COUNT(*) FROM no_trade_regret_events"
-    ).fetchone()[0] == 2
+    ).fetchone()[0] == 3
     conn.close()
 
 
