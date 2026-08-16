@@ -3971,6 +3971,13 @@ def _sync_riskguard_strategy_gate_actions(
             "expired_count": 0,
         }
 
+    def _scope_covers_reason(reason: str, revisions: set[str]) -> bool:
+        if reason.startswith("brier_degraded("):
+            return True
+        if reason.startswith("market_relative_alpha_unproven("):
+            return any(reason.endswith(f"revision={revision})") for revision in revisions)
+        return False
+
     recommended = {
         strategy: (
             "|".join(sorted(reasons)),
@@ -3986,8 +3993,11 @@ def _sync_riskguard_strategy_gate_actions(
             )
             if (probability_semantics_scopes or {}).get(strategy)
             and all(
-                reason.startswith(
-                    ("brier_degraded(", "market_relative_alpha_unproven(")
+                _scope_covers_reason(
+                    reason,
+                    (probability_semantics_scopes or {}).get(
+                        strategy, set()
+                    ),
                 )
                 for reason in reasons
             )

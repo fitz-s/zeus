@@ -6247,6 +6247,36 @@ class TestStrategyPolicyResolver:
         }
         conn.close()
 
+    def test_unbound_alpha_reason_cannot_inherit_unrelated_brier_scope(self):
+        conn = _policy_conn()
+        stale_revision = (
+            riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        )
+
+        riskguard_module._sync_riskguard_strategy_gate_actions(
+            conn,
+            {
+                "forecast_qkernel_entry": [
+                    "brier_degraded(level=RED,brier=0.35,sample=31)",
+                    "market_relative_alpha_unproven("
+                    "status=no_evidence,model_evalue=0.0,required=10.0,"
+                    "clusters=0,law=executable_min_order_capital_gain_v2,"
+                    "revision=None)",
+                ]
+            },
+            probability_semantics_scopes={
+                "forecast_qkernel_entry": {stale_revision}
+            },
+            issued_at="2026-08-16T19:36:56+00:00",
+        )
+        row = conn.execute(
+            "SELECT value FROM risk_actions WHERE action_id = ?",
+            ("riskguard:gate:forecast_qkernel_entry",),
+        ).fetchone()
+
+        assert row["value"] == "true"
+        conn.close()
+
     def test_resolve_strategy_policy_defaults_without_rows(self, monkeypatch):
         _neutralize_hard_safety(monkeypatch)
         conn = _policy_conn()
