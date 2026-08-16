@@ -3609,29 +3609,43 @@ def _qkernel_market_relative_alpha_evidence(
     }
 
 
-def _day0_market_relative_alpha_observation(
+def _market_relative_alpha_gate_reason(
     semantics_binding: Mapping[str, object],
     causal_alpha_evidence: Mapping[str, object],
     *,
     required_evalue: float,
 ) -> str | None:
-    """Describe current-law causal-alpha evidence without actuating admission.
+    """Return the current revision's missing capital-proof gate reason.
 
-    Model-vs-market e-values remain walk-forward learning and attribution. They
-    do not veto a current fixed action: current probability authority, current
-    executable economics, risk, and Kelly own admission. This prevents a thin,
-    unresolved, or superseded historical cohort from blocking unrelated current
-    families while preserving the evidence verbatim for calibration.
+    SCOPE: only the strategy and exact probability-semantics revision named by
+    ``semantics_binding``. DRAIN: settled, walk-forward model-vs-market capital
+    evidence is refreshed every RiskGuard tick. RESET: the reason disappears
+    when the current decision law and revision attain the required e-value and
+    positive realized-capital proof; a new revision starts its own cohort.
     """
 
     if semantics_binding.get("status") != "ok":
         return None
+    current_revision = str(
+        semantics_binding.get("current_revision") or ""
+    ).strip()
     cohorts = [
         cohort
         for cohort in (causal_alpha_evidence.get("cohorts") or [])
         if isinstance(cohort, Mapping)
         and cohort.get("decision_law_id")
         == "executable_min_order_capital_gain_v2"
+        and (
+            not current_revision
+            or current_revision
+            in {
+                str(revision).strip()
+                for revision in cohort.get(
+                    "probability_semantics_revisions", []
+                )
+                if str(revision).strip()
+            }
+        )
     ]
     shadow_validated = any(cohort.get("validated") is True for cohort in cohorts)
     if shadow_validated:
@@ -3971,7 +3985,12 @@ def _sync_riskguard_strategy_gate_actions(
                 separators=(",", ":"),
             )
             if (probability_semantics_scopes or {}).get(strategy)
-            and all(reason.startswith("brier_degraded(") for reason in reasons)
+            and all(
+                reason.startswith(
+                    ("brier_degraded(", "market_relative_alpha_unproven(")
+                )
+                for reason in reasons
+            )
             else "true",
         )
         for strategy, reasons in sorted(recommended_strategy_gate_reasons.items())
@@ -4719,6 +4738,23 @@ def _tick_once() -> RiskLevel:
             window_days=market_relative_alpha_window_days,
             as_of=market_relative_alpha_as_of,
         )
+        qkernel_market_relative_alpha_gate_evidence = (
+            _market_relative_alpha_evidence(
+                brier_actuating_rows
+                + qkernel_market_relative_alpha_shadow_rows,
+                strategy_key="forecast_qkernel_entry",
+                rejection_evalue=market_relative_alpha_evalue,
+                window_days=market_relative_alpha_window_days,
+                as_of=market_relative_alpha_as_of,
+            )
+        )
+        qkernel_market_relative_alpha_gate_reason = (
+            _market_relative_alpha_gate_reason(
+                probability_semantics_binding,
+                qkernel_market_relative_alpha_gate_evidence,
+                required_evalue=market_relative_alpha_evalue,
+            )
+        )
         qkernel_live_realized_capital_curve = (
             _qkernel_live_realized_capital_curve(
                 zeus_conn,
@@ -4747,13 +4783,15 @@ def _tick_once() -> RiskLevel:
             as_of=market_relative_alpha_as_of,
         )
         day0_market_relative_alpha_observation = (
-            _day0_market_relative_alpha_observation(
+            _market_relative_alpha_gate_reason(
                 day0_probability_semantics_binding,
                 day0_market_relative_alpha_evidence,
                 required_evalue=market_relative_alpha_evalue,
             )
         )
-        day0_market_relative_alpha_gate_required = False
+        day0_market_relative_alpha_gate_required = (
+            day0_market_relative_alpha_observation is not None
+        )
         probability_identity_ready_count = sum(
             bool(row.get("probability_identity_ready", False))
             for row in brier_candidate_rows
@@ -4902,9 +4940,11 @@ def _tick_once() -> RiskLevel:
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_scopes: dict[str, set[str]] = {}
-        # Historical/shadow alpha evidence is learning telemetry. It never
-        # becomes a durable strategy admission action; current probability
-        # semantics and executable expected growth remain the live authority.
+        # A current executable score is not capital authority by itself: q can
+        # be confidently wrong. Require walk-forward, revision-bound evidence
+        # that the model beats the executable market after costs. The durable
+        # action is revision-scoped, so a failed cohort cannot poison a new law
+        # and a new law cannot inherit proof it did not earn.
         probability_semantics_level = RiskLevel.GREEN
         if probability_semantics_binding.get("status") == "unavailable":
             probability_semantics_level = RiskLevel.DATA_DEGRADED
@@ -4913,6 +4953,30 @@ def _tick_once() -> RiskLevel:
                 "forecast_qkernel_entry",
                 "probability_semantics_authority_unavailable",
             )
+        for strategy, binding, reason in (
+            (
+                "forecast_qkernel_entry",
+                probability_semantics_binding,
+                qkernel_market_relative_alpha_gate_reason,
+            ),
+            (
+                "day0_nowcast_entry",
+                day0_probability_semantics_binding,
+                day0_market_relative_alpha_observation,
+            ),
+        ):
+            if reason is None:
+                continue
+            _append_reason(
+                recommended_strategy_gate_reasons,
+                strategy,
+                reason,
+            )
+            revision = str(binding.get("current_revision") or "").strip()
+            if revision:
+                recommended_strategy_gate_scopes.setdefault(
+                    strategy, set()
+                ).add(revision)
         degraded_brier_strategies = brier_verdict_breakdown.get(
             "degraded_strategies", {}
         )
@@ -5065,6 +5129,44 @@ def _tick_once() -> RiskLevel:
         )
         market_relative_alpha_gate_confirmation: dict[str, bool] = {}
         day0_market_relative_alpha_gate_confirmation: dict[str, bool] = {}
+        if qkernel_market_relative_alpha_gate_reason is not None:
+            market_relative_alpha_gate_confirmation = (
+                _confirm_active_durable_strategy_gates(
+                    zeus_conn,
+                    ["forecast_qkernel_entry"],
+                )
+            )
+        if day0_market_relative_alpha_gate_required:
+            day0_market_relative_alpha_gate_confirmation = (
+                _confirm_active_durable_strategy_gates(
+                    zeus_conn,
+                    ["day0_nowcast_entry"],
+                )
+            )
+        required_alpha_gates_confirmed = all(
+            confirmation.get(strategy, False)
+            for strategy, confirmation, required in (
+                (
+                    "forecast_qkernel_entry",
+                    market_relative_alpha_gate_confirmation,
+                    qkernel_market_relative_alpha_gate_reason is not None,
+                ),
+                (
+                    "day0_nowcast_entry",
+                    day0_market_relative_alpha_gate_confirmation,
+                    day0_market_relative_alpha_gate_required,
+                ),
+            )
+            if required
+        )
+        if (
+            qkernel_market_relative_alpha_gate_reason is not None
+            or day0_market_relative_alpha_gate_required
+        ) and not required_alpha_gates_confirmed:
+            # A missing durable localized gate must not turn missing capital
+            # authority into permission. DATA_DEGRADED blocks new entries while
+            # preserving monitor/exit lanes.
+            probability_semantics_level = RiskLevel.DATA_DEGRADED
         if brier_strategy_localization.get("status") == "pending_durable_strategy_gate":
             if durable_action_status.get("status") == "emitted":
                 brier_level = RiskLevel.GREEN
@@ -5330,7 +5432,15 @@ def _tick_once() -> RiskLevel:
                     day0_probability_semantics_binding
                 ),
                 "market_relative_alpha_evidence": market_relative_alpha_evidence,
-                "market_relative_alpha_admission_role": "observational",
+                "market_relative_alpha_gate_evidence": (
+                    qkernel_market_relative_alpha_gate_evidence
+                ),
+                "market_relative_alpha_gate_reason": (
+                    qkernel_market_relative_alpha_gate_reason
+                ),
+                "market_relative_alpha_admission_role": (
+                    "revision_scoped_entry_gate"
+                ),
                 "qkernel_market_relative_alpha_shadow": (
                     qkernel_market_relative_alpha_shadow_status
                 ),
@@ -5343,7 +5453,9 @@ def _tick_once() -> RiskLevel:
                 "day0_market_relative_alpha_evidence": (
                     day0_market_relative_alpha_evidence
                 ),
-                "day0_market_relative_alpha_admission_role": "observational",
+                "day0_market_relative_alpha_admission_role": (
+                    "revision_scoped_entry_gate"
+                ),
                 "day0_market_relative_alpha_observation": (
                     day0_market_relative_alpha_observation
                 ),

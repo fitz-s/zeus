@@ -4285,7 +4285,10 @@ class TestStrategyBrierMinSampleContinued:
         assert details["brier_actuating_sample_size"] == 11
         assert details["brier_evidence_ready_sample_size"] == 0
         assert details["portfolio_brier_thin_sample_no_verdict"] is True
-        assert details["recommended_strategy_gates"] == []
+        assert details["recommended_strategy_gates"] == [
+            "day0_nowcast_entry",
+            "forecast_qkernel_entry",
+        ]
         assert level == RiskLevel.GREEN
         assert risk_row["level"] == RiskLevel.GREEN.value
 
@@ -4541,9 +4544,9 @@ class TestStrategyBrierMinSampleContinued:
         assert details["brier_strategy_localization"]["status"] == expected_status
         if expected_reason is not None:
             assert details["brier_strategy_localization"]["reason"] == expected_reason
-        assert details["recommended_strategy_gates"] == (
-            [] if expected_thin else ["forecast_qkernel_entry"]
-        )
+        assert details["recommended_strategy_gates"] == [
+            "forecast_qkernel_entry"
+        ]
         assert level == expected_active_level
         assert row["level"] == expected_active_level.value
 
@@ -4751,7 +4754,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "status": "ok",
             "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
         }
-        assert riskguard_module._day0_market_relative_alpha_observation(
+        assert riskguard_module._market_relative_alpha_gate_reason(
             binding,
             evidence,
             required_evalue=10.0,
@@ -4897,6 +4900,10 @@ class TestQkernelMarketRelativeAlphaEvidence:
 
     @staticmethod
     def _validated_day0_shadow_evidence() -> dict:
+        from src.events.day0_authority import (
+            DAY0_PROBABILITY_SEMANTICS_REVISION,
+        )
+
         return {
             "status": "validated",
             "validated": True,
@@ -4904,6 +4911,9 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "cohorts": [
                 {
                     "decision_law_id": "executable_min_order_capital_gain_v2",
+                    "probability_semantics_revisions": [
+                        DAY0_PROBABILITY_SEMANTICS_REVISION
+                    ],
                     "model_over_market_evalue": 12.0,
                     "independent_cluster_count": 2,
                     "validated": True,
@@ -4932,7 +4942,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert curve["gross_realized_pnl_usd"] == pytest.approx(-0.06)
         assert curve["fee_bound_usd"] == pytest.approx(0.115409)
         assert curve["net_realized_pnl_usd"] == pytest.approx(-0.175409)
-        reason = riskguard_module._day0_market_relative_alpha_observation(
+        reason = riskguard_module._market_relative_alpha_gate_reason(
             {
                 "status": "ok",
                 "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
@@ -5073,7 +5083,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert curve["filled_position_count"] == 1
         assert curve["open_position_count"] == 1
         assert curve["realized_position_count"] == 0
-        reason = riskguard_module._day0_market_relative_alpha_observation(
+        reason = riskguard_module._market_relative_alpha_gate_reason(
             {
                 "status": "ok",
                 "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
@@ -5113,7 +5123,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         )
 
         assert curve["status"] == capital_status
-        assert riskguard_module._day0_market_relative_alpha_observation(
+        assert riskguard_module._market_relative_alpha_gate_reason(
             {
                 "status": "ok",
                 "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
@@ -5187,7 +5197,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert curve["net_realized_pnl_usd"] == pytest.approx(-0.602523)
         conn.close()
 
-    def test_realized_capital_curves_have_no_entry_gate_wiring(self):
+    def test_current_revision_capital_proof_is_wired_to_entry_gate(self):
         import inspect
 
         tick_source = inspect.getsource(riskguard_module._tick_once)
@@ -5196,12 +5206,14 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert "_day0_live_realized_capital_curve(" in tick_source
         assert '"qkernel_live_realized_capital_curve":' in tick_source
         assert '"day0_live_realized_capital_curve":' in tick_source
-        assert "live_realized_capital_gate_reason" not in tick_source
+        assert "qkernel_market_relative_alpha_gate_reason" in tick_source
+        assert "day0_market_relative_alpha_gate_required" in tick_source
+        assert "recommended_strategy_gate_scopes" in tick_source
         assert "live_capital_curve" not in inspect.signature(
             riskguard_module._qkernel_market_relative_alpha_evidence
         ).parameters
         assert "live_capital_curve" not in inspect.signature(
-            riskguard_module._day0_market_relative_alpha_observation
+            riskguard_module._market_relative_alpha_gate_reason
         ).parameters
         assert not hasattr(
             riskguard_module,
@@ -5308,7 +5320,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert cohort["hypothetical_realized_pnl_usd"] == pytest.approx(-1.30)
         assert cohort["capital_gain_validated"] is False
         assert evidence["validated"] is False
-        assert riskguard_module._day0_market_relative_alpha_observation(
+        assert riskguard_module._market_relative_alpha_gate_reason(
             {
                 "status": "ok",
                 "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
@@ -5377,7 +5389,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
     def test_current_day0_without_validated_causal_evidence_is_observed(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
-        reason = riskguard_module._day0_market_relative_alpha_observation(
+        reason = riskguard_module._market_relative_alpha_gate_reason(
             {
                 "status": "ok",
                 "current_count": 0,
@@ -5402,7 +5414,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
     def test_superseded_accuracy_cohort_cannot_unlock_capital_gain_law(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 
-        reason = riskguard_module._day0_market_relative_alpha_observation(
+        reason = riskguard_module._market_relative_alpha_gate_reason(
             {
                 "status": "ok",
                 "current_revision": DAY0_PROBABILITY_SEMANTICS_REVISION,
@@ -5429,6 +5441,40 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "status=no_evidence,model_evalue=0.0,required=10.0,clusters=0,"
             "law=executable_min_order_capital_gain_v2,"
             f"revision={DAY0_PROBABILITY_SEMANTICS_REVISION})"
+        )
+
+    def test_superseded_probability_revision_cannot_unlock_current_law(self):
+        current_revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        reason = riskguard_module._market_relative_alpha_gate_reason(
+            {
+                "status": "ok",
+                "current_revision": current_revision,
+            },
+            {
+                "status": "validated",
+                "validated": True,
+                "rejected": False,
+                "cohorts": [
+                    {
+                        "decision_law_id": (
+                            "executable_min_order_capital_gain_v2"
+                        ),
+                        "probability_semantics_revisions": ["superseded-v1"],
+                        "model_over_market_evalue": 100.0,
+                        "independent_cluster_count": 30,
+                        "validated": True,
+                        "rejected": False,
+                    }
+                ],
+            },
+            required_evalue=10.0,
+        )
+
+        assert reason == (
+            "market_relative_alpha_unproven("
+            "status=no_evidence,model_evalue=0.0,required=10.0,clusters=0,"
+            "law=executable_min_order_capital_gain_v2,"
+            f"revision={current_revision})"
         )
 
     def test_day0_shadow_joins_only_later_verified_exact_condition(self, tmp_path):
@@ -5828,7 +5874,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         }
         conn.close()
 
-    def test_tick_records_qkernel_evidence_and_expires_legacy_alpha_gate(
+    def test_tick_records_qkernel_evidence_and_replaces_legacy_alpha_gate(
         self,
         monkeypatch,
         tmp_path,
@@ -5962,18 +6008,30 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert level == RiskLevel.GREEN
         assert risk_row["level"] == RiskLevel.GREEN.value
         assert details["market_relative_alpha_evidence"]["rejected"] is True
-        assert details["market_relative_alpha_admission_role"] == "observational"
-        assert details["market_relative_alpha_gate_confirmation"] == {}
-        assert details["day0_market_relative_alpha_admission_role"] == "observational"
+        assert details["market_relative_alpha_admission_role"] == (
+            "revision_scoped_entry_gate"
+        )
+        assert details["market_relative_alpha_gate_confirmation"] == {
+            "forecast_qkernel_entry": True
+        }
+        assert details["day0_market_relative_alpha_admission_role"] == (
+            "revision_scoped_entry_gate"
+        )
         assert details["day0_market_relative_alpha_gate_required"] is False
         assert details["day0_market_relative_alpha_gate_confirmation"] == {}
-        assert {
+        gate_state = {
             row["strategy_key"]: (row["status"], row["reason"])
             for row in gate_rows
-        } == {
-            "day0_nowcast_entry": ("expired", "legacy_day0_alpha_gate"),
-            "forecast_qkernel_entry": ("expired", "legacy_alpha_gate"),
         }
+        assert gate_state["day0_nowcast_entry"] == (
+            "expired",
+            "legacy_day0_alpha_gate",
+        )
+        assert gate_state["forecast_qkernel_entry"][0] == "active"
+        assert gate_state["forecast_qkernel_entry"][1].startswith(
+            "market_relative_alpha_unproven("
+            "status=no_evidence,model_evalue=0.0"
+        )
 
 
 class TestRiskGuardExecutionQualityLocalization:
@@ -6156,6 +6214,37 @@ class TestStrategyPolicyResolver:
             ("riskguard:gate:forecast_qkernel_entry",),
         ).fetchone()
         assert row["value"] == "true"
+        conn.close()
+
+    def test_riskguard_emits_probability_scoped_unproven_alpha_gate(self):
+        conn = _policy_conn()
+        revision = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+
+        status = riskguard_module._sync_riskguard_strategy_gate_actions(
+            conn,
+            {
+                "forecast_qkernel_entry": [
+                    "market_relative_alpha_unproven("
+                    "status=no_evidence,model_evalue=0.0,required=10.0,"
+                    "clusters=0,law=executable_min_order_capital_gain_v2,"
+                    f"revision={revision})"
+                ]
+            },
+            probability_semantics_scopes={
+                "forecast_qkernel_entry": {revision}
+            },
+            issued_at="2026-08-16T19:00:00+00:00",
+        )
+        row = conn.execute(
+            "SELECT value FROM risk_actions WHERE action_id = ?",
+            ("riskguard:gate:forecast_qkernel_entry",),
+        ).fetchone()
+
+        assert status["emitted_count"] == 1
+        assert json.loads(row["value"]) == {
+            "gate": True,
+            "probability_semantics_revisions": [revision],
+        }
         conn.close()
 
     def test_resolve_strategy_policy_defaults_without_rows(self, monkeypatch):
