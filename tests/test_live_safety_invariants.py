@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-08-15; last_reused=2026-08-15
+# Lifecycle: created=2026-03-31; last_reviewed=2026-08-16; last_reused=2026-08-16
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-08-15
+# Last reused/audited: 2026-08-16
 # Authority basis: finite-evidence single-q global SELL ownership; price-band parity hot-fix
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -20310,6 +20310,142 @@ def test_global_sell_debt_drain_auxiliary_deadline_preserves_primary_refresh(
     assert summary["global_sell_snapshot_reauction_debts_pending"] == 1
     assert summary["held_monitor_optional_maintenance_deferred"] >= 1
     assert summary["held_monitor_primary_belief_read_completed"] == 1
+
+
+def test_auxiliary_retry_sql_deadline_preserves_primary_refresh(monkeypatch):
+    """A dust retry scan cannot retain the monitor after its auxiliary cutoff."""
+    from src.engine import cycle_runtime
+    from src.execution import exit_lifecycle
+
+    position = _make_position(
+        trade_id="bounded-auxiliary-dust-retry",
+        state="pending_exit",
+        exit_state="backoff_exhausted",
+    )
+    position.exit_reason = "SELL_REVERSAL [DUST: below snapshot min_order_size]"
+    clock = [0.0]
+    evaluations = _assert_primary_monitor_progress(
+        monkeypatch,
+        clock=clock,
+        position=position,
+    )
+
+    class Result:
+        def __init__(self, row=None):
+            self.row = row
+
+        def fetchone(self):
+            return self.row
+
+    class Conn:
+        in_transaction = False
+
+        def __init__(self):
+            self.busy_ms = 5_000
+            self.handler = None
+
+        def execute(self, sql, _params=()):
+            if sql == "PRAGMA busy_timeout":
+                return Result((self.busy_ms,))
+            if sql.startswith("PRAGMA busy_timeout = "):
+                self.busy_ms = int(sql.rsplit(" ", 1)[-1])
+                return Result()
+            raise AssertionError(sql)
+
+        def set_progress_handler(self, handler, _opcodes):
+            self.handler = handler
+
+        def commit(self):
+            return None
+
+        def rollback(self):
+            return None
+
+    conn = Conn()
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "check_pending_exits",
+        lambda *_args, **_kwargs: {
+            "filled": 0,
+            "retried": 0,
+            "unchanged": 1,
+            "filled_positions": [],
+        },
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_prefetch_held_replacement_artifact_hwm",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_fresh_local_held_monitor_orderbooks",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_day0_hard_fact_position_eligible",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "classify_global_sell_snapshot_reauction_debt",
+        lambda *_args, **_kwargs: (
+            exit_lifecycle.GlobalSellSnapshotReauctionDebtStatus.NO_DEBT
+        ),
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_is_non_executable_dust_hold",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "release_market_closed_pending_exit_hold",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "release_pending_exit_without_order_if_retryable",
+        lambda *_args, **_kwargs: False,
+    )
+
+    def unbounded_retry_read(_position, active_conn):
+        clock[0] = 2.0
+        assert active_conn.handler() == 1
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "has_global_sell_snapshot_reauction_retry",
+        unbounded_retry_read,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "check_pending_retries",
+        lambda *_args, **_kwargs: pytest.fail(
+            "interrupted ownership read must not continue retry mutation"
+        ),
+    )
+
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        conn,
+        object(),
+        _make_portfolio(position),
+        _monitor_test_artifact(),
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("bounded_auxiliary_dust_retry"),
+        run_exit_preflight=True,
+        held_position_monitor_budget_seconds=6.0,
+    )
+
+    assert evaluations == [position.trade_id]
+    assert summary["global_sell_snapshot_reauction_retry_runtime_deferred"] >= 1
+    assert summary["held_monitor_primary_belief_read_completed"] == 1
+    assert conn.handler is None
+    assert conn.busy_ms == 5_000
 
 
 def test_local_orderbook_prefetch_auxiliary_deadline_bypasses_to_primary_refresh(

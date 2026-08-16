@@ -1,5 +1,5 @@
 # Created: 2026-05-04
-# Last reused/audited: 2026-08-15
+# Last reused/audited: 2026-08-16
 # Authority basis: IOC forward-port (Fix C: allowed_discovery_modes_inverse) — 2026-05-23
 """Heavy runtime helpers extracted from cycle_runner.
 
@@ -6299,6 +6299,7 @@ def execute_monitoring_phase(
         execute_exit,
         GlobalSellSnapshotReauctionDebtStatus,
         has_global_sell_snapshot_reauction_retry,
+        _held_monitor_preparation_deadline,
         _is_non_executable_dust_hold,
         handle_exit_pending_missing,
         is_exit_cooldown_active,
@@ -6834,22 +6835,58 @@ def execute_monitoring_phase(
 
     def check_pending_retry_with_committed_global_reauction(position) -> bool:
         nonlocal portfolio_dirty
-        global_retry = has_global_snapshot_retry_runtime(position)
-        previous_runtime = (
-            {
-                field: getattr(position, field, "")
-                for field in global_retry_runtime_fields
-            }
-            if global_retry
-            else None
-        )
-        released = check_pending_retries(
-            position,
-            conn=conn,
-            global_sell_reauction_requester=(
-                request_global_sell_snapshot_reauction
-            ),
-        )
+
+        def defer_retry_runtime() -> bool:
+            defer_optional_maintenance("GLOBAL_SELL_RETRY_RUNTIME_DEADLINE")
+            summary["global_sell_snapshot_reauction_retry_runtime_deferred"] = (
+                summary.get(
+                    "global_sell_snapshot_reauction_retry_runtime_deferred",
+                    0,
+                )
+                + 1
+            )
+            return False
+
+        previous_runtime = {
+            field: getattr(position, field, "")
+            for field in global_retry_runtime_fields
+        }
+        if time.monotonic() >= auxiliary_deadline:
+            return defer_retry_runtime()
+        try:
+            if conn is None:
+                global_retry = has_global_snapshot_retry_runtime(position)
+                released = check_pending_retries(
+                    position,
+                    conn=conn,
+                    global_sell_reauction_requester=(
+                        request_global_sell_snapshot_reauction
+                    ),
+                )
+            else:
+                # This compatibility retry path re-reads durable SELL lineage
+                # after the bounded debt scan above.  Keep that duplicate read
+                # inside the same auxiliary clock: one dust position can own
+                # thousands of MONITOR_REFRESHED payloads, and an unbounded
+                # payload scan must not retain the full-book monitor claim.
+                # SCOPE: this position's retry classification in this pass.
+                # DRAIN: the next recurring pass retries from canonical truth.
+                # RESET: a complete classification before auxiliary_deadline.
+                with _held_monitor_preparation_deadline(
+                    conn,
+                    auxiliary_deadline,
+                ):
+                    global_retry = has_global_snapshot_retry_runtime(position)
+                    released = check_pending_retries(
+                        position,
+                        conn=conn,
+                        global_sell_reauction_requester=(
+                            request_global_sell_snapshot_reauction
+                        ),
+                    )
+        except (sqlite3.Error, TimeoutError):
+            restore_global_retry_runtime({id(position): previous_runtime})
+            return defer_retry_runtime()
         if not released or not global_retry:
             return released
         if conn is not None and conn.in_transaction and not _release_monitor_write_lock_boundary(
@@ -6859,7 +6896,6 @@ def execute_monitoring_phase(
             boundary="late_global_sell_snapshot_reauction",
             deadline_monotonic=auxiliary_deadline,
         ):
-            assert previous_runtime is not None
             for field, value in previous_runtime.items():
                 setattr(position, field, value)
             return False
