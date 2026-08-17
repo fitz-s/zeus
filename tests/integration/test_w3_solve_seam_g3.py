@@ -33985,8 +33985,23 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
     def witness(family_key: str, q: float) -> SimpleNamespace:
         return SimpleNamespace(
             family_key=family_key,
-            bin_ids=("20C",),
-            yes_point_q=np.array([q]),
+            bin_ids=("20C", "21C"),
+            bindings=(
+                SimpleNamespace(
+                    bin_id="20C",
+                    condition_id=f"condition-{family_key}",
+                    yes_token_id=f"token-{family_key}",
+                    no_token_id=f"no-token-{family_key}",
+                ),
+                SimpleNamespace(
+                    bin_id="21C",
+                    condition_id=f"condition-21-{family_key}",
+                    yes_token_id=f"token-21-{family_key}",
+                    no_token_id=f"no-token-21-{family_key}",
+                ),
+            ),
+            yes_point_q=np.array([q, 1.0 - q]),
+            yes_q_samples=np.tile(np.array([q, 1.0 - q]), (100, 1)),
             q_version=bind_day0_probability_semantics(f"q-{family_key}"),
             witness_identity=f"witness-{family_key}",
             probability_content_identity=f"content-{family_key}",
@@ -34356,6 +34371,144 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
     assert conn.execute(
         "SELECT COUNT(*) FROM no_trade_regret_events"
     ).fetchone()[0] == 2
+
+    exit_at = at + _dt.timedelta(hours=1)
+    wealth = SimpleNamespace(
+        ledger_snapshot_id="ledger",
+        witness_identity="wealth-witness",
+        economic_identity="wealth-economics",
+        strategy_capital_allocation=SimpleNamespace(
+            utility_liquid_cash_usd=Decimal("100")
+        ),
+    )
+    holdings = SimpleNamespace(
+        family_key=family_a,
+        ledger_snapshot_id="ledger",
+        endowment_claims=(),
+    )
+
+    def exit_epoch(*, price: str, size: str = "5") -> SimpleNamespace:
+        return SimpleNamespace(
+            witness_identity=f"exit-book-{price}-{size}",
+            max_age=_dt.timedelta(seconds=30),
+            sell_assets=(
+                SimpleNamespace(
+                    family_key=family_a,
+                    bin_id="20C",
+                    condition_id=f"condition-{family_a}",
+                    side="YES",
+                    token_id=f"token-{family_a}",
+                    captured_at_utc=exit_at,
+                    neg_risk=False,
+                    curve=ExecutableSellCurve(
+                        token_id=f"token-{family_a}",
+                        side="YES",
+                        snapshot_id=f"exit-snapshot-{price}-{size}",
+                        book_hash=f"exit-book-hash-{price}-{size}",
+                        levels=(
+                            BidBookLevel(
+                                price=Decimal(price),
+                                size=Decimal(size),
+                            ),
+                        ),
+                        fee_model=FeeModel(fee_rate=Decimal("0.02")),
+                        min_tick=Decimal("0.01"),
+                        min_order_size=Decimal("5"),
+                        quote_ttl=_dt.timedelta(seconds=30),
+                    ),
+                ),
+            ),
+        )
+
+    exits = global_batch_runtime._market_relative_alpha_shadow_exit_events(
+        conn,
+        probability_witnesses={family_a: witness(family_a, 0.10)},
+        holdings_by_family={family_a: holdings},
+        wealth_witness=wealth,
+        book_epoch=exit_epoch(price="0.30"),
+        decision_at_utc=exit_at,
+    )
+    assert len(exits) == 1
+    assert exits[0].direction == "sell_yes"
+    assert exits[0].regret_bucket == "EXECUTABLE_GAIN_LOCKED"
+    exit_envelope = json.loads(exits[0].envelope_json)
+    assert exit_envelope["decision_law_id"].endswith("sell-over-hold-v1")
+    assert Decimal(exit_envelope["locked_gain_usd"]) >= Decimal("0.05")
+    assert Decimal(exit_envelope["sell_over_hold_usd"]) >= Decimal("0.05")
+    assert exit_envelope["full_depth_executable"] is True
+    assert exit_envelope["venue_submit_count"] == 0
+
+    qkernel_exit_witness = SimpleNamespace(
+        **{
+            **vars(qkernel_witnesses[family_a]),
+            "yes_point_q": np.array([0.10, 0.90]),
+            "yes_q_samples": np.tile(np.array([0.10, 0.90]), (100, 1)),
+        }
+    )
+    qkernel_exits = (
+        global_batch_runtime._market_relative_alpha_shadow_exit_events(
+            conn,
+            probability_witnesses={family_a: qkernel_exit_witness},
+            holdings_by_family={family_a: holdings},
+            wealth_witness=wealth,
+            book_epoch=exit_epoch(price="0.30"),
+            decision_at_utc=exit_at,
+            qkernel_semantics_by_posterior={
+                f"posterior-{family_a}": (
+                    global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION
+                )
+            },
+        )
+    )
+    assert len(qkernel_exits) == 1
+    assert json.loads(qkernel_exits[0].envelope_json)["strategy_key"] == (
+        "forecast_qkernel_entry"
+    )
+
+    hold_dominates = (
+        global_batch_runtime._market_relative_alpha_shadow_exit_events(
+            conn,
+            probability_witnesses={family_a: witness(family_a, 0.30)},
+            holdings_by_family={family_a: holdings},
+            wealth_witness=wealth,
+            book_epoch=exit_epoch(price="0.30"),
+            decision_at_utc=exit_at,
+        )
+    )
+    assert hold_dominates == ()
+    sub_tick_gain = (
+        global_batch_runtime._market_relative_alpha_shadow_exit_events(
+            conn,
+            probability_witnesses={family_a: witness(family_a, 0.10)},
+            holdings_by_family={family_a: holdings},
+            wealth_witness=wealth,
+            book_epoch=exit_epoch(price="0.21"),
+            decision_at_utc=exit_at,
+        )
+    )
+    assert sub_tick_gain == ()
+    no_full_depth = (
+        global_batch_runtime._market_relative_alpha_shadow_exit_events(
+            conn,
+            probability_witnesses={family_a: witness(family_a, 0.10)},
+            holdings_by_family={family_a: holdings},
+            wealth_witness=wealth,
+            book_epoch=exit_epoch(price="0.30", size="4"),
+            decision_at_utc=exit_at,
+        )
+    )
+    assert no_full_depth == ()
+
+    first_exit = global_batch_runtime._record_market_relative_alpha_shadows(
+        conn, exits
+    )
+    second_exit = global_batch_runtime._record_market_relative_alpha_shadows(
+        conn, exits
+    )
+    assert first_exit == second_exit
+    assert conn.execute(
+        "SELECT COUNT(*) FROM no_trade_regret_events"
+    ).fetchone()[0] == 3
     conn.close()
 
 

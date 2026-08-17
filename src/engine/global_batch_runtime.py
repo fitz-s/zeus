@@ -4956,6 +4956,12 @@ _QKERNEL_ALPHA_SHADOW_EVENT_VERSION = (
 )
 _QKERNEL_ALPHA_SHADOW_DECISION_LAW = "executable_min_order_capital_gain_v2"
 _QKERNEL_ALPHA_SHADOW_SELECTION_RULE = _ALPHA_SHADOW_SELECTION_RULE
+_ALPHA_SHADOW_EXIT_EVENT_VERSION = (
+    "market-relative-alpha-shadow-exit-v1-global-winner"
+)
+_ALPHA_SHADOW_EXIT_DECISION_LAW = (
+    "full-depth-fee-net-one-tick-sell-over-hold-v1"
+)
 
 
 def _native_buy_min_order_vwap(
@@ -5343,6 +5349,406 @@ def _day0_market_relative_alpha_shadow_events(
         **kwargs,
         strategy_keys=("day0_nowcast_entry",),
     )
+
+
+def _market_relative_alpha_shadow_exit_events(
+    conn: object,
+    *,
+    probability_witnesses: Mapping[str, object],
+    holdings_by_family: Mapping[str, object],
+    wealth_witness: object,
+    book_epoch: CurrentGlobalBookEpoch | None,
+    decision_at_utc: datetime,
+    qkernel_semantics_by_posterior: Mapping[str, str] | None = None,
+) -> tuple[object, ...]:
+    """Freeze the first robust, executable exit for each exact shadow BUY.
+
+    A higher top bid is not capital-gain evidence. The complete proof-sized
+    holding must be sellable on the current native bid ladder after fees, the
+    locked gain must cover one venue tick across the holding, and SELL must
+    beat the current probability-valued HOLD by the same one-tick buffer.
+    This is evidence only; it neither submits nor changes RiskGuard policy.
+    """
+
+    if (
+        not isinstance(conn, sqlite3.Connection)
+        or book_epoch is None
+        or decision_at_utc.tzinfo is None
+    ):
+        return ()
+    from src.events.day0_authority import (
+        DAY0_PROBABILITY_SEMANTICS_REVISION,
+        day0_probability_semantics_revision,
+    )
+    from src.strategy.live_inference.no_trade_regret import NoTradeRegretEvent
+    from src.engine.global_single_order_auction import (
+        _candidate_portfolio_endowment,
+    )
+    from src.solve.solver import (
+        _score_global_single_order_sell_expected,
+        global_sell_candidate_from_holding,
+    )
+
+    decision_at_utc = decision_at_utc.astimezone(UTC)
+    sell_assets = {
+        (
+            str(asset.family_key),
+            str(asset.bin_id),
+            str(asset.condition_id),
+            str(asset.side),
+            str(asset.token_id),
+        ): asset
+        for asset in tuple(getattr(book_epoch, "sell_assets", ()) or ())
+    }
+    if not sell_assets:
+        return ()
+    try:
+        rows = conn.execute(
+            "SELECT regret_event_id,event_id,condition_id,token_id,"
+            "outcome_label,city,target_date,metric,family_id,direction,"
+            "decision_time,envelope_json "
+            "FROM no_trade_regret_events "
+            "WHERE rejection_stage='RISK_GUARD' "
+            "AND rejection_reason IN (?,?) "
+            "AND event_id LIKE ? "
+            "ORDER BY decision_time,regret_event_id",
+            (
+                _DAY0_ALPHA_SHADOW_REASON,
+                _QKERNEL_ALPHA_SHADOW_REASON,
+                "market-relative-alpha-shadow-v4-global-winner:%",
+            ),
+        ).fetchall()
+    except sqlite3.Error:
+        return ()
+
+    events: list[object] = []
+    for row in rows:
+        (
+            regret_event_id,
+            entry_event_id,
+            condition_id,
+            token_id,
+            outcome_label,
+            city,
+            target_date,
+            metric,
+            family_key,
+            direction,
+            entry_decision_time,
+            envelope_json,
+        ) = row
+        try:
+            envelope = json.loads(str(envelope_json or ""))
+            if not isinstance(envelope, Mapping):
+                continue
+            strategy_key = str(envelope.get("strategy_key") or "")
+            bin_id = str(envelope.get("bin_id") or "")
+            side = str(envelope.get("side") or "").upper()
+            entry_at = datetime.fromisoformat(
+                str(entry_decision_time or "").replace("Z", "+00:00")
+            )
+            shares = Decimal(str(envelope.get("global_proof_shares") or "0"))
+            entry_cost = Decimal(
+                str(envelope.get("global_proof_cost_usd") or "0")
+            )
+        except (ArithmeticError, TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if (
+            int(envelope.get("schema_version") or 0) != 2
+            or envelope.get("global_proof_winner") is not True
+            or str(envelope.get("selection_rule") or "")
+            != _ALPHA_SHADOW_SELECTION_RULE
+            or strategy_key
+            not in {"day0_nowcast_entry", "forecast_qkernel_entry"}
+            or side not in {"YES", "NO"}
+            or str(direction or "") != f"buy_{side.lower()}"
+            or str(envelope.get("family_key") or "") != str(family_key or "")
+            or str(envelope.get("condition_id") or "")
+            != str(condition_id or "")
+            or str(envelope.get("token_id") or "") != str(token_id or "")
+            or bin_id != str(outcome_label or "")
+            or not shares.is_finite()
+            or not entry_cost.is_finite()
+            or shares <= 0
+            or entry_cost <= 0
+            or entry_at.tzinfo is None
+            or entry_at.astimezone(UTC) >= decision_at_utc
+        ):
+            continue
+        entry_at = entry_at.astimezone(UTC)
+        witness = probability_witnesses.get(str(family_key or ""))
+        holdings = holdings_by_family.get(str(family_key or ""))
+        asset = sell_assets.get(
+            (
+                str(family_key or ""),
+                bin_id,
+                str(condition_id or ""),
+                side,
+                str(token_id or ""),
+            )
+        )
+        if (
+            witness is None
+            or holdings is None
+            or asset is None
+            or str(getattr(holdings, "ledger_snapshot_id", "") or "")
+            != str(getattr(wealth_witness, "ledger_snapshot_id", "") or "")
+        ):
+            continue
+        q_version = str(getattr(witness, "q_version", "") or "")
+        posterior_identity_hash = str(
+            getattr(witness, "posterior_identity_hash", "") or ""
+        )
+        current_revision = (
+            day0_probability_semantics_revision(q_version)
+            if strategy_key == "day0_nowcast_entry"
+            else str(
+                (qkernel_semantics_by_posterior or {}).get(
+                    posterior_identity_hash
+                )
+                or ""
+            )
+        )
+        if (
+            strategy_key == "day0_nowcast_entry"
+            and current_revision != DAY0_PROBABILITY_SEMANTICS_REVISION
+        ) or (
+            strategy_key == "forecast_qkernel_entry"
+            and current_revision
+            not in {
+                CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+            }
+        ):
+            continue
+        current_q = family_payoff_point_q(witness, bin_id=bin_id, side=side)
+        curve = getattr(asset, "curve", None)
+        captured_at = getattr(asset, "captured_at_utc", None)
+        if (
+            current_q is None
+            or not math.isfinite(float(current_q))
+            or not 0.0 <= float(current_q) <= 1.0
+            or not isinstance(curve, ExecutableSellCurve)
+            or getattr(captured_at, "tzinfo", None) is None
+            or captured_at.astimezone(UTC) > decision_at_utc
+            or captured_at.astimezone(UTC) + book_epoch.max_age
+            < decision_at_utc
+            or curve.token_id != str(token_id or "")
+            or curve.side != side
+            or shares < curve.min_order_size
+        ):
+            continue
+        remaining = shares
+        consumed_levels = []
+        for level in curve.levels:
+            take = min(remaining, Decimal(level.size))
+            if take <= 0:
+                continue
+            if not Decimal("0.05") <= Decimal(level.price) <= Decimal("0.95"):
+                consumed_levels = []
+                break
+            consumed_levels.append((Decimal(level.price), take))
+            remaining -= take
+            if remaining <= Decimal("1e-9"):
+                break
+        if not consumed_levels or remaining > Decimal("1e-9"):
+            continue
+        try:
+            net_proceeds, raw_vwap, limit_price = curve.proceeds_for_shares(
+                shares
+            )
+        except (ArithmeticError, TypeError, ValueError):
+            continue
+        net_vwap = net_proceeds / shares
+        locked_gain = net_proceeds - entry_cost
+        hold_value = Decimal(str(current_q)) * shares
+        sell_over_hold = net_proceeds - hold_value
+        one_tick_buffer = Decimal(curve.min_tick) * shares
+        if (
+            not all(
+                value.is_finite()
+                for value in (
+                    net_proceeds,
+                    raw_vwap,
+                    limit_price,
+                    net_vwap,
+                    locked_gain,
+                    hold_value,
+                    sell_over_hold,
+                    one_tick_buffer,
+                )
+            )
+            or one_tick_buffer <= 0
+            or locked_gain < one_tick_buffer
+            or sell_over_hold < one_tick_buffer
+        ):
+            continue
+        shadow_holding = SimpleNamespace(
+            position_id=f"shadow:{regret_event_id}",
+            family_key=str(family_key),
+            bin_id=bin_id,
+            side=side,
+            token_id=str(token_id),
+            shares=shares,
+        )
+        existing_claims = getattr(holdings, "endowment_claims", None)
+        if existing_claims is None:
+            existing_claims = getattr(holdings, "holdings", ())
+        augmented_holdings = SimpleNamespace(
+            family_key=str(family_key),
+            ledger_snapshot_id=str(wealth_witness.ledger_snapshot_id),
+            endowment_claims=tuple(existing_claims or ()) + (shadow_holding,),
+        )
+        try:
+            sell_candidate = global_sell_candidate_from_holding(
+                shadow_holding,
+                probability_witness=witness,
+                ledger_snapshot_id=str(wealth_witness.ledger_snapshot_id),
+                executable_sell_curve=curve,
+                book_captured_at_utc=captured_at,
+                neg_risk=bool(asset.neg_risk),
+                probability_functional="POSTERIOR_PREDICTIVE_MEAN",
+                exit_authority_status="not_applicable",
+                exit_authority_reason="shadow_exit_current_probability",
+                sell_action_authority_identity=(
+                    f"shadow-exit:{regret_event_id}:"
+                    f"{getattr(witness, 'witness_identity', '')}"
+                ),
+                execution_mode="TAKER_LIMIT",
+            )
+            q_samples = family_payoff_q_samples(
+                witness,
+                bin_id=bin_id,
+                side=side,
+            )
+            if sell_candidate is None or q_samples is None:
+                continue
+            endowment = _candidate_portfolio_endowment(
+                sell_candidate,
+                probability_witness=witness,
+                holdings_snapshot=augmented_holdings,
+                wealth_witness=wealth_witness,
+            )
+            exit_score = _score_global_single_order_sell_expected(
+                sell_candidate,
+                held_probability_mean=float(current_q),
+                sample_count=int(q_samples.size),
+                band_alpha=float(getattr(witness, "band_alpha", 0.0)),
+                endowment=endowment,
+            )
+            expected_terminal = exit_score.expected_terminal_wealth
+        except (ArithmeticError, AttributeError, TypeError, ValueError):
+            continue
+        if (
+            exit_score.candidate is None
+            or exit_score.shares != shares
+            or exit_score.cash_proceeds_usd != net_proceeds
+            or expected_terminal is None
+            or expected_terminal.expected_delta_log_wealth <= 0.0
+            or expected_terminal.expected_ev_usd <= 0.0
+            or exit_score.rejection_reasons
+        ):
+            continue
+        exit_envelope = {
+            "schema_version": 1,
+            "decision_law_id": _ALPHA_SHADOW_EXIT_DECISION_LAW,
+            "entry_shadow_regret_event_id": str(regret_event_id),
+            "entry_shadow_event_id": str(entry_event_id),
+            "entry_decision_at_utc": entry_at.isoformat(),
+            "entry_probability_semantics_revision": str(
+                envelope.get("probability_semantics_revision") or ""
+            ),
+            "entry_q": envelope.get("q"),
+            "entry_cost_usd": str(entry_cost),
+            "entry_global_proof_candidate_id": str(
+                envelope.get("global_proof_candidate_id") or ""
+            ),
+            "strategy_key": strategy_key,
+            "family_key": str(family_key),
+            "city": str(city or ""),
+            "target_date": str(target_date or ""),
+            "metric": str(metric or ""),
+            "bin_id": bin_id,
+            "condition_id": str(condition_id),
+            "side": side,
+            "token_id": str(token_id),
+            "exit_decision_at_utc": decision_at_utc.isoformat(),
+            "exit_probability_semantics_revision": current_revision,
+            "exit_q": float(current_q),
+            "exit_q_version": q_version,
+            "exit_probability_witness_identity": str(
+                getattr(witness, "witness_identity", "") or ""
+            ),
+            "exit_posterior_identity_hash": posterior_identity_hash,
+            "exit_book_epoch_identity": book_epoch.witness_identity,
+            "exit_book_snapshot_id": curve.snapshot_id,
+            "exit_book_hash": curve.book_hash,
+            "exit_book_captured_at_utc": captured_at.astimezone(UTC).isoformat(),
+            "shares": str(shares),
+            "raw_exit_vwap": str(raw_vwap),
+            "net_exit_vwap": str(net_vwap),
+            "exit_limit_price": str(limit_price),
+            "net_exit_proceeds_usd": str(net_proceeds),
+            "locked_gain_usd": str(locked_gain),
+            "return_on_entry_cost": str(locked_gain / entry_cost),
+            "hold_expected_value_usd": str(hold_value),
+            "sell_over_hold_usd": str(sell_over_hold),
+            "one_tick_buffer_usd": str(one_tick_buffer),
+            "expected_delta_log_wealth": (
+                expected_terminal.expected_delta_log_wealth
+            ),
+            "expected_ev_usd": expected_terminal.expected_ev_usd,
+            "wealth_witness_identity": str(
+                getattr(wealth_witness, "witness_identity", "") or ""
+            ),
+            "wealth_economic_identity": str(
+                getattr(wealth_witness, "economic_identity", "") or ""
+            ),
+            "ledger_snapshot_id": str(wealth_witness.ledger_snapshot_id),
+            "full_depth_executable": True,
+            "venue_submit_count": 0,
+        }
+        events.append(
+            NoTradeRegretEvent(
+                event_id=(
+                    f"{_ALPHA_SHADOW_EXIT_EVENT_VERSION}:"
+                    f"{regret_event_id}"
+                ),
+                rejection_stage="TRADE_SCORE",
+                rejection_reason=(
+                    f"MARKET_RELATIVE_ALPHA_SHADOW:exit:{strategy_key}"
+                ),
+                regret_bucket="EXECUTABLE_GAIN_LOCKED",
+                condition_id=str(condition_id),
+                token_id=str(token_id),
+                outcome_label=bin_id,
+                decision_time=decision_at_utc.isoformat(),
+                city=str(city or ""),
+                target_date=str(target_date or ""),
+                metric=str(metric or ""),
+                family_id=str(family_key or ""),
+                bin_label=bin_id,
+                direction=f"sell_{side.lower()}",
+                q_live=float(current_q),
+                p_fill_lcb=1.0,
+                native_quote_available=True,
+                source_status="current_executable_exit_authority",
+                family_complete=True,
+                hypothetical_order_type="MARKETABLE_LIMIT",
+                hypothetical_fill_status="FULL_DEPTH_EXECUTABLE_NOW",
+                hypothetical_fill_price=float(raw_vwap),
+                causal_snapshot_id=str(
+                    getattr(witness, "witness_identity", "") or ""
+                ),
+                executable_snapshot_id=curve.snapshot_id,
+                envelope_json=json.dumps(
+                    exit_envelope,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+        )
+    return tuple(events)
 
 
 def _record_market_relative_alpha_shadows(
@@ -6105,6 +6511,7 @@ def process_current_global_batch(
     selection_snapshot_release: Callable[[], None] | None = None
     actuation_started = False
     pending_alpha_shadow_events: dict[str, object] = {}
+    pending_alpha_shadow_exit_events: dict[str, object] = {}
     prepared_loser_receipts: dict[str, EventSubmissionReceipt] = {}
     preflight_rejection_receipts: dict[str, EventSubmissionReceipt] = {}
     batch_started = time.monotonic()
@@ -7638,6 +8045,34 @@ def process_current_global_batch(
                     str(getattr(shadow_event, "event_id", "")),
                     shadow_event,
                 )
+            alpha_shadow_exit_events = (
+                _market_relative_alpha_shadow_exit_events(
+                    world_conn,
+                    probability_witnesses=attempt_probabilities,
+                    holdings_by_family={
+                        str(
+                            getattr(
+                                getattr(prepared, "probability_witness", None),
+                                "family_key",
+                                "",
+                            )
+                            or ""
+                        ): getattr(prepared, "holdings_snapshot", None)
+                        for prepared in prepared_for_selection.values()
+                    },
+                    wealth_witness=selection_wealth,
+                    book_epoch=attempt_book_epoch,
+                    decision_at_utc=selection_at,
+                    qkernel_semantics_by_posterior=(
+                        qkernel_semantics_by_posterior
+                    ),
+                )
+            )
+            for exit_event in alpha_shadow_exit_events:
+                pending_alpha_shadow_exit_events.setdefault(
+                    str(getattr(exit_event, "event_id", "")),
+                    exit_event,
+                )
             receipt_store_started = time.monotonic()
             if held_completion_expired():
                 return reject("HELD_SELL_DEADLINE_EXPIRED")
@@ -8894,4 +9329,17 @@ def process_current_global_batch(
                 "Market-relative alpha shadow cut: candidates=%d recorded=%d",
                 len(alpha_shadow_events),
                 len(recorded_alpha_shadow_ids),
+            )
+        alpha_shadow_exit_events = tuple(
+            pending_alpha_shadow_exit_events.values()
+        )
+        recorded_alpha_shadow_exit_ids = _record_market_relative_alpha_shadows(
+            world_conn,
+            alpha_shadow_exit_events,
+        )
+        if alpha_shadow_exit_events:
+            _LOG.info(
+                "Market-relative alpha shadow exit cut: candidates=%d recorded=%d",
+                len(alpha_shadow_exit_events),
+                len(recorded_alpha_shadow_exit_ids),
             )
