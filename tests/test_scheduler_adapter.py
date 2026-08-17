@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-05-24; last_reviewed=2026-08-11; last_reused=2026-08-11
+# Lifecycle: created=2026-05-24; last_reviewed=2026-08-17; last_reused=2026-08-17
 # Purpose: Current single-live scheduler set and causal executor-class assignment.
 # Reuse: Inspect docs/operations/current/plans/data_temporal_kernel/PLAN.md + the target module before relying on it.
 # Created: 2026-05-24
-# Last reused or audited: 2026-08-11
+# Last reused or audited: 2026-08-17
 # Authority basis: docs/operations/current/plans/data_temporal_kernel/PLAN.md (PR6);
 #   operator spec §7 (Scheduler adapter / executor classes).
 """PR6: registry -> scheduler executor-class assignment (pure planner, daemon wiring deferred)."""
@@ -565,16 +565,24 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
         or tuple(sources or ()),
     )
     monkeypatch.setattr(prod, "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed", _scoped_path)
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda: {
+            ("Seoul", "2026-07-03", "high"): 0,
+            ("Wellington", "2026-07-03", "high"): 1,
+        },
+    )
     anchor_calls: list[dict[str, object]] = []
 
     def _download_anchor(_cfg, **kwargs):
         call_order.append("anchor_scope_download")
         anchor_calls.append(kwargs)
+        city = kwargs["required_scopes"][0][0]
         return {
             "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
             "available_cycle": "2026-07-02T12:00:00+00:00",
             "written_manifest_count": 1,
-            "written_manifests": ["/tmp/seoul-high.manifest.json"],
+            "written_manifests": [f"/tmp/{city.lower()}-high.manifest.json"],
             "coverage": {
                 "status": "CURRENT_TARGETS_MISSING_REPLACEMENT_COVERAGE",
                 "target_count": 2,
@@ -649,16 +657,19 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     assert fusion_calls[0]["manifest_snapshot"] is cycle_calls[0]["manifest_snapshot"]
     assert fusion_calls[0]["manifest_snapshot"]["manifest_paths"] == (
         "/tmp/seoul-high.manifest.json",
+        "/tmp/wellington-high.manifest.json",
     )
-    assert anchor_calls == [
-        {
-            "max_wall_clock_seconds": 10.0,
-            "required_scopes": (
-                ("Seoul", "2026-07-03", "high"),
-                ("Wellington", "2026-07-03", "high"),
-            ),
-        }
-    ]
+    assert len(anchor_calls) == 2
+    assert anchor_calls[0]["required_scopes"] == (
+        ("Seoul", "2026-07-03", "high"),
+    )
+    assert anchor_calls[0]["quota_critical"] is True
+    assert 0.0 < anchor_calls[0]["max_wall_clock_seconds"] <= 10.0
+    assert anchor_calls[1]["required_scopes"] == (
+        ("Wellington", "2026-07-03", "high"),
+    )
+    assert "quota_critical" not in anchor_calls[1]
+    assert 0.0 < anchor_calls[1]["max_wall_clock_seconds"] <= 10.0
     assert cycle_calls[0]["scopes"] == (
         ("Seoul", "2026-07-03", "high"),
         ("Wellington", "2026-07-03", "high"),
@@ -670,6 +681,7 @@ def test_replacement_availability_fast_poll_passes_changed_source_clock_report(m
     assert call_order == [
         "probe",
         "scoped_download",
+        "anchor_scope_download",
         "anchor_scope_download",
         "fusion_reseed",
         "cycle_reseed",

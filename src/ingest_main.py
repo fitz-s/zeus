@@ -258,6 +258,27 @@ def _day0_priority_scopes() -> frozenset[tuple[str, str]]:
     )
 
 
+def _held_day0_current_target_scopes(
+    scopes: tuple[tuple[str, str, str], ...],
+) -> tuple[tuple[str, str, str], ...]:
+    """Exact current-target scopes allowed to borrow the held Day0 reserve."""
+
+    try:
+        from src.data.replacement_forecast_seed_discovery import (
+            held_position_family_priorities,
+        )
+
+        priorities = held_position_family_priorities()
+    except Exception as exc:  # noqa: BLE001 - unreadable capital truth stays ordinary
+        logger.warning(
+            "HELD_DAY0_CURRENT_TARGET_SCOPE_READ_FAILED exc=%s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return ()
+    return tuple(scope for scope in scopes if priorities.get(scope) == 0)
+
+
 def _day0_family_admission_for_scopes(
     scopes: tuple[tuple[str, str], ...],
 ):
@@ -3089,30 +3110,65 @@ def _replacement_availability_poll_tick():
         if scopes:
             manifest_snapshot = None
             if anchor_scopes:
-                anchor_report = _download_replacement_forecast_current_targets_if_needed(
-                    cfg,
-                    max_wall_clock_seconds=min(
-                        10.0,
-                        _replacement_current_target_poll_timeout_seconds(
-                            _replacement_availability_poll_seconds()
-                        ),
-                    ),
-                    required_scopes=anchor_scopes,
+                critical_anchor_scopes = _held_day0_current_target_scopes(anchor_scopes)
+                critical_set = set(critical_anchor_scopes)
+                ordinary_anchor_scopes = tuple(
+                    scope for scope in anchor_scopes if scope not in critical_set
                 )
-                if isinstance(anchor_report, dict):
-                    report["anchor_scope_status"] = anchor_report.get("status")
-                    report["anchor_scope_manifest_count"] = anchor_report.get(
-                        "written_manifest_count"
+                anchor_deadline = time.monotonic() + min(
+                    10.0,
+                    _replacement_current_target_poll_timeout_seconds(
+                        _replacement_availability_poll_seconds()
+                    ),
+                )
+                anchor_reports: list[dict[str, object]] = []
+                written_manifests: list[str] = []
+                for partition, quota_critical in (
+                    (critical_anchor_scopes, True),
+                    (ordinary_anchor_scopes, False),
+                ):
+                    if not partition:
+                        continue
+                    remaining = max(0.0, anchor_deadline - time.monotonic())
+                    if remaining <= 0.0:
+                        break
+                    anchor_kwargs: dict[str, object] = {
+                        "max_wall_clock_seconds": remaining,
+                        "required_scopes": partition,
+                    }
+                    if quota_critical:
+                        anchor_kwargs["quota_critical"] = True
+                    anchor_report = _download_replacement_forecast_current_targets_if_needed(
+                        cfg,
+                        **anchor_kwargs,
                     )
-                    written_manifests = tuple(
+                    if not isinstance(anchor_report, dict):
+                        continue
+                    anchor_reports.append(anchor_report)
+                    written_manifests.extend(
                         str(path)
                         for path in (anchor_report.get("written_manifests") or ())
                         if str(path).strip()
                     )
-                    if written_manifests:
-                        manifest_snapshot = {
-                            "manifest_paths": written_manifests,
-                        }
+                if anchor_reports:
+                    statuses = tuple(
+                        str(anchor_report.get("status") or "")
+                        for anchor_report in anchor_reports
+                    )
+                    report["anchor_scope_status"] = (
+                        statuses[0]
+                        if len(statuses) == 1
+                        else "CURRENT_TARGET_PARTITIONED_DOWNLOAD"
+                    )
+                    report["anchor_scope_statuses"] = statuses
+                    report["anchor_scope_manifest_count"] = sum(
+                        int(anchor_report.get("written_manifest_count") or 0)
+                        for anchor_report in anchor_reports
+                    )
+                if written_manifests:
+                    manifest_snapshot = {
+                        "manifest_paths": tuple(dict.fromkeys(written_manifests)),
+                    }
             _attach_reseed_reports(
                 report,
                 scopes=scopes,

@@ -4856,6 +4856,43 @@ antibody that emits no aggregate `ENTRY_ORDER_VOIDED`.
 Allowed files for this hot-fix are `src/execution/command_recovery.py`,
 `tests/test_command_recovery.py`, and this plan.
 
+## 2026-08-17 Held Day0 current-q owns the final Open-Meteo reserve
+
+Live Dallas evidence exposed a quota-lane inversion. The new 12Z ensemble was
+complete, but the matching provider-center anchor stayed at 06Z. At 9,078
+metered requests the ordinary source-clock lane correctly stopped at its 9,000
+daily limit, while the exact held Day0 anchor refresh also stopped there even
+though the quota contract reserves the final tranche through the 9,500 hard
+cap for held Day0 probability. The resulting stale q blocked the current
+SELL/BUY/CASH comparison and therefore blocked evidence-based capital release.
+
+Only a canonical `day0_window` or `pending_exit` family may use that final
+reserve. Source-commit scopes are partitioned from the current canonical trade
+DB before download: exact held-Day0 scopes run first inside `critical_lane`;
+all other scopes remain on the ordinary lane. A broad request, an unreadable
+position projection, an `active` non-Day0 position, or an unlisted family can
+never inherit critical authority.
+
+SCOPE is the exact `(city, target_date, temperature_metric)` intersection of a
+fresh source commit and canonical held Day0/pending-exit positions. DRAIN is the
+bounded scoped anchor download followed by the existing manifest-bound reseed
+callback. RESET is per-call: critical authority ends when that exact scoped
+download returns, and later calls must re-prove the canonical phase; manifest
+currency then causes the existing current-target gate to skip further fetches.
+The ordinary lane remains fail-closed at the priority cap and the independent
+9,500 hard cap is unchanged.
+
+Allowed files for this hot-fix are
+`src/data/replacement_forecast_production.py`, `src/ingest_main.py`,
+`scripts/download_replacement_forecast_current_targets.py`,
+`tests/test_replacement_download_cycle_currency_gate.py`,
+`tests/test_scheduler_adapter.py`, and this plan. Acceptance requires
+antibodies proving (1) exact canonical held-Day0 scopes enter critical quota,
+(2) mixed batches partition without granting critical authority to ordinary
+scopes, (3) broad/nonheld downloads remain ordinary, focused tests, live
+deployment, and a new same-cycle Dallas posterior/held-monitor receipt or the
+next exact fail-closed reason.
+
 ## 2026-08-17 Entry provenance cannot replace held-exit snapshot projection
 
 Live health intermittently reported exact held outcome tokens as

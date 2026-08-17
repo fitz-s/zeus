@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-07
-# Last reused/audited: 2026-08-07
-# Lifecycle: created=2026-06-07; last_reviewed=2026-08-07
+# Last reused/audited: 2026-08-17
+# Lifecycle: created=2026-06-07; last_reviewed=2026-08-17; last_reused=2026-08-17
 # Purpose: Download current-target Open-Meteo ECMWF IFS 9km raw inputs for replacement forecast materialization.
 # Reuse: Run before live replacement materialization when dry-run reports current-target coverage gaps.
 # Authority basis: Raw artifacts are live inputs only after the replacement materializer emits
@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -41,6 +42,7 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: E402
     fetch_openmeteo_ifs9_model_meta,
     validate_openmeteo_ecmwf_ifs9_meta_window,
 )
+from src.data.openmeteo_quota import quota_tracker  # noqa: E402
 from src.data.raw_forecast_artifact_manifest import (  # noqa: E402
     RawForecastArtifactManifest,
     manifest_matches_artifact,
@@ -483,6 +485,7 @@ def _fetch_meta_stamped_anchor_wave(
     max_workers: int,
     deadline_monotonic: float | None,
     client: httpx.Client,
+    quota_critical: bool = False,
 ) -> tuple[
     dict[tuple[str, str], tuple[dict, dict[str, object], datetime]],
     dict[tuple[str, str], Exception],
@@ -511,16 +514,24 @@ def _fetch_meta_stamped_anchor_wave(
         # wall-clock budget by the number of queued city/date targets. Unattempted
         # targets remain absent and are reconsidered by the next maintenance cycle.
         wave_requests = dict(list(requests.items())[:workers])
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="openmeteo-anchor") as executor:
-        future_keys = {
-            executor.submit(
-                fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped,
+    def _fetch_payload(request):
+        quota_context = (
+            quota_tracker.critical_lane()
+            if quota_critical
+            else contextlib.nullcontext()
+        )
+        with quota_context:
+            return fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped(
                 request,
                 timeout=_deadline_timeout(deadline_monotonic, default=30.0),
                 max_retries=1,
                 fast_fail_429=True,
                 client=client,
-            ): key
+            )
+
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="openmeteo-anchor") as executor:
+        future_keys = {
+            executor.submit(_fetch_payload, request): key
             for key, request in wave_requests.items()
         }
         for future in as_completed(future_keys):
@@ -601,6 +612,7 @@ def download_current_target_raw_inputs(
     max_wall_clock_seconds: float | None = None,
     fetch_workers: int = 4,
     bucket_reader_pool=None,
+    quota_critical: bool = False,
 ) -> dict[str, object]:
     # Fetch the FULL plan (no limit) so uncovered cities beyond the first `limit`
     # alphabetical slots are visible.  The per-cycle cap is applied AFTER filtering
@@ -756,6 +768,7 @@ def download_current_target_raw_inputs(
                 max_workers=fetch_workers,
                 deadline_monotonic=deadline_monotonic,
                 client=openmeteo_client,
+                quota_critical=quota_critical,
             )
             downloaded["openmeteo_model_meta_fetch_count"] = 2
         except Exception as exc:
@@ -995,6 +1008,7 @@ def download_current_target_openmeteo_inputs(
     max_wall_clock_seconds: float | None = None,
     fetch_workers: int = 4,
     bucket_reader_pool=None,
+    quota_critical: bool = False,
 ) -> dict[str, object]:
     """Live replacement-chain downloader for Open-Meteo current-target inputs."""
 
@@ -1013,6 +1027,7 @@ def download_current_target_openmeteo_inputs(
         max_wall_clock_seconds=max_wall_clock_seconds,
         fetch_workers=fetch_workers,
         bucket_reader_pool=bucket_reader_pool,
+        quota_critical=quota_critical,
     )
 
 

@@ -25,6 +25,7 @@ manifests only — it never downloads).
 from __future__ import annotations
 
 import atexit
+import contextlib
 import fcntl
 import functools
 import json
@@ -664,6 +665,7 @@ def _download_replacement_forecast_current_targets_if_needed(
     *,
     max_wall_clock_seconds: float | None = None,
     required_scopes: Sequence[tuple[str, str, str]] | None = None,
+    quota_critical: bool = False,
 ) -> dict[str, object] | None:
     forecast_db = cfg.get("forecast_db")
     output_dir = cfg.get("download_output_dir") or cfg.get("raw_manifest_dir")
@@ -714,6 +716,23 @@ def _download_replacement_forecast_current_targets_if_needed(
                 "status": "CURRENT_TARGET_SCOPED_DOWNLOAD_NO_TARGETS",
                 "available_cycle": available_cycle.isoformat(),
             }
+        if quota_critical:
+            from src.data.replacement_forecast_seed_discovery import (  # noqa: PLC0415
+                held_position_family_priorities,
+            )
+
+            critical_families = held_position_family_priorities()
+            unauthorized = tuple(
+                scope for scope in required_scopes if critical_families.get(scope) != 0
+            )
+            if unauthorized:
+                raise ValueError(
+                    "critical current-target quota requires exact canonical "
+                    "day0_window/pending_exit scopes: "
+                    + ",".join("/".join(scope) for scope in unauthorized)
+                )
+    if quota_critical and required_scopes is None:
+        raise ValueError("critical current-target quota requires explicit scopes")
     cycle_targets_have_current_manifests = (
         plan is not None and plan.missing_openmeteo_manifest_count <= 0
     )
@@ -764,36 +783,46 @@ def _download_replacement_forecast_current_targets_if_needed(
         download_kwargs["required_scopes"] = required_scopes
     bucket_pool = _current_target_bucket_pool(cycle)
     try:
-        result = download_current_target_openmeteo_inputs(
-            forecast_db=Path(str(forecast_db)),
-            output_dir=Path(str(output_dir)),
-            cycle=cycle,
-            # ``required_scopes`` is already the bounded, freshly committed source
-            # batch. Applying the generic maintenance limit here silently drops the
-            # tail before the deadline can decide how much work fits, leaving raw
-            # model rows without the anchor required to materialize q.
-            limit=(
-                None
-                if required_scopes is not None
-                else int(cfg.get("download_limit") or 10)
-            ),
-            write_db=True,
-            release_lag_hours=release_lag_hours,
-            anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
-            # CYCLE-CURRENCY (K-root instance #3): when this call fires because the available
-            # cycle is AHEAD of the downloaded high-water mark, the NEW cycle's raw inputs are
-            # needed for ALL current targets — coverage ("a posterior exists") must not filter
-            # the target list. Once that cycle is already represented, a residual manifest gap
-            # must repair only uncovered rows; replaying every covered target each poll rewrites
-            # the same manifests and repeatedly drives global seed discovery.
-            include_covered=cycle_advanced,
-            missing_manifests_only=not cycle_advanced,
-            precomputed_plan=plan,
-            max_wall_clock_seconds=remaining,
-            fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
-            bucket_reader_pool=bucket_pool,
-            **download_kwargs,
-        )
+        quota_context = contextlib.nullcontext()
+        if quota_critical:
+            from src.data.openmeteo_quota import quota_tracker  # noqa: PLC0415
+
+            # SCOPE: only the explicit canonical Day0/pending-exit scopes validated
+            # above. DRAIN: this bounded raw-anchor call and its existing manifest
+            # commit. RESET: context exit; every later call re-proves current phase.
+            quota_context = quota_tracker.critical_lane()
+        with quota_context:
+            result = download_current_target_openmeteo_inputs(
+                forecast_db=Path(str(forecast_db)),
+                output_dir=Path(str(output_dir)),
+                cycle=cycle,
+                # ``required_scopes`` is already the bounded, freshly committed source
+                # batch. Applying the generic maintenance limit here silently drops the
+                # tail before the deadline can decide how much work fits, leaving raw
+                # model rows without the anchor required to materialize q.
+                limit=(
+                    None
+                    if required_scopes is not None
+                    else int(cfg.get("download_limit") or 10)
+                ),
+                write_db=True,
+                release_lag_hours=release_lag_hours,
+                anchor_sigma_c=float(cfg.get("download_anchor_sigma_c") or 3.0),
+                # CYCLE-CURRENCY (K-root instance #3): when this call fires because the available
+                # cycle is AHEAD of the downloaded high-water mark, the NEW cycle's raw inputs are
+                # needed for ALL current targets — coverage ("a posterior exists") must not filter
+                # the target list. Once that cycle is already represented, a residual manifest gap
+                # must repair only uncovered rows; replaying every covered target each poll rewrites
+                # the same manifests and repeatedly drives global seed discovery.
+                include_covered=cycle_advanced,
+                missing_manifests_only=not cycle_advanced,
+                precomputed_plan=plan,
+                max_wall_clock_seconds=remaining,
+                fetch_workers=int(cfg.get("source_clock_fanout_workers") or 4),
+                bucket_reader_pool=bucket_pool,
+                quota_critical=quota_critical,
+                **download_kwargs,
+            )
     except Exception:
         _close_current_target_bucket_pool(cycle)
         raise

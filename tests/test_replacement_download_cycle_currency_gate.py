@@ -1,5 +1,8 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-08-07
+# Last reused or audited: 2026-08-17
+# Lifecycle: created=2026-06-09; last_reviewed=2026-08-17; last_reused=2026-08-17
+# Purpose: Prove current-target anchor cycle currency and scoped quota authority.
+# Reuse: Run for replacement current-target download, source-clock, or quota-lane changes.
 # Authority basis: 2026-06-09 anchor-lag root cause (/tmp/anchor_lag_report.md, verified against
 #   src/data/replacement_forecast_production.py + replacement_forecast_current_target_plan.py):
 #   the ALREADY_COVERED / HAVE_RAW_MANIFESTS short-circuits contained NO cycle comparison, so once
@@ -20,6 +23,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -438,6 +442,125 @@ def test_scoped_source_commit_is_not_truncated_by_maintenance_limit(
     assert len(calls) == 1
     assert calls[0]["required_scopes"] == scopes
     assert calls[0]["limit"] is None
+
+
+def test_exact_held_day0_scope_enters_critical_quota_lane(
+    tmp_path, monkeypatch
+) -> None:
+    db = _make_db(
+        tmp_path,
+        {
+            "ecmwf_aifs_ens": STALE_CYCLE_ISO,
+            "openmeteo_ecmwf_ifs_9km": STALE_CYCLE_ISO,
+        },
+    )
+    calls: list = []
+    _wire(monkeypatch, plan=_PlanStub(ready=False), calls=calls)
+    scope = ("Dallas", "2026-08-17", "high")
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda: {scope: 0},
+    )
+    entered: list[str] = []
+
+    @contextmanager
+    def _critical_lane():
+        entered.append("enter")
+        try:
+            yield
+        finally:
+            entered.append("exit")
+
+    monkeypatch.setattr(
+        "src.data.openmeteo_quota.quota_tracker.critical_lane",
+        _critical_lane,
+    )
+
+    report = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path),
+        required_scopes=(scope,),
+        quota_critical=True,
+    )
+
+    assert report is not None
+    assert entered == ["enter", "exit"]
+    assert calls[0]["required_scopes"] == (scope,)
+
+
+def test_nonheld_scope_cannot_borrow_critical_quota(
+    tmp_path, monkeypatch
+) -> None:
+    db = _make_db(
+        tmp_path,
+        {
+            "ecmwf_aifs_ens": STALE_CYCLE_ISO,
+            "openmeteo_ecmwf_ifs_9km": STALE_CYCLE_ISO,
+        },
+    )
+    calls: list = []
+    _wire(monkeypatch, plan=_PlanStub(ready=False), calls=calls)
+    scope = ("Cape Town", "2026-08-19", "high")
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda: {scope: 1},
+    )
+
+    with pytest.raises(ValueError, match="exact canonical day0_window/pending_exit"):
+        _download_replacement_forecast_current_targets_if_needed(
+            _cfg(db, tmp_path),
+            required_scopes=(scope,),
+            quota_critical=True,
+        )
+
+    assert calls == []
+
+
+def test_critical_quota_context_propagates_into_anchor_worker(
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    class _Tracker:
+        def __init__(self) -> None:
+            self.local = threading.local()
+
+        @contextmanager
+        def critical_lane(self):
+            self.local.critical = True
+            try:
+                yield
+            finally:
+                self.local.critical = False
+
+        def is_critical(self) -> bool:
+            return bool(getattr(self.local, "critical", False))
+
+    tracker = _Tracker()
+    observed: list[bool] = []
+    monkeypatch.setattr(dl, "quota_tracker", tracker)
+    monkeypatch.setattr(dl, "fetch_openmeteo_ifs9_model_meta", lambda **_kwargs: {})
+    monkeypatch.setattr(
+        dl,
+        "validate_openmeteo_ecmwf_ifs9_meta_window",
+        lambda *_args: {},
+    )
+    monkeypatch.setattr(
+        dl,
+        "fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped",
+        lambda *_args, **_kwargs: observed.append(tracker.is_critical()) or {},
+    )
+
+    payloads, failures = dl._fetch_meta_stamped_anchor_wave(
+        {("Dallas", "2026-08-17"): object()},
+        max_workers=1,
+        deadline_monotonic=None,
+        client=object(),
+        quota_critical=True,
+    )
+
+    assert failures == {}
+    assert tuple(payloads) == (("Dallas", "2026-08-17"),)
+    assert observed == [True]
 
 
 def test_current_target_budget_starts_after_probe_and_plan(tmp_path, monkeypatch) -> None:
