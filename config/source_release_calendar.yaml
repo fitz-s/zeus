@@ -15,7 +15,7 @@ entries:
     period_semantics: max temperature at 2m in previous 6h ending at valid step
     expected_members: 51
     expected_step_rule: local_day_6h_windows_up_to_144h
-    partial_policy: BLOCK_LIVE
+    partial_policy: TARGET_WINDOW_COMPLETE_REQUIRED
     live_authorization: true
     source_transport_required: ensemble_snapshots_db_reader
     authority_tier: DERIVED_FROM_DISSEMINATION
@@ -62,7 +62,7 @@ entries:
     period_semantics: min temperature at 2m in previous 6h ending at valid step
     expected_members: 51
     expected_step_rule: local_day_6h_windows_up_to_144h
-    partial_policy: BLOCK_LIVE
+    partial_policy: TARGET_WINDOW_COMPLETE_REQUIRED
     live_authorization: true
     source_transport_required: ensemble_snapshots_db_reader
     authority_tier: DERIVED_FROM_DISSEMINATION

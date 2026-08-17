@@ -4,6 +4,40 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-17 Target-complete ENS windows must not wait for an unused 144h tail
+
+Current live auction evidence contains 150 probability families and target dates
+only through 2026-08-19.  Recomputing each family against the 2026-08-17 00Z
+cycle and its configured city timezone gives a largest honest required period-end
+step of 72h; no current family requires step 144.  The OpenData producer still
+uses the full-horizon 08:05 UTC safe-fetch gate and therefore withholds every
+target even after that target's complete step window is available.  Recent
+primary-object metadata places step 72 around 07:42 UTC and step 144 around
+07:45 UTC, while the current gate delays collection until 08:05 UTC.
+
+The partial window becomes collection-eligible without making an incomplete
+target executable.  A source run may remain PARTIAL, but only a target whose
+exact `source_run_coverage.expected_steps_json` is a subset of observed steps,
+has all expected members, and passes the existing executable reader may become
+COMPLETE/LIVE_ELIGIBLE.  `BLOCK_LIVE` retains its old meaning; the ECMWF tracks
+move to an explicit target-window-complete policy rather than silently changing
+that token's semantics.  Every partial refresh remains retryable until the full
+run succeeds, and each newly committed partial frontier may wake newly complete
+replacement scopes instead of being suppressed by a source-run-id-only wake
+ack.
+
+SCOPE is the two live ECMWF OpenData HIGH/LOW tracks and only target windows
+whose complete required steps and 51 members have been persisted.  DRAIN is the
+five-minute safe-cycle poll: it retries the same cycle, atomically replaces its
+source/coverage/readiness rows, and re-enqueues the scopes made complete by the
+new observed-step frontier.  RESET is a SUCCESS journal for the complete cycle;
+until then PARTIAL never satisfies current-cycle dedup, and missing required
+steps continue to block only their dependent target windows.  Acceptance
+requires calendar antibodies for old BLOCK_LIVE and new target-complete policy,
+producer/daemon selection at the partial gate, repeated partial-frontier wake
+proof, full focused suites, and live rows proving source availability, target
+coverage, replacement revision, auction result, and any venue actuation.
+
 ## 2026-08-13 Shared quote warming cannot consume the reserved q tranche
 
 Live restart recovery repeatedly admitted a full-book held monitor with roughly

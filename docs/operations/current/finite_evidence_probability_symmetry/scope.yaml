@@ -19,6 +19,9 @@ in_scope:
 - docs/reference/modules/state.md
 - docs/reference/AGENTS.md
 - config/settings.example.json
+- config/source_release_calendar.yaml
+- src/data/ecmwf_open_data.py
+- src/data/release_calendar.py
 - src/data/replacement_forecast_materializer.py
 - src/data/replacement_current_value_serving.py
 - src/data/replacement_forecast_seed_discovery.py
@@ -46,6 +49,7 @@ in_scope:
 - src/data/bayes_precision_fusion_download.py
 - src/data/replacement_forecast_production.py
 - src/ingest_main.py
+- src/ingest/forecast_live_daemon.py
 - src/main.py
 - src/engine/position_belief.py
 - src/execution/venue_sync_contract.py
@@ -95,6 +99,7 @@ in_scope:
 - src/risk_allocator/governor.py
 - src/runtime/bankroll_provider.py
 - architecture/capabilities.yaml
+- architecture/data_sources_registry_2026_05_08.yaml
 - architecture/2026_04_02_architecture_kernel.sql
 - architecture/_schema_fingerprint.txt
 - architecture/money_path_objects.yaml
@@ -130,6 +135,10 @@ in_scope:
 - tests/test_replacement_forecast_extras_coverage_gate.py
 - tests/test_openmeteo_call_budget.py
 - tests/test_forecast_live_daemon.py
+- tests/test_forecast_live_daemon_boot_schema.py
+- tests/test_release_calendar.py
+- tests/test_opendata_release_calendar_selection.py
+- tests/test_opendata_future_target_contract.py
 - tests/test_command_recovery.py
 - tests/test_exchange_reconcile.py
 - tests/test_chain_shares_persist_synced.py

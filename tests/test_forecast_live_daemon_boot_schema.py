@@ -347,3 +347,51 @@ def test_terminal_opendata_wake_is_acked(monkeypatch, status: str) -> None:
     assert calls == 1
     assert daemon._OPENDATA_WAKE_ACKED_SOURCE_RUN_IDS == {result["source_run_id"]}
     daemon._OPENDATA_WAKE_ACKED_SOURCE_RUN_IDS.clear()
+
+
+def test_partial_opendata_frontier_wakes_again_until_full_success(monkeypatch) -> None:
+    calls = 0
+
+    class _Connection:
+        def commit(self) -> None:
+            return None
+
+    def _wake(_conn, _result):
+        nonlocal calls
+        calls += 1
+        return {"status": "CYCLE_ADVANCE_TRIGGER"}
+
+    result = {
+        "status": "ok",
+        "source_run_id": "ecmwf_open_data:mx2t6_high:2026-08-17T00Z",
+        "source_run_status": "PARTIAL",
+        "source_run_completeness": "PARTIAL",
+        "snapshots_inserted": 362,
+    }
+    daemon._OPENDATA_WAKE_ACKED_SOURCE_RUN_IDS.clear()
+    monkeypatch.setattr(
+        daemon,
+        "_enqueue_committed_opendata_cycle_advance_reseeds",
+        _wake,
+    )
+
+    daemon._commit_opendata_result_and_wake(_Connection(), result)
+    daemon._commit_opendata_result_and_wake(_Connection(), result)
+
+    assert calls == 2
+    assert not daemon._OPENDATA_WAKE_ACKED_SOURCE_RUN_IDS
+
+
+def test_forecast_work_identity_uses_current_partial_cycle() -> None:
+    identity = daemon._forecast_work_identity(
+        "mx2t6_high",
+        now_utc=daemon.datetime(
+            2026, 8, 17, 6, 45, tzinfo=daemon.timezone.utc
+        ),
+    )
+
+    assert identity["decision"].value == "FETCH_ALLOWED"
+    assert identity["scheduled_for"] == daemon.datetime(
+        2026, 8, 17, 0, tzinfo=daemon.timezone.utc
+    )
+    assert identity["metadata"]["partial_window"] is True

@@ -43,6 +43,18 @@ def test_opendata_selection_uses_12z_after_full_horizon_release() -> None:
     assert metadata["horizon_profile"] == "full"
 
 
+def test_opendata_selection_admits_current_target_complete_partial_cycle() -> None:
+    decision, metadata = ecmwf_open_data._select_cycle_for_track(
+        track="mx2t6_high",
+        now_utc=_utc(6, 45),
+    )
+
+    assert decision is FetchDecision.FETCH_ALLOWED
+    assert metadata["selected_cycle_time"] == _utc(0)
+    assert metadata["partial_window"] is True
+    assert metadata["target_window_live_authorization"] is True
+
+
 def test_opendata_selection_rejects_unknown_track() -> None:
     try:
         ecmwf_open_data._select_cycle_for_track(track="unknown", now_utc=_utc(14))

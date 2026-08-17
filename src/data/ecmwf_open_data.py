@@ -682,6 +682,7 @@ def _select_cycle_for_track(*, track: str, now_utc: datetime) -> tuple[FetchDeci
         source_id=SOURCE_ID,
         track=track,
         required_max_step_hours=max(STEP_HOURS),
+        allow_partial=True,
     )
 
 

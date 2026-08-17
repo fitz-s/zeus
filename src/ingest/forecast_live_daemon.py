@@ -467,6 +467,7 @@ def _forecast_work_identity(track: str, *, now_utc: datetime) -> dict[str, objec
         source_id=SOURCE_ID,
         track=track,
         required_max_step_hours=max(STEP_HOURS),
+        allow_partial=True,
     )
     selected_cycle = metadata.get("selected_cycle_time")
     if not isinstance(selected_cycle, datetime):
@@ -930,12 +931,20 @@ def _enqueue_committed_opendata_cycle_advance_reseeds(
 def _commit_opendata_result_and_wake(conn, result: dict) -> dict:
     conn.commit()
     source_run_id = str(result.get("source_run_id") or "").strip()
-    if source_run_id in _OPENDATA_WAKE_ACKED_SOURCE_RUN_IDS:
+    partial_frontier = (
+        str(result.get("source_run_status") or "").upper() == "PARTIAL"
+        or str(result.get("source_run_completeness") or "").upper()
+        == "PARTIAL"
+    )
+    if source_run_id in _OPENDATA_WAKE_ACKED_SOURCE_RUN_IDS and not partial_frontier:
         return result
     report = _enqueue_committed_opendata_cycle_advance_reseeds(conn, result)
     if report is None:
         return result
-    if str(report.get("status") or "") in _OPENDATA_WAKE_TERMINAL_STATUSES:
+    if (
+        not partial_frontier
+        and str(report.get("status") or "") in _OPENDATA_WAKE_TERMINAL_STATUSES
+    ):
         _OPENDATA_WAKE_ACKED_SOURCE_RUN_IDS.add(source_run_id)
     return {**result, "cycle_advance_reseed": report}
 
