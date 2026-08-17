@@ -11185,6 +11185,20 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
         for field in CANONICAL_POSITION_SETTLED_DETAIL_FIELDS
         if _is_missing_settlement_value(details.get(field))
     ]
+    realized_pnl_usd = _coerce_settlement_float(details.get("pnl"))
+    held_side_result = (
+        "win" if position_won is True
+        else "loss" if position_won is False
+        else "unknown"
+    )
+    if realized_pnl_usd is None:
+        economic_result = "unknown"
+    elif realized_pnl_usd > 0.0:
+        economic_result = "profit"
+    elif realized_pnl_usd < 0.0:
+        economic_result = "loss"
+    else:
+        economic_result = "flat"
     normalized = {
         "trade_id": str(event.get("runtime_trade_id") or ""),
         "city": str(event.get("city") or ""),
@@ -11193,7 +11207,14 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
         "direction": direction,
         "p_posterior": _coerce_settlement_float(details.get("p_posterior")),
         "outcome": outcome,
-        "pnl": _coerce_settlement_float(details.get("pnl")),
+        "pnl": realized_pnl_usd,
+        "realized_pnl_usd": realized_pnl_usd,
+        "historical_shares": _coerce_settlement_float(event.get("historical_shares")),
+        "historical_cost_basis_usd": _coerce_settlement_float(
+            event.get("historical_cost_basis_usd")
+        ),
+        "held_side_result": held_side_result,
+        "economic_result": economic_result,
         "decision_snapshot_id": str(event.get("decision_snapshot_id") or ""),
         "edge_source": str(event.get("edge_source") or ""),
         "strategy": str(event.get("strategy") or ""),
@@ -11350,6 +11371,8 @@ def query_settlement_events(
                pc.market_id,
                pc.bin_label,
                pc.direction,
+               pc.shares AS historical_shares,
+               pc.cost_basis_usd AS historical_cost_basis_usd,
                e.strategy_key AS strategy,
                pc.edge_source,
                e.source_module AS source,

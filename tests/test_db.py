@@ -4101,6 +4101,84 @@ def test_query_authoritative_settlement_rows_prefers_position_events(tmp_path):
     assert rows[0]["exit_reason"] == "SETTLEMENT"
 
 
+def test_authoritative_settlement_read_model_labels_buy_no_by_held_cashflow(
+    tmp_path,
+):
+    from src.engine.lifecycle_events import build_settlement_canonical_write
+    from src.state.db import append_many_and_project, query_authoritative_settlement_rows
+    from src.state.portfolio import Position
+
+    db_path = tmp_path / "test.db"
+    conn = get_connection(db_path)
+    init_schema(conn)
+    pos = Position(
+        trade_id="buy-no-canonical-win",
+        market_id="m-buy-no-canonical-win",
+        city="Kuala Lumpur",
+        cluster="southeast-asia",
+        target_date="2026-08-15",
+        bin_label="33°C",
+        direction="buy_no",
+        env="test",
+        unit="C",
+        size_usd=2.60,
+        shares=5.0,
+        cost_basis_usd=2.60,
+        entry_price=0.52,
+        p_posterior=0.70,
+        decision_snapshot_id="snap-buy-no-canonical-win",
+        strategy="center_buy",
+        edge_source="center_buy",
+        exit_price=1.0,
+        pnl=4.01,
+        exit_reason="SETTLEMENT",
+        last_exit_at="2026-08-15T16:45:53Z",
+        state="settled",
+    )
+
+    events, projection = build_settlement_canonical_write(
+        pos,
+        winning_bin="32°C",
+        won=False,
+        outcome=1,
+        sequence_no=1,
+        phase_before="pending_exit",
+        settlement_authority="VERIFIED",
+        settlement_truth_source="world.settlements",
+        settlement_market_slug="kuala-lumpur-high-2026-08-15",
+        settlement_temperature_metric="high",
+        settlement_source="WU",
+        settlement_value=32.0,
+    )
+    append_many_and_project(conn, events, projection)
+    row = query_authoritative_settlement_rows(conn, limit=1, env=pos.env)[0]
+    conn.close()
+
+    assert row["won"] is False
+    assert row["market_bin_won"] is False
+    assert row["position_won"] is True
+    assert row["held_side_result"] == "win"
+    assert row["economic_result"] == "profit"
+    assert row["realized_pnl_usd"] == pytest.approx(4.01)
+    assert row["historical_shares"] == pytest.approx(5.0)
+    assert row["historical_cost_basis_usd"] == pytest.approx(2.60)
+
+
+def test_settlement_read_model_keeps_held_result_distinct_from_economics():
+    from src.state.db import _normalize_position_settlement_event
+
+    row = _normalize_position_settlement_event({
+        "runtime_trade_id": "held-win-economic-loss",
+        "direction": "buy_no",
+        "details": {"outcome": 1, "pnl": -0.01},
+    })
+
+    assert row is not None
+    assert row["position_won"] is True
+    assert row["held_side_result"] == "win"
+    assert row["economic_result"] == "loss"
+
+
 def test_query_authoritative_settlement_rows_ignores_decision_log_records(tmp_path):
     from src.state.db import query_authoritative_settlement_rows
     from src.state.decision_chain import SettlementRecord, store_settlement_records
