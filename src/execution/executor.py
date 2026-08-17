@@ -6001,7 +6001,11 @@ def _recapture_fresh_entry_snapshot_if_needed(
     if fresh is None:
         from types import SimpleNamespace
         from src.data.market_scanner import capture_executable_market_snapshot
-        from src.data.polymarket_client import PolymarketClient
+        from src.data.polymarket_client import (
+            PRESUBMIT_JIT_CLOB_HTTP_LIMITS,
+            PolymarketClient,
+        )
+        from src.data.polymarket_request_governor import RequestPriority
         from src.engine.cycle_runtime import _market_dict_from_snapshot
 
         decision = SimpleNamespace(
@@ -6013,7 +6017,10 @@ def _recapture_fresh_entry_snapshot_if_needed(
             edge=SimpleNamespace(direction=final_intent.direction),
         )
         captured_at = datetime.now(timezone.utc)
-        with PolymarketClient() as clob:
+        with PolymarketClient(
+            public_http_limits=PRESUBMIT_JIT_CLOB_HTTP_LIMITS,
+            public_request_priority=RequestPriority.SUBMIT_JIT,
+        ) as clob:
             fields = capture_executable_market_snapshot(
                 conn,
                 market=_market_dict_from_snapshot(snapshot),
@@ -6307,7 +6314,7 @@ def execute_final_intent(
         )
     except _PreVenueSubmitError:
         raise
-    except (ValueError, TypeError) as exc:
+    except Exception as exc:  # noqa: BLE001 - this entire span precedes venue I/O
         raise _PreVenueSubmitError(str(exc)) from exc
     trade_id = str(uuid.uuid4())[:12]
     if not legacy_intent.token_id:

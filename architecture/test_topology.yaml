@@ -390,7 +390,7 @@ test_trust_policy:
     tests/test_entry_exit_symmetry.py: {created: "2026-04-07", last_used: "2026-04-23"}
 
     tests/test_execution_price.py: {created: "2026-04-13", last_used: "2026-04-29"}
-    tests/test_executor.py: {created: "2026-04-27", last_used: "2026-08-12", note: "Executor live-order safety, including INV-43 inclusive 0.05/0.95 submitted-action boundaries. A SELL may consume a counterparty bid up to probability-domain 1.0 through an in-band submitted floor and preserve favorable execution; bids outside the probability domain and submitted limits outside the action band reject before command persistence."}
+    tests/test_executor.py: {created: "2026-04-27", last_used: "2026-08-17", note: "Executor live-order safety, including INV-43 inclusive 0.05/0.95 submitted-action boundaries, submit-time recapture priority, and pre-venue no-side-effect classification. A SELL may consume a counterparty bid up to probability-domain 1.0 through an in-band submitted floor and preserve favorable execution; bids outside the probability domain and submitted limits outside the action band reject before command persistence."}
     tests/test_executor_command_split.py: {created: "2026-04-26", last_used: "2026-08-10", note: "Executor command split ordering, current WORLD/FORECAST certificate binding, certified bounded taker ENTRY, and transaction-preserving collateral preflight before command persistence."}
     tests/test_executor_db_target.py: {created: "2026-04-26", last_used: "2026-04-27"}
     tests/test_executor_typed_boundary.py: {created: "2026-04-23", last_used: "2026-04-27"}

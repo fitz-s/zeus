@@ -1,8 +1,8 @@
-# Lifecycle: created=2026-04-27; last_reviewed=2026-08-14; last_reused=2026-08-14
+# Lifecycle: created=2026-04-27; last_reviewed=2026-08-17; last_reused=2026-08-17
 # Purpose: Regression coverage for executor and portfolio mechanics under R3 cutover preflight opt-outs.
 # Reuse: Run when executor order submission or portfolio save/load mechanics change.
 # Created: 2026-04-27
-# Last reused/audited: 2026-08-14
+# Last reused/audited: 2026-08-17
 # Authority basis: docs/archive/2026-Q2/task_2026-05-15_live_order_e2e_verification/LIVE_ORDER_E2E_VERIFICATION_PLAN.md; R3 Z1 cutover guard audit.
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P0-1 side-effect boundary fault injection.
 #                  + docs/operations/task_2026-05-21_live_side_effect_risk_boundaries/task.md P2-1 required live ATTACH seam.
@@ -626,6 +626,45 @@ class TestExecutor:
         assert submitted.correlation_key == "nyc:2026-04-27"
         assert captured["shares"] == pytest.approx(10.0)
         assert captured["decision_id"] == "hyp-final-1"
+
+    def test_submit_recapture_uses_jit_priority(self):
+        """Submit-time book recapture must never contend in the SCAN lane."""
+        import inspect
+
+        from src.execution.executor import _recapture_fresh_entry_snapshot_if_needed
+
+        source = inspect.getsource(_recapture_fresh_entry_snapshot_if_needed)
+
+        assert "public_http_limits=PRESUBMIT_JIT_CLOB_HTTP_LIMITS" in source
+        assert "public_request_priority=RequestPriority.SUBMIT_JIT" in source
+
+    def test_submit_recapture_admission_denial_is_pre_venue(self, monkeypatch):
+        """A governor denial before _live_order has a known zero side effect."""
+        from src.data.polymarket_request_governor import RequestAdmissionDenied
+        from src.engine.event_bound_final_intent import PreVenueSubmitError
+
+        final_intent = _final_execution_intent(
+            token_id="yes-token-recapture-admission",
+            final_limit_price=Decimal("0.33"),
+            size_value=Decimal("3.30"),
+        )
+
+        def deny_before_venue(*_args, **_kwargs):
+            raise RequestAdmissionDenied(
+                "POLYMARKET_SCAN_LEASE_BUSY:clob.polymarket.com:status=scan_in_flight"
+            )
+
+        def fail_live_order(*_args, **_kwargs):  # pragma: no cover - tripwire
+            raise AssertionError("pre-venue denial must not reach _live_order")
+
+        monkeypatch.setattr(
+            "src.execution.executor._recapture_fresh_entry_snapshot_if_needed",
+            deny_before_venue,
+        )
+        monkeypatch.setattr("src.execution.executor._live_order", fail_live_order)
+
+        with pytest.raises(PreVenueSubmitError, match="POLYMARKET_SCAN_LEASE_BUSY"):
+            execute_final_intent(final_intent, conn=_TEST_CONN)
 
     def test_execute_final_intent_submits_expected_fill_shares_below_limit(self, monkeypatch):
         final_intent = _final_execution_intent(
