@@ -6310,6 +6310,41 @@ class TestStrategyPolicyResolver:
         }
         conn.close()
 
+    def test_riskguard_emits_multi_revision_scoped_unproven_alpha_gate(self):
+        conn = _policy_conn()
+        revisions = {
+            riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION,
+            riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+        }
+
+        status = riskguard_module._sync_riskguard_strategy_gate_actions(
+            conn,
+            {
+                "forecast_qkernel_entry": [
+                    "brier_degraded(level=RED,brier=0.35,sample=31)",
+                    "market_relative_alpha_unproven("
+                    "status=no_evidence,model_evalue=0.0,required=10.0,"
+                    "clusters=0,law=executable_min_order_capital_gain_v2,"
+                    f"revision={','.join(sorted(revisions))})",
+                ]
+            },
+            probability_semantics_scopes={
+                "forecast_qkernel_entry": revisions,
+            },
+            issued_at="2026-08-17T00:17:00+00:00",
+        )
+        row = conn.execute(
+            "SELECT value FROM risk_actions WHERE action_id = ?",
+            ("riskguard:gate:forecast_qkernel_entry",),
+        ).fetchone()
+
+        assert status["emitted_count"] == 1
+        assert json.loads(row["value"]) == {
+            "gate": True,
+            "probability_semantics_revisions": sorted(revisions),
+        }
+        conn.close()
+
     def test_unbound_alpha_reason_cannot_inherit_unrelated_brier_scope(self):
         conn = _policy_conn()
         stale_revision = (

@@ -4073,7 +4073,15 @@ def _sync_riskguard_strategy_gate_actions(
         if reason.startswith("brier_degraded("):
             return True
         if reason.startswith("market_relative_alpha_unproven("):
-            return any(reason.endswith(f"revision={revision})") for revision in revisions)
+            marker = ",revision="
+            if marker not in reason or not reason.endswith(")"):
+                return False
+            reason_revisions = {
+                revision.strip()
+                for revision in reason.rsplit(marker, 1)[1][:-1].split(",")
+                if revision.strip()
+            }
+            return bool(reason_revisions) and reason_revisions.issubset(revisions)
         return False
 
     recommended = {
