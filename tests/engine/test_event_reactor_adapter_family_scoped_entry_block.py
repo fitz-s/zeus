@@ -1,6 +1,6 @@
 # Created: 2026-07-25
-# Last reused or audited: 2026-08-13
-# Lifecycle: created=2026-07-25; last_reviewed=2026-08-13; last_reused=2026-08-13
+# Last reused or audited: 2026-08-17
+# Lifecycle: created=2026-07-25; last_reviewed=2026-08-17; last_reused=2026-08-17
 # Authority basis: 7-day production block-event audit -- one stuck EDLI order
 #   was blocking new-entry BUY admission for every family (32,763 blocking
 #   instances, 20.97h/7d). This narrows the adapter-level gate
@@ -28,6 +28,7 @@ import pytest
 
 import src.engine.event_reactor_adapter as era
 from src.events.candidate_binding import weather_family_id
+from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
 from src.events.opportunity_event import OpportunityEvent
 
 NOW = datetime(2026, 7, 25, 12, 0, tzinfo=timezone.utc)
@@ -183,9 +184,27 @@ def test_family_blocked_buy_is_removed_before_global_capital_ranking():
 def test_unresolved_day0_statistical_buy_is_removed_before_capital_ranking():
     reason = era._day0_unresolved_entry_probability_rejection_reason(
         day0_payoff_truth="unresolved",
+        probability_semantics_revision="superseded-day0-law",
     )
 
     assert reason == "GLOBAL_DAY0_UNRESOLVED_ENTRY_PROBABILITY_UNCALIBRATED"
+
+
+@pytest.mark.parametrize(
+    "revision",
+    (
+        era.CURRENT_EVIDENCE_SEMANTICS_REVISION,
+        era.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+        DAY0_PROBABILITY_SEMANTICS_REVISION,
+    ),
+)
+def test_unresolved_day0_current_statistical_witness_reaches_capital_ranking(
+    revision,
+):
+    assert era._day0_unresolved_entry_probability_rejection_reason(
+        day0_payoff_truth="unresolved",
+        probability_semantics_revision=revision,
+    ) is None
 
 
 def test_day0_entry_containment_preserves_hard_facts_and_non_day0_candidates():
@@ -397,6 +416,92 @@ def test_live_global_policy_reads_prepared_day0_truth_before_selection(
     assert captured["reason"] == (
         "GLOBAL_DAY0_UNRESOLVED_ENTRY_PROBABILITY_UNCALIBRATED"
     )
+
+
+@pytest.mark.parametrize(
+    ("carrier_event_type", "revision"),
+    (
+        ("DAY0_EXTREME_UPDATED", DAY0_PROBABILITY_SEMANTICS_REVISION),
+        (
+            "FORECAST_SNAPSHOT_READY",
+            era.CURRENT_EVIDENCE_SEMANTICS_REVISION,
+        ),
+    ),
+)
+def test_live_global_current_day0_probability_reaches_capital_selection(
+    monkeypatch,
+    carrier_event_type,
+    revision,
+):
+    from src.engine import global_batch_runtime
+
+    captured = {}
+
+    def fake_prepare(_event, **_kwargs):
+        return SimpleNamespace(
+            probability_witness=SimpleNamespace(
+                family_key=FAMILY_A,
+                witness_identity="current-day0-q",
+            ),
+            day0_payoff_truth_by_bin_side=(("bin-a", "YES", "unresolved"),),
+            candidate_seeds=(),
+        )
+
+    def fake_process(events, **kwargs):
+        receipt = kwargs["prepare_event"](events[0], NOW)
+        assert receipt.prepared_global_family is not None
+        captured["reason"] = kwargs["candidate_policy_rejection_resolver"](
+            SimpleNamespace(
+                action="BUY",
+                family_key=FAMILY_A,
+                bin_id="bin-a",
+                side="YES",
+            )
+        )
+        return SimpleNamespace(events=tuple(events), winner_event_id=None, receipts={})
+
+    monkeypatch.setattr(era, "_prepare_current_global_probability_family", fake_prepare)
+    monkeypatch.setattr(
+        era,
+        "_prepared_global_probability_semantics_revision",
+        lambda *_args, **_kwargs: revision,
+    )
+    monkeypatch.setattr(era, "_entry_global_submit_suppression_reason", lambda: None)
+    monkeypatch.setattr(
+        era,
+        "_edli_forecast_lane_phase_evidence",
+        lambda **_kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(era, "_forecast_lane_phase_admits", lambda _evidence: True)
+    monkeypatch.setattr(era, "_event_bound_strategy_key", lambda **_kwargs: "test")
+    monkeypatch.setattr(
+        era,
+        "_global_current_entry_feasibility_rejection_reason",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(global_batch_runtime, "process_current_global_batch", fake_process)
+    adapter = era.event_bound_live_adapter_from_trade_conn(
+        sqlite3.connect(":memory:"),
+        get_current_level=lambda: era.RiskLevel.GREEN,
+        forecast_conn=sqlite3.connect(":memory:"),
+        topology_conn=sqlite3.connect(":memory:"),
+        calibration_conn=sqlite3.connect(":memory:"),
+        auction_capital_authority=SimpleNamespace(),
+    )
+
+    adapter.process_global_batch(
+        (
+            _make_event(
+                city="Dallas",
+                target_date="2026-07-25",
+                metric="high",
+                event_type=carrier_event_type,
+            ),
+        ),
+        NOW,
+    )
+
+    assert captured["reason"] is None
 
 
 def test_live_global_batch_wires_family_block_into_selection_policy(monkeypatch):

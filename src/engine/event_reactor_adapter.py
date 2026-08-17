@@ -250,6 +250,7 @@ from src.engine.event_bound_final_intent import (
 from src.data import replacement_input_hwm as _replacement_input_hwm
 from src.data.replacement_forecast_cycle_policy import (
     CURRENT_EVIDENCE_SEMANTICS_REVISION,
+    STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     _current_evidence_shape,
     current_evidence_shape_semantics_mismatch,
 )
@@ -7041,15 +7042,25 @@ def _entry_family_blocked_candidate_reason(
 def _day0_unresolved_entry_probability_rejection_reason(
     *,
     day0_payoff_truth: object,
+    probability_semantics_revision: object = None,
 ) -> str | None:
-    """Contain statistical Day0 entry until its peak-state q is calibrated."""
+    """Reject unresolved Day0 entry only when current probability law is absent."""
 
     if (
         str(day0_payoff_truth or "").strip().lower()
-        == Day0PayoffTruth.UNRESOLVED.value
+        != Day0PayoffTruth.UNRESOLVED.value
     ):
-        return "GLOBAL_DAY0_UNRESOLVED_ENTRY_PROBABILITY_UNCALIBRATED"
-    return None
+        return None
+    from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+    revision = str(probability_semantics_revision or "").strip()
+    if revision in {
+        DAY0_PROBABILITY_SEMANTICS_REVISION,
+        CURRENT_EVIDENCE_SEMANTICS_REVISION,
+        STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+    }:
+        return None
+    return "GLOBAL_DAY0_UNRESOLVED_ENTRY_PROBABILITY_UNCALIBRATED"
 
 
 def event_bound_live_adapter_from_trade_conn(
@@ -10498,16 +10509,22 @@ def event_bound_live_adapter_from_trade_conn(
             event_type, metric, day0_truth_by_bin_side = owner
             bin_id = str(getattr(candidate, "bin_id", "") or "").strip()
             day0_payoff_truth = day0_truth_by_bin_side.get((bin_id, side))
+            probability_semantics_revision = (
+                _global_entry_probability_revision_by_family.get(family_key)
+            )
             # SCOPE: only risk-increasing BUYs whose current Day0 payoff is
-            # unresolved; deterministic Day0 facts, non-Day0 BUYs, and every
-            # SELL/HOLD/CASH proposal remain eligible. DRAIN: replace the
-            # marginal city/month/hour peak-set atom with a causal trajectory-
-            # conditioned posterior and validate it walk-forward. RESET: a
-            # current monotone fact makes this exact side LOCKED/REFUTED, or a
-            # validated probability-semantics revision removes this guard.
+            # unresolved AND whose current probability semantics are absent or
+            # unknown; deterministic facts, current statistical witnesses, and
+            # every SELL/HOLD/CASH proposal remain eligible. DRAIN: probability
+            # preparation stamps the current Day0 or qkernel revision each cut.
+            # RESET: a current monotone fact makes this side LOCKED/REFUTED, or
+            # the next current probability witness restores statistical entry.
             day0_probability_reason = (
                 _day0_unresolved_entry_probability_rejection_reason(
                     day0_payoff_truth=day0_payoff_truth,
+                    probability_semantics_revision=(
+                        probability_semantics_revision
+                    ),
                 )
             )
             if day0_probability_reason is not None:
@@ -10526,7 +10543,7 @@ def event_bound_live_adapter_from_trade_conn(
                 candidate,
                 strategy_key=strategy_key,
                 probability_semantics_revision=(
-                    _global_entry_probability_revision_by_family.get(family_key)
+                    probability_semantics_revision
                 ),
                 strategy_policy_conn=trade_conn,
                 strategy_policy_cache=strategy_policy_cache,
