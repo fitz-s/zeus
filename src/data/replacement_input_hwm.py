@@ -1758,6 +1758,93 @@ def latest_live_input_cycle(
     return max(candidates, key=lambda item: item[0])
 
 
+def _latest_eligible_ensemble_input_mark(
+    conn: sqlite3.Connection,
+    *,
+    city: str,
+    target_date: object,
+    metric: str,
+    decision_time: datetime,
+) -> tuple[int, datetime] | None:
+    """Return the newest decision-time-available full ENS cycle for one family."""
+
+    table_ref = _authority_table_ref(conn, "ensemble_snapshots")
+    if table_ref is None:
+        return None
+    columns = _hwm_table_ref_columns(conn, table_ref)
+    required = {"snapshot_id", "city", "target_date", "temperature_metric"}
+    if not required.issubset(columns):
+        return None
+    cycle_expr = (
+        "COALESCE(source_cycle_time, issue_time)"
+        if {"source_cycle_time", "issue_time"}.issubset(columns)
+        else "source_cycle_time"
+        if "source_cycle_time" in columns
+        else "issue_time"
+        if "issue_time" in columns
+        else None
+    )
+    available_expr = (
+        "COALESCE(source_available_at, available_at)"
+        if {"source_available_at", "available_at"}.issubset(columns)
+        else "source_available_at"
+        if "source_available_at" in columns
+        else "available_at"
+        if "available_at" in columns
+        else None
+    )
+    if cycle_expr is None or available_expr is None:
+        return None
+    predicates = [
+        "city = ?",
+        "target_date = ?",
+        "temperature_metric = ?",
+        f"datetime({available_expr}) <= datetime(?)",
+    ]
+    params: list[object] = [
+        city,
+        str(target_date),
+        metric,
+        decision_time.astimezone(UTC).isoformat(),
+    ]
+    if "authority" in columns:
+        predicates.append("COALESCE(authority, 'VERIFIED') = 'VERIFIED'")
+    if "causality_status" in columns:
+        predicates.append("COALESCE(causality_status, 'OK') = 'OK'")
+    if "boundary_ambiguous" in columns:
+        predicates.append("COALESCE(boundary_ambiguous, 0) = 0")
+    if "contributes_to_target_extrema" in columns:
+        predicates.append("COALESCE(contributes_to_target_extrema, 0) = 1")
+    try:
+        row = conn.execute(
+            f"""
+            SELECT snapshot_id, {cycle_expr} AS source_cycle_time
+              FROM {table_ref}
+             WHERE {' AND '.join(predicates)}
+             ORDER BY datetime({cycle_expr}) DESC,
+                      datetime({available_expr}) DESC,
+                      snapshot_id DESC
+             LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        _raise_hwm_read_unavailable(
+            exc,
+            basis="ensemble_snapshot_hwm_read_unavailable",
+        )
+    if row is None:
+        return None
+    try:
+        snapshot_id = int(row["snapshot_id"])
+        raw_cycle = row["source_cycle_time"]
+    except Exception:  # noqa: BLE001 - tuple row compatibility
+        snapshot_id = int(row[0])
+        raw_cycle = row[1]
+    cycle = _parse_source_cycle_utc(raw_cycle)
+    return (snapshot_id, cycle) if cycle is not None else None
+
+
 def _replacement_live_input_lag_reason(
     conn: sqlite3.Connection,
     *,
@@ -1785,6 +1872,43 @@ def _replacement_live_input_lag_reason(
         )
         if provenance is None:
             return "basis=posterior_provenance_unverifiable"
+    fusion = provenance.get("bayes_precision_fusion")
+    shape = (
+        fusion.get("current_evidence_shape")
+        if isinstance(fusion, Mapping)
+        else None
+    )
+    consumed_ensemble_cycle = (
+        _parse_source_cycle_utc(shape.get("source_cycle_time"))
+        if isinstance(shape, Mapping)
+        else None
+    )
+    latest_ensemble_mark = _latest_eligible_ensemble_input_mark(
+        conn,
+        city=city,
+        target_date=target_date,
+        metric=metric,
+        decision_time=decision_time,
+    )
+    if latest_ensemble_mark is not None:
+        latest_snapshot_id, latest_ensemble_cycle = latest_ensemble_mark
+        if consumed_ensemble_cycle is None:
+            return "basis=current_ensemble_snapshot_provenance_unverifiable"
+        # FAIL-CLOSED GATE CONTRACT
+        # SCOPE: probability authority for this one city/date/metric family.
+        # DRAIN: the normal materializer consumes the newest eligible ENS cycle.
+        # RESET: the consumed shape cycle catches up to the latest available cycle.
+        if latest_ensemble_cycle > consumed_ensemble_cycle:
+            lag_hours = (
+                latest_ensemble_cycle - consumed_ensemble_cycle
+            ).total_seconds() / 3600.0
+            return (
+                "basis=current_ensemble_snapshot_superseded:"
+                f"latest_snapshot_id={latest_snapshot_id}:"
+                f"latest_ensemble_cycle={latest_ensemble_cycle.isoformat()}:"
+                f"consumed_ensemble_cycle={consumed_ensemble_cycle.isoformat()}:"
+                f"lag_h={lag_hours:.2f}"
+            )
     rich_used_input_provenance = _provenance_has_current_value_serving(provenance)
     exact_serving_checked = False
     if rich_used_input_provenance:

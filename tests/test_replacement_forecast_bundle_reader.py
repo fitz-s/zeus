@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-08-11
-# Lifecycle: created=2026-06-06; last_reviewed=2026-08-11; last_reused=2026-08-11
+# Last reused/audited: 2026-08-17
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-17; last_reused=2026-08-17
 # Purpose: Protect replacement posterior bundle reader no-bypass semantics.
 # Reuse: Run before wiring replacement posterior into executable forecast reader or event reactor.
 # Authority basis: Operator-directed live replacement forecast bundle reader semantics.
@@ -953,6 +953,40 @@ def _dt(hour: int, minute: int = 0) -> datetime:
     return datetime(2026, 6, 6, hour, minute, tzinfo=UTC)
 
 
+def _insert_ensemble_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    snapshot_id: int,
+    source_cycle_time: datetime,
+    available_at: datetime,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO ensemble_snapshots (
+            snapshot_id, city, target_date, temperature_metric,
+            physical_quantity, observation_field, issue_time, available_at,
+            fetch_time, lead_hours, members_json, model_version, dataset_id,
+            causality_status, boundary_ambiguous, provenance_json, authority,
+            members_unit, source_cycle_time, source_available_at,
+            contributes_to_target_extrema
+        ) VALUES (?, 'Shanghai', '2026-06-07', 'high', ?, ?, ?, ?, ?, 24.0,
+                  ?, 'ecmwf_ens', ?, 'OK', 0, '{}', 'VERIFIED', 'degC', ?, ?, 1)
+        """,
+        (
+            snapshot_id,
+            "daily_maximum_temperature",
+            "high_temp",
+            source_cycle_time.isoformat(),
+            available_at.isoformat(),
+            available_at.isoformat(),
+            json.dumps([30.0] * 51),
+            "ecmwf_opendata_mx2t3_local_calendar_day_max",
+            source_cycle_time.isoformat(),
+            available_at.isoformat(),
+        ),
+    )
+
+
 def _live_provenance() -> dict[str, object]:
     return {
         "reader_test": True,
@@ -962,6 +996,8 @@ def _live_provenance() -> dict[str, object]:
         "bayes_precision_fusion": {
             "current_evidence_shape": {
                 "semantics_revision": CURRENT_EVIDENCE_SEMANTICS_REVISION,
+                "snapshot_id": 1,
+                "source_cycle_time": _dt(0).isoformat(),
                 "shape_lag_hours": 0.0,
                 "stale_shape_reused": False,
                 "translation_applied": False,
@@ -1023,10 +1059,11 @@ def _insert_posterior(
             json.dumps({"cold": 0.3, "warm": 0.9}),
             "openmeteo_ecmwf_ifs9_bayes_fusion",
             json.dumps(
-                dependency_source_run_ids
-                or {
+                {
                     "baseline_b0": "b0-run",
                     "openmeteo_ifs9_anchor": "om9-run",
+                    "current_ensemble_snapshot": 1,
+                    **(dependency_source_run_ids or {}),
                 }
             ),
             json.dumps(_live_provenance()),
@@ -1040,6 +1077,41 @@ def _insert_posterior(
         ),
     )
     return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+
+def test_live_input_hwm_blocks_posterior_when_newer_ensemble_cycle_is_available() -> None:
+    conn = _conn()
+    _insert_ensemble_snapshot(
+        conn,
+        snapshot_id=1,
+        source_cycle_time=_dt(0),
+        available_at=_dt(1),
+    )
+    _insert_ensemble_snapshot(
+        conn,
+        snapshot_id=2,
+        source_cycle_time=_dt(2),
+        available_at=_dt(3),
+    )
+
+    reason = replacement_live_input_lag_reason(
+        conn,
+        city="Shanghai",
+        target_date="2026-06-07",
+        metric="high",
+        decision_time=_dt(4),
+        posterior_source_cycle_time=_dt(0),
+        posterior_computed_at=_dt(1, 30),
+        posterior_provenance=_live_provenance(),
+    )
+
+    assert reason == (
+        "basis=current_ensemble_snapshot_superseded:"
+        "latest_snapshot_id=2:"
+        "latest_ensemble_cycle=2026-06-06T02:00:00+00:00:"
+        "consumed_ensemble_cycle=2026-06-06T00:00:00+00:00:"
+        "lag_h=2.00"
+    )
 
 
 def _readiness(*, posterior_id: int, baseline_run_id: str = "b0-run", posterior_available_at: datetime | None = None):
