@@ -397,6 +397,186 @@ def _seed_exit_intent_event(
     )
 
 
+def _seed_canonical_position_identity(
+    c,
+    *,
+    position_id: str,
+    token_id: str,
+    shares: float,
+    direction: str | None = "buy_yes",
+    no_token_id: str | None = None,
+    exit_reason: str | None = None,
+) -> None:
+    c.execute(
+        """
+        INSERT OR IGNORE INTO position_current (
+            position_id, phase, direction, token_id, no_token_id, shares,
+            strategy_key, updated_at, temperature_metric, chain_state, exit_reason
+        ) VALUES (?, 'day0_window', ?, ?, ?, ?, 'center_buy', ?, 'high', 'synced', ?)
+        """,
+        (
+            position_id,
+            direction,
+            token_id,
+            no_token_id if no_token_id is not None else f"{token_id}-no",
+            shares,
+            _NOW.isoformat(),
+            exit_reason,
+        ),
+    )
+
+
+def _seed_red_monitor_provenance(
+    c,
+    *,
+    position_id: str,
+    token_id: str = YES_TOKEN,
+    shares: float = 10.0,
+    direction: str = "buy_yes",
+    no_token_id: str | None = None,
+) -> None:
+    _seed_canonical_position_identity(
+        c,
+        position_id=position_id,
+        token_id=token_id,
+        shares=shares,
+        direction=direction,
+        no_token_id=no_token_id,
+    )
+    c.execute(
+        "UPDATE position_current SET exit_reason = 'red_force_exit' "
+        "WHERE position_id = ?",
+        (position_id,),
+    )
+    sequence_no = c.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
+        "WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    c.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, ?, 'MONITOR_REFRESHED', ?, 'day0_window',
+                  'day0_window', 'center_buy', 'src.engine.cycle_runtime', ?, 'live')
+        """,
+        (
+            f"{position_id}:monitor_red:{sequence_no}",
+            position_id,
+            sequence_no,
+            _NOW.isoformat(),
+            json.dumps(
+                {
+                    "exit_decision_should_exit": True,
+                    "exit_decision_reason": "RED_FORCE_EXIT",
+                    "exit_decision_trigger": "RED_FORCE_EXIT",
+                    "applied_validations": [
+                        "red_force_exit",
+                        "dt2_red_force_exit_sweep_actuated",
+                    ],
+                },
+                sort_keys=True,
+            ),
+        ),
+    )
+
+
+def _seed_canonical_red_intent(
+    c,
+    *,
+    position_id: str,
+    token_id: str,
+    shares: float,
+    decision_id: str = "decision-red-intent",
+    env: str = "live",
+) -> None:
+    _seed_canonical_position_identity(
+        c,
+        position_id=position_id,
+        token_id=token_id,
+        shares=shares,
+    )
+    c.execute(
+        "UPDATE position_current SET exit_reason = 'red_force_exit' "
+        "WHERE position_id = ?",
+        (position_id,),
+    )
+    sequence_no = c.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
+        "WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    c.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key,
+            decision_id, source_module, payload_json, env
+        ) VALUES (?, ?, 1, ?, 'EXIT_INTENT', ?, 'day0_window',
+                  'pending_exit', 'center_buy', ?,
+                  'src.execution.exit_lifecycle', ?, ?)
+        """,
+        (
+            f"{position_id}:exit_intent_red:{sequence_no}",
+            position_id,
+            sequence_no,
+            _NOW.isoformat(),
+            decision_id,
+            json.dumps(
+                {
+                    "exit_intent_close_position": True,
+                    "exit_intent_decision_id": decision_id,
+                    "exit_intent_reason": "RED_FORCE_EXIT",
+                    "exit_intent_shares": shares,
+                    "exit_intent_token_id": token_id,
+                },
+                sort_keys=True,
+            ),
+            env,
+        ),
+    )
+
+
+def _seed_hold_monitor_rows(c, *, position_id: str, count: int) -> None:
+    sequence_no = c.execute(
+        "SELECT COALESCE(MAX(sequence_no), 0) + 1 FROM position_events "
+        "WHERE position_id = ?",
+        (position_id,),
+    ).fetchone()[0]
+    rows = []
+    payload = json.dumps(
+        {
+            "exit_decision_should_exit": False,
+            "exit_decision_reason": "HOLD",
+            "exit_decision_trigger": "MONITOR_REFRESH",
+        },
+        sort_keys=True,
+    )
+    for offset in range(count):
+        rows.append(
+            (
+                f"{position_id}:monitor_hold:{sequence_no + offset}",
+                position_id,
+                sequence_no + offset,
+                (_NOW + timedelta(microseconds=offset + 1)).isoformat(),
+                payload,
+            )
+        )
+    c.executemany(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, ?, 'MONITOR_REFRESHED', ?, 'pending_exit',
+                  'pending_exit', 'center_buy', 'src.engine.cycle_runtime', ?, 'live')
+        """,
+        rows,
+    )
+
+
 def _ack_exit(c, command_id: str = "cmd-exit-1", venue_order_id: str = "ord-1") -> None:
     from src.state.venue_command_repo import append_event
 
@@ -5091,7 +5271,6 @@ def test_pending_exit_does_not_poll_entry_order_as_exit_order(conn):
     ).fetchall()
     assert len(events) == 1
     event = events[0]
-    payload = json.loads(event["payload_json"])
     assert event["event_type"] == "EXIT_RETRY_RELEASED"
     assert event["phase_before"] == "pending_exit"
     assert event["phase_after"] == "active"
@@ -6986,6 +7165,7 @@ def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeyp
         size_usd=10.0,
         shares=20.0,
         cost_basis_usd=10.0,
+        strategy_key="center_buy",
         env="test",
     )
     portfolio = PortfolioState(positions=[position])
@@ -6999,7 +7179,6 @@ def test_live_exit_captures_snapshot_for_held_position_before_sell(conn, monkeyp
 
     monkeypatch.setattr(exit_lifecycle, "check_sell_collateral", lambda *args, **kwargs: (True, ""))
     monkeypatch.setattr(exit_lifecycle, "_refresh_exit_collateral_snapshot_for_submit", lambda *args, **kwargs: None)
-
     sibling = {
         "market_id": "condition-test",
         "condition_id": "condition-test",
@@ -7734,7 +7913,10 @@ def test_live_exit_identity_seed_does_not_reuse_stale_accepting_orders_as_tradab
     assert context == {}
 
 
-def test_live_exit_quick_confirmed_without_explicit_fill_price_does_not_close(monkeypatch):
+def test_live_exit_quick_confirmed_without_explicit_fill_price_does_not_close(
+    conn,
+    monkeypatch,
+):
     from src.execution import exit_lifecycle
     from src.state.portfolio import ExitContext, PortfolioState, Position
 
@@ -7753,6 +7935,7 @@ def test_live_exit_quick_confirmed_without_explicit_fill_price_does_not_close(mo
         size_usd=10.0,
         shares=20.0,
         cost_basis_usd=10.0,
+        strategy_key="center_buy",
         env="test",
     )
     portfolio = PortfolioState(positions=[position])
@@ -7765,6 +7948,17 @@ def test_live_exit_quick_confirmed_without_explicit_fill_price_does_not_close(mo
 
     monkeypatch.setattr(exit_lifecycle, "check_sell_collateral", lambda *args, **kwargs: (True, ""))
     monkeypatch.setattr(exit_lifecycle, "_refresh_exit_collateral_snapshot_for_submit", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *_args, **_kwargs: {
+            "executable_snapshot_id": "snap-quick-confirmed-no-fill-price",
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "0.01",
+            "executable_snapshot_neg_risk": False,
+            "executable_snapshot_orderbook_top_bid": "0.49",
+        },
+    )
 
     def fake_place_sell_order(**kwargs):
         return exit_lifecycle.OrderResult(
@@ -7789,7 +7983,7 @@ def test_live_exit_quick_confirmed_without_explicit_fill_price_does_not_close(mo
         position,
         exit_context,
         clob=FakeClob(),
-        conn=None,
+        conn=conn,
     )
 
     assert result == "sell_pending: order=ord-quick-confirmed-no-fill-price, status=CONFIRMED, missing_fill_price"
@@ -8069,6 +8263,7 @@ def test_live_exit_snapshot_capture_exception_retries_after_intent(conn, monkeyp
         strategy_key="opening_inertia",
     )
     position.exit_reason = "red_force_exit"
+    _seed_red_monitor_provenance(conn, position_id=position.trade_id, shares=20.0)
     portfolio = PortfolioState(positions=[position])
     exit_context = ExitContext(
         exit_reason="RED_FORCE_EXIT",
@@ -8660,6 +8855,7 @@ def test_live_exit_below_min_order_rejection_enters_dust_hold_not_retry(conn, mo
         strategy_key="opening_inertia",
     )
     position.exit_reason = "red_force_exit"
+    _seed_red_monitor_provenance(conn, position_id=position.trade_id, shares=1.5873)
     portfolio = PortfolioState(positions=[position])
     exit_context = ExitContext(
         exit_reason="RED_FORCE_EXIT",
@@ -9455,6 +9651,7 @@ def test_live_exit_snapshot_min_order_dust_hold_preempts_stale_collateral(conn, 
         strategy_key="opening_inertia",
     )
     position.exit_reason = "red_force_exit"
+    _seed_red_monitor_provenance(conn, position_id=position.trade_id, shares=4.95)
     portfolio = PortfolioState(positions=[position])
     exit_context = ExitContext(
         exit_reason="RED_FORCE_EXIT",
@@ -9549,6 +9746,14 @@ def test_live_exit_no_bid_snapshot_still_enforces_min_order_dust(conn, monkeypat
         env="live",
     )
     position.exit_reason = "red_force_exit"
+    _seed_red_monitor_provenance(
+        conn,
+        position_id=position.trade_id,
+        token_id=YES_TOKEN,
+        shares=1.0,
+        direction="buy_no",
+        no_token_id=NO_TOKEN,
+    )
     exit_context = ExitContext(
         exit_reason="RED_FORCE_EXIT",
         current_market_price=0.0,
@@ -9953,6 +10158,1032 @@ def test_pre_settlement_stale_market_price_still_enters_retry(conn):
     assert event["phase_after"] == "pending_exit"
     assert payload["error"] == "stale_current_market_price"
     assert payload["status"] == "retry_pending"
+
+
+def test_red_stale_retry_preserves_intent_then_sells_after_green_risk_recovery(
+    conn, monkeypatch
+):
+    from src.execution import exit_lifecycle
+    from src.riskguard.risk_level import RiskLevel
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    trade_id = "pos-red-obligation-retry"
+    position = Position(
+        trade_id=trade_id,
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="Kuala Lumpur",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=6.4,
+        shares=10.0,
+        chain_shares=10.0,
+        cost_basis_usd=6.4,
+        state="day0_window",
+        chain_state="synced",
+        strategy_key="center_buy",
+        env="live",
+        exit_reason="red_force_exit",
+    )
+    _seed_red_monitor_provenance(conn, position_id=trade_id)
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: RiskLevel.GREEN,
+    )
+
+    class Clob:
+        @staticmethod
+        def get_order_status(_order_id):
+            return {"status": "OPEN"}
+
+    stale = ExitContext(
+        exit_reason="RED_FORCE_EXIT",
+        current_market_price=0.45,
+        current_market_price_is_fresh=False,
+        best_bid=0.45,
+    )
+    outcome = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]),
+        position,
+        stale,
+        clob=Clob(),
+        conn=conn,
+    )
+    assert outcome == "exit_blocked: stale_market_price"
+    events = conn.execute(
+        "SELECT event_type FROM position_events WHERE position_id = ? "
+        "ORDER BY sequence_no",
+        (trade_id,),
+    ).fetchall()
+    assert [row["event_type"] for row in events][-2:] == [
+        "EXIT_INTENT",
+        "EXIT_ORDER_REJECTED",
+    ]
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? "
+        "AND intent_kind = 'EXIT' AND side = 'SELL'",
+        (trade_id,),
+    ).fetchone()[0] == 0
+
+    position.next_exit_retry_at = (_NOW - timedelta(minutes=1)).isoformat()
+    assert exit_lifecycle.check_pending_retries(position, conn=conn) is True
+    assert position.state == "day0_window"
+    assert position.exit_reason == "red_force_exit"
+
+    def persist_and_return_pending(**kwargs):
+        _insert_exit_command(
+            conn,
+            command_id="cmd-red-obligation-retry",
+            position_id=trade_id,
+            token_id=YES_TOKEN,
+            size=10.0,
+            price=0.45,
+            venue_order_id="ord-red-obligation-retry",
+        )
+        return exit_lifecycle.OrderResult(
+            trade_id=trade_id,
+            status="pending",
+            order_id="ord-red-obligation-retry",
+            external_order_id="ord-red-obligation-retry",
+        )
+
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *_args, **_kwargs: {
+            "executable_snapshot_id": "snapshot-red-obligation-retry",
+            "executable_snapshot_orderbook_top_bid": 0.45,
+            "executable_snapshot_min_order_size": 0.01,
+        },
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "check_sell_collateral",
+        lambda *_args, **_kwargs: (True, ""),
+    )
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", persist_and_return_pending)
+    fresh = replace(stale, current_market_price_is_fresh=True)
+    retry_outcome = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]),
+        position,
+        fresh,
+        clob=Clob(),
+        conn=conn,
+    )
+    assert retry_outcome.startswith("sell_pending:")
+    command = conn.execute(
+        "SELECT intent_kind, side, state FROM venue_commands "
+        "WHERE command_id = 'cmd-red-obligation-retry'"
+    ).fetchone()
+    assert dict(command) == {
+        "intent_kind": "EXIT",
+        "side": "SELL",
+        "state": "INTENT_CREATED",
+    }
+
+
+def test_red_intent_survives_partial_fill_and_nonterminal_override(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.riskguard.risk_level import RiskLevel
+    from src.state.portfolio import ExitContext, Position
+
+    trade_id = "pos-red-partial-residual"
+    position = Position(
+        trade_id=trade_id,
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="Kuala Lumpur",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=2.56,
+        shares=4.0,
+        chain_shares=4.0,
+        cost_basis_usd=2.56,
+        state="day0_window",
+        chain_state="synced",
+        strategy_key="center_buy",
+        env="live",
+        exit_reason="red_force_exit",
+    )
+    _seed_canonical_red_intent(
+        conn,
+        position_id=trade_id,
+        token_id=YES_TOKEN,
+        shares=10.0,
+    )
+    sequence_no = conn.execute(
+        "SELECT MAX(sequence_no) + 1 FROM position_events WHERE position_id = ?",
+        (trade_id,),
+    ).fetchone()[0]
+    conn.executemany(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, ?, ?, ?, 'pending_exit', 'pending_exit',
+                  'center_buy', 'tests.test_exit_safety', ?, 'live')
+        """,
+        [
+            (
+                f"{trade_id}:partial_fill:{sequence_no}",
+                trade_id,
+                sequence_no,
+                "EXIT_ORDER_FILLED",
+                (_NOW + timedelta(microseconds=1)).isoformat(),
+                json.dumps({"filled_shares": 6.0}, sort_keys=True),
+            ),
+            (
+                f"{trade_id}:manual_override:{sequence_no + 1}",
+                trade_id,
+                sequence_no + 1,
+                "MANUAL_OVERRIDE_APPLIED",
+                (_NOW + timedelta(microseconds=2)).isoformat(),
+                json.dumps({"reason": "operator_review"}, sort_keys=True),
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: RiskLevel.GREEN,
+    )
+
+    assert exit_lifecycle._red_force_exit_authorized(
+        position,
+        ExitContext(exit_reason="RED_FORCE_EXIT", current_market_price=0.45),
+        conn=conn,
+    ) is True
+
+    conn.execute(
+        """
+        INSERT INTO position_events (
+            event_id, position_id, event_version, sequence_no, event_type,
+            occurred_at, phase_before, phase_after, strategy_key,
+            source_module, payload_json, env
+        ) VALUES (?, ?, 1, ?, 'SETTLED', ?, 'pending_exit', 'settled',
+                  'center_buy', 'tests.test_exit_safety', ?, 'live')
+        """,
+        (
+            f"{trade_id}:settled:{sequence_no + 2}",
+            trade_id,
+            sequence_no + 2,
+            (_NOW + timedelta(microseconds=3)).isoformat(),
+            json.dumps({"reason": "terminal"}, sort_keys=True),
+        ),
+    )
+    assert exit_lifecycle._red_force_exit_authorized(
+        position,
+        ExitContext(exit_reason="RED_FORCE_EXIT", current_market_price=0.45),
+        conn=conn,
+    ) is False
+
+
+def test_red_obligation_survives_many_hold_monitor_rows(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.riskguard.risk_level import RiskLevel
+    from src.state.portfolio import ExitContext, Position
+
+    trade_id = "pos-red-many-holds"
+    position = Position(
+        trade_id=trade_id,
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="Kuala Lumpur",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=6.4,
+        shares=10.0,
+        chain_shares=10.0,
+        cost_basis_usd=6.4,
+        state="day0_window",
+        chain_state="synced",
+        strategy_key="center_buy",
+        env="live",
+        exit_reason="red_force_exit",
+    )
+    _seed_red_monitor_provenance(conn, position_id=trade_id)
+    _seed_hold_monitor_rows(conn, position_id=trade_id, count=6000)
+    red_monitor = conn.execute(
+        """
+        SELECT payload_json
+          FROM position_events
+         WHERE position_id = ?
+           AND event_type = 'MONITOR_REFRESHED'
+           AND json_extract(payload_json, '$.exit_decision_should_exit') = 1
+         ORDER BY sequence_no DESC
+         LIMIT 1
+        """,
+        (trade_id,),
+    ).fetchone()
+    assert "selected_outcome_token_id" not in json.loads(red_monitor["payload_json"])
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: RiskLevel.GREEN,
+    )
+
+    assert exit_lifecycle._red_force_exit_authorized(
+        position,
+        ExitContext(exit_reason="RED_FORCE_EXIT", current_market_price=0.45),
+        conn=conn,
+    ) is True
+
+    intent = exit_lifecycle.ExitIntent(
+        trade_id=trade_id,
+        reason="RED_FORCE_EXIT",
+        token_id=YES_TOKEN,
+        shares=10.0,
+        current_market_price=0.45,
+        best_bid=0.45,
+        decision_id="decision-red-many-holds",
+    )
+    assert exit_lifecycle._record_exit_intent_before_execution_gates(
+        conn, position, intent
+    ) is True
+    trace: list[str] = []
+    conn.set_trace_callback(trace.append)
+    try:
+        assert exit_lifecycle._red_force_exit_authorized(
+            position,
+            ExitContext(exit_reason="RED_FORCE_EXIT", current_market_price=0.45),
+            conn=conn,
+        ) is True
+    finally:
+        conn.set_trace_callback(None)
+    assert any(
+        "INDEXED BY idx_position_events_position_type_sequence" in statement
+        and "event_type = 'EXIT_INTENT'" in statement
+        for statement in trace
+    )
+    assert not any("event_type = 'MONITOR_REFRESHED'" in statement for statement in trace)
+
+
+def test_non_red_intent_persistence_failure_blocks_venue_sell(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    position = Position(
+        trade_id="pos-non-red-intent-persist-failure",
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="Kuala Lumpur",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=6.4,
+        shares=10.0,
+        chain_shares=10.0,
+        state="holding",
+        strategy_key="center_buy",
+        env="test",
+        exit_reason="EDGE_REVERSAL",
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_dual_write_canonical_pending_exit_if_available",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "place_sell_order",
+        lambda **_kwargs: pytest.fail("failed non-RED EXIT_INTENT reached venue"),
+    )
+
+    outcome = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]),
+        position,
+        ExitContext(
+            exit_reason="EDGE_REVERSAL",
+            current_market_price=0.45,
+            current_market_price_is_fresh=True,
+            best_bid=0.45,
+        ),
+        clob=object(),
+        conn=conn,
+    )
+
+    assert outcome == "exit_blocked: exit_intent_persistence_failed"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? AND side = 'SELL'",
+        (position.trade_id,),
+    ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("failure", ("transition_false", "commit_exception"))
+def test_red_intent_persistence_failure_blocks_venue_sell(conn, monkeypatch, failure):
+    from src.execution import exit_lifecycle
+    from src.riskguard.risk_level import RiskLevel
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    trade_id = f"pos-red-intent-persist-{failure}"
+    position = Position(
+        trade_id=trade_id,
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="Kuala Lumpur",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=6.4,
+        shares=10.0,
+        chain_shares=10.0,
+        state="day0_window",
+        strategy_key="center_buy",
+        chain_state="synced",
+        env="live",
+        exit_reason="red_force_exit",
+    )
+    _seed_canonical_position_identity(
+        conn,
+        position_id=trade_id,
+        token_id=YES_TOKEN,
+        shares=10.0,
+    )
+    _seed_red_monitor_provenance(conn, position_id=trade_id)
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: RiskLevel.RED,
+    )
+    if failure == "transition_false":
+        monkeypatch.setattr(
+            exit_lifecycle,
+            "_dual_write_canonical_pending_exit_if_available",
+            lambda *_args, **_kwargs: False,
+        )
+    else:
+        real_commit = exit_lifecycle._commit_exit_write_boundary
+
+        def fail_intent_commit(boundary_conn, *, stage, deadline_monotonic=None):
+            if stage == "exit_intent":
+                raise RuntimeError("injected exit intent commit failure")
+            return real_commit(
+                boundary_conn,
+                stage=stage,
+                deadline_monotonic=deadline_monotonic,
+            )
+
+        monkeypatch.setattr(
+            exit_lifecycle,
+            "_commit_exit_write_boundary",
+            fail_intent_commit,
+        )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "place_sell_order",
+        lambda **_kwargs: pytest.fail("failed EXIT_INTENT persistence reached venue"),
+    )
+
+    outcome = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]),
+        position,
+        ExitContext(
+            exit_reason="RED_FORCE_EXIT",
+            current_market_price=0.45,
+            current_market_price_is_fresh=True,
+            best_bid=0.45,
+        ),
+        clob=object(),
+        conn=conn,
+    )
+
+    assert outcome == "exit_blocked: exit_intent_persistence_failed"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? AND side = 'SELL'",
+        (trade_id,),
+    ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("canonical_phase", "canonical_shares", "risk_level"),
+    (
+        ("settled", 10.0, "RED"),
+        ("settled", 10.0, "GREEN"),
+        ("day0_window", 0.0, "RED"),
+    ),
+)
+def test_red_authority_cannot_reopen_terminal_or_zero_canonical_position(
+    conn,
+    monkeypatch,
+    canonical_phase,
+    canonical_shares,
+    risk_level,
+):
+    from src.execution import exit_lifecycle
+    from src.riskguard.risk_level import RiskLevel
+    from src.state.portfolio import ExitContext, Position
+
+    trade_id = f"pos-red-canonical-close-{canonical_phase}-{risk_level}"
+    position = Position(
+        trade_id=trade_id,
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="Kuala Lumpur",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=6.4,
+        shares=10.0,
+        chain_shares=10.0,
+        state="day0_window",
+        env="live",
+        exit_reason="red_force_exit",
+    )
+    _seed_canonical_red_intent(
+        conn,
+        position_id=trade_id,
+        token_id=YES_TOKEN,
+        shares=10.0,
+    )
+    conn.execute(
+        "UPDATE position_current SET phase = ?, shares = ?, chain_shares = ? "
+        "WHERE position_id = ?",
+        (canonical_phase, canonical_shares, canonical_shares, trade_id),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: getattr(RiskLevel, risk_level),
+    )
+
+    assert exit_lifecycle._red_force_exit_authorized(
+        position,
+        ExitContext(exit_reason="RED_FORCE_EXIT", current_market_price=0.45),
+        conn=conn,
+    ) is False
+
+
+def test_non_live_red_provenance_cannot_authorize_live_handoff(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.riskguard.risk_level import RiskLevel
+    from src.state.portfolio import ExitContext, Position
+
+    trade_id = "pos-red-replay-provenance"
+    position = Position(
+        trade_id=trade_id,
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="Kuala Lumpur",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=6.4,
+        shares=10.0,
+        chain_shares=10.0,
+        state="day0_window",
+        env="live",
+        exit_reason="red_force_exit",
+    )
+    _seed_canonical_red_intent(
+        conn,
+        position_id=trade_id,
+        token_id=YES_TOKEN,
+        shares=10.0,
+        env="test",
+    )
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: RiskLevel.GREEN,
+    )
+
+    assert exit_lifecycle._red_force_exit_authorized(
+        position,
+        ExitContext(exit_reason="RED_FORCE_EXIT", current_market_price=0.45),
+        conn=conn,
+    ) is False
+
+
+def test_red_provenance_rejects_canonical_token_mismatch(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.riskguard.risk_level import RiskLevel
+    from src.state.portfolio import ExitContext, Position
+
+    trade_id = "pos-red-canonical-token-mismatch"
+    position = Position(
+        trade_id=trade_id,
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="Kuala Lumpur",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=6.4,
+        shares=10.0,
+        chain_shares=10.0,
+        state="day0_window",
+        env="live",
+        exit_reason="red_force_exit",
+    )
+    _seed_canonical_red_intent(
+        conn,
+        position_id=trade_id,
+        token_id=NO_TOKEN,
+        shares=10.0,
+    )
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: RiskLevel.GREEN,
+    )
+
+    assert exit_lifecycle._red_force_exit_authorized(
+        position,
+        ExitContext(exit_reason="RED_FORCE_EXIT", current_market_price=0.45),
+        conn=conn,
+    ) is False
+
+
+def test_red_authority_rejects_zero_canonical_chain_residual(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.riskguard.risk_level import RiskLevel
+    from src.state.portfolio import ExitContext, Position
+
+    trade_id = "pos-red-canonical-chain-zero"
+    position = Position(
+        trade_id=trade_id,
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="Kuala Lumpur",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=6.4,
+        shares=10.0,
+        chain_shares=10.0,
+        state="day0_window",
+        env="live",
+        exit_reason="red_force_exit",
+    )
+    _seed_canonical_red_intent(
+        conn,
+        position_id=trade_id,
+        token_id=YES_TOKEN,
+        shares=10.0,
+    )
+    conn.execute(
+        "UPDATE position_current SET shares = 10.0, chain_shares = 0.0, "
+        "chain_state = 'synced' WHERE position_id = ?",
+        (trade_id,),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: RiskLevel.RED,
+    )
+
+    assert exit_lifecycle._red_force_exit_authorized(
+        position,
+        ExitContext(exit_reason="RED_FORCE_EXIT", current_market_price=0.45),
+        conn=conn,
+    ) is False
+
+
+@pytest.mark.parametrize(
+    (
+        "canonical_direction",
+        "runtime_direction",
+        "runtime_token",
+        "canonical_yes",
+        "canonical_no",
+        "expected",
+    ),
+    (
+        ("buy_yes", "buy_yes", YES_TOKEN, YES_TOKEN, NO_TOKEN, True),
+        ("buy_no", "buy_no", NO_TOKEN, YES_TOKEN, NO_TOKEN, True),
+        ("buy_yes", "buy_yes", NO_TOKEN, YES_TOKEN, NO_TOKEN, False),
+        ("buy_no", "buy_no", YES_TOKEN, YES_TOKEN, NO_TOKEN, False),
+        (None, "buy_yes", YES_TOKEN, YES_TOKEN, NO_TOKEN, False),
+        ("unknown", "buy_yes", YES_TOKEN, YES_TOKEN, NO_TOKEN, False),
+        ("buy_yes", "unknown", YES_TOKEN, YES_TOKEN, NO_TOKEN, False),
+        ("buy_yes", "buy_yes", YES_TOKEN, "", NO_TOKEN, False),
+        ("buy_no", "buy_no", NO_TOKEN, YES_TOKEN, "", False),
+    ),
+)
+def test_red_runtime_identity_binds_directional_canonical_token(
+    conn,
+    canonical_direction,
+    runtime_direction,
+    runtime_token,
+    canonical_yes,
+    canonical_no,
+    expected,
+):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    trade_id = (
+        "pos-red-directional-token-"
+        f"{canonical_direction}-{runtime_direction}-{expected}"
+    )
+    position = Position(
+        trade_id=trade_id,
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="Kuala Lumpur",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction=runtime_direction,
+        token_id=runtime_token if runtime_direction == "buy_yes" else canonical_yes,
+        no_token_id=runtime_token if runtime_direction == "buy_no" else canonical_no,
+        shares=10.0,
+        chain_shares=10.0,
+        state="day0_window",
+        chain_state="synced",
+        env="unknown_env",
+        exit_reason="red_force_exit",
+    )
+    _seed_canonical_position_identity(
+        conn,
+        position_id=trade_id,
+        token_id=canonical_yes,
+        no_token_id=canonical_no,
+        shares=10.0,
+        direction=canonical_direction,
+    )
+
+    assert exit_lifecycle._red_runtime_position_open(
+        conn, position, require_canonical=True
+    ) is expected
+
+
+def test_unknown_runtime_env_uses_live_canonical_red_provenance(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.riskguard.risk_level import RiskLevel
+    from src.state.portfolio import ExitContext, Position
+
+    trade_id = "pos-red-unknown-runtime-env"
+    position = Position(
+        trade_id=trade_id,
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="Kuala Lumpur",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        shares=10.0,
+        chain_shares=10.0,
+        state="day0_window",
+        chain_state="synced",
+        env="unknown_env",
+        exit_reason="red_force_exit",
+    )
+    _seed_red_monitor_provenance(conn, position_id=trade_id)
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level", lambda: RiskLevel.RED
+    )
+
+    assert exit_lifecycle._red_force_exit_authorized(
+        position,
+        ExitContext(exit_reason="RED_FORCE_EXIT", current_market_price=0.45),
+        conn=conn,
+    ) is True
+
+
+def test_current_red_without_canonical_row_cannot_authorize(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.riskguard.risk_level import RiskLevel
+    from src.state.portfolio import ExitContext, Position
+
+    position = Position(
+        trade_id="pos-red-no-canonical-row",
+        market_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="Kuala Lumpur",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        shares=10.0,
+        chain_shares=10.0,
+        state="day0_window",
+        chain_state="synced",
+        env="unknown_env",
+        exit_reason="red_force_exit",
+    )
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level", lambda: RiskLevel.RED
+    )
+
+    assert exit_lifecycle._red_force_exit_authorized(
+        position,
+        ExitContext(exit_reason="RED_FORCE_EXIT", current_market_price=0.45),
+        conn=conn,
+    ) is False
+
+
+def test_exit_intent_commit_failure_rolls_back_real_connection_boundary(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    trade_id = "pos-red-real-commit-rollback"
+    position = Position(
+        trade_id=trade_id,
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="Kuala Lumpur",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        shares=10.0,
+        chain_shares=10.0,
+        state="day0_window",
+        chain_state="synced",
+        strategy_key="center_buy",
+        env="live",
+        exit_reason="red_force_exit",
+    )
+    _seed_canonical_position_identity(
+        conn,
+        position_id=trade_id,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        shares=10.0,
+    )
+    conn.commit()
+    conn.execute("BEGIN")
+
+    class CommitFailingConnection:
+        def __init__(self, delegate):
+            self.delegate = delegate
+            self.commit_calls = 0
+            self.rollback_calls = 0
+
+        def __getattr__(self, name):
+            return getattr(self.delegate, name)
+
+        def commit(self):
+            self.commit_calls += 1
+            raise sqlite3.OperationalError("injected commit failure")
+
+        def rollback(self):
+            self.rollback_calls += 1
+            return self.delegate.rollback()
+
+    wrapped = CommitFailingConnection(conn)
+    intent = exit_lifecycle.ExitIntent(
+        trade_id=trade_id,
+        reason="RED_FORCE_EXIT",
+        token_id=YES_TOKEN,
+        shares=10.0,
+        current_market_price=0.45,
+        best_bid=0.45,
+        decision_id="decision-real-rollback",
+    )
+
+    assert exit_lifecycle._record_exit_intent_before_execution_gates(
+        wrapped, position, intent
+    ) is False
+    assert wrapped.commit_calls == 1
+    assert wrapped.rollback_calls >= 1
+    assert conn.in_transaction is False
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events "
+        "WHERE position_id = ? AND event_type = 'EXIT_INTENT'",
+        (trade_id,),
+    ).fetchone()[0] == 0
+    projection_after_failure = conn.execute(
+        "SELECT phase, order_id FROM position_current WHERE position_id = ?",
+        (trade_id,),
+    ).fetchone()
+    assert projection_after_failure["phase"] == "day0_window"
+    assert projection_after_failure["order_id"] is None
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? AND side = 'SELL'",
+        (trade_id,),
+    ).fetchone()[0] == 0
+
+
+def test_repeated_red_execute_adopts_same_active_sell_without_duplicate(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.riskguard.risk_level import RiskLevel
+    from src.state.portfolio import ExitContext, PortfolioState, Position
+
+    trade_id = "pos-red-repeated-adoption"
+    position = Position(
+        trade_id=trade_id,
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="Kuala Lumpur",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        entry_price=0.64,
+        size_usd=6.4,
+        shares=10.0,
+        chain_shares=10.0,
+        state="day0_window",
+        strategy_key="center_buy",
+        chain_state="synced",
+        env="live",
+        exit_reason="red_force_exit",
+    )
+    _seed_canonical_position_identity(
+        conn,
+        position_id=trade_id,
+        token_id=YES_TOKEN,
+        shares=10.0,
+    )
+    _seed_red_monitor_provenance(conn, position_id=trade_id)
+    _insert_exit_command(
+        conn,
+        command_id="cmd-red-repeated-adoption",
+        position_id=trade_id,
+        token_id=YES_TOKEN,
+        size=10.0,
+        price=0.45,
+        venue_order_id="ord-red-repeated-adoption",
+    )
+    _ack_exit(
+        conn,
+        command_id="cmd-red-repeated-adoption",
+        venue_order_id="ord-red-repeated-adoption",
+    )
+    monkeypatch.setattr(
+        "src.riskguard.riskguard.get_current_level",
+        lambda: RiskLevel.RED,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "place_sell_order",
+        lambda **_kwargs: pytest.fail("active RED SELL was duplicated"),
+    )
+    context = ExitContext(
+        exit_reason="RED_FORCE_EXIT",
+        current_market_price=0.45,
+        current_market_price_is_fresh=True,
+        best_bid=0.45,
+    )
+
+    first = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]), position, context, clob=None, conn=conn
+    )
+    first_order = position.last_exit_order_id
+    second = exit_lifecycle.execute_exit(
+        PortfolioState(positions=[position]), position, context, clob=None, conn=conn
+    )
+
+    assert first.startswith("sell_pending: active_prior_exit_sell")
+    assert second.startswith("sell_pending: active_prior_exit_sell")
+    assert first_order == "ord-red-repeated-adoption"
+    assert position.last_exit_order_id == first_order
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? AND side = 'SELL'",
+        (trade_id,),
+    ).fetchone()[0] == 1
+
+
+def test_red_intent_preserves_existing_order_projection(conn):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    trade_id = "pos-red-intent-preserves-order"
+    position = Position(
+        trade_id=trade_id,
+        market_id="condition-test",
+        condition_id="condition-test",
+        city="Kuala Lumpur",
+        cluster="Kuala Lumpur",
+        target_date="2026-07-08",
+        bin_label="33C",
+        direction="buy_yes",
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        shares=10.0,
+        chain_shares=10.0,
+        state="day0_window",
+        chain_state="synced",
+        strategy_key="center_buy",
+        env="live",
+        exit_reason="red_force_exit",
+        last_exit_order_id="ord-red-preserved",
+        order_status="sell_pending",
+    )
+    _seed_canonical_position_identity(
+        conn,
+        position_id=trade_id,
+        token_id=YES_TOKEN,
+        no_token_id=NO_TOKEN,
+        shares=10.0,
+    )
+    _insert_exit_command(
+        conn,
+        command_id="cmd-red-preserved",
+        position_id=trade_id,
+        token_id=YES_TOKEN,
+        size=10.0,
+        price=0.45,
+        venue_order_id="ord-red-preserved",
+    )
+    intent = exit_lifecycle.ExitIntent(
+        trade_id=trade_id,
+        reason="RED_FORCE_EXIT",
+        token_id=YES_TOKEN,
+        shares=10.0,
+        current_market_price=0.45,
+        best_bid=0.45,
+        decision_id="decision-red-preserved",
+    )
+
+    assert exit_lifecycle._record_exit_intent_before_execution_gates(
+        conn, position, intent
+    ) is True
+    projection = conn.execute(
+        "SELECT order_id, order_status FROM position_current WHERE position_id = ?",
+        (trade_id,),
+    ).fetchone()
+    assert projection["order_id"] == "ord-red-preserved"
+    assert projection["order_status"] == "sell_pending"
+    assert conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? AND side = 'SELL'",
+        (trade_id,),
+    ).fetchone()[0] == 1
 
 
 def test_market_closed_hold_preserves_last_fresh_monitor_values(conn):

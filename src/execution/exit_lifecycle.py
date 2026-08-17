@@ -4318,19 +4318,292 @@ def _hard_fact_sell_authority_valid(
     )
 
 
-def _red_force_exit_authorized(position: Position, exit_context: ExitContext) -> bool:
-    """Require both the sweep marker and current durable RED/review authority."""
+_RED_FORCE_EXIT = "RED_FORCE_EXIT"
+_RED_FORCE_EXIT_MARKERS = frozenset(
+    {"red_force_exit", "dt2_red_force_exit_sweep_actuated"}
+)
+_RED_TERMINAL_PHASES = frozenset(
+    {
+        LifecyclePhase.ECONOMICALLY_CLOSED.value,
+        LifecyclePhase.SETTLED.value,
+        LifecyclePhase.VOIDED.value,
+        LifecyclePhase.ADMIN_CLOSED.value,
+    }
+)
+
+
+def _red_runtime_position_open(
+    conn: sqlite3.Connection | None,
+    position: Position,
+    *,
+    require_canonical: bool,
+) -> bool:
+    """Require canonical open phase, token identity, and positive residual."""
+
+    if _runtime_state_value(position) in _RED_TERMINAL_PHASES:
+        return False
+    if _positive_decimal(getattr(position, "effective_shares", None)) is None:
+        return False
+    if conn is None:
+        return not require_canonical
+    position_id = str(getattr(position, "trade_id", "") or "")
+    expected_token = _asset_id_for_position(position)
+    try:
+        row = conn.execute(
+            """
+            SELECT phase, direction, token_id, no_token_id, shares,
+                   chain_shares, chain_state
+              FROM position_current
+             WHERE position_id = ?
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if row is None:
+        # A RED runtime read cannot reopen a position without canonical
+        # identity.  ``require_canonical`` remains part of the private API for
+        # callers that distinguish diagnostics, but missing canonical truth is
+        # fail-closed for every authority path.
+        return False
+    if str(_row_value(row, "phase", 0) or "").strip().lower() in _RED_TERMINAL_PHASES:
+        return False
+    canonical_direction = str(_row_value(row, "direction", 1) or "").strip().lower()
+    raw_direction = getattr(position, "direction", "")
+    expected_direction = str(
+        getattr(raw_direction, "value", raw_direction) or ""
+    ).strip().lower()
+    valid_directions = {"buy_yes", "buy_no"}
+    if (
+        canonical_direction not in valid_directions
+        or expected_direction not in valid_directions
+        or canonical_direction != expected_direction
+    ):
+        return False
+    canonical_yes_token = str(_row_value(row, "token_id", 2) or "").strip()
+    canonical_no_token = str(_row_value(row, "no_token_id", 3) or "").strip()
+    selected_token = (
+        canonical_yes_token
+        if canonical_direction == "buy_yes"
+        else canonical_no_token
+    )
+    if not selected_token or not expected_token or expected_token != selected_token:
+        return False
+    canonical_chain_raw = _row_value(row, "chain_shares", 5)
+    if canonical_chain_raw not in (None, ""):
+        from src.contracts.position_truth import has_current_money_risk_chain_state
+
+        if not has_current_money_risk_chain_state(
+            _row_value(row, "chain_state", 6)
+        ):
+            return False
+        return _positive_decimal(canonical_chain_raw) is not None
+    return _positive_decimal(_row_value(row, "shares", 4)) is not None
+
+
+def _red_monitor_provenance_matches(
+    payload: Mapping[str, object],
+) -> bool:
+    validations = {
+        str(value or "").strip()
+        for value in payload.get("applied_validations", []) or []
+    }
+    if not _RED_FORCE_EXIT_MARKERS.issubset(validations):
+        return False
+    if (
+        payload.get("exit_decision_should_exit") is not True
+        or str(payload.get("exit_decision_reason") or "").upper()
+        != _RED_FORCE_EXIT
+        or str(payload.get("exit_decision_trigger") or "").upper()
+        != _RED_FORCE_EXIT
+    ):
+        return False
+    return True
+
+
+def _red_intent_provenance_matches(
+    payload: Mapping[str, object],
+    *,
+    position: Position,
+    event_decision_id: str,
+) -> bool:
+    if str(payload.get("exit_intent_reason") or "").upper() != _RED_FORCE_EXIT:
+        return False
+    if str(payload.get("exit_intent_token_id") or "") != _asset_id_for_position(position):
+        return False
+    intended_shares = _positive_decimal(payload.get("exit_intent_shares"))
+    held_shares = _positive_decimal(getattr(position, "effective_shares", None))
+    if intended_shares is None or held_shares is None or intended_shares < held_shares:
+        return False
+    payload_decision_id = str(payload.get("exit_intent_decision_id") or "")
+    return bool(
+        event_decision_id
+        and payload_decision_id
+        and event_decision_id == payload_decision_id
+    )
+
+
+def _canonical_red_force_exit_provenance(
+    conn: sqlite3.Connection | None,
+    position: Position,
+) -> bool:
+    """Return true only for an open position with exact persisted RED authority."""
+
+    if not _red_runtime_position_open(conn, position, require_canonical=True):
+        return False
+    position_id = str(getattr(position, "trade_id", "") or "")
+
+    def terminal_after(sequence_no: int) -> bool:
+        try:
+            terminal = conn.execute(
+                """
+                SELECT 1
+                  FROM position_events
+                 WHERE position_id = ?
+                   AND env = 'live'
+                   AND sequence_no > ?
+                   AND phase_after IN (
+                       'economically_closed', 'settled', 'voided', 'admin_closed'
+                   )
+                 LIMIT 1
+                """,
+                (position_id, sequence_no),
+            ).fetchone()
+        except sqlite3.Error:
+            return True
+        return terminal is not None
+
+    try:
+        # Normal current path: the position/event index bounds this to the
+        # latest semantic intent.  A newer non-live or malformed intent is
+        # still authoritative evidence that the live handoff is not proven;
+        # do not fall through to an older monitor row in that case.
+        intent_row = conn.execute(
+            """
+            SELECT sequence_no, event_type, source_module, env,
+                   decision_id, phase_after, payload_json
+              FROM position_events INDEXED BY idx_position_events_position_type_sequence
+             WHERE position_id = ?
+               AND event_type = 'EXIT_INTENT'
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+
+    if intent_row is not None:
+        if (
+            str(intent_row["env"] or "") != "live"
+            or str(intent_row["source_module"] or "")
+            != "src.execution.exit_lifecycle"
+            or str(intent_row["phase_after"] or "")
+            in _RED_TERMINAL_PHASES
+            or terminal_after(int(intent_row["sequence_no"]))
+        ):
+            return False
+        try:
+            decoded_payload = json.loads(str(intent_row["payload_json"] or "{}"))
+        except (TypeError, ValueError):
+            decoded_payload = {}
+        payload = decoded_payload if isinstance(decoded_payload, Mapping) else {}
+        return _red_intent_provenance_matches(
+            payload,
+            position=position,
+            event_decision_id=str(intent_row["decision_id"] or ""),
+        )
+
+    # Wellington compatibility: historical RED monitor decisions predate the
+    # semantic EXIT_INTENT event.  This recovery is deliberately secondary and
+    # bounded to an open canonical live RED position.
+    try:
+        current = conn.execute(
+            """
+            SELECT exit_reason, phase
+              FROM position_current
+             WHERE position_id = ?
+             LIMIT 1
+            """,
+            (position_id,),
+        ).fetchone()
+        if (
+            current is None
+            or str(current["exit_reason"] or "").upper() != _RED_FORCE_EXIT
+            or str(current["phase"] or "").lower() in _RED_TERMINAL_PHASES
+        ):
+            return False
+        monitor_row = conn.execute(
+            """
+            SELECT sequence_no, event_type, source_module, env,
+                   phase_after, payload_json
+              FROM position_events INDEXED BY idx_position_events_position_type_sequence
+             WHERE position_id = ?
+               AND event_type = 'MONITOR_REFRESHED'
+               AND source_module = 'src.engine.cycle_runtime'
+               AND json_valid(payload_json)
+               AND json_extract(payload_json, '$.exit_decision_should_exit') = 1
+               AND UPPER(COALESCE(json_extract(
+                   payload_json, '$.exit_decision_reason'
+               ), '')) = ?
+               AND UPPER(COALESCE(json_extract(
+                   payload_json, '$.exit_decision_trigger'
+               ), '')) = ?
+               AND EXISTS (
+                   SELECT 1 FROM json_each(payload_json, '$.applied_validations')
+                    WHERE value = 'red_force_exit'
+               )
+               AND EXISTS (
+                   SELECT 1 FROM json_each(payload_json, '$.applied_validations')
+                    WHERE value = 'dt2_red_force_exit_sweep_actuated'
+               )
+             ORDER BY sequence_no DESC
+             LIMIT 1
+            """,
+            (position_id, _RED_FORCE_EXIT, _RED_FORCE_EXIT),
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    if (
+        monitor_row is None
+        or str(monitor_row["env"] or "") != "live"
+        or terminal_after(int(monitor_row["sequence_no"]))
+    ):
+        return False
+    try:
+        decoded_payload = json.loads(str(monitor_row["payload_json"] or "{}"))
+    except (TypeError, ValueError):
+        decoded_payload = {}
+    payload = decoded_payload if isinstance(decoded_payload, Mapping) else {}
+    return _red_monitor_provenance_matches(payload)
+
+
+def _red_force_exit_authorized(
+    position: Position,
+    exit_context: ExitContext,
+    *,
+    conn: sqlite3.Connection | None = None,
+) -> bool:
+    """Authorize RED from current RED or an exact, still-open RED handoff.
+
+    The current risk level authorizes a new sweep. Once the sweep's exact
+    decision is canonical, a later RiskGuard read must not revoke that exit
+    obligation. Caller strings alone never grant the emergency exemption.
+    """
 
     if (
         str(getattr(position, "exit_reason", "") or "").strip().lower()
         != "red_force_exit"
-        or str(exit_context.exit_reason or "").upper() != "RED_FORCE_EXIT"
+        or str(exit_context.exit_reason or "").upper() != _RED_FORCE_EXIT
     ):
         return False
-    from src.riskguard.risk_level import RiskLevel
-    from src.riskguard.riskguard import get_current_level
-
-    return get_current_level() == RiskLevel.RED
+    if not _red_runtime_position_open(conn, position, require_canonical=False):
+        return False
+    # Both current RED and a persisted handoff must prove canonical live
+    # provenance.  The later RiskLevel read is therefore never an authority
+    # downgrade or a row-missing fallback.
+    return _canonical_red_force_exit_provenance(conn, position)
 
 
 def is_exit_cooldown_active(position: Position) -> bool:
@@ -5087,7 +5360,6 @@ def _mark_exit_dust_hold(
     normalized_error = (error or "below_min_order_size")[:500]
     local_shares_before: float | None = None
     chain_projection_changed = False
-    projection_changed = False
     if chain_balance_units is not None and chain_balance_shares is not None:
         local_shares_before, chain_projection_changed = _sync_position_to_chain_dust(
             position,
@@ -5095,18 +5367,14 @@ def _mark_exit_dust_hold(
             chain_balance_shares=chain_balance_shares,
             asset_id=asset_id,
         )
-        projection_changed = chain_projection_changed
         normalized_error = (getattr(position, "last_exit_error", "") or normalized_error)[:500]
     already_held = (
         str(getattr(position, "exit_state", "") or "") == "backoff_exhausted"
         and str(getattr(position, "exit_reason", "") or "") == str(reason or "")
     )
     _mark_pending_exit(position)
-    old_order_status = str(getattr(position, "order_status", "") or "")
     position.exit_state = "backoff_exhausted"
     position.order_status = "backoff_exhausted"
-    if old_order_status != "backoff_exhausted":
-        projection_changed = True
     position.next_exit_retry_at = ""
     position.exit_reason = reason
     position.last_exit_error = normalized_error
@@ -5295,7 +5563,7 @@ def _record_exit_intent_before_execution_gates(
     conn: sqlite3.Connection | None,
     position: Position,
     exit_intent: ExitIntent,
-) -> None:
+) -> bool:
     """Persist the semantic exit decision before executable-liquidity gates.
 
     Snapshot, liquidity, collateral, and venue checks are execution facts.  The
@@ -5306,16 +5574,55 @@ def _record_exit_intent_before_execution_gates(
     _mark_pending_exit(position)
     position.exit_state = "exit_intent"
     position.order_status = "exit_intent"
-    _dual_write_canonical_pending_exit_if_available(
-        conn,
-        position,
-        reason=exit_intent.reason or "EXIT_INTENT",
-        error="",
-        event_type="EXIT_INTENT",
-        extra_payload=_exit_intent_audit_payload(exit_intent),
-        decision_id=exit_intent.decision_id or None,
-    )
-    _commit_exit_write_boundary(conn, stage="exit_intent")
+    active_order_id = str(getattr(position, "last_exit_order_id", "") or "")
+    try:
+        canonical_written = _dual_write_canonical_pending_exit_if_available(
+            conn,
+            position,
+            reason=exit_intent.reason or "EXIT_INTENT",
+            error="",
+            event_type="EXIT_INTENT",
+            extra_payload=_exit_intent_audit_payload(exit_intent),
+            decision_id=exit_intent.decision_id or None,
+        )
+        if not canonical_written:
+            logger.warning(
+                "EXIT_INTENT persistence failed before execution for %s",
+                getattr(position, "trade_id", ""),
+            )
+            return False
+        if active_order_id and conn is not None:
+            # transition_phase intentionally clears order_id for a new intent.
+            # An already-adopted SELL is a single-flight fact, not a new order;
+            # restore its identity in the same transaction so the durable
+            # semantic intent cannot orphan or duplicate the active command.
+            conn.execute(
+                """
+                UPDATE position_current
+                   SET order_id = ?,
+                       order_status = CASE
+                           WHEN order_status IN ('sell_pending', 'sell_placed')
+                           THEN order_status
+                           ELSE 'sell_pending'
+                       END
+                 WHERE position_id = ?
+                """,
+                (active_order_id, str(getattr(position, "trade_id", "") or "")),
+            )
+        if not _commit_exit_write_boundary(conn, stage="exit_intent"):
+            logger.warning(
+                "EXIT_INTENT commit failed before execution for %s",
+                getattr(position, "trade_id", ""),
+            )
+            return False
+    except Exception as exc:  # noqa: BLE001 - fail closed before venue I/O.
+        logger.warning(
+            "EXIT_INTENT persistence raised before execution for %s: %s",
+            getattr(position, "trade_id", ""),
+            exc,
+        )
+        return False
+    return True
 
 
 def _exit_intent_audit_payload(exit_intent: ExitIntent) -> dict[str, object]:
@@ -5479,7 +5786,33 @@ def execute_exit(
     Live mode: place sell order, check fill, retry on failure.
     NEVER close a live position without confirmed fill.
     """
-    is_red_force_exit = _red_force_exit_authorized(position, exit_context)
+    exit_intent = exit_intent or build_exit_intent(position, exit_context)
+    _validate_exit_intent(position, exit_context, exit_intent)
+    is_red_force_exit = _red_force_exit_authorized(
+        position,
+        exit_context,
+        conn=conn,
+    )
+    if is_red_force_exit:
+        active_exit = _active_exit_sell_for_lock(
+            conn,
+            position,
+            token_id=exit_intent.token_id,
+            clob=clob,
+        )
+        if active_exit is not None:
+            return _adopt_active_exit_sell(
+                position,
+                active_exit,
+                conn=conn,
+                reason=f"{exit_context.exit_reason} [ACTIVE_EXIT_SELL_IN_FLIGHT]",
+            )
+        if not _record_exit_intent_before_execution_gates(
+            conn,
+            position,
+            exit_intent,
+        ):
+            return "exit_blocked: exit_intent_persistence_failed"
     # PR-S1 Bug #3: block SELL for tokens with unresolved aggregate violations.
     _eff_token_id = (
         position.token_id if getattr(position, "direction", "") == "buy_yes"
@@ -5512,21 +5845,19 @@ def execute_exit(
         retry_reason = f"{exit_context.exit_reason or 'EXIT'} [INCOMPLETE_CONTEXT]"
         _mark_exit_retry(position, reason=retry_reason, error="missing_current_market_price", conn=conn)
         return "exit_blocked: incomplete_context"
-    if not is_red_force_exit and not exit_context.current_market_price_is_fresh:
+    if not exit_context.current_market_price_is_fresh:
         if _exit_context_is_after_settlement_or_market_closed(exit_context):
-            mark_market_closed_hold_to_settlement(
-                position,
-                reason=_market_closed_hold_reason_from_exit_context(exit_context),
-                error="stale_current_market_price_after_settlement",
-                conn=conn,
-            )
-            return "exit_blocked: market_closed_hold_to_settlement"
+            if not is_red_force_exit:
+                mark_market_closed_hold_to_settlement(
+                    position,
+                    reason=_market_closed_hold_reason_from_exit_context(exit_context),
+                    error="stale_current_market_price_after_settlement",
+                    conn=conn,
+                )
+                return "exit_blocked: market_closed_hold_to_settlement"
         retry_reason = f"{exit_context.exit_reason or 'EXIT'} [STALE_MARKET_PRICE]"
         _mark_exit_retry(position, reason=retry_reason, error="stale_current_market_price", conn=conn)
         return "exit_blocked: stale_market_price"
-
-    exit_intent = exit_intent or build_exit_intent(position, exit_context)
-    _validate_exit_intent(position, exit_context, exit_intent)
 
     # Live path: sell order lifecycle
     return _execute_live_exit(
@@ -5542,6 +5873,7 @@ def execute_exit(
         hard_fact_authority=hard_fact_authority,
         global_sell_prefetched_orderbook=global_sell_prefetched_orderbook,
         global_sell_required_snapshot_id=global_sell_required_snapshot_id,
+        exit_intent_already_recorded=is_red_force_exit,
     )
 
 
@@ -5559,6 +5891,7 @@ def _execute_live_exit(
     hard_fact_authority: object | None,
     global_sell_prefetched_orderbook: Mapping[str, object] | None = None,
     global_sell_required_snapshot_id: str | None = None,
+    exit_intent_already_recorded: bool = False,
 ) -> str:
     """Live exit: place sell, check fill, retry on failure."""
     if conn is not None:
@@ -5684,8 +6017,14 @@ def _execute_live_exit(
             # DRAIN: the adapter must rebuild the closure from its exact receipt.
             # RESET: a subsequent actuation with a matching typed closure clears it.
             return f"exit_blocked: {closure_error}"
-    _record_exit_intent_before_execution_gates(conn, position, exit_intent)
-
+    if not exit_intent_already_recorded:
+        intent_recorded = _record_exit_intent_before_execution_gates(
+            conn,
+            position,
+            exit_intent,
+        )
+        if not intent_recorded:
+            return "exit_blocked: exit_intent_persistence_failed"
     try:
         required_book_hash = (
             global_sell_authority.jit_candidate.executable_sell_curve.book_hash

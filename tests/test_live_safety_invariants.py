@@ -16469,32 +16469,177 @@ def test_collateral_check_fails_closed_on_api_error():
 def test_live_exit_collateral_blocked_goes_to_retry(monkeypatch):
     """Live exit that fails collateral check transitions to retry_pending."""
     from src.riskguard.risk_level import RiskLevel
+    from src.execution import exit_lifecycle
+    from src.execution.collateral import PreparedCollateralSnapshot
+    from src.state.collateral_ledger import CollateralSnapshot, init_collateral_schema
+    from src.state.db import init_schema, init_schema_trade_only
+    from src.engine.lifecycle_events import build_position_current_projection
+    from src.state.projection import upsert_position_current
 
-    pos = _make_position(state="holding")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_collateral_schema(conn)
+    submit_conn = sqlite3.connect(":memory:")
+    submit_conn.row_factory = sqlite3.Row
+    init_schema(submit_conn)
+    init_schema_trade_only(submit_conn)
+    init_collateral_schema(submit_conn)
+
+    pos = _make_position(
+        state="holding",
+        strategy_key="center_buy",
+        condition_id="condition-test",
+        entered_at="2026-08-17T00:00:00+00:00",
+        shares=25.0,
+        chain_shares=25.0,
+        chain_state="synced",
+    )
     pos.exit_reason = "red_force_exit"
     portfolio = _make_portfolio(pos)
-    clob = _make_clob(balance=0.01)  # Not enough
+    clob = _make_clob(balance=100.0)
+    red_monitor_payload = json.dumps(
+        {
+            "exit_decision_should_exit": True,
+            "exit_decision_reason": "RED_FORCE_EXIT",
+            "exit_decision_trigger": "RED_FORCE_EXIT",
+            "applied_validations": [
+                "red_force_exit",
+                "dt2_red_force_exit_sweep_actuated",
+            ],
+        },
+        sort_keys=True,
+    )
+    for canonical_conn in (conn, submit_conn):
+        upsert_position_current(
+            canonical_conn, build_position_current_projection(pos)
+        )
+        canonical_conn.execute(
+            "UPDATE position_current SET exit_reason = 'red_force_exit' "
+            "WHERE position_id = ?",
+            (pos.trade_id,),
+        )
+        canonical_conn.execute(
+            """
+            INSERT INTO position_events (
+                event_id, position_id, event_version, sequence_no, event_type,
+                occurred_at, phase_before, phase_after, strategy_key,
+                source_module, payload_json, env
+            ) VALUES (?, ?, 1, 1, 'MONITOR_REFRESHED', ?, 'active', 'active',
+                      'center_buy', 'src.engine.cycle_runtime', ?, 'live')
+            """,
+            (
+                f"{pos.trade_id}:red-monitor:{id(canonical_conn)}",
+                pos.trade_id,
+                datetime.now(timezone.utc).isoformat(),
+                red_monitor_payload,
+            ),
+        )
+        canonical_conn.commit()
+
+    class NonClosingConnection:
+        def __init__(self, delegate):
+            self.delegate = delegate
+
+        def __getattr__(self, name):
+            return getattr(self.delegate, name)
+
+        def close(self):
+            return None
+
+    submit_handle = NonClosingConnection(submit_conn)
     monkeypatch.setattr(
         "src.riskguard.riskguard.get_current_level",
         lambda: RiskLevel.RED,
     )
-
-    outcome = execute_exit(
-        portfolio=portfolio,
-        position=pos,
-        exit_context=ExitContext(
-            exit_reason="RED_FORCE_EXIT",
-            current_market_price=0.45,
-            current_market_price_is_fresh=False,
-            best_bid=0.45,
-        ),
-        clob=clob,
+    monkeypatch.setattr(
+        "src.control.cutover_guard.assert_submit_allowed",
+        lambda *_args, **_kwargs: None,
     )
+    monkeypatch.setattr(
+        "src.control.heartbeat_supervisor.assert_heartbeat_allows_order_type",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "src.control.ws_gap_guard.assert_ws_allows_submit",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_exit_execution_authority_deadline_error",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *_args, **_kwargs: {
+            "executable_snapshot_id": "collateral-boundary-snapshot",
+            "executable_snapshot_min_tick_size": "0.01",
+            "executable_snapshot_min_order_size": "0.01",
+            "executable_snapshot_neg_risk": False,
+            "executable_snapshot_orderbook_top_bid": "0.45",
+        },
+    )
+    insufficient_snapshot = CollateralSnapshot(
+        pusd_balance_micro=1_000_000,
+        pusd_allowance_micro=1_000_000,
+        usdc_e_legacy_balance_micro=0,
+        ctf_token_balances={},
+        ctf_token_allowances={},
+        reserved_pusd_for_buys_micro=0,
+        reserved_tokens_for_sells={},
+        captured_at=datetime.now(timezone.utc),
+        authority_tier="CHAIN",
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._refresh_exit_collateral_snapshot_for_submit",
+        lambda *_args, **_kwargs: PreparedCollateralSnapshot(
+            snapshot=insufficient_snapshot,
+            persist=True,
+            action="exit_submit",
+        ),
+    )
+    monkeypatch.setattr(
+        "src.execution.executor.get_trade_connection_with_world_required",
+        lambda: submit_handle,
+    )
+    monkeypatch.setattr(
+        "src.execution.executor._select_risk_allocator_order_type",
+        lambda *_args, **_kwargs: "GTC",
+    )
+    try:
+        outcome = execute_exit(
+            portfolio=portfolio,
+            position=pos,
+            exit_context=ExitContext(
+                exit_reason="RED_FORCE_EXIT",
+                current_market_price=0.45,
+                current_market_price_is_fresh=True,
+                best_bid=0.45,
+            ),
+            clob=clob,
+            conn=conn,
+        )
+    finally:
+        conn.close()
 
-    assert "collateral_blocked" in outcome
+    assert "ctf_tokens_insufficient" in outcome
     assert pos.exit_state == "retry_pending"
-    assert pos.exit_retry_count == 1
+    assert pos.exit_retry_count == 0  # pre-submit collateral failure does not consume budget
     assert pos in portfolio.positions  # NOT closed
+    assert submit_conn.execute(
+        "SELECT COUNT(*) FROM venue_commands WHERE position_id = ? AND side = 'SELL'",
+        (pos.trade_id,),
+    ).fetchone()[0] == 0
+    assert submit_conn.execute(
+        "SELECT COUNT(*) FROM collateral_reservations WHERE released_at IS NULL"
+    ).fetchone()[0] == 0
+    assert not any(
+        call[0].split(".", 1)[0] in {"place_order", "post_order", "create_order"}
+        for call in clob.mock_calls
+    )
+    submit_conn.close()
 
 
 def test_deferred_confirmed_fill_logs_last_monitor_best_bid(tmp_path):
@@ -18259,58 +18404,47 @@ def test_spoofed_red_context_without_sweep_marker_cannot_reach_venue(monkeypatch
     assert outcome == "exit_blocked: global_capital_optimal_sell_intent_required"
 
 
-def test_cycle_normalized_current_red_marker_bypasses_global_auction_authority(monkeypatch):
-    """The cycle's upper-case RED marker retains the emergency exit path."""
+def test_current_red_marker_still_fails_closed_on_stale_market(monkeypatch):
+    """RED authority preserves the obligation, but never bypasses freshness."""
 
-    from src.execution import exit_lifecycle
     from src.riskguard.risk_level import RiskLevel
+    from src.state.collateral_ledger import init_collateral_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
-    pos = _make_position(state="holding")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_collateral_schema(conn)
+    pos = _make_position(
+        state="holding",
+        strategy_key="center_buy",
+        condition_id="condition-test",
+    )
     pos.exit_reason = "RED_FORCE_EXIT"
     monkeypatch.setattr(
         "src.riskguard.riskguard.get_current_level",
         lambda: RiskLevel.RED,
     )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "_latest_or_capture_exit_snapshot_context",
-        lambda *_args, **_kwargs: {},
-    )
-    monkeypatch.setattr(
-        exit_lifecycle,
-        "check_sell_collateral",
-        lambda *_args, **_kwargs: (True, ""),
-    )
-    submitted = []
-
-    def place(**kwargs):
-        submitted.append(kwargs)
-        return exit_lifecycle.OrderResult(
-            trade_id=pos.trade_id,
-            status="pending",
-            order_id="red-sell-order",
-            external_order_id="red-sell-order",
-        )
-
-    monkeypatch.setattr(exit_lifecycle, "place_sell_order", place)
-
-    class Clob:
-        @staticmethod
-        def get_order_status(_order_id):
-            return {"status": "OPEN"}
-
     context = ExitContext(
         exit_reason="RED_FORCE_EXIT",
         current_market_price=0.45,
         current_market_price_is_fresh=False,
         best_bid=0.45,
     )
-    outcome = execute_exit(_make_portfolio(pos), pos, context, clob=Clob())
+    try:
+        outcome = execute_exit(
+            _make_portfolio(pos),
+            pos,
+            context,
+            clob=object(),
+            conn=conn,
+        )
+    finally:
+        conn.close()
 
-    assert outcome == "sell_pending: order=red-sell-order, status=OPEN"
-    assert len(submitted) == 1
-    assert submitted[0]["shares"] == pos.effective_shares
-    assert submitted[0]["exact_limit_price"] is None
+    assert outcome == "exit_blocked: stale_market_price"
+    assert pos.exit_state == "retry_pending"
 
 
 # ---- Autonomous Discovery Tests ----
@@ -19168,8 +19302,6 @@ def test_cross_process_monitor_preempts_background_apply_without_partial_commit(
 
 def test_process_death_resets_holder_and_waiter_state(tmp_path):
     """A dead holder releases the kernel gate to an already queued MONITOR."""
-    from src.state.write_coordinator import DBIdentity, WriteCoordinator, WritePriority
-
     db_path = tmp_path / "turnstile-process-death.db"
     with sqlite3.connect(db_path) as conn:
         conn.execute("PRAGMA journal_mode=WAL")
