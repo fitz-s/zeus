@@ -1133,7 +1133,7 @@ def test_ecmwf_source_clock_captures_anchor_before_single_runs_fanout(monkeypatc
                 "quota_critical": True,
             }
             return {
-                "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
+                "status": "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED",
                 "written_manifest_count": 0,
             }
         calls.append("anchor")
@@ -1154,6 +1154,8 @@ def test_ecmwf_source_clock_captures_anchor_before_single_runs_fanout(monkeypatc
         assert calls == [
             "probe",
             "held_anchor",
+            "held_fusion_reseed",
+            "held_cycle_reseed",
             "anchor",
             "anchor_fusion_reseed",
             "anchor_cycle_reseed",
@@ -1169,17 +1171,28 @@ def test_ecmwf_source_clock_captures_anchor_before_single_runs_fanout(monkeypatc
         "_download_bayes_precision_fusion_source_clock_raw_inputs_if_needed",
         _scoped,
     )
+    def _fusion_reseed(_cfg, **kwargs):
+        calls.append(
+            "held_fusion_reseed" if kwargs.get("scopes") else "anchor_fusion_reseed"
+        )
+        return {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1}
+
     monkeypatch.setattr(
         prod,
         "_enqueue_fusion_upgrade_reseeds_if_needed",
-        lambda _cfg, **_kwargs: calls.append("anchor_fusion_reseed")
-        or {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1},
+        _fusion_reseed,
     )
+
+    def _cycle_reseed(_cfg, **kwargs):
+        calls.append(
+            "held_cycle_reseed" if kwargs.get("scopes") else "anchor_cycle_reseed"
+        )
+        return {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1}
+
     monkeypatch.setattr(
         prod,
         "_enqueue_cycle_advance_reseeds_if_needed",
-        lambda _cfg: calls.append("anchor_cycle_reseed")
-        or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1},
+        _cycle_reseed,
     )
     monkeypatch.setattr(
         source_clock_probe,
@@ -1197,12 +1210,18 @@ def test_ecmwf_source_clock_captures_anchor_before_single_runs_fanout(monkeypatc
         "cycle_advance_seeds_enqueued": 1,
     }
     assert result["source_clock_held_anchor_download"] == {
-        "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
+        "status": "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED",
+        "fusion_upgrade_status": "FUSION_UPGRADE_TRIGGER",
+        "fusion_upgrade_seeds_enqueued": 1,
+        "cycle_advance_status": "CYCLE_ADVANCE_TRIGGER",
+        "cycle_advance_seeds_enqueued": 1,
     }
     assert result["reseed_maintenance_status"] == "SOURCE_ANCHOR_RESEEDS_PUBLISHED"
     assert calls == [
         "probe",
         "held_anchor",
+        "held_fusion_reseed",
+        "held_cycle_reseed",
         "anchor",
         "anchor_fusion_reseed",
         "anchor_cycle_reseed",

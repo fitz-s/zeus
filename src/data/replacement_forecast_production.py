@@ -659,6 +659,60 @@ def _probe_resolved_bayes_precision_fusion_extras_cycle() -> datetime | None:
     return newest_complete_cycle(availability)
 
 
+def _critical_scopes_missing_current_anchor(
+    forecast_db: Path,
+    scopes: Sequence[tuple[str, str, str]],
+    cycle: datetime,
+) -> tuple[tuple[str, str, str], ...] | None:
+    """Return exact critical scopes without a canonical anchor at ``cycle``."""
+
+    from src.data.replacement_forecast_source_run_identity import (  # noqa: PLC0415
+        expected_replacement_dependency_identity_by_role,
+    )
+    from src.state.db import _connect  # noqa: PLC0415
+
+    try:
+        conn = _connect(forecast_db, write_class=None)
+        conn.execute("PRAGMA query_only=ON")
+        try:
+            missing: list[tuple[str, str, str]] = []
+            cycle_iso = cycle.astimezone(timezone.utc).isoformat()
+            for city, target_date, metric in scopes:
+                identity = expected_replacement_dependency_identity_by_role(metric)[
+                    "openmeteo_ifs9_anchor"
+                ]
+                row = conn.execute(
+                    """
+                    SELECT 1
+                    FROM raw_forecast_artifacts
+                    WHERE source_id = ?
+                      AND product_id = ?
+                      AND data_version = ?
+                      AND source_cycle_time = ?
+                      AND json_extract(artifact_metadata_json, '$.city') = ?
+                      AND json_extract(artifact_metadata_json, '$.target_date') = ?
+                      AND json_extract(artifact_metadata_json, '$.metric') = ?
+                    LIMIT 1
+                    """,
+                    (
+                        identity.source_id,
+                        identity.product_id,
+                        identity.data_version,
+                        cycle_iso,
+                        city,
+                        target_date,
+                        metric,
+                    ),
+                ).fetchone()
+                if row is None:
+                    missing.append((city, target_date, metric))
+            return tuple(missing)
+        finally:
+            conn.close()
+    except Exception:
+        return None
+
+
 @_single_current_target_download
 def _download_replacement_forecast_current_targets_if_needed(
     cfg: dict[str, object],
@@ -731,6 +785,27 @@ def _download_replacement_forecast_current_targets_if_needed(
                     "day0_window/pending_exit scopes: "
                     + ",".join("/".join(scope) for scope in unauthorized)
                 )
+            missing_critical_scopes = _critical_scopes_missing_current_anchor(
+                Path(str(forecast_db)),
+                required_scopes,
+                available_cycle,
+            )
+            if missing_critical_scopes is None:
+                raise RuntimeError("critical current-target anchor coverage unreadable")
+            if not missing_critical_scopes:
+                _close_current_target_bucket_pool()
+                return {
+                    "status": "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED",
+                    "available_cycle": available_cycle.isoformat(),
+                    "downloaded_cycle": (
+                        None
+                        if downloaded_cycle is None
+                        else downloaded_cycle.isoformat()
+                    ),
+                    "target_count": len(required_scopes),
+                    "written_manifest_count": 0,
+                }
+            required_scopes = missing_critical_scopes
     if quota_critical and required_scopes is None:
         raise ValueError("critical current-target quota requires explicit scopes")
     cycle_targets_have_current_manifests = (

@@ -515,6 +515,46 @@ def test_nonheld_scope_cannot_borrow_critical_quota(
     assert calls == []
 
 
+def test_covered_critical_scope_does_not_rewrite_anchor(
+    tmp_path, monkeypatch
+) -> None:
+    db = _make_db(
+        tmp_path,
+        {"openmeteo_ecmwf_ifs_9km": CURRENT_CYCLE_ISO},
+    )
+    scope = ("Dallas", "2026-08-17", "high")
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        UPDATE raw_forecast_artifacts
+        SET product_id = 'openmeteo_ecmwf_ifs9_deterministic_anchor_v1',
+            data_version = 'openmeteo_ecmwf_ifs9_anchor_localday_high',
+            artifact_metadata_json = ?
+        WHERE source_id = 'openmeteo_ecmwf_ifs_9km'
+        """,
+        (json.dumps({"city": "Dallas", "target_date": "2026-08-17", "metric": "high"}),),
+    )
+    conn.commit()
+    conn.close()
+    calls: list = []
+    _wire(monkeypatch, plan=_PlanStub(ready=False), calls=calls)
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda: {scope: 0},
+    )
+
+    report = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path),
+        required_scopes=(scope,),
+        quota_critical=True,
+    )
+
+    assert report["status"] == "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED"
+    assert report["target_count"] == 1
+    assert report["written_manifest_count"] == 0
+    assert calls == []
+
+
 def test_critical_quota_context_propagates_into_anchor_worker(
     monkeypatch,
 ) -> None:

@@ -3047,12 +3047,16 @@ def _replacement_availability_poll_tick():
                 required_scopes=held_anchor_scopes,
                 quota_critical=True,
             )
-            if (
-                isinstance(source_clock_held_anchor_report, dict)
-                and int(
-                    source_clock_held_anchor_report.get("written_manifest_count") or 0
-                )
+            held_anchor_status = (
+                str(source_clock_held_anchor_report.get("status") or "")
+                if isinstance(source_clock_held_anchor_report, dict)
+                else ""
+            )
+            if isinstance(source_clock_held_anchor_report, dict) and (
+                int(source_clock_held_anchor_report.get("written_manifest_count") or 0)
                 > 0
+                or held_anchor_status
+                == "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED"
             ):
                 held_manifests = tuple(
                     str(path)

@@ -4879,6 +4879,12 @@ the extras may already have committed before quota pressure or process reload,
 while the matching anchor is still missing. Its scoped manifest receipt feeds
 the existing reseed triggers before the ordinary broad anchor pass; BPF
 cooldown cannot postpone held-capital probability to the next quota day.
+Critical recovery is idempotent at the canonical artifact identity: a scope
+already holding the current-cycle anchor is not downloaded or rewritten.
+Coverage instead triggers the scoped reseed with a fresh causal computation
+cut. This prevents a recurring poll from advancing immutable
+`captured_at/source_available_at` on the same evidence and turning the current
+anchor into a perpetual future fact.
 
 SCOPE is the exact `(city, target_date, temperature_metric)` intersection of a
 fresh source commit and canonical held Day0/pending-exit positions. DRAIN is the
