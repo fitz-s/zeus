@@ -5635,6 +5635,48 @@ def test_monitor_debt_yields_before_runtime_setup_and_releases_reactor_lock(
     assert not lock.locked()
 
 
+def test_reserved_monitor_completion_reaches_runtime_setup_under_monitor_pressure(
+    monkeypatch,
+):
+    import src.events.reactor as reactor_module
+    import src.main as main
+    import src.state.db as db
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+
+    class RuntimeSetupReached(RuntimeError):
+        pass
+
+    monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(
+        reactor_module,
+        "_durable_exact_held_sell_completion_pending",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        reactor_module,
+        "_paused_entry_wake_should_park",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: (_ for _ in ()).throw(RuntimeSetupReached()),
+    )
+
+    reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    try:
+        with pytest.raises(RuntimeSetupReached):
+            reactor_module.run_edli_event_reactor_cycle(
+                active_lock=threading.Lock(),
+                held_position_monitor_debt_pending=lambda: True,
+            )
+    finally:
+        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+
+
 @pytest.mark.parametrize("preemption", (False, True), ids=("deadline", "monitor"))
 def test_reactor_construct_slow_sql_is_bounded_and_releases_resources(
     monkeypatch,

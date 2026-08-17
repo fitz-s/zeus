@@ -7764,7 +7764,13 @@ def run_edli_event_reactor_cycle(
             held_sell_completion_cycle
             or paused_forecast_held_auction
             or committed_day0_wake
+            or _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
         ):
+            # SCOPE: only the already-reserved fairness completion cut. DRAIN:
+            # the existing bounded cancellation probe may still yield once to
+            # current monitor debt, otherwise one terminal global cut runs.
+            # RESET: _settle_global_auction_monitor_fairness clears the token
+            # only after that cut reaches a non-cancelled terminal result.
             return False
         if not _held_position_monitor_preemption_pending(
             held_position_monitor_pending,
