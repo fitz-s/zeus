@@ -4289,10 +4289,13 @@ class TestStrategyBrierMinSampleContinued:
         assert details["brier_actuating_sample_size"] == 11
         assert details["brier_evidence_ready_sample_size"] == 0
         assert details["portfolio_brier_thin_sample_no_verdict"] is True
-        assert details["recommended_strategy_gates"] == [
-            "day0_nowcast_entry",
-            "forecast_qkernel_entry",
-        ]
+        assert details["recommended_strategy_gates"] == []
+        assert details["market_relative_alpha_observation"].startswith(
+            "market_relative_alpha_unproven("
+        )
+        assert details["day0_market_relative_alpha_observation"].startswith(
+            "market_relative_alpha_unproven("
+        )
         assert level == RiskLevel.GREEN
         assert risk_row["level"] == RiskLevel.GREEN.value
 
@@ -4466,6 +4469,7 @@ class TestStrategyBrierMinSampleContinued:
             "expected_thin",
             "expected_status",
             "expected_reason",
+            "expected_gates",
         ),
         [
             (
@@ -4475,6 +4479,7 @@ class TestStrategyBrierMinSampleContinued:
                 True,
                 "not_applicable",
                 "portfolio_brier_thin_sample_no_verdict",
+                [],
             ),
             (
                 10,
@@ -4483,6 +4488,7 @@ class TestStrategyBrierMinSampleContinued:
                 False,
                 "localized_red_scope",
                 None,
+                ["forecast_qkernel_entry"],
             ),
         ],
     )
@@ -4496,6 +4502,7 @@ class TestStrategyBrierMinSampleContinued:
         expected_thin,
         expected_status,
         expected_reason,
+        expected_gates,
     ):
         zeus_db = tmp_path / "zeus.db"
         risk_db = tmp_path / "risk_state.db"
@@ -4548,9 +4555,7 @@ class TestStrategyBrierMinSampleContinued:
         assert details["brier_strategy_localization"]["status"] == expected_status
         if expected_reason is not None:
             assert details["brier_strategy_localization"]["reason"] == expected_reason
-        assert details["recommended_strategy_gates"] == [
-            "forecast_qkernel_entry"
-        ]
+        assert details["recommended_strategy_gates"] == expected_gates
         assert level == expected_active_level
         assert row["level"] == expected_active_level.value
 
@@ -5415,7 +5420,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
             f"revision={DAY0_PROBABILITY_SEMANTICS_REVISION})"
         )
 
-    def test_qkernel_alpha_gate_scopes_only_unproven_licensed_revision(self):
+    def test_qkernel_alpha_observation_does_not_gate_unproven_revision(self):
         current = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
         stale = (
             riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
@@ -5456,6 +5461,54 @@ class TestQkernelMarketRelativeAlphaEvidence:
             binding,
             evidence,
         ) == (stale,)
+        assert riskguard_module._market_relative_alpha_rejection_gate_reason(
+            binding,
+            evidence,
+            required_evalue=10.0,
+        ) == (None, ())
+
+    def test_qkernel_alpha_gate_scopes_only_directly_rejected_capital_law(self):
+        current = riskguard_module.CURRENT_EVIDENCE_SEMANTICS_REVISION
+        stale = (
+            riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        )
+        binding = {
+            "status": "ok",
+            "licensed_revisions": [current, stale],
+        }
+        evidence = {
+            "cohorts": [
+                {
+                    "decision_law_id": "executable_min_order_capital_gain_v2",
+                    "probability_semantics_revisions": [current],
+                    "model_over_market_evalue": 1.0,
+                    "independent_cluster_count": 12,
+                    "validated": False,
+                    "rejected": False,
+                },
+                {
+                    "decision_law_id": "executable_min_order_capital_gain_v2",
+                    "probability_semantics_revisions": [stale],
+                    "model_over_market_evalue": 0.05,
+                    "independent_cluster_count": 12,
+                    "validated": False,
+                    "rejected": True,
+                },
+            ]
+        }
+
+        reason, revisions = (
+            riskguard_module._market_relative_alpha_rejection_gate_reason(
+                binding,
+                evidence,
+                required_evalue=10.0,
+            )
+        )
+
+        assert revisions == (stale,)
+        assert reason is not None
+        assert "status=rejected" in reason
+        assert f"revision={stale})" in reason
 
     def test_superseded_accuracy_cohort_cannot_unlock_capital_gain_law(self):
         from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
@@ -6086,13 +6139,15 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert risk_row["level"] == RiskLevel.GREEN.value
         assert details["market_relative_alpha_evidence"]["rejected"] is True
         assert details["market_relative_alpha_admission_role"] == (
-            "revision_scoped_entry_gate"
+            "revision_scoped_rejection_gate"
         )
-        assert details["market_relative_alpha_gate_confirmation"] == {
-            "forecast_qkernel_entry": True
-        }
+        assert details["market_relative_alpha_gate_reason"] is None
+        assert details["market_relative_alpha_observation"].startswith(
+            "market_relative_alpha_unproven("
+        )
+        assert details["market_relative_alpha_gate_confirmation"] == {}
         assert details["day0_market_relative_alpha_admission_role"] == (
-            "revision_scoped_entry_gate"
+            "revision_scoped_rejection_gate"
         )
         assert details["day0_market_relative_alpha_gate_required"] is False
         assert details["day0_market_relative_alpha_gate_confirmation"] == {}
@@ -6104,10 +6159,9 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "expired",
             "legacy_day0_alpha_gate",
         )
-        assert gate_state["forecast_qkernel_entry"][0] == "active"
-        assert gate_state["forecast_qkernel_entry"][1].startswith(
-            "market_relative_alpha_unproven("
-            "status=no_evidence,model_evalue=0.0"
+        assert gate_state["forecast_qkernel_entry"] == (
+            "expired",
+            "legacy_alpha_gate",
         )
 
 

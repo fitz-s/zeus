@@ -3805,6 +3805,56 @@ def _market_relative_alpha_unproven_revisions(
     return tuple(revision for revision in revisions if revision not in validated)
 
 
+def _market_relative_alpha_rejected_revisions(
+    semantics_binding: Mapping[str, object],
+    causal_alpha_evidence: Mapping[str, object],
+) -> tuple[str, ...]:
+    """Return licensed revisions with direct capital-law rejection evidence."""
+
+    licensed = set(
+        _market_relative_alpha_unproven_revisions(
+            semantics_binding,
+            {"cohorts": []},
+        )
+    )
+    rejected = {
+        str(revision).strip()
+        for cohort in (causal_alpha_evidence.get("cohorts") or [])
+        if isinstance(cohort, Mapping)
+        and cohort.get("decision_law_id")
+        == "executable_min_order_capital_gain_v2"
+        and cohort.get("rejected") is True
+        for revision in cohort.get("probability_semantics_revisions", [])
+        if str(revision).strip()
+    }
+    return tuple(sorted(licensed.intersection(rejected)))
+
+
+def _market_relative_alpha_rejection_gate_reason(
+    semantics_binding: Mapping[str, object],
+    causal_alpha_evidence: Mapping[str, object],
+    *,
+    required_evalue: float,
+) -> tuple[str | None, tuple[str, ...]]:
+    """Gate only an explicitly rejected capital law, never missing history."""
+
+    revisions = _market_relative_alpha_rejected_revisions(
+        semantics_binding,
+        causal_alpha_evidence,
+    )
+    if not revisions:
+        return None, ()
+    reason = _market_relative_alpha_gate_reason(
+        {
+            "status": semantics_binding.get("status"),
+            "licensed_revisions": revisions,
+        },
+        causal_alpha_evidence,
+        required_evalue=required_evalue,
+    )
+    return reason, revisions
+
+
 # Below this many settled observations a per-strategy Brier score is noise,
 # not a verdict (a single loss at p=0.6 scores 0.36 > brier_red). Thin
 # Thin rows remain visible in raw portfolio telemetry and the loss gates. They
@@ -4886,14 +4936,22 @@ def _tick_once() -> RiskLevel:
                 as_of=market_relative_alpha_as_of,
             )
         )
-        qkernel_market_relative_alpha_gate_reason = (
+        qkernel_market_relative_alpha_observation = (
             _market_relative_alpha_gate_reason(
                 probability_semantics_binding,
                 qkernel_market_relative_alpha_gate_evidence,
                 required_evalue=market_relative_alpha_evalue,
             )
         )
-        qkernel_market_relative_alpha_gate_revisions = (
+        (
+            qkernel_market_relative_alpha_gate_reason,
+            qkernel_market_relative_alpha_gate_revisions,
+        ) = _market_relative_alpha_rejection_gate_reason(
+            probability_semantics_binding,
+            qkernel_market_relative_alpha_gate_evidence,
+            required_evalue=market_relative_alpha_evalue,
+        )
+        qkernel_market_relative_alpha_unproven_revisions = (
             _market_relative_alpha_unproven_revisions(
                 probability_semantics_binding,
                 qkernel_market_relative_alpha_gate_evidence,
@@ -4933,14 +4991,16 @@ def _tick_once() -> RiskLevel:
                 required_evalue=market_relative_alpha_evalue,
             )
         )
-        day0_market_relative_alpha_gate_revisions = (
-            _market_relative_alpha_unproven_revisions(
-                day0_probability_semantics_binding,
-                day0_market_relative_alpha_evidence,
-            )
+        (
+            day0_market_relative_alpha_gate_reason,
+            day0_market_relative_alpha_gate_revisions,
+        ) = _market_relative_alpha_rejection_gate_reason(
+            day0_probability_semantics_binding,
+            day0_market_relative_alpha_evidence,
+            required_evalue=market_relative_alpha_evalue,
         )
         day0_market_relative_alpha_gate_required = (
-            day0_market_relative_alpha_observation is not None
+            day0_market_relative_alpha_gate_reason is not None
         )
         probability_identity_ready_count = sum(
             bool(row.get("probability_identity_ready", False))
@@ -5090,11 +5150,11 @@ def _tick_once() -> RiskLevel:
         recommended_control_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_reasons: dict[str, list[str]] = {}
         recommended_strategy_gate_scopes: dict[str, set[str]] = {}
-        # A current executable score is not capital authority by itself: q can
-        # be confidently wrong. Require walk-forward, revision-bound evidence
-        # that the model beats the executable market after costs. The durable
-        # action is revision-scoped, so a failed cohort cannot poison a new law
-        # and a new law cannot inherit proof it did not earn.
+        # Current q/book/wealth economics are the decision authority. Walk-forward
+        # market-relative evidence remains revision-bound, but missing or
+        # inconclusive history cannot create an absorbing no-entry state: doing
+        # so prevents the fills that can ever settle that evidence. Only direct
+        # rejection of the same executable capital law emits an alpha gate.
         probability_semantics_level = RiskLevel.GREEN
         if probability_semantics_binding.get("status") == "unavailable":
             probability_semantics_level = RiskLevel.DATA_DEGRADED
@@ -5113,7 +5173,7 @@ def _tick_once() -> RiskLevel:
             (
                 "day0_nowcast_entry",
                 day0_probability_semantics_binding,
-                day0_market_relative_alpha_observation,
+                day0_market_relative_alpha_gate_reason,
                 day0_market_relative_alpha_gate_revisions,
             ),
         ):
@@ -5594,8 +5654,14 @@ def _tick_once() -> RiskLevel:
                 "market_relative_alpha_gate_reason": (
                     qkernel_market_relative_alpha_gate_reason
                 ),
+                "market_relative_alpha_observation": (
+                    qkernel_market_relative_alpha_observation
+                ),
+                "market_relative_alpha_unproven_revisions": (
+                    qkernel_market_relative_alpha_unproven_revisions
+                ),
                 "market_relative_alpha_admission_role": (
-                    "revision_scoped_entry_gate"
+                    "revision_scoped_rejection_gate"
                 ),
                 "qkernel_market_relative_alpha_shadow": (
                     qkernel_market_relative_alpha_shadow_status
@@ -5610,7 +5676,10 @@ def _tick_once() -> RiskLevel:
                     day0_market_relative_alpha_evidence
                 ),
                 "day0_market_relative_alpha_admission_role": (
-                    "revision_scoped_entry_gate"
+                    "revision_scoped_rejection_gate"
+                ),
+                "day0_market_relative_alpha_gate_reason": (
+                    day0_market_relative_alpha_gate_reason
                 ),
                 "day0_market_relative_alpha_observation": (
                     day0_market_relative_alpha_observation
