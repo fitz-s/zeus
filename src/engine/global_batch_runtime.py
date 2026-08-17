@@ -5096,7 +5096,7 @@ def _market_relative_alpha_shadow_events(
         getattr(proof_candidate, "candidate_id", "") or ""
     )
     proof_action = str(
-        getattr(proof_candidate, "action", "") or ""
+        getattr(proof_candidate, "action", "BUY") or "BUY"
     ).upper()
     proof_execution_mode = _global_candidate_execution_mode(proof_candidate)
     proof_growth = getattr(proof_decision, "expected_growth", None)

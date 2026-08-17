@@ -34020,9 +34020,14 @@ def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
     )
 
     def proof_for(evaluation: SimpleNamespace) -> SimpleNamespace:
+        # Live BUY candidates predate the explicit action field and rely on the
+        # solver's canonical BUY default. The shadow writer must preserve that
+        # runtime shape while matching the candidate id back to the gated row.
+        proof_candidate_fields = dict(vars(evaluation))
+        proof_candidate_fields.pop("action", None)
         return SimpleNamespace(
             decision=SimpleNamespace(
-                candidate=evaluation,
+                candidate=SimpleNamespace(**proof_candidate_fields),
                 shares=Decimal("5"),
                 cost_usd=Decimal("1.01"),
                 expected_growth=SimpleNamespace(
