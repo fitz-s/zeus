@@ -737,7 +737,11 @@ def _source_run_coverage_schema_ready(conn: sqlite3.Connection) -> bool:
         "target_local_date",
         "temperature_metric",
         "data_version",
+        "completeness_status",
+        "readiness_status",
         "computed_at",
+        "expires_at",
+        "recorded_at",
     }
     return required.issubset(_columns(conn, "source_run_coverage"))
 

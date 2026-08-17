@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -49,9 +50,14 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: E402
     validate_openmeteo_ecmwf_ifs9_meta_window,
 )
 from src.data.openmeteo_quota import quota_tracker  # noqa: E402
+from src.data.openmeteo_ecmwf_ifs9_precision_guard import (  # noqa: E402
+    OpenMeteoIfs9PrecisionMetadata,
+    evaluate_openmeteo_ecmwf_ifs9_precision_guard,
+)
 from src.data.raw_forecast_artifact_manifest import (  # noqa: E402
     RawForecastArtifactManifest,
     manifest_matches_artifact,
+    read_manifest,
     repin_manifest_from_file,
     write_manifest,
     write_manifest_to_db,
@@ -67,6 +73,104 @@ from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema  
 
 _CURRENT_TARGET_ROTATION_LOCK = Lock()
 _CURRENT_TARGET_ROTATION_OFFSETS: dict[str, int] = {}
+_CURRENT_TARGET_ROTATION_STATE_VERSION = 1
+
+
+def _rotation_state_lock_path(state_path: Path) -> Path:
+    return state_path.with_name(f"{state_path.name}.lock")
+
+
+def _read_rotation_state(
+    state_path: Path,
+    *,
+    cycle_key: str,
+    row_count: int,
+) -> tuple[int, int]:
+    if not state_path.exists():
+        return 0, 0
+    try:
+        state = json.loads(state_path.read_text())
+        if not isinstance(state, dict):
+            raise ValueError("rotation state must be an object")
+        if set(state) != {"version", "cycle", "next_start", "generation"}:
+            raise ValueError("rotation state fields mismatch")
+        if state.get("version") != _CURRENT_TARGET_ROTATION_STATE_VERSION:
+            raise ValueError("rotation state version mismatch")
+        state_cycle = state.get("cycle")
+        next_start = state.get("next_start")
+        generation = state.get("generation")
+        if (
+            not isinstance(state_cycle, str)
+            or isinstance(next_start, bool)
+            or not isinstance(next_start, int)
+            or next_start < 0
+            or isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 0
+        ):
+            raise ValueError("rotation state fields invalid")
+        parsed_cycle = datetime.fromisoformat(state_cycle.replace("Z", "+00:00"))
+        if (
+            parsed_cycle.tzinfo is None
+            or parsed_cycle.utcoffset() is None
+            or parsed_cycle.astimezone(UTC).isoformat() != state_cycle
+        ):
+            raise ValueError("rotation state cycle is not canonical UTC ISO")
+        if state_cycle != cycle_key:
+            return 0, 0
+        if row_count > 0 and next_start >= row_count:
+            raise ValueError("rotation state next_start outside current row set")
+        return next_start, generation
+    except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"CURRENT_TARGET_ROTATION_STATE_INVALID:{state_path}"
+        ) from exc
+
+
+def _write_rotation_state(
+    state_path: Path,
+    *,
+    cycle_key: str,
+    next_start: int,
+    generation: int,
+) -> None:
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=state_path.parent,
+            prefix=f".{state_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            json.dump(
+                {
+                    "version": _CURRENT_TARGET_ROTATION_STATE_VERSION,
+                    "cycle": cycle_key,
+                    "next_start": next_start,
+                    "generation": generation,
+                },
+                handle,
+                sort_keys=True,
+            )
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+            temp_path = Path(handle.name)
+        os.replace(temp_path, state_path)
+        temp_path = None
+        directory_fd = os.open(state_path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _current_target_family_key(row: object) -> tuple[str, str, str]:
@@ -102,27 +206,31 @@ def _rotate_current_target_rows(
     *,
     cycle: datetime,
     state_path: Path | None = None,
-) -> tuple[list[object], int, int]:
+) -> tuple[list[object], int, int, int]:
     ordered = list(rows)
     if not ordered:
-        return ordered, 0, 0
+        return ordered, 0, 0, 0
     cycle_key = cycle.astimezone(UTC).isoformat()
     with _CURRENT_TARGET_ROTATION_LOCK:
         persisted_start = 0
-        if state_path is not None and state_path.exists():
-            try:
-                state = json.loads(state_path.read_text())
-                if state.get("cycle") == cycle_key:
-                    persisted_start = int(state.get("next_start") or 0)
-            except (OSError, TypeError, ValueError, json.JSONDecodeError):
-                persisted_start = 0
-        start = _CURRENT_TARGET_ROTATION_OFFSETS.get(
-            cycle_key,
-            persisted_start,
+        generation = 0
+        if state_path is not None:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            with _rotation_state_lock_path(state_path).open("a+") as lock_handle:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+                persisted_start, generation = _read_rotation_state(
+                    state_path,
+                    cycle_key=cycle_key,
+                    row_count=len(ordered),
+                )
+        start = (
+            persisted_start
+            if state_path is not None
+            else _CURRENT_TARGET_ROTATION_OFFSETS.get(cycle_key, 0)
         ) % len(ordered)
         _CURRENT_TARGET_ROTATION_OFFSETS.clear()
         _CURRENT_TARGET_ROTATION_OFFSETS[cycle_key] = start
-    return ordered[start:] + ordered[:start], start, len(ordered)
+    return ordered[start:] + ordered[:start], start, len(ordered), generation
 
 
 def _advance_current_target_rotation(
@@ -132,37 +240,46 @@ def _advance_current_target_rotation(
     attempted_count: int,
     incomplete: bool,
     state_path: Path | None = None,
-) -> int:
+    expected_generation: int = 0,
+) -> tuple[int, bool]:
     cycle_key = cycle.astimezone(UTC).isoformat()
-    with _CURRENT_TARGET_ROTATION_LOCK:
+
+    def advance_locked() -> tuple[int, bool]:
+        if state_path is not None:
+            persisted_start, persisted_generation = _read_rotation_state(
+                state_path,
+                cycle_key=cycle_key,
+                row_count=row_count,
+            )
+            if persisted_generation != expected_generation:
+                return persisted_start, False
         if not incomplete or row_count <= 0:
             next_start = 0
         else:
-            next_start = (
-                _CURRENT_TARGET_ROTATION_OFFSETS.get(cycle_key, 0)
-                + max(1, int(attempted_count))
-            ) % row_count
+            current_start = (
+                persisted_start
+                if state_path is not None
+                else _CURRENT_TARGET_ROTATION_OFFSETS.get(cycle_key, 0)
+            )
+            next_start = (current_start + max(1, int(attempted_count))) % row_count
         _CURRENT_TARGET_ROTATION_OFFSETS.clear()
         _CURRENT_TARGET_ROTATION_OFFSETS[cycle_key] = next_start
         if state_path is not None:
+            _write_rotation_state(
+                state_path,
+                cycle_key=cycle_key,
+                next_start=next_start,
+                generation=expected_generation + 1,
+            )
+        return next_start, True
+
+    with _CURRENT_TARGET_ROTATION_LOCK:
+        if state_path is not None:
             state_path.parent.mkdir(parents=True, exist_ok=True)
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=state_path.parent,
-                prefix=f".{state_path.name}.",
-                suffix=".tmp",
-                delete=False,
-            ) as handle:
-                json.dump(
-                    {"cycle": cycle_key, "next_start": next_start},
-                    handle,
-                    sort_keys=True,
-                )
-                handle.write("\n")
-                temp_path = Path(handle.name)
-            os.replace(temp_path, state_path)
-        return next_start
+            with _rotation_state_lock_path(state_path).open("a+") as lock_handle:
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+                return advance_locked()
+        return advance_locked()
 
 
 METRIC_TO_OPENMETEO_VERSION = {"high": OPENMETEO_HIGH_DATA_VERSION, "low": OPENMETEO_LOW_DATA_VERSION}
@@ -365,6 +482,7 @@ def _canonical_current_target_reuse(
     cycle: datetime,
     targets: Sequence[object],
     raw_dir: Path,
+    anchor_sigma_c: float,
 ) -> dict[tuple[str, str, str], int]:
     """Return exact canonical artifacts whose immutable bytes already exist.
 
@@ -429,7 +547,36 @@ def _canonical_current_target_reuse(
             artifact_path = Path(str(row["artifact_path"]))
             if artifact_path.resolve() != expected_path.resolve():
                 continue
-            raw = artifact_path.read_bytes()
+            payload_text = str(metadata.get("openmeteo_payload_json") or "").strip()
+            precision_text = str(metadata.get("precision_metadata_json") or "").strip()
+            if not payload_text or not precision_text:
+                continue
+            payload_path = Path(payload_text)
+            precision_path = Path(precision_text)
+            if not payload_path.is_absolute():
+                payload_path = raw_dir.parent / payload_path
+            if not precision_path.is_absolute():
+                precision_path = raw_dir.parent / precision_path
+            if payload_path.resolve() != artifact_path.resolve():
+                continue
+            if not _json_file_valid(payload_path) or not _json_file_valid(precision_path):
+                continue
+            precision_payload = json.loads(precision_path.read_text(encoding="utf-8"))
+            if not isinstance(precision_payload, dict):
+                continue
+            expected_precision = _precision_metadata(
+                city,
+                target_date,
+                anchor_sigma_c=anchor_sigma_c,
+            )
+            if precision_payload != expected_precision:
+                continue
+            precision_guard = evaluate_openmeteo_ecmwf_ifs9_precision_guard(
+                OpenMeteoIfs9PrecisionMetadata(**precision_payload)
+            )
+            if not precision_guard.passable_for_live_materialization:
+                continue
+            raw = payload_path.read_bytes()
             if len(raw) != int(row["byte_size"]):
                 continue
             if hashlib.sha256(raw).hexdigest() != str(row["sha256"]):
@@ -441,6 +588,24 @@ def _canonical_current_target_reuse(
                 city_timezone=city_config.timezone,
                 target_date=target_date,
                 cycle=cycle,
+            ):
+                continue
+            manifest_path = raw_dir.parent / (
+                f"{OPENMETEO_SOURCE_ID}.{row['data_version']}."
+                f"{cycle.strftime('%Y%m%dT%H%M%SZ')}."
+                f"{str(row['sha256'])[:12]}.{_safe_name(city)}.manifest.json"
+            )
+            manifest = read_manifest(manifest_path)
+            manifest.verify_artifact()
+            if (
+                manifest.source_id != OPENMETEO_SOURCE_ID
+                or manifest.product_id != OPENMETEO_PRODUCT_ID
+                or manifest.data_version != str(row["data_version"])
+                or manifest.source_cycle_time != cycle.astimezone(UTC)
+                or Path(manifest.artifact_path).resolve() != artifact_path.resolve()
+                or manifest.sha256 != str(row["sha256"])
+                or manifest.byte_size != int(row["byte_size"])
+                or dict(manifest.product_metadata) != metadata
             ):
                 continue
             reused[key] = int(row["artifact_id"])
@@ -875,6 +1040,8 @@ def download_current_target_raw_inputs(
     # ``include_covered=True`` (passed by the production wrapper when the available cycle is
     # ahead of the downloaded high-water mark, and by the CLI when --cycle is explicit)
     # downloads raw inputs for ALL current targets at the requested cycle.
+    if limit is not None and (isinstance(limit, bool) or limit <= 0):
+        raise ValueError("limit must be a positive integer or None")
     plan: ReplacementForecastCurrentTargetPlan | None = None
     if required_scopes is not None:
         _rows = [
@@ -914,12 +1081,17 @@ def download_current_target_raw_inputs(
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     rotation_state_path = output_dir / ".current_target_rotation.json"
-    rotated_rows, rotation_start, rotation_row_count = _rotate_current_target_rows(
+    (
+        rotated_rows,
+        rotation_start,
+        rotation_row_count,
+        rotation_generation,
+    ) = _rotate_current_target_rows(
         _rows,
         cycle=cycle,
         state_path=rotation_state_path,
     )
-    targets = rotated_rows[:limit] if limit else rotated_rows
+    targets = rotated_rows[:limit] if limit is not None else rotated_rows
     raw_dir = output_dir / cycle.strftime("%Y%m%dT%H%M%SZ")
     raw_dir.mkdir(parents=True, exist_ok=True)
     canonical_reuse = (
@@ -928,6 +1100,7 @@ def download_current_target_raw_inputs(
             cycle=cycle,
             targets=targets,
             raw_dir=raw_dir,
+            anchor_sigma_c=anchor_sigma_c,
         )
         if write_db
         else {}
@@ -1263,16 +1436,19 @@ def download_current_target_raw_inputs(
         if conn is not None:
             conn.close()
 
+    unscheduled_target_count = max(0, rotation_row_count - len(targets))
     incomplete_target_set = (
         timeboxed_incomplete
         or len(manifests) + len(canonical_reuse) < len(targets)
+        or unscheduled_target_count > 0
     )
-    rotation_next_start = _advance_current_target_rotation(
+    rotation_next_start, rotation_cas_applied = _advance_current_target_rotation(
         cycle=cycle,
         row_count=rotation_row_count,
         attempted_count=processed_target_count,
         incomplete=incomplete_target_set,
         state_path=rotation_state_path,
+        expected_generation=rotation_generation,
     )
 
     return {
@@ -1297,9 +1473,11 @@ def download_current_target_raw_inputs(
         "skipped_cities": skipped_cities,
         "timeboxed_incomplete": timeboxed_incomplete,
         "unattempted_target_count": len(targets) - processed_target_count,
+        "unscheduled_target_count": unscheduled_target_count,
         "target_rotation_start": rotation_start,
         "target_rotation_next_start": rotation_next_start,
         "target_rotation_advanced": incomplete_target_set,
+        "target_rotation_cas_applied": rotation_cas_applied,
         "max_wall_clock_seconds": max_wall_clock_seconds,
         "fetch_workers": min(max(1, int(fetch_workers)), 8),
         "coverage_before": None if plan is None else plan.as_dict(),

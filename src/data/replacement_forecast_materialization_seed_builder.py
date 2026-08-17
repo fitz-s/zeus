@@ -227,6 +227,14 @@ def build_replacement_forecast_materialization_seed(
         field_name="baseline_coverage_expires_at",
     ) <= computed:
         reasons.append("BASELINE_COVERAGE_EXPIRED")
+    baseline_computed_at = baseline_coverage.get("computed_at")
+    if not baseline_computed_at:
+        reasons.append("BASELINE_COVERAGE_COMPUTED_AT_MISSING")
+    elif _dt(
+        baseline_computed_at,
+        field_name="baseline_coverage_computed_at",
+    ) > computed:
+        reasons.append("BASELINE_COVERAGE_COMPUTED_IN_FUTURE")
     if openmeteo_manifest.source_id != expected["openmeteo_ifs9_anchor"].source_id or openmeteo_manifest.data_version != expected["openmeteo_ifs9_anchor"].data_version:
         reasons.append("OPENMETEO_MANIFEST_IDENTITY_MISMATCH")
     baseline_source_cycle_time = baseline_coverage.get("source_cycle_time")

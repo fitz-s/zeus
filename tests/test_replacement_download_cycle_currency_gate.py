@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import multiprocessing
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -111,7 +112,7 @@ def test_current_target_download_prioritizes_held_families_before_alphabetic() -
         rows,
         priorities,
     )
-    rotated, start, rotating_count = dl._rotate_current_target_rows(
+    rotated, start, rotating_count, generation = dl._rotate_current_target_rows(
         ordered,
         cycle=AVAILABLE_CYCLE.replace(hour=4),
     )
@@ -119,6 +120,7 @@ def test_current_target_download_prioritizes_held_families_before_alphabetic() -
     assert [row.city for row in ordered] == ["Wellington", "Dallas", "Amsterdam"]
     assert start == 0
     assert rotating_count == 3
+    assert generation == 0
     assert [row.city for row in rotated] == ["Wellington", "Dallas", "Amsterdam"]
 
 
@@ -134,21 +136,22 @@ def test_timeboxed_current_target_download_rotates_past_attempted_prefix(
     ]
     with dl._CURRENT_TARGET_ROTATION_LOCK:
         dl._CURRENT_TARGET_ROTATION_OFFSETS.clear()
-    first, first_start, row_count = dl._rotate_current_target_rows(
+    first, first_start, row_count, generation = dl._rotate_current_target_rows(
         rows,
         cycle=rotation_cycle,
         state_path=tmp_path / "rotation.json",
     )
-    next_start = dl._advance_current_target_rotation(
+    next_start, applied = dl._advance_current_target_rotation(
         cycle=rotation_cycle,
         row_count=row_count,
         attempted_count=2,
         incomplete=True,
         state_path=tmp_path / "rotation.json",
+        expected_generation=generation,
     )
     with dl._CURRENT_TARGET_ROTATION_LOCK:
         dl._CURRENT_TARGET_ROTATION_OFFSETS.clear()
-    second, second_start, _ = dl._rotate_current_target_rows(
+    second, second_start, _, second_generation = dl._rotate_current_target_rows(
         rows,
         cycle=rotation_cycle,
         state_path=tmp_path / "rotation.json",
@@ -157,7 +160,9 @@ def test_timeboxed_current_target_download_rotates_past_attempted_prefix(
     assert first_start == 0
     assert [row.city for row in first] == ["Amsterdam", "Ankara", "Atlanta", "Austin"]
     assert next_start == 2
+    assert applied is True
     assert second_start == 2
+    assert second_generation == 1
     assert [row.city for row in second] == ["Atlanta", "Austin", "Amsterdam", "Ankara"]
     with dl._CURRENT_TARGET_ROTATION_LOCK:
         dl._CURRENT_TARGET_ROTATION_OFFSETS.clear()
@@ -179,23 +184,25 @@ def test_durable_rotation_gives_ordinary_lane_a_turn_after_held_prefix(
         priorities,
     )
     state_path = tmp_path / "rotation.json"
-    first, _, row_count = dl._rotate_current_target_rows(
+    first, _, row_count, generation = dl._rotate_current_target_rows(
         ordered,
         cycle=cycle,
         state_path=state_path,
     )
     assert first[0].city == "Dallas"
-    dl._advance_current_target_rotation(
+    next_start, applied = dl._advance_current_target_rotation(
         cycle=cycle,
         row_count=row_count,
         attempted_count=1,
-        incomplete=True,
+        incomplete=1 < row_count,
         state_path=state_path,
+        expected_generation=generation,
     )
+    assert (next_start, applied) == (1, True)
 
     with dl._CURRENT_TARGET_ROTATION_LOCK:
         dl._CURRENT_TARGET_ROTATION_OFFSETS.clear()
-    after_restart, start, _ = dl._rotate_current_target_rows(
+    after_restart, start, _, _ = dl._rotate_current_target_rows(
         ordered,
         cycle=cycle,
         state_path=state_path,
@@ -203,6 +210,180 @@ def test_durable_rotation_gives_ordinary_lane_a_turn_after_held_prefix(
 
     assert start == 1
     assert after_restart[0].city == "Amsterdam"
+
+
+def test_rotation_cursor_cas_prevents_cross_process_regression(
+    tmp_path: Path,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    cycle = AVAILABLE_CYCLE.replace(hour=6)
+    state_path = tmp_path / "rotation.json"
+    rows = [
+        _TargetRow(city, "2026-06-10", "high", False, True)
+        for city in ("Amsterdam", "Ankara", "Atlanta")
+    ]
+    _, _, row_count, generation = dl._rotate_current_target_rows(
+        rows,
+        cycle=cycle,
+        state_path=state_path,
+    )
+    assert dl._advance_current_target_rotation(
+        cycle=cycle,
+        row_count=row_count,
+        attempted_count=2,
+        incomplete=True,
+        state_path=state_path,
+        expected_generation=generation,
+    ) == (2, True)
+    assert dl._advance_current_target_rotation(
+        cycle=cycle,
+        row_count=row_count,
+        attempted_count=1,
+        incomplete=True,
+        state_path=state_path,
+        expected_generation=generation,
+    ) == (2, False)
+
+
+def _advance_rotation_in_process(
+    state_path: str,
+    cycle_iso: str,
+    row_count: int,
+    attempted_count: int,
+    start_event,
+    result_queue,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    start_event.wait()
+    result_queue.put(
+        dl._advance_current_target_rotation(
+            cycle=datetime.fromisoformat(cycle_iso),
+            row_count=row_count,
+            attempted_count=attempted_count,
+            incomplete=True,
+            state_path=Path(state_path),
+            expected_generation=0,
+        )
+    )
+
+
+def test_rotation_cursor_os_lock_allows_exactly_one_cross_process_cas(
+    tmp_path: Path,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    cycle = AVAILABLE_CYCLE.replace(hour=6)
+    state_path = tmp_path / "rotation.json"
+    rows = [
+        _TargetRow(city, "2026-06-10", "high", False, True)
+        for city in ("Amsterdam", "Ankara", "Atlanta")
+    ]
+    dl._rotate_current_target_rows(rows, cycle=cycle, state_path=state_path)
+    context = multiprocessing.get_context("spawn")
+    start_event = context.Event()
+    result_queue = context.Queue()
+    processes = [
+        context.Process(
+            target=_advance_rotation_in_process,
+            args=(str(state_path), cycle.isoformat(), len(rows), count, start_event, result_queue),
+        )
+        for count in (1, 2)
+    ]
+    for process in processes:
+        process.start()
+    start_event.set()
+    results = [result_queue.get(timeout=5.0) for _ in processes]
+    for process in processes:
+        process.join(timeout=5.0)
+        assert process.exitcode == 0
+
+    assert sum(1 for _next_start, applied in results if applied) == 1
+    persisted = json.loads(state_path.read_text())
+    assert persisted["generation"] == 1
+    assert persisted["next_start"] in {1, 2}
+
+
+def test_rotation_cursor_isolated_by_state_path(tmp_path: Path) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    cycle = AVAILABLE_CYCLE.replace(hour=6)
+    rows = [
+        _TargetRow(city, "2026-06-10", "high", False, True)
+        for city in ("Amsterdam", "Ankara", "Atlanta")
+    ]
+    first_path = tmp_path / "first.json"
+    second_path = tmp_path / "second.json"
+    for state_path in (first_path, second_path):
+        dl._rotate_current_target_rows(rows, cycle=cycle, state_path=state_path)
+
+    assert dl._advance_current_target_rotation(
+        cycle=cycle,
+        row_count=len(rows),
+        attempted_count=1,
+        incomplete=True,
+        state_path=first_path,
+        expected_generation=0,
+    ) == (1, True)
+    assert dl._advance_current_target_rotation(
+        cycle=cycle,
+        row_count=len(rows),
+        attempted_count=2,
+        incomplete=True,
+        state_path=second_path,
+        expected_generation=0,
+    ) == (2, True)
+
+
+def test_malformed_rotation_state_fails_closed(tmp_path: Path) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    state_path = tmp_path / "rotation.json"
+    state_path.write_text("[]")
+    with pytest.raises(RuntimeError, match="CURRENT_TARGET_ROTATION_STATE_INVALID"):
+        dl._rotate_current_target_rows(
+            [_TargetRow("Dallas", "2026-06-10", "high", False, True)],
+            cycle=AVAILABLE_CYCLE.replace(hour=7),
+            state_path=state_path,
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {
+            "version": 1,
+            "cycle": AVAILABLE_CYCLE.replace(hour=7).isoformat(),
+            "next_start": True,
+            "generation": 0,
+        },
+        {
+            "version": 1,
+            "cycle": AVAILABLE_CYCLE.replace(hour=7).isoformat(),
+            "next_start": 0,
+            "generation": 0,
+            "unexpected": "field",
+        },
+        {
+            "version": 1,
+            "cycle": "2026-06-09T07:00:00Z",
+            "next_start": 0,
+            "generation": 0,
+        },
+    ),
+)
+def test_rotation_state_schema_is_strict(tmp_path: Path, payload: dict) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    state_path = tmp_path / "rotation.json"
+    state_path.write_text(json.dumps(payload))
+    with pytest.raises(RuntimeError, match="CURRENT_TARGET_ROTATION_STATE_INVALID"):
+        dl._rotate_current_target_rows(
+            [_TargetRow("Dallas", "2026-06-10", "high", False, True)],
+            cycle=AVAILABLE_CYCLE.replace(hour=7),
+            state_path=state_path,
+        )
 
 
 def _make_db(tmp_path: Path, cycles_by_source: dict[str, str]) -> Path:
@@ -484,8 +665,25 @@ def test_direct_downloader_reuses_canonical_bytes_without_moving_capture_time(
         "openmeteo_Dallas_2026-06-10_high_20260609T000000Z.json"
     )
     payload_path.write_text(json.dumps(_anchor_payload()) + "\n")
+    precision_path = raw_dir / "openmeteo_precision_Dallas_2026-06-10_high.json"
+    precision_path.write_text(
+        json.dumps(
+            dl._precision_metadata(
+                "Dallas",
+                "2026-06-10",
+                anchor_sigma_c=3.0,
+            )
+        )
+    )
     payload = payload_path.read_bytes()
     original_capture = "2026-06-09T13:59:45+00:00"
+    metadata = {
+        "city": "Dallas",
+        "target_date": "2026-06-10",
+        "metric": "high",
+        "openmeteo_payload_json": str(payload_path),
+        "precision_metadata_json": str(precision_path),
+    }
     conn.execute(
         """
         INSERT INTO raw_forecast_artifacts (
@@ -504,17 +702,24 @@ def test_direct_downloader_reuses_canonical_bytes_without_moving_capture_time(
             str(payload_path),
             hashlib.sha256(payload).hexdigest(),
             len(payload),
-            json.dumps(
-                {
-                    "city": "Dallas",
-                    "target_date": "2026-06-10",
-                    "metric": "high",
-                }
-            ),
+            json.dumps(metadata),
         ),
     )
     conn.commit()
     conn.close()
+    canonical_manifest = dl.RawForecastArtifactManifest.from_file(
+        payload_path,
+        source_id=dl.OPENMETEO_SOURCE_ID,
+        product_id=dl.OPENMETEO_PRODUCT_ID,
+        data_version=dl.OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time=AVAILABLE_CYCLE,
+        source_available_at=original_capture,
+        captured_at=original_capture,
+        request_url="https://example.test/canonical",
+        request_params={"run": AVAILABLE_CYCLE.isoformat()},
+        product_metadata=metadata,
+    )
+    dl._write_manifest_file(output_dir, canonical_manifest)
 
     monkeypatch.setattr(dl, "ensure_replacement_forecast_live_schema", lambda _conn: None)
 
@@ -544,6 +749,185 @@ def test_direct_downloader_reuses_canonical_bytes_without_moving_capture_time(
     assert report["reused_canonical_artifact_count"] == 1
     assert report["target_rotation_advanced"] is False
     assert persisted == (original_capture, original_capture, 1)
+
+
+def test_canonical_reuse_refuses_and_repairs_semantically_wrong_precision_sidecar(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    target = _TargetRow(
+        city="Dallas",
+        target_date="2026-06-10",
+        temperature_metric="high",
+        covered=True,
+        missing_openmeteo_manifest=False,
+    )
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.execute(_ARTIFACTS_DDL)
+    output_dir = tmp_path / "raw"
+    raw_dir = output_dir / AVAILABLE_CYCLE.strftime("%Y%m%dT%H%M%SZ")
+    raw_dir.mkdir(parents=True)
+    payload_path = raw_dir / "openmeteo_Dallas_2026-06-10_high_20260609T000000Z.json"
+    payload_path.write_text(json.dumps(_anchor_payload()) + "\n")
+    invalid_precision = raw_dir / "invalid-precision.json"
+    invalid_payload = dl._precision_metadata(
+        "Dallas",
+        "2026-06-10",
+        anchor_sigma_c=3.0,
+    )
+    invalid_payload["target_local_date"] = "2026-06-11"
+    invalid_precision.write_text(json.dumps(invalid_payload))
+    payload = payload_path.read_bytes()
+    metadata = {
+        "city": "Dallas",
+        "target_date": "2026-06-10",
+        "metric": "high",
+        "openmeteo_payload_json": str(payload_path),
+        "precision_metadata_json": str(invalid_precision),
+    }
+    captured_at = "2026-06-09T13:59:45+00:00"
+    conn.execute(
+        """
+        INSERT INTO raw_forecast_artifacts (
+            source_id, product_id, data_version, source_cycle_time,
+            source_available_at, captured_at, artifact_path, sha256,
+            byte_size, artifact_metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            dl.OPENMETEO_SOURCE_ID,
+            dl.OPENMETEO_PRODUCT_ID,
+            dl.OPENMETEO_HIGH_DATA_VERSION,
+            AVAILABLE_CYCLE.isoformat(),
+            captured_at,
+            captured_at,
+            str(payload_path),
+            hashlib.sha256(payload).hexdigest(),
+            len(payload),
+            json.dumps(metadata),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    manifest = dl.RawForecastArtifactManifest.from_file(
+        payload_path,
+        source_id=dl.OPENMETEO_SOURCE_ID,
+        product_id=dl.OPENMETEO_PRODUCT_ID,
+        data_version=dl.OPENMETEO_HIGH_DATA_VERSION,
+        source_cycle_time=AVAILABLE_CYCLE,
+        source_available_at=captured_at,
+        captured_at=captured_at,
+        request_url="https://example.test/canonical",
+        request_params={"run": AVAILABLE_CYCLE.isoformat()},
+        product_metadata=metadata,
+    )
+    dl._write_manifest_file(output_dir, manifest)
+
+    assert dl._canonical_current_target_reuse(
+        db,
+        cycle=AVAILABLE_CYCLE,
+        targets=(target,),
+        raw_dir=raw_dir,
+        anchor_sigma_c=3.0,
+    ) == {}
+    fetches: list[tuple[str, str]] = []
+
+    def _wave(requests, **_kwargs):
+        key = next(iter(requests))
+        fetches.append(key)
+        return {
+            key: (
+                {"hourly": {"time": [], "temperature_2m": []}},
+                {
+                    "openmeteo_endpoint": "standard_api_meta_stamped",
+                    "run_authority": "provider_meta_declared",
+                },
+                datetime.fromisoformat(captured_at),
+            )
+        }, {}
+
+    monkeypatch.setattr(dl, "_fetch_meta_stamped_anchor_wave", _wave)
+    monkeypatch.setattr(dl, "ensure_replacement_forecast_live_schema", lambda _conn: None)
+    monkeypatch.setattr(dl, "write_manifest_to_db", lambda *_args, **_kwargs: 2)
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=db,
+        output_dir=output_dir,
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=True,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        include_covered=True,
+        precomputed_plan=_PlanStub(ready=True, rows=(target,)),
+    )
+
+    assert fetches == []
+    assert (raw_dir / "openmeteo_precision_Dallas_2026-06-10_high.json").is_file()
+    assert report["reused_canonical_artifact_count"] == 0
+    assert report["written_manifest_count"] == 1
+
+
+def test_limited_batch_advances_past_complete_canonical_reuse(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    rows = (
+        _TargetRow("Dallas", "2026-06-10", "high", True, False),
+        _TargetRow("London", "2026-06-10", "high", False, True),
+    )
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda: {("Dallas", "2026-06-10", "high"): 0},
+    )
+    monkeypatch.setattr(
+        dl,
+        "_canonical_current_target_reuse",
+        lambda *_args, **_kwargs: {("Dallas", "2026-06-10", "high"): 7},
+    )
+    monkeypatch.setattr(dl, "ensure_replacement_forecast_live_schema", lambda _conn: None)
+
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=tmp_path / "forecasts.db",
+        output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE,
+        limit=1,
+        write_db=True,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        include_covered=True,
+        precomputed_plan=_PlanStub(ready=False, rows=rows),
+    )
+
+    assert report["target_count"] == 1
+    assert report["reused_canonical_artifact_count"] == 1
+    assert report["unscheduled_target_count"] == 1
+    assert report["target_rotation_next_start"] == 1
+    assert report["target_rotation_cas_applied"] is True
+
+
+@pytest.mark.parametrize("limit", (0, -1, True))
+def test_current_target_download_rejects_nonpositive_or_boolean_limit(
+    tmp_path: Path,
+    limit,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    with pytest.raises(ValueError, match="limit must be a positive integer or None"):
+        dl.download_current_target_raw_inputs(
+            forecast_db=tmp_path / "forecasts.db",
+            output_dir=tmp_path / "raw",
+            cycle=AVAILABLE_CYCLE,
+            limit=limit,
+            write_db=False,
+            release_lag_hours=14.0,
+            anchor_sigma_c=3.0,
+            required_scopes=(),
+        )
 
 
 def _wire(monkeypatch, *, plan: _PlanStub, calls: list):

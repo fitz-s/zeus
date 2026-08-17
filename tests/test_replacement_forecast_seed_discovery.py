@@ -15,8 +15,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from src.data.openmeteo_ecmwf_ifs9_anchor import HIGH_DATA_VERSION as OPENMETEO_HIGH_DATA_VERSION
-from src.data.raw_forecast_artifact_manifest import RawForecastArtifactManifest, write_manifest
+from src.data.raw_forecast_artifact_manifest import (
+    RawForecastArtifactManifest,
+    read_manifest,
+    write_manifest,
+)
+from src.data.replacement_forecast_materialization_seed_builder import (
+    build_replacement_forecast_materialization_seed,
+)
 from src.data.replacement_forecast_readiness import SOURCE_ID as REPLACEMENT_SOURCE_ID
 from src.data.replacement_forecast_readiness import STRATEGY_KEY as REPLACEMENT_STRATEGY_KEY
 from src.data.replacement_forecast_seed_discovery import (
@@ -1299,6 +1308,122 @@ def test_seed_discovery_uses_latest_causal_baseline_not_newer_independent_head(
     assert seed["source_cycle_time"] == "2026-06-06T06:00:00+00:00"
 
 
+def test_seed_builder_boundary_rejects_future_coverage_computation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "forecast.db"
+    raw_dir = tmp_path / "raw"
+    seed_dir = tmp_path / "seeds"
+    _init_db(db_path)
+    _write_raw_inputs(raw_dir)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        coverage = dict(
+            conn.execute(
+                """
+                SELECT c.*, sr.source_cycle_time, sr.source_available_at
+                FROM source_run_coverage c
+                JOIN source_run sr USING (source_run_id)
+                WHERE c.source_run_id = 'baseline-run'
+                """
+            ).fetchone()
+        )
+    finally:
+        conn.close()
+    coverage["computed_at"] = "2026-06-07T10:00:00+00:00"
+    coverage["expires_at"] = "2026-06-08T00:00:00+00:00"
+    monkeypatch.setattr(
+        seed_discovery,
+        "latest_baseline_coverage_for_replacement_seed",
+        lambda *_args, **_kwargs: coverage,
+    )
+
+    report = discover_replacement_forecast_materialization_seeds(
+        forecast_db=db_path,
+        raw_manifest_dir=raw_dir,
+        seed_dir=seed_dir,
+        computed_at="2026-06-07T09:00:00+00:00",
+    )
+
+    assert report.status == "NO_ELIGIBLE_TARGETS"
+    assert report.discovered_count == 0
+    assert "BASELINE_COVERAGE_COMPUTED_IN_FUTURE" in report.reason_codes
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    (
+        ({"completeness_status": "PARTIAL"}, "BASELINE_COVERAGE_INCOMPLETE"),
+        (
+            {"readiness_status": "SHADOW_ONLY"},
+            "BASELINE_COVERAGE_NOT_LIVE_ELIGIBLE",
+        ),
+        (
+            {"expires_at": "2026-06-06T04:00:00+00:00"},
+            "BASELINE_COVERAGE_EXPIRED",
+        ),
+        (
+            {"source_available_at": "2026-06-06T05:00:00+00:00"},
+            "REPLACEMENT_MATERIALIZATION_SEED_HAS_FUTURE_DEPENDENCY",
+        ),
+        (
+            {"source_cycle_time": "2026-06-06T06:00:00+00:00"},
+            "REPLACEMENT_MATERIALIZATION_SEED_OM9_CYCLE_REGRESSES_BASELINE",
+        ),
+    ),
+)
+def test_seed_builder_boundary_rejects_each_noncausal_baseline_state(
+    tmp_path: Path,
+    overrides: dict[str, object],
+    reason: str,
+) -> None:
+    raw_dir = tmp_path / "raw"
+    _write_raw_inputs(raw_dir)
+    coverage: dict[str, object] = {
+        "source_run_id": "baseline-run",
+        "source_id": "ecmwf_open_data",
+        "data_version": "ecmwf_opendata_mx2t3_local_calendar_day_max",
+        "temperature_metric": "high",
+        "completeness_status": "COMPLETE",
+        "readiness_status": "LIVE_ELIGIBLE",
+        "expires_at": "2026-06-07T00:00:00+00:00",
+        "computed_at": "2026-06-06T02:05:00+00:00",
+        "source_cycle_time": "2026-06-06T00:00:00+00:00",
+        "source_available_at": "2026-06-06T02:00:00+00:00",
+        "city_id": "NYC",
+        "city_timezone": "America/New_York",
+    }
+    coverage.update(overrides)
+
+    result = build_replacement_forecast_materialization_seed(
+        city="NYC",
+        target_date="2026-06-08",
+        temperature_metric="high",
+        market_bins=(
+            {
+                "bin_id": "24C",
+                "center_c": 24.0,
+                "lower_c": 24.0,
+                "upper_c": 24.0,
+                "display_unit": "C",
+                "settlement_unit": "F",
+                "rounding_rule": "wmo_half_up",
+            },
+        ),
+        baseline_coverage=coverage,
+        openmeteo_manifest=read_manifest(raw_dir / "openmeteo.manifest.json"),
+        openmeteo_payload_json=raw_dir / "openmeteo.json",
+        precision_metadata_json=raw_dir / "precision_metadata.json",
+        computed_at="2026-06-06T04:00:00+00:00",
+        base_dir=tmp_path,
+    )
+
+    assert result.status == "BLOCKED"
+    assert reason in result.reason_codes
+
+
 def test_seed_discovery_limit_applies_after_filtering_seedable_targets(tmp_path: Path) -> None:
     db_path = tmp_path / "forecast.db"
     raw_dir = tmp_path / "raw"
@@ -1738,6 +1863,22 @@ def test_seed_discovery_blocks_when_source_run_coverage_schema_is_missing(tmp_pa
                 temperature_metric TEXT NOT NULL,
                 token_id TEXT,
                 range_label TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE source_run_coverage (
+                source_run_id TEXT,
+                source_id TEXT,
+                city TEXT,
+                target_local_date TEXT,
+                temperature_metric TEXT,
+                data_version TEXT,
+                completeness_status TEXT,
+                readiness_status TEXT,
+                computed_at TEXT,
+                recorded_at TEXT
             )
             """
         )
