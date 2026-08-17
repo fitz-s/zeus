@@ -363,6 +363,45 @@ def _load(db_path, *, direction="buy_no", bin_label=BIN, now=NOW, **kw):
 
 
 class TestLoadReplacementBelief:
+    def test_future_local_day_bypasses_impossible_observed_floor_read(
+        self, forecasts_db, monkeypatch
+    ):
+        """Pre-Day0 belief serving must not spend its deadline on the world DB."""
+        import src.engine.position_belief as pb
+
+        future_target = "2026-06-13"
+        future_bin = "Will the highest temperature in Karachi be 37°C on June 13?"
+        _insert(
+            forecasts_db,
+            posterior_id="future-local-day-no-floor",
+            computed_at=(NOW - timedelta(minutes=5)).isoformat(),
+            q={future_bin: 0.24},
+            source_cycle_time=(NOW - timedelta(hours=1)).isoformat(),
+            target_date=future_target,
+        )
+
+        def impossible_floor_read(**_kwargs):
+            raise AssertionError("future local day cannot have an observed extreme")
+
+        monkeypatch.setattr(
+            pb,
+            "_observed_running_extreme_native",
+            impossible_floor_read,
+        )
+
+        belief = load_replacement_belief(
+            city="Karachi",
+            target_date=future_target,
+            temperature_metric="high",
+            bin_label=future_bin,
+            direction="buy_yes",
+            db_path=forecasts_db,
+            now=NOW,
+        )
+
+        assert belief is not None
+        assert belief.held_side_prob == pytest.approx(0.24)
+
     def test_held_floor_uses_corrected_same_clock_publication(self, tmp_path):
         from src.state.schema.observation_prints_schema import append_print, ensure_table
 

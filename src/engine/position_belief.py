@@ -54,8 +54,9 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Mapping
+from zoneinfo import ZoneInfo
 
 from src.data.replacement_forecast_readiness import (
     LIVE_RUNTIME_LAYER,
@@ -213,6 +214,28 @@ def _raw_input_lag_basis(reason: str | None) -> str | None:
     if not text.startswith("basis="):
         return None
     return text.split(":", 1)[0].removeprefix("basis=") or None
+
+
+def _target_local_day_has_started(
+    *,
+    city: str,
+    target_date: str,
+    now: datetime,
+) -> bool:
+    """Whether an observed extreme can exist for this settlement local day."""
+
+    try:
+        from src.config import runtime_cities_by_name
+
+        city_cfg = runtime_cities_by_name().get(city)
+        timezone_name = str(getattr(city_cfg, "timezone", "") or "")
+        target_d = date.fromisoformat(target_date)
+        now_utc = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+        local_d = now_utc.astimezone(ZoneInfo(timezone_name)).date()
+    except (KeyError, TypeError, ValueError):
+        # Unknown time geometry cannot authorize skipping the canonical fact read.
+        return True
+    return local_d >= target_d
 
 
 def _latest_live_input_cycle(
@@ -803,14 +826,20 @@ def load_replacement_belief(
     # canonical read; best-effort (any failure serves the belief unfloored — the floor only
     # ever ADDS the measured fact). Pure measured-fact conditioning, not a fitted de-bias.
     try:
-        observed_extreme = _observed_running_extreme_native(
+        observed_extreme = None
+        if _target_local_day_has_started(
             city=city,
             target_date=target_date,
-            metric=temperature_metric,
             now=now_dt,
-            world_db_path=world_db_path,
-            deadline_monotonic=deadline_monotonic,
-        )
+        ):
+            observed_extreme = _observed_running_extreme_native(
+                city=city,
+                target_date=target_date,
+                metric=temperature_metric,
+                now=now_dt,
+                world_db_path=world_db_path,
+                deadline_monotonic=deadline_monotonic,
+            )
         if observed_extreme is not None:
             q = apply_observed_floor_to_q_vector(
                 q,
