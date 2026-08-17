@@ -7017,6 +7017,26 @@ def _prepared_global_probability_semantics_revision(
     return revision or None
 
 
+def _stamp_global_receipt_probability_semantics_revision(
+    receipt: EventSubmissionReceipt,
+    global_actuation: object | None,
+    revisions_by_family: Mapping[str, str | None],
+) -> EventSubmissionReceipt:
+    """Bind the selected family's prepared probability law to its receipt."""
+
+    if str(receipt.probability_semantics_revision or "").strip():
+        return receipt
+    decision = getattr(global_actuation, "decision", None)
+    candidate = getattr(decision, "candidate", None)
+    family_key = str(getattr(candidate, "family_key", "") or "").strip()
+    revision = str(revisions_by_family.get(family_key) or "").strip()
+    if not family_key or not revision:
+        return receipt
+    return dataclass_replace(
+        receipt,
+        probability_semantics_revision=revision,
+    )
+
 
 def edli_trade_score_gate(event: OpportunityEvent) -> bool:
     """TradeScore is generated inside the event-bound no-submit adapter.
@@ -7508,6 +7528,11 @@ def event_bound_live_adapter_from_trade_conn(
                 family_snapshot_refresher=family_snapshot_refresher,
                 global_actuation=global_actuation,
             )
+        no_submit_receipt = _stamp_global_receipt_probability_semantics_revision(
+            no_submit_receipt,
+            global_actuation,
+            _global_entry_probability_revision_by_family,
+        )
         if preflight_only:
             return no_submit_receipt
         # D2 SHIFT-BIN CLOSE-BEFORE-OPEN — old-leg exit submission (2026-06-22 consult

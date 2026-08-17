@@ -1,5 +1,5 @@
 # Created: 2026-06-30
-# Last reused/audited: 2026-08-14
+# Last reused/audited: 2026-08-17
 # Authority basis: live-money qkernel submit authority and canonical selection-fact persistence.
 
 from __future__ import annotations
@@ -2856,6 +2856,39 @@ def test_prepared_global_probability_revision_is_bound_to_exact_posterior():
     prepared.probability_witness.posterior_identity_hash = "posterior-other"
     assert era._prepared_global_probability_semantics_revision(prepared, conn) is None
     conn.close()
+
+
+def test_global_receipt_stamps_selected_family_probability_revision():
+    receipt = EventSubmissionReceipt(
+        False,
+        "event-1",
+        "snapshot-1",
+        probability_semantics_revision=None,
+    )
+    actuation = SimpleNamespace(
+        decision=SimpleNamespace(
+            candidate=SimpleNamespace(family_key="family-current")
+        )
+    )
+
+    stamped = era._stamp_global_receipt_probability_semantics_revision(
+        receipt,
+        actuation,
+        {"family-current": "day0-current-v2"},
+    )
+
+    assert stamped.probability_semantics_revision == "day0-current-v2"
+    assert receipt.probability_semantics_revision is None
+    assert era._stamp_global_receipt_probability_semantics_revision(
+        stamped,
+        actuation,
+        {"family-current": "superseding-v3"},
+    ) is stamped
+    assert era._stamp_global_receipt_probability_semantics_revision(
+        receipt,
+        actuation,
+        {"other-family": "day0-current-v2"},
+    ) is receipt
 
 
 @pytest.mark.parametrize("side", ("YES", "NO"))
