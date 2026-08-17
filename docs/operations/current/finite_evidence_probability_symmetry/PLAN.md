@@ -4856,6 +4856,41 @@ antibody that emits no aggregate `ENTRY_ORDER_VOIDED`.
 Allowed files for this hot-fix are `src/execution/command_recovery.py`,
 `tests/test_command_recovery.py`, and this plan.
 
+## 2026-08-17 Entry provenance cannot replace held-exit snapshot projection
+
+Live health intermittently reported exact held outcome tokens as
+`EXIT_TOKEN_SNAPSHOT_STALE_OR_MISSING` even though the regular market scanner
+had recently published a reusable three-minute snapshot.  The append-only
+evidence was intact: an entry-only `JIT_PRESUBMIT` row with a newer
+`captured_at` and a one-second deadline had unconditionally replaced the
+token's `executable_market_snapshot_latest` projection.  Once that one-second
+row expired, held-monitor fallback and health saw stale projection state until
+the next ordinary scanner refresh.
+
+The snapshot repository now separates immutable evidence append from latest
+projection advancement.  Advancement remains the default and is retained by
+ordinary scanner and exit `JIT_SUBMIT` writes.  Entry provenance explicitly
+appends without advancing latest, so its exact row remains addressable by
+snapshot id without narrowing the held-exit reuse window.
+
+SCOPE is only entry `JIT_PRESUBMIT` persistence for one exact condition/token.
+DRAIN is the existing ordinary scanner or exit JIT writer advancing the latest
+projection with its normal freshness contract.  RESET is the next valid
+held-token snapshot; an entry receipt, process heartbeat, or expired one-second
+row cannot reset held-exit freshness.  No schema, append-log, lifecycle,
+probability, or action-law semantics change.
+
+Acceptance requires antibodies proving that the entry JIT row remains
+retrievable by id while the prior reusable latest row remains selected, and
+that the default insert path still advances latest.  Focused tests, compile,
+diff checks, hot-fix landing, exact loaded SHA, heartbeat, canonical open
+exposure, and forward health evidence complete the slice.
+
+Additional allowed files are `src/state/snapshot_repo.py`,
+`src/engine/event_reactor_adapter.py`,
+`tests/test_k1_stage1_presubmit_snapshot_persist.py`,
+`architecture/test_topology.yaml`, and this plan.
+
 ## 2026-08-13 Partial fill control state cannot impersonate owned wealth
 
 Live venue truth then exposed the non-terminal twin: Wellington had a confirmed

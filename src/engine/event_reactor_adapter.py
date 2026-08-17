@@ -3928,7 +3928,12 @@ def persist_presubmit_jit_snapshot(
         )
         # capture_policy_spec.md §2 trigger 2: presubmit JIT witness, already
         # structurally full.
-        insert_snapshot(trade_conn, row, capture_trigger="JIT_SUBMIT")
+        insert_snapshot(
+            trade_conn,
+            row,
+            capture_trigger="JIT_SUBMIT",
+            advance_latest=False,
+        )
         trade_conn.commit()
         return row.snapshot_id
     except Exception as exc:  # noqa: BLE001 - fail-soft: persistence must never block submit

@@ -84,6 +84,7 @@ in_scope:
 - src/state/fill_dedup.py
 - src/state/review_work_items.py
 - src/state/venue_command_repo.py
+- src/state/snapshot_repo.py
 - src/analysis/settlement_skill_attribution.py
 - src/state/collateral_ledger.py
 - src/state/chain_mirror_reconciler.py
@@ -210,6 +211,7 @@ in_scope:
 - tests/decision_kernel/test_execution_command_certificate.py
 - tests/events/test_live_order_aggregate.py
 - tests/test_unknown_side_effect.py
+- tests/test_k1_stage1_presubmit_snapshot_persist.py
 - tests/test_command_bus_types.py
 - tests/test_command_grammar_amendment.py
 - src/strategy/strategy_profile.py
@@ -233,6 +235,7 @@ out_of_scope:
 live_side_effects_allowed: true
 supersedes: null
 tests:
+- tests/test_k1_stage1_presubmit_snapshot_persist.py
 - tests/test_finite_evidence_probability_symmetry.py
 - tests/test_architecture_contracts.py::token_suppression migration subset
 - tests/test_phase10a_hygiene.py::TestRCJTokenSuppressionHistoryView
