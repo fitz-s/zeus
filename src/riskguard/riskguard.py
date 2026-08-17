@@ -2522,8 +2522,8 @@ def _settled_market_relative_alpha_shadow_rows(
             or envelope.get("strategy_key") != strategy_key
             or envelope.get("selection_rule")
             != (
-                "earliest_complete_global_cut_max_positive_q_minus_"
-                "fee_adjusted_min_order_cost_per_target_date_v2"
+                "earliest_complete_global_cut_exact_global_posterior_mean_"
+                "expected_growth_winner_v3"
             )
             or revision not in expected_revisions
             or not revision_identity_ready
@@ -2554,6 +2554,16 @@ def _settled_market_relative_alpha_shadow_rows(
             row_fee_adjusted_cost = float(row["c_fee_adjusted"])
             min_order_size = float(envelope["min_order_size"])
             expected_net_edge = float(envelope["expected_net_edge_per_share"])
+            proof_candidate_id = str(envelope["global_proof_candidate_id"])
+            proof_execution_mode = str(
+                envelope["global_proof_execution_mode"]
+            )
+            proof_shares = float(envelope["global_proof_shares"])
+            proof_cost = float(envelope["global_proof_cost_usd"])
+            proof_delta_log_wealth = float(
+                envelope["global_proof_expected_delta_log_wealth"]
+            )
+            proof_ev_usd = float(envelope["global_proof_expected_ev_usd"])
             decision_time = datetime.fromisoformat(
                 str(row["decision_time"] or "").replace("Z", "+00:00")
             )
@@ -2576,6 +2586,10 @@ def _settled_market_relative_alpha_shadow_rows(
                     fee_adjusted_cost,
                     min_order_size,
                     expected_net_edge,
+                    proof_shares,
+                    proof_cost,
+                    proof_delta_log_wealth,
+                    proof_ev_usd,
                 )
             )
             or not 0.0 <= q <= 1.0
@@ -2583,6 +2597,14 @@ def _settled_market_relative_alpha_shadow_rows(
             or not 0.0 < fee_adjusted_cost < 1.0
             or min_order_size <= 0.0
             or expected_net_edge <= 0.0
+            or envelope.get("global_proof_winner") is not True
+            or not proof_candidate_id
+            or proof_execution_mode != "TAKER_LIMIT"
+            or proof_shares <= 0.0
+            or proof_cost <= 0.0
+            or not 0.0 < proof_cost / proof_shares < 1.0
+            or proof_delta_log_wealth <= 0.0
+            or proof_ev_usd <= 0.0
             or not math.isclose(
                 q - fee_adjusted_cost,
                 expected_net_edge,

@@ -1,8 +1,8 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-08-16
+# Last reused/audited: 2026-08-17
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix; 2026-08-15 economic-settlement trailing-loss hotfix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-08-16; last_reused=2026-08-16
+# Lifecycle: created=2026-03-30; last_reviewed=2026-08-17; last_reused=2026-08-17
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
@@ -5544,8 +5544,8 @@ class TestQkernelMarketRelativeAlphaEvidence:
                 DAY0_PROBABILITY_SEMANTICS_REVISION
             ),
             "selection_rule": (
-                "earliest_complete_global_cut_max_positive_q_minus_"
-                "fee_adjusted_min_order_cost_per_target_date_v2"
+                "earliest_complete_global_cut_exact_global_posterior_mean_"
+                "expected_growth_winner_v3"
             ),
             "selection_epoch_identity": "selection",
             "selection_cut_at_utc": decision_at.isoformat(),
@@ -5577,13 +5577,20 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "raw_min_order_vwap": 0.20,
             "fee_adjusted_min_order_cost": 0.21,
             "expected_net_edge_per_share": 0.69,
+            "global_proof_winner": True,
+            "global_proof_candidate_id": "candidate-global-winner",
+            "global_proof_execution_mode": "TAKER_LIMIT",
+            "global_proof_shares": "5",
+            "global_proof_cost_usd": "1.05",
+            "global_proof_expected_delta_log_wealth": 0.01,
+            "global_proof_expected_ev_usd": 3.95,
         }
         conn = sqlite3.connect(":memory:")
         ensure_table(conn)
         NoTradeRegretLedger(conn).insert_idempotent(
             NoTradeRegretEvent(
                 event_id=(
-                    "market-relative-alpha-shadow-v2:"
+                    "market-relative-alpha-shadow-v4-global-winner:"
                     "day0_nowcast_entry:"
                     f"{DAY0_PROBABILITY_SEMANTICS_REVISION}:"
                     "2026-08-10"
@@ -5747,8 +5754,8 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "decision_law_id": "executable_min_order_capital_gain_v2",
             "probability_semantics_revision": revision,
             "selection_rule": (
-                "earliest_complete_global_cut_max_positive_q_minus_"
-                "fee_adjusted_min_order_cost_per_target_date_v2"
+                "earliest_complete_global_cut_exact_global_posterior_mean_"
+                "expected_growth_winner_v3"
             ),
             "selection_epoch_identity": "selection",
             "selection_cut_at_utc": decision_at.isoformat(),
@@ -5780,13 +5787,20 @@ class TestQkernelMarketRelativeAlphaEvidence:
             "raw_min_order_vwap": 0.20,
             "fee_adjusted_min_order_cost": 0.21,
             "expected_net_edge_per_share": 0.69,
+            "global_proof_winner": True,
+            "global_proof_candidate_id": "candidate-global-winner",
+            "global_proof_execution_mode": "TAKER_LIMIT",
+            "global_proof_shares": "5",
+            "global_proof_cost_usd": "1.05",
+            "global_proof_expected_delta_log_wealth": 0.01,
+            "global_proof_expected_ev_usd": 3.95,
         }
         conn = sqlite3.connect(":memory:")
         ensure_table(conn)
         NoTradeRegretLedger(conn).insert_idempotent(
             NoTradeRegretEvent(
                 event_id=(
-                    "market-relative-alpha-shadow-v2:"
+                    "market-relative-alpha-shadow-v4-global-winner:"
                     f"forecast_qkernel_entry:{revision}:2026-08-10"
                 ),
                 rejection_stage="RISK_GUARD",

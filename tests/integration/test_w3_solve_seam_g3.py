@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-16
+# Last reused/audited: 2026-08-17
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -33963,7 +33963,7 @@ def test_global_auction_receipt_delta_component_uses_byte_minimal_exact_encoding
     )
 
 
-def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
+def test_alpha_shadow_freezes_exact_global_proof_winner_without_money():
     from src.events.day0_authority import bind_day0_probability_semantics
     from src.state.schema.no_trade_regret_events_schema import ensure_table
 
@@ -34018,6 +34018,20 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
         )
         for family_key in (family_a, family_b)
     )
+
+    def proof_for(evaluation: SimpleNamespace) -> SimpleNamespace:
+        return SimpleNamespace(
+            decision=SimpleNamespace(
+                candidate=evaluation,
+                shares=Decimal("5"),
+                cost_usd=Decimal("1.01"),
+                expected_growth=SimpleNamespace(
+                    expected_delta_log_wealth=0.01,
+                    expected_ev_usd=1.0,
+                ),
+            )
+        )
+
     assets = tuple(
         SimpleNamespace(
             family_key=family_key,
@@ -34037,6 +34051,7 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
         selected=SimpleNamespace(
             decision=SimpleNamespace(candidate_evaluations=evaluations)
         ),
+        proof_selected=proof_for(evaluations[0]),
         probability_witnesses={
             family_a: witness(family_a, 0.90),
             family_b: witness(family_b, 0.80),
@@ -34069,7 +34084,11 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
     envelope = json.loads(events[0].envelope_json)
     assert envelope["schema_version"] == 2
     assert envelope["decision_law_id"] == "executable_min_order_capital_gain_v2"
-    assert envelope["selection_rule"].endswith("per_target_date_v2")
+    assert envelope["selection_rule"].endswith(
+        "posterior_mean_expected_growth_winner_v3"
+    )
+    assert envelope["global_proof_winner"] is True
+    assert envelope["global_proof_candidate_id"] == "candidate-family-a"
     assert envelope["q"] == pytest.approx(0.90)
     assert envelope["expected_net_edge_per_share"] > 0.0
 
@@ -34077,6 +34096,7 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
         selected=SimpleNamespace(
             decision=SimpleNamespace(candidate_evaluations=evaluations)
         ),
+        proof_selected=proof_for(evaluations[0]),
         probability_witnesses={
             family_a: witness(family_a, 0.10),
             family_b: witness(family_b, 0.20),
@@ -34186,6 +34206,7 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
         selected=SimpleNamespace(
             decision=SimpleNamespace(candidate_evaluations=qkernel_evaluations)
         ),
+        proof_selected=proof_for(qkernel_evaluations[0]),
         probability_witnesses=qkernel_witnesses,
         book_epoch=SimpleNamespace(
             assets=assets,
@@ -34209,7 +34230,7 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
         qkernel_semantics_by_posterior=semantics_by_posterior,
         strategy_keys=("forecast_qkernel_entry",),
     )
-    assert len(qkernel_events) == 2
+    assert len(qkernel_events) == 1
     qkernel_envelopes = [
         json.loads(event.envelope_json) for event in qkernel_events
     ]
@@ -34218,7 +34239,6 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
         for envelope in qkernel_envelopes
     } == {
         global_batch_runtime.CURRENT_EVIDENCE_SEMANTICS_REVISION,
-        global_batch_runtime.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
     }
     assert all(
         envelope["strategy_key"] == "forecast_qkernel_entry"
@@ -34228,41 +34248,42 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
         event.rejection_reason
         == "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
         and event.event_id.startswith(
-            "market-relative-alpha-shadow-v3-current-semantics:"
+            "market-relative-alpha-shadow-v4-global-winner:"
         )
         for event in qkernel_events
     )
     stale_events = global_batch_runtime._market_relative_alpha_shadow_events(
-            selected=SimpleNamespace(
-                decision=SimpleNamespace(
-                    candidate_evaluations=qkernel_evaluations
-                )
-            ),
-            probability_witnesses=qkernel_witnesses,
-            book_epoch=SimpleNamespace(
-                assets=assets,
-                witness_identity="book-epoch",
-            ),
-            family_context_by_key={
-                family_a: {
-                    "city": "Alpha",
-                    "target_date": "2026-08-11",
-                    "metric": "high",
-                },
-                family_b: {
-                    "city": "Beta",
-                    "target_date": "2026-08-11",
-                    "metric": "low",
-                },
+        selected=SimpleNamespace(
+            decision=SimpleNamespace(
+                candidate_evaluations=qkernel_evaluations
+            )
+        ),
+        proof_selected=proof_for(qkernel_evaluations[0]),
+        probability_witnesses=qkernel_witnesses,
+        book_epoch=SimpleNamespace(
+            assets=assets,
+            witness_identity="book-epoch",
+        ),
+        family_context_by_key={
+            family_a: {
+                "city": "Alpha",
+                "target_date": "2026-08-11",
+                "metric": "high",
             },
-            selection_epoch_identity="selection-epoch",
-            selection_cut_at_utc=at,
-            decision_at_utc=at,
-            qkernel_semantics_by_posterior={
-                f"posterior-{family_key}": "stale_ensemble_absolute_disagreement_v2"
-                for family_key in (family_a, family_b)
+            family_b: {
+                "city": "Beta",
+                "target_date": "2026-08-11",
+                "metric": "low",
             },
-            strategy_keys=("forecast_qkernel_entry",),
+        },
+        selection_epoch_identity="selection-epoch",
+        selection_cut_at_utc=at,
+        decision_at_utc=at,
+        qkernel_semantics_by_posterior={
+            f"posterior-{family_key}": "stale_ensemble_absolute_disagreement_v2"
+            for family_key in (family_a, family_b)
+        },
+        strategy_keys=("forecast_qkernel_entry",),
     )
     assert len(stale_events) == 1
     assert json.loads(stale_events[0].envelope_json)[
@@ -34286,6 +34307,7 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
                     candidate_evaluations=qkernel_evaluations
                 )
             ),
+            proof_selected=proof_for(qkernel_evaluations[0]),
             probability_witnesses=missing_posterior_witnesses,
             book_epoch=SimpleNamespace(
                 assets=assets,
@@ -34328,7 +34350,7 @@ def test_day0_alpha_shadow_freezes_first_cut_cluster_max_without_money():
     )
     assert conn.execute(
         "SELECT COUNT(*) FROM no_trade_regret_events"
-    ).fetchone()[0] == 3
+    ).fetchone()[0] == 2
     conn.close()
 
 

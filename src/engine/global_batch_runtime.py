@@ -4943,18 +4943,19 @@ _DAY0_ALPHA_SHADOW_REASON = (
     "MARKET_RELATIVE_ALPHA_SHADOW:day0_nowcast_entry"
 )
 _DAY0_ALPHA_SHADOW_DECISION_LAW = "executable_min_order_capital_gain_v2"
-_DAY0_ALPHA_SHADOW_SELECTION_RULE = (
-    "earliest_complete_global_cut_max_positive_q_minus_"
-    "fee_adjusted_min_order_cost_per_target_date_v2"
+_ALPHA_SHADOW_SELECTION_RULE = (
+    "earliest_complete_global_cut_exact_global_posterior_mean_"
+    "expected_growth_winner_v3"
 )
+_DAY0_ALPHA_SHADOW_SELECTION_RULE = _ALPHA_SHADOW_SELECTION_RULE
 _QKERNEL_ALPHA_SHADOW_REASON = (
     "MARKET_RELATIVE_ALPHA_SHADOW:forecast_qkernel_entry"
 )
 _QKERNEL_ALPHA_SHADOW_EVENT_VERSION = (
-    "market-relative-alpha-shadow-v3-current-semantics"
+    "market-relative-alpha-shadow-v4-global-winner"
 )
 _QKERNEL_ALPHA_SHADOW_DECISION_LAW = "executable_min_order_capital_gain_v2"
-_QKERNEL_ALPHA_SHADOW_SELECTION_RULE = _DAY0_ALPHA_SHADOW_SELECTION_RULE
+_QKERNEL_ALPHA_SHADOW_SELECTION_RULE = _ALPHA_SHADOW_SELECTION_RULE
 
 
 def _native_buy_min_order_vwap(
@@ -5048,6 +5049,7 @@ def _qkernel_shadow_current_semantics_by_posterior(
 def _market_relative_alpha_shadow_events(
     *,
     selected: object,
+    proof_selected: object | None,
     probability_witnesses: Mapping[str, object],
     book_epoch: CurrentGlobalBookEpoch | None,
     family_context_by_key: Mapping[str, Mapping[str, str]],
@@ -5062,14 +5064,15 @@ def _market_relative_alpha_shadow_events(
 ) -> tuple[object, ...]:
     """Freeze no-money current-law evidence for gated entry strategies.
 
-    One immutable positive-edge candidate per strategy and target date is
-    chosen at the first complete cut that reaches this writer. The choice uses
-    only decision-time q and fee-adjusted executable minimum-order cost, so
-    neither settlement nor a non-tradable disagreement can authorize the
-    capital evidence graded later.
+    Only the exact side-effect-free global proof winner may become evidence.
+    Grading locally attractive candidates that the capital allocator would not
+    select evaluates a different policy and can permanently gate the real one.
+    The winner is still benchmarked at decision time against its executable
+    minimum-order cost, so neither settlement nor a non-tradable disagreement
+    can authorize the capital evidence graded later.
     """
 
-    if book_epoch is None:
+    if book_epoch is None or proof_selected is None:
         return ()
     from src.events.day0_authority import (
         DAY0_PROBABILITY_SEMANTICS_REVISION,
@@ -5087,6 +5090,45 @@ def _market_relative_alpha_shadow_events(
     evaluations = tuple(
         getattr(decision, "candidate_evaluations", ()) or ()
     )
+    proof_decision = getattr(proof_selected, "decision", None)
+    proof_candidate = getattr(proof_decision, "candidate", None)
+    proof_candidate_id = str(
+        getattr(proof_candidate, "candidate_id", "") or ""
+    )
+    proof_action = str(
+        getattr(proof_candidate, "action", "") or ""
+    ).upper()
+    proof_execution_mode = _global_candidate_execution_mode(proof_candidate)
+    proof_growth = getattr(proof_decision, "expected_growth", None)
+    try:
+        proof_shares = Decimal(
+            str(getattr(proof_decision, "shares", "0") or "0")
+        )
+        proof_cost = Decimal(
+            str(getattr(proof_decision, "cost_usd", "0") or "0")
+        )
+        proof_delta_log_wealth = float(
+            getattr(proof_growth, "expected_delta_log_wealth", 0.0) or 0.0
+        )
+        proof_ev_usd = float(
+            getattr(proof_growth, "expected_ev_usd", 0.0) or 0.0
+        )
+    except (ArithmeticError, TypeError, ValueError):
+        return ()
+    if (
+        not proof_candidate_id
+        or proof_action != "BUY"
+        or proof_execution_mode != "TAKER_LIMIT"
+        or not proof_shares.is_finite()
+        or not proof_cost.is_finite()
+        or proof_shares <= 0
+        or proof_cost <= 0
+        or not math.isfinite(proof_delta_log_wealth)
+        or not math.isfinite(proof_ev_usd)
+        or proof_delta_log_wealth <= 0.0
+        or proof_ev_usd <= 0.0
+    ):
+        return ()
     assets = {
         (
             str(asset.family_key),
@@ -5097,7 +5139,6 @@ def _market_relative_alpha_shadow_events(
         ): asset
         for asset in tuple(getattr(book_epoch, "assets", ()) or ())
     }
-    selected_by_cluster: dict[str, dict[str, object]] = {}
     for evaluation in evaluations:
         reason = str(getattr(evaluation, "rejection_reason", "") or "")
         strategy_key = next(
@@ -5117,6 +5158,8 @@ def _market_relative_alpha_shadow_events(
         )
         if (
             strategy_key is None
+            or str(getattr(evaluation, "candidate_id", "") or "")
+            != proof_candidate_id
             or str(getattr(evaluation, "action", "") or "").upper() != "BUY"
             or str(getattr(evaluation, "status", "") or "").upper()
             != "REJECTED"
@@ -5151,7 +5194,7 @@ def _market_relative_alpha_shadow_events(
             shadow_reason = _DAY0_ALPHA_SHADOW_REASON
             decision_law = _DAY0_ALPHA_SHADOW_DECISION_LAW
             selection_rule = _DAY0_ALPHA_SHADOW_SELECTION_RULE
-            event_version = "market-relative-alpha-shadow-v2"
+            event_version = "market-relative-alpha-shadow-v4-global-winner"
         else:
             revision = str(
                 (qkernel_semantics_by_posterior or {}).get(
@@ -5242,11 +5285,16 @@ def _market_relative_alpha_shadow_events(
             "raw_min_order_vwap": raw_vwap,
             "fee_adjusted_min_order_cost": fee_adjusted,
             "expected_net_edge_per_share": expected_edge,
+            "global_proof_winner": True,
+            "global_proof_candidate_id": proof_candidate_id,
+            "global_proof_execution_mode": proof_execution_mode,
+            "global_proof_shares": str(proof_shares),
+            "global_proof_cost_usd": str(proof_cost),
+            "global_proof_expected_delta_log_wealth": proof_delta_log_wealth,
+            "global_proof_expected_ev_usd": proof_ev_usd,
         }
-        candidate = {
-            "claimed_edge": expected_edge,
-            "tie_break": (family_key, bin_id, side, token_id),
-            "event": NoTradeRegretEvent(
+        return (
+            NoTradeRegretEvent(
                 event_id=(
                     f"{event_version}:{strategy_key}:{revision}:{target_date}"
                 ),
@@ -5282,21 +5330,8 @@ def _market_relative_alpha_shadow_events(
                     separators=(",", ":"),
                 ),
             ),
-        }
-        # Probability revisions are separately settled/graded regimes.  A
-        # same-date v4 witness must not suppress the stale-shape cohort (or the
-        # reverse), otherwise an accepted live revision has no DRAIN path for
-        # its own performance gate.
-        cluster = f"{strategy_key}:{revision}:{target_date}"
-        incumbent = selected_by_cluster.get(cluster)
-        if incumbent is None or (
-            candidate["claimed_edge"], candidate["tie_break"]
-        ) > (incumbent["claimed_edge"], incumbent["tie_break"]):
-            selected_by_cluster[cluster] = candidate
-    return tuple(
-        selected_by_cluster[cluster]["event"]
-        for cluster in sorted(selected_by_cluster)
-    )
+        )
+    return ()
 
 
 def _day0_market_relative_alpha_shadow_events(
@@ -7587,6 +7622,7 @@ def process_current_global_batch(
             )
             alpha_shadow_events = _market_relative_alpha_shadow_events(
                 selected=selected,
+                proof_selected=proof_selected,
                 probability_witnesses=attempt_probabilities,
                 book_epoch=attempt_book_epoch,
                 family_context_by_key=family_context_by_key,
