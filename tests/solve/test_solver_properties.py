@@ -1,6 +1,6 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-14
-# Lifecycle: created=2026-07-03; last_reviewed=2026-08-14; last_reused=2026-08-14
+# Last reused/audited: 2026-08-17
+# Lifecycle: created=2026-07-03; last_reviewed=2026-08-17; last_reused=2026-08-17
 # Authority basis: current global auction, executable Kelly, and wealth contracts
 """Current global-auction solver properties over executable portfolio wealth."""
 
@@ -2059,7 +2059,7 @@ def test_family_entry_block_removes_higher_growth_buy_before_same_family_sell():
     assert evaluations[sell.candidate_id].status == "SELECTED"
 
 
-def test_global_buy_is_sized_to_current_fdr_feasible_prefix_before_ranking():
+def test_global_buy_size_uses_mean_not_false_edge_sample_rate():
     buy = _global_candidate(
         candidate_id="buy-fdr-prefix-cap",
         family="buy-fdr-prefix-cap-family",
@@ -2086,16 +2086,20 @@ def test_global_buy_is_sized_to_current_fdr_feasible_prefix_before_ranking():
     )
 
     assert decision.candidate is buy
-    selected_rate = S.finite_sample_false_edge_rate(
+    diagnostic_rate = S.finite_sample_false_edge_rate(
         tuple(q_samples),
         cost=float(decision.cost_usd / decision.shares),
     )
-    assert selected_rate is not None
-    assert selected_rate <= 0.10
-    assert decision.shares < Decimal("25")
+    assert diagnostic_rate is not None
+    assert diagnostic_rate > 0.10
+    assert decision.expected_terminal_wealth is not None
+    assert decision.expected_terminal_wealth.probability_basis == (
+        "POSTERIOR_PREDICTIVE_MEAN"
+    )
+    assert decision.shares == Decimal("25")
 
 
-def test_fdr_infeasible_buy_is_removed_before_positive_sell_ranking():
+def test_false_edge_sample_rate_does_not_remove_buy_before_global_ranking():
     buy = _global_candidate(
         candidate_id="buy-fdr-infeasible",
         family="buy-fdr-infeasible-family",
@@ -2126,14 +2130,16 @@ def test_fdr_infeasible_buy_is_removed_before_positive_sell_ranking():
     )
 
     assert decision.candidate is sell
-    assert decision.rejection_reasons[buy.candidate_id] == (
-        "FDR_ROUTE_FALSE_EDGE_RATE_EXCEEDS_ALPHA"
-    )
+    assert buy.candidate_id not in decision.rejection_reasons
     evaluations = {
         evaluation.candidate_id: evaluation
         for evaluation in decision.candidate_evaluations
     }
-    assert evaluations[buy.candidate_id].status == "REJECTED"
+    assert evaluations[buy.candidate_id].status == "SCORED"
+    assert evaluations[buy.candidate_id].expected_growth is not None
+    assert evaluations[buy.candidate_id].expected_growth.probability_basis == (
+        "POSTERIOR_PREDICTIVE_MEAN"
+    )
     assert evaluations[sell.candidate_id].status == "SELECTED"
 
 
