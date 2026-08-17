@@ -518,6 +518,51 @@ def test_anchor_ladder_skips_single_runs_when_source_clock_says_not_public(monke
     assert provenance["run_authority"] == "bucket_partial_run_test"
 
 
+def test_anchor_ladder_falls_through_empty_http_payloads_to_bucket(
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+    from src.data.openmeteo_ecmwf_ifs9_anchor import build_anchor_request
+
+    request = build_anchor_request(
+        latitude=40.77945,
+        longitude=-73.88027,
+        run="2026-06-25T12:00:00+00:00",
+        timezone_name="America/New_York",
+    )
+    empty = _anchor_payload("2026-06-25", value_c=None)
+    valid = _anchor_payload("2026-06-25", value_c=21.0)
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: True)
+    monkeypatch.setattr(
+        dl,
+        "fetch_openmeteo_ecmwf_ifs9_anchor_payload",
+        lambda *_args, **_kwargs: empty,
+    )
+    monkeypatch.setattr(
+        "src.data.openmeteo_ecmwf_ifs9_anchor.fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped",
+        lambda *_args, **_kwargs: (empty, {"run_authority": "provider_meta_declared"}),
+    )
+    seen: list[dict[str, object]] = []
+
+    def _bucket(**kwargs):
+        seen.append(kwargs)
+        return valid, {"run_authority": "bucket_partial_run_test"}
+
+    monkeypatch.setattr(dl, "_try_bucket_rung_three", _bucket)
+
+    payload, provenance = dl._resolve_anchor_payload(
+        request=request,
+        city="NYC",
+        target_date="2026-06-25",
+        timezone_name="America/New_York",
+    )
+
+    assert payload == valid
+    assert provenance["run_authority"] == "bucket_partial_run_test"
+    assert len(seen) == 1
+    assert "no finite target-day sample" in str(seen[0]["meta_refusal"])
+
+
 def test_meta_stamped_wave_brackets_concurrent_payloads_once(monkeypatch) -> None:
     import scripts.download_replacement_forecast_current_targets as dl
     from src.data.openmeteo_ecmwf_ifs9_anchor import build_anchor_request
@@ -547,7 +592,7 @@ def test_meta_stamped_wave_brackets_concurrent_payloads_once(monkeypatch) -> Non
         events.append("payload-start")
         barrier.wait(timeout=1.0)
         events.append("payload-done")
-        return {"hourly": {"time": [], "temperature_2m": []}}
+        return _anchor_payload("2026-06-25")
 
     monkeypatch.setattr(dl, "fetch_openmeteo_ifs9_model_meta", _meta)
     monkeypatch.setattr(
@@ -594,7 +639,7 @@ def test_deadlined_meta_wave_never_queues_more_than_one_worker_width(monkeypatch
 
     def _payload(request, **_kwargs):
         attempted.append(request)
-        return {"hourly": {"time": [], "temperature_2m": []}}
+        return _anchor_payload("2026-08-07")
 
     monkeypatch.setattr(
         dl,
@@ -644,7 +689,7 @@ def test_meta_stamped_wave_discards_every_payload_when_provider_changes_run(
     monkeypatch.setattr(
         dl,
         "fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped",
-        lambda *_args, **_kwargs: {"hourly": {}},
+        lambda *_args, **_kwargs: _anchor_payload("2026-06-25"),
     )
 
     requests = {("Atlanta", "2026-06-25"): request, ("Paris", "2026-06-25"): request}
@@ -1328,6 +1373,7 @@ def test_critical_quota_context_propagates_into_anchor_worker(
     monkeypatch,
 ) -> None:
     import scripts.download_replacement_forecast_current_targets as dl
+    from src.data.openmeteo_ecmwf_ifs9_anchor import build_anchor_request
 
     class _Tracker:
         def __init__(self) -> None:
@@ -1356,11 +1402,20 @@ def test_critical_quota_context_propagates_into_anchor_worker(
     monkeypatch.setattr(
         dl,
         "fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped",
-        lambda *_args, **_kwargs: observed.append(tracker.is_critical()) or {},
+        lambda *_args, **_kwargs: (
+            observed.append(tracker.is_critical())
+            or _anchor_payload("2026-08-17")
+        ),
+    )
+    request = build_anchor_request(
+        latitude=32.8998,
+        longitude=-97.0403,
+        run="2026-08-17T12:00:00+00:00",
+        timezone_name="America/Chicago",
     )
 
     payloads, failures = dl._fetch_meta_stamped_anchor_wave(
-        {("Dallas", "2026-08-17"): object()},
+        {("Dallas", "2026-08-17"): request},
         max_workers=1,
         deadline_monotonic=None,
         client=object(),

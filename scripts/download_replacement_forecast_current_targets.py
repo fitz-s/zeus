@@ -845,10 +845,19 @@ def _resolve_anchor_payload(
                     max_retries=1,
                 )
             payload = fetch_openmeteo_ecmwf_ifs9_anchor_payload(request, **kwargs)
-            return payload, {
-                "openmeteo_endpoint": "single_runs_api",
-                "run_authority": "run_pinned_single_runs",
-            }
+            if _current_target_payload_materializable(
+                payload,
+                city_timezone=timezone_name,
+                target_date=target_date,
+                cycle=request.run,
+            ):
+                return payload, {
+                    "openmeteo_endpoint": "single_runs_api",
+                    "run_authority": "run_pinned_single_runs",
+                }
+            single_runs_exc = ValueError(
+                "single-runs payload has no finite target-day sample"
+            )
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code
             if status_code != 400 and status_code != 429 and status_code < 500:
@@ -878,9 +887,18 @@ def _resolve_anchor_payload(
             payload, meta_provenance = fetch_openmeteo_ecmwf_ifs9_anchor_payload_meta_stamped(
                 request, **kwargs
             )
-            provenance = dict(meta_provenance)
-            provenance["single_runs_fallback_reason"] = _exception_summary(single_runs_exc)
-            return payload, provenance
+            if _current_target_payload_materializable(
+                payload,
+                city_timezone=timezone_name,
+                target_date=target_date,
+                cycle=request.run,
+            ):
+                provenance = dict(meta_provenance)
+                provenance["single_runs_fallback_reason"] = _exception_summary(single_runs_exc)
+                return payload, provenance
+            rung2_reason = ValueError(
+                "meta-stamped payload has no finite target-day sample"
+            )
         except httpx.HTTPStatusError as meta_status_exc:
             # 429/5xx = provider-side unavailability (degrade to rung 3); other 4xx = our defect.
             status_code = meta_status_exc.response.status_code
@@ -974,7 +992,18 @@ def _fetch_meta_stamped_anchor_wave(
         for future in as_completed(future_keys):
             key = future_keys[future]
             try:
-                payloads[key] = (dict(future.result()), datetime.now(tz=UTC))
+                payload = dict(future.result())
+                request = wave_requests[key]
+                if not _current_target_payload_materializable(
+                    payload,
+                    city_timezone=request.timezone_name,
+                    target_date=key[1],
+                    cycle=request.run,
+                ):
+                    raise ValueError(
+                        "meta-stamped payload has no finite target-day sample"
+                    )
+                payloads[key] = (payload, datetime.now(tz=UTC))
             except Exception as exc:  # each city retains its independent bucket fallback
                 failures[key] = exc
 
@@ -1019,9 +1048,18 @@ def _fetch_run_pinned_anchor_wave(
         client=client,
     )
     captured_at = datetime.now(tz=UTC)
-    return {
-        key: (
-            dict(payload),
+    resolved: dict[tuple[str, str], tuple[dict, dict[str, object], datetime]] = {}
+    for (key, request), payload in zip(items, payloads, strict=True):
+        raw_payload = dict(payload)
+        if not _current_target_payload_materializable(
+            raw_payload,
+            city_timezone=request.timezone_name,
+            target_date=key[1],
+            cycle=request.run,
+        ):
+            continue
+        resolved[key] = (
+            raw_payload,
             {
                 "openmeteo_endpoint": "single_runs_api",
                 "run_authority": "run_pinned_single_runs",
@@ -1029,8 +1067,7 @@ def _fetch_run_pinned_anchor_wave(
             },
             captured_at,
         )
-        for (key, _request), payload in zip(items, payloads, strict=True)
-    }
+    return resolved
 
 
 def download_current_target_raw_inputs(

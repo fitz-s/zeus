@@ -4910,6 +4910,17 @@ The additional allowed files are
 `src/data/replacement_forecast_live_materialization_queue.py` and
 `tests/test_day0_extreme_updated_materialization_bridge.py`.
 
+NYC then proved that semantic validity also belongs inside transport selection:
+the run-pinned and meta-stamped HTTP rungs could return a syntactically valid
+all-null target day and stop the ladder before the independently verified S3
+bucket rung. Each HTTP wave/rung now admits a payload only when the canonical
+extractor can materialize the exact local target day. An empty rung falls
+through with an explicit reason; the bucket keeps all existing run, timestep,
+and city cross-check gates, and the final publisher repeats materializability
+validation. SCOPE is the exact city/date/cycle transport attempt. DRAIN is the
+next admitted rung. RESET requires a finite canonical target-day payload; HTTP
+status alone never resets it.
+
 ## 2026-08-17 Held Day0 current-q owns the final Open-Meteo reserve
 
 Live Dallas evidence exposed a quota-lane inversion. The new 12Z ensemble was
