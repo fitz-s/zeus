@@ -4895,6 +4895,21 @@ invalid clocks, and corrupt values still fail closed. This keeps critical held
 retries independent from ordinary discovery without deleting runtime evidence
 or silently resetting a malformed cursor.
 
+The next exact live cut exposed a separate Day0 ownership collision for
+Shanghai: a newer observation seed intentionally reused the last materializable
+00Z source while its enqueue marker targeted the missing 12Z cycle. Ownership
+looked up `target_cycle_time` using the seed's consumed `source_cycle_time`, hit
+an older marker, and discarded the newest 28C conditioning seed as stale.
+Ownership now reads the latest `enqueue_id` for the exact family and compares
+its seed path plus conditioning identity; the witness carries the marker's true
+target cycle. SCOPE is that exact family enqueue. DRAIN is the next seed queue
+poll. RESET requires a committed posterior consuming the same conditioning
+identity; a newer enqueue deterministically supersedes the older owner.
+
+The additional allowed files are
+`src/data/replacement_forecast_live_materialization_queue.py` and
+`tests/test_day0_extreme_updated_materialization_bridge.py`.
+
 ## 2026-08-17 Held Day0 current-q owns the final Open-Meteo reserve
 
 Live Dallas evidence exposed a quota-lane inversion. The new 12Z ensemble was

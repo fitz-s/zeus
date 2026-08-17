@@ -1360,6 +1360,71 @@ def test_queue_quarantines_preexisting_stale_day0_upgrade_seed(tmp_path, monkeyp
     )
 
 
+def test_current_day0_owner_uses_latest_enqueue_not_consumed_source_cycle(
+    tmp_path,
+) -> None:
+    """A newer target-cycle marker may intentionally reuse the consumed source cycle."""
+    db_path = _prepare_forecast_db(tmp_path)
+    old_seed = tmp_path / "old.json"
+    new_seed = tmp_path / "new.json"
+    old_seed.write_text("{}", encoding="utf-8")
+    new_seed.write_text("{}", encoding="utf-8")
+    consumed_cycle = "2026-07-19T00:00:00+00:00"
+    new_identity = {
+        "day0_observed_extreme_source": "wu_icao_history",
+        "day0_observed_extreme_observation_time": "2026-07-19T05:05:00+00:00",
+        "day0_observed_extreme_c": 21.0,
+        "day0_observed_extreme_unit": "C",
+    }
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=consumed_cycle,
+        target_cycle_iso=consumed_cycle,
+        held_position=True,
+        seed_file=str(old_seed),
+        day0_observed_extreme_source="aviationweather_metar",
+        day0_observed_extreme_observation_time="2026-07-19T05:00:00+00:00",
+        day0_observed_extreme_c=20.0,
+        day0_observed_extreme_unit="C",
+    ) is True
+    assert cycle_advance._record_enqueue(
+        conn,
+        city="Shanghai",
+        target_date="2026-07-19",
+        metric="high",
+        consumed_cycle_iso=consumed_cycle,
+        target_cycle_iso="2026-07-19T12:00:00+00:00",
+        held_position=True,
+        seed_file=str(new_seed),
+        reason="DAY0_OBSERVATION_ADVANCED",
+        **new_identity,
+    ) is True
+    conn.commit()
+    conn.close()
+
+    ownership = materialization_queue._upgrade_day0_seed_has_current_enqueue_ownership(
+        forecast_db=db_path,
+        seed_file=new_seed,
+        seed={
+            "city": "Shanghai",
+            "target_date": "2026-07-19",
+            "temperature_metric": "high",
+            "source_cycle_time": consumed_cycle,
+            "upgrade_trigger": "day0_observation_advanced",
+            **new_identity,
+        },
+    )
+
+    assert ownership.ownership is materialization_queue._Day0EnqueueOwnership.CURRENT
+    assert ownership.witness is not None
+    assert ownership.witness["target_cycle_time"] == "2026-07-19T12:00:00+00:00"
+
+
 def test_queue_defers_current_day0_upgrade_seed_when_marker_read_is_transient(
     tmp_path, monkeypatch
 ) -> None:

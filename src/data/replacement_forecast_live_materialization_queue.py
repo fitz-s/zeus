@@ -594,6 +594,7 @@ def _upgrade_day0_seed_has_current_enqueue_ownership(
                 for row in conn.execute("PRAGMA table_info(cycle_advance_enqueues)").fetchall()
             }
             required = {
+                "enqueue_id",
                 "city",
                 "target_date",
                 "metric",
@@ -605,19 +606,19 @@ def _upgrade_day0_seed_has_current_enqueue_ownership(
                 return _Day0EnqueueOwnershipCheck(_Day0EnqueueOwnership.INDETERMINATE)
             row = conn.execute(
                 """
-                SELECT seed_file, day0_conditioning_identity_json
+                SELECT seed_file, day0_conditioning_identity_json,
+                       target_cycle_time
                 FROM cycle_advance_enqueues
                 WHERE city = ?
                   AND target_date = ?
                   AND metric = ?
-                  AND target_cycle_time = ?
+                ORDER BY enqueue_id DESC
                 LIMIT 1
                 """,
                 (
                     str(seed.get("city") or ""),
                     str(seed.get("target_date") or ""),
                     str(seed.get("temperature_metric") or ""),
-                    str(seed.get("source_cycle_time") or ""),
                 ),
             ).fetchone()
             if row is None:
@@ -635,7 +636,7 @@ def _upgrade_day0_seed_has_current_enqueue_ownership(
                     "city": str(seed.get("city") or ""),
                     "target_date": str(seed.get("target_date") or ""),
                     "metric": str(seed.get("temperature_metric") or ""),
-                    "target_cycle_time": str(seed.get("source_cycle_time") or ""),
+                    "target_cycle_time": str(row["target_cycle_time"] or ""),
                     "seed_file": str(seed_file),
                     "conditioning_identity": identity,
                 },
