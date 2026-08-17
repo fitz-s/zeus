@@ -11213,6 +11213,9 @@ def _normalize_position_settlement_event(event: dict) -> Optional[dict]:
         "historical_cost_basis_usd": _coerce_settlement_float(
             event.get("historical_cost_basis_usd")
         ),
+        "entry_economics_source": str(
+            event.get("entry_economics_source") or "position_current_projection"
+        ),
         "held_side_result": held_side_result,
         "economic_result": economic_result,
         "decision_snapshot_id": str(event.get("decision_snapshot_id") or ""),
@@ -11394,7 +11397,24 @@ def query_settlement_events(
         query += "\n        LIMIT ?"
         params.append(limit)
     rows = conn.execute(query, params).fetchall()
-    return _decode_position_event_rows(rows)
+    events = _decode_position_event_rows(rows)
+    fill_hints = _query_entry_execution_fill_hints(
+        conn,
+        [str(event.get("runtime_trade_id") or "") for event in events],
+    )
+    for event in events:
+        event["entry_economics_source"] = "position_current_projection"
+        fill_hint = fill_hints.get(str(event.get("runtime_trade_id") or ""))
+        if fill_hint is None or not fill_hint.get(
+            "entry_fill_command_identity_complete"
+        ):
+            continue
+        event["historical_shares"] = fill_hint["shares_filled"]
+        event["historical_cost_basis_usd"] = fill_hint["filled_cost_basis_usd"]
+        event["entry_economics_source"] = str(
+            fill_hint.get("entry_economics_source") or "execution_fact"
+        )
+    return events
 
 
 def query_authoritative_settlement_rows(
@@ -13447,6 +13467,7 @@ def _query_entry_execution_fill_hints(
                 "_latest_intent_id": "",
                 "_latest_venue_status": "",
                 "_command_ids": [],
+                "_command_identity_complete": True,
             },
         )
         hint["_shares"] += shares
@@ -13457,6 +13478,8 @@ def _query_entry_execution_fill_hints(
         )
         if command_id:
             hint["_command_ids"].append(command_id)
+        else:
+            hint["_command_identity_complete"] = False
         filled_at = str(row["filled_at"] or "")
         if filled_at >= hint["_latest_at"]:
             hint["_latest_at"] = filled_at
@@ -13471,6 +13494,7 @@ def _query_entry_execution_fill_hints(
         latest_intent_id = hint.pop("_latest_intent_id")
         latest_venue_status = hint.pop("_latest_venue_status")
         command_ids = tuple(sorted(set(hint.pop("_command_ids"))))
+        command_identity_complete = bool(hint.pop("_command_identity_complete"))
         hints[trade_id] = {
             "entry_price_avg_fill": float(total_cost / total_shares),
             "shares_filled": float(total_shares),
@@ -13487,6 +13511,7 @@ def _query_entry_execution_fill_hints(
             "execution_fact_filled_at": latest_at,
             "execution_fact_venue_status": latest_venue_status,
             "execution_fact_command_ids": command_ids,
+            "entry_fill_command_identity_complete": command_identity_complete,
         }
     return hints
 
