@@ -336,6 +336,73 @@ def test_rotation_cursor_isolated_by_state_path(tmp_path: Path) -> None:
     ) == (2, True)
 
 
+def test_scoped_rotation_cursor_isolated_from_ordinary_universe(
+    tmp_path: Path,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    rows = [_TargetRow("Dallas", "2026-06-10", "high", False, True)]
+    ordinary = dl._current_target_rotation_state_path(
+        tmp_path,
+        rows,
+        scoped=False,
+    )
+    scoped = dl._current_target_rotation_state_path(
+        tmp_path,
+        rows,
+        scoped=True,
+    )
+    different_scope = dl._current_target_rotation_state_path(
+        tmp_path,
+        [_TargetRow("NYC", "2026-06-10", "low", False, True)],
+        scoped=True,
+    )
+
+    assert ordinary.name == ".current_target_rotation.json"
+    assert scoped != ordinary
+    assert different_scope != scoped
+
+
+def test_legacy_rotation_cursor_is_read_then_upgraded(
+    tmp_path: Path,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    cycle = AVAILABLE_CYCLE.replace(hour=7)
+    state_path = tmp_path / "rotation.json"
+    state_path.write_text(
+        json.dumps({"cycle": cycle.isoformat(), "next_start": 1})
+    )
+    rows = [
+        _TargetRow(city, "2026-06-10", "high", False, True)
+        for city in ("Amsterdam", "Dallas")
+    ]
+
+    rotated, start, row_count, generation = dl._rotate_current_target_rows(
+        rows,
+        cycle=cycle,
+        state_path=state_path,
+    )
+    next_start, applied = dl._advance_current_target_rotation(
+        cycle=cycle,
+        row_count=row_count,
+        attempted_count=1,
+        incomplete=True,
+        state_path=state_path,
+        expected_generation=generation,
+    )
+
+    assert [row.city for row in rotated] == ["Dallas", "Amsterdam"]
+    assert start == 1
+    assert (next_start, applied) == (0, True)
+    assert json.loads(state_path.read_text()) == {
+        "version": 1,
+        "cycle": cycle.isoformat(),
+        "next_start": 0,
+        "generation": 1,
+    }
+
+
 def test_malformed_rotation_state_fails_closed(tmp_path: Path) -> None:
     import scripts.download_replacement_forecast_current_targets as dl
 

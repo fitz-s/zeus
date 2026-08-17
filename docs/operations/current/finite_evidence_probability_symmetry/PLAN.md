@@ -4886,6 +4886,15 @@ The additional allowed files are
 `src/data/replacement_forecast_production.py`,
 `tests/test_replacement_download_cycle_currency_gate.py`, and this plan.
 
+The first post-deploy exact-scope retry exposed a second identity collision:
+scoped held recovery and ordinary universe rotation shared one cursor file, and
+the live file still used the prior two-field schema. Exact-scope rotation is now
+keyed by its concrete family set, while the single known legacy cursor shape is
+read once and upgraded on its next compare-and-swap advance. Unknown fields,
+invalid clocks, and corrupt values still fail closed. This keeps critical held
+retries independent from ordinary discovery without deleting runtime evidence
+or silently resetting a malformed cursor.
+
 ## 2026-08-17 Held Day0 current-q owns the final Open-Meteo reserve
 
 Live Dallas evidence exposed a quota-lane inversion. The new 12Z ensemble was

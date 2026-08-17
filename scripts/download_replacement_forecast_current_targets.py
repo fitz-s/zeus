@@ -92,13 +92,23 @@ def _read_rotation_state(
         state = json.loads(state_path.read_text())
         if not isinstance(state, dict):
             raise ValueError("rotation state must be an object")
-        if set(state) != {"version", "cycle", "next_start", "generation"}:
+        state_fields = set(state)
+        legacy_state = state_fields == {"cycle", "next_start"}
+        if not legacy_state and state_fields != {
+            "version",
+            "cycle",
+            "next_start",
+            "generation",
+        }:
             raise ValueError("rotation state fields mismatch")
-        if state.get("version") != _CURRENT_TARGET_ROTATION_STATE_VERSION:
+        if (
+            not legacy_state
+            and state.get("version") != _CURRENT_TARGET_ROTATION_STATE_VERSION
+        ):
             raise ValueError("rotation state version mismatch")
         state_cycle = state.get("cycle")
         next_start = state.get("next_start")
-        generation = state.get("generation")
+        generation = 0 if legacy_state else state.get("generation")
         if (
             not isinstance(state_cycle, str)
             or isinstance(next_start, bool)
@@ -179,6 +189,22 @@ def _current_target_family_key(row: object) -> tuple[str, str, str]:
         str(getattr(row, "target_date")),
         str(getattr(row, "temperature_metric")),
     )
+
+
+def _current_target_rotation_state_path(
+    output_dir: Path,
+    rows: Sequence[object],
+    *,
+    scoped: bool,
+) -> Path:
+    if not scoped:
+        return output_dir / ".current_target_rotation.json"
+    scope_identity = json.dumps(
+        sorted(_current_target_family_key(row) for row in rows),
+        separators=(",", ":"),
+    )
+    scope_hash = hashlib.sha256(scope_identity.encode("utf-8")).hexdigest()[:16]
+    return output_dir / f".current_target_rotation.scoped-{scope_hash}.json"
 
 
 def _ordered_current_target_rows(
@@ -1080,7 +1106,11 @@ def download_current_target_raw_inputs(
         held_family_priority,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
-    rotation_state_path = output_dir / ".current_target_rotation.json"
+    rotation_state_path = _current_target_rotation_state_path(
+        output_dir,
+        _rows,
+        scoped=required_scopes is not None,
+    )
     (
         rotated_rows,
         rotation_start,
