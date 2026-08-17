@@ -10990,6 +10990,10 @@ def _qkernel_selected_route_fdr_proof(
 
     Return ``None`` for non-qkernel proofs so the legacy BH path remains
     byte-for-byte responsible for legacy selections.
+
+    A sealed global current-state action has already been ranked on posterior-
+    mean expected log wealth.  Its false-edge rate remains recorded confidence
+    evidence, but it cannot delete that fixed action at preflight.
     """
 
     cert = _qkernel_fdr_execution_economics(selected_proof)
@@ -11001,7 +11005,10 @@ def _qkernel_selected_route_fdr_proof(
     from src.events.money_path_adapters import FdrProof
     from src.strategy.selection_family import DEFAULT_FDR_ALPHA
 
-    passed = bool(selected_proof.passed_prefilter) and false_edge_rate <= float(DEFAULT_FDR_ALPHA)
+    current_state_action = _declares_global_current_state_execution_economics(cert)
+    passed = bool(selected_proof.passed_prefilter) and (
+        current_state_action or false_edge_rate <= float(DEFAULT_FDR_ALPHA)
+    )
     return FdrProof(
         fdr_family_id=family_id,
         attempted_hypotheses=len(all_hypothesis_ids),

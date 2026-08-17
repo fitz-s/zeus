@@ -5276,6 +5276,29 @@ def test_day0_global_mean_route_delegates_fdr_to_current_state_certificate():
     )
 
 
+def test_global_mean_route_false_edge_rate_is_diagnostic_not_action_gate():
+    cert = _global_mean_current_qkernel_cert()
+    cert["false_edge_rate"] = 0.95
+    _seal_current_qkernel_cert(cert)
+    proof = SimpleNamespace(
+        passed_prefilter=True,
+        selection_authority_applied="qkernel_spine",
+        direction="buy_yes",
+        qkernel_execution_economics=cert,
+    )
+
+    fdr = era._qkernel_selected_route_fdr_proof(
+        family_id="family-current",
+        all_hypothesis_ids=("h7",),
+        selected_hypothesis_id="h7",
+        selected_proof=proof,
+    )
+
+    assert fdr is not None
+    assert fdr.passed is True
+    assert fdr.selected_post_fdr == ("h7",)
+
+
 def test_day0_replacement_route_without_qkernel_certificate_uses_legacy_fdr():
     proof = SimpleNamespace(
         passed_prefilter=True,

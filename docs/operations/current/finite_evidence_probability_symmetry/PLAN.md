@@ -4,6 +4,27 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-17 Current-state mean actions must not be deleted by FDR confidence
+
+Post-restart live receipts selected two positive posterior-mean actions but the
+winner preflight deleted both through the legacy `FDR_REJECTED` route.  Their
+global certificates already proved a fixed executable action using posterior-
+predictive-mean EV and expected log wealth; the sampled false-edge rate is
+confidence evidence and cannot replace that action's expected payoff.  The
+solver-side deletion had already been removed, but the selected-route FDR
+adapter still reapplied the same confidence threshold immediately before
+submission.
+
+For an exact sealed global current-state certificate, the selected-route FDR
+shape now records the hypothesis and diagnostic false-edge rate without using
+that rate as action admission.  The prefilter, certificate grammar, current q,
+JIT book, wealth, positive mean EV/log-growth, price band, fees, depth, Kelly,
+and all submit-boundary verification remain cumulative.  Legacy non-current-
+state qkernel and family-BH routes retain their existing FDR law.  SCOPE is one
+globally selected current-state BUY preflight.  DRAIN is the next complete
+auction and JIT revalidation.  RESET is each new sealed global decision; stale
+q/book/wealth still supersedes and reauctions rather than inheriting this pass.
+
 ## 2026-08-17 Target-complete ENS windows must not wait for an unused 144h tail
 
 Current live auction evidence contains 150 probability families and target dates
