@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-08-16; last_reused=2026-08-16
+# Lifecycle: created=2026-03-31; last_reviewed=2026-08-17; last_reused=2026-08-17
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-08-16
+# Last reused/audited: 2026-08-17
 # Authority basis: finite-evidence single-q global SELL ownership; price-band parity hot-fix
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -11656,8 +11656,8 @@ def test_global_jit_authority_rejects_current_clob_market_conflicts(
         )
 
 
-def test_global_jit_authority_uses_current_book_rules_when_clob_omits_duplicates():
-    """The live CLOB endpoint may omit rules already carried by its raw book."""
+def test_global_jit_authority_accepts_projected_book_with_current_clob_rules():
+    """A continuity book may omit rules current Gamma and CLOB both prove."""
     from src.engine import event_reactor_adapter as adapter
 
     gamma_market = {
@@ -11667,7 +11667,7 @@ def test_global_jit_authority_uses_current_book_rules_when_clob_omits_duplicates
         "acceptingOrders": True,
         "enableOrderBook": True,
         "clobTokenIds": ["yes-buy", "no-buy"],
-        "orderPriceMinTickSize": "0.001",
+        "orderPriceMinTickSize": "0.01",
         "orderMinSize": "1",
         "negRisk": False,
         "feeSchedule": {"exponent": 1, "rate": 0.05, "takerOnly": True},
@@ -11680,7 +11680,8 @@ def test_global_jit_authority_uses_current_book_rules_when_clob_omits_duplicates
     clob_market["minimum_tick_size"] = "0.01"
     clob_market["minimum_order_size"] = "1"
     raw_book = _global_jit_book("yes-buy")
-    raw_book["tick_size"] = "0.001"
+    raw_book.pop("tick_size")
+    raw_book.pop("min_order_size")
 
     authority = adapter._current_global_market_authority(
         condition_id="condition-buy",
@@ -11695,7 +11696,7 @@ def test_global_jit_authority_uses_current_book_rules_when_clob_omits_duplicates
         timeout=1.0,
     )
 
-    assert authority.snapshot.min_tick_size == Decimal("0.001")
+    assert authority.snapshot.min_tick_size == Decimal("0.01")
     assert authority.snapshot.min_order_size == Decimal("1")
 
     conflicting_book = dict(raw_book)
@@ -11710,6 +11711,22 @@ def test_global_jit_authority_uses_current_book_rules_when_clob_omits_duplicates
             ),
             clob_market_get=lambda *_args, **_kwargs: clob_market,
             raw_book=conflicting_book,
+            captured_at_utc=datetime.now(timezone.utc),
+            timeout=1.0,
+        )
+
+    conflicting_clob = dict(clob_market)
+    conflicting_clob["minimum_tick_size"] = "0.02"
+    with pytest.raises(ValueError, match="METADATA_INVALID"):
+        adapter._current_global_market_authority(
+            condition_id="condition-buy",
+            token_id="yes-buy",
+            side="YES",
+            gamma_get=lambda *_args, **_kwargs: SimpleNamespace(
+                status_code=200, json=lambda: [gamma_market]
+            ),
+            clob_market_get=lambda *_args, **_kwargs: conflicting_clob,
+            raw_book=raw_book,
             captured_at_utc=datetime.now(timezone.utc),
             timeout=1.0,
         )

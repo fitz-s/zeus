@@ -775,14 +775,29 @@ def _current_global_market_authority(
             or clob_archived is not False
         ):
             raise ValueError("invalid CLOB tradeability")
-        current_tick_names = ("tick_size", "min_tick_size", "minTickSize")
-        current_min_order_names = ("min_order_size", "minOrderSize")
-        current_tick = _required_decimal_fact(
-            (dict(raw_book),), current_tick_names
+        current_tick_names = (
+            "tick_size",
+            "minimum_tick_size",
+            "min_tick_size",
+            "minTickSize",
         )
-        current_min_order = _required_decimal_fact(
-            (dict(raw_book),),
-            ("min_order_size", "minimum_order_size", "minOrderSize"),
+        current_min_order_names = (
+            "min_order_size",
+            "minimum_order_size",
+            "minOrderSize",
+        )
+        current_tick = (
+            _required_decimal_fact((dict(raw_book),), current_tick_names)
+            if any(raw_book.get(name) not in (None, "") for name in current_tick_names)
+            else None
+        )
+        current_min_order = (
+            _required_decimal_fact((dict(raw_book),), current_min_order_names)
+            if any(
+                raw_book.get(name) not in (None, "")
+                for name in current_min_order_names
+            )
+            else None
         )
         clob_tick = (
             _required_decimal_fact((raw_clob_market,), current_tick_names)
@@ -804,10 +819,18 @@ def _current_global_market_authority(
             (raw_clob_market,), ("neg_risk", "negRisk", "negative_risk")
         )
         if (
-            current_tick != min_tick
-            or current_min_order != min_order_size
-            or (clob_tick is not None and clob_tick != current_tick)
-            or (clob_min_order is not None and clob_min_order != current_min_order)
+            (current_tick is None and clob_tick is None)
+            or (current_min_order is None and clob_min_order is None)
+            or (current_tick is not None and current_tick != min_tick)
+            or (
+                current_min_order is not None
+                and current_min_order != min_order_size
+            )
+            or (clob_tick is not None and clob_tick != min_tick)
+            or (
+                clob_min_order is not None
+                and clob_min_order != min_order_size
+            )
             or clob_neg_risk != neg_risk
         ):
             raise ValueError("Gamma/CLOB/book market rules conflict")
