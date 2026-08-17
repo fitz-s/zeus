@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -35,6 +37,8 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: E402
     CURRENT_RUN_CONTEXT_HOURS,
     HIGH_DATA_VERSION as OPENMETEO_HIGH_DATA_VERSION,
     LOW_DATA_VERSION as OPENMETEO_LOW_DATA_VERSION,
+    PRODUCT_ID as OPENMETEO_PRODUCT_ID,
+    SOURCE_ID as OPENMETEO_SOURCE_ID,
     build_anchor_request,
     build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest,
     fetch_openmeteo_ecmwf_ifs9_anchor_payload,
@@ -302,6 +306,88 @@ def _json_file_valid(path: Path) -> bool:
         return True
     except Exception:
         return False
+
+
+def _canonical_current_target_reuse(
+    forecast_db: Path,
+    *,
+    cycle: datetime,
+    targets: Sequence[object],
+    raw_dir: Path,
+) -> dict[tuple[str, str, str], int]:
+    """Return exact canonical artifacts whose immutable bytes already exist.
+
+    SCOPE: one current-target family at one source cycle. DRAIN: a missing or
+    byte-drifted artifact stays outside this map and follows the normal fetch /
+    repin path in the same tick. RESET: a new source cycle changes both the DB
+    predicate and payload path, so it is fetched normally.
+
+    Reusing a payload must not manufacture a later possession time. The DB row
+    already records the first canonical capture; rebuilding its manifest with
+    ``datetime.now()`` would move ``source_available_at`` forward on every poll
+    and make causal materialization chase a fact that never becomes old enough.
+    """
+    if not forecast_db.exists() or not targets:
+        return {}
+    wanted = {_current_target_family_key(row) for row in targets}
+    cycle_iso = cycle.astimezone(UTC).isoformat()
+    try:
+        conn = _connect(forecast_db)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT artifact_id, data_version, artifact_path, sha256, byte_size,
+                   artifact_metadata_json
+            FROM raw_forecast_artifacts
+            WHERE source_id = ?
+              AND product_id = ?
+              AND source_cycle_time = ?
+              AND data_version IN (?, ?)
+            ORDER BY artifact_id DESC
+            """,
+            (
+                OPENMETEO_SOURCE_ID,
+                OPENMETEO_PRODUCT_ID,
+                cycle_iso,
+                OPENMETEO_HIGH_DATA_VERSION,
+                OPENMETEO_LOW_DATA_VERSION,
+            ),
+        ).fetchall()
+    except (OSError, sqlite3.Error):
+        return {}
+    finally:
+        if "conn" in locals():
+            conn.close()
+
+    reused: dict[tuple[str, str, str], int] = {}
+    for row in rows:
+        try:
+            metadata = json.loads(str(row["artifact_metadata_json"] or "{}"))
+            key = (
+                str(metadata.get("city") or ""),
+                str(metadata.get("target_date") or ""),
+                str(metadata.get("metric") or ""),
+            )
+            if key not in wanted or key in reused:
+                continue
+            city, target_date, metric = key
+            expected_path = raw_dir / (
+                f"openmeteo_{_safe_name(city)}_{target_date}_{metric}_"
+                f"{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
+            )
+            artifact_path = Path(str(row["artifact_path"]))
+            if artifact_path.resolve() != expected_path.resolve():
+                continue
+            raw = artifact_path.read_bytes()
+            if len(raw) != int(row["byte_size"]):
+                continue
+            if hashlib.sha256(raw).hexdigest() != str(row["sha256"]):
+                continue
+            json.loads(raw)
+            reused[key] = int(row["artifact_id"])
+        except (OSError, TypeError, ValueError, UnicodeError, json.JSONDecodeError):
+            continue
+    return reused
 
 
 def _write_manifest_file(output_dir: Path, manifest: RawForecastArtifactManifest) -> Path:
@@ -777,6 +863,16 @@ def download_current_target_raw_inputs(
     targets = rotated_rows[:limit] if limit else rotated_rows
     raw_dir = output_dir / cycle.strftime("%Y%m%dT%H%M%SZ")
     raw_dir.mkdir(parents=True, exist_ok=True)
+    canonical_reuse = (
+        _canonical_current_target_reuse(
+            forecast_db,
+            cycle=cycle,
+            targets=targets,
+            raw_dir=raw_dir,
+        )
+        if write_db
+        else {}
+    )
     nominal_source_available = _source_available_at(
         cycle, release_lag_hours=release_lag_hours
     )
@@ -822,6 +918,8 @@ def download_current_target_raw_inputs(
     for target in targets:
         city_config = cities_by_name.get(target.city)
         if city_config is None:
+            continue
+        if _current_target_family_key(target) in canonical_reuse:
             continue
         target_key = (target.city, target.target_date)
         payload_path = raw_dir / f"openmeteo_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}_{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
@@ -910,6 +1008,10 @@ def download_current_target_raw_inputs(
             target_key = (target.city, target.target_date)
             city_config = cities_by_name.get(target.city)
             if city_config is None:
+                processed_target_count += 1
+                continue
+            family_key = _current_target_family_key(target)
+            if family_key in canonical_reuse:
                 processed_target_count += 1
                 continue
             payload_path = raw_dir / f"openmeteo_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}_{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
@@ -1072,7 +1174,10 @@ def download_current_target_raw_inputs(
         if conn is not None:
             conn.close()
 
-    incomplete_target_set = timeboxed_incomplete or len(manifests) < len(targets)
+    incomplete_target_set = (
+        timeboxed_incomplete
+        or len(manifests) + len(canonical_reuse) < len(targets)
+    )
     rotation_next_start = _advance_current_target_rotation(
         cycle=cycle,
         row_count=rotation_row_count,
@@ -1096,6 +1201,8 @@ def download_current_target_raw_inputs(
         "written_manifests": written_manifests,
         "write_db": write_db,
         "db_artifact_ids": db_artifact_ids,
+        "reused_canonical_artifact_count": len(canonical_reuse),
+        "reused_canonical_artifact_ids": list(canonical_reuse.values()),
         "downloaded": downloaded,
         "skipped_city_count": len(skipped_cities),
         "skipped_cities": skipped_cities,

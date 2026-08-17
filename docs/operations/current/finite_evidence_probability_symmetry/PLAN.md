@@ -4886,6 +4886,14 @@ cut. This prevents a recurring poll from advancing immutable
 `captured_at/source_available_at` on the same evidence and turning the current
 anchor into a perpetual future fact.
 
+That immutability binds the ordinary fanout too. A valid on-disk payload whose
+exact source/product/data-version/cycle/scope, path, size, and SHA already match
+the canonical artifact is complete work: the downloader reuses it without
+rewriting either the payload, companion metadata, manifest, or DB row. A
+missing row, mismatched path, corrupt JSON, size drift, or SHA drift remains on
+the existing fetch/repin path. Thus quota class changes who may fetch a missing
+fact, never whether an already-persisted fact may acquire a later timestamp.
+
 SCOPE is the exact `(city, target_date, temperature_metric)` intersection of a
 fresh source commit and canonical held Day0/pending-exit positions. DRAIN is the
 bounded scoped anchor download followed by the existing manifest-bound reseed
@@ -4902,7 +4910,8 @@ Allowed files for this hot-fix are
 `tests/test_scheduler_adapter.py`, and this plan. Acceptance requires
 antibodies proving (1) exact canonical held-Day0 scopes enter critical quota,
 (2) mixed batches partition without granting critical authority to ordinary
-scopes, (3) broad/nonheld downloads remain ordinary, focused tests, live
+scopes, (3) broad/nonheld downloads remain ordinary, (4) both ordinary and
+critical reuse preserve the first canonical capture timestamps, focused tests, live
 deployment, and a new same-cycle Dallas posterior/held-monitor receipt or the
 next exact fail-closed reason.
 

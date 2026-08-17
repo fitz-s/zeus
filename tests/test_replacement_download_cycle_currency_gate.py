@@ -21,6 +21,7 @@ Cross-module invariant (plan coverage -> download gate boundary):
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -445,6 +446,91 @@ def test_direct_downloader_uses_payload_completion_as_possession_time(
     manifest = json.loads(Path(report["written_manifests"][0]).read_text())
     assert manifest["captured_at"] == captured_at.isoformat()
     assert manifest["source_available_at"] == captured_at.isoformat()
+
+
+def test_direct_downloader_reuses_canonical_bytes_without_moving_capture_time(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    row = _TargetRow(
+        city="Dallas",
+        target_date="2026-06-10",
+        temperature_metric="high",
+        covered=True,
+        missing_openmeteo_manifest=False,
+    )
+    db = tmp_path / "forecasts.db"
+    conn = sqlite3.connect(db)
+    conn.execute(_ARTIFACTS_DDL)
+    output_dir = tmp_path / "raw"
+    raw_dir = output_dir / AVAILABLE_CYCLE.strftime("%Y%m%dT%H%M%SZ")
+    raw_dir.mkdir(parents=True)
+    payload_path = raw_dir / (
+        "openmeteo_Dallas_2026-06-10_high_20260609T000000Z.json"
+    )
+    payload_path.write_text('{"hourly":{"temperature_2m":[40.0]}}\n')
+    payload = payload_path.read_bytes()
+    original_capture = "2026-06-09T13:59:45+00:00"
+    conn.execute(
+        """
+        INSERT INTO raw_forecast_artifacts (
+            source_id, product_id, data_version, source_cycle_time,
+            source_available_at, captured_at, artifact_path, sha256,
+            byte_size, artifact_metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            dl.OPENMETEO_SOURCE_ID,
+            dl.OPENMETEO_PRODUCT_ID,
+            dl.OPENMETEO_HIGH_DATA_VERSION,
+            AVAILABLE_CYCLE.isoformat(),
+            original_capture,
+            original_capture,
+            str(payload_path),
+            hashlib.sha256(payload).hexdigest(),
+            len(payload),
+            json.dumps(
+                {
+                    "city": "Dallas",
+                    "target_date": "2026-06-10",
+                    "metric": "high",
+                }
+            ),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(dl, "ensure_replacement_forecast_live_schema", lambda _conn: None)
+
+    def _network_forbidden(*_args, **_kwargs):
+        raise AssertionError("canonical same-cycle bytes must not be fetched again")
+
+    monkeypatch.setattr(dl, "_resolve_anchor_payload", _network_forbidden)
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=db,
+        output_dir=output_dir,
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=True,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        include_covered=True,
+        precomputed_plan=_PlanStub(ready=True, rows=(row,)),
+    )
+
+    conn = sqlite3.connect(db)
+    persisted = conn.execute(
+        "SELECT source_available_at, captured_at, COUNT(*) "
+        "FROM raw_forecast_artifacts"
+    ).fetchone()
+    conn.close()
+    assert report["written_manifest_count"] == 0
+    assert report["reused_canonical_artifact_count"] == 1
+    assert report["target_rotation_advanced"] is False
+    assert persisted == (original_capture, original_capture, 1)
 
 
 def _wire(monkeypatch, *, plan: _PlanStub, calls: list):
