@@ -4873,6 +4873,13 @@ all other scopes remain on the ordinary lane. A broad request, an unreadable
 position projection, an `active` non-Day0 position, or an unlisted family can
 never inherit critical authority.
 
+The same exact held set runs first when the provider-proved `ecmwf_ifs` source
+clock advances. That recovery does not depend on a BPF source-commit callback:
+the extras may already have committed before quota pressure or process reload,
+while the matching anchor is still missing. Its scoped manifest receipt feeds
+the existing reseed triggers before the ordinary broad anchor pass; BPF
+cooldown cannot postpone held-capital probability to the next quota day.
+
 SCOPE is the exact `(city, target_date, temperature_metric)` intersection of a
 fresh source commit and canonical held Day0/pending-exit positions. DRAIN is the
 bounded scoped anchor download followed by the existing manifest-bound reseed

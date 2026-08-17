@@ -279,6 +279,25 @@ def _held_day0_current_target_scopes(
     return tuple(scope for scope in scopes if priorities.get(scope) == 0)
 
 
+def _all_held_day0_current_target_scopes() -> tuple[tuple[str, str, str], ...]:
+    """Current canonical Day0/pending-exit families, in deterministic order."""
+
+    try:
+        from src.data.replacement_forecast_seed_discovery import (
+            held_position_family_priorities,
+        )
+
+        priorities = held_position_family_priorities()
+    except Exception as exc:  # noqa: BLE001 - missing proof cannot widen quota scope
+        logger.warning(
+            "HELD_DAY0_CURRENT_TARGET_UNIVERSE_READ_FAILED exc=%s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return ()
+    return tuple(sorted(scope for scope, priority in priorities.items() if priority == 0))
+
+
 def _day0_family_admission_for_scopes(
     scopes: tuple[tuple[str, str], ...],
 ):
@@ -2939,6 +2958,7 @@ def _replacement_availability_poll_tick():
         *,
         max_wall_clock_seconds: float | None = None,
         required_scopes: tuple[tuple[str, str, str], ...] | None = None,
+        quota_critical: bool = False,
     ):
         current_target_timeout = (
             _replacement_current_target_poll_timeout_seconds(
@@ -2953,6 +2973,8 @@ def _replacement_availability_poll_tick():
             }
             if required_scopes is not None:
                 kwargs["required_scopes"] = required_scopes
+            if quota_critical:
+                kwargs["quota_critical"] = True
             return _download_replacement_forecast_current_targets_if_needed(
                 cfg,
                 **kwargs,
@@ -3007,11 +3029,51 @@ def _replacement_availability_poll_tick():
     _reset_replacement_bpf_no_progress_backoff()
     logger.info("replacement source-clock update detected; running download path: %s", source_clock_payload)
     source_clock_anchor_report = None
+    source_clock_held_anchor_report = None
     anchor_reseed_published = False
     if "ecmwf_ifs" in source_clock_report.updated_sources:
         # The current provider center is the first q input and already has a
         # run-authoritative live-API ladder. Capture it before waiting for the
         # slower Single Runs archive used by the multimodel BPF inputs.
+        held_anchor_scopes = _all_held_day0_current_target_scopes()
+        if held_anchor_scopes:
+            source_clock_held_anchor_report = _download_current_targets(
+                max_wall_clock_seconds=min(
+                    10.0,
+                    _replacement_current_target_poll_timeout_seconds(
+                        _replacement_availability_poll_seconds()
+                    ),
+                ),
+                required_scopes=held_anchor_scopes,
+                quota_critical=True,
+            )
+            if (
+                isinstance(source_clock_held_anchor_report, dict)
+                and int(
+                    source_clock_held_anchor_report.get("written_manifest_count") or 0
+                )
+                > 0
+            ):
+                held_manifests = tuple(
+                    str(path)
+                    for path in (
+                        source_clock_held_anchor_report.get("written_manifests") or ()
+                    )
+                    if str(path).strip()
+                )
+                _attach_reseed_reports(
+                    source_clock_held_anchor_report,
+                    scopes=held_anchor_scopes,
+                    changed_sources=("ecmwf_ifs",),
+                    prepared_manifest_snapshot=(
+                        {"manifest_paths": held_manifests}
+                        if held_manifests
+                        else {}
+                    ),
+                )
+                anchor_reseed_published = not bool(
+                    source_clock_held_anchor_report.get("reseed_errors")
+                )
         source_clock_anchor_report = _download_current_targets(
             max_wall_clock_seconds=min(
                 10.0,
@@ -3228,6 +3290,11 @@ def _replacement_availability_poll_tick():
     )
     if source_clock_anchor_compact is not None:
         report["source_clock_anchor_download"] = source_clock_anchor_compact
+    source_clock_held_anchor_compact = _compact_replacement_current_target_report(
+        source_clock_held_anchor_report
+    )
+    if source_clock_held_anchor_compact is not None:
+        report["source_clock_held_anchor_download"] = source_clock_held_anchor_compact
     # No raw input can land while the provider quota is cooling down. Run one
     # catch-up scan, then suppress identical JSON-heavy reseed scans until the
     # downloader can make progress again.

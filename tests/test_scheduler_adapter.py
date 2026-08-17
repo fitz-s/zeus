@@ -1118,8 +1118,24 @@ def test_ecmwf_source_clock_captures_anchor_before_single_runs_fanout(monkeypatc
         "probe_openmeteo_source_clock_updates",
         lambda **_kwargs: calls.append("probe") or _Changed(),
     )
+    held_scope = ("Dallas", "2026-08-17", "high")
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda: {held_scope: 0},
+    )
 
     def _anchor(_cfg, **kwargs):
+        if kwargs.get("quota_critical"):
+            calls.append("held_anchor")
+            assert kwargs == {
+                "max_wall_clock_seconds": 10.0,
+                "required_scopes": (held_scope,),
+                "quota_critical": True,
+            }
+            return {
+                "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
+                "written_manifest_count": 0,
+            }
         calls.append("anchor")
         assert kwargs == {"max_wall_clock_seconds": 10.0}
         return {
@@ -1137,6 +1153,7 @@ def test_ecmwf_source_clock_captures_anchor_before_single_runs_fanout(monkeypatc
         calls.append("scoped_download")
         assert calls == [
             "probe",
+            "held_anchor",
             "anchor",
             "anchor_fusion_reseed",
             "anchor_cycle_reseed",
@@ -1179,9 +1196,13 @@ def test_ecmwf_source_clock_captures_anchor_before_single_runs_fanout(monkeypatc
         "cycle_advance_status": "CYCLE_ADVANCE_TRIGGER",
         "cycle_advance_seeds_enqueued": 1,
     }
+    assert result["source_clock_held_anchor_download"] == {
+        "status": "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
+    }
     assert result["reseed_maintenance_status"] == "SOURCE_ANCHOR_RESEEDS_PUBLISHED"
     assert calls == [
         "probe",
+        "held_anchor",
         "anchor",
         "anchor_fusion_reseed",
         "anchor_cycle_reseed",
