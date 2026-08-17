@@ -81,6 +81,70 @@ class _TargetRow:
     missing_openmeteo_manifest: bool
 
 
+def test_current_target_download_prioritizes_held_families_before_alphabetic() -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    rows = (
+        _TargetRow("Amsterdam", "2026-06-10", "high", False, True),
+        _TargetRow("Wellington", "2026-06-10", "high", False, True),
+        _TargetRow("Dallas", "2026-06-10", "high", False, True),
+    )
+    priorities = {
+        ("Wellington", "2026-06-10", "high"): 0,
+        ("Dallas", "2026-06-10", "high"): 1,
+    }
+    ordered = dl._ordered_current_target_rows(
+        rows,
+        priorities,
+    )
+    rotated, start, rotating_count = dl._rotate_current_target_rows(
+        ordered,
+        cycle=AVAILABLE_CYCLE.replace(hour=4),
+        held_family_priority=priorities,
+    )
+
+    assert [row.city for row in ordered] == ["Wellington", "Dallas", "Amsterdam"]
+    assert start == 0
+    assert rotating_count == 2
+    assert [row.city for row in rotated] == ["Wellington", "Dallas", "Amsterdam"]
+
+
+def test_timeboxed_current_target_download_rotates_past_attempted_prefix() -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    rotation_cycle = AVAILABLE_CYCLE.replace(hour=3)
+    rows = [
+        _TargetRow(city, "2026-06-10", "high", False, True)
+        for city in ("Amsterdam", "Ankara", "Atlanta", "Austin")
+    ]
+    with dl._CURRENT_TARGET_ROTATION_LOCK:
+        dl._CURRENT_TARGET_ROTATION_OFFSETS.clear()
+    first, first_start, row_count = dl._rotate_current_target_rows(
+        rows,
+        cycle=rotation_cycle,
+        held_family_priority={},
+    )
+    next_start = dl._advance_current_target_rotation(
+        cycle=rotation_cycle,
+        row_count=row_count,
+        attempted_count=2,
+        incomplete=True,
+    )
+    second, second_start, _ = dl._rotate_current_target_rows(
+        rows,
+        cycle=rotation_cycle,
+        held_family_priority={},
+    )
+
+    assert first_start == 0
+    assert [row.city for row in first] == ["Amsterdam", "Ankara", "Atlanta", "Austin"]
+    assert next_start == 2
+    assert second_start == 2
+    assert [row.city for row in second] == ["Atlanta", "Austin", "Amsterdam", "Ankara"]
+    with dl._CURRENT_TARGET_ROTATION_LOCK:
+        dl._CURRENT_TARGET_ROTATION_OFFSETS.clear()
+
+
 def _make_db(tmp_path: Path, cycles_by_source: dict[str, str]) -> Path:
     db = tmp_path / "forecasts.db"
     conn = sqlite3.connect(db)

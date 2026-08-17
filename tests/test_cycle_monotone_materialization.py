@@ -1,7 +1,8 @@
 # Created: 2026-06-12
-# Last reused or audited: 2026-06-19 (external review FINDING 2: per-family materializable-cycle
+# Last reused or audited: 2026-08-17 (causal baseline-anchor pairing for Day0 redecision;
+#   external review FINDING 2: per-family materializable-cycle
 #   gate + typed leg-artifact-missing reason)
-# Lifecycle: created=2026-06-12; last_reviewed=2026-06-19; last_reused=2026-06-19
+# Lifecycle: created=2026-06-12; last_reviewed=2026-08-17; last_reused=2026-08-17
 # Purpose: Relationship tests for consumed-cycle monotonicity and single-family BPF reseed repair.
 # Reuse: Run when replacement cycle-advance, materialization reseed, or freshness gates change.
 # Authority basis: U5 step 2a (operator regime-unification + freshness investigation 2026-06-12,
@@ -403,6 +404,57 @@ def test_family_materializable_cycle_anchor_present_returns_cycle() -> None:
     )
     assert got == cyc
     assert missing == ()
+
+
+def test_cycle_advance_bounds_baseline_selection_by_selected_anchor_cycle(
+    tmp_path: Path,
+) -> None:
+    cycle = datetime(2026, 6, 12, 6, tzinfo=UTC)
+    anchor_identity = expected_replacement_dependency_identity_by_role("high")[
+        "openmeteo_ifs9_anchor"
+    ]
+    manifest = SimpleNamespace(
+        source_id=anchor_identity.source_id,
+        data_version=anchor_identity.data_version,
+        source_cycle_time=cycle,
+        artifact_path="openmeteo.json",
+        product_metadata={},
+    )
+    selected: dict[str, object] = {}
+    written: list[dict[str, object]] = []
+
+    def latest_coverage(_conn, **kwargs):
+        selected.update(kwargs)
+        return {"source_run_id": "causal-baseline"}
+
+    conn = sqlite3.connect(":memory:")
+    result = cycle_advance._build_and_write_advance_seed(
+        conn,
+        city="Dallas",
+        target_date="2026-06-12",
+        metric="high",
+        manifests=(manifest,),
+        raw_dir=tmp_path,
+        seed_path=tmp_path,
+        computed_at=datetime(2026, 6, 12, 12, tzinfo=UTC),
+        build_seed=lambda **_kwargs: SimpleNamespace(ok=True, seed={"ready": True}),
+        latest_baseline_coverage=latest_coverage,
+        market_bins=lambda *_args, **_kwargs: ({"bin": "32C"},),
+        write_seed=lambda _path, payload: written.append(dict(payload)),
+        latest_manifest=lambda *_args, **_kwargs: manifest,
+        manifest_path_value=lambda _manifest, key: (
+            "precision.json" if key == "precision_metadata_json" else None
+        ),
+        manifest_base_dir=lambda *_args, **_kwargs: tmp_path,
+        resolve_path=lambda path, **_kwargs: path,
+        seed_name=lambda *_args, **_kwargs: "seed.json",
+        expected_identity=expected_replacement_dependency_identity_by_role,
+    )
+
+    assert result == tmp_path / "seed.json"
+    assert selected["not_after_source_cycle_time"] == cycle
+    assert written == [{"ready": True, "upgrade_trigger": "newer_cycle_ingested"}]
+    conn.close()
 
 
 def test_family_materializable_cycle_missing_anchor_blocks_and_names_gap() -> None:

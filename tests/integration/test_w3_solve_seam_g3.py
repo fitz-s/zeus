@@ -6208,6 +6208,84 @@ def test_global_day0_actuation_rejects_conditioning_not_equal_to_current_state()
     conn.close()
 
 
+def test_fast_residual_clock_advance_is_held_only_and_value_strict(monkeypatch):
+    from src.data import day0_fast_obs
+
+    conn, carrier = _stale_day0_carrier_and_current_observations()
+    conditioning = {
+        "active": True,
+        "metric": "high",
+        "observation_time": "2026-07-10T19:00:00+00:00",
+        "observed_extreme_c": 27.0,
+        "sample_count": 2,
+        "source": "aviationweather_metar",
+        "unit": "C",
+        "fast_residual_likelihood": {"station_id": "UUWW"},
+    }
+    monkeypatch.setattr(
+        era,
+        "_validated_fast_residual_day0_conditioning",
+        lambda value: value,
+    )
+    monkeypatch.setattr(
+        day0_fast_obs,
+        "latest_fast_station_extreme_c",
+        lambda *_args, **_kwargs: (
+            27.0,
+            "2026-07-10T19:30:00+00:00",
+            3,
+            "C",
+        ),
+    )
+    kwargs = {
+        "family": SimpleNamespace(
+            city="Moscow", target_date="2026-07-10", metric="high"
+        ),
+        "resolution": SimpleNamespace(measurement_unit="C", station_id="UUWW"),
+        "conditioning": conditioning,
+        "observation_conn": conn,
+        "decision_time": _dt.datetime(
+            2026, 7, 10, 20, 0, tzinfo=_dt.timezone.utc
+        ),
+        "posterior_id": 29918,
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_OBSERVATION_MISMATCH",
+    ):
+        era._global_day0_execution_payload(carrier, **kwargs)
+
+    held = era._global_day0_execution_payload(
+        carrier,
+        **kwargs,
+        allow_equivalent_conditioning_clock_advance=True,
+    )
+    binding = held["_edli_global_day0_binding"]
+    assert binding["probability_conditioning_observation_time"] == (
+        "2026-07-10T19:00:00+00:00"
+    )
+    assert binding["current_observation_time"] == (
+        "2026-07-10T19:30:00+00:00"
+    )
+    assert binding["conditioning_clock_lag_seconds"] == pytest.approx(1800.0)
+    assert binding["conditioning_clock_role"] == (
+        "same_extreme_newer_observation_clock"
+    )
+
+    changed = {**conditioning, "observed_extreme_c": 28.0}
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_OBSERVATION_MISMATCH",
+    ):
+        era._global_day0_execution_payload(
+            carrier,
+            **{**kwargs, "conditioning": changed},
+            allow_equivalent_conditioning_clock_advance=True,
+        )
+    conn.close()
+
+
 @pytest.mark.parametrize(
     "conditioning_source",
     (

@@ -33467,7 +33467,6 @@ def _global_day0_execution_payload(
             if (
                 str(conditioning.get("unit") or "").strip().upper() != unit
                 or str(fast_unit or "").strip().upper() != unit
-                or conditioned_at != fast_at
                 or not math.isclose(
                     conditioned_c,
                     float(fast_c),
@@ -33477,6 +33476,24 @@ def _global_day0_execution_payload(
             ):
                 raise ValueError(
                     "GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_OBSERVATION_MISMATCH"
+                )
+            if (
+                conditioned_at != fast_at
+                and not allow_equivalent_conditioning_clock_advance
+            ):
+                raise ValueError(
+                    "GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_OBSERVATION_MISMATCH"
+                )
+            if conditioned_at != fast_at:
+                conditioning_at = fast_at
+                conditioning_observation_time = conditioned_at.isoformat()
+                conditioning_clock_lag_seconds = abs(
+                    (fast_at - conditioned_at).total_seconds()
+                )
+                conditioning_clock_role = (
+                    "same_extreme_newer_observation_clock"
+                    if conditioned_at < fast_at
+                    else "same_extreme_conditioning_ahead_of_reader_clock"
                 )
         else:
             # A held-position posterior may be statistically conditioned on the

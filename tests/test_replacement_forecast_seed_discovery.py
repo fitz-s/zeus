@@ -1,6 +1,6 @@
 # Created: 2026-06-06
-# Last reused/audited: 2026-07-28
-# Lifecycle: created=2026-06-06; last_reviewed=2026-07-28; last_reused=2026-07-28
+# Last reused/audited: 2026-08-17
+# Lifecycle: created=2026-06-06; last_reviewed=2026-08-17; last_reused=2026-08-17
 # Purpose: Protect automatic replacement seed discovery from DB context plus raw manifests.
 # Reuse: Run before enabling daemon-side replacement shadow materialization discovery.
 # Authority basis: Simple switch must not depend on hand-authored seeds once raw inputs exist.
@@ -1201,7 +1201,9 @@ def test_seed_discovery_selects_latest_anchor_even_when_fusion_current_missing(t
     )
 
 
-def test_seed_discovery_does_not_write_mixed_baseline_anchor_cycle_seed(tmp_path: Path) -> None:
+def test_seed_discovery_uses_latest_causal_baseline_not_newer_independent_head(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "forecast.db"
     raw_dir = tmp_path / "raw"
     seed_dir = tmp_path / "seeds"
@@ -1240,6 +1242,24 @@ def test_seed_discovery_does_not_write_mixed_baseline_anchor_cycle_seed(tmp_path
             WHERE source_run_id = 'baseline-run'
             """
         )
+        conn.execute(
+            "INSERT INTO source_run VALUES "
+            "('causal-baseline-run', 'ecmwf_open_data', 'mx2t3_high', "
+            "'2026-06-06T00:00:00+00:00', '2026-06-06T02:00:00+00:00')"
+        )
+        conn.execute(
+            """
+            INSERT INTO source_run_coverage
+              (coverage_id, source_run_id, source_id, city_id, city, city_timezone,
+               target_local_date, temperature_metric, data_version,
+               completeness_status, readiness_status, computed_at)
+            VALUES
+              ('causal-coverage', 'causal-baseline-run', 'ecmwf_open_data',
+               'NYC', 'NYC', 'America/New_York', '2026-06-08', 'high',
+               'ecmwf_opendata_mx2t3_local_calendar_day_max',
+               'COMPLETE', 'LIVE_ELIGIBLE', '2026-06-06T02:05:00+00:00')
+            """
+        )
         conn.commit()
     finally:
         conn.close()
@@ -1251,11 +1271,12 @@ def test_seed_discovery_does_not_write_mixed_baseline_anchor_cycle_seed(tmp_path
         computed_at="2026-06-06T13:00:00+00:00",
     )
 
-    assert report.status == "NO_ELIGIBLE_TARGETS"
-    assert report.discovered_count == 0
-    assert report.failed_count == 1
-    assert report.written_seed_files == ()
-    assert "REPLACEMENT_MATERIALIZATION_SEED_OM9_CYCLE_REGRESSES_BASELINE" in report.reason_codes
+    assert report.status == "DISCOVERED"
+    assert report.discovered_count == 1
+    assert report.failed_count == 0
+    seed = json.loads(Path(report.written_seed_files[0]).read_text())
+    assert seed["baseline_source_run_id"] == "causal-baseline-run"
+    assert seed["source_cycle_time"] == "2026-06-06T06:00:00+00:00"
 
 
 def test_seed_discovery_limit_applies_after_filtering_seedable_targets(tmp_path: Path) -> None:

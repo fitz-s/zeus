@@ -1139,6 +1139,7 @@ def discover_replacement_forecast_materialization_seeds(
                 city=city,
                 target_date=target_date,
                 temperature_metric=metric,
+                not_after_source_cycle_time=openmeteo.source_cycle_time,
             )
             bins = market_bins_for_replacement_seed(
                 conn,

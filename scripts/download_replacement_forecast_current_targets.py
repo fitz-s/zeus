@@ -21,6 +21,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from threading import Lock
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -57,6 +58,86 @@ from src.data.replacement_forecast_current_target_plan import (  # noqa: E402
 )
 from src.state.db import _connect  # noqa: E402
 from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema  # noqa: E402
+
+
+_CURRENT_TARGET_ROTATION_LOCK = Lock()
+_CURRENT_TARGET_ROTATION_OFFSETS: dict[str, int] = {}
+
+
+def _current_target_family_key(row: object) -> tuple[str, str, str]:
+    return (
+        str(getattr(row, "city")),
+        str(getattr(row, "target_date")),
+        str(getattr(row, "temperature_metric")),
+    )
+
+
+def _ordered_current_target_rows(
+    rows: Sequence[object],
+    held_family_priority: dict[tuple[str, str, str], int],
+) -> list[object]:
+    """Put existing exposure ahead of discovery without dropping either lane."""
+
+    def sort_key(row: object) -> tuple[object, ...]:
+        city, target_date, metric = _current_target_family_key(row)
+        return (
+            held_family_priority.get((city, target_date, metric), 2),
+            0 if getattr(row, "missing_openmeteo_manifest", False) else 1,
+            0 if not getattr(row, "covered", False) else 1,
+            target_date,
+            city,
+            metric,
+        )
+
+    return sorted(rows, key=sort_key)
+
+
+def _rotate_current_target_rows(
+    rows: Sequence[object],
+    *,
+    cycle: datetime,
+    held_family_priority: dict[tuple[str, str, str], int],
+) -> tuple[list[object], int, int]:
+    ordered = list(rows)
+    if not ordered:
+        return ordered, 0, 0
+    critical = [
+        row
+        for row in ordered
+        if held_family_priority.get(_current_target_family_key(row), 2) < 2
+    ]
+    ordinary = [row for row in ordered if row not in critical]
+    rotating = critical or ordinary
+    cycle_key = cycle.astimezone(UTC).isoformat()
+    with _CURRENT_TARGET_ROTATION_LOCK:
+        start = _CURRENT_TARGET_ROTATION_OFFSETS.get(cycle_key, 0) % len(rotating)
+        _CURRENT_TARGET_ROTATION_OFFSETS.clear()
+        _CURRENT_TARGET_ROTATION_OFFSETS[cycle_key] = start
+    rotated = rotating[start:] + rotating[:start]
+    if critical:
+        rotated.extend(ordinary)
+    return rotated, start, len(rotating)
+
+
+def _advance_current_target_rotation(
+    *,
+    cycle: datetime,
+    row_count: int,
+    attempted_count: int,
+    incomplete: bool,
+) -> int:
+    cycle_key = cycle.astimezone(UTC).isoformat()
+    with _CURRENT_TARGET_ROTATION_LOCK:
+        if not incomplete or row_count <= 0:
+            _CURRENT_TARGET_ROTATION_OFFSETS.pop(cycle_key, None)
+            return 0
+        next_start = (
+            _CURRENT_TARGET_ROTATION_OFFSETS.get(cycle_key, 0)
+            + max(1, int(attempted_count))
+        ) % row_count
+        _CURRENT_TARGET_ROTATION_OFFSETS.clear()
+        _CURRENT_TARGET_ROTATION_OFFSETS[cycle_key] = next_start
+        return next_start
 
 
 METRIC_TO_OPENMETEO_VERSION = {"high": OPENMETEO_HIGH_DATA_VERSION, "low": OPENMETEO_LOW_DATA_VERSION}
@@ -657,16 +738,21 @@ def download_current_target_raw_inputs(
             _rows = [row for row in plan.rows if row.missing_openmeteo_manifest]
         else:
             _rows = [row for row in plan.rows if not row.covered]
-        _rows.sort(
-            key=lambda row: (
-                0 if getattr(row, "missing_openmeteo_manifest", False) else 1,
-                0 if not getattr(row, "covered", False) else 1,
-                str(getattr(row, "target_date", "")),
-                str(getattr(row, "city", "")),
-                str(getattr(row, "temperature_metric", "")),
-            )
-        )
-    targets = _rows[:limit] if limit else _rows
+    from src.data.replacement_forecast_seed_discovery import (
+        held_position_family_priorities,
+    )
+
+    held_family_priority = held_position_family_priorities()
+    _rows = _ordered_current_target_rows(
+        _rows,
+        held_family_priority,
+    )
+    rotated_rows, rotation_start, rotation_row_count = _rotate_current_target_rows(
+        _rows,
+        cycle=cycle,
+        held_family_priority=held_family_priority,
+    )
+    targets = rotated_rows[:limit] if limit else rotated_rows
     output_dir.mkdir(parents=True, exist_ok=True)
     raw_dir = output_dir / cycle.strftime("%Y%m%dT%H%M%SZ")
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -965,6 +1051,14 @@ def download_current_target_raw_inputs(
         if conn is not None:
             conn.close()
 
+    incomplete_target_set = timeboxed_incomplete or len(manifests) < len(targets)
+    rotation_next_start = _advance_current_target_rotation(
+        cycle=cycle,
+        row_count=rotation_row_count,
+        attempted_count=processed_target_count,
+        incomplete=incomplete_target_set,
+    )
+
     return {
         "status": (
             "CURRENT_TARGET_RAW_INPUTS_TIMEBOXED_INCOMPLETE"
@@ -985,6 +1079,9 @@ def download_current_target_raw_inputs(
         "skipped_cities": skipped_cities,
         "timeboxed_incomplete": timeboxed_incomplete,
         "unattempted_target_count": len(targets) - processed_target_count,
+        "target_rotation_start": rotation_start,
+        "target_rotation_next_start": rotation_next_start,
+        "target_rotation_advanced": incomplete_target_set,
         "max_wall_clock_seconds": max_wall_clock_seconds,
         "fetch_workers": min(max(1, int(fetch_workers)), 8),
         "coverage_before": None if plan is None else plan.as_dict(),

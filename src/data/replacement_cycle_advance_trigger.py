@@ -2823,7 +2823,13 @@ def _build_and_write_advance_seed(
     precision_metadata = manifest_path_value(openmeteo, "precision_metadata_json")
     if not openmeteo_payload or not precision_metadata:
         return None
-    coverage = latest_baseline_coverage(conn, city=city, target_date=target_date, temperature_metric=metric)
+    coverage = latest_baseline_coverage(
+        conn,
+        city=city,
+        target_date=target_date,
+        temperature_metric=metric,
+        not_after_source_cycle_time=openmeteo.source_cycle_time,
+    )
     bins = market_bins(conn, city=city, target_date=target_date, temperature_metric=metric)
     if coverage is None or not bins:
         return None

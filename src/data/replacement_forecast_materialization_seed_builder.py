@@ -318,27 +318,68 @@ def latest_baseline_coverage_for_replacement_seed(
     city: str,
     target_date: str,
     temperature_metric: str,
+    not_after_source_cycle_time: datetime | str | None = None,
 ) -> Mapping[str, object] | None:
     expected = expected_replacement_dependency_identity_by_role(temperature_metric)["baseline_b0"]
-    row = conn.execute(
-        """
-        SELECT c.*, sr.source_cycle_time AS source_cycle_time, sr.source_available_at AS source_available_at
-        FROM source_run_coverage c
-        LEFT JOIN source_run sr ON sr.source_run_id = c.source_run_id
-        WHERE c.city = ?
-          AND c.target_local_date = ?
-          AND c.temperature_metric = ?
-          AND c.source_id = ?
-          AND c.data_version = ?
-        ORDER BY
-          CASE WHEN c.completeness_status = 'COMPLETE' THEN 0 ELSE 1 END,
-          CASE WHEN c.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END,
-          c.computed_at DESC,
-          c.recorded_at DESC
-        LIMIT 1
-        """,
-        (city, target_date, temperature_metric, expected.source_id, expected.data_version),
-    ).fetchone()
+    causal_bound = (
+        _dt(
+            not_after_source_cycle_time,
+            field_name="baseline_not_after_source_cycle_time",
+        ).isoformat()
+        if not_after_source_cycle_time is not None
+        else None
+    )
+    identity = (
+        city,
+        target_date,
+        temperature_metric,
+        expected.source_id,
+        expected.data_version,
+    )
+    if causal_bound is not None:
+        row = conn.execute(
+            """
+            SELECT c.*, sr.source_cycle_time AS source_cycle_time,
+                   sr.source_available_at AS source_available_at
+            FROM source_run_coverage c
+            JOIN source_run sr ON sr.source_run_id = c.source_run_id
+            WHERE c.city = ?
+              AND c.target_local_date = ?
+              AND c.temperature_metric = ?
+              AND c.source_id = ?
+              AND c.data_version = ?
+              AND c.completeness_status = 'COMPLETE'
+              AND c.readiness_status = 'LIVE_ELIGIBLE'
+              AND sr.source_cycle_time IS NOT NULL
+              AND julianday(sr.source_cycle_time) <= julianday(?)
+            ORDER BY julianday(sr.source_cycle_time) DESC,
+                     c.computed_at DESC,
+                     c.recorded_at DESC
+            LIMIT 1
+            """,
+            (*identity, causal_bound),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT c.*, sr.source_cycle_time AS source_cycle_time,
+                   sr.source_available_at AS source_available_at
+            FROM source_run_coverage c
+            LEFT JOIN source_run sr ON sr.source_run_id = c.source_run_id
+            WHERE c.city = ?
+              AND c.target_local_date = ?
+              AND c.temperature_metric = ?
+              AND c.source_id = ?
+              AND c.data_version = ?
+            ORDER BY
+              CASE WHEN c.completeness_status = 'COMPLETE' THEN 0 ELSE 1 END,
+              CASE WHEN c.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END,
+              c.computed_at DESC,
+              c.recorded_at DESC
+            LIMIT 1
+            """,
+            identity,
+        ).fetchone()
     return dict(row) if row else None
 
 
