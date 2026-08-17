@@ -207,6 +207,7 @@ def build_replacement_forecast_materialization_seed(
     rounding_rule = SettlementSemantics.for_city(city_config).rounding_rule
     expected = expected_replacement_dependency_identity_by_role(metric)
     baseline_expected = expected["baseline_b0"]
+    computed = _dt(computed_at, field_name="computed_at")
     reasons: list[str] = []
     if baseline_coverage.get("source_id") != baseline_expected.source_id:
         reasons.append("BASELINE_COVERAGE_SOURCE_ID_MISMATCH")
@@ -214,6 +215,18 @@ def build_replacement_forecast_materialization_seed(
         reasons.append("BASELINE_COVERAGE_DATA_VERSION_MISMATCH")
     if baseline_coverage.get("temperature_metric") != metric:
         reasons.append("BASELINE_COVERAGE_METRIC_MISMATCH")
+    if baseline_coverage.get("completeness_status") != "COMPLETE":
+        reasons.append("BASELINE_COVERAGE_INCOMPLETE")
+    if baseline_coverage.get("readiness_status") != "LIVE_ELIGIBLE":
+        reasons.append("BASELINE_COVERAGE_NOT_LIVE_ELIGIBLE")
+    baseline_expires_at = baseline_coverage.get("expires_at")
+    if not baseline_expires_at:
+        reasons.append("BASELINE_COVERAGE_EXPIRY_MISSING")
+    elif _dt(
+        baseline_expires_at,
+        field_name="baseline_coverage_expires_at",
+    ) <= computed:
+        reasons.append("BASELINE_COVERAGE_EXPIRED")
     if openmeteo_manifest.source_id != expected["openmeteo_ifs9_anchor"].source_id or openmeteo_manifest.data_version != expected["openmeteo_ifs9_anchor"].data_version:
         reasons.append("OPENMETEO_MANIFEST_IDENTITY_MISMATCH")
     baseline_source_cycle_time = baseline_coverage.get("source_cycle_time")
@@ -225,7 +238,6 @@ def build_replacement_forecast_materialization_seed(
         return ReplacementForecastMaterializationSeedResult(status="BLOCKED", reason_codes=tuple(reasons), seed=None)
 
     base_path = Path(base_dir)
-    computed = _dt(computed_at, field_name="computed_at")
     baseline_available = _dt(
         baseline_coverage.get("source_available_at") or baseline_coverage.get("computed_at"),
         field_name="baseline_source_available_at",
@@ -318,68 +330,54 @@ def latest_baseline_coverage_for_replacement_seed(
     city: str,
     target_date: str,
     temperature_metric: str,
-    not_after_source_cycle_time: datetime | str | None = None,
+    not_after_source_cycle_time: datetime | str,
+    as_of_time: datetime | str,
 ) -> Mapping[str, object] | None:
     expected = expected_replacement_dependency_identity_by_role(temperature_metric)["baseline_b0"]
-    causal_bound = (
-        _dt(
-            not_after_source_cycle_time,
-            field_name="baseline_not_after_source_cycle_time",
-        ).isoformat()
-        if not_after_source_cycle_time is not None
-        else None
-    )
-    identity = (
-        city,
-        target_date,
-        temperature_metric,
-        expected.source_id,
-        expected.data_version,
-    )
-    if causal_bound is not None:
-        row = conn.execute(
-            """
-            SELECT c.*, sr.source_cycle_time AS source_cycle_time,
-                   sr.source_available_at AS source_available_at
-            FROM source_run_coverage c
-            JOIN source_run sr ON sr.source_run_id = c.source_run_id
-            WHERE c.city = ?
-              AND c.target_local_date = ?
-              AND c.temperature_metric = ?
-              AND c.source_id = ?
-              AND c.data_version = ?
-              AND c.completeness_status = 'COMPLETE'
-              AND c.readiness_status = 'LIVE_ELIGIBLE'
-              AND sr.source_cycle_time IS NOT NULL
-              AND julianday(sr.source_cycle_time) <= julianday(?)
-            ORDER BY julianday(sr.source_cycle_time) DESC,
-                     c.computed_at DESC,
-                     c.recorded_at DESC
-            LIMIT 1
-            """,
-            (*identity, causal_bound),
-        ).fetchone()
-    else:
-        row = conn.execute(
-            """
-            SELECT c.*, sr.source_cycle_time AS source_cycle_time,
-                   sr.source_available_at AS source_available_at
-            FROM source_run_coverage c
-            LEFT JOIN source_run sr ON sr.source_run_id = c.source_run_id
-            WHERE c.city = ?
-              AND c.target_local_date = ?
-              AND c.temperature_metric = ?
-              AND c.source_id = ?
-              AND c.data_version = ?
-            ORDER BY
-              CASE WHEN c.completeness_status = 'COMPLETE' THEN 0 ELSE 1 END,
-              CASE WHEN c.readiness_status = 'LIVE_ELIGIBLE' THEN 0 ELSE 1 END,
-              c.computed_at DESC,
-              c.recorded_at DESC
-            LIMIT 1
-            """,
-            identity,
-        ).fetchone()
+    causal_bound = _dt(
+        not_after_source_cycle_time,
+        field_name="baseline_not_after_source_cycle_time",
+    ).isoformat()
+    as_of = _dt(
+        as_of_time,
+        field_name="baseline_as_of_time",
+    ).isoformat()
+    row = conn.execute(
+        """
+        SELECT c.*, sr.source_cycle_time AS source_cycle_time,
+               sr.source_available_at AS source_available_at
+        FROM source_run_coverage c
+        JOIN source_run sr ON sr.source_run_id = c.source_run_id
+        WHERE c.city = ?
+          AND c.target_local_date = ?
+          AND c.temperature_metric = ?
+          AND c.source_id = ?
+          AND c.data_version = ?
+          AND c.completeness_status = 'COMPLETE'
+          AND c.readiness_status = 'LIVE_ELIGIBLE'
+          AND c.expires_at IS NOT NULL
+          AND julianday(c.computed_at) <= julianday(?)
+          AND julianday(c.expires_at) > julianday(?)
+          AND sr.source_cycle_time IS NOT NULL
+          AND julianday(sr.source_cycle_time) <= julianday(?)
+          AND julianday(sr.source_available_at) <= julianday(?)
+        ORDER BY julianday(sr.source_cycle_time) DESC,
+                 c.computed_at DESC,
+                 c.recorded_at DESC
+        LIMIT 1
+        """,
+        (
+            city,
+            target_date,
+            temperature_metric,
+            expected.source_id,
+            expected.data_version,
+            as_of,
+            as_of,
+            causal_bound,
+            as_of,
+        ),
+    ).fetchone()
     return dict(row) if row else None
 
 

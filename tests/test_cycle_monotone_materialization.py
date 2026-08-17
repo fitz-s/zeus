@@ -453,6 +453,7 @@ def test_cycle_advance_bounds_baseline_selection_by_selected_anchor_cycle(
 
     assert result == tmp_path / "seed.json"
     assert selected["not_after_source_cycle_time"] == cycle
+    assert selected["as_of_time"] == datetime(2026, 6, 12, 12, tzinfo=UTC)
     assert written == [{"ready": True, "upgrade_trigger": "newer_cycle_ingested"}]
     conn.close()
 

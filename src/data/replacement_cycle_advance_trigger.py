@@ -2829,6 +2829,7 @@ def _build_and_write_advance_seed(
         target_date=target_date,
         temperature_metric=metric,
         not_after_source_cycle_time=openmeteo.source_cycle_time,
+        as_of_time=computed_at,
     )
     bins = market_bins(conn, city=city, target_date=target_date, temperature_metric=metric)
     if coverage is None or not bins:

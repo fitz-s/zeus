@@ -96,27 +96,28 @@ def _rotate_current_target_rows(
     rows: Sequence[object],
     *,
     cycle: datetime,
-    held_family_priority: dict[tuple[str, str, str], int],
+    state_path: Path | None = None,
 ) -> tuple[list[object], int, int]:
     ordered = list(rows)
     if not ordered:
         return ordered, 0, 0
-    critical = [
-        row
-        for row in ordered
-        if held_family_priority.get(_current_target_family_key(row), 2) < 2
-    ]
-    ordinary = [row for row in ordered if row not in critical]
-    rotating = critical or ordinary
     cycle_key = cycle.astimezone(UTC).isoformat()
     with _CURRENT_TARGET_ROTATION_LOCK:
-        start = _CURRENT_TARGET_ROTATION_OFFSETS.get(cycle_key, 0) % len(rotating)
+        persisted_start = 0
+        if state_path is not None and state_path.exists():
+            try:
+                state = json.loads(state_path.read_text())
+                if state.get("cycle") == cycle_key:
+                    persisted_start = int(state.get("next_start") or 0)
+            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+                persisted_start = 0
+        start = _CURRENT_TARGET_ROTATION_OFFSETS.get(
+            cycle_key,
+            persisted_start,
+        ) % len(ordered)
         _CURRENT_TARGET_ROTATION_OFFSETS.clear()
         _CURRENT_TARGET_ROTATION_OFFSETS[cycle_key] = start
-    rotated = rotating[start:] + rotating[:start]
-    if critical:
-        rotated.extend(ordinary)
-    return rotated, start, len(rotating)
+    return ordered[start:] + ordered[:start], start, len(ordered)
 
 
 def _advance_current_target_rotation(
@@ -125,18 +126,37 @@ def _advance_current_target_rotation(
     row_count: int,
     attempted_count: int,
     incomplete: bool,
+    state_path: Path | None = None,
 ) -> int:
     cycle_key = cycle.astimezone(UTC).isoformat()
     with _CURRENT_TARGET_ROTATION_LOCK:
         if not incomplete or row_count <= 0:
-            _CURRENT_TARGET_ROTATION_OFFSETS.pop(cycle_key, None)
-            return 0
-        next_start = (
-            _CURRENT_TARGET_ROTATION_OFFSETS.get(cycle_key, 0)
-            + max(1, int(attempted_count))
-        ) % row_count
+            next_start = 0
+        else:
+            next_start = (
+                _CURRENT_TARGET_ROTATION_OFFSETS.get(cycle_key, 0)
+                + max(1, int(attempted_count))
+            ) % row_count
         _CURRENT_TARGET_ROTATION_OFFSETS.clear()
         _CURRENT_TARGET_ROTATION_OFFSETS[cycle_key] = next_start
+        if state_path is not None:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=state_path.parent,
+                prefix=f".{state_path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                json.dump(
+                    {"cycle": cycle_key, "next_start": next_start},
+                    handle,
+                    sort_keys=True,
+                )
+                handle.write("\n")
+                temp_path = Path(handle.name)
+            os.replace(temp_path, state_path)
         return next_start
 
 
@@ -747,13 +767,14 @@ def download_current_target_raw_inputs(
         _rows,
         held_family_priority,
     )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rotation_state_path = output_dir / ".current_target_rotation.json"
     rotated_rows, rotation_start, rotation_row_count = _rotate_current_target_rows(
         _rows,
         cycle=cycle,
-        held_family_priority=held_family_priority,
+        state_path=rotation_state_path,
     )
     targets = rotated_rows[:limit] if limit else rotated_rows
-    output_dir.mkdir(parents=True, exist_ok=True)
     raw_dir = output_dir / cycle.strftime("%Y%m%dT%H%M%SZ")
     raw_dir.mkdir(parents=True, exist_ok=True)
     nominal_source_available = _source_available_at(
@@ -1057,6 +1078,7 @@ def download_current_target_raw_inputs(
         row_count=rotation_row_count,
         attempted_count=processed_target_count,
         incomplete=incomplete_target_set,
+        state_path=rotation_state_path,
     )
 
     return {

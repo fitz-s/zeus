@@ -6283,6 +6283,26 @@ def test_fast_residual_clock_advance_is_held_only_and_value_strict(monkeypatch):
             **{**kwargs, "conditioning": changed},
             allow_equivalent_conditioning_clock_advance=True,
         )
+
+    monkeypatch.setattr(
+        day0_fast_obs,
+        "latest_fast_station_extreme_c",
+        lambda *_args, **_kwargs: (
+            27.0,
+            "2026-07-10T18:30:00+00:00",
+            1,
+            "C",
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_FAST_RESIDUAL_CURRENT_OBSERVATION_MISMATCH",
+    ):
+        era._global_day0_execution_payload(
+            carrier,
+            **kwargs,
+            allow_equivalent_conditioning_clock_advance=True,
+        )
     conn.close()
 
 

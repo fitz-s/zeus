@@ -732,6 +732,7 @@ def _init_db(path: Path) -> None:
                 completeness_status TEXT NOT NULL,
                 readiness_status TEXT NOT NULL,
                 computed_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL DEFAULT '2099-01-01T00:00:00+00:00',
                 recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE forecast_posteriors (
@@ -1248,6 +1249,11 @@ def test_seed_discovery_uses_latest_causal_baseline_not_newer_independent_head(
             "'2026-06-06T00:00:00+00:00', '2026-06-06T02:00:00+00:00')"
         )
         conn.execute(
+            "INSERT INTO source_run VALUES "
+            "('expired-causal-run', 'ecmwf_open_data', 'mx2t3_high', "
+            "'2026-06-06T03:00:00+00:00', '2026-06-06T05:00:00+00:00')"
+        )
+        conn.execute(
             """
             INSERT INTO source_run_coverage
               (coverage_id, source_run_id, source_id, city_id, city, city_timezone,
@@ -1258,6 +1264,20 @@ def test_seed_discovery_uses_latest_causal_baseline_not_newer_independent_head(
                'NYC', 'NYC', 'America/New_York', '2026-06-08', 'high',
                'ecmwf_opendata_mx2t3_local_calendar_day_max',
                'COMPLETE', 'LIVE_ELIGIBLE', '2026-06-06T02:05:00+00:00')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO source_run_coverage
+              (coverage_id, source_run_id, source_id, city_id, city, city_timezone,
+               target_local_date, temperature_metric, data_version,
+               completeness_status, readiness_status, computed_at, expires_at)
+            VALUES
+              ('expired-causal-coverage', 'expired-causal-run', 'ecmwf_open_data',
+               'NYC', 'NYC', 'America/New_York', '2026-06-08', 'high',
+               'ecmwf_opendata_mx2t3_local_calendar_day_max',
+               'COMPLETE', 'LIVE_ELIGIBLE', '2026-06-06T05:05:00+00:00',
+               '2026-06-06T12:00:00+00:00')
             """
         )
         conn.commit()
@@ -1775,6 +1795,7 @@ def test_seed_discovery_blocks_when_replacement_dependency_schema_is_missing(tmp
                 completeness_status TEXT NOT NULL,
                 readiness_status TEXT NOT NULL,
                 computed_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL DEFAULT '2099-01-01T00:00:00+00:00',
                 recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             );
             CREATE TABLE forecast_posteriors (
