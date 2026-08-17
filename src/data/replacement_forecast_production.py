@@ -664,11 +664,15 @@ def _critical_scopes_missing_current_anchor(
     scopes: Sequence[tuple[str, str, str]],
     cycle: datetime,
 ) -> tuple[tuple[str, str, str], ...] | None:
-    """Return exact critical scopes without a canonical anchor at ``cycle``."""
+    """Return exact critical scopes without materializable canonical raw at ``cycle``."""
 
     from src.data.replacement_forecast_source_run_identity import (  # noqa: PLC0415
         expected_replacement_dependency_identity_by_role,
     )
+    from scripts.download_replacement_forecast_current_targets import (  # noqa: PLC0415
+        _current_target_payload_file_materializable,
+    )
+    from src.config import cities_by_name  # noqa: PLC0415
     from src.state.db import _connect  # noqa: PLC0415
 
     try:
@@ -683,7 +687,7 @@ def _critical_scopes_missing_current_anchor(
                 ]
                 row = conn.execute(
                     """
-                    SELECT 1
+                    SELECT artifact_path, sha256, byte_size
                     FROM raw_forecast_artifacts
                     WHERE source_id = ?
                       AND product_id = ?
@@ -705,6 +709,17 @@ def _critical_scopes_missing_current_anchor(
                     ),
                 ).fetchone()
                 if row is None:
+                    missing.append((city, target_date, metric))
+                    continue
+                city_config = cities_by_name.get(city)
+                if city_config is None or not _current_target_payload_file_materializable(
+                    Path(str(row[0])),
+                    city_timezone=city_config.timezone,
+                    target_date=target_date,
+                    cycle=cycle,
+                    expected_sha256=str(row[1]),
+                    expected_byte_size=int(row[2]),
+                ):
                     missing.append((city, target_date, metric))
             return tuple(missing)
         finally:

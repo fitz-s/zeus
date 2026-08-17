@@ -41,6 +41,7 @@ from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: E402
     SOURCE_ID as OPENMETEO_SOURCE_ID,
     build_anchor_request,
     build_openmeteo_ecmwf_ifs9_anchor_artifact_manifest,
+    extract_openmeteo_ecmwf_ifs9_localday_anchor,
     fetch_openmeteo_ecmwf_ifs9_anchor_payload,
     fetch_openmeteo_ecmwf_ifs9_anchor_payloads,
     fetch_openmeteo_ecmwf_ifs9_anchor_payload_standard_unstamped,
@@ -308,6 +309,56 @@ def _json_file_valid(path: Path) -> bool:
         return False
 
 
+def _current_target_payload_materializable(
+    payload: object,
+    *,
+    city_timezone: str,
+    target_date: str,
+    cycle: datetime,
+) -> bool:
+    """Whether the raw payload can produce the canonical target-day anchor."""
+
+    try:
+        extract_openmeteo_ecmwf_ifs9_localday_anchor(
+            payload,
+            city_timezone=city_timezone,
+            target_local_date=date.fromisoformat(target_date),
+            source_cycle_time=cycle,
+        )
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _current_target_payload_file_materializable(
+    path: Path,
+    *,
+    city_timezone: str,
+    target_date: str,
+    cycle: datetime,
+    expected_sha256: str | None = None,
+    expected_byte_size: int | None = None,
+) -> bool:
+    try:
+        raw = path.read_bytes()
+        if expected_byte_size is not None and len(raw) != expected_byte_size:
+            return False
+        if (
+            expected_sha256 is not None
+            and hashlib.sha256(raw).hexdigest() != expected_sha256
+        ):
+            return False
+        payload = json.loads(raw)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return _current_target_payload_materializable(
+        payload,
+        city_timezone=city_timezone,
+        target_date=target_date,
+        cycle=cycle,
+    )
+
+
 def _canonical_current_target_reuse(
     forecast_db: Path,
     *,
@@ -383,7 +434,15 @@ def _canonical_current_target_reuse(
                 continue
             if hashlib.sha256(raw).hexdigest() != str(row["sha256"]):
                 continue
-            json.loads(raw)
+            payload = json.loads(raw)
+            city_config = cities_by_name.get(city)
+            if city_config is None or not _current_target_payload_materializable(
+                payload,
+                city_timezone=city_config.timezone,
+                target_date=target_date,
+                cycle=cycle,
+            ):
+                continue
             reused[key] = int(row["artifact_id"])
         except (OSError, TypeError, ValueError, UnicodeError, json.JSONDecodeError):
             continue
@@ -923,7 +982,12 @@ def download_current_target_raw_inputs(
             continue
         target_key = (target.city, target.target_date)
         payload_path = raw_dir / f"openmeteo_{_safe_name(target.city)}_{target.target_date}_{target.temperature_metric}_{cycle.strftime('%Y%m%dT%H%M%SZ')}.json"
-        if payload_path.exists() and _json_file_valid(payload_path):
+        if payload_path.exists() and _current_target_payload_file_materializable(
+            payload_path,
+            city_timezone=city_config.timezone,
+            target_date=target.target_date,
+            cycle=cycle,
+        ):
             continue
         pending_requests.setdefault(
             target_key,
@@ -1030,7 +1094,16 @@ def download_current_target_raw_inputs(
                 "run_authority": "run_pinned_single_runs",
             }
 
-            if (not payload_path.exists()) or (not _json_file_valid(payload_path)):
+            payload_is_materializable = (
+                payload_path.exists()
+                and _current_target_payload_file_materializable(
+                    payload_path,
+                    city_timezone=city_config.timezone,
+                    target_date=target.target_date,
+                    cycle=cycle,
+                )
+            )
+            if not payload_is_materializable:
                 try:
                     if target_key in unavailable_targets:
                         raise BucketTransportNotAdmissible(
@@ -1080,6 +1153,22 @@ def download_current_target_raw_inputs(
                     continue
                 except TimeoutError:
                     timeboxed_incomplete = True
+                    continue
+                if not _current_target_payload_materializable(
+                    payload,
+                    city_timezone=city_config.timezone,
+                    target_date=target.target_date,
+                    cycle=cycle,
+                ):
+                    skipped_cities.append(
+                        {
+                            "city": target.city,
+                            "target_date": target.target_date,
+                            "metric": target.temperature_metric,
+                            "reason": "anchor payload has no finite target-day sample",
+                        }
+                    )
+                    processed_target_count += 1
                     continue
                 _write_json(payload_path, payload)
             _write_json(

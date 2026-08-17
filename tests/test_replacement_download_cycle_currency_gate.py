@@ -82,6 +82,19 @@ class _TargetRow:
     missing_openmeteo_manifest: bool
 
 
+def _anchor_payload(
+    target_date: str = "2026-06-10",
+    value_c: float | None = 20.0,
+) -> dict[str, object]:
+    return {
+        "hourly": {
+            "time": [f"{target_date}T12:00"],
+            "temperature_2m": [value_c],
+        },
+        "hourly_units": {"temperature_2m": "°C"},
+    }
+
+
 def test_current_target_download_prioritizes_held_families_before_alphabetic() -> None:
     import scripts.download_replacement_forecast_current_targets as dl
 
@@ -423,7 +436,7 @@ def test_direct_downloader_uses_payload_completion_as_possession_time(
         key = next(iter(requests))
         return {
             key: (
-                {"hourly": {"time": [], "temperature_2m": []}},
+                _anchor_payload(),
                 provenance,
                 captured_at,
             )
@@ -470,7 +483,7 @@ def test_direct_downloader_reuses_canonical_bytes_without_moving_capture_time(
     payload_path = raw_dir / (
         "openmeteo_Dallas_2026-06-10_high_20260609T000000Z.json"
     )
-    payload_path.write_text('{"hourly":{"temperature_2m":[40.0]}}\n')
+    payload_path.write_text(json.dumps(_anchor_payload()) + "\n")
     payload = payload_path.read_bytes()
     original_capture = "2026-06-09T13:59:45+00:00"
     conn.execute(
@@ -719,16 +732,27 @@ def test_covered_critical_scope_does_not_rewrite_anchor(
         {"openmeteo_ecmwf_ifs_9km": CURRENT_CYCLE_ISO},
     )
     scope = ("Dallas", "2026-08-17", "high")
+    payload_path = tmp_path / "openmeteo_Dallas_2026-08-17_high.json"
+    payload_path.write_text(json.dumps(_anchor_payload("2026-08-17")) + "\n")
+    payload_bytes = payload_path.read_bytes()
     conn = sqlite3.connect(db)
     conn.execute(
         """
         UPDATE raw_forecast_artifacts
         SET product_id = 'openmeteo_ecmwf_ifs9_deterministic_anchor_v1',
             data_version = 'openmeteo_ecmwf_ifs9_anchor_localday_high',
+            artifact_path = ?,
+            sha256 = ?,
+            byte_size = ?,
             artifact_metadata_json = ?
         WHERE source_id = 'openmeteo_ecmwf_ifs_9km'
         """,
-        (json.dumps({"city": "Dallas", "target_date": "2026-08-17", "metric": "high"}),),
+        (
+            str(payload_path),
+            hashlib.sha256(payload_bytes).hexdigest(),
+            len(payload_bytes),
+            json.dumps({"city": "Dallas", "target_date": "2026-08-17", "metric": "high"}),
+        ),
     )
     conn.commit()
     conn.close()
@@ -749,6 +773,104 @@ def test_covered_critical_scope_does_not_rewrite_anchor(
     assert report["target_count"] == 1
     assert report["written_manifest_count"] == 0
     assert calls == []
+
+
+def test_all_null_critical_raw_does_not_mask_missing_anchor(
+    tmp_path, monkeypatch
+) -> None:
+    db = _make_db(
+        tmp_path,
+        {"openmeteo_ecmwf_ifs_9km": CURRENT_CYCLE_ISO},
+    )
+    scope = ("Dallas", "2026-08-17", "high")
+    payload_path = tmp_path / "openmeteo_Dallas_2026-08-17_high.json"
+    payload_path.write_text(
+        json.dumps(_anchor_payload("2026-08-17", value_c=None)) + "\n"
+    )
+    payload_bytes = payload_path.read_bytes()
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """
+        UPDATE raw_forecast_artifacts
+        SET product_id = 'openmeteo_ecmwf_ifs9_deterministic_anchor_v1',
+            data_version = 'openmeteo_ecmwf_ifs9_anchor_localday_high',
+            artifact_path = ?,
+            sha256 = ?,
+            byte_size = ?,
+            artifact_metadata_json = ?
+        WHERE source_id = 'openmeteo_ecmwf_ifs_9km'
+        """,
+        (
+            str(payload_path),
+            hashlib.sha256(payload_bytes).hexdigest(),
+            len(payload_bytes),
+            json.dumps({"city": "Dallas", "target_date": "2026-08-17", "metric": "high"}),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    calls: list = []
+    _wire(monkeypatch, plan=_PlanStub(ready=False), calls=calls)
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda: {scope: 0},
+    )
+
+    report = _download_replacement_forecast_current_targets_if_needed(
+        _cfg(db, tmp_path),
+        required_scopes=(scope,),
+        quota_critical=True,
+    )
+
+    assert report["status"] == "CURRENT_TARGET_RAW_INPUTS_DOWNLOADED"
+    assert len(calls) == 1
+    assert calls[0]["required_scopes"] == (scope,)
+
+
+def test_direct_downloader_does_not_publish_all_null_anchor_payload(
+    tmp_path, monkeypatch
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    row = _TargetRow(
+        city="Dallas",
+        target_date="2026-06-10",
+        temperature_metric="high",
+        covered=False,
+        missing_openmeteo_manifest=True,
+    )
+    monkeypatch.setattr(dl, "_single_runs_public_for_request", lambda _request: True)
+    monkeypatch.setattr(
+        dl,
+        "_resolve_anchor_payload",
+        lambda **_kwargs: (
+            _anchor_payload(value_c=None),
+            {"openmeteo_endpoint": "single_runs_api", "run_authority": "test"},
+        ),
+    )
+
+    report = dl.download_current_target_raw_inputs(
+        forecast_db=tmp_path / "forecasts.db",
+        output_dir=tmp_path / "raw",
+        cycle=AVAILABLE_CYCLE,
+        limit=None,
+        write_db=False,
+        release_lag_hours=14.0,
+        anchor_sigma_c=3.0,
+        include_covered=True,
+        precomputed_plan=_PlanStub(ready=False, rows=(row,)),
+    )
+
+    assert report["manifest_count"] == 0
+    assert report["written_manifest_count"] == 0
+    assert report["skipped_cities"] == [
+        {
+            "city": "Dallas",
+            "target_date": "2026-06-10",
+            "metric": "high",
+            "reason": "anchor payload has no finite target-day sample",
+        }
+    ]
 
 
 def test_critical_quota_context_propagates_into_anchor_worker(
@@ -1161,7 +1283,7 @@ def test_direct_current_target_downloader_prioritizes_missing_cycle_manifest_bef
         dl,
         "_resolve_anchor_payload",
         lambda **_kwargs: (
-            {"hourly": {"time": [], "temperature_2m": []}},
+            _anchor_payload(),
             {"openmeteo_endpoint": "single_runs_api", "run_authority": "test"},
         ),
     )
@@ -1209,7 +1331,7 @@ def test_same_cycle_repair_excludes_uncovered_rows_with_manifest(
         dl,
         "_resolve_anchor_payload",
         lambda **_kwargs: (
-            {"hourly": {"time": [], "temperature_2m": []}},
+            _anchor_payload(),
             {"openmeteo_endpoint": "single_runs_api", "run_authority": "test"},
         ),
     )
@@ -1266,7 +1388,7 @@ def test_direct_downloader_reuses_plan_and_city_date_payload_across_metrics(
     def _resolve(**kwargs):
         calls.append(kwargs)
         return (
-            {"hourly": {"time": [], "temperature_2m": []}},
+            _anchor_payload(),
             {"openmeteo_endpoint": "bucket", "run_authority": "bucket_partial_run_test"},
         )
 
@@ -1320,7 +1442,7 @@ def test_direct_downloader_batches_run_pinned_anchor_locations(
         captured_at = datetime.now(timezone.utc)
         return {
             key: (
-                {"hourly": {"time": [], "temperature_2m": []}},
+                _anchor_payload(),
                 {
                     "openmeteo_endpoint": "single_runs_api",
                     "run_authority": "run_pinned_single_runs",
@@ -1390,7 +1512,7 @@ def test_timebox_commits_ready_wave_payloads_before_deferring_unresolved(
         captured_at = datetime.now(timezone.utc)
         return {
             key: (
-                {"hourly": {"time": [], "temperature_2m": []}},
+                _anchor_payload(),
                 {
                     "openmeteo_endpoint": "single_runs_api",
                     "run_authority": "run_pinned_single_runs",
@@ -1471,7 +1593,7 @@ def test_anchor_location_batch_failure_falls_back_as_one_meta_wave(
         return (
             {
                 key: (
-                    {"hourly": {"time": [], "temperature_2m": []}},
+                    _anchor_payload(),
                     {
                         "openmeteo_endpoint": "standard_forecast_api",
                         "run_authority": "provider_meta_declared",

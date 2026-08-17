@@ -4856,6 +4856,36 @@ antibody that emits no aggregate `ENTRY_ORDER_VOIDED`.
 Allowed files for this hot-fix are `src/execution/command_recovery.py`,
 `tests/test_command_recovery.py`, and this plan.
 
+## 2026-08-17 Empty provider payload cannot cover a held probability scope
+
+Live NYC LOW reconstruction found a current-cycle raw artifact whose complete
+target horizon contained only `null` temperatures. The critical held-family
+download gate treated the row's identity as proof of coverage even though the
+canonical extractor could not produce a deterministic anchor. The same
+syntactically valid file was then reused without another fetch, leaving the held
+position read-only after its probability certificate exceeded the absolute age
+bound.
+
+Current-target raw reuse and critical coverage now require the existing
+canonical local-day extractor to produce at least one finite target-day sample.
+Fetched empty payloads are not published as new canonical artifacts; they remain
+an explicit skipped result and the next held-priority cycle retries. No
+probability freshness, quota, or price boundary is weakened.
+
+SCOPE is the exact held `day0_window`/`pending_exit` city, target date, metric,
+and provider cycle. DRAIN is the next critical provider retry, followed by the
+existing seed/materialization cycle. RESET requires a materializable raw payload
+for that exact scope and cycle; valid JSON, a matching DB row, or an all-null
+hourly series cannot reset the gate. Acceptance requires valid-reuse and
+all-null-retry antibodies, focused downloader/scheduler suites, exact-SHA live
+deployment, and a fresh held-position probability certificate or the current
+provider rejection as the remaining fail-closed reason.
+
+The additional allowed files are
+`scripts/download_replacement_forecast_current_targets.py`,
+`src/data/replacement_forecast_production.py`,
+`tests/test_replacement_download_cycle_currency_gate.py`, and this plan.
+
 ## 2026-08-17 Held Day0 current-q owns the final Open-Meteo reserve
 
 Live Dallas evidence exposed a quota-lane inversion. The new 12Z ensemble was
