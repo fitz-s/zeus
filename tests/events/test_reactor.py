@@ -491,23 +491,29 @@ def _held_sell_completion_result(
         "wake_kind",
         "completion_due",
         "exact_held_completion",
+        "entries_blocked",
         "has_held_exposure",
         "expected_reduce_only",
+        "expected_terminal_without_cut",
     ),
     (
-        ("generic_no_exposure", True, False, False, False),
-        ("generic_held", True, False, True, False),
-        ("exact_terminal_no_exposure", True, True, False, False),
-        ("exact_active_exposure", True, True, True, True),
-        ("ordinary_probability", False, False, True, False),
+        ("generic_no_exposure", True, False, False, False, False, False),
+        ("generic_held", True, False, False, True, False, False),
+        ("blocked_generic_no_exposure", True, False, True, False, False, True),
+        ("blocked_generic_held", True, False, True, True, True, False),
+        ("exact_terminal_no_exposure", True, True, True, False, False, False),
+        ("exact_active_exposure", True, True, True, True, True, False),
+        ("ordinary_probability", False, False, True, True, False, False),
     ),
 )
 def test_completion_mode_separates_fairness_from_reduce_only(
     wake_kind,
     completion_due,
     exact_held_completion,
+    entries_blocked,
     has_held_exposure,
     expected_reduce_only,
+    expected_terminal_without_cut,
 ):
     """Completion debt must not remove BUYs after its held capital is gone."""
     from src.events.reactor import _global_auction_completion_mode
@@ -525,10 +531,12 @@ def test_completion_mode_separates_fairness_from_reduce_only(
     mode = _global_auction_completion_mode(
         completion_due=completion_due,
         exact_held_completion=exact_held_completion,
+        entries_blocked=entries_blocked,
         trade_conn=_TradeConnection(),
     )
     assert mode.fairness_reserved is completion_due
     assert mode.reduce_only is expected_reduce_only
+    assert mode.terminal_without_cut is expected_terminal_without_cut
 
 
 def test_exact_completion_exposure_read_failure_stays_reduce_only(caplog):
@@ -709,6 +717,14 @@ def test_completion_risk_bypass_is_bound_to_reduce_only_mode():
         in source
     )
     assert "held_sell_completion_cycle or entry_risk_gate(event)" not in source
+    completion_mode = source.index("_monitor_completion_mode = _construct_sql(")
+    process_pending = source.index("reactor.process_pending(", completion_mode)
+    assert "_monitor_completion_mode.terminal_without_cut" in source[
+        completion_mode:process_pending
+    ]
+    assert "terminal_no_book_completion=True" in source[
+        completion_mode:process_pending
+    ]
 
 
 def test_no_submit_claim_debt_drains_before_cycle_entry_gate():

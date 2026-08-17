@@ -7439,30 +7439,34 @@ def _global_auction_monitor_cancellation_probe(
 class _GlobalAuctionCompletionMode:
     fairness_reserved: bool
     reduce_only: bool
+    terminal_without_cut: bool = False
 
 
 def _global_auction_completion_mode(
     *,
     completion_due: bool,
     exact_held_completion: bool,
+    entries_blocked: bool = False,
     trade_conn: object,
 ) -> _GlobalAuctionCompletionMode:
     """Reserve a completion cut for held capital only when it still exists.
 
-    Generic fairness always keeps the complete BUY/SELL/HOLD/CASH feasible set.
-    An exact held-SELL wake enters reduce-only only while canonical held capital
-    still exists. If that exposure has already become terminal, forcing an
-    empty reduce-only scope produces no candidate and leaves the debt armed
-    forever; the existing terminal receipt path still owns request completion.
+    Generic fairness keeps the complete BUY/SELL/HOLD/CASH feasible set while
+    entry is allowed.  When entry is blocked, it becomes reduce-only if held
+    capital exists; without held capital there is no economic cut to complete,
+    so the in-process fairness debt may terminate.  An exact held-SELL wake
+    enters reduce-only only while canonical held capital still exists; its
+    durable request still owns terminalization after the exposure is gone.
 
     SCOPE: this one completion auction. DRAIN: the next completion cycle
     rereads canonical runtime-open positions. RESET: a successful empty read
-    restores ordinary BUY selection for the completion cycle.
+    either restores ordinary BUY selection or terminalizes blocked generic
+    fairness without granting entry authority.
     """
 
     if not completion_due:
         return _GlobalAuctionCompletionMode(False, False)
-    if not exact_held_completion:
+    if not exact_held_completion and not entries_blocked:
         return _GlobalAuctionCompletionMode(True, False)
     try:
         row = trade_conn.execute(
@@ -7482,7 +7486,13 @@ def _global_auction_completion_mode(
             exc,
         )
         return _GlobalAuctionCompletionMode(True, True)
-    return _GlobalAuctionCompletionMode(True, row is not None)
+    if row is not None:
+        return _GlobalAuctionCompletionMode(True, True)
+    return _GlobalAuctionCompletionMode(
+        True,
+        False,
+        terminal_without_cut=not exact_held_completion,
+    )
 
 
 _DURABLE_EXACT_HELD_COMPLETION_SEEN: set[str] = set()
@@ -8573,6 +8583,7 @@ def run_edli_event_reactor_cycle(
             exact_held_completion=active_held_sell_completion_cycle,
         )
         _construct_checkpoint("before_completion_mode")
+        _completion_risk_level = get_current_level()
         _monitor_completion_mode = _construct_sql(
             "completion_mode",
             lambda bounded_conn: _global_auction_completion_mode(
@@ -8580,11 +8591,25 @@ def run_edli_event_reactor_cycle(
                 exact_held_completion=(
                     active_held_sell_completion_cycle
                 ),
+                entries_blocked=(
+                    _completion_risk_level != RiskLevel.GREEN
+                ),
                 trade_conn=bounded_conn,
             ),
         )
+        if _monitor_completion_mode.terminal_without_cut:
+            _settle_global_auction_monitor_fairness(
+                completion_due_at_start=_monitor_completion_due_at_start,
+                result=None,
+                terminal_no_book_completion=True,
+            )
+            _log.info(
+                "EDLI reactor cleared blocked generic completion debt: "
+                "no canonical runtime-open held exposure"
+            )
+            return not completion_wake
         if (
-            get_current_level() != RiskLevel.GREEN
+            _completion_risk_level != RiskLevel.GREEN
             and not _monitor_completion_mode.reduce_only
         ):
             _log.info(
