@@ -1865,6 +1865,106 @@ def test_replacement_maintenance_quota_cooldown_is_partial_but_reseeds(
     }
 
 
+@pytest.mark.parametrize(
+    ("held_status", "written_manifest_count"),
+    (
+        ("CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED", 0),
+        ("CURRENT_TARGET_RAW_INPUTS_DOWNLOADED", 1),
+    ),
+)
+def test_replacement_maintenance_repairs_held_anchor_during_broad_cooldown(
+    monkeypatch, held_status, written_manifest_count,
+) -> None:
+    """Held current-q repair cannot wait for another source-clock transition."""
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    held_scope = ("NYC", "2026-08-17", "low")
+    now = [100.0]
+    monkeypatch.setattr(ingest_main.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC",
+        0.0,
+    )
+    monkeypatch.setattr(
+        ingest_main,
+        "_all_held_day0_current_target_scopes",
+        lambda: (held_scope,),
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download."
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 120,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    downloads: list[dict[str, object]] = []
+
+    def _download(_cfg, **kwargs):
+        downloads.append(kwargs)
+        return {
+            "status": held_status,
+            "written_manifest_count": written_manifest_count,
+            "required_scope_count": 1,
+        }
+
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        _download,
+    )
+    reseeds: list[tuple[str, object, object]] = []
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda _cfg, *, scopes=None, limit=None: (
+            reseeds.append(("fusion", scopes, limit))
+            or {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": 1}
+        ),
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda _cfg, *, scopes=None, limit=None: (
+            reseeds.append(("cycle", scopes, limit))
+            or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": 1}
+        ),
+    )
+
+    result = ingest_main._replacement_maintenance_tick.__wrapped__()
+    now[0] = 160.0
+    second = ingest_main._replacement_maintenance_tick.__wrapped__()
+
+    assert len(downloads) == 2
+    assert all(call["required_scopes"] == (held_scope,) for call in downloads)
+    assert all(call["quota_critical"] is True for call in downloads)
+    assert all(0 < call["max_wall_clock_seconds"] <= 10.0 for call in downloads)
+    assert result["held_current_target_download"] == {
+        "status": held_status,
+    }
+    assert reseeds[:2] == [
+        ("fusion", (held_scope,), 1),
+        ("cycle", (held_scope,), 1),
+    ]
+    assert result["maintenance_errors"] == (
+        "bayes_precision_fusion_extra:"
+        "BAYES_PRECISION_FUSION_EXTRA_QUOTA_COOLDOWN_SKIPPED",
+    )
+    assert second["broad_maintenance_status"] == "REPLACEMENT_MAINTENANCE_NOT_DUE"
+    assert second["reseed_maintenance_status"] == (
+        "REPLACEMENT_MAINTENANCE_HELD_RESEEDS_PUBLISHED"
+    )
+    assert "maintenance_errors" not in second
+    assert reseeds[-2:] == [
+        ("fusion", (held_scope,), 1),
+        ("cycle", (held_scope,), 1),
+    ]
+
+
 def test_replacement_maintenance_repairs_full_extras_before_reseed(
     monkeypatch,
 ) -> None:
@@ -1929,6 +2029,8 @@ def test_replacement_maintenance_repairs_full_extras_before_reseed(
     )
     assert result["bayes_precision_fusion_extra_rows_written"] == 2
     assert result["fusion_upgrade_seeds_enqueued"] == 1
+    assert "held_current_target_download" not in result
+    assert "maintenance_errors" not in result
 
 
 def test_replacement_maintenance_backs_off_only_zero_progress_bpf_fanout(

@@ -2499,6 +2499,7 @@ def _harvester_truth_writer_tick():
 
 _REPLACEMENT_MAINTENANCE_CURRENT_TARGET_OK_STATUSES = frozenset(
     {
+        "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED",
         "CURRENT_TARGET_SCOPED_DOWNLOAD_NO_TARGETS",
         "CURRENT_TARGETS_ALREADY_COVERED",
         "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
@@ -2586,9 +2587,7 @@ def _replacement_maintenance_tick():
 
     cfg = _replacement_forecast_live_materialization_queue_config()
     cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
-    if not _replacement_maintenance_due():
-        return {"status": "REPLACEMENT_MAINTENANCE_NOT_DUE"}
-
+    held_scopes = _all_held_day0_current_target_scopes()
     timeout_s = _replacement_current_target_poll_timeout_seconds(
         _replacement_availability_poll_seconds()
     )
@@ -2597,7 +2596,55 @@ def _replacement_maintenance_tick():
     def _remaining_budget() -> float:
         return max(0.0, deadline_monotonic - time.monotonic())
 
-    if cooldown_seconds > 0:
+    held_report = None
+    held_reseed_scopes: tuple[tuple[str, str, str], ...] = ()
+    if held_scopes and _remaining_budget() > 0.0:
+        # SCOPE: exact canonical day0_window/pending_exit families only.
+        # DRAIN: each maintenance tick repairs their current anchor and enqueues
+        # targeted materialization below, even without a new source-clock edge.
+        # RESET: current materializable anchor coverage plus current reseed markers.
+        try:
+            held_report = _download_replacement_forecast_current_targets_if_needed(
+                cfg,
+                max_wall_clock_seconds=min(10.0, _remaining_budget()),
+                required_scopes=held_scopes,
+                quota_critical=True,
+            )
+        except TimeoutError as exc:
+            held_report = {
+                "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
+                "timeout_seconds": timeout_s,
+                "error": str(exc)[:240],
+            }
+        except Exception as exc:  # noqa: BLE001 - broad repair remains independent
+            logger.warning(
+                "replacement maintenance held-anchor repair failed: %s",
+                exc,
+                exc_info=True,
+            )
+            held_report = {
+                "status": "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
+                "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+            }
+        held_status = (
+            str(held_report.get("status") or "")
+            if isinstance(held_report, dict)
+            else ""
+        )
+        if (
+            held_status == "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED"
+            or int((held_report or {}).get("written_manifest_count") or 0) > 0
+        ):
+            held_reseed_scopes = held_scopes
+
+    broad_due = _replacement_maintenance_due()
+    if not broad_due and held_report is None:
+        return {"status": "REPLACEMENT_MAINTENANCE_NOT_DUE"}
+
+    if not broad_due:
+        download_report = None
+        extras_report = None
+    elif cooldown_seconds > 0:
         _defer_replacement_maintenance(float(cooldown_seconds))
         download_report = None
         extras_report = {
@@ -2668,6 +2715,10 @@ def _replacement_maintenance_tick():
             download_report
         ),
     }
+    if held_report is not None:
+        report["held_current_target_download"] = (
+            _compact_replacement_current_target_report(held_report)
+        )
     if extras_report is not None:
         report["bayes_precision_fusion_extra_status"] = extras_report.get("status")
         report["bayes_precision_fusion_extra_rows_written"] = extras_report.get(
@@ -2680,9 +2731,12 @@ def _replacement_maintenance_tick():
             {
                 tuple(str(part) for part in scope)
                 for scope in (
-                    extras_report.get("committed_families") or ()
-                    if isinstance(extras_report, dict)
-                    else ()
+                    *held_reseed_scopes,
+                    *(
+                        extras_report.get("committed_families") or ()
+                        if isinstance(extras_report, dict)
+                        else ()
+                    ),
                 )
                 if isinstance(scope, (tuple, list)) and len(scope) == 3
             }
@@ -2734,6 +2788,14 @@ def _replacement_maintenance_tick():
         error
         for error in (
             _replacement_maintenance_lane_error(
+                "held_current_target",
+                held_report,
+                ok_statuses=_REPLACEMENT_MAINTENANCE_CURRENT_TARGET_OK_STATUSES,
+                retryable_statuses=(
+                    _REPLACEMENT_MAINTENANCE_CURRENT_TARGET_RETRYABLE_STATUSES
+                ),
+            ),
+            _replacement_maintenance_lane_error(
                 "current_target",
                 download_report,
                 ok_statuses=_REPLACEMENT_MAINTENANCE_CURRENT_TARGET_OK_STATUSES,
@@ -2756,9 +2818,16 @@ def _replacement_maintenance_tick():
     download_timeboxed = any(
         isinstance(lane_report, dict)
         and bool(lane_report.get("timeboxed_incomplete"))
-        for lane_report in (download_report, extras_report)
+        for lane_report in (held_report, download_report, extras_report)
     )
-    if download_timeboxed or _remaining_budget() <= 0.0:
+    if not broad_due:
+        report["broad_maintenance_status"] = "REPLACEMENT_MAINTENANCE_NOT_DUE"
+        report["reseed_maintenance_status"] = (
+            "REPLACEMENT_MAINTENANCE_HELD_RESEEDS_PUBLISHED"
+            if committed_reseed_report_count == 2
+            else "REPLACEMENT_MAINTENANCE_BROAD_NOT_DUE"
+        )
+    elif download_timeboxed or _remaining_budget() <= 0.0:
         report["reseed_maintenance_status"] = (
             "REPLACEMENT_MAINTENANCE_COMMITTED_RESEEDS_PUBLISHED"
             if committed_reseed_report_count == 2
