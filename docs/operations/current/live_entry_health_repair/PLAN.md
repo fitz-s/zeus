@@ -1993,3 +1993,36 @@ publication barrier.
   unknown or batch-wide authority defects remain fail-closed. Focused global
   auction tests, compilation, planning lock, and `git diff --check` must pass
   before exact-SHA hot-fix deployment.
+
+### Slice B104 — Fall through a market-scoped unknown side effect (2026-08-18)
+
+- Live defect: current global cuts repeatedly rank Helsinki market `3655497`
+  first, then pre-submit rejects it with
+  `risk_allocator_pre_submit_blocked: unknown_side_effect_same_market`. The
+  blocker is explicitly market-scoped, but the batch treats its unregistered
+  base reason as a generic transient and requeues the same winner, producing no
+  order despite independent executable candidates in the same complete cut.
+- First-principles invariant: an action blocked by current risk authority is not
+  executable and cannot be the globally best executable order. A market-scoped
+  unknown must keep that market fail-closed without suppressing independent
+  BUY/SELL/HOLD/CASH alternatives.
+- Minimal repair: classify only the exact same-market allocator reason as
+  `CANDIDATE_BLOCKED`, then use the existing exact-candidate exclusion and
+  same-epoch global re-auction path.
+- SCOPE: the exact selected candidate in the affected market. DRAIN: exclude it
+  without venue I/O and rank the remaining current feasible set. RESET: the
+  recurring command reconciler clears the scoped unknown; a later fresh cut may
+  admit the candidate again.
+- Forbidden: clearing or weakening the unknown-side-effect latch, treating an
+  unscoped/systemic unknown as local, reusing stale q/book/wealth, forcing an
+  order, or changing Kelly/cap/price-band law.
+- Acceptance: no venue call occurs for the blocked winner; the exact candidate
+  is excluded; a current sibling can submit once; existing batch-wide and
+  unscoped blockers remain fail-closed. Focused global-auction tests,
+  compilation, planning lock, and `git diff --check` must pass before exact-SHA
+  hot-fix deployment.
+- Verification: scope classification plus maker/taker end-to-end sibling
+  fallthrough coverage passes `64/64`; module/test compilation, changed-surface
+  planning lock, and `git diff --check` pass. Live proof still requires an exact
+  deployed SHA and a post-deploy same-market block followed by a different
+  executable winner or a clean reconciliation of the scoped unknown.

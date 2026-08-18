@@ -13832,6 +13832,15 @@ def _global_preflight_block_status(reason: str) -> str:
         # DRAIN: the batch excludes it and re-ranks the remaining current cut.
         # RESET: the next recurring cut fetches a fresh book for the token.
         return "CANDIDATE_BLOCKED"
+    if reason == "risk_allocator_pre_submit_blocked: unknown_side_effect_same_market":
+        # The allocator's scope lattice has already proved this block belongs
+        # to the selected market, not the complete auction.  Keep that market
+        # fail-closed while comparing independent candidates from the same
+        # frozen q/book/wealth cut.  SCOPE: the exact selected candidate.
+        # DRAIN: exclude it and re-rank the remaining feasible set. RESET: the
+        # recurring command reconciler clears the market-scoped unknown, after
+        # which a later current cut may admit the candidate again.
+        return "CANDIDATE_BLOCKED"
     if reason.startswith(
         (
             "LIVE_ENTRY_BLOCKED:entry_readiness:",
