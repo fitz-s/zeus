@@ -27045,7 +27045,10 @@ def test_global_batch_rejects_unexpected_probability_prepare_failure(
     selection.close()
 
 
-def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
+@pytest.mark.parametrize("submitted", (True, False))
+def test_global_batch_actuates_exactly_one_claimed_global_winner(
+    monkeypatch, caplog, submitted,
+):
     decision_at = _dt.datetime(2026, 7, 10, 8, 0, tzinfo=_dt.timezone.utc)
     event = _global_scope_event(city="Alpha", source_run_id="run-a")
     duplicate = _global_scope_event(city="Alpha", source_run_id="run-duplicate")
@@ -27095,13 +27098,15 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
     def actuate(winner, chosen, _at):
         assert winner.event_id == event.event_id
         assert chosen is actuation
-        calls["venue"] += 1
+        if submitted:
+            calls["venue"] += 1
         return EventSubmissionReceipt(
-            True,
+            submitted,
             winner.event_id,
             winner.causal_snapshot_id,
+            reason=None if submitted else "FINAL_NO_SUBMIT_TEST",
             proof_accepted=False,
-            side_effect_status="SUBMITTED",
+            side_effect_status="SUBMITTED" if submitted else "NO_SUBMIT",
         )
 
     result = global_batch_runtime.process_current_global_batch(
@@ -27125,16 +27130,21 @@ def test_global_batch_actuates_exactly_one_claimed_global_winner(monkeypatch):
         fractional_kelly_multiplier=Decimal("0.03125"),
     )
 
-    assert calls["venue"] == 1
+    assert calls["venue"] == int(submitted)
     assert calls["fractional_kelly_multiplier"] == Decimal("0.03125")
-    assert result.venue_submit_count == 1
+    assert result.venue_submit_count == int(submitted)
     assert result.winner_event_id == event.event_id
-    assert result.receipts[event.event_id].submitted is True
+    assert result.receipts[event.event_id].submitted is submitted
     assert result.receipts[event.event_id].proof_accepted is False
     assert result.receipts[duplicate.event_id].reason == (
         f"GLOBAL_DUPLICATE_FAMILY_CARRIER:{event.event_id}"
     )
     continuation = result.continuation_event
+    if not submitted:
+        assert continuation is None
+        assert "global winner actuation produced no venue order" in caplog.text
+        assert "reason=FINAL_NO_SUBMIT_TEST" in caplog.text
+        return
     assert continuation is not None
     assert continuation.event_id not in result.receipts
     assert continuation.event_type == event.event_type

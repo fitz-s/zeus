@@ -9225,6 +9225,22 @@ def process_current_global_batch(
         venue_delta = venue_submit_count() - before_calls
         if venue_delta not in {0, 1}:
             raise RuntimeError("GLOBAL_ACTUATION_VENUE_COUNT_INVALID")
+        if venue_delta == 0 or not winner_receipt.submitted:
+            _LOG.warning(
+                "global winner actuation produced no venue order: "
+                "event=%s candidate=%s actuation=%s status=%s reason=%s "
+                "proof_accepted=%s venue_call_started=%s venue_ack_received=%s",
+                winner_id,
+                str(
+                    getattr(selected.decision.candidate, "candidate_id", "") or ""
+                ),
+                str(getattr(selected.actuation, "actuation_identity", "") or ""),
+                str(getattr(winner_receipt, "side_effect_status", "") or ""),
+                str(getattr(winner_receipt, "reason", "") or ""),
+                getattr(winner_receipt, "proof_accepted", None),
+                getattr(winner_receipt, "venue_call_started", None),
+                getattr(winner_receipt, "venue_ack_received", None),
+            )
         if (
             venue_delta == 0
             and str(getattr(winner_receipt, "reason", "") or "")
