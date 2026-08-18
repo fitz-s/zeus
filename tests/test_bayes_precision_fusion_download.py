@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Lifecycle: created=2026-06-08; last_reviewed=2026-08-04; last_reused=2026-08-04
+# Lifecycle: created=2026-06-08; last_reviewed=2026-08-18; last_reused=2026-08-18
 # Purpose: Regression tests for BPF raw forecast download and persistence semantics.
 # Reuse: Run when changing Bayes precision fusion raw-input capture or scheduler health.
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
@@ -315,6 +315,55 @@ def test_source_clock_fetch_batches_multiple_locations_into_one_request(monkeypa
         {date(2026, 6, 9): {"ecmwf_ifs": (22.0, 19.0)}},
         {date(2026, 6, 9): {"ecmwf_ifs": (32.0, 29.0)}},
     ]
+
+
+@pytest.mark.parametrize(
+    ("target_date", "decision_at", "first_hour", "last_hour", "expected"),
+    (
+        # Sao Paulo 19:30 local: the 06:00 prefix gap is already elapsed and
+        # the current run still covers the unresolved evening.
+        (date(2026, 8, 18), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 6, 23, True),
+        # A clipped suffix can omit the unresolved peak and remains forbidden.
+        (date(2026, 8, 18), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 6, 18, False),
+        # A run that starts after the decision does not cover the current-to-end window.
+        (date(2026, 8, 18), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 21, 23, False),
+        # The nominal evening threshold is not enough when it is already behind the decision.
+        (date(2026, 8, 18), datetime(2026, 8, 19, 1, 30, tzinfo=UTC), 6, 20, False),
+        # Missing-prefix relaxation is Day0-only; future days still need full coverage.
+        (date(2026, 8, 19), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 6, 23, False),
+        (date(2026, 8, 19), datetime(2026, 8, 18, 22, 30, tzinfo=UTC), 0, 23, True),
+    ),
+)
+def test_single_runs_partial_day_requires_elapsed_prefix_and_remaining_coverage(
+    target_date: date,
+    decision_at: datetime,
+    first_hour: int,
+    last_hour: int,
+    expected: bool,
+) -> None:
+    from src.data.bayes_precision_fusion_download import (
+        _parse_batched_single_runs_payload,
+    )
+
+    hours = list(range(first_hour, last_hour + 1))
+    payload = {
+        "hourly": {
+            "time": [f"{target_date.isoformat()}T{hour:02d}:00" for hour in hours],
+            "temperature_2m": [float(hour) for hour in hours],
+        },
+        "hourly_units": {"temperature_2m": "C"},
+    }
+    parsed = _parse_batched_single_runs_payload(
+        payload,
+        ["ecmwf_ifs"],
+        target_date,
+        "America/Sao_Paulo",
+        decision_at=decision_at,
+    )
+
+    assert ("ecmwf_ifs" in parsed) is expected
+    if expected:
+        assert parsed["ecmwf_ifs"] == (float(last_hour), float(first_hour))
 
 
 def test_source_clock_fetch_isolates_location_response_failure(monkeypatch) -> None:

@@ -1,5 +1,5 @@
 # Created: 2026-06-08
-# Last reused or audited: 2026-08-04
+# Last reused or audited: 2026-08-18
 # Authority basis: BAYES_PRECISION_FUSION_SPEC.md §6 F1 (raw capture: previous_runs + single_runs ->
 #   raw_model_forecasts), §3 (causality: previous-runs fixed-lead; single-runs live capture;
 #   run_time != source_available_at), §5 (~6mo retention); §7 antibodies (C/F unit mix ->
@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -1152,6 +1153,8 @@ def _parse_batched_single_runs_payload(
     models: list[str],
     target_local_date: "date",
     timezone_name: str,
+    *,
+    decision_at: datetime | str | None = None,
 ) -> dict[str, tuple[float | None, float | None]]:
     """Parse a batched single-runs response into {model: (high_c, low_c)}.
 
@@ -1160,6 +1163,8 @@ def _parse_batched_single_runs_payload(
     Uses extract_openmeteo_ecmwf_ifs9_localday_anchor for consistent local-day windowing.
     """
     from src.data.openmeteo_ecmwf_ifs9_anchor import (  # noqa: PLC0415
+        LOCALDAY_SPAN_EARLY_HOUR,
+        LOCALDAY_SPAN_LATE_HOUR,
         extract_openmeteo_ecmwf_ifs9_localday_anchor,
     )
 
@@ -1187,8 +1192,42 @@ def _parse_batched_single_runs_payload(
                 sub_payload,
                 city_timezone=timezone_name,
                 target_local_date=target_local_date,
-                require_full_localday=True,  # 2026-06-17: reject horizon-clipped partial days
+                require_full_localday=False,
             )
+            local_times = anchor.contributing_local_times
+            earliest = min(local_times)
+            latest = max(local_times)
+            covers_full_day = (
+                earliest.hour <= LOCALDAY_SPAN_EARLY_HOUR
+                and latest.hour >= LOCALDAY_SPAN_LATE_HOUR
+            )
+            if not covers_full_day:
+                decision_utc = (
+                    datetime.now(UTC)
+                    if decision_at is None
+                    else _utc_datetime(decision_at)
+                )
+                decision_local = decision_utc.astimezone(ZoneInfo(timezone_name))
+                ordered_times = sorted(local_times)
+                positive_steps = tuple(
+                    right - left
+                    for left, right in zip(ordered_times, ordered_times[1:], strict=False)
+                    if right > left
+                )
+                final_slot_end = latest + (
+                    min(positive_steps) if positive_steps else timedelta(hours=1)
+                )
+                covers_remaining_day0 = (
+                    decision_local.date() == target_local_date
+                    and earliest <= decision_local
+                    and final_slot_end > decision_local
+                    and latest.hour >= LOCALDAY_SPAN_LATE_HOUR
+                )
+                if not covers_remaining_day0:
+                    raise ValueError(
+                        "partial local-day coverage is not an elapsed-prefix-only "
+                        "Day0 slice with remaining-day coverage"
+                    )
             result[model] = (float(anchor.high_c), float(anchor.low_c))
         except Exception as exc:
             _LOG.warning(

@@ -2302,3 +2302,37 @@ publication barrier.
   `priority_lane`, and a priority-only cooldown defers Paris without suppressing
   Seoul. Freshness, provider identity, materialization, q, sizing, price, and
   venue I/O remain unchanged.
+
+### Slice B114 — Preserve Day0 remaining-window probability authority (2026-08-18)
+
+- Live defect: current-cycle global models were present at the provider but every
+  held-family capture was discarded because the parser required samples from the
+  already elapsed local-day prefix. The materializer consequently had no current
+  BPF shape, so held positions produced durable degraded monitor events without
+  current action authority.
+- First-principles invariant: forecast coverage is directional in continuous
+  time. A future local day requires the normal full-day span. On Day0, a current
+  run may omit only a prefix that is already elapsed; it must begin no later than
+  the decision instant and still span the unresolved suffix through the evening.
+  The existing remaining-window center transform and observed-extreme support
+  conditioning then consume that current evidence exactly once.
+- SCOPE: current `single_runs` local-day coverage classification for BPF raw
+  capture. DRAIN: the recurring held-priority source-clock poll retries deferred
+  families and materialization consumes the newly persisted exact-cycle rows.
+  RESET: full-day coverage or an elapsed-prefix-only Day0 slice passes; future,
+  post-day, not-yet-started, and suffix-clipped slices remain fail-closed.
+- Forbidden: disabling local-day coverage, accepting a missing unresolved
+  suffix, substituting stale history, changing source roles, changing q/edge/exit
+  thresholds, or double-applying the Day0 remaining-window correction.
+- Acceptance: deterministic Sao Paulo fixtures prove active-Day0 `[06..23]`
+  passes at 19:30 local, `[06..18]` and `[21..23]` fail, future `[06..23]`
+  fails, and future `[00..23]` remains valid. Focused BPF, materialization/Day0,
+  planning, topology, compilation, and diff checks pass before exact-SHA deploy.
+- Verification: BPF capture, held-priority source-clock coverage, Day0 remaining
+  center, and remaining-day pricing pass `235/235`; bounded-file Ruff,
+  compilation, freshness, map maintenance, planning evidence, and diff checks
+  pass. The broader materializer file has six failures reproduced unchanged on
+  current live (five retired runtime-layer/schema fixtures and one isolated
+  subprocess missing its test world DB). Repo-wide source/test/fatal topology
+  gates remain blocked by the same current-live registry/YAML drift; none is on
+  the changed behavior or newly registered test.
