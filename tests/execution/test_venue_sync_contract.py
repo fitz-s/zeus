@@ -359,6 +359,36 @@ def test_complete_account_snapshot_also_captures_authenticated_point_order_reads
     assert snapshot.get_order("order-absent") is None
 
 
+def test_point_order_snapshot_stops_network_reads_after_shared_deadline():
+    from src.execution import venue_sync_contract as vsc
+
+    class Client:
+        def __init__(self):
+            self.point_reads: list[str] = []
+
+        def get_account_truth(self, *, deadline_monotonic):
+            assert deadline_monotonic > time.monotonic()
+            return type("Truth", (), {"open_orders": (), "trades": ()})()
+
+        def get_order(self, order_id, *, deadline_monotonic):
+            self.point_reads.append(order_id)
+            time.sleep(0.02)
+            raise TimeoutError("point read exceeded shared deadline")
+
+    client = Client()
+    snapshot = vsc.capture_venue_read_snapshot(
+        client,
+        order_ids=["order-a", "order-b", "order-c"],
+        derive_orders_from_account_truth=True,
+        deadline_monotonic=time.monotonic() + 0.01,
+    )
+
+    assert client.point_reads == ["order-a"]
+    for order_id in ("order-a", "order-b", "order-c"):
+        with pytest.raises(vsc.SnapshotMissError):
+            snapshot.get_order(order_id)
+
+
 def test_capture_snapshot_keeps_empty_point_order_shape_failure_unknown():
     from src.execution import venue_sync_contract as vsc
     from src.venue.response_contracts import VenueResponseShapeError

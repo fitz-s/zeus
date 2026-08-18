@@ -33748,3 +33748,63 @@ def test_full_quantum_prioritizes_unknown_submit_and_rotates_stayed_peers(
         "unknown-submit-a",
         "historical-review",
     ]
+
+
+def test_full_priming_limits_historical_matched_orders_to_one_network_quantum(
+    monkeypatch,
+):
+    from src.execution import command_recovery
+
+    matched_rows = [
+        {
+            "command_id": f"matched-{index}",
+            "venue_order_id": f"order-{index}",
+        }
+        for index in range(5)
+    ]
+    monkeypatch.setattr(command_recovery, "find_unresolved_commands", lambda _conn: [])
+    monkeypatch.setattr(
+        command_recovery,
+        "_active_venue_command_priming_rows",
+        lambda *_args, **_kwargs: [
+            {
+                "command_id": f"filled-history-{index}",
+                "venue_order_id": f"filled-order-{index}",
+            }
+            for index in range(5)
+        ],
+    )
+    for name in (
+        "_local_orphan_no_fill_candidates",
+        "_terminal_point_order_candidates",
+        "_latest_unprojected_live_entry_candidates",
+        "_latest_unprojected_filled_entry_candidates",
+    ):
+        monkeypatch.setattr(command_recovery, name, lambda _conn: [])
+    monkeypatch.setattr(
+        command_recovery,
+        "_latest_matched_order_fact_candidates",
+        lambda _conn: matched_rows,
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_partial_remainder_candidates",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        command_recovery,
+        "_full_background_recovery_quantum_slot",
+        lambda: 0,
+    )
+
+    priming = command_recovery._collect_recovery_priming_keys(
+        object(),
+        scope="full",
+    )
+
+    assert priming["matched_command_ids"] == {"matched-0"}
+    assert priming["active_command_ids"] == {"filled-history-0"}
+    assert priming["order_ids"] == {"filled-order-0", "order-0"}
+    assert priming["active_quantum_remaining"] is True
+    assert priming["matched_quantum_remaining"] is True
+    assert "filled-order-4" not in priming["order_ids"]

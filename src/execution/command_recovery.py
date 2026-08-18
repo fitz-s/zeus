@@ -27007,14 +27007,19 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
     """SNAPSHOT phase helper: gather every venue-read key the apply passes will need.
 
     Runs only read queries (the per-pass candidate selects + the in-flight scan)
-    on a short-lived connection and returns the union of venue_order_ids,
-    idempotency keys, and condition ids. Over-collection is safe; the apply-phase
-    venue snapshot raises a located ``SnapshotMissError`` only if a needed key was
-    NOT collected here.
+    on a short-lived connection and returns the venue identities needed by this
+    invocation. High-cadence scopes collect every current candidate. The full
+    historical sweep collects one crash-stable quantum per background class so
+    NETWORK work is bounded to the same rows APPLY can advance this invocation.
+    Under-collection raises a located ``SnapshotMissError`` at APPLY.
     """
     order_ids: set[str] = set()
     idem_keys: set[str] = set()
     condition_ids: set[str] = set()
+    active_command_ids: set[str] = set()
+    active_quantum_remaining = False
+    matched_command_ids: set[str] = set()
+    matched_quantum_remaining = False
 
     def _harvest(rows) -> None:
         for row in rows or []:
@@ -27064,18 +27069,44 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
             "idempotency_keys": idem_keys,
             "condition_ids": condition_ids,
         }
-    try:
-        _harvest(
-            _active_venue_command_priming_rows(
-                conn,
-                include_filled=scope != "live_tick",
+    if scope in {"live_tick", "boot_fast"}:
+        try:
+            _harvest(
+                _active_venue_command_priming_rows(
+                    conn,
+                    include_filled=scope != "live_tick",
+                )
             )
-        )
-    except Exception:  # noqa: BLE001 — a missing table just means no candidates
-        logger.debug(
-            "recovery: priming candidate _active_venue_command_priming_rows failed",
-            exc_info=True,
-        )
+        except Exception:  # noqa: BLE001 — a missing table just means no candidates
+            logger.debug(
+                "recovery: priming candidate _active_venue_command_priming_rows failed",
+                exc_info=True,
+            )
+    elif scope == "full":
+        # Historical FILLED commands never belong in one account-wide point-read
+        # burst. Their durable quantum rotates every minute; current unresolved,
+        # partial, and projection candidates remain collected separately below.
+        try:
+            active_rows = _active_venue_command_priming_rows(
+                conn,
+                include_filled=True,
+            )
+            active_batches = _full_background_recovery_command_id_batches(
+                [str(row.get("command_id") or "") for row in active_rows]
+            )
+            if active_batches:
+                active_command_ids.update(active_batches[0])
+                _harvest(
+                    row
+                    for row in active_rows
+                    if str(row.get("command_id") or "") in active_command_ids
+                )
+                active_quantum_remaining = len(active_batches) > 1
+        except Exception:  # noqa: BLE001 — a missing table just means no candidates
+            logger.debug(
+                "recovery: priming candidate _active_venue_command_priming_rows failed",
+                exc_info=True,
+            )
     if scope in {"live_tick", "boot_fast"}:
         for candidate_fn in (
             _local_orphan_no_fill_candidates,
@@ -27120,7 +27151,6 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
     for candidate_fn in (
         _local_orphan_no_fill_candidates,
         _terminal_point_order_candidates,
-        _latest_matched_order_fact_candidates,
         _latest_unprojected_live_entry_candidates,
         _latest_unprojected_filled_entry_candidates,
     ):
@@ -27128,6 +27158,27 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
             _harvest(candidate_fn(conn))
         except Exception:  # noqa: BLE001
             logger.debug("recovery: priming candidate %s failed", candidate_fn.__name__, exc_info=True)
+    try:
+        matched_rows = _latest_matched_order_fact_candidates(conn)
+        # Match the existing one-command APPLY quantum before any venue I/O.
+        # The selected ids are carried in ``priming`` so a minute-boundary
+        # rotation cannot make APPLY ask for an identity NETWORK did not capture.
+        matched_batches = _full_background_recovery_command_id_batches(
+            [str(row.get("command_id") or "") for row in matched_rows]
+        )
+        if matched_batches:
+            matched_command_ids.update(matched_batches[0])
+            _harvest(
+                row
+                for row in matched_rows
+                if str(row.get("command_id") or "") in matched_command_ids
+            )
+            matched_quantum_remaining = len(matched_batches) > 1
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "recovery: priming candidate _latest_matched_order_fact_candidates failed",
+            exc_info=True,
+        )
     try:
         _harvest(_partial_remainder_candidates(conn, updated_before=None))
     except Exception:  # noqa: BLE001
@@ -27144,6 +27195,10 @@ def _collect_recovery_priming_keys(conn: sqlite3.Connection, *, scope: str = "fu
         "order_ids": order_ids,
         "idempotency_keys": idem_keys,
         "condition_ids": condition_ids,
+        "active_command_ids": active_command_ids,
+        "active_quantum_remaining": active_quantum_remaining,
+        "matched_command_ids": matched_command_ids,
+        "matched_quantum_remaining": matched_quantum_remaining,
     }
 
 
@@ -28999,28 +29054,18 @@ def _reconcile_passes_short_conn(
     _client_pass("terminal_point_orders",
                  reconcile_terminal_point_orders, "terminal_point_orders")
     if scope == "full":
-        with open_tracked(
-            read_conn_factory,
-            label="recovery.matched_order_facts:quantum_snapshot",
-        ) as conn:
-            matched_command_ids = [
-                str(row.get("command_id") or "")
-                for row in _latest_matched_order_fact_candidates(conn)
-            ]
-        for command_ids in _full_background_recovery_command_id_batches(
-            matched_command_ids,
-        ):
+        matched_command_ids = frozenset(
+            str(command_id)
+            for command_id in priming.get("matched_command_ids", set())
+            if str(command_id)
+        )
+        if matched_command_ids:
             _client_pass(
                 "matched_order_facts",
                 reconcile_matched_order_facts,
                 "matched_order_facts",
-                command_ids=command_ids,
+                command_ids=matched_command_ids,
             )
-            if (
-                summary.get("db_lock_deferred")
-                or summary.get("db_budget_deferred")
-            ):
-                break
     else:
         _client_pass("matched_order_facts", reconcile_matched_order_facts, "matched_order_facts")
     _db_pass(
@@ -29133,6 +29178,16 @@ def _reconcile_passes_short_conn(
     if scope == "full" and summary.pop("inflight_quantum_remaining", False):
         summary["db_budget_deferred"] = True
         summary["db_budget_deferred_at"] = "inflight_quantum"
+        summary["db_budget_deferred_count"] = 1
+        summary["deferred_full_sweep"] = True
+    if scope == "full" and priming.get("matched_quantum_remaining"):
+        summary["db_budget_deferred"] = True
+        summary.setdefault("db_budget_deferred_at", "matched_order_facts_quantum")
+        summary["db_budget_deferred_count"] = 1
+        summary["deferred_full_sweep"] = True
+    if scope == "full" and priming.get("active_quantum_remaining"):
+        summary["db_budget_deferred"] = True
+        summary.setdefault("db_budget_deferred_at", "active_order_quantum")
         summary["db_budget_deferred_count"] = 1
         summary["deferred_full_sweep"] = True
     if scope == "full" and (

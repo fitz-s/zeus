@@ -592,8 +592,17 @@ def capture_venue_read_snapshot(
         ),
         None,
     )
+    point_read_deadline_skips = 0
     if callable(get_order_source):
-        for oid in requested_order_ids:
+        for oid in sorted(requested_order_ids):
+            if time.monotonic() >= account_deadline:
+                point_read_deadline_skips += 1
+                orders[oid] = _CapturedVenueReadFailure(
+                    IncompleteAccountTruthError(
+                        "INCOMPLETE_ACCOUNT_TRUTH: point-order snapshot deadline exhausted"
+                    )
+                )
+                continue
             try:
                 if derive_orders_from_account_truth:
                     orders[oid] = get_order_source(
@@ -610,6 +619,11 @@ def capture_venue_read_snapshot(
             except Exception as exc:  # noqa: BLE001 — preserve timeout/auth/read failure.
                 logger.warning("venue_sync_contract: get_order(%s) failed during snapshot", oid, exc_info=True)
                 orders[oid] = _CapturedVenueReadFailure(exc)
+    if point_read_deadline_skips:
+        logger.warning(
+            "venue_sync_contract: skipped %d point-order reads after shared snapshot deadline",
+            point_read_deadline_skips,
+        )
 
     idempotency: dict = {}
     finder = next(
