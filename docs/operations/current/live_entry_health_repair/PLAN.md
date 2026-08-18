@@ -2221,3 +2221,38 @@ publication barrier.
   1-of-4 partial counterexample fails, 4-of-4 succeeds, an explicit same-pass
   chain-missing close discharges its obligation, and canonical-write/preemption
   failures remain incomplete before focused/broader tests and hot-fix deployment.
+
+### Slice B112 — Unify definitive Day0 ENTRY and HELD probability authority (2026-08-18)
+
+- Live defect: the same Austin current-day WU settlement fact and remaining
+  provider vectors produced NO q `0.4304` for ENTRY but `0.151875` for
+  HELD_MONITOR. The held path treated every authorized current-day observation
+  as a held-only continuity exception, skipped the replacement bundle, invented
+  a different base/content identity, and omitted the source-clock bound.
+- First-principles invariant: a definitive current-day settlement-channel fact
+  uses one replacement probability authority for ENTRY, HELD_MONITOR, and
+  REDUCE_ONLY_EXIT at the same decision-time truth. Held-only continuity exists
+  only for a genuinely provisional observation or post-local incomplete final
+  publication; action role must not create a second q regime.
+- SCOPE: current-day global probability preparation when the authorized Day0
+  fact is definitive. DRAIN: every redecision reads the same current replacement
+  bundle and rebuilds the remaining-day simplex. RESET: genuinely provisional
+  evidence or the typed post-local incomplete state enters the existing scoped
+  continuity path; final daily truth still upgrades to the exact simplex.
+- Files authorized: `src/engine/event_reactor_adapter.py`,
+  `tests/integration/test_w3_solve_seam_g3.py`, `architecture/source_rationale.yaml`,
+  `architecture/test_topology.yaml`, and this packet.
+- Acceptance: the definitive WU fixture produces identical ENTRY/HELD point q,
+  q version, source-truth identity, probability-content identity, base identity,
+  and source-clock bound while reading the replacement bundle for both roles;
+  provisional HKO and post-local incomplete continuity tests still pass. Focused
+  integration tests, compilation, narrow lint, planning/freshness gates, and
+  `git diff --check` pass before exact-SHA hot-fix deployment.
+- Verification: the focused Day0/held slice passes `16/16`; the complete W3
+  integration file passes `488/494` with the same six failures reproduced on
+  unmodified live (three sample-count fixtures, one stale fast-observation
+  fixture, and two post-day capture-cutoff fixtures). Compilation, test-file
+  Ruff, freshness, map maintenance, planning, and `git diff --check` pass. The
+  adapter's ten F821 findings are identical to `HEAD`; the source-rationale YAML
+  parser remains blocked by the same pre-existing line-1285 error on `HEAD` and
+  this slice.

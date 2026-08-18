@@ -7493,10 +7493,16 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     import src.data.replacement_forecast_current_target_plan as current_target_plan
     import src.data.replacement_forecast_readiness as readiness_reader
 
+    definitive_fact = {
+        "observation_source": "wu_icao_history",
+        "observation_time": "2026-07-11T17:00:00+00:00",
+        "observation_available_at": "2026-07-11T17:05:00+00:00",
+        "observed_extreme_native": 69.0,
+    }
     monkeypatch.setattr(
         current_target_plan,
         "_latest_authorized_day0_fact",
-        lambda *args, **kwargs: None,
+        lambda *_args, **_kwargs: definitive_fact,
     )
 
     forecast = sqlite3.connect(":memory:")
@@ -7556,8 +7562,35 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     )
     observations = sqlite3.connect(":memory:")
     observations.execute(
-        "CREATE TABLE observation_instants ("
-        "city TEXT, target_date TEXT, marker INTEGER)"
+        """
+        CREATE TABLE observation_instants (
+            city TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            running_max REAL,
+            utc_timestamp TEXT NOT NULL,
+            local_timestamp TEXT NOT NULL,
+            source TEXT NOT NULL,
+            causality_status TEXT NOT NULL,
+            authority TEXT NOT NULL,
+            source_role TEXT NOT NULL,
+            training_allowed INTEGER NOT NULL
+        )
+        """
+    )
+    observations.execute(
+        "INSERT INTO observation_instants VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "Dallas",
+            "2026-07-11",
+            69.0,
+            "2026-07-11T17:00:00+00:00",
+            "2026-07-11T12:00:00-05:00",
+            "wu_icao_history",
+            "CAUSAL",
+            "AUTHORIZED",
+            "SETTLEMENT",
+            0,
+        ),
     )
 
     posterior_bins = (
@@ -7801,6 +7834,39 @@ def test_current_day0_global_probability_uses_current_remaining_day_simplex(
     ] == pytest.approx(0.4)
     assert witness.yes_point_q.tolist() == pytest.approx([0.0, 0.2, 0.8])
     assert day0_payload["_edli_day0_source_clock_bound_posterior_identity"]
+
+    held_payload: dict[str, object] = {}
+    held = era._prepare_current_global_probability_family(
+        _global_day0_scope_event(city="Dallas", source_run_id="run-dallas"),
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=_dt.datetime(
+            2026, 7, 11, 18, 0, tzinfo=_dt.timezone.utc
+        ),
+        max_age=_dt.timedelta(seconds=30),
+        day0_payload_out=held_payload,
+        allow_provisional_day0_replacement=True,
+        probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
+    )
+    held_witness = held.probability_witness
+    assert replacement_bound_reads == 2
+    assert held_witness.yes_point_q.tolist() == pytest.approx(
+        witness.yes_point_q.tolist()
+    )
+    assert held_witness.q_version == witness.q_version
+    assert held_witness.source_truth_identity == witness.source_truth_identity
+    assert (
+        held_witness.probability_content_identity
+        == witness.probability_content_identity
+    )
+    assert held_payload["_edli_global_day0_binding"][
+        "probability_base_identity"
+    ] == binding["probability_base_identity"]
+    assert held_payload[
+        "_edli_day0_source_clock_bound_posterior_identity"
+    ] == day0_payload["_edli_day0_source_clock_bound_posterior_identity"]
+    assert "_edli_day0_redecision_authority_scope" not in held_payload
 
     capture_time["value"] = "2026-07-11T17:31:00+00:00"
     recaptured_payload: dict[str, object] = {}

@@ -35269,6 +35269,10 @@ def _prepare_current_global_probability_family(
             current_day0_redecision_only = bool(
                 provisional_day0_fact is not None
                 and (
+                    provisional_day0_observation
+                    or post_local_incomplete_monitor_authority
+                )
+                and (
                     local_target == local_now.date()
                     or post_local_incomplete_monitor_authority
                 )
@@ -35279,8 +35283,10 @@ def _prepare_current_global_probability_family(
                 }
             )
         if final_daily_observation is None and current_day0_redecision_only:
-            # SCOPE: this already-held Day0 family's monitor and reduce-only
-            # submit revalidation. ENTRY still requires the replacement bundle.
+            # SCOPE: this already-held family's genuinely provisional Day0 or
+            # post-local incomplete monitor/reduce-only submit revalidation.
+            # Definitive current-day evidence uses the replacement bundle for
+            # the same probability authority as ENTRY.
             # DRAIN: the strict remaining-window builder below consumes a fresh,
             # complete expected-provider vector bundle on every redecision.
             # RESET: missing/stale vectors or the next local day fail closed;
