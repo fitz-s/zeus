@@ -2125,3 +2125,28 @@ publication barrier.
   unrelated missing reasons remain fail-closed. Focused global actuation tests,
   compilation, planning lock, topology freshness, and `git diff --check` pass
   before exact-SHA hot-fix deployment.
+
+### Slice B109 — Reserve source-clock capture for held families (2026-08-18)
+
+- Live defect: Wellington's current 12Z anchor artifact and matching ENS coverage
+  were present, but its held-family posterior remained on the prior source day.
+  The source-clock downloader sorted held targets first yet submitted that one
+  task together with every broad-universe task. Broad Seoul traffic established
+  the shared quota cooldown before Wellington obtained the simultaneous provider
+  captures required by the live probability authority.
+- First-principles invariant: held-family priority is an execution barrier, not
+  submission order. Each updated provider first receives its bounded held-family
+  micro-batch; only after those requests terminate may the same cycle spend
+  transport capacity on entry-discovery targets. Independent provider requests
+  within the held tranche remain concurrent.
+- SCOPE: source-clock current-value capture for canonical held families only.
+  DRAIN: recurring availability polls retry missing provider rows, publish their
+  commit wake, and then materialize the current posterior. RESET: once every held
+  tranche terminates, broad source fanout resumes in the same bounded call; when
+  there are no held targets, existing independent-source concurrency is unchanged.
+- Forbidden: stale-as-fresh probability, single-source q, weakening sigma/bounds
+  authority, inventing provider data, suppressing broad targets permanently, or
+  increasing provider quota. Acceptance: a deterministic two-source antibody
+  proves both Wellington held requests start before either Seoul broad request;
+  no-held concurrency tests remain green; focused capture tests, compilation,
+  planning lock, and `git diff --check` pass before hot-fix deployment.

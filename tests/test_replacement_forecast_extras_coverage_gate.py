@@ -1,6 +1,6 @@
 # Created: 2026-06-16
-# Last reused or audited: 2026-08-11
-# Lifecycle: created=2026-06-16; last_reviewed=2026-08-11; last_reused=2026-08-11
+# Last reused or audited: 2026-08-18
+# Lifecycle: created=2026-06-16; last_reviewed=2026-08-18; last_reused=2026-08-18
 # Authority basis: docs/evidence/timing_audit/capture_reactor_stall_rootcause_2026-06-16.md
 #   (PRIMARY/CODE fix) + docs/evidence/timing_audit/impl_flat_threshold_capture_fix_2026-06-16.md.
 #   BAYES_PRECISION_FUSION_SPEC §6 F1 (the q-path consumes the persisted single_runs capture).
@@ -762,6 +762,124 @@ def test_source_clock_scoped_capture_prioritizes_held_families(
         ("Seoul", "2026-07-17"),
         ("Seoul", "2026-07-16"),
     )
+    assert report["status"] == (
+        "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+    )
+
+
+def test_source_clock_scoped_capture_drains_held_family_across_sources_before_broad_fanout(
+    tmp_path, monkeypatch
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.replacement_forecast_current_target_plan as target_plan
+    import src.data.replacement_forecast_seed_discovery as seed_discovery
+    import src.strategy.live_inference.source_clock_city_weights as city_weights
+
+    sources = ("ecmwf_ifs", "icon_global")
+
+    class _Report:
+        updated_sources = sources
+        affected_cities = ("Seoul", "Wellington")
+
+        def as_dict(self):
+            return {
+                "updated_sources": list(self.updated_sources),
+                "affected_cities": list(self.affected_cities),
+                "source_runs": {
+                    source: {
+                        "initialisation_time": _CYCLE.isoformat(),
+                        "availability_time": _CYCLE.isoformat(),
+                        "update_interval_seconds": 3600,
+                    }
+                    for source in self.updated_sources
+                },
+            }
+
+    keys = (
+        target_plan.ReplacementForecastTargetKey(
+            "Wellington", "2026-07-17", "high"
+        ),
+        target_plan.ReplacementForecastTargetKey("Seoul", "2026-07-17", "high"),
+    )
+    calls: list[tuple[str, str]] = []
+    lock = threading.Lock()
+    held_sources: set[str] = set()
+    all_held_started = threading.Event()
+    held_completed: set[str] = set()
+    all_held_completed = threading.Event()
+
+    monkeypatch.setitem(
+        prod.settings["edli"],
+        "replacement_0_1_bayes_precision_fusion_capture_enabled",
+        True,
+    )
+    monkeypatch.setattr(dl, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    monkeypatch.setattr(
+        target_plan,
+        "replacement_forecast_current_target_keys",
+        lambda _path: keys,
+    )
+    monkeypatch.setattr(
+        seed_discovery,
+        "held_position_family_priorities",
+        lambda: {("Wellington", "2026-07-17", "high"): 0},
+    )
+    monkeypatch.setattr(
+        city_weights,
+        "affected_cities_for_source_updates",
+        lambda _sources: {"Seoul", "Wellington"},
+    )
+
+    def _download(**kwargs):
+        source = tuple(kwargs["models"])[0]
+        cities = tuple(dict.fromkeys(target.city for target in kwargs["targets"]))
+        assert len(cities) == 1
+        city = cities[0]
+        with lock:
+            calls.append((source, city))
+            if city == "Wellington":
+                held_sources.add(source)
+                if held_sources == set(sources):
+                    all_held_started.set()
+        if city == "Wellington":
+            assert all_held_started.wait(0.5)
+            with lock:
+                held_completed.add(source)
+                if held_completed == set(sources):
+                    all_held_completed.set()
+        if city == "Seoul":
+            assert all_held_completed.is_set(), (
+                "broad source I/O must wait for the held-family tranche to terminate"
+            )
+        return {
+            "status": "BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED",
+            "target_count": len(kwargs["targets"]),
+            "written_row_count": len(kwargs["targets"]),
+            "committed_families": tuple(
+                (target.city, target.target_date, target.metric)
+                for target in kwargs["targets"]
+            ),
+            "global_models_expected": 1,
+            "global_models_unavailable": [],
+            "single_runs_request_cycles": {source: _CYCLE.isoformat()},
+        }
+
+    monkeypatch.setattr(dl, "download_bayes_precision_fusion_extra_raw_inputs", _download)
+
+    report = prod._download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
+        {
+            "forecast_db": str(tmp_path / "zeus-forecasts.db"),
+            "source_clock_fanout_workers": 4,
+        },
+        source_clock_report=_Report(),
+        max_wall_clock_seconds=1.0,
+    )
+
+    assert {source for source, city in calls[:2] if city == "Wellington"} == set(sources)
+    assert all(city == "Wellington" for _source, city in calls[:2])
+    assert all(city == "Seoul" for _source, city in calls[2:])
+    assert report["priority_probe_sources"] == sources
+    assert report["priority_probe_families"] == (("Wellington", "2026-07-17"),)
     assert report["status"] == (
         "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
     )

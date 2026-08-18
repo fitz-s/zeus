@@ -1443,7 +1443,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             list[BayesPrecisionFusionDownloadTarget],
         ]
         tasks_by_source: dict[str, list[task_type]] = {}
-        priority_task: task_type | None = None
+        priority_tasks: list[task_type] = []
         source_order = tuple(
             sorted(
                 resolved_sources,
@@ -1480,36 +1480,33 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                     grouped_targets.append([target])
                 else:
                     grouped_targets[index].append(target)
-            if priority_task is None:
-                first_priority = min(
-                    held_priority.get(
-                        (target.city, target.target_date, target.metric),
-                        2,
-                    )
-                    for target in grouped_targets[0]
+            held_groups: list[list[BayesPrecisionFusionDownloadTarget]] = []
+            while grouped_targets and min(
+                held_priority.get(
+                    (target.city, target.target_date, target.metric),
+                    2,
                 )
-                priority_groups: list[list[BayesPrecisionFusionDownloadTarget]] = []
-                while (
-                    grouped_targets
-                    and len(priority_groups) < _SOURCE_CLOCK_LOCATION_BATCH_SIZE
-                    and min(
-                        held_priority.get(
-                            (target.city, target.target_date, target.metric),
-                            2,
-                        )
-                        for target in grouped_targets[0]
-                    ) == first_priority
-                ):
-                    priority_groups.append(grouped_targets.pop(0))
-                priority_task = (
+                for target in grouped_targets[0]
+            ) < 2:
+                held_groups.append(grouped_targets.pop(0))
+            priority_tasks.extend(
+                (
                     source,
                     source_cycles[source],
                     [
                         target
-                        for group in priority_groups
+                        for group in held_groups[
+                            offset : offset + _SOURCE_CLOCK_LOCATION_BATCH_SIZE
+                        ]
                         for target in group
                     ],
                 )
+                for offset in range(
+                    0,
+                    len(held_groups),
+                    _SOURCE_CLOCK_LOCATION_BATCH_SIZE,
+                )
+            )
             if not grouped_targets:
                 tasks_by_source[source] = []
                 continue
@@ -1531,6 +1528,14 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                     _SOURCE_CLOCK_LOCATION_BATCH_SIZE,
                 )
             ]
+
+        held_priority_barrier = bool(priority_tasks)
+        if not priority_tasks:
+            for source in source_order:
+                source_tasks = tasks_by_source.get(source, [])
+                if source_tasks:
+                    priority_tasks.append(source_tasks.pop(0))
+                    break
 
         tasks: list[
             tuple[
@@ -1610,9 +1615,9 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         source_commit_notifications = 0
         source_commit_notification_errors: list[str] = []
 
-        assert priority_task is not None
-        priority_report: dict[str, object] = {}
-        scheduled_tasks = (priority_task, *tasks)
+        assert priority_tasks
+        priority_reports: list[dict[str, object]] = []
+        scheduled_tasks = (*priority_tasks, *tasks)
         executor_worker_count = min(max_workers, len(scheduled_tasks))
         callback_futures = {}
         source_executor = ThreadPoolExecutor(
@@ -1625,7 +1630,16 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         )
         try:
             futures = {}
-            for index, task in enumerate(scheduled_tasks):
+
+            def _submit_task(
+                task: task_type,
+                *,
+                is_priority: bool,
+                runner: Callable[
+                    [str, datetime, list[BayesPrecisionFusionDownloadTarget]],
+                    tuple[str, dict[str, object]],
+                ],
+            ) -> object:
                 source, cycle, chunk = task
                 task_key = (
                     source,
@@ -1643,7 +1657,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 with _SOURCE_CLOCK_DOWNLOAD_INFLIGHT_LOCK:
                     future = _SOURCE_CLOCK_DOWNLOAD_INFLIGHT.get(task_key)
                     if future is None:
-                        future = source_executor.submit(_download_task, *task)
+                        future = source_executor.submit(runner, *task)
                         _SOURCE_CLOCK_DOWNLOAD_INFLIGHT[task_key] = future
                         created = True
 
@@ -1654,7 +1668,61 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                                 _SOURCE_CLOCK_DOWNLOAD_INFLIGHT.pop(key, None)
 
                     future.add_done_callback(_release_source_future)
-                futures[future] = (source, index == 0)
+                futures[future] = (source, is_priority)
+
+                return future
+
+            priority_futures = {
+                _submit_task(task, is_priority=True, runner=_download_task)
+                for task in priority_tasks
+            }
+            priority_barrier = Event()
+            if not held_priority_barrier:
+                priority_barrier.set()
+            else:
+                priority_remaining = [len(priority_futures)]
+                priority_lock = Lock()
+
+                def _release_priority_barrier(_future: object) -> None:
+                    with priority_lock:
+                        priority_remaining[0] -= 1
+                        if priority_remaining[0] == 0:
+                            priority_barrier.set()
+
+                for future in priority_futures:
+                    future.add_done_callback(_release_priority_barrier)
+
+            def _download_after_priority(
+                source: str,
+                cycle: datetime,
+                chunk: list[BayesPrecisionFusionDownloadTarget],
+            ) -> tuple[str, dict[str, object]]:
+                remaining = (
+                    max(0.0, deadline - time.monotonic())
+                    if deadline is not None
+                    else None
+                )
+                if not priority_barrier.wait(remaining):
+                    return source, {
+                        "status": "BAYES_PRECISION_FUSION_EXTRA_TIMEBOXED_INCOMPLETE",
+                        "target_count": len(chunk),
+                        "written_row_count": 0,
+                        "timeboxed_incomplete": True,
+                        "timebox_unattempted_target_groups": len(
+                            {target.city for target in chunk}
+                        ),
+                        "global_models_expected": 1,
+                        "global_models_unavailable": (source,),
+                        "single_runs_request_cycles": {source: cycle.isoformat()},
+                    }
+                return _download_task(source, cycle, chunk)
+
+            for task in tasks:
+                _submit_task(
+                    task,
+                    is_priority=False,
+                    runner=_download_after_priority,
+                )
 
             source_timeout = (
                 None
@@ -1673,7 +1741,7 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                         continue
                     reports_by_source[result_source].append(task_report)
                     if is_priority:
-                        priority_report = task_report
+                        priority_reports.append(task_report)
                     if (
                         on_source_commit is not None
                         and int(task_report.get("written_row_count") or 0) > 0
@@ -1989,15 +2057,20 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             "source_commit_notification_errors": tuple(
                 source_commit_notification_errors
             ),
-            "priority_probe_source": priority_task[0],
+            "priority_probe_source": priority_tasks[0][0],
+            "priority_probe_sources": tuple(
+                dict.fromkeys(task[0] for task in priority_tasks)
+            ),
             "priority_probe_families": tuple(
                 dict.fromkeys(
                     (target.city, target.target_date)
-                    for target in priority_task[2]
+                    for task in priority_tasks
+                    for target in task[2]
                 )
             ),
-            "priority_probe_transport_aborted": bool(
-                priority_report.get("transport_aborted_remaining_targets")
+            "priority_probe_transport_aborted": any(
+                bool(report.get("transport_aborted_remaining_targets"))
+                for report in priority_reports
             ),
             "updated_sources": updated_sources,
             "affected_cities": affected_cities,
