@@ -2044,3 +2044,40 @@ publication barrier.
 - Acceptance: YES and NO sides of an exact-dead YES bin are fresh with q=0/q=1,
   the deterministic authority remains in the receipt, and exact exit authority
   survives local midnight without weakening quote, source, or freshness gates.
+### Slice B106 — Normalize rotation cursors across a dynamic target universe (2026-08-18)
+
+- Live defect: the ordinary current-target download lane persisted cursor `85`
+  for source cycle `2026-08-18T12Z`. The current market-derived target universe
+  later shrank below that size within the same cycle, so the reader classified
+  the otherwise valid non-negative cursor as corrupt. Every broad maintenance
+  pass then failed soft before download, while held-only priority lanes continued;
+  Paris LOW consequently retained a posterior from the prior source day.
+- First-principles invariant: a durable rotation cursor is an offset hint into
+  the current ordered universe, not an identity-bound row index. The target set
+  may grow, shrink, or reorder while the source cycle remains fixed, so every
+  valid non-negative cursor is normalized modulo the current non-empty row count.
+  Schema, generation, and canonical cycle validation remain strict. The write CAS
+  binds the exact observed `(stored cycle, generation)` epoch. A mismatched epoch
+  may be superseded only by a strictly newer canonical source cycle, so a new
+  cycle still wins when an older worker populated previously absent state, while
+  an older cycle can never overwrite a newer cycle's state.
+- SCOPE: ordinary current-target rotation for one source cycle. DRAIN: the next
+  maintenance pass reads the existing cursor, normalizes it against the current
+  rows, performs its bounded attempt, and atomically persists the next in-range
+  cursor with an incremented generation. Concurrent same-cycle workers over
+  differently sized universes remain first-writer-wins because row membership is
+  deliberately not cursor identity; the next pass normalizes that valid hint.
+  RESET: a strictly newer source cycle resets cursor zero and may supersede an
+  older observed epoch; an empty universe validates any existing state but
+  performs no write, generation increment, or lock-file creation.
+- Forbidden: deleting or rewriting live state by hand, tolerating malformed or
+  negative cursors, weakening held-family priority, bypassing provider quota or
+  freshness gates, or treating successful rotation as posterior materialization.
+- Acceptance: an oversized same-cycle cursor rotates a smaller row set from its
+  modulo offset and advances through the existing CAS path; malformed state still
+  fails closed; the downloader's existing ETL read/write surface is registered;
+  cycle state advances monotonically under both absent-state race orders; same-
+  cycle workers serialize by generation under both universe-size orders and the
+  next pass normalizes the winning hint; an empty universe is mutation-free;
+  focused download tests, topology/planning gates, compilation, and `git
+  diff --check` pass before a data-ingest-only hot-fix restart.

@@ -1,6 +1,6 @@
 # Created: 2026-06-09
-# Last reused or audited: 2026-08-17
-# Lifecycle: created=2026-06-09; last_reviewed=2026-08-17; last_reused=2026-08-17
+# Last reused or audited: 2026-08-18
+# Lifecycle: created=2026-06-09; last_reviewed=2026-08-18; last_reused=2026-08-18
 # Purpose: Prove current-target anchor cycle currency and scoped quota authority.
 # Reuse: Run for replacement current-target download, source-clock, or quota-lane changes.
 # Authority basis: 2026-06-09 anchor-lag root cause (/tmp/anchor_lag_report.md, verified against
@@ -112,7 +112,7 @@ def test_current_target_download_prioritizes_held_families_before_alphabetic() -
         rows,
         priorities,
     )
-    rotated, start, rotating_count, generation = dl._rotate_current_target_rows(
+    rotated, start, rotating_count, generation, _ = dl._rotate_current_target_rows(
         ordered,
         cycle=AVAILABLE_CYCLE.replace(hour=4),
     )
@@ -136,7 +136,7 @@ def test_timeboxed_current_target_download_rotates_past_attempted_prefix(
     ]
     with dl._CURRENT_TARGET_ROTATION_LOCK:
         dl._CURRENT_TARGET_ROTATION_OFFSETS.clear()
-    first, first_start, row_count, generation = dl._rotate_current_target_rows(
+    first, first_start, row_count, generation, state_token = dl._rotate_current_target_rows(
         rows,
         cycle=rotation_cycle,
         state_path=tmp_path / "rotation.json",
@@ -148,10 +148,11 @@ def test_timeboxed_current_target_download_rotates_past_attempted_prefix(
         incomplete=True,
         state_path=tmp_path / "rotation.json",
         expected_generation=generation,
+        expected_state_token=state_token,
     )
     with dl._CURRENT_TARGET_ROTATION_LOCK:
         dl._CURRENT_TARGET_ROTATION_OFFSETS.clear()
-    second, second_start, _, second_generation = dl._rotate_current_target_rows(
+    second, second_start, _, second_generation, _ = dl._rotate_current_target_rows(
         rows,
         cycle=rotation_cycle,
         state_path=tmp_path / "rotation.json",
@@ -184,7 +185,7 @@ def test_durable_rotation_gives_ordinary_lane_a_turn_after_held_prefix(
         priorities,
     )
     state_path = tmp_path / "rotation.json"
-    first, _, row_count, generation = dl._rotate_current_target_rows(
+    first, _, row_count, generation, state_token = dl._rotate_current_target_rows(
         ordered,
         cycle=cycle,
         state_path=state_path,
@@ -197,12 +198,13 @@ def test_durable_rotation_gives_ordinary_lane_a_turn_after_held_prefix(
         incomplete=1 < row_count,
         state_path=state_path,
         expected_generation=generation,
+        expected_state_token=state_token,
     )
     assert (next_start, applied) == (1, True)
 
     with dl._CURRENT_TARGET_ROTATION_LOCK:
         dl._CURRENT_TARGET_ROTATION_OFFSETS.clear()
-    after_restart, start, _, _ = dl._rotate_current_target_rows(
+    after_restart, start, _, _, _ = dl._rotate_current_target_rows(
         ordered,
         cycle=cycle,
         state_path=state_path,
@@ -210,6 +212,55 @@ def test_durable_rotation_gives_ordinary_lane_a_turn_after_held_prefix(
 
     assert start == 1
     assert after_restart[0].city == "Amsterdam"
+
+
+def test_rotation_cursor_normalizes_when_same_cycle_universe_shrinks(
+    tmp_path: Path,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    cycle = AVAILABLE_CYCLE.replace(hour=5)
+    state_path = tmp_path / "rotation.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "cycle": cycle.isoformat(),
+                "next_start": 5,
+                "generation": 42,
+            }
+        )
+    )
+    rows = [
+        _TargetRow(city, "2026-06-10", "high", False, True)
+        for city in ("Amsterdam", "Ankara", "Atlanta")
+    ]
+
+    rotated, start, row_count, generation, state_token = dl._rotate_current_target_rows(
+        rows,
+        cycle=cycle,
+        state_path=state_path,
+    )
+    next_start, applied = dl._advance_current_target_rotation(
+        cycle=cycle,
+        row_count=row_count,
+        attempted_count=1,
+        incomplete=True,
+        state_path=state_path,
+        expected_generation=generation,
+        expected_state_token=state_token,
+    )
+
+    assert start == 2
+    assert generation == 42
+    assert [row.city for row in rotated] == ["Atlanta", "Amsterdam", "Ankara"]
+    assert (next_start, applied) == (0, True)
+    assert json.loads(state_path.read_text()) == {
+        "version": 1,
+        "cycle": cycle.isoformat(),
+        "next_start": 0,
+        "generation": 43,
+    }
 
 
 def test_rotation_cursor_cas_prevents_cross_process_regression(
@@ -223,7 +274,7 @@ def test_rotation_cursor_cas_prevents_cross_process_regression(
         _TargetRow(city, "2026-06-10", "high", False, True)
         for city in ("Amsterdam", "Ankara", "Atlanta")
     ]
-    _, _, row_count, generation = dl._rotate_current_target_rows(
+    _, _, row_count, generation, state_token = dl._rotate_current_target_rows(
         rows,
         cycle=cycle,
         state_path=state_path,
@@ -235,6 +286,7 @@ def test_rotation_cursor_cas_prevents_cross_process_regression(
         incomplete=True,
         state_path=state_path,
         expected_generation=generation,
+        expected_state_token=state_token,
     ) == (2, True)
     assert dl._advance_current_target_rotation(
         cycle=cycle,
@@ -243,7 +295,283 @@ def test_rotation_cursor_cas_prevents_cross_process_regression(
         incomplete=True,
         state_path=state_path,
         expected_generation=generation,
+        expected_state_token=state_token,
     ) == (2, False)
+
+
+def test_rotation_cursor_cas_binds_source_cycle_epoch(tmp_path: Path) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    old_cycle = AVAILABLE_CYCLE.replace(hour=6)
+    new_cycle = AVAILABLE_CYCLE.replace(hour=12)
+    state_path = tmp_path / "rotation.json"
+    rows = [
+        _TargetRow(city, "2026-06-10", "high", False, True)
+        for city in ("Amsterdam", "Ankara", "Atlanta")
+    ]
+
+    _, _, row_count, generation, state_token = dl._rotate_current_target_rows(
+        rows,
+        cycle=old_cycle,
+        state_path=state_path,
+    )
+    assert dl._advance_current_target_rotation(
+        cycle=old_cycle,
+        row_count=row_count,
+        attempted_count=1,
+        incomplete=True,
+        state_path=state_path,
+        expected_generation=generation,
+        expected_state_token=state_token,
+    ) == (1, True)
+
+    _, _, _, stale_generation, stale_token = dl._rotate_current_target_rows(
+        rows,
+        cycle=old_cycle,
+        state_path=state_path,
+    )
+    _, _, new_row_count, new_generation, new_token = dl._rotate_current_target_rows(
+        rows,
+        cycle=new_cycle,
+        state_path=state_path,
+    )
+    assert new_generation == 0
+    assert new_token == (old_cycle.isoformat(), 1)
+    assert dl._advance_current_target_rotation(
+        cycle=new_cycle,
+        row_count=new_row_count,
+        attempted_count=1,
+        incomplete=True,
+        state_path=state_path,
+        expected_generation=new_generation,
+        expected_state_token=new_token,
+    ) == (1, True)
+    assert dl._advance_current_target_rotation(
+        cycle=old_cycle,
+        row_count=row_count,
+        attempted_count=1,
+        incomplete=True,
+        state_path=state_path,
+        expected_generation=stale_generation,
+        expected_state_token=stale_token,
+    ) == (0, False)
+    assert json.loads(state_path.read_text()) == {
+        "version": 1,
+        "cycle": new_cycle.isoformat(),
+        "next_start": 1,
+        "generation": 1,
+    }
+
+
+@pytest.mark.parametrize("old_advances_first", (False, True))
+def test_rotation_cycle_advancement_is_monotonic_from_absent_state(
+    tmp_path: Path,
+    old_advances_first: bool,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    old_cycle = AVAILABLE_CYCLE.replace(hour=6)
+    new_cycle = AVAILABLE_CYCLE.replace(hour=12)
+    state_path = tmp_path / "rotation.json"
+    rows = [_TargetRow("Amsterdam", "2026-06-10", "high", False, True)]
+    _, _, row_count, old_generation, old_token = dl._rotate_current_target_rows(
+        rows,
+        cycle=old_cycle,
+        state_path=state_path,
+    )
+    _, _, _, new_generation, new_token = dl._rotate_current_target_rows(
+        rows,
+        cycle=new_cycle,
+        state_path=state_path,
+    )
+
+    old_result = None
+    if old_advances_first:
+        old_result = dl._advance_current_target_rotation(
+            cycle=old_cycle,
+            row_count=row_count,
+            attempted_count=1,
+            incomplete=True,
+            state_path=state_path,
+            expected_generation=old_generation,
+            expected_state_token=old_token,
+        )
+        assert old_result == (0, True)
+    assert dl._advance_current_target_rotation(
+        cycle=new_cycle,
+        row_count=row_count,
+        attempted_count=1,
+        incomplete=True,
+        state_path=state_path,
+        expected_generation=new_generation,
+        expected_state_token=new_token,
+    ) == (0, True)
+    old_result = dl._advance_current_target_rotation(
+        cycle=old_cycle,
+        row_count=row_count,
+        attempted_count=1,
+        incomplete=True,
+        state_path=state_path,
+        expected_generation=old_generation,
+        expected_state_token=old_token,
+    )
+    assert old_result == (0, False)
+
+    _, _, _, late_old_generation, late_old_token = dl._rotate_current_target_rows(
+        rows,
+        cycle=old_cycle,
+        state_path=state_path,
+    )
+    assert late_old_generation == 0
+    assert late_old_token == (new_cycle.isoformat(), 1)
+    assert dl._advance_current_target_rotation(
+        cycle=old_cycle,
+        row_count=row_count,
+        attempted_count=1,
+        incomplete=True,
+        state_path=state_path,
+        expected_generation=late_old_generation,
+        expected_state_token=late_old_token,
+    ) == (0, False)
+
+    assert json.loads(state_path.read_text())["cycle"] == new_cycle.isoformat()
+
+
+def test_empty_rotation_universe_validates_without_state_mutation(
+    tmp_path: Path,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    cycle = AVAILABLE_CYCLE.replace(hour=6)
+    state_path = tmp_path / "rotation.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "cycle": cycle.isoformat(),
+                "next_start": 5,
+                "generation": 42,
+            }
+        )
+    )
+    before = state_path.read_bytes()
+
+    rows, start, row_count, generation, state_token = dl._rotate_current_target_rows(
+        [],
+        cycle=cycle,
+        state_path=state_path,
+    )
+    assert (rows, start, row_count, generation) == ([], 0, 0, 42)
+    assert dl._advance_current_target_rotation(
+        cycle=cycle,
+        row_count=row_count,
+        attempted_count=0,
+        incomplete=False,
+        state_path=state_path,
+        expected_generation=generation,
+        expected_state_token=state_token,
+    ) == (0, False)
+    assert state_path.read_bytes() == before
+
+    absent_path = tmp_path / "absent.json"
+    _, _, absent_count, absent_generation, absent_token = dl._rotate_current_target_rows(
+        [],
+        cycle=cycle,
+        state_path=absent_path,
+    )
+    assert dl._advance_current_target_rotation(
+        cycle=cycle,
+        row_count=absent_count,
+        attempted_count=0,
+        incomplete=False,
+        state_path=absent_path,
+        expected_generation=absent_generation,
+        expected_state_token=absent_token,
+    ) == (0, False)
+    assert not absent_path.exists()
+    assert not dl._rotation_state_lock_path(absent_path).exists()
+
+
+def test_rotation_cursor_cas_rejects_stale_dynamic_universe(
+    tmp_path: Path,
+) -> None:
+    import scripts.download_replacement_forecast_current_targets as dl
+
+    cycle = AVAILABLE_CYCLE.replace(hour=6)
+    state_path = tmp_path / "rotation.json"
+    small_rows = [
+        _TargetRow(city, "2026-06-10", "high", False, True)
+        for city in ("Amsterdam", "Ankara")
+    ]
+    large_rows = small_rows + [
+        _TargetRow(city, "2026-06-10", "high", False, True)
+        for city in ("Atlanta", "Austin", "Dallas")
+    ]
+    _, _, small_count, small_generation, small_token = dl._rotate_current_target_rows(
+        small_rows,
+        cycle=cycle,
+        state_path=state_path,
+    )
+    _, _, large_count, large_generation, large_token = dl._rotate_current_target_rows(
+        large_rows,
+        cycle=cycle,
+        state_path=state_path,
+    )
+
+    assert dl._advance_current_target_rotation(
+        cycle=cycle,
+        row_count=large_count,
+        attempted_count=4,
+        incomplete=True,
+        state_path=state_path,
+        expected_generation=large_generation,
+        expected_state_token=large_token,
+    ) == (4, True)
+    assert dl._advance_current_target_rotation(
+        cycle=cycle,
+        row_count=small_count,
+        attempted_count=1,
+        incomplete=True,
+        state_path=state_path,
+        expected_generation=small_generation,
+        expected_state_token=small_token,
+    ) == (4, False)
+
+    reverse_path = tmp_path / "reverse.json"
+    _, _, small_count, small_generation, small_token = dl._rotate_current_target_rows(
+        small_rows,
+        cycle=cycle,
+        state_path=reverse_path,
+    )
+    _, _, large_count, large_generation, large_token = dl._rotate_current_target_rows(
+        large_rows,
+        cycle=cycle,
+        state_path=reverse_path,
+    )
+    assert dl._advance_current_target_rotation(
+        cycle=cycle,
+        row_count=small_count,
+        attempted_count=1,
+        incomplete=True,
+        state_path=reverse_path,
+        expected_generation=small_generation,
+        expected_state_token=small_token,
+    ) == (1, True)
+    assert dl._advance_current_target_rotation(
+        cycle=cycle,
+        row_count=large_count,
+        attempted_count=4,
+        incomplete=True,
+        state_path=reverse_path,
+        expected_generation=large_generation,
+        expected_state_token=large_token,
+    ) == (1, False)
+    _, normalized_start, _, _, _ = dl._rotate_current_target_rows(
+        large_rows,
+        cycle=cycle,
+        state_path=reverse_path,
+    )
+    assert normalized_start == 1
 
 
 def _advance_rotation_in_process(
@@ -378,7 +706,7 @@ def test_legacy_rotation_cursor_is_read_then_upgraded(
         for city in ("Amsterdam", "Dallas")
     ]
 
-    rotated, start, row_count, generation = dl._rotate_current_target_rows(
+    rotated, start, row_count, generation, state_token = dl._rotate_current_target_rows(
         rows,
         cycle=cycle,
         state_path=state_path,
@@ -390,6 +718,7 @@ def test_legacy_rotation_cursor_is_read_then_upgraded(
         incomplete=True,
         state_path=state_path,
         expected_generation=generation,
+        expected_state_token=state_token,
     )
 
     assert [row.city for row in rotated] == ["Dallas", "Amsterdam"]
@@ -414,6 +743,12 @@ def test_malformed_rotation_state_fails_closed(tmp_path: Path) -> None:
             cycle=AVAILABLE_CYCLE.replace(hour=7),
             state_path=state_path,
         )
+    with pytest.raises(RuntimeError, match="CURRENT_TARGET_ROTATION_STATE_INVALID"):
+        dl._rotate_current_target_rows(
+            [],
+            cycle=AVAILABLE_CYCLE.replace(hour=7),
+            state_path=state_path,
+        )
 
 
 @pytest.mark.parametrize(
@@ -424,6 +759,18 @@ def test_malformed_rotation_state_fails_closed(tmp_path: Path) -> None:
             "cycle": AVAILABLE_CYCLE.replace(hour=7).isoformat(),
             "next_start": True,
             "generation": 0,
+        },
+        {
+            "version": 1,
+            "cycle": AVAILABLE_CYCLE.replace(hour=7).isoformat(),
+            "next_start": -1,
+            "generation": 0,
+        },
+        {
+            "version": 1,
+            "cycle": AVAILABLE_CYCLE.replace(hour=7).isoformat(),
+            "next_start": 0,
+            "generation": -1,
         },
         {
             "version": 1,

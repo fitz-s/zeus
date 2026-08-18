@@ -872,6 +872,23 @@ scripts:
     promotion_barrier: "Read-only read_only_evidence; output cannot authorize live trading, live restart, submit/cancel, or DB truth mutation."
     required_tests: [tests/test_ops_scripts_smoke.py]
   deploy_live.py: {class: runtime_support, required_tests: [tests/test_ops_scripts_smoke.py], reuse_when: "Restart live launchd daemons safely: stop the live mesh, run bounded schema/command recovery, verify prerequisite identity and preflight, require the restart-blocking absolute_live_unit_price_band attestation, then bootstrap and verify runtime progress; refuses a dirty or unpushed runtime tree unless explicitly overridden.", do_not_use_when: "Do not use to deploy untested code; the gate is a tree-cleanliness and stopped-recovery protocol, not a correctness proof.", canonical_command: "python3 scripts/deploy_live.py status|restart <daemon|all>"}
+  download_replacement_forecast_current_targets.py:
+    class: etl_writer
+    dangerous_if_run: true
+    dry_run_default: false
+    apply_flag: implicit
+    target_db: state/zeus-forecasts.db
+    read_targets: [config/cities.json, config/settings.json, state/source_updates/open_meteo_model_updates.jsonl, state/openmeteo_quota.json, state/zeus-world.db, state/zeus-forecasts.db, state/zeus_trades.db, state/replacement_forecast_live/raw_manifests]
+    write_targets: [state/openmeteo_quota.json, state/replacement_forecast_live/raw_manifests, state/zeus-forecasts.db, output_json]
+    authority_scope: replacement_forecast_raw_capture
+    reuse_when: "Capture current-target run-pinned Open-Meteo anchor payloads, precision metadata, durable rotation state, and raw artifact manifests before replacement posterior materialization."
+    do_not_use_when: "Do not treat downloaded raw artifacts as executable probability authority; only the replacement materializer may publish live forecast_posteriors after exact manifest and freshness validation."
+    canonical_command: "python3 scripts/download_replacement_forecast_current_targets.py [--cycle ISO] [--limit N] [--write-db] [--output-json PATH] [--stdout]"
+    external_inputs: [Open-Meteo forecast APIs, Open-Meteo bucket partial-run transport]
+    promotion_barrier: "Raw payloads, precision metadata, manifests, and rotation state are non-executable inputs; --write-db registers only verified raw_forecast_artifacts, and a separate current-revision materialization must succeed before trading consumption."
+    required_helpers: [src.data.replacement_forecast_current_target_plan.build_replacement_forecast_current_target_plan, src.data.replacement_forecast_seed_discovery.held_position_family_priorities, src.data.openmeteo_quota.quota_tracker, src.data.raw_forecast_artifact_manifest.write_manifest, src.data.raw_forecast_artifact_manifest.write_manifest_to_db]
+    required_tests: [tests/test_replacement_download_cycle_currency_gate.py]
+    unguarded_write_rationale: "The command always writes bounded raw payload, precision, manifest, and rotation files under the declared output directory; canonical forecast-DB writes occur only with explicit --write-db and verify the artifact bytes first."
   restore_live_trading_launchagent.py:
     class: repair
     dangerous_if_run: false

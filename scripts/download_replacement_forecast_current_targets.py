@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Created: 2026-06-07
-# Last reused/audited: 2026-08-17
-# Lifecycle: created=2026-06-07; last_reviewed=2026-08-17; last_reused=2026-08-17
+# Last reused/audited: 2026-08-18
+# Lifecycle: created=2026-06-07; last_reviewed=2026-08-18; last_reused=2026-08-18
 # Purpose: Download current-target Open-Meteo ECMWF IFS 9km raw inputs for replacement forecast materialization.
 # Reuse: Run before live replacement materialization when dry-run reports current-target coverage gaps.
 # Authority basis: Raw artifacts are live inputs only after the replacement materializer emits
@@ -74,6 +74,7 @@ from src.state.schema.v2_schema import ensure_replacement_forecast_live_schema  
 _CURRENT_TARGET_ROTATION_LOCK = Lock()
 _CURRENT_TARGET_ROTATION_OFFSETS: dict[str, int] = {}
 _CURRENT_TARGET_ROTATION_STATE_VERSION = 1
+_RotationStateToken = tuple[str | None, int | None]
 
 
 def _rotation_state_lock_path(state_path: Path) -> Path:
@@ -84,10 +85,9 @@ def _read_rotation_state(
     state_path: Path,
     *,
     cycle_key: str,
-    row_count: int,
-) -> tuple[int, int]:
+) -> tuple[int, int, _RotationStateToken]:
     if not state_path.exists():
-        return 0, 0
+        return 0, 0, (None, None)
     try:
         state = json.loads(state_path.read_text())
         if not isinstance(state, dict):
@@ -127,10 +127,8 @@ def _read_rotation_state(
         ):
             raise ValueError("rotation state cycle is not canonical UTC ISO")
         if state_cycle != cycle_key:
-            return 0, 0
-        if row_count > 0 and next_start >= row_count:
-            raise ValueError("rotation state next_start outside current row set")
-        return next_start, generation
+            return 0, 0, (state_cycle, generation)
+        return next_start, generation, (state_cycle, generation)
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise RuntimeError(
             f"CURRENT_TARGET_ROTATION_STATE_INVALID:{state_path}"
@@ -232,22 +230,28 @@ def _rotate_current_target_rows(
     *,
     cycle: datetime,
     state_path: Path | None = None,
-) -> tuple[list[object], int, int, int]:
+) -> tuple[list[object], int, int, int, _RotationStateToken]:
     ordered = list(rows)
-    if not ordered:
-        return ordered, 0, 0, 0
     cycle_key = cycle.astimezone(UTC).isoformat()
+    if not ordered:
+        if state_path is None:
+            return ordered, 0, 0, 0, (None, None)
+        _, generation, state_token = _read_rotation_state(
+            state_path,
+            cycle_key=cycle_key,
+        )
+        return ordered, 0, 0, generation, state_token
     with _CURRENT_TARGET_ROTATION_LOCK:
         persisted_start = 0
         generation = 0
+        state_token: _RotationStateToken = (None, None)
         if state_path is not None:
             state_path.parent.mkdir(parents=True, exist_ok=True)
             with _rotation_state_lock_path(state_path).open("a+") as lock_handle:
                 fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-                persisted_start, generation = _read_rotation_state(
+                persisted_start, generation, state_token = _read_rotation_state(
                     state_path,
                     cycle_key=cycle_key,
-                    row_count=len(ordered),
                 )
         start = (
             persisted_start
@@ -256,7 +260,13 @@ def _rotate_current_target_rows(
         ) % len(ordered)
         _CURRENT_TARGET_ROTATION_OFFSETS.clear()
         _CURRENT_TARGET_ROTATION_OFFSETS[cycle_key] = start
-    return ordered[start:] + ordered[:start], start, len(ordered), generation
+    return (
+        ordered[start:] + ordered[:start],
+        start,
+        len(ordered),
+        generation,
+        state_token,
+    )
 
 
 def _advance_current_target_rotation(
@@ -267,19 +277,32 @@ def _advance_current_target_rotation(
     incomplete: bool,
     state_path: Path | None = None,
     expected_generation: int = 0,
+    expected_state_token: _RotationStateToken = (None, None),
 ) -> tuple[int, bool]:
     cycle_key = cycle.astimezone(UTC).isoformat()
 
+    if row_count <= 0:
+        if state_path is not None:
+            _read_rotation_state(state_path, cycle_key=cycle_key)
+        return 0, False
+
     def advance_locked() -> tuple[int, bool]:
         if state_path is not None:
-            persisted_start, persisted_generation = _read_rotation_state(
+            persisted_start, persisted_generation, persisted_state_token = _read_rotation_state(
                 state_path,
                 cycle_key=cycle_key,
-                row_count=row_count,
             )
+            persisted_cycle = persisted_state_token[0]
+            if persisted_cycle is not None and cycle_key != persisted_cycle:
+                if cycle_key <= persisted_cycle:
+                    return persisted_start, False
+                persisted_start = 0
+                persisted_generation = 0
+            elif persisted_state_token != expected_state_token:
+                return persisted_start, False
             if persisted_generation != expected_generation:
                 return persisted_start, False
-        if not incomplete or row_count <= 0:
+        if not incomplete:
             next_start = 0
         else:
             current_start = (
@@ -1153,6 +1176,7 @@ def download_current_target_raw_inputs(
         rotation_start,
         rotation_row_count,
         rotation_generation,
+        rotation_state_token,
     ) = _rotate_current_target_rows(
         _rows,
         cycle=cycle,
@@ -1516,6 +1540,7 @@ def download_current_target_raw_inputs(
         incomplete=incomplete_target_set,
         state_path=rotation_state_path,
         expected_generation=rotation_generation,
+        expected_state_token=rotation_state_token,
     )
 
     return {
