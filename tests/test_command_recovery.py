@@ -1,8 +1,8 @@
 # Created: 2026-04-26
-# Lifecycle: created=2026-04-26; last_reviewed=2026-08-14; last_reused=2026-08-14
+# Lifecycle: created=2026-04-26; last_reviewed=2026-08-17; last_reused=2026-08-17
 # Purpose: Lock INV-31 command recovery behavior plus snapshot-gated command inserts.
 # Reuse: Run when command recovery, command journal schema, or executable snapshot gating changes.
-# Last reused/audited: 2026-08-14
+# Last reused/audited: 2026-08-17
 # Authority basis: docs/operations/task_2026-04-26_execution_state_truth_p1_command_bus/implementation_plan.md u00a7P1.S4
 """INV-31 anchor tests: command recovery loop.
 
@@ -26723,6 +26723,99 @@ class TestRecoveryResolutionTable:
 
         candidates = _partial_remainder_candidates(conn, live_tick_scope=True)
         assert [candidate["command_id"] for candidate in candidates] == ["cmd-001"]
+
+    def test_live_tick_prioritizes_current_partial_before_historical_filled_repair(
+        self,
+        conn,
+    ):
+        _insert(
+            conn,
+            command_id="cmd-historical-filled",
+            position_id="pos-historical-filled",
+            token_id="tok-historical-filled",
+            condition_id="condition-historical-filled",
+            size=5.0,
+        )
+        _advance_to_acked(
+            conn,
+            command_id="cmd-historical-filled",
+            venue_order_id="ord-historical-filled",
+        )
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-historical-filled",
+            command_id="cmd-historical-filled",
+            order_id="ord-historical-filled",
+            token_id="tok-historical-filled",
+        )
+        conn.execute(
+            """
+            UPDATE venue_commands
+               SET state = 'FILLED',
+                   updated_at = '2026-04-20T00:00:00Z'
+             WHERE command_id = 'cmd-historical-filled'
+            """
+        )
+        conn.execute(
+            """
+            UPDATE position_current
+               SET phase = 'active',
+                   shares = 1.25,
+                   cost_basis_usd = 0.625,
+                   entry_price = 0.5,
+                   order_status = 'partial'
+             WHERE position_id = 'pos-historical-filled'
+            """
+        )
+        _append_confirmed_trade_fact(
+            conn,
+            command_id="cmd-historical-filled",
+            order_id="ord-historical-filled",
+            trade_id="trade-historical-filled",
+            filled_size="1.25",
+            fill_price="0.50",
+        )
+
+        _insert(
+            conn,
+            command_id="cmd-current-partial",
+            position_id="pos-current-partial",
+            token_id="tok-current-partial",
+            condition_id="condition-current-partial",
+            size=5.0,
+        )
+        _advance_to_partial(
+            conn,
+            command_id="cmd-current-partial",
+            venue_order_id="ord-current-partial",
+        )
+        _seed_pending_entry_projection(
+            conn,
+            position_id="pos-current-partial",
+            command_id="cmd-current-partial",
+            order_id="ord-current-partial",
+            token_id="tok-current-partial",
+        )
+        conn.execute(
+            """
+            UPDATE venue_commands
+               SET updated_at = '2026-04-26T00:06:00Z'
+             WHERE command_id = 'cmd-current-partial'
+            """
+        )
+
+        from src.execution.command_recovery import _partial_remainder_candidates
+
+        full_candidates = _partial_remainder_candidates(conn)
+        assert [candidate["command_id"] for candidate in full_candidates[:2]] == [
+            "cmd-historical-filled",
+            "cmd-current-partial",
+        ]
+        candidates = _partial_remainder_candidates(conn, live_tick_scope=True)
+        assert [candidate["command_id"] for candidate in candidates[:2]] == [
+            "cmd-current-partial",
+            "cmd-historical-filled",
+        ]
 
     def test_partial_exit_matched_trade_fact_projects_pending_exit_without_economic_close(
         self,

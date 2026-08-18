@@ -14589,6 +14589,11 @@ def _partial_remainder_candidates(
         if _needs_remainder_reconcile(command := _dict_row(row))
     )
     return sorted(candidates, key=lambda command: (
+        0
+        if str(command.get("intent_kind") or "") == "EXIT"
+        else 1
+        if str(command.get("state") or "") == CommandState.PARTIAL.value
+        else 2,
         str(command.get("updated_at") or ""),
         str(command.get("command_id") or ""),
     ))
