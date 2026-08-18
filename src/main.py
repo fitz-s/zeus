@@ -276,7 +276,15 @@ def _utc_run_time_after(seconds: float) -> datetime:
 
 
 def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
-    """Release entry work only after every held position has fresh coverage."""
+    """Release entry work after every held position has a post-boot decision attempt.
+
+    Bootstrap proves monitor continuity, not probability/quote authority. A
+    current ``MONITOR_REFRESHED`` carrying typed DATA_DEGRADED evidence counts
+    as an attempted decision; the separate entry-authority gate below keeps
+    that exact family fail-closed until its inputs recover. Requiring fresh
+    inputs here conflates those debts and turns one provider gap into a global
+    reactor/recovery storm.
+    """
 
     global _held_position_monitor_bootstrap_last_check
     if _held_position_monitor_bootstrap_complete.is_set():
@@ -317,7 +325,7 @@ def _promote_held_position_monitor_bootstrap_from_canonical_progress() -> bool:
                 min_occurred_at=boot_at,
                 strict_future=True,
                 monitor_refreshed_only=True,
-                require_fresh_inputs=True,
+                require_fresh_inputs=False,
                 sample_limit=0,
             )
         finally:
@@ -406,7 +414,12 @@ def _held_position_monitor_entry_block_reason() -> str | None:
 
 
 def _held_position_monitor_debt_pending() -> bool:
-    """Recheck canonical held coverage inside long-running reactor cuts."""
+    """Recheck canonical monitor cadence inside long-running reactor cuts.
+
+    Probability/quote authority is an entry-family concern handled by
+    ``_held_position_monitor_entry_block_reason``. Only a missing/old monitor
+    attempt may claim the global monitor writer and preempt the reactor.
+    """
 
     global _held_position_monitor_canonical_last_check
 
@@ -428,17 +441,30 @@ def _held_position_monitor_debt_pending() -> bool:
         ):
             return _held_position_monitor_canonical_debt.is_set()
         _held_position_monitor_canonical_last_check = now
-        reason = _held_position_monitor_entry_block_reason()
-        if reason is not None:
+        try:
+            evidence = _held_position_monitor_recovery_evidence()
+            overdue_count, future_count, _groups = (
+                _held_position_monitor_recovery_counts(evidence)
+            )
+        except Exception as exc:  # noqa: BLE001 - unknown cadence stays debt.
+            overdue_count = 1
+            future_count = 0
+            logger.warning(
+                "held-position monitor cadence authority unavailable: %s",
+                exc,
+                exc_info=True,
+            )
+        if overdue_count > 0 or future_count > 0:
             # SCOPE: only the current/new reactor auction. DRAIN: its
             # cooperative callback yields, then monitor recovery refreshes the
             # canonical held book. RESET: recovery clears the debt after full
             # current coverage; queued auction facts remain durable.
             _held_position_monitor_canonical_debt.set()
             logger.warning(
-                "reactor yielded to newly overdue canonical held-position "
-                "monitor debt (%s)",
-                reason,
+                "reactor yielded to canonical held-position monitor cadence "
+                "debt (overdue=%d future=%d)",
+                overdue_count,
+                future_count,
             )
         return _held_position_monitor_canonical_debt.is_set()
     finally:
@@ -446,6 +472,8 @@ def _held_position_monitor_debt_pending() -> bool:
 
 
 def _canonical_overdue_monitor_families(
+    *,
+    require_fresh_inputs: bool = True,
 ) -> frozenset[tuple[str, str, str]] | None:
     """Return every family whose current exposure lacks fresh monitor truth.
 
@@ -472,7 +500,7 @@ def _canonical_overdue_monitor_families(
             now=now,
             max_age_seconds=HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS,
             monitor_refreshed_only=True,
-            require_fresh_inputs=True,
+            require_fresh_inputs=require_fresh_inputs,
             sample_limit=max(1, obligation_count),
         )
         blocking = monitor_cadence_blocking_evidence(evidence)
@@ -9211,7 +9239,9 @@ def _exit_monitor_cycle(
         target_families is not None
         and _held_position_monitor_canonical_debt.is_set()
     ):
-        overdue_families = _canonical_overdue_monitor_families()
+        overdue_families = _canonical_overdue_monitor_families(
+            require_fresh_inputs=False,
+        )
         if overdue_families is None:
             # SCOPE: this targeted held-monitor attempt only. DRAIN: one
             # bounded full-book pass reconstructs exact canonical coverage.
@@ -9234,7 +9264,9 @@ def _exit_monitor_cycle(
             return False
         if debt_scope_is_full_book:
             return False
-        current_overdue = _canonical_overdue_monitor_families()
+        current_overdue = _canonical_overdue_monitor_families(
+            require_fresh_inputs=False,
+        )
         return current_overdue is None or not current_overdue.issubset(
             absorbed_overdue_families
         )
@@ -9487,7 +9519,12 @@ def _exit_monitor_cycle(
 
 
 def _held_position_monitor_recovery_evidence() -> dict[str, Any]:
-    """Read the durable held-monitor obligation from canonical trade state."""
+    """Read durable monitor-cadence debt from canonical trade state.
+
+    A recent typed DATA_DEGRADED decision is current cadence evidence even
+    though it cannot authorize a trade. Source repair and family entry gates
+    retain that separate authority debt without monopolizing this writer.
+    """
 
     from src.ops.monitor_cadence import (
         collect_monitor_cadence_evidence,
@@ -9501,7 +9538,7 @@ def _held_position_monitor_recovery_evidence() -> dict[str, Any]:
             now=datetime.now(timezone.utc),
             max_age_seconds=HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS,
             monitor_refreshed_only=True,
-            require_fresh_inputs=True,
+            require_fresh_inputs=False,
             sample_limit=5,
         )
     finally:

@@ -8803,6 +8803,7 @@ def test_reactor_bootstrap_releases_after_canonical_monitor_coverage(
         assert observed_kwargs["min_occurred_at"] == boot_at
         assert observed_kwargs["strict_future"] is True
         assert observed_kwargs["monitor_refreshed_only"] is True
+        assert observed_kwargs["require_fresh_inputs"] is False
     finally:
         main_module._held_position_monitor_active.clear()
         main_module._held_position_monitor_bootstrap_complete.clear()
@@ -9513,7 +9514,7 @@ def test_urgent_exit_monitor_finishes_before_newer_day0_wake(monkeypatch) -> Non
     monkeypatch.setattr(
         main_module,
         "_canonical_overdue_monitor_families",
-        lambda: frozenset(),
+        lambda **_kwargs: frozenset(),
     )
     monkeypatch.setattr(
         main_module,
@@ -9562,7 +9563,7 @@ def test_targeted_monitor_absorbs_every_canonically_overdue_family(
     monkeypatch.setattr(
         main_module,
         "_canonical_overdue_monitor_families",
-        lambda: frozenset(
+        lambda **_kwargs: frozenset(
             {
                 ("London", "2026-08-12", "high"),
                 ("Moscow", "2026-08-12", "high"),
@@ -9617,7 +9618,7 @@ def test_targeted_monitor_preempts_only_for_new_canonical_cadence_debt(
     monkeypatch.setattr(
         main_module,
         "_canonical_overdue_monitor_families",
-        lambda: frozenset({("London", "2026-08-12", "high")}),
+        lambda **_kwargs: frozenset({("London", "2026-08-12", "high")}),
     )
     monkeypatch.setattr(
         main_module,
@@ -10814,6 +10815,7 @@ def test_durable_monitor_recovery_is_a_noop_with_fresh_canonical_coverage(
         == main_module.HELD_POSITION_MONITOR_RECOVERY_MAX_AGE_SECONDS
     )
     assert observed_kwargs["monitor_refreshed_only"] is True
+    assert observed_kwargs["require_fresh_inputs"] is False
 
 
 def test_durable_monitor_recovery_dispatches_without_running_monitor_inline(
@@ -11593,7 +11595,7 @@ def test_canonical_monitor_debt_blocks_only_exact_weather_families(
     monkeypatch.setattr(
         main_module,
         "_canonical_overdue_monitor_families",
-        lambda: frozenset(
+        lambda **_kwargs: frozenset(
             {
                 ("London", "2026-08-12", "high"),
                 ("Moscow", "2026-08-12", "low"),
@@ -11628,7 +11630,7 @@ def test_canonical_monitor_debt_scope_failure_blocks_every_family(
     monkeypatch.setattr(
         main_module,
         "_canonical_overdue_monitor_families",
-        lambda: None,
+        lambda **_kwargs: None,
     )
 
     assert main_module._canonical_monitor_entry_block_scope(
@@ -11656,8 +11658,12 @@ def test_long_reactor_cut_rechecks_and_yields_when_canonical_monitor_becomes_sta
     checks = []
     monkeypatch.setattr(
         main_module,
-        "_held_position_monitor_entry_block_reason",
-        lambda: checks.append(True) or "held_position_monitor_cadence_overdue",
+        "_held_position_monitor_recovery_evidence",
+        lambda: checks.append(True) or {
+            "stale_or_missing_position_count": 1,
+            "stale_or_missing_positions": [{"position_id": "p-stale"}],
+            "future_monitor_event_count": 0,
+        },
     )
 
     assert main_module._held_position_monitor_debt_pending() is True
