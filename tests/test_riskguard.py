@@ -1,8 +1,8 @@
 # Created: 2026-03-30
-# Last reused/audited: 2026-08-17
+# Last reused/audited: 2026-08-18
 # Authority basis: docs/operations/task_2026-04-28_contamination_remediation/plan.md Batch D RiskGuard test-law remediation; Wave26 verification-noise helper alignment; PR90 current-env fallback review fix; 2026-08-15 economic-settlement trailing-loss hotfix.
 #                  2026-05-17 live lock remediation: RiskGuard trade/world DB lock degrades to fresh DATA_DEGRADED rather than stale RED.
-# Lifecycle: created=2026-03-30; last_reviewed=2026-08-17; last_reused=2026-08-17
+# Lifecycle: created=2026-03-30; last_reviewed=2026-08-18; last_reused=2026-08-18
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
 # 2026-08-17: Brier strategy-gate evidence is independent by target date.
@@ -1146,7 +1146,14 @@ class TestMetrics:
 
         assert riskguard_module._riskguard_brier_metric_rows(rows) == []
 
-    def test_venue_resolved_outcome_grades_q_before_physical_value(self):
+    @pytest.mark.parametrize(
+        "truth_source",
+        ["gamma_exact_held_event", "trades.payout_observations"],
+    )
+    def test_venue_resolved_outcome_grades_q_before_physical_value(
+        self,
+        truth_source,
+    ):
         from src.state.db import _normalize_position_settlement_event
 
         normalized = _normalize_position_settlement_event(
@@ -1172,10 +1179,14 @@ class TestMetrics:
                     "pnl": -1.768,
                     "exit_reason": "SETTLEMENT",
                     "settlement_authority": "VENUE_RESOLVED",
-                    "settlement_truth_source": "gamma_exact_held_event",
+                    "settlement_truth_source": truth_source,
                     "settlement_market_slug": "guangzhou-high-2026-07-24",
                     "settlement_temperature_metric": "high",
-                    "settlement_source": "gamma",
+                    "settlement_source": (
+                        "polymarket_chain_rpc_finalized_v1"
+                        if truth_source == "trades.payout_observations"
+                        else "gamma"
+                    ),
                     "settlement_value": None,
                 },
             }
@@ -1189,6 +1200,44 @@ class TestMetrics:
         assert riskguard_module._riskguard_brier_metric_rows([normalized]) == [
             normalized
         ]
+
+    def test_unfinalized_chain_payout_cannot_grade_probability(self):
+        from src.state.db import _normalize_position_settlement_event
+
+        normalized = _normalize_position_settlement_event(
+            {
+                "runtime_trade_id": "unfinalized-chain-payout",
+                "city": "Busan",
+                "target_date": "2026-08-18",
+                "bin_label": "29°C",
+                "direction": "buy_yes",
+                "decision_snapshot_id": "entry-q",
+                "strategy": "forecast_qkernel_entry",
+                "timestamp": "2026-08-18T16:23:37Z",
+                "env": "live",
+                "details": {
+                    "contract_version": "position_settled.v1",
+                    "winning_bin": "",
+                    "position_bin": "29°C",
+                    "won": False,
+                    "outcome": 0,
+                    "p_posterior": 0.41,
+                    "exit_price": 0.0,
+                    "pnl": -1.2,
+                    "exit_reason": "SETTLEMENT",
+                    "settlement_authority": "VENUE_RESOLVED",
+                    "settlement_truth_source": "trades.payout_observations",
+                    "settlement_market_slug": "busan-high-2026-08-18",
+                    "settlement_temperature_metric": "high",
+                    "settlement_source": "chain_rpc_latest_unfinalized",
+                    "settlement_value": None,
+                },
+            }
+        )
+
+        assert normalized is not None
+        assert normalized["probability_outcome_ready"] is False
+        assert normalized["learning_snapshot_ready"] is False
 
     def test_probability_identity_binding_requires_one_complete_entry_q_version(self):
         conn = sqlite3.connect(":memory:")
@@ -1253,7 +1302,7 @@ class TestMetrics:
         assert riskguard_module._riskguard_brier_actuating_rows(bound) == [bound[0]]
         conn.close()
 
-    def test_probability_identity_binding_composites_only_filled_entry_commands(self):
+    def test_probability_identity_binding_composites_economically_filled_entries(self):
         conn = sqlite3.connect(":memory:")
         conn.execute(
             "CREATE TABLE venue_commands ("
@@ -1279,6 +1328,8 @@ class TestMetrics:
             [
                 ("composite", "filled-a", "ENTRY", "q-v1", "FILLED"),
                 ("composite", "filled-b", "ENTRY", "q-v2", "FILLED"),
+                ("composite", "partial-c", "ENTRY", "q-v3", "CANCELLED"),
+                ("composite", "confirmed-d", "ENTRY", "q-v4", "FILLED"),
                 ("composite", "rejected", "ENTRY", "q-v3", "REJECTED"),
             ],
         )
@@ -1288,6 +1339,8 @@ class TestMetrics:
                 ("filled-a", "entry", "2026-07-27T00:00:00Z", "filled", 4.0),
                 ("filled-a", "entry", "2026-07-27T00:00:01Z", "filled", 4.0),
                 ("filled-b", "entry", "2026-07-27T00:01:00Z", "filled", 6.0),
+                ("partial-c", "entry", "2026-07-27T00:02:00Z", "partial", 2.0),
+                ("confirmed-d", "entry", "2026-07-27T00:03:00Z", "confirmed", 3.0),
             ],
         )
 
@@ -1312,6 +1365,8 @@ class TestMetrics:
             [
                 ("command", "filled-a", "SUBMIT_REQUESTED", 1, submit_payload(0.8)),
                 ("command", "filled-b", "SUBMIT_REQUESTED", 1, submit_payload(0.6)),
+                ("command", "partial-c", "SUBMIT_REQUESTED", 1, submit_payload(0.4)),
+                ("command", "confirmed-d", "SUBMIT_REQUESTED", 1, submit_payload(0.9)),
             ],
         )
         conn.execute(
@@ -1325,9 +1380,9 @@ class TestMetrics:
         )
 
         assert bound[0]["probability_identity_ready"] is True
-        assert bound[0]["p_posterior"] == pytest.approx(0.68)
+        assert bound[0]["p_posterior"] == pytest.approx(10.3 / 15.0)
         assert bound[0]["entry_q_version"].startswith("filled-entry-composite:")
-        assert bound[0]["entry_q_versions"] == ("q-v1", "q-v2")
+        assert bound[0]["entry_q_versions"] == ("q-v1", "q-v2", "q-v3", "q-v4")
         assert (
             bound[0]["probability_identity_source"]
             == "filled_entry_commands.q_version+submit_q_live+fill_shares"

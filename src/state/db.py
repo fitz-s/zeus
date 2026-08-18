@@ -1519,6 +1519,7 @@ SETTLEMENT_PROBABILITY_OUTCOME_TRUTH_SOURCES = (
     | frozenset({
         "gamma_exact_held_event",
         "gamma_exact_held_condition",
+        "trades.payout_observations",
     })
 )
 AUTHORITATIVE_SETTLEMENT_ROW_REQUIRED_FIELDS = (
@@ -11129,6 +11130,12 @@ def _settlement_probability_outcome_ready(normalized: dict) -> bool:
 
     authority = str(normalized.get("settlement_authority") or "").strip().upper()
     source = str(normalized.get("settlement_truth_source") or "").strip()
+    settlement_source = str(normalized.get("settlement_source") or "").strip()
+    if (
+        source == "trades.payout_observations"
+        and settlement_source != "polymarket_chain_rpc_finalized_v1"
+    ):
+        return False
     return (
         authority in {"VERIFIED", "VENUE_RESOLVED"}
         and source in SETTLEMENT_PROBABILITY_OUTCOME_TRUTH_SOURCES

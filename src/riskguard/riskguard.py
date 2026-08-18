@@ -2122,7 +2122,8 @@ def _filled_entry_probability_composites(
                            MAX(
                                CASE
                                    WHEN filled_at IS NOT NULL
-                                    AND lower(COALESCE(terminal_exec_status,''))='filled'
+                                    AND lower(COALESCE(terminal_exec_status,''))
+                                        IN ('filled','confirmed','partial')
                                    THEN filled_at
                                END
                            ) AS filled_at,
@@ -2130,7 +2131,8 @@ def _filled_entry_probability_composites(
                                WHEN SUM(
                                    CASE
                                        WHEN filled_at IS NOT NULL
-                                        AND lower(COALESCE(terminal_exec_status,''))='filled'
+                                        AND lower(COALESCE(terminal_exec_status,''))
+                                            IN ('filled','confirmed','partial')
                                        THEN 1 ELSE 0
                                    END
                                ) > 0
@@ -2139,21 +2141,24 @@ def _filled_entry_probability_composites(
                            MAX(
                                CASE
                                    WHEN filled_at IS NOT NULL
-                                    AND lower(COALESCE(terminal_exec_status,''))='filled'
+                                    AND lower(COALESCE(terminal_exec_status,''))
+                                        IN ('filled','confirmed','partial')
                                    THEN shares
                                END
                            ) AS shares,
                            MIN(
                                CASE
                                    WHEN filled_at IS NOT NULL
-                                    AND lower(COALESCE(terminal_exec_status,''))='filled'
+                                    AND lower(COALESCE(terminal_exec_status,''))
+                                        IN ('filled','confirmed','partial')
                                    THEN shares
                                END
                            ) AS min_shares,
                            MAX(
                                CASE
                                    WHEN filled_at IS NOT NULL
-                                    AND lower(COALESCE(terminal_exec_status,''))='filled'
+                                    AND lower(COALESCE(terminal_exec_status,''))
+                                        IN ('filled','confirmed','partial')
                                    THEN shares
                                END
                            ) AS max_shares
