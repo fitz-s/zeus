@@ -83,6 +83,7 @@ _EXIT_PRE_SUBMIT_WRITE_LEASE_MAX_HOLD_MS = 500
 
 _LIVE_ENTRY_MIN_EXPECTED_PROFIT_USD = 0.05
 _LIVE_ENTRY_MIN_SUBMIT_EDGE_DENSITY = 0.02
+_ENTRY_INCREMENT_POSITION_SHARE_TOLERANCE = Decimal("0.0001")
 
 
 # Mode-based fill timeout (seconds). Spec §6.4.
@@ -1220,7 +1221,8 @@ def _entry_increment_fact_backing_component(
         or projected_cost is None
         or aggregate_shares is None
         or aggregate_cost is None
-        or abs(projected_shares - aggregate_shares) > Decimal("0.000000001")
+        or abs(projected_shares - aggregate_shares)
+        > _ENTRY_INCREMENT_POSITION_SHARE_TOLERANCE
     ):
         return _capability_component(
             "entry_increment_fact_backing",
@@ -1231,6 +1233,7 @@ def _entry_increment_fact_backing_component(
             aggregate_shares=str(aggregate_shares or ""),
             aggregate_cost_basis_usd=str(aggregate_cost or ""),
             execution_fact_count=execution_fact_count,
+            share_tolerance=str(_ENTRY_INCREMENT_POSITION_SHARE_TOLERANCE),
         )
     return _capability_component(
         "entry_increment_fact_backing",
