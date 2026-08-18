@@ -15038,6 +15038,12 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
             "CANDIDATE_BLOCKED",
         ),
         (
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_CROSSED_BOOK:"
+            "token_id=token-a:best_bid=0.39:best_ask=0.39",
+            "CANDIDATE_BLOCKED",
+        ),
+        (
             "GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"
             "REPLACEMENT_NO_BOUND_CERTIFICATE_PARENT_MISMATCH:served_yes_q",
             "CANDIDATE_BLOCKED",
@@ -28716,6 +28722,13 @@ def test_global_batch_falls_through_family_local_preflight_block(
             "GLOBAL_SELL_POSITION_EXIT_ALREADY_ACTIVE",
             "SELL",
             "BUY",
+        ),
+        (
+            "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+            "PRE_SUBMIT_BOOK_AUTHORITY_JIT_CROSSED_BOOK:"
+            "token_id=token-a:best_bid=0.39:best_ask=0.39",
+            "BUY",
+            "SELL",
         ),
         (
             "GLOBAL_PREFLIGHT_CANDIDATE_PROOF_INVALID:"

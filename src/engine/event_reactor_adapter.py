@@ -13823,6 +13823,16 @@ def _global_preflight_block_status(reason: str) -> str:
     ):
         return "CANDIDATE_BLOCKED"
     if reason.startswith(
+        "EDLI_LIVE_CERTIFICATE_BUILD_FAILED:"
+        "PRE_SUBMIT_BOOK_AUTHORITY_JIT_CROSSED_BOOK:"
+    ):
+        # A locked/crossed JIT book cannot authorize this token's selected
+        # action, but it does not invalidate the frozen q, wealth, or the
+        # independent books of every runner-up. SCOPE: this exact candidate.
+        # DRAIN: the batch excludes it and re-ranks the remaining current cut.
+        # RESET: the next recurring cut fetches a fresh book for the token.
+        return "CANDIDATE_BLOCKED"
+    if reason.startswith(
         (
             "LIVE_ENTRY_BLOCKED:entry_readiness:",
             "LIVE_ENTRY_BLOCKED:entry_readiness_family:",

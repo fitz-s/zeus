@@ -1966,3 +1966,30 @@ publication barrier.
   worsen. Acceptance: the regression antibody proves an existing preflight
   handoff cannot suppress a post-probability book recapture, and the fresh book
   remains bound through the existing snapshot, authority, and executor gates.
+
+### Slice B103 — Fall through a selected crossed JIT book (2026-08-18)
+
+- Live defect: four consecutive current events in decision cut `463209/463210`
+  selected the same token, whose submit-time CLOB book was locked at
+  `best_bid=0.39 / best_ask=0.39`. The JIT gate correctly refused that book,
+  but classified the token-local failure as `BATCH_BLOCKED`, so all four
+  carriers retried with zero submits instead of comparing the remaining global
+  BUY/SELL/HOLD/CASH set.
+- First-principles invariant: a crossed/locked book is never executable submit
+  authority. It invalidates the exact selected token/action, not independently
+  current q, wealth, or other token books in the same frozen epoch.
+- Minimal repair: classify only
+  `EDLI_LIVE_CERTIFICATE_BUILD_FAILED:PRE_SUBMIT_BOOK_AUTHORITY_JIT_CROSSED_BOOK`
+  as `CANDIDATE_BLOCKED`, then use the existing candidate exclusion and
+  same-epoch global re-auction path.
+- SCOPE: the exact selected action key, including execution mode. DRAIN: exclude
+  it without venue I/O and rank the remaining current feasible set. RESET: the
+  next recurring cut fetches a fresh JIT book and may admit the token again.
+- Forbidden: accepting a crossed book, fabricating a spread, modifying q/Kelly/
+  fees/depth/price-band law, broadening unrelated certificate failures, forcing
+  an order, or mutating canonical state.
+- Acceptance: the crossed winner produces no venue call; its exact candidate is
+  excluded; a current sibling/runner-up can be selected and submitted once;
+  unknown or batch-wide authority defects remain fail-closed. Focused global
+  auction tests, compilation, planning lock, and `git diff --check` must pass
+  before exact-SHA hot-fix deployment.
