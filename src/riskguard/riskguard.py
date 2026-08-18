@@ -6,7 +6,7 @@ and emits durable risk actions into zeus.db when the canonical table exists.
 Graduated response: GREEN → YELLOW → ORANGE → RED.
 
 # Created: (pre-audit)
-# Last reused or audited: 2026-08-17
+# Last reused or audited: 2026-08-18
 # Authority basis: connection-leak audit 2026-05-10 — 51 open zeus-world.db-wal
 #   handles observed on PID 18538. Root cause: tick() and tick_with_portfolio()
 #   opened zeus_conn / risk_conn without try/finally, so any exception in the
@@ -2343,7 +2343,8 @@ def _bind_entry_market_benchmarks(
                 "FROM position_current AS pc "
                 "LEFT JOIN execution_fact AS ef ON ef.position_id=pc.position_id "
                 "AND ef.order_role='entry' AND ef.filled_at IS NOT NULL "
-                "AND lower(COALESCE(ef.terminal_exec_status,''))='filled' "
+                "AND lower(COALESCE(ef.terminal_exec_status,'')) "
+                "IN ('filled','confirmed','partial') "
                 f"WHERE pc.position_id IN ({placeholders})",
                 tuple(chunk),
             ).fetchall():
@@ -3463,6 +3464,306 @@ def _qkernel_live_realized_capital_curve(
         window_days=window_days,
         as_of=as_of,
     )
+
+
+_GLOBAL_CAPITAL_EVIDENCE_LAW = "executable_min_order_capital_gain_v2"
+
+
+def _global_winner_certificate_q(
+    payload_json: object,
+    *,
+    strategy_key: str,
+) -> tuple[float, float, float] | None:
+    """Return frozen q, target shares, and max spend for one winner."""
+
+    try:
+        payload = json.loads(str(payload_json or ""))
+        economics = payload["qkernel_execution_economics"]
+        receipt = economics["global_auction_receipt"]
+        q = float(economics["global_cut_time_win_probability_mean"])
+        target_shares = float(economics["global_target_shares"])
+        max_spend = float(economics["global_max_spend_usd"])
+        expected_growth = float(economics["global_expected_delta_log_wealth"])
+        expected_ev = float(economics["global_expected_ev_usd"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, Mapping) or not isinstance(economics, Mapping):
+        return None
+    if not isinstance(receipt, Mapping):
+        return None
+    candidate_id = str(economics.get("global_candidate_id") or "").strip()
+    actuation_id = str(economics.get("global_actuation_identity") or "").strip()
+    epoch_id = str(economics.get("global_selection_epoch_identity") or "").strip()
+    winner_event_id = str(economics.get("global_winner_event_id") or "").strip()
+    if (
+        str(payload.get("strategy_key") or "").strip() != strategy_key
+        or str(economics.get("global_optimum_semantics") or "")
+        != "CUT_TIME_GLOBAL_OPTIMUM"
+        or str(economics.get("global_probability_functional") or "")
+        != "POSTERIOR_PREDICTIVE_MEAN"
+        or str(economics.get("global_execution_mode") or "")
+        not in {"TAKER_LIMIT", "MAKER_REST"}
+        or not candidate_id
+        or not actuation_id
+        or not epoch_id
+        or not winner_event_id
+        or str(receipt.get("winner_candidate_id") or "") != candidate_id
+        or str(receipt.get("winner_actuation_identity") or "") != actuation_id
+        or str(receipt.get("selection_epoch_identity") or "") != epoch_id
+        or str(receipt.get("winner_event_id") or "") != winner_event_id
+        or not all(
+            math.isfinite(value)
+            for value in (q, target_shares, max_spend, expected_growth, expected_ev)
+        )
+        or not 0.0 <= q <= 1.0
+        or target_shares <= 0.0
+        or max_spend <= 0.0
+        or expected_growth <= 0.0
+        or expected_ev <= 0.0
+    ):
+        return None
+    return q, target_shares, max_spend
+
+
+def _bind_actual_global_capital_evidence(
+    conn: sqlite3.Connection,
+    rows: list[dict],
+    *,
+    strategy_key: str,
+    capital_curve: Mapping[str, object],
+) -> tuple[list[dict], dict[str, object]]:
+    """Bind settled actual fills to their exact global-winner capital law.
+
+    ``position_current.decision_law_id`` names the unified probability/EV law,
+    not the global-auction admission certificate.  The latter lives on each
+    filled ENTRY's immutable ``ActionableTradeCertificate``.  Only when every
+    economically filled command carries a matching LIVE VERIFIED winner and
+    its share-weighted q reproduces the frozen settlement row may actual fills
+    enter the revision-scoped capital-alpha cohort.
+    """
+
+    if strategy_key not in {"day0_nowcast_entry", "forecast_qkernel_entry"}:
+        raise ValueError("actual global capital strategy is not canonical")
+    output = [dict(row) for row in rows]
+    candidates = {
+        str(row.get("trade_id") or "").strip()
+        for row in output
+        if str(row.get("strategy") or "").strip() == strategy_key
+        and str(row.get("trade_id") or "").strip()
+        and row.get("probability_identity_ready") is True
+        and row.get("probability_semantics_ready") is True
+        and str(row.get("decision_law_id") or "").strip() in DECISION_LAW_IDS
+    }
+    status: dict[str, object] = {
+        "status": "no_actual_candidates",
+        "strategy_key": strategy_key,
+        "candidate_count": len(candidates),
+        "capital_law_ready_count": 0,
+        "capital_gain_proof_ready_count": 0,
+        "blocked_reasons": {},
+        "source": (
+            "execution_fact+position_decision_attribution+"
+            "world.decision_certificates+live_realized_capital_curve"
+        ),
+    }
+    if not candidates:
+        return output, status
+
+    blocked: dict[str, int] = status["blocked_reasons"]  # type: ignore[assignment]
+
+    def block(reason: str) -> None:
+        blocked[reason] = blocked.get(reason, 0) + 1
+
+    database_names = {
+        str(row[1]) for row in conn.execute("PRAGMA database_list").fetchall()
+    }
+    required_columns = {
+        "execution_fact": {
+            "position_id", "command_id", "order_role", "filled_at",
+            "terminal_exec_status", "fill_price", "shares",
+        },
+        "position_decision_attribution": {
+            "position_id", "command_id", "decision_certificate_hash",
+            "resolution", "intent_kind",
+        },
+    }
+    try:
+        schema_ready = "world" in database_names and all(
+            _table_exists(conn, table)
+            and required.issubset(
+                {
+                    str(column[1])
+                    for column in conn.execute(
+                        f"PRAGMA table_info({table})"
+                    ).fetchall()
+                }
+            )
+            for table, required in required_columns.items()
+        )
+        world_columns = {
+            str(column[1])
+            for column in conn.execute(
+                "PRAGMA world.table_info(decision_certificates)"
+            ).fetchall()
+        }
+        schema_ready = schema_ready and {
+            "certificate_hash", "certificate_type", "mode",
+            "verifier_status", "payload_json",
+        }.issubset(world_columns)
+    except sqlite3.Error:
+        schema_ready = False
+    if not schema_ready:
+        status["status"] = "certificate_authority_unavailable"
+        block("certificate_schema_unavailable")
+        return output, status
+
+    command_parts: dict[str, list[tuple[float, float]]] = {
+        position_id: [] for position_id in candidates
+    }
+    invalid: set[str] = set()
+    ids = sorted(candidates)
+    for start in range(0, len(ids), 500):
+        chunk = ids[start : start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        facts = conn.execute(
+            "SELECT ef.position_id,ef.command_id,MIN(ef.shares),MAX(ef.shares),"
+            "MIN(ef.fill_price),MAX(ef.fill_price),"
+            "pda.decision_certificate_hash,dc.payload_json "
+            "FROM execution_fact AS ef "
+            "LEFT JOIN position_decision_attribution AS pda "
+            "ON pda.position_id=ef.position_id AND pda.command_id=ef.command_id "
+            "AND pda.intent_kind='ENTRY' AND pda.resolution='ATTRIBUTED' "
+            "LEFT JOIN world.decision_certificates AS dc "
+            "ON dc.certificate_hash=pda.decision_certificate_hash "
+            "AND dc.certificate_type='ActionableTradeCertificate' "
+            "AND dc.mode='LIVE' AND dc.verifier_status='VERIFIED' "
+            "WHERE ef.order_role='entry' AND ef.filled_at IS NOT NULL "
+            "AND lower(COALESCE(ef.terminal_exec_status,'')) "
+            "IN ('filled','confirmed','partial') "
+            f"AND ef.position_id IN ({placeholders}) "
+            "GROUP BY ef.position_id,ef.command_id,pda.decision_certificate_hash,"
+            "dc.payload_json",
+            tuple(chunk),
+        ).fetchall()
+        for raw in facts:
+            position_id = str(raw[0] or "").strip()
+            command_id = str(raw[1] or "").strip()
+            try:
+                min_shares = float(raw[2])
+                max_shares = float(raw[3])
+                min_price = float(raw[4])
+                max_price = float(raw[5])
+            except (TypeError, ValueError):
+                invalid.add(position_id)
+                continue
+            certificate = _global_winner_certificate_q(
+                raw[7],
+                strategy_key=strategy_key,
+            )
+            if (
+                not command_id
+                or not str(raw[6] or "").strip()
+                or certificate is None
+                or not math.isfinite(min_shares)
+                or min_shares <= 0.0
+                or not math.isfinite(min_price)
+                or not 0.0 < min_price < 1.0
+                or not math.isclose(
+                    min_shares,
+                    max_shares,
+                    rel_tol=0.0,
+                    abs_tol=max(1e-9, abs(max_shares) * 1e-9),
+                )
+                or not math.isclose(
+                    min_price,
+                    max_price,
+                    rel_tol=0.0,
+                    abs_tol=1e-12,
+                )
+            ):
+                invalid.add(position_id)
+                continue
+            q, _certified_target_shares, certified_max_spend = certificate
+            if min_price * min_shares > certified_max_spend + 0.011:
+                invalid.add(position_id)
+                continue
+            command_parts[position_id].append((q, min_shares))
+
+    capital_by_position = {
+        str(point.get("position_id") or "").strip(): point
+        for point in (capital_curve.get("curve") or [])
+        if isinstance(point, Mapping)
+        and str(point.get("position_id") or "").strip()
+    }
+    bindings: dict[str, dict[str, object]] = {}
+    for position_id in sorted(candidates):
+        parts = command_parts.get(position_id, [])
+        if position_id in invalid or not parts:
+            block("global_certificate_identity_incomplete")
+            continue
+        total_shares = sum(shares for _q, shares in parts)
+        composite_q = sum(q * shares for q, shares in parts) / total_shares
+        capital = capital_by_position.get(position_id)
+        binding: dict[str, object] = {
+            "p_posterior": composite_q,
+            "capital_gain_proof_ready": False,
+            "capital_evidence_source": "actual_global_winner_fill",
+        }
+        if capital is not None:
+            try:
+                committed = float(capital["capital_committed_usd"])
+                realized_pnl = float(capital["net_realized_pnl_usd"])
+            except (KeyError, TypeError, ValueError):
+                committed = math.nan
+                realized_pnl = math.nan
+            if (
+                math.isfinite(committed)
+                and committed > 0.0
+                and math.isfinite(realized_pnl)
+            ):
+                binding.update(
+                    capital_gain_proof_ready=True,
+                    hypothetical_capital_committed_usd=committed,
+                    hypothetical_realized_pnl_usd=realized_pnl,
+                )
+        bindings[position_id] = binding
+
+    for row in output:
+        position_id = str(row.get("trade_id") or "").strip()
+        binding = bindings.get(position_id)
+        if binding is None:
+            continue
+        try:
+            frozen_q = float(row["p_posterior"])
+            certificate_q = float(binding["p_posterior"])
+        except (KeyError, TypeError, ValueError):
+            block("global_certificate_probability_mismatch")
+            continue
+        if not math.isclose(
+            frozen_q,
+            certificate_q,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            block("global_certificate_probability_mismatch")
+            continue
+        row["persisted_decision_law_id"] = row.get("decision_law_id")
+        row["decision_law_id"] = _GLOBAL_CAPITAL_EVIDENCE_LAW
+        row["decision_law_evidence_source"] = (
+            "filled_entry_actionable_global_winner_certificate"
+        )
+        row.update(binding)
+        status["capital_law_ready_count"] = (
+            int(status["capital_law_ready_count"]) + 1
+        )
+        if binding["capital_gain_proof_ready"] is True:
+            status["capital_gain_proof_ready_count"] = (
+                int(status["capital_gain_proof_ready_count"]) + 1
+            )
+    status["status"] = (
+        "ok" if status["capital_law_ready_count"] else "no_verified_winners"
+    )
+    return output, status
 
 
 def _market_relative_alpha_evidence(
@@ -5063,15 +5364,32 @@ def _tick_once() -> RiskLevel:
             window_days=market_relative_alpha_window_days,
             as_of=market_relative_alpha_as_of,
         )
+        qkernel_live_realized_capital_curve = (
+            _qkernel_live_realized_capital_curve(
+                zeus_conn,
+                window_days=market_relative_alpha_window_days,
+                as_of=market_relative_alpha_as_of,
+            )
+        )
+        (
+            qkernel_actual_global_capital_rows,
+            qkernel_actual_global_capital_binding,
+        ) = _bind_actual_global_capital_evidence(
+            zeus_conn,
+            brier_actuating_rows,
+            strategy_key="forecast_qkernel_entry",
+            capital_curve=qkernel_live_realized_capital_curve,
+        )
         market_relative_alpha_evidence = _qkernel_market_relative_alpha_evidence(
-            brier_actuating_rows + qkernel_market_relative_alpha_shadow_rows,
+            qkernel_actual_global_capital_rows
+            + qkernel_market_relative_alpha_shadow_rows,
             rejection_evalue=market_relative_alpha_evalue,
             window_days=market_relative_alpha_window_days,
             as_of=market_relative_alpha_as_of,
         )
         qkernel_market_relative_alpha_gate_evidence = (
             _market_relative_alpha_evidence(
-                brier_actuating_rows
+                qkernel_actual_global_capital_rows
                 + qkernel_market_relative_alpha_shadow_rows,
                 strategy_key="forecast_qkernel_entry",
                 rejection_evalue=market_relative_alpha_evalue,
@@ -5100,13 +5418,6 @@ def _tick_once() -> RiskLevel:
                 qkernel_market_relative_alpha_gate_evidence,
             )
         )
-        qkernel_live_realized_capital_curve = (
-            _qkernel_live_realized_capital_curve(
-                zeus_conn,
-                window_days=market_relative_alpha_window_days,
-                as_of=market_relative_alpha_as_of,
-            )
-        )
         (
             day0_market_relative_alpha_shadow_rows,
             day0_market_relative_alpha_shadow_status,
@@ -5120,8 +5431,18 @@ def _tick_once() -> RiskLevel:
             window_days=market_relative_alpha_window_days,
             as_of=market_relative_alpha_as_of,
         )
+        (
+            day0_actual_global_capital_rows,
+            day0_actual_global_capital_binding,
+        ) = _bind_actual_global_capital_evidence(
+            zeus_conn,
+            brier_actuating_rows,
+            strategy_key="day0_nowcast_entry",
+            capital_curve=day0_live_realized_capital_curve,
+        )
         day0_market_relative_alpha_evidence = _market_relative_alpha_evidence(
-            brier_actuating_rows + day0_market_relative_alpha_shadow_rows,
+            day0_actual_global_capital_rows
+            + day0_market_relative_alpha_shadow_rows,
             strategy_key="day0_nowcast_entry",
             rejection_evalue=market_relative_alpha_evalue,
             window_days=market_relative_alpha_window_days,
@@ -5809,6 +6130,9 @@ def _tick_once() -> RiskLevel:
                 "qkernel_market_relative_alpha_shadow": (
                     qkernel_market_relative_alpha_shadow_status
                 ),
+                "qkernel_actual_global_capital_binding": (
+                    qkernel_actual_global_capital_binding
+                ),
                 "market_relative_alpha_gate_confirmation": (
                     market_relative_alpha_gate_confirmation
                 ),
@@ -5829,6 +6153,9 @@ def _tick_once() -> RiskLevel:
                 ),
                 "day0_market_relative_alpha_shadow": (
                     day0_market_relative_alpha_shadow_status
+                ),
+                "day0_actual_global_capital_binding": (
+                    day0_actual_global_capital_binding
                 ),
                 "day0_live_realized_capital_curve": (
                     day0_live_realized_capital_curve

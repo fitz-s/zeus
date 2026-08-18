@@ -4771,6 +4771,108 @@ class TestQkernelMarketRelativeAlphaEvidence:
         )
         return conn
 
+    @staticmethod
+    def _actual_global_conn(
+        *,
+        q: float = 0.95,
+        receipt_candidate_id: str = "candidate",
+        terminal_status: str = "partial",
+        strategy_key: str = "forecast_qkernel_entry",
+    ) -> sqlite3.Connection:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.execute("ATTACH DATABASE ':memory:' AS world")
+        conn.execute(
+            "CREATE TABLE execution_fact ("
+            "position_id TEXT,command_id TEXT,order_role TEXT,filled_at TEXT,"
+            "terminal_exec_status TEXT,fill_price REAL,shares REAL)"
+        )
+        conn.execute(
+            "CREATE TABLE position_decision_attribution ("
+            "position_id TEXT,command_id TEXT,decision_certificate_hash TEXT,"
+            "resolution TEXT,intent_kind TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE world.decision_certificates ("
+            "certificate_hash TEXT,certificate_type TEXT,mode TEXT,"
+            "verifier_status TEXT,payload_json TEXT)"
+        )
+        conn.execute(
+            "INSERT INTO execution_fact VALUES "
+            "('actual','command','entry','2026-08-10T12:00:00Z',?,0.05,5.0)",
+            (terminal_status,),
+        )
+        conn.execute(
+            "INSERT INTO position_decision_attribution VALUES "
+            "('actual','command','certificate','ATTRIBUTED','ENTRY')"
+        )
+        payload = {
+            "strategy_key": strategy_key,
+            "qkernel_execution_economics": {
+                "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
+                "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+                "global_execution_mode": "TAKER_LIMIT",
+                "global_candidate_id": "candidate",
+                "global_actuation_identity": "actuation",
+                "global_selection_epoch_identity": "epoch",
+                "global_winner_event_id": "winner-event",
+                "global_cut_time_win_probability_mean": q,
+                "global_target_shares": "5",
+                "global_max_spend_usd": "0.25",
+                "global_expected_delta_log_wealth": 0.01,
+                "global_expected_ev_usd": 1.0,
+                "global_auction_receipt": {
+                    "winner_candidate_id": receipt_candidate_id,
+                    "winner_actuation_identity": "actuation",
+                    "selection_epoch_identity": "epoch",
+                    "winner_event_id": "winner-event",
+                },
+            },
+        }
+        conn.execute(
+            "INSERT INTO world.decision_certificates VALUES "
+            "('certificate','ActionableTradeCertificate','LIVE','VERIFIED',?)",
+            (json.dumps(payload),),
+        )
+        return conn
+
+    @staticmethod
+    def _actual_global_row(
+        *,
+        q: float = 0.95,
+        strategy_key: str = "forecast_qkernel_entry",
+        revision: str | None = None,
+    ) -> dict:
+        return {
+            "trade_id": "actual",
+            "strategy": strategy_key,
+            "decision_law_id": "predicted_bin_ev_v1",
+            "probability_identity_ready": True,
+            "probability_semantics_ready": True,
+            "probability_semantics_revisions": (
+                revision
+                or riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION,
+            ),
+            "p_posterior": q,
+            "outcome": 0,
+            "settled_at": "2026-08-10T22:00:00+00:00",
+            "entry_market_benchmark_ready": True,
+            "entry_market_benchmark": 0.05,
+            "entry_market_benchmark_family": ("NYC", "2026-08-10", "high"),
+        }
+
+    @staticmethod
+    def _actual_capital_curve() -> dict:
+        return {
+            "curve": [
+                {
+                    "position_id": "actual",
+                    "capital_committed_usd": 0.25,
+                    "net_realized_pnl_usd": -0.25,
+                }
+            ]
+        }
+
     def test_live_failure_path_rejects_without_counting_correlated_dates_twice(self):
         rows = [
             self._row("helsinki-yes", city="Helsinki", q=0.3720459264, outcome=0),
@@ -4840,6 +4942,109 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert evidence["status"] == "ok"
         assert evidence["rejected"] is False
         assert evidence["cohorts"][0]["market_over_model_evalue"] < 10.0
+        conn.close()
+
+    @pytest.mark.parametrize("terminal_status", ["filled", "confirmed", "partial"])
+    def test_entry_market_benchmark_accepts_economically_filled_statuses(
+        self,
+        terminal_status,
+    ):
+        conn = self._conn()
+        conn.execute(
+            "INSERT INTO position_current VALUES (?,?,?,?,?)",
+            ("economic-fill", 0.20, "NYC", "2026-08-10", "high"),
+        )
+        conn.execute(
+            "INSERT INTO execution_fact VALUES (?,'entry','2026-08-10',?,?,1)",
+            ("economic-fill", terminal_status, 0.20),
+        )
+
+        bound = riskguard_module._bind_entry_market_benchmarks(
+            conn,
+            [self._row("economic-fill", city="NYC", q=0.60, outcome=1)],
+        )
+
+        assert bound[0]["entry_market_benchmark_ready"] is True
+        assert bound[0]["entry_market_benchmark"] == pytest.approx(0.20)
+        conn.close()
+
+    def test_actual_global_winner_fill_supplies_capital_law_evidence(self):
+        current = (
+            riskguard_module.STALE_ENSEMBLE_ABSOLUTE_DISAGREEMENT_SEMANTICS_REVISION
+        )
+        conn = self._actual_global_conn()
+
+        bound, status = riskguard_module._bind_actual_global_capital_evidence(
+            conn,
+            [self._actual_global_row()],
+            strategy_key="forecast_qkernel_entry",
+            capital_curve=self._actual_capital_curve(),
+        )
+        evidence = riskguard_module._market_relative_alpha_evidence(
+            bound,
+            strategy_key="forecast_qkernel_entry",
+            rejection_evalue=10.0,
+            as_of=datetime(2026, 8, 11, tzinfo=timezone.utc),
+        )
+        reason, revisions = (
+            riskguard_module._market_relative_alpha_rejection_gate_reason(
+                {"status": "ok", "licensed_revisions": [current]},
+                evidence,
+                required_evalue=10.0,
+            )
+        )
+
+        assert status["status"] == "ok"
+        assert status["capital_law_ready_count"] == 1
+        assert status["capital_gain_proof_ready_count"] == 1
+        assert bound[0]["persisted_decision_law_id"] == "predicted_bin_ev_v1"
+        assert bound[0]["decision_law_id"] == "executable_min_order_capital_gain_v2"
+        assert bound[0]["capital_gain_proof_ready"] is True
+        assert bound[0]["hypothetical_capital_committed_usd"] == pytest.approx(0.25)
+        assert bound[0]["hypothetical_realized_pnl_usd"] == pytest.approx(-0.25)
+        assert evidence["rejected"] is True
+        assert evidence["cohorts"][0]["market_over_model_evalue"] == pytest.approx(19.0)
+        assert revisions == (current,)
+        assert reason is not None and "status=rejected" in reason
+        conn.close()
+
+    def test_mismatched_global_winner_receipt_cannot_name_capital_law(self):
+        conn = self._actual_global_conn(receipt_candidate_id="other")
+
+        bound, status = riskguard_module._bind_actual_global_capital_evidence(
+            conn,
+            [self._actual_global_row()],
+            strategy_key="forecast_qkernel_entry",
+            capital_curve=self._actual_capital_curve(),
+        )
+
+        assert status["status"] == "no_verified_winners"
+        assert status["capital_law_ready_count"] == 0
+        assert status["blocked_reasons"] == {
+            "global_certificate_identity_incomplete": 1,
+        }
+        assert bound[0]["decision_law_id"] == "predicted_bin_ev_v1"
+        conn.close()
+
+    def test_day0_actual_global_winner_uses_same_capital_law_binding(self):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        conn = self._actual_global_conn(strategy_key="day0_nowcast_entry")
+        bound, status = riskguard_module._bind_actual_global_capital_evidence(
+            conn,
+            [
+                self._actual_global_row(
+                    strategy_key="day0_nowcast_entry",
+                    revision=DAY0_PROBABILITY_SEMANTICS_REVISION,
+                )
+            ],
+            strategy_key="day0_nowcast_entry",
+            capital_curve=self._actual_capital_curve(),
+        )
+
+        assert status["capital_law_ready_count"] == 1
+        assert bound[0]["decision_law_id"] == "executable_min_order_capital_gain_v2"
+        assert bound[0]["capital_evidence_source"] == "actual_global_winner_fill"
         conn.close()
 
     def test_missing_executable_benchmark_is_visible_but_non_actuating(self):
