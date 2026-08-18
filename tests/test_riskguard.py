@@ -290,6 +290,45 @@ class TestForwardCapitalAudit:
         assert evidence["evalue"] == pytest.approx(1.3875)
         assert evidence["threshold_reached"] is False
 
+    def test_hybrid_exit_and_residual_settlement_counts_as_early_exit(self):
+        from scripts.audit_realtime_pnl import _forward_capital_summary
+
+        result = _forward_capital_summary(
+            activity={
+                "chain_fact_coverage_complete": True,
+                "entry_filled_position_count": 1,
+                "unclassified_filled_position_count": 0,
+                "preboundary_entry_fill_count": 0,
+            },
+            curves=(
+                {
+                    "status": "positive",
+                    "filled_position_count": 1,
+                    "open_position_count": 0,
+                    "capital_committed_usd": 2.0,
+                    "curve": [
+                        {
+                            "position_id": "hybrid",
+                            "target_date": "2026-08-11",
+                            "close_type": (
+                                "EXIT_ORDER_FILLED_WITH_RESIDUAL_SETTLEMENT"
+                            ),
+                            "realized_at": "2026-08-11T23:00:00+00:00",
+                            "capital_committed_usd": 2.0,
+                            "gross_realized_pnl_usd": 1.0,
+                            "fee_bound_usd": 0.1,
+                            "net_realized_pnl_usd": 0.9,
+                        }
+                    ],
+                },
+            ),
+            robust_evalue_threshold=10.0,
+        )
+
+        assert result["settled_position_count"] == 0
+        assert result["early_exit_position_count"] == 1
+        assert result["hybrid_exit_settlement_position_count"] == 1
+
     def test_same_target_date_positions_are_one_capital_evidence_cluster(self):
         from scripts.audit_realtime_pnl import _robust_capital_evidence
 
@@ -5135,6 +5174,46 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert curve["blocked_position_count"] == 0
         assert curve["filled_position_count"] == 1
         assert curve["capital_committed_usd"] == pytest.approx(1.6185)
+        conn.close()
+
+    def test_settled_dust_after_material_exit_is_not_reported_as_hold_to_settlement(self):
+        conn = self._live_capital_conn(
+            phase="settled",
+            gross_pnl=4.68,
+            exit_price=0.93,
+        )
+        conn.execute(
+            "UPDATE execution_fact SET shares=6.23 WHERE order_role='exit'"
+        )
+        conn.execute(
+            "UPDATE position_current SET shares=0.01,cost_basis_usd=0.0025"
+        )
+        conn.execute(
+            "INSERT INTO position_events VALUES (?,?,?,?,?)",
+            (
+                "current-trial",
+                3,
+                "SETTLED",
+                "2026-08-11T23:00:00+00:00",
+                json.dumps({"pnl": 4.68}),
+            ),
+        )
+        conn.commit()
+
+        curve = riskguard_module._day0_live_realized_capital_curve(
+            conn,
+            window_days=7.0,
+            as_of=datetime(2026, 8, 12, 0, tzinfo=timezone.utc),
+        )
+
+        row = curve["curve"][0]
+        assert row["close_type"] == "EXIT_ORDER_FILLED_WITH_RESIDUAL_SETTLEMENT"
+        assert row["terminal_event_type"] == "SETTLED"
+        assert row["entry_filled_shares"] == pytest.approx(6.24)
+        assert row["exit_filled_shares"] == pytest.approx(6.23)
+        assert row["exit_fill_fraction"] == pytest.approx(0.998397)
+        assert row["remaining_after_exit_shares"] == pytest.approx(0.01)
+        assert row["first_exit_filled_at"] == "2026-08-11T16:48:04+00:00"
         conn.close()
 
     def test_validated_shadow_ignores_unresolved_live_fill(self):

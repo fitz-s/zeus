@@ -2900,8 +2900,11 @@ def _live_realized_capital_curve(
 
     A profitable early exit is capital truth but not a binary-outcome grade;
     probability accuracy is not capital gain. Only exact entry fills plus an
-    EXIT_ORDER_FILLED/SETTLED event enter this curve. Gross canonical P&L is
-    reduced by the frozen fee schedule because venue facts may omit fees.
+    EXIT_ORDER_FILLED/SETTLED event enter this curve. A position that exits
+    before resolution and later settles only a residual is reported as a
+    hybrid close, never as if the full entry were held to settlement. Gross
+    canonical P&L is reduced by the frozen fee schedule because venue facts
+    may omit fees.
     This retrospective curve never supplies entry admission for either strategy;
     current causal alpha and the normal executable economics/risk stack do.
     """
@@ -3202,6 +3205,7 @@ def _live_realized_capital_curve(
             continue
         position.update(
             entry_notional_usd=entry_notional,
+            entry_filled_shares=entry_shares,
             entry_fee_bound_usd=entry_fee,
             capital_committed_usd=entry_notional + entry_fee,
             entered_at=min(entry_times),
@@ -3225,8 +3229,8 @@ def _live_realized_capital_curve(
     position_ids = sorted(current_positions)
     placeholders = ",".join("?" for _ in position_ids)
     exit_rows = conn.execute(
-        "SELECT vc.position_id,ef.fill_price,ef.shares,vse.post_only,"
-        "vse.fee_details_json "
+        "SELECT vc.position_id,ef.fill_price,ef.shares,ef.filled_at,"
+        "vse.post_only,vse.fee_details_json "
         "FROM venue_commands AS vc "
         "JOIN execution_fact AS ef ON ef.command_id=vc.command_id "
         "JOIN venue_submission_envelopes AS vse ON vse.envelope_id=vc.envelope_id "
@@ -3240,11 +3244,19 @@ def _live_realized_capital_curve(
     exit_fees: dict[str, float | None] = {
         position_id: 0.0 for position_id in position_ids
     }
+    exit_summaries: dict[str, dict[str, object]] = {
+        position_id: {
+            "filled_shares": 0.0,
+            "first_filled_at": None,
+            "last_filled_at": None,
+        }
+        for position_id in position_ids
+    }
     for raw in exit_rows:
         position_id = str(raw[0] or "")
         fee = _submission_schedule_fee_usd(
-            post_only=raw[3],
-            fee_details_json=raw[4],
+            post_only=raw[4],
+            fee_details_json=raw[5],
             fill_price=raw[1],
             shares=raw[2],
         )
@@ -3252,6 +3264,24 @@ def _live_realized_capital_curve(
             exit_fees[position_id] = None
         elif exit_fees[position_id] is not None:
             exit_fees[position_id] = float(exit_fees[position_id]) + fee
+        try:
+            filled_shares = float(raw[2])
+            filled_at = datetime.fromisoformat(
+                str(raw[3] or "").replace("Z", "+00:00")
+            )
+        except (TypeError, ValueError):
+            exit_fees[position_id] = None
+            continue
+        if filled_at.tzinfo is None:
+            filled_at = filled_at.replace(tzinfo=timezone.utc)
+        summary = exit_summaries[position_id]
+        summary["filled_shares"] = float(summary["filled_shares"]) + filled_shares
+        first_filled_at = summary["first_filled_at"]
+        last_filled_at = summary["last_filled_at"]
+        if first_filled_at is None or filled_at < first_filled_at:
+            summary["first_filled_at"] = filled_at
+        if last_filled_at is None or filled_at > last_filled_at:
+            summary["last_filled_at"] = filled_at
 
     event_rows = conn.execute(
         "SELECT position_id,event_type,occurred_at,payload_json "
@@ -3303,13 +3333,34 @@ def _live_realized_capital_curve(
             block("exit_fee_identity_incomplete")
             continue
         fee_bound = float(position["entry_fee_bound_usd"]) + float(exit_fee)
+        exit_summary = exit_summaries[position_id]
+        entry_filled_shares = float(position["entry_filled_shares"])
+        exit_filled_shares = float(exit_summary["filled_shares"])
+        remaining_after_exit_shares = max(
+            0.0,
+            entry_filled_shares - exit_filled_shares,
+        )
+        close_type = expected_event
+        if phase == "settled" and exit_filled_shares > 0.0:
+            close_type = "EXIT_ORDER_FILLED_WITH_RESIDUAL_SETTLEMENT"
         realized.append(
             {
                 "position_id": position_id,
                 "city": position["city"],
                 "target_date": position["target_date"],
                 "metric": position["metric"],
-                "close_type": expected_event,
+                "close_type": close_type,
+                "terminal_event_type": expected_event,
+                "entry_filled_shares": entry_filled_shares,
+                "exit_filled_shares": exit_filled_shares,
+                "exit_fill_fraction": (
+                    min(1.0, exit_filled_shares / entry_filled_shares)
+                    if entry_filled_shares > 0.0
+                    else 0.0
+                ),
+                "remaining_after_exit_shares": remaining_after_exit_shares,
+                "first_exit_filled_at": exit_summary["first_filled_at"],
+                "last_exit_filled_at": exit_summary["last_filled_at"],
                 "realized_at": realized_at,
                 "capital_committed_usd": float(position["capital_committed_usd"]),
                 "gross_realized_pnl_usd": event_pnl,
@@ -3327,6 +3378,23 @@ def _live_realized_capital_curve(
             {
                 **row,
                 "realized_at": row["realized_at"].isoformat(),
+                "first_exit_filled_at": (
+                    row["first_exit_filled_at"].isoformat()
+                    if row["first_exit_filled_at"] is not None
+                    else None
+                ),
+                "last_exit_filled_at": (
+                    row["last_exit_filled_at"].isoformat()
+                    if row["last_exit_filled_at"] is not None
+                    else None
+                ),
+                "entry_filled_shares": round(float(row["entry_filled_shares"]), 6),
+                "exit_filled_shares": round(float(row["exit_filled_shares"]), 6),
+                "exit_fill_fraction": round(float(row["exit_fill_fraction"]), 6),
+                "remaining_after_exit_shares": round(
+                    float(row["remaining_after_exit_shares"]),
+                    6,
+                ),
                 "capital_committed_usd": round(float(row["capital_committed_usd"]), 6),
                 "gross_realized_pnl_usd": round(float(row["gross_realized_pnl_usd"]), 6),
                 "fee_bound_usd": round(float(row["fee_bound_usd"]), 6),

@@ -4,6 +4,20 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-18 Early exit plus residual settlement is a hybrid capital route
+
+The forward capital audit treated the last lifecycle event as the entire
+economic route.  A Tel Aviv Aug-17 NO position sold 16.23 of 16.231665 shares
+at 0.93, then settled only the 0.001665-share residual at 1.00; selecting the
+later `SETTLED` event mislabeled this as a full hold-to-resolution win.
+
+Capital attribution now preserves the terminal cumulative P&L while separately
+reporting entry-filled shares, exit-filled shares, exit-fill fraction, residual
+shares, and first/last exit-fill times.  A settled position with any confirmed
+exit fill is classified as `EXIT_ORDER_FILLED_WITH_RESIDUAL_SETTLEMENT`, never
+as a pure `SETTLED` route.  Acceptance requires a material early exit followed
+by dust settlement to remain an early-exit count and expose its exact residual.
+
 ## 2026-08-17 Incremental live entries remain visible after the first fill
 
 The canonical command and venue-fact rows showed five current open entry

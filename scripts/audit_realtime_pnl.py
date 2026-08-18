@@ -241,7 +241,16 @@ def _forward_capital_summary(
             str(row.get("close_type") or "") == "SETTLED" for row in combined_curve
         ),
         "early_exit_position_count": sum(
-            str(row.get("close_type") or "") == "EXIT_ORDER_FILLED"
+            str(row.get("close_type") or "")
+            in {
+                "EXIT_ORDER_FILLED",
+                "EXIT_ORDER_FILLED_WITH_RESIDUAL_SETTLEMENT",
+            }
+            for row in combined_curve
+        ),
+        "hybrid_exit_settlement_position_count": sum(
+            str(row.get("close_type") or "")
+            == "EXIT_ORDER_FILLED_WITH_RESIDUAL_SETTLEMENT"
             for row in combined_curve
         ),
         "win_count": win_count,
