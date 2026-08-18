@@ -3221,6 +3221,8 @@ def mark_market_closed_hold_to_settlement(
     settlement harvesting.
     """
 
+    position_before = copy.deepcopy(vars(position))
+
     current_state = _runtime_state_value(position)
     if current_state in {
         # T5 (docs/rebuild/quarantine_excision_2026-07-11.md): QUARANTINED
@@ -3281,7 +3283,11 @@ def mark_market_closed_hold_to_settlement(
         error=error,
         preserve_exit_reason=preserve_exit_reason,
     )
-    return conn is None or canonical_written
+    succeeded = conn is None or canonical_written
+    if not succeeded:
+        vars(position).clear()
+        vars(position).update(position_before)
+    return succeeded
 
 
 def _restore_last_monitor_snapshot_for_closed_hold(
@@ -3382,7 +3388,7 @@ def _dual_write_market_closed_hold_if_available(
             reason=reason,
             error=error,
         ):
-            return False
+            return True
         monitor_basis_sequence_no = _latest_monitor_sequence_no(conn, trade_id)
         idempotency_key = _market_closed_hold_idempotency_key(
             trade_id=trade_id,
@@ -3433,7 +3439,12 @@ def _dual_write_market_closed_hold_if_available(
             append_many_and_project(conn, [event], projection)
         except sqlite3.IntegrityError as exc:
             if _is_position_event_idempotency_collision(exc):
-                return False
+                return _has_equivalent_market_closed_hold(
+                    conn,
+                    trade_id,
+                    reason=reason,
+                    error=error,
+                )
             raise
         return True
     except Exception as exc:  # noqa: BLE001 - monitor can retry next cycle

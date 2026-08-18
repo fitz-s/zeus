@@ -12574,7 +12574,7 @@ def test_closed_market_canonical_failure_has_no_artifact_or_monitor_count(monkey
     )
 
     summary = {"monitors": 0, "exits": 0}
-    cycle_runtime.execute_monitoring_phase(
+    portfolio_dirty, tracker_dirty = cycle_runtime.execute_monitoring_phase(
         None,
         object(),
         _make_portfolio(pos),
@@ -12586,8 +12586,13 @@ def test_closed_market_canonical_failure_has_no_artifact_or_monitor_count(monkey
     )
 
     assert results == []
+    assert portfolio_dirty is False
+    assert tracker_dirty is False
     assert summary["monitors"] == 0
     assert summary["monitor_canonical_write_failed"] == 1
+    assert "monitor_skipped_closed_market_pending_settlement" not in summary
+    assert "monitor_closed_market_pending_settlement_positions" not in summary
+    assert "monitor_closed_market_pending_settlement_reasons" not in summary
 
 
 def test_day0_closed_market_detection_uses_static_market_end_when_clob_info_missing():

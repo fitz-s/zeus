@@ -11252,7 +11252,7 @@ def test_market_closed_hold_revokes_last_monitor_action_authority(conn):
         last_monitor_market_price_is_fresh=True,
     )
 
-    mark_market_closed_hold_to_settlement(stale_in_memory, conn=conn)
+    assert mark_market_closed_hold_to_settlement(stale_in_memory, conn=conn) is True
 
     current = conn.execute(
         """
@@ -11292,6 +11292,64 @@ def test_market_closed_hold_revokes_last_monitor_action_authority(conn):
     assert payload["exit_decision_available"] is False
     assert payload["exit_decision_reason"] == "MARKET_CLOSED_AWAITING_SETTLEMENT"
     assert "closed_market_hold_no_action_authority" in payload["applied_validations"]
+
+    event_count = conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+        (persisted.trade_id,),
+    ).fetchone()[0]
+    assert mark_market_closed_hold_to_settlement(stale_in_memory, conn=conn) is True
+    assert conn.execute(
+        "SELECT COUNT(*) FROM position_events WHERE position_id = ?",
+        (persisted.trade_id,),
+    ).fetchone()[0] == event_count
+
+
+def test_market_closed_hold_write_failure_restores_position(conn, monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.state.portfolio import Position
+
+    position = Position(
+        trade_id="pos-market-closed-write-failure",
+        market_id="condition-failure",
+        city="Chicago",
+        cluster="Chicago",
+        target_date="2026-06-24",
+        bin_label="88F",
+        direction="buy_no",
+        token_id="yes-token",
+        no_token_id="no-token",
+        condition_id="condition-failure",
+        state="active",
+        chain_state="synced",
+        shares=12.0,
+        chain_shares=12.0,
+        cost_basis_usd=8.4,
+        chain_cost_basis_usd=8.4,
+        strategy_key="center_buy",
+        env="live",
+        entered_at="2026-06-24T10:00:00+00:00",
+        order_status="retry_pending",
+        exit_state="retry_pending",
+        exit_reason="EDGE_REVERSAL",
+        last_monitor_prob=0.21,
+        last_monitor_prob_is_fresh=True,
+        last_monitor_edge=-0.33,
+        last_monitor_market_price=0.54,
+        last_monitor_market_price_is_fresh=True,
+        last_monitor_best_bid=0.53,
+    )
+    before = copy.deepcopy(vars(position))
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_dual_write_market_closed_hold_if_available",
+        lambda *_args, **_kwargs: False,
+    )
+
+    assert exit_lifecycle.mark_market_closed_hold_to_settlement(
+        position,
+        conn=conn,
+    ) is False
+    assert vars(position) == before
 
 
 def test_position_projection_round_trips_zero_monitor_bid(conn):

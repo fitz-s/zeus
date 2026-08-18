@@ -26,6 +26,7 @@ would-have-won.
 """
 from __future__ import annotations
 
+import copy
 import json
 import sqlite3
 from dataclasses import replace
@@ -650,6 +651,44 @@ class TestDay0StaticClosedBehavioral:
                     lambda: datetime(2026, 6, 20, 6, 0, tzinfo=timezone.utc)
                 ),
             },
+        )
+        summary = {"monitors": 0, "exits": 0}
+
+        from src.execution import exit_lifecycle
+
+        original_mark = exit_lifecycle.mark_market_closed_hold_to_settlement
+        position_before = copy.deepcopy(vars(pos))
+        monkeypatch.setattr(
+            exit_lifecycle,
+            "mark_market_closed_hold_to_settlement",
+            lambda *_args, **_kwargs: False,
+        )
+        cycle_runtime.execute_monitoring_phase(
+            conn,
+            ClosedClob(),
+            portfolio,
+            Artifact(),
+            type("Tracker", (), {"record_exit": lambda self, position: None})(),
+            summary,
+            deps=deps,
+        )
+        changed_fields = {
+            key
+            for key in set(vars(pos)) | set(position_before)
+            if vars(pos).get(key) != position_before.get(key)
+        }
+        assert changed_fields == {
+            "_canonical_monitor_refreshed_at",
+            "next_exit_retry_at",
+        }
+        assert results == []
+        assert summary["monitors"] == 0
+        assert summary["monitor_canonical_write_failed"] == 1
+
+        monkeypatch.setattr(
+            exit_lifecycle,
+            "mark_market_closed_hold_to_settlement",
+            original_mark,
         )
         summary = {"monitors": 0, "exits": 0}
 

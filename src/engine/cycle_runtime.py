@@ -10,6 +10,7 @@ function here receives a `deps` object, typically the cycle_runner module.
 
 from __future__ import annotations
 
+import copy
 import inspect
 import json
 import logging
@@ -8684,6 +8685,7 @@ def execute_monitoring_phase(
                     "EXIT_DEAD_BIN",
                     "HOLD_STRUCTURAL_WIN",
                 }:
+                    hard_fact_position_before = copy.deepcopy(vars(pos))
                     hard_fact_win = _hard_fact.action == "HOLD_STRUCTURAL_WIN"
                     hard_fact_trigger = (
                         "DAY0_HARD_FACT_STRUCTURAL_WIN_MARKET_CLOSED"
@@ -8736,11 +8738,15 @@ def execute_monitoring_phase(
                         ),
                         conn=conn,
                     )
-                    summary["day0_hard_fact_closed_market_hold_to_settlement"] = (
-                        summary.get("day0_hard_fact_closed_market_hold_to_settlement", 0) + 1
-                    )
-                    portfolio_dirty = True
                     if canonical_written:
+                        summary["day0_hard_fact_closed_market_hold_to_settlement"] = (
+                            summary.get(
+                                "day0_hard_fact_closed_market_hold_to_settlement",
+                                0,
+                            )
+                            + 1
+                        )
+                        portfolio_dirty = True
                         artifact.add_monitor_result(
                             deps.MonitorResult(
                                 position_id=pos.trade_id,
@@ -8756,6 +8762,8 @@ def execute_monitoring_phase(
                         )
                         summary["monitors"] += 1
                     else:
+                        vars(pos).clear()
+                        vars(pos).update(hard_fact_position_before)
                         summary["monitor_canonical_write_failed"] = (
                             summary.get("monitor_canonical_write_failed", 0) + 1
                         )
@@ -8769,8 +8777,8 @@ def execute_monitoring_phase(
                     conn=conn,
                     preserve_exit_reason=True,
                 )
-                portfolio_dirty = True
                 if closed_hold_written:
+                    portfolio_dirty = True
                     artifact.add_monitor_result(
                         deps.MonitorResult(
                             position_id=pos.trade_id,
@@ -8789,21 +8797,21 @@ def execute_monitoring_phase(
                         + 1
                     )
                     summary["monitors"] = summary.get("monitors", 0) + 1
+                    summary["monitor_skipped_closed_market_pending_settlement"] = (
+                        summary.get("monitor_skipped_closed_market_pending_settlement", 0) + 1
+                    )
+                    summary.setdefault("monitor_closed_market_pending_settlement_positions", []).append(pos.trade_id)
+                    summary.setdefault("monitor_closed_market_pending_settlement_reasons", []).append(
+                        {
+                            "position_id": pos.trade_id,
+                            "reason": "market_closed_non_accepting_orders",
+                            **closed_market_info,
+                        }
+                    )
                 else:
                     summary["monitor_canonical_write_failed"] = (
                         summary.get("monitor_canonical_write_failed", 0) + 1
                     )
-                summary["monitor_skipped_closed_market_pending_settlement"] = (
-                    summary.get("monitor_skipped_closed_market_pending_settlement", 0) + 1
-                )
-                summary.setdefault("monitor_closed_market_pending_settlement_positions", []).append(pos.trade_id)
-                summary.setdefault("monitor_closed_market_pending_settlement_reasons", []).append(
-                    {
-                        "position_id": pos.trade_id,
-                        "reason": "market_closed_non_accepting_orders",
-                        **closed_market_info,
-                    }
-                )
                 continue
 
             # Earlier pending-exit/Day0 lifecycle work may have opened a TRADE
@@ -9711,7 +9719,7 @@ def execute_monitoring_phase(
             ):
                 from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
 
-                mark_market_closed_hold_to_settlement(
+                closed_hold_written = mark_market_closed_hold_to_settlement(
                     pos,
                     reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
                     error=str(
@@ -9721,18 +9729,23 @@ def execute_monitoring_phase(
                     conn=conn,
                     preserve_exit_reason=True,
                 )
-                portfolio_dirty = True
-                summary["monitor_closed_market_pending_settlement_after_eval"] = (
-                    summary.get("monitor_closed_market_pending_settlement_after_eval", 0) + 1
-                )
-                summary.setdefault("monitor_closed_market_pending_settlement_positions", []).append(pos.trade_id)
-                summary.setdefault("monitor_closed_market_pending_settlement_reasons", []).append(
-                    {
-                        "position_id": pos.trade_id,
-                        "reason": "market_closed_no_executable_bid",
-                        **deferred_static_closed_market_info,
-                    }
-                )
+                if closed_hold_written:
+                    portfolio_dirty = True
+                    summary["monitor_closed_market_pending_settlement_after_eval"] = (
+                        summary.get("monitor_closed_market_pending_settlement_after_eval", 0) + 1
+                    )
+                    summary.setdefault("monitor_closed_market_pending_settlement_positions", []).append(pos.trade_id)
+                    summary.setdefault("monitor_closed_market_pending_settlement_reasons", []).append(
+                        {
+                            "position_id": pos.trade_id,
+                            "reason": "market_closed_no_executable_bid",
+                            **deferred_static_closed_market_info,
+                        }
+                    )
+                else:
+                    summary["monitor_canonical_write_failed"] = (
+                        summary.get("monitor_canonical_write_failed", 0) + 1
+                    )
             elif deferred_static_closed_market_info is not None:
                 summary["day0_static_closed_market_tradable_bid_preserved"] = (
                     summary.get("day0_static_closed_market_tradable_bid_preserved", 0) + 1
