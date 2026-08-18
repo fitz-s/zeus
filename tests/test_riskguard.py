@@ -4873,7 +4873,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
             ]
         }
 
-    def test_live_failure_path_rejects_without_counting_correlated_dates_twice(self):
+    def test_live_failure_path_rejects_without_counting_same_city_date_twice(self):
         rows = [
             self._row("helsinki-yes", city="Helsinki", q=0.3720459264, outcome=0),
             self._row("helsinki-no", city="Helsinki", q=0.9998639330, outcome=1),
@@ -4917,7 +4917,7 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert len(evidence["cohorts"]) == 1
         cohort = evidence["cohorts"][0]
         assert cohort["candidate_count"] == 4
-        assert cohort["independent_cluster_count"] == 2
+        assert cohort["independent_cluster_count"] == 3
         assert cohort["market_over_model_evalue"] > 12.0
         conn.close()
 
@@ -5673,6 +5673,51 @@ class TestQkernelMarketRelativeAlphaEvidence:
         assert cohort["independent_cluster_count"] == 1
         assert cohort["model_over_market_evalue"] == pytest.approx(4.75)
         assert evidence["validated"] is False
+        conn.close()
+
+    def test_same_target_date_different_cities_are_independent_evidence_clusters(self):
+        from src.events.day0_authority import DAY0_PROBABILITY_SEMANTICS_REVISION
+
+        rows = []
+        conn = self._conn()
+        for trade_id, city in (
+            ("same-date-nyc", "NYC"),
+            ("same-date-tel-aviv", "Tel Aviv"),
+        ):
+            rows.append(
+                {
+                    **self._row(trade_id, city=city, q=0.90, outcome=0),
+                    "strategy": "day0_nowcast_entry",
+                    "decision_law_id": "executable_min_order_capital_gain_v2",
+                    "probability_semantics_revisions": (
+                        DAY0_PROBABILITY_SEMANTICS_REVISION,
+                    ),
+                    "capital_gain_proof_ready": True,
+                    "hypothetical_capital_committed_usd": 1.0,
+                    "hypothetical_realized_pnl_usd": -1.0,
+                }
+            )
+            conn.execute(
+                "INSERT INTO position_current VALUES (?,?,?,?,?)",
+                (trade_id, 0.20, city, "2026-08-10", "high"),
+            )
+            conn.execute(
+                "INSERT INTO execution_fact VALUES (?,'entry','2026-08-10','filled',?,1)",
+                (trade_id, 0.20),
+            )
+
+        evidence = riskguard_module._market_relative_alpha_evidence(
+            riskguard_module._bind_entry_market_benchmarks(conn, rows),
+            strategy_key="day0_nowcast_entry",
+            rejection_evalue=10.0,
+            as_of=datetime(2026, 8, 11, tzinfo=timezone.utc),
+        )
+
+        cohort = evidence["cohorts"][0]
+        assert cohort["candidate_count"] == 2
+        assert cohort["independent_cluster_count"] == 2
+        assert cohort["market_over_model_evalue"] == pytest.approx(64.0)
+        assert evidence["rejected"] is True
         conn.close()
 
     def test_unvalidated_shadow_remains_visible_under_evalue_contract(self):

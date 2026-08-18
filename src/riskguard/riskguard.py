@@ -3778,8 +3778,9 @@ def _market_relative_alpha_evidence(
 
     For one binary claim, ``market/model`` likelihood is a valid sequential
     e-value because both probabilities were fixed before the outcome. Sibling
-    bins and same-day weather errors are correlated, so each target-date/metric
-    cluster contributes only its largest ex-ante claimed edge. This is a
+    bins and HIGH/LOW observations within one city-date family are correlated,
+    so each city-date cluster contributes only its largest ex-ante claimed edge.
+    This is a
     capital-alpha test, not a stop-loss: model/market evidence proves admission;
     market/model evidence rejects it. Both probabilities are immutable decision-
     time witnesses, never reconstructed after settlement.
@@ -3847,11 +3848,14 @@ def _market_relative_alpha_evidence(
             )
         )
         cohort_key = (decision_law_id, revisions)
-        # HIGH and LOW from the same target date share weather, observation,
-        # and market-information shocks.  Treat the date as the independent
-        # unit; choosing between metrics remains an ex-ante claimed-edge choice,
-        # never a second likelihood-ratio observation.
-        evidence_cluster = (str(family[1]).strip(),)
+        # Sibling bins and HIGH/LOW from one city-date share weather,
+        # observation, and market-information shocks.  Different cities are
+        # distinct settlement claims; collapsing them by calendar date alone
+        # discards executable evidence from unrelated market families.
+        evidence_cluster = (
+            str(family[0]).strip(),
+            str(family[1]).strip(),
+        )
         try:
             capital_committed = float(
                 row.get("hypothetical_capital_committed_usd")

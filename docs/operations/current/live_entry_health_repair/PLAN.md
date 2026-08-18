@@ -2336,3 +2336,30 @@ publication barrier.
   subprocess missing its test world DB). Repo-wide source/test/fatal topology
   gates remain blocked by the same current-live registry/YAML drift; none is on
   the changed behavior or newly registered test.
+
+### Slice B115 — Cluster capital-alpha evidence by executable market family (2026-08-18)
+
+- Live defect: the revision-scoped sequential alpha test collapsed every city
+  settling on the same calendar date into one observation. Eighteen current-Day0
+  fills across 13 city-date families were therefore reduced to two samples:
+  the gate reported `market_over_model_evalue=1.318` and remained inconclusive
+  while exact realized capital was down `$65.54` on `$102.09`. Replaying the
+  same frozen q, executable entry prices, and outcomes at the city-date family
+  boundary yields 13 clusters and `market_over_model_evalue=1108.44`.
+- First-principles invariant: sibling bins and HIGH/LOW claims within one city
+  and target date share physical and market-information shocks and contribute
+  only the largest ex-ante claimed edge. Different cities are different binary
+  settlement claims; a shared calendar date is not sufficient identity to erase
+  their immutable decision-time likelihood evidence.
+- SCOPE: revision-scoped admission for `day0_nowcast_entry` and
+  `forecast_qkernel_entry`; any rejected revision gates only its strategy and
+  semantics revision. SELL/HOLD/exit lanes and other strategies remain active.
+  DRAIN: every riskguard tick recomputes the seven-day sequential evidence from
+  authoritative settlements and frozen entry witnesses. RESET: the existing
+  revision-scoped recovery/validation contract expires the durable gate when the
+  rejected revision is no longer licensed or its current evidence no longer
+  requires the gate.
+- Acceptance: same-city same-date HIGH/LOW remains one cluster; same-date NYC
+  and Tel Aviv become two clusters and two 8x market/model likelihood ratios
+  compound to e-value 64. Focused riskguard tests, compilation, registry checks,
+  live-data replay, and exact-SHA runtime confirmation must pass before closeout.
