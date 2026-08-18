@@ -2565,6 +2565,152 @@ class GlobalSellExecutionAuthority:
         return self.limit_price()
 
 
+@dataclass(frozen=True)
+class BranchwiseDominantSellAuthority:
+    """Typed proof that every current payoff draw values HOLD at zero.
+
+    This is not a second statistical SELL route. It is the degenerate case in
+    which an in-band cash bid strictly dominates a zero-valued token in every
+    draw, so a global capital comparison has no competing state to resolve.
+    """
+
+    position_id: str
+    token_id: str
+    held_shares: str
+    probability_content_identity: str
+    probability_witness_identity: str
+    probability_observed_at: str
+    support_identity: str
+    authority_identity: str
+
+    @staticmethod
+    def _support_identity(samples: object) -> str:
+        try:
+            values = tuple(float(value) for value in samples)
+        except (TypeError, ValueError):
+            raise ValueError("BRANCHWISE_SELL_SUPPORT_INVALID") from None
+        if not values or not all(
+            math.isfinite(value) and 0.0 <= value <= 1e-12
+            for value in values
+        ):
+            raise ValueError("BRANCHWISE_SELL_SUPPORT_NOT_ZERO")
+        return hashlib.sha256(
+            json.dumps(values, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        ).hexdigest()
+
+    @staticmethod
+    def _identity_payload(
+        *,
+        position_id: str,
+        token_id: str,
+        held_shares: str,
+        probability_content_identity: str,
+        probability_witness_identity: str,
+        probability_observed_at: str,
+        support_identity: str,
+    ) -> dict[str, str]:
+        return {
+            "position_id": position_id,
+            "token_id": token_id,
+            "held_shares": held_shares,
+            "probability_content_identity": probability_content_identity,
+            "probability_witness_identity": probability_witness_identity,
+            "probability_observed_at": probability_observed_at,
+            "support_identity": support_identity,
+        }
+
+    @classmethod
+    def from_current(
+        cls,
+        position: Position,
+        exit_context: ExitContext,
+    ) -> "BranchwiseDominantSellAuthority":
+        try:
+            fresh_prob = float(exit_context.fresh_prob)
+            best_bid = float(exit_context.best_bid)
+        except (TypeError, ValueError):
+            raise ValueError("BRANCHWISE_SELL_CURRENT_EVIDENCE_INVALID") from None
+        if (
+            not exit_context.fresh_prob_is_fresh
+            or not exit_context.current_market_price_is_fresh
+            or not math.isfinite(fresh_prob)
+            or not 0.0 <= fresh_prob <= 1e-12
+            or not math.isfinite(best_bid)
+            or not 0.05 <= best_bid <= 0.95
+        ):
+            raise ValueError("BRANCHWISE_SELL_CURRENT_EVIDENCE_INVALID")
+        receipt = exit_context.probability_receipt
+        if not isinstance(receipt, Mapping):
+            raise ValueError("BRANCHWISE_SELL_PROBABILITY_RECEIPT_MISSING")
+        probability_content_identity = str(
+            receipt.get("probability_content_identity") or ""
+        ).strip()
+        probability_witness_identity = str(
+            receipt.get("probability_witness_identity") or ""
+        ).strip()
+        probability_observed_at = str(
+            getattr(position, "last_monitor_at", "") or ""
+        ).strip()
+        raw_direction = getattr(position, "direction", "")
+        direction = str(getattr(raw_direction, "value", raw_direction) or "").lower()
+        token_id = str(
+            getattr(position, "no_token_id", "")
+            if direction == "buy_no"
+            else getattr(position, "token_id", "")
+        ).strip()
+        position_id = str(getattr(position, "trade_id", "") or "").strip()
+        held_shares = str(getattr(position, "effective_shares", "") or "").strip()
+        if not all(
+            (
+                position_id,
+                token_id,
+                held_shares,
+                probability_content_identity,
+                probability_witness_identity,
+                probability_observed_at,
+            )
+        ):
+            raise ValueError("BRANCHWISE_SELL_IDENTITY_INCOMPLETE")
+        support_identity = cls._support_identity(
+            getattr(position, "_current_global_held_probability_samples", None)
+        )
+        payload = cls._identity_payload(
+            position_id=position_id,
+            token_id=token_id,
+            held_shares=held_shares,
+            probability_content_identity=probability_content_identity,
+            probability_witness_identity=probability_witness_identity,
+            probability_observed_at=probability_observed_at,
+            support_identity=support_identity,
+        )
+        return cls(
+            **payload,
+            authority_identity=hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
+            ).hexdigest(),
+        )
+
+    def __post_init__(self) -> None:
+        payload = self._identity_payload(
+            position_id=self.position_id,
+            token_id=self.token_id,
+            held_shares=self.held_shares,
+            probability_content_identity=self.probability_content_identity,
+            probability_witness_identity=self.probability_witness_identity,
+            probability_observed_at=self.probability_observed_at,
+            support_identity=self.support_identity,
+        )
+        if not all(payload.values()):
+            raise ValueError("BRANCHWISE_SELL_IDENTITY_INCOMPLETE")
+        expected = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if self.authority_identity != expected:
+            raise ValueError("BRANCHWISE_SELL_AUTHORITY_IDENTITY_MISMATCH")
+
+
 def _global_sell_execution_authority_shape_error(
     authority: object | None,
 ) -> str | None:
@@ -4063,6 +4209,71 @@ def _global_sell_receipt_closure_error(
         != str(getattr(actuation, "selection_epoch_identity", "") or "")
     ):
         return "global_sell_receipt_closure_identity_mismatch"
+    return None
+
+
+def _branchwise_dominant_sell_authority_error(
+    position: Position,
+    exit_intent: ExitIntent,
+    authority: BranchwiseDominantSellAuthority | None,
+    *,
+    snapshot_context: Mapping[str, object] | None = None,
+) -> str | None:
+    """Reproduce zero-support dominance at the live submit boundary."""
+
+    if str(exit_intent.reason or "").strip() != "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES":
+        return "branchwise_dominant_sell_intent_required"
+    if type(authority) is not BranchwiseDominantSellAuthority:
+        return "branchwise_dominant_sell_authority_required"
+    try:
+        authority.__post_init__()
+        support_identity = authority._support_identity(
+            getattr(position, "_current_global_held_probability_samples", None)
+        )
+        held_shares = Decimal(str(getattr(position, "effective_shares", "")))
+        intended_shares = Decimal(str(exit_intent.shares))
+        fresh_prob = float(exit_intent.fresh_prob)
+    except (AttributeError, InvalidOperation, TypeError, ValueError):
+        return "branchwise_dominant_sell_authority_invalid"
+    receipt = exit_intent.probability_receipt
+    if not isinstance(receipt, Mapping):
+        return "branchwise_dominant_sell_probability_receipt_missing"
+    receipt_content_identity = str(
+        receipt.get("probability_content_identity") or ""
+    ).strip()
+    receipt_witness_identity = str(
+        receipt.get("probability_witness_identity") or ""
+    ).strip()
+    if (
+        authority.position_id != str(getattr(position, "trade_id", "") or "")
+        or authority.token_id != exit_intent.token_id
+        or authority.held_shares != str(getattr(position, "effective_shares", "") or "")
+        or authority.probability_observed_at
+        != str(getattr(position, "last_monitor_at", "") or "")
+        or authority.probability_content_identity != receipt_content_identity
+        or authority.probability_witness_identity != receipt_witness_identity
+        or authority.support_identity != support_identity
+        or not held_shares.is_finite()
+        or not intended_shares.is_finite()
+        or held_shares <= 0
+        or intended_shares != held_shares
+        or not exit_intent.close_position
+        or exit_intent.fresh_prob_is_fresh is not True
+        or not math.isfinite(fresh_prob)
+        or not 0.0 <= fresh_prob <= 1e-12
+    ):
+        return "branchwise_dominant_sell_authority_mismatch"
+    if snapshot_context is not None:
+        submit_bid = _positive_decimal(
+            snapshot_context.get("executable_snapshot_orderbook_top_bid")
+        )
+        if (
+            submit_bid is None
+            or not LIVE_ORDER_MIN_UNIT_PRICE
+            <= submit_bid
+            <= LIVE_ORDER_MAX_UNIT_PRICE
+        ):
+            return "branchwise_dominant_sell_submit_bid_not_executable"
     return None
 
 
@@ -5777,6 +5988,7 @@ def execute_exit(
     exit_intent: ExitIntent | None = None,
     execution_evidence: ExitExecutionEvidence | None = None,
     global_sell_authority: GlobalSellExecutionAuthority | None = None,
+    branchwise_sell_authority: BranchwiseDominantSellAuthority | None = None,
     hard_fact_authority: object | None = None,
     global_sell_prefetched_orderbook: Mapping[str, object] | None = None,
     global_sell_required_snapshot_id: str | None = None,
@@ -5870,6 +6082,7 @@ def execute_exit(
         execution_evidence=execution_evidence,
         is_red_force_exit=is_red_force_exit,
         global_sell_authority=global_sell_authority,
+        branchwise_sell_authority=branchwise_sell_authority,
         hard_fact_authority=hard_fact_authority,
         global_sell_prefetched_orderbook=global_sell_prefetched_orderbook,
         global_sell_required_snapshot_id=global_sell_required_snapshot_id,
@@ -5887,8 +6100,9 @@ def _execute_live_exit(
     conn: sqlite3.Connection | None,
     execution_evidence: ExitExecutionEvidence | None,
     is_red_force_exit: bool,
-    global_sell_authority: GlobalSellExecutionAuthority | None,
-    hard_fact_authority: object | None,
+    global_sell_authority: GlobalSellExecutionAuthority | None = None,
+    branchwise_sell_authority: BranchwiseDominantSellAuthority | None = None,
+    hard_fact_authority: object | None = None,
     global_sell_prefetched_orderbook: Mapping[str, object] | None = None,
     global_sell_required_snapshot_id: str | None = None,
     exit_intent_already_recorded: bool = False,
@@ -5964,6 +6178,7 @@ def _execute_live_exit(
         )
     )
     global_authorized = False
+    branchwise_authorized = False
     continuing_existing_exit = bool(
         str(getattr(position, "last_exit_order_id", "") or "")
     )
@@ -5971,24 +6186,36 @@ def _execute_live_exit(
         live_non_red
         and not hard_fact_authorized
     ):
-        preliminary_error = _global_sell_execution_authority_shape_error(
-            global_sell_authority
+        branchwise_candidate = (
+            str(exit_intent.reason or "").strip()
+            == "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
         )
-        if preliminary_error is None:
-            global_authorized = (
-                str(exit_intent.reason or "") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
+        if branchwise_candidate:
+            preliminary_error = _branchwise_dominant_sell_authority_error(
+                position,
+                exit_intent,
+                branchwise_sell_authority,
             )
-            preliminary_error = (
-                None
-                if global_authorized
-                else "global_capital_optimal_sell_intent_required"
-            )
+            branchwise_authorized = preliminary_error is None
         else:
-            preliminary_error = (
-                preliminary_error
-                if str(exit_intent.reason or "") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
-                else "global_capital_optimal_sell_intent_required"
+            preliminary_error = _global_sell_execution_authority_shape_error(
+                global_sell_authority
             )
+            if preliminary_error is None:
+                global_authorized = (
+                    str(exit_intent.reason or "") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
+                )
+                preliminary_error = (
+                    None
+                    if global_authorized
+                    else "global_capital_optimal_sell_intent_required"
+                )
+            else:
+                preliminary_error = (
+                    preliminary_error
+                    if str(exit_intent.reason or "") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
+                    else "global_capital_optimal_sell_intent_required"
+                )
         if preliminary_error is not None and (
             not continuing_existing_exit
             or str(exit_intent.reason or "") == "GLOBAL_CAPITAL_OPTIMAL_SELL"
@@ -6090,6 +6317,13 @@ def _execute_live_exit(
                 conn=conn,
                 snapshot_context=snapshot_context,
                 now=_utcnow(),
+            )
+        elif branchwise_authorized:
+            authority_error = _branchwise_dominant_sell_authority_error(
+                position,
+                exit_intent,
+                branchwise_sell_authority,
+                snapshot_context=snapshot_context,
             )
         elif hard_fact_authorized or continuing_existing_exit:
             authority_error = None
@@ -6257,6 +6491,10 @@ def _execute_live_exit(
 
     current_market_price = exit_intent.current_market_price
     best_bid = exit_intent.best_bid
+    if branchwise_authorized:
+        submit_bid = float(snapshot_context["executable_snapshot_orderbook_top_bid"])
+        current_market_price = submit_bid
+        best_bid = submit_bid
 
     # Cancel stale sell order before retry.  M4: cancel uncertainty must not
     # fail open into a replacement sell.  When a command row is available, route
@@ -6386,7 +6624,7 @@ def _execute_live_exit(
                 return f"exit_blocked: cancel_{outcome.status.lower()}"
 
     if live_non_red and continuing_existing_exit and not (
-        global_authorized or hard_fact_authorized
+        global_authorized or branchwise_authorized or hard_fact_authorized
     ):
         logger.warning(
             "EXIT_REPLACEMENT_BLOCKED_FRESH_CAPITAL_AUTHORITY trade_id=%s",

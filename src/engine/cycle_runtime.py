@@ -8977,21 +8977,60 @@ def execute_monitoring_phase(
                 and local_exit_trigger == "SELL_REVERSAL"
                 and _posterior_support_zero_sell_dominates(pos, exit_context)
             )
+            branchwise_sell_authority = None
             if posterior_support_zero_direct_sell:
+                from src.execution.exit_lifecycle import (
+                    BranchwiseDominantSellAuthority,
+                )
+
                 exit_reason = "POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES"
                 local_exit_trigger = exit_reason
-                pos.applied_validations = list(
-                    dict.fromkeys(
-                        [
-                            *(pos.applied_validations or []),
-                            "posterior_support_zero_sell_dominates",
-                            "global_auction_comparison_inapplicable:branchwise_dominance",
-                        ]
+                try:
+                    branchwise_sell_authority = (
+                        BranchwiseDominantSellAuthority.from_current(
+                            pos,
+                            replace(exit_context, exit_reason=exit_reason),
+                        )
                     )
-                )
-                summary["monitor_branchwise_dominant_direct_sells"] = (
-                    summary.get("monitor_branchwise_dominant_direct_sells", 0) + 1
-                )
+                except (TypeError, ValueError) as exc:
+                    should_exit = False
+                    exit_reason = (
+                        "BRANCHWISE_DOMINANT_SELL_AUTHORITY_UNAVAILABLE:"
+                        f"{type(exc).__name__}:{exc}"
+                    )
+                    local_exit_trigger = exit_reason
+                    pos.applied_validations = list(
+                        dict.fromkeys(
+                            [
+                                *(pos.applied_validations or []),
+                                "branchwise_dominant_sell_authority_fail_closed",
+                            ]
+                        )
+                    )
+                    summary["monitor_branchwise_dominant_authority_failed"] = (
+                        summary.get(
+                            "monitor_branchwise_dominant_authority_failed", 0
+                        )
+                        + 1
+                    )
+                else:
+                    pos.applied_validations = list(
+                        dict.fromkeys(
+                            [
+                                *(pos.applied_validations or []),
+                                "posterior_support_zero_sell_dominates",
+                                "global_auction_comparison_inapplicable:branchwise_dominance",
+                                (
+                                    "branchwise_sell_authority:"
+                                    f"{branchwise_sell_authority.authority_identity}"
+                                ),
+                            ]
+                        )
+                    )
+                    summary["monitor_branchwise_dominant_direct_sells"] = (
+                        summary.get("monitor_branchwise_dominant_direct_sells", 0)
+                        + 1
+                    )
             statistical_sell_requires_global = (
                 should_exit
                 and not posterior_support_zero_direct_sell
@@ -9492,6 +9531,7 @@ def execute_monitoring_phase(
                     clob=clob,
                     conn=conn,
                     exit_intent=exit_intent,
+                    branchwise_sell_authority=branchwise_sell_authority,
                     hard_fact_authority=(
                         _hard_fact
                         if exit_trigger == "DAY0_HARD_FACT_BIN_DEAD"

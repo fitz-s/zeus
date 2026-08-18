@@ -6794,22 +6794,25 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
                 },
             )
         else:
+            probability_receipt = {
+                "probability_witness_identity": "probability-current",
+                "probability_content_identity": (
+                    "probability-content-current"
+                ),
+                "q_version": "probability-content-current",
+                "source_truth_identity": "source-current",
+                "band": {
+                    "alpha": 0.05,
+                    "basis": "test-band",
+                },
+            }
             setattr(
                 position,
                 "_day0_monitor_probability_receipt",
-                {
-                    "probability_witness_identity": "probability-current",
-                    "probability_content_identity": (
-                        "probability-content-current"
-                    ),
-                    "q_version": "probability-content-current",
-                    "source_truth_identity": "source-current",
-                    "band": {
-                        "alpha": 0.05,
-                        "basis": "test-band",
-                    },
-                },
+                probability_receipt,
             )
+            if posterior_support_zero:
+                setattr(position, "_monitor_probability_receipt", probability_receipt)
         return EdgeContext(
             p_raw=np.array([]),
             p_cal=np.array([]),
@@ -6893,6 +6896,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
         lambda: invalidations.append("venue_side_effect"),
     )
     execute_calls = []
+    execute_authorities = []
     same_turn_reauction_drain_attempts = []
     auction_completion_requests = []
     published_requests = []
@@ -6979,6 +6983,7 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
 
     def fake_execute_exit(*args, **kwargs):
         execute_calls.append(kwargs.get("position") or args[1])
+        execute_authorities.append(kwargs.get("branchwise_sell_authority"))
         return "exit_failed:test_stub"
 
     monkeypatch.setattr(
@@ -7239,6 +7244,9 @@ def test_current_global_monitor_sell_has_one_statistical_actuator_and_preserves_
             assert "posterior_support_zero_sell_dominates" in (
                 pos.applied_validations
             )
+            assert execute_authorities[0] is not None
+        else:
+            assert execute_authorities == [None]
         assert execute_calls == [pos]
         assert same_turn_reauction_drain_attempts == [pos.trade_id]
     if outcome not in {"blocked", "request_failed", "dust"}:
@@ -18263,6 +18271,133 @@ def test_local_exit_without_capital_certificate_cannot_reach_venue(monkeypatch):
     assert outcome == "exit_blocked: global_capital_optimal_sell_intent_required"
     assert called is False
     assert pos.exit_state == ""
+
+
+def test_zero_support_direct_sell_reaches_venue_with_typed_authority(monkeypatch):
+    """Exact zero support must not be vetoed by the global statistical SELL gate."""
+    from src.execution import exit_lifecycle
+
+    pos = _make_position(
+        state="holding",
+        direction="buy_no",
+        shares=70.1,
+        chain_shares=70.1,
+        token_id="singapore-yes",
+        no_token_id="singapore-no",
+    )
+    pos.last_monitor_at = "2026-08-18T16:24:22+00:00"
+    pos._current_global_held_probability_samples = (0.0, 0.0, 0.0)
+    receipt = {
+        "probability_content_identity": "final-daily-zero-content",
+        "probability_witness_identity": "final-daily-zero-witness",
+        "q_version": "final-daily-zero-v1",
+    }
+    context = ExitContext(
+        exit_reason="POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
+        fresh_prob=0.0,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.10,
+        current_market_price_is_fresh=True,
+        best_bid=0.10,
+        best_ask=0.13,
+        probability_receipt=receipt,
+        position_state="day0_window",
+        day0_active=True,
+    )
+    authority = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(
+        pos,
+        context,
+    )
+    submitted = []
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_latest_or_capture_exit_snapshot_context",
+        lambda *_args, **_kwargs: {
+            "executable_snapshot_id": "snapshot-submit-zero",
+            "executable_snapshot_hash": "hash-submit-zero",
+            "executable_snapshot_orderbook_top_bid": 0.08,
+            "executable_snapshot_orderbook_top_ask": 0.10,
+            "executable_snapshot_min_order_size": 5.0,
+        },
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_record_exit_intent_before_execution_gates",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def place(**kwargs):
+        submitted.append(kwargs)
+        return exit_lifecycle.OrderResult(
+            trade_id=pos.trade_id,
+            status="rejected",
+            reason="venue_no_fill",
+        )
+
+    monkeypatch.setattr(exit_lifecycle, "place_sell_order", place)
+
+    outcome = execute_exit(
+        _make_portfolio(pos),
+        pos,
+        context,
+        clob=object(),
+        exit_intent=exit_lifecycle.build_exit_intent(pos, context),
+        branchwise_sell_authority=authority,
+    )
+
+    assert submitted
+    assert submitted[0]["best_bid"] == pytest.approx(0.08)
+    assert submitted[0]["current_price"] == pytest.approx(0.08)
+    assert outcome == "sell_error: venue_no_fill"
+
+
+def test_zero_support_direct_sell_rejects_changed_probability_support(monkeypatch):
+    """A later non-zero draw invalidates the direct authority before submission."""
+    from src.execution import exit_lifecycle
+
+    pos = _make_position(
+        state="holding",
+        direction="buy_yes",
+        shares=10.0,
+        chain_shares=10.0,
+        token_id="held-yes",
+    )
+    pos.last_monitor_at = "2026-08-18T16:24:22+00:00"
+    pos._current_global_held_probability_samples = (0.0, 0.0)
+    receipt = {
+        "probability_content_identity": "zero-content",
+        "probability_witness_identity": "zero-witness",
+    }
+    context = ExitContext(
+        exit_reason="POSTERIOR_SUPPORT_ZERO_SELL_DOMINATES",
+        fresh_prob=0.0,
+        fresh_prob_is_fresh=True,
+        current_market_price=0.10,
+        current_market_price_is_fresh=True,
+        best_bid=0.10,
+        probability_receipt=receipt,
+    )
+    authority = exit_lifecycle.BranchwiseDominantSellAuthority.from_current(
+        pos,
+        context,
+    )
+    pos._current_global_held_probability_samples = (0.0, 1e-6)
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "place_sell_order",
+        lambda **_kwargs: pytest.fail("changed support reached venue"),
+    )
+
+    outcome = execute_exit(
+        _make_portfolio(pos),
+        pos,
+        context,
+        clob=object(),
+        exit_intent=exit_lifecycle.build_exit_intent(pos, context),
+        branchwise_sell_authority=authority,
+    )
+
+    assert outcome == "exit_blocked: branchwise_dominant_sell_authority_invalid"
 
 
 def test_spoofed_hold_authority_rejection_cannot_reach_venue(monkeypatch):
