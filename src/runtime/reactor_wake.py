@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Collection, Iterator
@@ -532,21 +532,32 @@ def held_sell_reauction_material_identity(
     ).hexdigest()
 
 
-def _held_sell_reauction_attempt_identity(material: dict[str, object]) -> str:
-    """Bind one V3 attempt to its trigger q/book context."""
+def _held_sell_reauction_attempt_identity(
+    material: dict[str, object],
+    *,
+    completion_deadline_at: str | None = None,
+) -> str:
+    """Bind one V3/V4 attempt to its trigger and actuation clock."""
+
+    identity = {
+        "scope_identity": material["scope_identity"],
+        "probability_content_identity": material[
+            "probability_content_identity"
+        ],
+        "probability_observed_at": material["probability_observed_at"],
+        "held_best_bid": material["held_best_bid"],
+        "bid_observed_at": material["bid_observed_at"],
+        "book_state": material["book_state"],
+    }
+    if (
+        int(material.get("schema_version", 1)) == HELD_SELL_REAUCTION_V4
+        and completion_deadline_at is not None
+    ):
+        identity["completion_deadline_at"] = str(completion_deadline_at)
 
     return hashlib.sha256(
         json.dumps(
-            {
-                "scope_identity": material["scope_identity"],
-                "probability_content_identity": material[
-                    "probability_content_identity"
-                ],
-                "probability_observed_at": material["probability_observed_at"],
-                "held_best_bid": material["held_best_bid"],
-                "bid_observed_at": material["bid_observed_at"],
-                "book_state": material["book_state"],
-            },
+            identity,
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
@@ -647,7 +658,15 @@ def make_held_sell_reauction_request(
             timezone.utc
         ).isoformat()
     attempt_identity = (
-        _held_sell_reauction_attempt_identity(material)
+        _held_sell_reauction_attempt_identity(
+            material,
+            completion_deadline_at=(
+                clean_completion_deadline
+                if int(material.get("schema_version", 1))
+                == HELD_SELL_REAUCTION_V4
+                else None
+            ),
+        )
         if int(material.get("schema_version", 1))
         in {HELD_SELL_REAUCTION_V3, HELD_SELL_REAUCTION_V4}
         else ""
@@ -686,6 +705,7 @@ def _clean_held_sell_reauction_requests(
 
         claimed_request_id = str(get("request_id") or "").strip()
         claimed_material_identity = str(get("material_identity") or "").strip()
+        claimed_attempt_identity = str(get("attempt_identity") or "").strip()
         generation = str(get("generation") or "").strip()
         try:
             material_identity = held_sell_reauction_material_identity(
@@ -735,6 +755,32 @@ def _clean_held_sell_reauction_requests(
             )
         except (TypeError, ValueError):
             continue
+        if claimed_attempt_identity != request.attempt_identity:
+            if request.schema_version != HELD_SELL_REAUCTION_V4:
+                continue
+            legacy_material = _held_sell_reauction_material(
+                position_id=request.position_id,
+                family=request.family,
+                probability_content_identity=request.probability_content_identity,
+                held_token_id=request.held_token_id,
+                held_best_bid=request.held_best_bid,
+                bid_observed_at=request.bid_observed_at,
+                schema_version=request.schema_version,
+                scope_identity=request.scope_identity,
+                book_state=request.book_state,
+                probability_observed_at=request.probability_observed_at,
+            )
+            if claimed_attempt_identity != _held_sell_reauction_attempt_identity(
+                legacy_material
+            ):
+                continue
+            # Compatibility only: pre-fix V4 persisted q/book identity without
+            # the deadline. Preserve that exact claimed identity until a fresh
+            # publisher advances the lineage to the deadline-bound form.
+            request = dataclass_replace(
+                request,
+                attempt_identity=claimed_attempt_identity,
+            )
         if not legacy_generation and claimed_request_id != request.request_id:
             continue
         if request.request_id in seen:
@@ -2158,11 +2204,11 @@ def persist_held_sell_reauction_receipts(
                         or lineage.generation != receipt.generation
                     ):
                         raise ValueError("HELD_SELL_REAUCTION_RECEIPT_LINEAGE_INVALID")
+                    latest = _v4_held_sell_reauction_lineage_request(lineage)
                     if (
                         receipt.status
                         == SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN
                     ):
-                        latest = _v4_held_sell_reauction_lineage_request(lineage)
                         if (
                             receipt.attempt_identity != latest.attempt_identity
                             or receipt.position_id != latest.position_id
@@ -2182,7 +2228,42 @@ def persist_held_sell_reauction_receipts(
                         attempt_identity=receipt.attempt_identity,
                     )
                     if existing is not None:
-                        continue
+                        latest_material = _held_sell_reauction_material(
+                            position_id=latest.position_id,
+                            family=latest.family,
+                            probability_content_identity=(
+                                latest.probability_content_identity
+                            ),
+                            held_token_id=latest.held_token_id,
+                            held_best_bid=latest.held_best_bid,
+                            bid_observed_at=latest.bid_observed_at,
+                            schema_version=latest.schema_version,
+                            scope_identity=latest.scope_identity,
+                            book_state=latest.book_state,
+                            probability_observed_at=(
+                                latest.probability_observed_at
+                            ),
+                        )
+                        legacy_deadline_collision = bool(
+                            existing.status == DEADLINE_EXPIRED
+                            and receipt.status
+                            in {
+                                POSITION_NO_LONGER_EXPOSED,
+                                SUPERSEDED_BY_DAY0_HARD_FACT_STRUCTURAL_WIN,
+                            }
+                            and latest.attempt_identity
+                            == _held_sell_reauction_attempt_identity(
+                                latest_material
+                            )
+                            and existing.completion_deadline_at
+                            != latest.completion_deadline_at
+                        )
+                        if not legacy_deadline_collision:
+                            continue
+                        # Pre-fix V4 omitted the deadline from attempt identity,
+                        # so a re-armed request could collide with an older
+                        # deadline receipt forever. Only an absorbing canonical
+                        # close/structural-win proof may repair that legacy slot.
                     temp = target.with_name(
                         f".{target.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
                     )

@@ -7999,6 +7999,135 @@ def test_v4_deadline_receipt_cannot_ack_another_attempt(tmp_path):
     )
 
 
+def test_v4_rearmed_deadline_changes_attempt_identity():
+    from src.runtime import reactor_wake
+
+    common = dict(
+        position_id="deadline-identity-position",
+        family=("Paris", "2026-08-13", "high"),
+        probability_content_identity="q-same",
+        held_token_id="deadline-identity-token",
+        held_best_bid=0.21,
+        bid_observed_at="2026-08-13T12:00:00+00:00",
+        probability_observed_at="2026-08-13T12:00:00+00:00",
+        schema_version=4,
+        generation="deadline-identity-generation",
+        scope_identity="deadline-identity-scope",
+        book_state="EXECUTABLE",
+    )
+    old = reactor_wake.make_held_sell_reauction_request(
+        **common,
+        completion_deadline_at="2026-08-13T12:00:30+00:00",
+    )
+    rearmed = reactor_wake.make_held_sell_reauction_request(
+        **common,
+        completion_deadline_at="2026-08-13T12:01:00+00:00",
+    )
+
+    assert old.request_id == rearmed.request_id
+    assert old.attempt_identity != rearmed.attempt_identity
+
+
+def test_v4_legacy_deadline_collision_accepts_absorbing_close_proof(tmp_path):
+    from src.runtime import reactor_wake
+
+    common = dict(
+        position_id="legacy-deadline-position",
+        family=("Paris", "2026-08-13", "high"),
+        probability_content_identity="q-legacy",
+        held_token_id="legacy-deadline-token",
+        held_best_bid=0.21,
+        bid_observed_at="2026-08-13T12:00:00+00:00",
+        probability_observed_at="2026-08-13T12:00:00+00:00",
+        schema_version=4,
+        generation="legacy-deadline-generation",
+        scope_identity="legacy-deadline-scope",
+        book_state="EXECUTABLE",
+    )
+
+    def legacy_request(deadline: str):
+        current = reactor_wake.make_held_sell_reauction_request(
+            **common,
+            completion_deadline_at=deadline,
+        )
+        material = reactor_wake._held_sell_reauction_material(
+            position_id=current.position_id,
+            family=current.family,
+            probability_content_identity=current.probability_content_identity,
+            held_token_id=current.held_token_id,
+            held_best_bid=current.held_best_bid,
+            bid_observed_at=current.bid_observed_at,
+            schema_version=current.schema_version,
+            scope_identity=current.scope_identity,
+            book_state=current.book_state,
+            probability_observed_at=current.probability_observed_at,
+        )
+        return replace(
+            current,
+            attempt_identity=reactor_wake._held_sell_reauction_attempt_identity(
+                material
+            ),
+        )
+
+    old = legacy_request("2026-08-13T12:00:30+00:00")
+    rearmed = legacy_request("2026-08-13T12:01:00+00:00")
+    assert old.attempt_identity == rearmed.attempt_identity
+    path = tmp_path / "legacy-deadline-wake.json"
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        held_sell_reauction_requests=(old,),
+    )
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (
+            reactor_wake.HeldSellReauctionReceipt(
+                request_id=old.request_id,
+                material_identity=old.material_identity,
+                generation=old.generation,
+                attempt_identity=old.attempt_identity,
+                completion_deadline_at=old.completion_deadline_at,
+                schema_version=4,
+                scope_identity=old.scope_identity,
+                book_state="EXECUTABLE",
+                status=reactor_wake.DEADLINE_EXPIRED,
+                reason="HELD_SELL_ACTUATION_DEADLINE_EXPIRED",
+            ),
+        ),
+        path=path,
+    )
+    reactor_wake.publish_reactor_wake(
+        source="held_position_monitor",
+        reason=reactor_wake.GLOBAL_AUCTION_COMPLETION_WAKE_REASON,
+        path=path,
+        held_sell_reauction_requests=(rearmed,),
+    )
+    assert reactor_wake.persist_held_sell_reauction_receipts(
+        (
+            reactor_wake.HeldSellReauctionReceipt(
+                request_id=rearmed.request_id,
+                material_identity=rearmed.material_identity,
+                generation=rearmed.generation,
+                attempt_identity=rearmed.attempt_identity,
+                schema_version=4,
+                scope_identity=rearmed.scope_identity,
+                book_state="EXECUTABLE",
+                status=reactor_wake.POSITION_NO_LONGER_EXPOSED,
+                reason=(
+                    reactor_wake.SELL_OBLIGATION_ENDED_BY_CANONICAL_CHAIN_ZERO
+                ),
+                lifecycle_phase="economically_closed",
+                chain_state="synced",
+                chain_shares=0.0,
+            ),
+        ),
+        path=path,
+    )
+    assert reactor_wake.held_sell_reauction_requests_completed(
+        (rearmed,), path=path
+    )
+
+
 def test_v4_earliest_deadline_does_not_terminalize_later_attempt():
     from src.engine import global_batch_runtime
     from src.events import reactor
