@@ -2400,11 +2400,12 @@ class GlobalSellExecutionAuthority:
                 != jit_witness.witness_identity
             ):
                 raise ValueError("GLOBAL_SELL_EXECUTION_MAKER_WITNESS_INVALID")
+            # Snapshot id/hash and candidate binding may change on the final
+            # book recapture; each witness already proves its own exact binding.
             if any(
                 getattr(selected_witness, field) != getattr(jit_witness, field)
                 for field in (
                     "asset_epoch_identity",
-                    "book_hash",
                     "limit_price",
                     "rest_deadline_minutes",
                     "outcomes",

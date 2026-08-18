@@ -634,9 +634,12 @@ def _current_global_market_authority(
     side: str,
     gamma_get: Callable[..., object],
     clob_market_get: Callable[..., object],
-    raw_book: Mapping[str, object],
-    captured_at_utc: datetime,
+    raw_book: Mapping[str, object] | None,
+    captured_at_utc: datetime | None,
     timeout: float,
+    raw_book_provider: (
+        Callable[[], tuple[Mapping[str, object], datetime]] | None
+    ) = None,
 ) -> _CurrentGlobalMarketAuthority:
     """Capture exact current Gamma/CLOB/book submit authority.
 
@@ -694,10 +697,6 @@ def _current_global_market_authority(
     selected_side = str(side or "").strip().upper()
     if selected_side not in {"YES", "NO"}:
         raise ValueError("GLOBAL_JIT_MARKET_SIDE_INVALID")
-    if not isinstance(raw_book, Mapping):
-        raise ValueError("GLOBAL_JIT_MARKET_BOOK_INVALID")
-    if captured_at_utc.tzinfo is None:
-        raise ValueError("GLOBAL_JIT_MARKET_CLOCK_INVALID")
     try:
         raw_clob_market = clob_market_get(condition_id, timeout=float(timeout))
     except Exception as exc:  # noqa: BLE001 - authority transport is fail closed
@@ -722,6 +721,20 @@ def _current_global_market_authority(
     market_closed = _boolish_market_field(dict(market), "closed", "isClosed")
     if market_active is None or market_closed is None:
         raise ValueError("GLOBAL_JIT_MARKET_LIFECYCLE_INVALID")
+    if raw_book_provider is not None:
+        if raw_book is not None or captured_at_utc is not None:
+            raise ValueError("GLOBAL_JIT_MARKET_BOOK_AUTHORITY_AMBIGUOUS")
+        try:
+            provided = raw_book_provider()
+        except Exception as exc:  # noqa: BLE001 - authority transport
+            raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE") from exc
+        if not isinstance(provided, tuple) or len(provided) != 2:
+            raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE")
+        raw_book, captured_at_utc = provided
+    if not isinstance(raw_book, Mapping):
+        raise ValueError("GLOBAL_JIT_MARKET_BOOK_INVALID")
+    if not isinstance(captured_at_utc, datetime) or captured_at_utc.tzinfo is None:
+        raise ValueError("GLOBAL_JIT_MARKET_CLOCK_INVALID")
     for field, names, expected in (
         ("accepting_orders", ("acceptingOrders", "accepting_orders"), True),
         (
@@ -13061,26 +13074,36 @@ def _submit_current_global_sell(
             public_http_timeout=timeout,
             public_request_priority=RequestPriority.HELD_REDUCE_ONLY,
         ) as clob:
-            if jit_handoff is not None:
-                # The preflight token already owns this exact Gamma+CLOB+book
-                # cut. Actuation may create the submit client, but it must not
-                # fetch a second authority instant.
+            if jit_handoff is not None and preflight_only:
+                # A preflight retry may reuse its still-current exact venue
+                # cut.  Actuation must recapture the book after the slower
+                # probability/wealth/position checks above: the preflight book
+                # is ranking evidence, not submit-time executable truth.
                 current_candidate = jit_handoff.candidate
                 raw_book = dict(jit_handoff.raw_book)
                 market_authority = jit_handoff.authority
                 book_captured_at_utc = market_authority.snapshot.captured_at
             else:
-                try:
-                    books = clob.get_orderbook_snapshots(
-                        [str(getattr(candidate, "token_id", "") or "")],
-                        timeout=timeout,
-                    )
-                except Exception as exc:  # noqa: BLE001 - authority transport
-                    raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE") from exc
-                book_captured_at_utc = datetime.now(UTC)
-                raw_book = books.get(str(getattr(candidate, "token_id", "") or ""))
-                if not isinstance(raw_book, Mapping):
-                    raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE")
+                raw_book: dict[str, object] = {}
+                candidate_token_id = str(
+                    getattr(candidate, "token_id", "") or ""
+                )
+
+                def _capture_final_sell_book():
+                    try:
+                        books = clob.get_orderbook_snapshots(
+                            [candidate_token_id],
+                            timeout=timeout,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - authority transport
+                        raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE") from exc
+                    current_book = books.get(candidate_token_id)
+                    if not isinstance(current_book, Mapping):
+                        raise ValueError("GLOBAL_JIT_RAW_BOOK_UNAVAILABLE")
+                    raw_book.clear()
+                    raw_book.update(dict(current_book))
+                    return raw_book, datetime.now(UTC)
+
                 try:
                     gamma = _global_current_gamma_client(timeout_seconds=timeout)
                 except Exception as exc:  # noqa: BLE001 - authority transport
@@ -13103,10 +13126,12 @@ def _submit_current_global_sell(
                     side=str(getattr(candidate, "side", "") or ""),
                     gamma_get=_held_gamma_get,
                     clob_market_get=clob.get_held_clob_market_info,
-                    raw_book=raw_book,
-                    captured_at_utc=book_captured_at_utc,
+                    raw_book=None,
+                    captured_at_utc=None,
                     timeout=timeout,
+                    raw_book_provider=_capture_final_sell_book,
                 )
+                book_captured_at_utc = market_authority.snapshot.captured_at
                 try:
                     current_candidate = _global_sell_candidate_from_raw_book(
                         candidate,

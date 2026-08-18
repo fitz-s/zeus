@@ -32567,10 +32567,11 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         authority_scope="runtime_exposure",
         positions=[position],
     )
-    monkeypatch.setattr(
-        era,
-        "_current_global_actuation_prepared_family",
-        lambda *_, **__: (
+    actuation_steps = []
+
+    def current_prepared_family(*_args, **_kwargs):
+        actuation_steps.append("probability")
+        return (
             SimpleNamespace(
                 day0_exit_authority_status="not_applicable",
                 sell_action_authority_identity=(
@@ -32578,7 +32579,12 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
                 ),
             ),
             {},
-        ),
+        )
+
+    monkeypatch.setattr(
+        era,
+        "_current_global_actuation_prepared_family",
+        current_prepared_family,
     )
     monkeypatch.setattr(
         era,
@@ -32591,6 +32597,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
 
     class Clob:
         ctf_units = 10 * 1_000_000
+        book_hash = "jit-sell-hash"
 
         def __init__(self, **kwargs):
             if kwargs:
@@ -32606,12 +32613,13 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
             return False
 
         def get_orderbook_snapshots(self, tokens, *, timeout):
+            actuation_steps.append("book")
             assert timeout >= 1.0
             assert tokens == ["yes-token"]
             return {
                 "yes-token": {
                     "asset_id": "yes-token",
-                    "hash": "jit-sell-hash",
+                    "hash": type(self).book_hash,
                     "tick_size": tick,
                     "min_order_size": "5",
                     "bids": [
@@ -32622,6 +32630,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
             }
 
         def get_held_clob_market_info(self, condition_id, *, timeout=None):
+            actuation_steps.append("clob_metadata")
             assert condition_id == "condition-1"
             return {
                 "condition_id": condition_id,
@@ -32669,7 +32678,7 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         assert authority.jit_candidate.executable_sell_curve.book_hash
         assert kwargs["global_sell_prefetched_orderbook"] == {
             "asset_id": "yes-token",
-            "hash": "jit-sell-hash",
+            "hash": Clob.book_hash,
             "tick_size": tick,
             "min_order_size": "5",
             "bids": [
@@ -32801,6 +32810,10 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
     assert expired.reason == "HELD_SELL_DEADLINE_EXPIRED"
     assert expired.venue_call_started is False
     assert exits == []
+    assert isinstance(preflight.global_jit_candidate, era._GlobalJitHandoff)
+    assert preflight.global_jit_candidate.raw_book["hash"] == "jit-sell-hash"
+    Clob.book_hash = "jit-sell-hash-actuation"
+    final_step_start = len(actuation_steps)
     receipt = era._submit_current_global_sell(
         event,
         decision_time=at,
@@ -32817,7 +32830,14 @@ def test_global_sell_adapter_bypasses_entry_lane_and_uses_reduce_only_exit(
         hard_authority_cancelled=lambda: False,
         global_claimed_at=global_claimed_at,
         global_claim_attempt_count=global_claim_attempt_count,
+        jit_handoff=preflight.global_jit_candidate,
     )
+    assert actuation_steps[final_step_start:] == [
+        "probability",
+        "clob_metadata",
+        "book",
+    ]
+    assert preflight.global_jit_candidate.raw_book["hash"] == "jit-sell-hash"
     assert receipt.submitted is True, receipt.reason
     assert receipt.side_effect_status == "EXIT_SUBMITTED"
     assert receipt.reason == "GLOBAL_SELL_EXIT:sell_placed: order=sell-1"

@@ -1937,3 +1937,32 @@ publication barrier.
   preserve the proven sibling axis, both remain non-actionable, focused live
   safety tests, planning lock, compilation, and diff checks pass before exact-SHA
   hot-fix deployment.
+
+### Slice B102 — Recapture held SELL book after slow authority work (2026-08-18)
+
+- Live defect: Dallas and Kuala Lumpur repeatedly held fresh negative edge with
+  executable 0.28–0.67 bids, but exact held-SELL completion attempts expired.
+  Kuala Lumpur later reached two FAK submits whose immutable JIT books contained
+  enough depth; both commands were created about five seconds after those book
+  captures and the venue reported no match. A post-fix Toronto fill reproduced
+  the same snapshot-to-command delay, proving the latency shape remained live.
+- Structural invariant: probability, wealth, inventory, and claim fencing run
+  before the final executable-book read. A preflight book ranks the candidate
+  but cannot authorize a later venue submit. Actuation recaptures the book and
+  may preserve the selected SELL only when the current executable prefix covers
+  the same shares for no less proceeds and no worse limit; otherwise the
+  existing global reauction path owns the changed decision.
+- Maker witness boundary: the final snapshot id/hash and candidate binding are
+  intentionally rebound to the final book. The immutable comparison retains
+  asset epoch, limit, deadline, outcome distribution, model/sample provenance,
+  and validity interval; comparing the old and final book hash would make every
+  normal maker-book update self-veto before submit.
+- SCOPE: one preflighted global held-position SELL actuation. DRAIN: a no-fill,
+  worsened prefix, identity change, or unavailable final book returns typed
+  reauction evidence and the exact durable wake retries it. RESET: a fresh final
+  book with non-worsened economics constructs new immutable submit authority.
+- Forbidden: stop-loss thresholds, stale-book reuse, local statistical SELL
+  authority, weakening the live price band, or submitting after economics
+  worsen. Acceptance: the regression antibody proves an existing preflight
+  handoff cannot suppress a post-probability book recapture, and the fresh book
+  remains bound through the existing snapshot, authority, and executor gates.
