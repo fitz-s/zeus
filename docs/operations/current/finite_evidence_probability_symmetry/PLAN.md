@@ -25,6 +25,13 @@ global cut carrying conditioning inside 15 minutes.  Held-position redecision
 and reduce-only SELL remain executable, and unrelated families continue to
 compete for the single global order.
 
+Live verification exposed one remaining type boundary: expiry initially surfaced
+as a generic `ValueError`, so the reactor retried the stale family at the head of
+the queue instead of completing the global cut without it.  It is now a typed
+`FamilyAuthorityUnavailable` reason.  SCOPE is that one family; DRAIN is the
+same next causal station print; RESET is the next current conditioning witness.
+The cut continues across every other eligible family, held SELL, HOLD, and CASH.
+
 ## 2026-08-17 Side-effect-free rejected commands need a fresh carrier
 
 A Warsaw maker continuation remained the global positive-growth winner after

@@ -26723,6 +26723,14 @@ def test_global_batch_claims_unpaged_cut_time_winner_and_continues_actuation(
             (
                 "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
                 "FamilyAuthorityUnavailable:"
+                "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE"
+            ),
+            True,
+        ),
+        (
+            (
+                "GLOBAL_CURRENT_PROBABILITY_PREPARE_FAILED:"
+                "FamilyAuthorityUnavailable:"
                 "GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH"
             ),
             True,
@@ -26874,6 +26882,8 @@ def test_global_batch_excludes_typed_current_q_ineligible_family(
                     raise ValueError(
                         "GLOBAL_DAY0_CONDITIONING_OBSERVATION_TIME_MISMATCH"
                     )
+                if "FAST_OBSERVATION_ENTRY_STALE" in ineligible_reason:
+                    raise ValueError("GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE")
                 if "CONDITIONING_OBSERVATION_MISMATCH" in ineligible_reason:
                     raise ValueError("GLOBAL_DAY0_CONDITIONING_OBSERVATION_MISMATCH")
                 if "PROVISIONAL_REVISION_LIKELIHOOD" in ineligible_reason:
