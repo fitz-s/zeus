@@ -4856,7 +4856,7 @@ def _day0_absorbing_hard_fact_overlay(
 
 
 def _would_use_day0_monitor_lane(pos: Position, city, target_d) -> bool:
-    """Whether same-day monitor probability must be observation-aware Day0 belief."""
+    """Whether held probability must use current target-day observation truth."""
 
     return (
         pos.entry_method == EntryMethod.DAY0_OBSERVATION.value
@@ -4866,6 +4866,10 @@ def _would_use_day0_monitor_lane(pos: Position, city, target_d) -> bool:
         )
         or (
             _is_position_target_local_day(pos, city, target_d)
+            and _city_supports_executable_day0_observation(city)
+        )
+        or (
+            _is_position_after_target_local_day(pos, city, target_d)
             and _city_supports_executable_day0_observation(city)
         )
     )

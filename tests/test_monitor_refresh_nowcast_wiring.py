@@ -407,7 +407,7 @@ def test_day0_monitor_reads_exact_current_global_probability_witness(
     monkeypatch.setattr(
         state_db,
         "get_forecasts_connection_read_only",
-        lambda: forecasts,
+        lambda **_kwargs: forecasts,
     )
 
     witness = SimpleNamespace(
@@ -1406,6 +1406,81 @@ def test_identified_day0_monitor_fails_closed_without_global_probability(
     )
     assert reseeds == [
         {"city": "Paris", "target_date": "2026-07-14", "metric": "high"}
+    ]
+
+
+def test_pending_exit_after_target_day_keeps_exact_global_probability_authority(
+    monkeypatch,
+) -> None:
+    """Lifecycle transition cannot demote final observation truth to stale forecast."""
+    from src.engine import position_belief
+
+    pos = _make_position()
+    pos.state = "pending_exit"
+    pos.city = "Shanghai"
+    pos.target_date = "2026-08-18"
+    pos.entry_method = "qkernel_spine"
+    pos.condition_id = "0x" + "38" * 32
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_day0_absorbing_hard_fact_overlay",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_is_position_target_local_day",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_is_position_after_target_local_day",
+        lambda *args, **kwargs: True,
+    )
+
+    def current_global(position, **kwargs):
+        refreshed = replace(position)
+        refreshed.selected_method = (
+            monitor_refresh_module.SELECTED_METHOD_FINAL_DAILY_OBSERVATION_EXACT
+        )
+        refreshed.applied_validations = [
+            "probability_authority="
+            "final_daily_observation_exact_global_probability_v1"
+        ]
+        monitor_refresh_module._set_monitor_probability_fresh(refreshed, True)
+        return 0.0, refreshed, True
+
+    monkeypatch.setattr(
+        monitor_refresh_module,
+        "_refresh_current_global_day0_probability",
+        current_global,
+    )
+    monkeypatch.setattr(
+        position_belief,
+        "load_replacement_belief",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("final observation authority must dominate replacement belief")
+        ),
+    )
+
+    probability, refreshed, fresh = monitor_refresh_module.monitor_probability_refresh(
+        pos,
+        conn=object(),
+        city=SimpleNamespace(
+            name="Shanghai",
+            timezone="Asia/Shanghai",
+            settlement_source_type="wu_icao",
+        ),
+        target_d=date(2026, 8, 18),
+    )
+
+    assert probability == pytest.approx(0.0)
+    assert fresh is True
+    assert (
+        refreshed.selected_method
+        == monitor_refresh_module.SELECTED_METHOD_FINAL_DAILY_OBSERVATION_EXACT
+    )
+    assert refreshed.applied_validations == [
+        "probability_authority=final_daily_observation_exact_global_probability_v1"
     ]
 
 
