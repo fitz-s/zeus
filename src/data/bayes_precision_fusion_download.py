@@ -579,14 +579,18 @@ def _can_split_location_batch(
 
 
 def bayes_precision_fusion_quota_cooldown_seconds() -> int:
-    """Return time until the source-clock quota lane can make another call."""
+    """Return time until either exact-current Open-Meteo transport is available."""
 
     with _BPF_OPENMETEO_QUOTA_TRACKER.priority_lane():
-        return int(
+        waits = (
             _BPF_OPENMETEO_QUOTA_TRACKER.retry_after_seconds(
                 "single-runs-api.open-meteo.com/v1/forecast"
-            )
+            ),
+            _BPF_OPENMETEO_QUOTA_TRACKER.retry_after_seconds(
+                "api.open-meteo.com/v1/forecast"
+            ),
         )
+    return 0 if 0 in waits else int(min(waits))
 
 
 def bayes_precision_fusion_source_clock_quota_priority():

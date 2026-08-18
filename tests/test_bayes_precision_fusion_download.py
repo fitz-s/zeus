@@ -663,6 +663,26 @@ def test_single_runs_quota_rejects_standard_payload_when_frozen_run_mismatches(
     ][0]
 
 
+def test_bpf_preflight_waits_only_when_both_current_transports_are_blocked(
+    monkeypatch,
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+
+    waits = {
+        "single-runs-api.open-meteo.com/v1/forecast": 300,
+        "api.open-meteo.com/v1/forecast": 0,
+    }
+    monkeypatch.setattr(
+        dl._BPF_OPENMETEO_QUOTA_TRACKER,
+        "retry_after_seconds",
+        lambda endpoint: waits[endpoint],
+    )
+
+    assert dl.bayes_precision_fusion_quota_cooldown_seconds() == 0
+    waits["api.open-meteo.com/v1/forecast"] = 40
+    assert dl.bayes_precision_fusion_quota_cooldown_seconds() == 40
+
+
 def test_nbm_standard_fallback_discards_payload_when_metadata_changes(
     monkeypatch,
 ) -> None:
