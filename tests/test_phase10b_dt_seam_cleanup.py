@@ -1421,6 +1421,74 @@ class TestRCPV2RowCountSensor:
         assert open_orders["count"] == 0
         assert open_orders["orders"] == []
 
+    def test_current_open_entry_orders_includes_incremental_order_on_active_position(self):
+        """Position-level fill status cannot hide a later command-specific live add."""
+        from src.observability import status_summary as status_summary_module
+
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE venue_commands (
+                command_id TEXT PRIMARY KEY,
+                venue_order_id TEXT,
+                intent_kind TEXT,
+                state TEXT,
+                side TEXT,
+                size REAL,
+                price REAL,
+                position_id TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            CREATE TABLE position_current (
+                position_id TEXT PRIMARY KEY,
+                phase TEXT,
+                order_status TEXT,
+                city TEXT,
+                target_date TEXT,
+                strategy_key TEXT
+            );
+            CREATE TABLE venue_order_facts (
+                fact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                venue_order_id TEXT,
+                command_id TEXT,
+                state TEXT,
+                remaining_size TEXT,
+                matched_size TEXT,
+                source TEXT,
+                observed_at TEXT,
+                ingested_at TEXT,
+                local_sequence INTEGER
+            );
+            INSERT INTO position_current VALUES (
+                'pos-add', 'active', 'filled', 'London', '2026-08-19',
+                'forecast_qkernel_entry'
+            );
+            INSERT INTO venue_commands VALUES (
+                'cmd-add', 'ord-add', 'ENTRY', 'ACKED', 'BUY', 73.05, 0.20,
+                'pos-add', '2026-08-18T04:09:30+00:00',
+                '2026-08-18T04:09:53+00:00'
+            );
+            INSERT INTO venue_order_facts VALUES (
+                NULL, 'ord-add', 'cmd-add', 'LIVE', '73.05', '0', 'WS_USER',
+                '2026-08-18T04:09:53+00:00',
+                '2026-08-18T04:09:53+00:00', 1
+            );
+            """
+        )
+
+        open_orders = status_summary_module._query_current_open_entry_orders(conn)
+
+        assert open_orders["status"] == "ok"
+        assert open_orders["count"] == 1
+        assert open_orders["pending_entry_count"] == 0
+        assert open_orders["by_strategy"] == {"forecast_qkernel_entry": 1}
+        assert open_orders["orders"][0]["command_id"] == "cmd-add"
+        assert open_orders["orders"][0]["phase"] == "active"
+        assert open_orders["orders"][0]["order_status"] == "filled"
+        assert open_orders["orders"][0]["venue_state"] == "LIVE"
+
     def test_cycle_pulse_latest_fact_queries_are_command_driven(self):
         """Current-order visibility must not window-scan all historical facts."""
         import inspect

@@ -4,6 +4,25 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-17 Incremental live entries remain visible after the first fill
+
+The canonical command and venue-fact rows showed five current open entry
+orders, while `status_summary.execution.current_open_entry_orders` reported
+zero.  The derived query incorrectly treated `position_current.order_status`
+as if it described every later command: an active position legitimately keeps
+the original entry's `filled` status while a separately identified incremental
+ENTRY command rests at the venue.
+
+Current-order visibility now uses the position-level terminal order status only
+while the position is still `pending_entry`.  For active and Day0 positions,
+the exact command state and its latest command-specific venue fact decide
+whether an incremental order is open; terminal lifecycle phases still exclude
+closed positions.  This changes only the derived operator read model, not
+selection, sizing, reservations, submission, cancellation, or venue state.
+Acceptance requires an active position with `order_status=filled` and a later
+LIVE ENTRY fact to appear in the projection, while terminal venue facts and
+terminal lifecycle phases remain excluded.
+
 ## 2026-08-17 Persisted fast observations retain the 15-minute ENTRY lifetime
 
 Shanghai Aug-18 HIGH NO filled at 03:33:54 UTC from a Day0 probability whose

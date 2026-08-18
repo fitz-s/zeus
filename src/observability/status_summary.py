@@ -1121,7 +1121,16 @@ def _query_current_open_entry_orders(conn) -> dict:
         venue_state = str(row["venue_state"] or "")
         if phase.lower() in _TERMINAL_ENTRY_PHASES:
             continue
-        if order_status.lower() in _TERMINAL_ENTRY_ORDER_STATUSES:
+        # position_current.order_status describes the position's original
+        # entry, not necessarily this command.  An active/day0 position may
+        # have a later incremental ENTRY resting at the venue while the
+        # position still says ``filled``.  Only use that projection to retire
+        # the command while the position itself is still pending entry;
+        # command state plus the command-specific venue fact govern additions.
+        if (
+            phase.lower() == "pending_entry"
+            and order_status.lower() in _TERMINAL_ENTRY_ORDER_STATUSES
+        ):
             continue
         if venue_state.upper() in _TERMINAL_VENUE_ORDER_STATES:
             continue
