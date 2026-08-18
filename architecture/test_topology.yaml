@@ -2858,6 +2858,9 @@ test_metadata:
       canonical authorization for a subsequent held monitor projection.
       Urgent monitor handoff coverage proves an orphaned preempt request cannot
       make the next periodic full-book owner yield without a live urgent owner.
+      Canonical held-monitor cadence debt stays scoped to its exact stale weather
+      families while transient full-book fairness/handoff debt retains reactor
+      admission priority.
       Also proves that the control reader reconstructs the engine's keyed
       candidate-index delta before validating the canonical receipt hash.
       The latest global-auction receipt lookup uses the timestamp index for an
@@ -2869,7 +2872,7 @@ test_metadata:
       is emitted with the failing surface name. Call site in _write_heartbeat() in
       src/main.py surfaces composite to state/live_health_composite.json each cycle.
     created: 2026-05-19
-    last_reused_or_audited: 2026-08-04
+    last_reused_or_audited: 2026-08-18
 
   tests/test_posterior_starvation_alert.py:
     modules: [control]

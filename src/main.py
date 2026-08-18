@@ -596,13 +596,9 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     if job_name not in _HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS:
         return False
 
-    monitor_debt_pending = (
-        _held_position_monitor_canonical_debt.is_set()
-        or _periodic_held_position_monitor_fairness_debt.is_set()
-    )
     exact_held_sell_pending = bool(
         job_name == "edli_event_reactor"
-        and monitor_debt_pending
+        and _periodic_held_position_monitor_fairness_debt.is_set()
         and _exact_held_sell_completion_pending()
     )
 
@@ -612,16 +608,16 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     ):
         monitor_block_reason = _held_position_monitor_entry_block_reason()
         if monitor_block_reason is not None:
-            # SCOPE: ordinary replayable EDLI auctions while current held
-            # exposure lacks canonical redecision authority. An already
-            # durable exact held-SELL request is the output of a completed
-            # fresh q/book redecision, not a competitor for that evidence; it
-            # must reach the existing reduce-only SELL/HOLD/CASH cut before its
-            # actuation clock expires. DRAIN: exact debt runs one reduce-only
-            # cut; otherwise the dedicated monitor recovery cadence refreshes
-            # the full held book. RESET: its exact receipt removes the bypass,
-            # or a canonical clean read clears this event. Unreadable wake debt
-            # fails closed through _exact_held_sell_completion_pending().
+            # SCOPE: canonical stale evidence blocks BUY only in the exact
+            # overdue weather families (or every BUY family when that scope is
+            # unreadable); _edli_event_reactor_cycle supplies those blocks and
+            # retains SELL/HOLD/CASH. It is not monitor-writer ownership and
+            # cannot suppress unrelated fresh families. DRAIN: the dedicated
+            # monitor recovery cadence refreshes the overdue families while
+            # the reactor compares the remaining executable set. RESET: a
+            # canonical clean read clears this event; every new cut rebuilds
+            # the family scope. Transient fairness/handoff debt below remains
+            # the only admission-level monitor preemption.
             if exact_held_sell_pending:
                 logger.info(
                     "edli_event_reactor retaining exact held-SELL completion "
@@ -630,11 +626,10 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
                 )
             else:
                 logger.warning(
-                    "edli_event_reactor deferred: canonical held-position monitor "
-                    "debt owns current-capital redecision (%s)",
+                    "edli_event_reactor retaining scoped auction while canonical "
+                    "held-position monitor debt remains (%s)",
                     monitor_block_reason,
                 )
-                return True
         else:
             _held_position_monitor_canonical_debt.clear()
 
@@ -4536,6 +4531,7 @@ def _edli_event_reactor_cycle(
         _settings_section("edli", {})
     )
     canonical_monitor_entry_block = _held_position_monitor_entry_block_reason()
+    canonical_monitor_debt_at_start = canonical_monitor_entry_block is not None
     if canonical_monitor_entry_block is None:
         _held_position_monitor_canonical_debt.clear()
         monitor_entry_block = None
@@ -4588,18 +4584,22 @@ def _edli_event_reactor_cycle(
             lambda: (
                 _periodic_held_position_monitor_handoff_pending.is_set()
                 or (
-                    monitor_entry_block is None
+                    not canonical_monitor_debt_at_start
+                    and monitor_entry_block is None
                     and _held_position_monitor_debt_pending()
                 )
             )
         ),
         held_position_monitor_debt_pending=(
-            # Canonical stale evidence is already a current-capital debt, not
-            # merely a BUY veto. Let the replayable auction yield at its next
-            # safe point so monitor redecision can refresh SELL/HOLD authority.
+            # Debt already present at admission is carried by the exact family
+            # BUY block. Debt that first appears after admission cancels this
+            # replayable cut so the next cut can rebuild that scope.
             lambda: (
                 _periodic_held_position_monitor_fairness_debt.is_set()
-                or _held_position_monitor_debt_pending()
+                or (
+                    not canonical_monitor_debt_at_start
+                    and _held_position_monitor_debt_pending()
+                )
             )
         ),
     )
@@ -6328,15 +6328,11 @@ def _edli_reactor_wake_poll_once() -> bool:
         read_reactor_wake,
     )
 
-    ordinary_reactor_blocked_by_monitor_debt = (
+    reactor_blocked_by_monitor_fairness = (
         _periodic_held_position_monitor_fairness_debt.is_set()
-        or (
-            _held_position_monitor_canonical_debt.is_set()
-            and _held_position_monitor_entry_block_reason() is not None
-        )
     )
     exact_held_sell_wake_ids: frozenset[str] = frozenset()
-    if ordinary_reactor_blocked_by_monitor_debt:
+    if reactor_blocked_by_monitor_fairness:
         try:
             exact_held_sell_wake_ids = frozenset(
                 exact_held_sell_completion_wake_ids(fail_on_error=True)
@@ -6391,20 +6387,20 @@ def _edli_reactor_wake_poll_once() -> bool:
             wake = (
                 read_reactor_wake(
                     exclude_wake_ids=excluded_wake_ids,
-                    prefer_exact_held_sell=ordinary_reactor_blocked_by_monitor_debt,
+                    prefer_exact_held_sell=reactor_blocked_by_monitor_fairness,
                     prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
                     fail_on_error=(
                         prefer_forecast_carrier_progress
-                        or ordinary_reactor_blocked_by_monitor_debt
+                        or reactor_blocked_by_monitor_fairness
                     ),
                 )
                 if excluded_wake_ids
                 else read_reactor_wake(
-                    prefer_exact_held_sell=ordinary_reactor_blocked_by_monitor_debt,
+                    prefer_exact_held_sell=reactor_blocked_by_monitor_fairness,
                     prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
                     fail_on_error=(
                         prefer_forecast_carrier_progress
-                        or ordinary_reactor_blocked_by_monitor_debt
+                        or reactor_blocked_by_monitor_fairness
                     ),
                 )
             )
@@ -6412,11 +6408,11 @@ def _edli_reactor_wake_poll_once() -> bool:
             excluded_wake_ids = frozenset(excluded_wake_ids | global_yield_ids)
             wake = read_reactor_wake(
                 exclude_wake_ids=excluded_wake_ids,
-                prefer_exact_held_sell=ordinary_reactor_blocked_by_monitor_debt,
+                prefer_exact_held_sell=reactor_blocked_by_monitor_fairness,
                 prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
                 fail_on_error=(
                     prefer_forecast_carrier_progress
-                    or ordinary_reactor_blocked_by_monitor_debt
+                    or reactor_blocked_by_monitor_fairness
                 ),
             )
         if (
@@ -6449,7 +6445,7 @@ def _edli_reactor_wake_poll_once() -> bool:
         )
         return False
     if (
-        ordinary_reactor_blocked_by_monitor_debt
+        reactor_blocked_by_monitor_fairness
         and (
             wake is None
             or wake.wake_id not in exact_held_sell_wake_ids

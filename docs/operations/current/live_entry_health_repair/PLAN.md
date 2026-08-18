@@ -2172,3 +2172,29 @@ publication barrier.
   current-state identity hash, and focused global-actuation tests, compilation,
   planning lock, topology freshness, and `git diff --check` pass before exact-SHA
   hot-fix deployment.
+
+### Slice B110 — Scope canonical held-monitor debt to stale families (2026-08-18)
+
+- Live defect: after a full monitor pass exceeded its bounded deadline, only two
+  held weather families remained canonically overdue, but reactor admission and
+  wake selection promoted that typed family debt into a global defer. The exact
+  family block map was already built yet unreachable, so unrelated fresh
+  families could not compete and no global auction could complete.
+- First-principles invariant: missing current probability/monitor truth blocks
+  BUY authority only in the exact affected weather family. If that family scope
+  is unreadable, all BUYs fail closed; SELL/HOLD/CASH still run. Only transient
+  monitor writer fairness/handoff may preempt reactor admission globally.
+- SCOPE: exact overdue weather families, widened to every BUY family only when
+  canonical scope is unreadable. DRAIN: the independent recovery monitor refreshes
+  overdue holdings while each reactor cut ranks the remaining executable set.
+  RESET: a clean cadence read clears debt; every new cut rebuilds the scope.
+- Mid-cut law: canonical debt first discovered after a cut starts still cancels
+  that replayable cut at the next safe point; the following cut reads and applies
+  the exact family scope. Existing Day0 supersession, submit-time q/book JIT,
+  price band, Kelly, monitor fairness, and exact held-SELL authority are unchanged.
+- Acceptance: canonical debt present at cut start does not globally defer or force
+  exact-only wake selection; its family block reaches the live adapter; periodic
+  fairness debt remains exact-only/preemptive; scope failure blocks every BUY but
+  retains reduce-only evaluation. Focused runtime antibodies, compilation,
+  planning lock, topology freshness, and `git diff --check` must pass before
+  exact-SHA hot-fix deployment.
