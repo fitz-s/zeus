@@ -2256,3 +2256,26 @@ publication barrier.
   adapter's ten F821 findings are identical to `HEAD`; the source-rationale YAML
   parser remains blocked by the same pre-existing line-1285 error on `HEAD` and
   this slice.
+
+### Slice B112 — Canonical degraded evidence cannot discharge economic redecision (2026-08-18)
+
+- Live defect: post-B111 full-book artifacts durably exposed partial coverage,
+  but a `MONITOR_REFRESHED` row with unavailable current q/book evidence still
+  entered the same canonical-coverage set as an actionable HOLD/SELL decision.
+  The writer proved an attempted read, not a current economic decision, so it
+  could still clear urgent full-book debt.
+- First-principles invariant: monitor event durability and action authority are
+  separate facts. A candidate discharges its pass-local economic obligation only
+  through a current action-authoritative redecision or an explicit terminal /
+  economically-closed transition. DATA_DEGRADED and incomplete exit context stay
+  durable for fairness and diagnosis but remain outstanding monitor debt.
+- SCOPE: completion classification for the exact positions whose current q/book
+  evidence was unavailable in one full-book pass. DRAIN: recurring and recovery
+  monitor passes retry those identities under a fresh source/book deadline.
+  RESET: a later action-authoritative decision or explicit discharge removes the
+  identity from that pass's no-authority set.
+- Forbidden: stale-as-fresh substitution, treating a canonical write as an
+  economic HOLD, changing q/edge/price/Kelly thresholds, or globally blocking
+  unrelated entry families. Acceptance: canonical 4-of-4 with one no-authority
+  identity remains incomplete; batch/singular degraded attempts persist exact
+  identities; complete fresh coverage and explicit discharge remain successful.

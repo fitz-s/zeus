@@ -12150,7 +12150,7 @@ def _full_book_monitor_completed_canonical_coverage(
     *,
     open_position_count: int,
 ) -> bool:
-    """Whether one admitted full-book pass discharged every held obligation."""
+    """Whether one full-book pass discharged every economic redecision obligation."""
 
     if open_position_count <= 0:
         return True
@@ -12161,15 +12161,26 @@ def _full_book_monitor_completed_canonical_coverage(
         for value in summary.get("held_monitor_candidate_position_ids", ()) or ()
         if str(value).strip()
     }
-    completed_ids = {
+    canonical_ids = {
         str(value).strip()
-        for field in (
-            "held_monitor_canonical_position_ids",
-            "held_monitor_discharged_position_ids",
-        )
-        for value in summary.get(field, ()) or ()
+        for value in summary.get("held_monitor_canonical_position_ids", ()) or ()
         if str(value).strip()
     }
+    discharged_ids = {
+        str(value).strip()
+        for value in summary.get("held_monitor_discharged_position_ids", ()) or ()
+        if str(value).strip()
+    }
+    no_action_authority_ids = {
+        str(value).strip()
+        for value in summary.get(
+            "held_monitor_no_action_authority_position_ids",
+            (),
+        )
+        or ()
+        if str(value).strip()
+    }
+    completed_ids = (canonical_ids - no_action_authority_ids) | discharged_ids
     return (
         int(summary.get("held_monitor_candidates") or 0) == len(candidate_ids)
         and candidate_ids.issubset(completed_ids)

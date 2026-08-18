@@ -14107,6 +14107,9 @@ def test_monitoring_failed_singular_recovery_does_not_fan_out(monkeypatch):
     assert summary["held_monitor_batch_failure_singular_unavailable"] == 1
     assert summary["monitor_data_degraded_attempts"] == 2
     assert summary["monitors"] == 2
+    assert summary["held_monitor_no_action_authority_position_ids"] == [
+        position.trade_id for position in positions
+    ]
     assert positions[0].last_monitor_prob_is_fresh is False
     assert positions[0].last_monitor_market_price_is_fresh is False
     assert positions[1].last_monitor_prob_is_fresh is False
@@ -20226,6 +20229,9 @@ def test_incomplete_exit_context_is_not_persisted_as_economic_hold(monkeypatch):
     assert results[0].fresh_edge is None
     assert summary["monitor_incomplete_exit_context"] == 1
     assert summary["monitors"] == 1
+    assert summary["held_monitor_no_action_authority_position_ids"] == [
+        position.trade_id
+    ]
 
 
 def test_quote_incomplete_exit_preserves_current_probability_axis(monkeypatch):
@@ -20292,6 +20298,9 @@ def test_quote_incomplete_exit_preserves_current_probability_axis(monkeypatch):
     assert results[0].fresh_edge is None
     assert summary["monitor_incomplete_exit_context"] == 1
     assert summary["monitors"] == 1
+    assert summary["held_monitor_no_action_authority_position_ids"] == [
+        position.trade_id
+    ]
 
 
 def test_probability_incomplete_monitor_preserves_current_quote_axis():
