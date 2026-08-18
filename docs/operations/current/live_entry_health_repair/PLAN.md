@@ -2150,3 +2150,25 @@ publication barrier.
   proves both Wellington held requests start before either Seoul broad request;
   no-held concurrency tests remain green; focused capture tests, compilation,
   planning lock, and `git diff --check` pass before hot-fix deployment.
+
+### Slice B109.1 — Persist the cumulative-Kelly endowment in each BUY certificate (2026-08-18)
+
+- Live evidence gap: a Warsaw maker increment was selected after an existing
+  32-share holding had already reconciled, and the solver consumed that holding
+  through `CandidatePortfolioEndowment`; however, the immutable execution
+  certificate exposed only the additional 47.25-share order. An operator could
+  not prove from the receipt that sizing used the current holding rather than an
+  empty endowment.
+- First-principles invariant: every incremental BUY certificate must disclose
+  the exact current-token holding, full-Kelly final target, fractional-Kelly
+  final target, and sizing mode that produced the additional order. These values
+  are already part of the selected decision and economic identity; persisting
+  them adds auditability without changing ranking, sizing, price, or venue I/O.
+- SCOPE: future selected global BUY certificates only. DRAIN: each new decision
+  serializes its own four sizing fields. RESET: every fresh auction rebuilds the
+  fields from its current ledger-aligned holdings snapshot.
+- Acceptance: a selected BUY with 32 existing shares persists all three terminal
+  share quantities plus `FRACTIONAL_TARGET`; the fields participate in the
+  current-state identity hash, and focused global-actuation tests, compilation,
+  planning lock, topology freshness, and `git diff --check` pass before exact-SHA
+  hot-fix deployment.

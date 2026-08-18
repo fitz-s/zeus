@@ -14726,6 +14726,10 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
         limit_price=Decimal("0.01"),
         expected_fill_price_before_fee=Decimal("0.0094227"),
         max_spend_usd=Decimal("1.0495"),
+        current_token_shares=Decimal("32"),
+        full_kelly_target_shares=Decimal("164"),
+        fractional_kelly_target_shares=Decimal("132"),
+        buy_sizing_mode="FRACTIONAL_TARGET",
         robust_delta_log_wealth=0.01906524,
         ruin_probability_reduction=0.0,
         robust_ev_usd=49.6777,
@@ -14808,6 +14812,15 @@ def test_global_winner_binding_does_not_reapply_legacy_price_floor(monkeypatch):
     assert captured["global_execution_mode"] == "TAKER_LIMIT"
     assert captured["cost"] == 0.027666
     assert captured["current_candidate_cap"] == pytest.approx(0.42)
+    assert captured["global_current_token_shares"] == "32"
+    assert captured["global_full_kelly_target_shares"] == "164"
+    assert captured["global_fractional_kelly_target_shares"] == "132"
+    assert captured["global_buy_sizing_mode"] == "FRACTIONAL_TARGET"
+    assert qkernel_current_state_identity_hash(captured) != (
+        qkernel_current_state_identity_hash(
+            {**captured, "global_current_token_shares": "31"}
+        )
+    )
 
     drifted_witness = SimpleNamespace(
         **{

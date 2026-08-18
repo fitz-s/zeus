@@ -16084,6 +16084,21 @@ def _global_actuation_selected_proof(
             "global_optimum_semantics": "CUT_TIME_GLOBAL_OPTIMUM",
         }
     )
+    if str(getattr(candidate, "action", "BUY") or "BUY").upper() == "BUY":
+        cert.update(
+            {
+                "global_current_token_shares": str(
+                    decision.current_token_shares
+                ),
+                "global_full_kelly_target_shares": str(
+                    decision.full_kelly_target_shares
+                ),
+                "global_fractional_kelly_target_shares": str(
+                    decision.fractional_kelly_target_shares
+                ),
+                "global_buy_sizing_mode": str(decision.buy_sizing_mode),
+            }
+        )
     expected_growth = getattr(decision, "expected_growth", None)
     if global_execution_mode == "MAKER_REST" and expected_growth is None:
         raise ValueError("GLOBAL_MAKER_REST_COMPARISON_MISSING")
