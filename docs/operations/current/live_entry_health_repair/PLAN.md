@@ -1916,3 +1916,24 @@ publication barrier.
   rollback/defer, restored connection settings, no venue read after deferral,
   and the next unlocked pass reaches primary refresh without serialized
   30-second lock debt.
+
+### Slice B101 — Preserve independent held q and quote authority (2026-08-18)
+
+- Live defect: Shanghai's final target-day observation produced an exact current
+  held probability of zero, but its dust-sized token had no executable bid.
+  The incomplete-exit recorder revoked both evidence axes, persisting the exact
+  q as stale and preventing truthful whole-book monitor coverage.
+- Structural invariant: probability and executable quote are independent facts.
+  Missing probability revokes only q/edge authority; missing market price or bid
+  revokes only quote/edge authority. Either missing axis still emits the typed
+  non-actionable incomplete-decision receipt and cannot authorize a SELL.
+- SCOPE: one held monitor decision with a typed
+  `INCOMPLETE_EXIT_CONTEXT` field set. DRAIN: the recurring monitor refreshes the
+  missing q or quote axis. RESET: the next complete current q+book snapshot
+  produces an ordinary economic BUY/SELL/HOLD/CASH comparison.
+- Forbidden: stale-as-fresh substitution, treating no bid as an executable zero
+  price, carrying an edge across a missing quote, or weakening global-auction
+  completeness. Acceptance: probability-only and quote-only counterexamples
+  preserve the proven sibling axis, both remain non-actionable, focused live
+  safety tests, planning lock, compilation, and diff checks pass before exact-SHA
+  hot-fix deployment.

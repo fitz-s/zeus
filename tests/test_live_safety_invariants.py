@@ -1,8 +1,8 @@
 # Created: 2026-03-31
-# Lifecycle: created=2026-03-31; last_reviewed=2026-08-17; last_reused=2026-08-17
+# Lifecycle: created=2026-03-31; last_reviewed=2026-08-18; last_reused=2026-08-18
 # Purpose: Lock live-money safety invariants across fill, exit, chain, and P&L flows.
 # Reuse: Run for execution finality, live exit, chain reconciliation, and safety invariant changes.
-# Last reused/audited: 2026-08-17
+# Last reused/audited: 2026-08-18
 # Authority basis: finite-evidence single-q global SELL ownership; price-band parity hot-fix
 """Live safety invariant tests: relationship tests, not function tests.
 
@@ -20226,6 +20226,98 @@ def test_incomplete_exit_context_is_not_persisted_as_economic_hold(monkeypatch):
     assert results[0].fresh_edge is None
     assert summary["monitor_incomplete_exit_context"] == 1
     assert summary["monitors"] == 1
+
+
+def test_quote_incomplete_exit_preserves_current_probability_axis(monkeypatch):
+    """A missing bid blocks action without relabeling an exact current q as stale."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(
+        trade_id="monitor-quote-incomplete-current-q",
+        state="holding",
+        chain_state="synced",
+    )
+    emitted = []
+    results = []
+
+    def refresh(*_args):
+        context = _monitor_test_edge_context(position)
+        position.last_monitor_market_price_is_fresh = False
+        position.last_monitor_best_bid = None
+        return context
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda *_args, **_kwargs: ExitDecision(
+            False,
+            "EVIDENCE_UNAVAILABLE",
+            trigger="EVIDENCE_UNAVAILABLE",
+            applied_validations=["evidence_unavailable_third_state"],
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **kwargs: emitted.append(kwargs) or True,
+    )
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, result: results.append(result)},
+    )()
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        artifact,
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_quote_incomplete_current_q"),
+        run_exit_preflight=False,
+    )
+
+    assert len(emitted) == 1
+    assert emitted[0]["decision_unavailable_reason"] == (
+        "INCOMPLETE_EXIT_CONTEXT "
+        "(missing=current_market_price_is_fresh,hours_to_settlement,best_bid)"
+    )
+    assert position.last_monitor_prob_is_fresh is True
+    assert position.last_monitor_prob == pytest.approx(0.61)
+    assert position.last_monitor_market_price_is_fresh is False
+    assert results[0].fresh_prob == pytest.approx(0.61)
+    assert results[0].fresh_edge is None
+    assert summary["monitor_incomplete_exit_context"] == 1
+    assert summary["monitors"] == 1
+
+
+def test_probability_incomplete_monitor_preserves_current_quote_axis():
+    """A missing q witness cannot erase an independently current executable book."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(trade_id="monitor-probability-incomplete-current-quote")
+    position.last_monitor_prob = 0.61
+    position.last_monitor_prob_is_fresh = True
+    position.last_monitor_edge = 0.12
+    position.last_monitor_market_price = 0.49
+    position.last_monitor_market_price_is_fresh = True
+    position.last_monitor_best_bid = 0.48
+    position.last_monitor_best_ask = 0.50
+
+    cycle_runtime._revoke_monitor_action_authority(
+        position,
+        missing_fields={"fresh_prob_is_fresh"},
+    )
+
+    assert position.last_monitor_prob_is_fresh is False
+    assert position.last_monitor_edge is None
+    assert position.last_monitor_market_price_is_fresh is True
+    assert position.last_monitor_market_price == pytest.approx(0.49)
+    assert position.last_monitor_best_bid == pytest.approx(0.48)
+    assert position.last_monitor_best_ask == pytest.approx(0.50)
 
 
 def test_monitor_absolute_deadline_includes_pending_exit_preflight(monkeypatch):

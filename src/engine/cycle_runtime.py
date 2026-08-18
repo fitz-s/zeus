@@ -3576,16 +3576,29 @@ def _record_monitor_hold_decision(
     return canonical_written
 
 
-def _revoke_monitor_action_authority(pos) -> None:
-    """Make a monitor result observational only until fresh inputs return."""
+def _revoke_monitor_action_authority(
+    pos,
+    *,
+    missing_fields: set[str] | None = None,
+) -> None:
+    """Revoke only the evidence axes an incomplete monitor attempt did not prove."""
 
-    pos.last_monitor_prob_is_fresh = False
-    pos.last_monitor_market_price_is_fresh = False
-    pos.last_monitor_edge = None
-    pos.last_monitor_market_price = None
-    pos.last_monitor_best_bid = None
-    pos.last_monitor_best_ask = None
-    pos.last_monitor_market_vig = None
+    missing = None if missing_fields is None else set(missing_fields)
+    revoke_all = missing is None or not missing
+    if revoke_all or missing & {"fresh_prob", "fresh_prob_is_fresh"}:
+        pos.last_monitor_prob_is_fresh = False
+        pos.last_monitor_edge = None
+    if revoke_all or missing & {
+        "current_market_price",
+        "current_market_price_is_fresh",
+        "best_bid",
+    }:
+        pos.last_monitor_market_price_is_fresh = False
+        pos.last_monitor_edge = None
+        pos.last_monitor_market_price = None
+        pos.last_monitor_best_bid = None
+        pos.last_monitor_best_ask = None
+        pos.last_monitor_market_vig = None
 
 
 def _record_monitor_data_degraded_attempt(
@@ -9556,7 +9569,12 @@ def execute_monitoring_phase(
                 )
 
             if _incomplete_reason is not None and not should_exit:
-                _revoke_monitor_action_authority(pos)
+                _revoke_monitor_action_authority(
+                    pos,
+                    missing_fields=_missing_fields_from_incomplete_exit_reason(
+                        _incomplete_reason
+                    ),
+                )
                 monitor_canonical_written = (
                     _emit_monitor_refreshed_canonical_if_available(
                         conn,
