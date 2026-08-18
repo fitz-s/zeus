@@ -10,9 +10,10 @@ import atexit
 import hashlib
 import json
 import logging
+import math
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from enum import Enum
 from typing import Mapping
@@ -228,6 +229,50 @@ def request_identity(url: str, params: dict) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _parameter_count(value: object) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return len([item for item in value.split(",") if item.strip()])
+    if isinstance(value, (list, tuple)):
+        return len(value)
+    return 1
+
+
+def _provider_quota_cost(params: Mapping[str, object]) -> int:
+    """Conservatively meter Open-Meteo's documented weighted API-call units."""
+
+    locations = max(
+        1,
+        _parameter_count(params.get("latitude")),
+        _parameter_count(params.get("longitude")),
+    )
+    variables = max(
+        1,
+        sum(
+            _parameter_count(params.get(key))
+            for key in ("hourly", "daily", "current", "minutely_15")
+        ),
+    )
+    hours = max(
+        float(params.get("forecast_hours") or 0),
+        24.0 * float(params.get("forecast_days") or 0),
+    ) + max(
+        float(params.get("past_hours") or 0),
+        24.0 * float(params.get("past_days") or 0),
+    )
+    explicit_days = 0
+    try:
+        start = date.fromisoformat(str(params.get("start_date")))
+        end = date.fromisoformat(str(params.get("end_date")))
+        explicit_days = max(0, (end - start).days + 1)
+    except ValueError:
+        pass
+    days = max(1.0, hours / 24.0, float(explicit_days))
+    weighted = locations * max(1.0, variables / 10.0) * max(1.0, days / 14.0)
+    return max(1, math.ceil(weighted))
+
+
 def _endpoint_for_url(url: str) -> str:
     parsed = urlsplit(url)
     return f"{parsed.netloc}{parsed.path}"[:160]
@@ -258,7 +303,29 @@ def _provider_reason(response: httpx.Response) -> str | None:
     if not isinstance(payload, dict):
         return None
     reason = str(payload.get("reason") or "").strip().lower()
-    return reason if reason in {"run_not_published", "availability"} else None
+    if reason in {"run_not_published", "availability"}:
+        return reason
+    for window in ("daily", "hourly", "minutely"):
+        if reason.startswith(f"{window} api request limit exceeded"):
+            return f"{window}_api_request_limit_exceeded"
+    return None
+
+
+def _rate_limit_wait(outcome: OpenMeteoHTTPOutcome, attempt: int) -> float:
+    if outcome.retry_after_seconds:
+        return outcome.retry_after_seconds
+    now = datetime.now(timezone.utc)
+    if outcome.reason == "daily_api_request_limit_exceeded":
+        boundary = datetime.combine(
+            now.date() + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+        )
+    elif outcome.reason == "hourly_api_request_limit_exceeded":
+        boundary = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    elif outcome.reason == "minutely_api_request_limit_exceeded":
+        boundary = now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    else:
+        return DEFAULT_429_FALLBACK_WAIT * (attempt + 1)
+    return max(1.0, (boundary - now).total_seconds() + 1.0)
 
 
 def _http_outcome(response: httpx.Response) -> OpenMeteoHTTPOutcome:
@@ -319,6 +386,7 @@ def fetch(
     """
     tracker = quota or quota_tracker
     request_id = request_identity(url, params)
+    quota_cost = _provider_quota_cost(params) if count_toward_quota else 1
     endpoint = _endpoint_for_url(url)
     job = endpoint_label or endpoint
     last_exc: Exception | None = None
@@ -329,6 +397,7 @@ def fetch(
             job=job,
             lease_seconds=max(float(timeout) + 5.0, DEFAULT_TIMEOUT),
             count_toward_quota=count_toward_quota,
+            quota_cost=quota_cost,
         )
         if not allowed:
             if reason and reason.startswith("request_terminal="):
@@ -349,9 +418,7 @@ def fetch(
                 outcome = _http_outcome(resp)
                 error = OpenMeteoHTTPStatusError(resp, outcome)
                 if outcome.retry_class is OpenMeteoRetryClass.RATE_LIMITED:
-                    wait = outcome.retry_after_seconds or 0.0
-                    if wait <= 0.0:
-                        wait = DEFAULT_429_FALLBACK_WAIT * (attempt + 1)
+                    wait = _rate_limit_wait(outcome, attempt)
                     tracker.note_rate_limited(int(wait))
                     tracker.record_request_retry(
                         request_id,

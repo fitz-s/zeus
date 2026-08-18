@@ -12360,6 +12360,44 @@ def test_openmeteo_request_single_flight_is_shared(monkeypatch, tmp_path):
     assert next_lease and next_lease != lease_id
 
 
+
+def test_openmeteo_request_reserves_provider_equivalent_quota_cost(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    path = tmp_path / "openmeteo_quota.json"
+    tracker = OpenMeteoQuotaTracker(state_path=path)
+
+    allowed, reason, lease_id = tracker.acquire_request(
+        "multi-location", quota_cost=25
+    )
+
+    assert (allowed, reason) == (True, None)
+    assert lease_id
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["day_count"] == 25
+    assert payload["hour_count"] == 25
+    assert payload["minute_count"] == 25
+    assert payload["requests"]["multi-location"]["quota_cost"] == 25
+
+
+def test_openmeteo_request_cost_cannot_cross_lane_reserve(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    path = tmp_path / "openmeteo_quota.json"
+    tracker = OpenMeteoQuotaTracker(state_path=path)
+    now = datetime.now(timezone.utc)
+    state = tracker._default_state(now)
+    state["day_count"] = MAINTENANCE_DAILY_LIMIT - 10
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    allowed, reason, lease_id = tracker.acquire_request(
+        "too-expensive", quota_cost=25
+    )
+
+    assert allowed is False
+    assert reason == f"day_limit={MAINTENANCE_DAILY_LIMIT - 10}/{MAINTENANCE_DAILY_LIMIT}"
+    assert lease_id is None
+    assert tracker.calls_today() == MAINTENANCE_DAILY_LIMIT - 10
+
+
 def test_openmeteo_active_request_state_is_not_evicted(monkeypatch, tmp_path):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     path = tmp_path / "openmeteo_quota.json"
@@ -12579,6 +12617,90 @@ def test_openmeteo_429_persists_cooldown_without_sleeping(monkeypatch, tmp_path)
 
     assert slept == []
     assert tracker.cooldown_remaining_seconds() > 0
+
+
+
+def test_openmeteo_multi_location_fetch_uses_weighted_quota(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+
+    class _FreshClient:
+        def get(self, *_args, **_kwargs):
+            return httpx.Response(
+                200,
+                json=[{"fresh": True}] * 3,
+                request=httpx.Request("GET", "https://api.open-meteo.com"),
+            )
+
+    result = openmeteo_client.fetch(
+        "https://api.open-meteo.com/v1/forecast",
+        {
+            "latitude": "1,2,3",
+            "longitude": "4,5,6",
+            "hourly": "temperature_2m",
+            "forecast_hours": 120,
+        },
+        max_retries=1,
+        quota=tracker,
+        client=_FreshClient(),
+    )
+
+    assert result == [{"fresh": True}] * 3
+    assert tracker.calls_today() == 3
+
+
+def test_openmeteo_long_archive_fetch_uses_weighted_quota(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+
+    class _FreshClient:
+        def get(self, *_args, **_kwargs):
+            return httpx.Response(
+                200,
+                json={"fresh": True},
+                request=httpx.Request("GET", "https://archive-api.open-meteo.com"),
+            )
+
+    openmeteo_client.fetch(
+        "https://archive-api.open-meteo.com/v1/archive",
+        {
+            "latitude": 1,
+            "longitude": 2,
+            "hourly": "temperature_2m",
+            "start_date": "2026-01-01",
+            "end_date": "2026-03-31",
+        },
+        max_retries=1,
+        quota=tracker,
+        client=_FreshClient(),
+    )
+
+    assert tracker.calls_today() == 7
+
+
+def test_openmeteo_daily_429_blocks_until_next_utc_day(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+
+    class _DailyLimitedClient:
+        def get(self, *_args, **_kwargs):
+            return httpx.Response(
+                429,
+                json={"reason": "Daily API request limit exceeded. Please try again tomorrow."},
+                request=httpx.Request("GET", "https://api.open-meteo.com"),
+            )
+
+    with pytest.raises(openmeteo_client.OpenMeteoHTTPStatusError) as raised:
+        openmeteo_client.fetch(
+            "https://api.open-meteo.com/v1/forecast",
+            {"latitude": 2, "longitude": 1},
+            max_retries=1,
+            quota=tracker,
+            client=_DailyLimitedClient(),
+        )
+
+    assert raised.value.outcome.reason == "daily_api_request_limit_exceeded"
+    assert tracker.cooldown_remaining_seconds() > 3600
 
 
 def test_openmeteo_generic_400_is_terminal_and_persisted_across_polls(

@@ -487,6 +487,7 @@ class OpenMeteoQuotaTracker:
         priority: bool,
         critical: bool = False,
         recovery: bool = False,
+        quota_cost: int = 1,
     ) -> tuple[bool, str | None]:
         blocked_until = cls._blocked_until_from_state(state)
         if blocked_until is not None and now < blocked_until:
@@ -499,7 +500,7 @@ class OpenMeteoQuotaTracker:
         )
         labels = ("day", "hour", "minute")
         for label, count, limit in zip(labels, counts, limits, strict=True):
-            if count >= limit:
+            if count + quota_cost > limit:
                 return False, f"{label}_limit={count}/{limit}"
         return True, None
 
@@ -510,6 +511,7 @@ class OpenMeteoQuotaTracker:
         priority: bool,
         critical: bool = False,
         recovery: bool = False,
+        quota_cost: int = 1,
     ) -> tuple[bool, str | None]:
         if self._blocked_until is not None and now < self._blocked_until:
             return False, f"cooldown_until={self._blocked_until.isoformat()}"
@@ -517,7 +519,7 @@ class OpenMeteoQuotaTracker:
         counts = (self._count, self._hour_count, self._minute_count)
         labels = ("day", "hour", "minute")
         for label, count, limit in zip(labels, counts, limits, strict=True):
-            if count >= limit:
+            if count + quota_cost > limit:
                 return False, f"{label}_limit={count}/{limit}"
         return True, None
 
@@ -647,14 +649,18 @@ class OpenMeteoQuotaTracker:
         job: str = "",
         lease_seconds: float = REQUEST_LEASE_SECONDS,
         count_toward_quota: bool = True,
+        quota_cost: int = 1,
     ) -> tuple[bool, str | None, str | None]:
-        """Atomically reserve one request lease and, when metered, one quota unit.
+        """Atomically reserve one request lease and its provider-equivalent quota cost.
 
         Unmetered requests retain the same cooldown, retry, terminal-outcome,
         single-flight, and capacity contracts.  They differ only in that they
         neither consult nor increment forecast API day/hour/minute counters.
         """
 
+        if isinstance(quota_cost, bool) or not isinstance(quota_cost, int) or quota_cost < 1:
+            raise ValueError("quota_cost must be a positive integer")
+        metered_cost = quota_cost if count_toward_quota else 0
         priority = self._is_priority()
         critical = self._is_critical()
         recovery = self._is_recovery()
@@ -709,6 +715,7 @@ class OpenMeteoQuotaTracker:
                     priority=priority,
                     critical=critical,
                     recovery=recovery,
+                    quota_cost=metered_cost,
                 )
             else:
                 blocked_until = self._blocked_until_from_state(state)
@@ -726,9 +733,9 @@ class OpenMeteoQuotaTracker:
                     int(state.get("day_count") or 0),
                 ), False
             if count_toward_quota:
-                state["day_count"] = int(state.get("day_count") or 0) + 1
-                state["hour_count"] = int(state.get("hour_count") or 0) + 1
-                state["minute_count"] = int(state.get("minute_count") or 0) + 1
+                state["day_count"] = int(state.get("day_count") or 0) + metered_cost
+                state["hour_count"] = int(state.get("hour_count") or 0) + metered_cost
+                state["minute_count"] = int(state.get("minute_count") or 0) + metered_cost
             self._record_request(
                 state,
                 now,
@@ -739,7 +746,7 @@ class OpenMeteoQuotaTracker:
                 outcome="attempt",
                 lease_id=lease_id,
                 in_flight_until=now + timedelta(seconds=lease_seconds),
-                quota_cost=1 if count_toward_quota else 0,
+                quota_cost=metered_cost,
             )
             return (True, None, lease_id, int(state["day_count"])), True
 
@@ -789,6 +796,7 @@ class OpenMeteoQuotaTracker:
                             priority=priority,
                             critical=critical,
                             recovery=recovery,
+                            quota_cost=metered_cost,
                         )
                     else:
                         allowed = (
@@ -802,9 +810,9 @@ class OpenMeteoQuotaTracker:
                         )
                 if allowed:
                     if count_toward_quota:
-                        self._count += 1
-                        self._hour_count += 1
-                        self._minute_count += 1
+                        self._count += metered_cost
+                        self._hour_count += metered_cost
+                        self._minute_count += metered_cost
                     self._record_request(
                         local_state,
                         now,
@@ -815,7 +823,7 @@ class OpenMeteoQuotaTracker:
                         outcome="attempt",
                         lease_id=lease_id,
                         in_flight_until=now + timedelta(seconds=lease_seconds),
-                        quota_cost=1 if count_toward_quota else 0,
+                        quota_cost=metered_cost,
                     )
                     acquired_lease_id = lease_id
                 else:
