@@ -10950,6 +10950,114 @@ def test_fenced_global_target_without_command_requeues_for_retry_and_boot():
     ) == ("pending", None, GLOBAL_WINNER_TARGETED_CLAIM)
 
 
+def test_side_effect_free_rejected_global_target_retries_with_fresh_carrier(
+    monkeypatch,
+):
+    import src.events.event_store as event_store
+    from src.engine.event_reactor_adapter import (
+        _fence_global_target_claim_before_command,
+    )
+    from src.engine.global_batch_runtime import _next_claim_carrier
+
+    clock = ["2026-05-24T18:00:00+00:00"]
+    monkeypatch.setattr(event_store, "_utc_now", lambda: clock[0])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    init_schema(conn)
+    store = EventStore(conn, processing_lease_seconds=10)
+    source = _forecast_event("rejected-command-source", target_date="2026-05-25")
+    target = _next_claim_carrier(
+        source,
+        targeted_at=datetime.fromisoformat(clock[0]),
+        economic_identity="rejected-command-economics",
+        payload=json.loads(source.payload_json),
+    )
+
+    assert store.prioritize_global_winner(target)
+    assert store.claim(target.event_id, claimed_at=clock[0])
+    attempt_count = store.attempt_count(target.event_id)
+    _fence_global_target_claim_before_command(
+        conn,
+        target,
+        claimed_at=clock[0],
+        attempt_count=attempt_count,
+    )
+    aggregate_id = f"{target.event_id}:final-intent"
+    conn.execute(
+        "INSERT INTO edli_live_order_events ("
+        "aggregate_event_id,aggregate_id,event_sequence,event_type,"
+        "event_hash,payload_json,payload_hash,source_authority,occurred_at,"
+        "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+        (
+            "rejected-command-created-event",
+            aggregate_id,
+            1,
+            "ExecutionCommandCreated",
+            "rejected-command-created-hash",
+            "{}",
+            "rejected-command-created-payload-hash",
+            "engine_adapter",
+            clock[0],
+            clock[0],
+        ),
+    )
+    conn.execute(
+        "INSERT INTO edli_live_order_events ("
+        "aggregate_event_id,aggregate_id,event_sequence,event_type,"
+        "event_hash,payload_json,payload_hash,source_authority,occurred_at,"
+        "created_at,schema_version) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
+        (
+            "rejected-command-terminal-event",
+            aggregate_id,
+            2,
+            "SubmitRejected",
+            "rejected-command-terminal-hash",
+            json.dumps(
+                {
+                    "pre_submit_rejection": True,
+                    "venue_call_started": False,
+                    "reason_code": (
+                        "GLOBAL_AUCTION_NO_TRADE:"
+                        "GLOBAL_HARD_AUTHORITY_REVOKED"
+                    ),
+                }
+            ),
+            "rejected-command-terminal-payload-hash",
+            "engine_adapter",
+            clock[0],
+            clock[0],
+        ),
+    )
+
+    assert store.requeue_claim_if_current(
+        target.event_id,
+        claimed_at=clock[0],
+        attempt_count=attempt_count,
+        last_error="GLOBAL_AUCTION_NO_TRADE:GLOBAL_HARD_AUTHORITY_REVOKED",
+    )
+    assert tuple(
+        conn.execute(
+            "SELECT processing_status, claimed_at, last_error "
+            "FROM opportunity_event_processing WHERE consumer_name=? AND event_id=?",
+            (store.consumer_name, target.event_id),
+        ).fetchone()
+    ) == ("expired", None, "GLOBAL_WINNER_TARGET_SUPERSEDED")
+
+    clock[0] = "2026-05-24T18:00:01+00:00"
+    retry = store.prioritized_global_winner_event(target)
+    assert retry is not None
+    assert retry.event_id != target.event_id
+    assert ":claim_retry:" in retry.source
+    assert store.claim(retry.event_id, claimed_at=clock[0])
+    retry_attempt = store.attempt_count(retry.event_id)
+    _fence_global_target_claim_before_command(
+        conn,
+        retry,
+        claimed_at=clock[0],
+        attempt_count=retry_attempt,
+    )
+
+
 @pytest.mark.parametrize("inject_venue_attempt_during_expiry", (False, True))
 def test_legacy_orphaned_global_target_expiry_is_atomic_with_venue_attempt(
     monkeypatch,

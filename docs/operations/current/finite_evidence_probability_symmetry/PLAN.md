@@ -4,6 +4,28 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-17 Side-effect-free rejected commands need a fresh carrier
+
+A Warsaw maker continuation remained the global positive-growth winner after
+its first pre-submit pass was correctly revoked by a newer hard-authority fact.
+That pass had already appended `ExecutionCommandCreated` and a terminal
+`SubmitRejected`, with `pre_submit_rejection=true`, `venue_call_started=false`,
+and no `VenueSubmitAttempted`.  The reactor requeued the same immutable carrier;
+the command fence then rejected every retry because that carrier already owned a
+command certificate.  The result was a permanent `GLOBAL_WINNER_CLAIM_FENCE_LOST`
+loop despite unchanged positive economics.
+
+A targeted claim with that exact side-effect-free terminal shape now expires
+only its spent carrier.  The next complete global cut must materialize a fresh
+`claim_retry` carrier and pass the unchanged generation, pointer, current-q,
+JIT-book, wealth, and final hard-authority fences before any venue call.  Any
+`VenueSubmitAttempted` event keeps recovery authority and disables this path.
+SCOPE is one pre-submit-rejected global carrier.  DRAIN is the next global cut
+and fresh carrier claim.  RESET is a new immutable carrier, while any venue
+attempt remains recovery-owned.  Acceptance requires an antibody proving the
+old carrier expires, the replacement identity differs, and the replacement can
+acquire the command fence without weakening supersession or venue-attempt law.
+
 ## 2026-08-17 Current-state mean actions must not be deleted by FDR confidence
 
 Post-restart live receipts selected two positive posterior-mean actions but the

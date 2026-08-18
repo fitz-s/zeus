@@ -3081,7 +3081,82 @@ class EventStore:
                 ).fetchone()
             )
             now = _utc_now()
-            if targeted and not pointer_current:
+            side_effect_free_rejected_command = bool(
+                targeted
+                and _table_exists(self.conn, "edli_live_order_events")
+                and self.conn.execute(
+                    """
+                    SELECT 1
+                      FROM edli_live_order_events AS rejected
+                     WHERE rejected.event_type = 'SubmitRejected'
+                       AND rejected.aggregate_id GLOB ?
+                       AND COALESCE(
+                            json_extract(
+                                rejected.payload_json,
+                                '$.pre_submit_rejection'
+                            ),
+                            0
+                       ) = 1
+                       AND COALESCE(
+                            json_extract(
+                                rejected.payload_json,
+                                '$.venue_call_started'
+                            ),
+                            0
+                       ) = 0
+                       AND EXISTS (
+                            SELECT 1
+                              FROM edli_live_order_events AS command
+                             WHERE command.event_type = 'ExecutionCommandCreated'
+                               AND command.aggregate_id = rejected.aggregate_id
+                       )
+                       AND NOT EXISTS (
+                            SELECT 1
+                              FROM edli_live_order_events AS attempted
+                             WHERE attempted.event_type = 'VenueSubmitAttempted'
+                               AND attempted.aggregate_id GLOB ?
+                       )
+                     LIMIT 1
+                    """,
+                    (f"{event_id}:*", f"{event_id}:*"),
+                ).fetchone()
+            )
+            if side_effect_free_rejected_command:
+                # A command certificate is immutable once appended, so retrying
+                # this carrier would collide with its terminal no-submit proof
+                # and fail the command fence forever.  No venue call occurred:
+                # retire only this carrier.  The next auction materializes the
+                # same current opportunity under a fresh claim_retry identity.
+                # SCOPE: one targeted carrier with explicit pre-submit rejection
+                # and no VenueSubmitAttempted event. DRAIN: the next global cut
+                # creates and claims a fresh carrier. RESET: any venue attempt
+                # makes this branch false and leaves recovery in authority.
+                cur = self.conn.execute(
+                    """
+                    UPDATE opportunity_event_processing
+                       SET processing_status = 'expired',
+                           claimed_at = NULL,
+                           processed_at = ?,
+                           last_error = 'GLOBAL_WINNER_TARGET_SUPERSEDED',
+                           updated_at = ?
+                     WHERE consumer_name = ?
+                       AND event_id = ?
+                       AND processing_status = 'processing'
+                       AND claimed_at = ?
+                       AND attempt_count = ?
+                    """,
+                    (
+                        now,
+                        now,
+                        self.consumer_name,
+                        event_id,
+                        claimed_at,
+                        int(attempt_count),
+                    ),
+                )
+                if cur.rowcount == 1:
+                    self._forget_winner(event_id)
+            elif targeted and not pointer_current:
                 cur = self.conn.execute(
                     """
                     UPDATE opportunity_event_processing
