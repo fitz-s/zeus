@@ -896,6 +896,98 @@ def test_provisional_day0_monitor_uses_revision_aware_remaining_probability() ->
     )
 
 
+@pytest.mark.parametrize(
+    ("direction", "expected_probability"),
+    (("buy_yes", 0.0), ("buy_no", 1.0)),
+)
+def test_deterministic_day0_monitor_remains_exact_after_hard_fact_overlay_expires(
+    direction: str,
+    expected_probability: float,
+) -> None:
+    """The family witness keeps exact held q across the target-day boundary."""
+    from datetime import timedelta
+
+    from src.solve.solver import (
+        DeterministicBinPayoffWitness,
+        OutcomeTokenBinding,
+        deterministic_bin_payoff_witness_identity,
+    )
+
+    condition_id = "0x" + "76" * 32
+    unknown_condition_id = "0x" + "77" * 32
+    bindings = (
+        OutcomeTokenBinding("28C", condition_id, "yes-28", "no-28"),
+        OutcomeTokenBinding(
+            "29C",
+            unknown_condition_id,
+            "yes-29",
+            "no-29",
+        ),
+    )
+    identity = {
+        "family_key": "Ankara|2026-08-18|high",
+        "bindings": bindings,
+        "exact_yes_payoffs": (("28C", 0),),
+        "q_version": "deterministic-q",
+        "resolution_identity": "resolution",
+        "topology_identity": "topology",
+        "posterior_identity_hash": "posterior",
+        "source_truth_identity": "source-truth",
+        "authority_certificate_hash": "authority-certificate",
+        "band_alpha": 0.05,
+        "band_basis": "day0_deterministic_bin_payoff_v1",
+        "captured_at_utc": datetime(2026, 8, 18, 21, tzinfo=timezone.utc),
+    }
+    witness = DeterministicBinPayoffWitness(
+        **identity,
+        max_age=timedelta(seconds=30),
+        witness_identity=deterministic_bin_payoff_witness_identity(**identity),
+    )
+    snapshot = monitor_refresh_module._CurrentGlobalDay0FamilySnapshot(
+        witness=witness,
+        token_pairs=(
+            (condition_id, "yes-28", "no-28"),
+            (unknown_condition_id, "yes-29", "no-29"),
+        ),
+        deterministic_condition_ids=frozenset({condition_id}),
+        day0_payload={},
+        metric="high",
+        probability_authority="day0_deterministic_bin_payoff_v1",
+    )
+    pos = _make_position()
+    pos.condition_id = condition_id
+    pos.direction = direction
+    pos.token_id = "yes-28"
+    pos.no_token_id = "no-28"
+
+    probability, refreshed, fresh = (
+        monitor_refresh_module._materialize_current_global_day0_probability(
+            pos,
+            snapshot,
+        )
+    )
+
+    assert probability == expected_probability
+    assert fresh is True
+    assert refreshed.selected_method == "day0_absorbing_hard_fact"
+    assert refreshed._day0_zero_probability_exit_authority is True
+    assert (
+        "belief_source=day0_absorbing_hard_fact;"
+        "kind=deterministic_bin_payoff;metric=high;posterior_mode=model_only_v1"
+        in refreshed.applied_validations
+    )
+    receipt = refreshed._day0_monitor_probability_receipt
+    assert receipt["probability_authority"] == "day0_deterministic_bin_payoff_v1"
+    assert receipt["held_side_probability"] == expected_probability
+    assert receipt["band"]["held_side_summary"] == {
+        "count": 400,
+        "min": expected_probability,
+        "q50": expected_probability,
+        "q90": expected_probability,
+        "max": expected_probability,
+    }
+
+
 def test_day0_family_cache_keeps_partial_exact_witness_condition_local() -> None:
     from datetime import timedelta
 

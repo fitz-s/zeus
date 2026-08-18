@@ -5143,6 +5143,9 @@ def _materialize_current_global_day0_probability(
         snapshot.probability_authority
         == "day0_remaining_day_global_probability_v1"
     )
+    is_deterministic_bin_payoff = (
+        snapshot.probability_authority == "day0_deterministic_bin_payoff_v1"
+    )
     if is_final_daily:
         selected_method = SELECTED_METHOD_FINAL_DAILY_OBSERVATION_EXACT
         probability_authority = (
@@ -5158,6 +5161,9 @@ def _materialize_current_global_day0_probability(
     elif is_remaining_day:
         selected_method = SELECTED_METHOD_DAY0_OBSERVATION_REMAINING_WINDOW
         probability_authority = "day0_remaining_day_global_probability_v1"
+    elif is_deterministic_bin_payoff:
+        selected_method = SELECTED_METHOD_DAY0_ABSORBING_HARD_FACT
+        probability_authority = "day0_deterministic_bin_payoff_v1"
     else:
         raise ValueError(
             "monitor current global Day0 probability authority is unsupported: "
@@ -5198,9 +5204,20 @@ def _materialize_current_global_day0_probability(
             kind="probabilistic_day0_conditioned_replacement",
             metric=snapshot.metric,
         )
+    elif is_deterministic_bin_payoff:
+        _stamp_day0_monitor_belief(
+            refreshed,
+            selected_method=selected_method,
+            kind="deterministic_bin_payoff",
+            metric=snapshot.metric,
+        )
     else:
         _stamp_day0_remaining_window_belief(refreshed, metric=snapshot.metric)
-    if not is_final_daily and not is_unobserved_prefix_replacement:
+    if (
+        not is_final_daily
+        and not is_unobserved_prefix_replacement
+        and not is_deterministic_bin_payoff
+    ):
         maturity_status = str(
             snapshot.day0_payload.get("_edli_day0_exit_authority_status")
             or "unavailable"
@@ -5217,7 +5234,10 @@ def _materialize_current_global_day0_probability(
         if maturity_reason:
             _append_monitor_validation(refreshed, maturity_reason)
     _set_monitor_probability_fresh(refreshed, True)
-    _set_day0_zero_probability_exit_authority(refreshed, False)
+    _set_day0_zero_probability_exit_authority(
+        refreshed,
+        is_deterministic_bin_payoff,
+    )
     setattr(refreshed, _GLOBAL_MONITOR_SAMPLES_ATTR, held_samples)
     setattr(refreshed, _GLOBAL_MONITOR_ALPHA_ATTR, float(witness.band_alpha))
 

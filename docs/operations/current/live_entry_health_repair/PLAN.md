@@ -2026,3 +2026,21 @@ publication barrier.
   planning lock, and `git diff --check` pass. Live proof still requires an exact
   deployed SHA and a post-deploy same-market block followed by a different
   executable winner or a clean reconciliation of the scoped unknown.
+
+### Slice B105 — Deterministic Day0 monitor continuity across local midnight (2026-08-18)
+
+- Live defect: after Ankara's target-day local midnight, the direct hard-fact
+  overlay no longer applied, while the same canonical Day0 event still produced
+  an exact `day0_deterministic_bin_payoff_v1` family witness. Held monitoring
+  rejected that valid exact authority as unsupported, marked q stale, retained
+  the restart guard, and starved the global capital auction.
+- Structural invariant: an exact condition-bound deterministic witness remains
+  exact across the target-day boundary. The monitor must preserve its witness
+  identity, token/side binding, and 0/1 q; unsupported, probabilistic, missing,
+  or mismatched witnesses remain fail closed.
+- SCOPE: only a held condition covered by the deterministic witness. DRAIN: the
+  recurring monitor materializes its exact held-side q. RESET: a later canonical
+  witness replaces it through the ordinary current-family rebuild.
+- Acceptance: YES and NO sides of an exact-dead YES bin are fresh with q=0/q=1,
+  the deterministic authority remains in the receipt, and exact exit authority
+  survives local midnight without weakening quote, source, or freshness gates.
