@@ -7787,8 +7787,25 @@ def run_edli_event_reactor_cycle(
             held_position_monitor_debt_pending,
         ):
             return False
+        # SCOPE: only this replayable global-auction cycle. DRAIN: the monitor
+        # receives this handoff, while the durable completion wake and in-process
+        # token force the next cycle past this early-yield boundary. RESET: one
+        # non-cancelled terminal global cut clears the token through
+        # _settle_global_auction_monitor_fairness().
+        completion_reserved = request_global_auction_completion(
+            reason="periodic_monitor_preemption",
+            position_id="",
+        )
+        if not completion_reserved:
+            _log.warning(
+                "EDLI reactor retained global auction before %s because monitor "
+                "completion wake was not durably accepted",
+                stage,
+            )
+            return False
         _log.info(
-            "EDLI reactor yielded before %s for held-position monitor pressure",
+            "EDLI reactor yielded once before %s for held-position monitor "
+            "pressure; completion debt armed",
             stage,
         )
         return True

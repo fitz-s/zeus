@@ -5642,13 +5642,31 @@ def test_monitor_debt_yields_before_runtime_setup_and_releases_reactor_lock(
         "get_world_connection",
         lambda: pytest.fail("monitor debt must yield before runtime DB setup"),
     )
+    reservations: list[tuple[str, str]] = []
+
+    def reserve_completion(**kwargs):
+        reservations.append((kwargs["reason"], kwargs["position_id"]))
+        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+        return True
+
+    monkeypatch.setattr(
+        reactor_module,
+        "request_global_auction_completion",
+        reserve_completion,
+    )
 
     lock = threading.Lock()
-    assert reactor_module.run_edli_event_reactor_cycle(
-        active_lock=lock,
-        held_position_monitor_debt_pending=lambda: True,
-    ) is False
-    assert not lock.locked()
+    reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
+    try:
+        assert reactor_module.run_edli_event_reactor_cycle(
+            active_lock=lock,
+            held_position_monitor_debt_pending=lambda: True,
+        ) is False
+        assert reservations == [("periodic_monitor_preemption", "")]
+        assert reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+        assert not lock.locked()
+    finally:
+        reactor_module._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
 def test_reserved_monitor_completion_reaches_runtime_setup_under_monitor_pressure(
