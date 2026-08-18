@@ -3664,7 +3664,11 @@ def test_periodic_cycle_yields_to_already_pending_day0_before_runtime_db_setup(
         },
     )
     monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
-    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: "day0-wake")
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_revision",
+        lambda: "day0-wake",
+    )
     monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(
         db,
@@ -3677,6 +3681,62 @@ def test_periodic_cycle_yields_to_already_pending_day0_before_runtime_db_setup(
         urgent_day0_pending=lambda: True,
     ) is False
     assert lock.acquired is False
+
+
+def test_reserved_completion_absorbs_preexisting_day0_before_runtime_db_setup(
+    monkeypatch,
+):
+    import src.main as main
+    import src.state.db as db
+    from src.events import reactor
+    from src.events.reactor import run_edli_event_reactor_cycle
+    from src.riskguard import riskguard
+    from src.riskguard.risk_level import RiskLevel
+    from src.runtime import reactor_wake
+
+    class ExitAuctionReached(RuntimeError):
+        pass
+
+    existing = reactor_wake.ReactorWake(
+        "existing-day0",
+        "2026-08-18T02:14:59+00:00",
+        "day0",
+        "day0_extreme_event_committed",
+        event_ids=("event-day0",),
+    )
+    monkeypatch.setattr(
+        main,
+        "_settings_section",
+        lambda *_args, **_kwargs: {"enabled": True, "event_writer_enabled": True},
+    )
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(reactor_wake, "reactor_urgent_wake_revision", lambda: "day0-wake")
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_identity",
+        lambda: (existing.wake_id, existing.reason),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_wakes_since",
+        lambda *_args, **_kwargs: (existing,),
+    )
+    monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
+    monkeypatch.setattr(
+        db,
+        "get_world_connection",
+        lambda: (_ for _ in ()).throw(ExitAuctionReached()),
+    )
+
+    reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.set()
+    try:
+        with pytest.raises(ExitAuctionReached):
+            run_edli_event_reactor_cycle(
+                active_lock=threading.Lock(),
+                urgent_day0_pending=lambda: True,
+            )
+    finally:
+        reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
 
 def test_cycle_releases_dispatcher_lock_when_connection_close_fails(monkeypatch):
@@ -3874,6 +3934,64 @@ def test_targeted_forecast_wake_ignores_disjoint_family_revision(monkeypatch):
     assert cancelled() is False
     assert cancelled() is False
     assert reads == [frozenset({current.wake_id})]
+
+
+def test_reserved_probe_ignores_only_wakes_that_preexist_its_current_cut(
+    monkeypatch,
+):
+    from src.events.reactor import _reactor_wake_cancellation_probe
+    from src.runtime import reactor_wake
+
+    existing = reactor_wake.ReactorWake(
+        "wake-existing-day0",
+        "2026-08-18T02:14:59+00:00",
+        "day0",
+        "day0_extreme_event_committed",
+    )
+    newer = reactor_wake.ReactorWake(
+        "wake-new-day0",
+        "2026-08-18T02:19:55+00:00",
+        "day0",
+        "day0_extreme_event_committed",
+    )
+    revisions = iter(("base", "base", "new"))
+    urgent_identities = iter(
+        (
+            (existing.wake_id, existing.reason),
+            (existing.wake_id, existing.reason),
+            (newer.wake_id, newer.reason),
+        )
+    )
+
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_revision",
+        lambda: next(revisions),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "reactor_urgent_wake_identity",
+        lambda: next(urgent_identities),
+    )
+
+    def _wakes_since(_published_at, *, exclude_wake_ids=()):
+        if existing.wake_id not in exclude_wake_ids:
+            return (existing,)
+        return (newer,)
+
+    monkeypatch.setattr(reactor_wake, "reactor_wakes_since", _wakes_since)
+
+    cancelled = _reactor_wake_cancellation_probe(
+        producer_wake_reason=None,
+        producer_wake_ids=(),
+        producer_wake_published_at=None,
+        forecast_wake_families=set(),
+        urgent_day0_pending=lambda: True,
+        ignore_preexisting_wakes=True,
+    )
+
+    assert cancelled() is False
+    assert cancelled() is True
 
 
 def test_day0_posterior_advance_reemits_current_observation_on_new_probability_clock():

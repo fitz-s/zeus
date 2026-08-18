@@ -6664,6 +6664,7 @@ def _reactor_wake_cancellation_probe(
     forecast_wake_families: set[tuple[str, str, str]],
     urgent_day0_pending: Callable[[], bool] | None,
     allow_paused_forecast_snapshot_completion: bool = False,
+    ignore_preexisting_wakes: bool = False,
 ) -> Callable[[], bool]:
     """Cancel only when a newer wake invalidates the current work scope.
 
@@ -6671,19 +6672,36 @@ def _reactor_wake_cancellation_probe(
     for one already-selected, no-submit forecast carrier. It can absorb only
     an overlapping forecast wake; every other capital-risk or unknown reason
     retains the cancellation path.
+
+    ``ignore_preexisting_wakes`` is reserved for an ordinary scheduler cut
+    that already owns monitor-fairness completion. Its snapshot is part of the
+    cut's starting truth; only a wake published after that snapshot cancels it.
     """
 
     from src.runtime.reactor_wake import (
+        reactor_urgent_wake_identity,
         reactor_urgent_wake_revision,
         reactor_wakes_since,
     )
 
     observed_revision = reactor_urgent_wake_revision()
+    preexisting_wakes = (
+        tuple(reactor_wakes_since(None)) if ignore_preexisting_wakes else ()
+    )
+    preexisting_wake_ids = frozenset(wake.wake_id for wake in preexisting_wakes)
+    preexisting_urgent_identity = (
+        reactor_urgent_wake_identity() if ignore_preexisting_wakes else None
+    )
+    if (
+        preexisting_urgent_identity is not None
+        and preexisting_urgent_identity[0] not in preexisting_wake_ids
+    ):
+        preexisting_urgent_identity = None
     owned_wake_ids = frozenset(
         wake_id
         for raw_wake_id in producer_wake_ids
         if (wake_id := str(raw_wake_id or "").strip())
-    )
+    ) | preexisting_wake_ids
     targeted_forecast = (
         producer_wake_reason == "forecast_posterior_advanced"
         and bool(forecast_wake_families)
@@ -6696,8 +6714,14 @@ def _reactor_wake_cancellation_probe(
         if superseded:
             return True
         if urgent_day0_pending is not None and urgent_day0_pending():
-            superseded = True
-            return True
+            current_urgent_identity = reactor_urgent_wake_identity()
+            if not (
+                ignore_preexisting_wakes
+                and preexisting_urgent_identity is not None
+                and current_urgent_identity == preexisting_urgent_identity
+            ):
+                superseded = True
+                return True
 
         current_revision = reactor_urgent_wake_revision()
         if current_revision is None or current_revision == observed_revision:
@@ -7731,6 +7755,10 @@ def run_edli_event_reactor_cycle(
         )
     )
     producer_fast_path = committed_event_wake or targeted_forecast_wake
+    completion_reserved_at_start = (
+        producer_wake_reason is None
+        and _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+    )
     _urgent_wake_pending = _reactor_wake_cancellation_probe(
         producer_wake_reason=producer_wake_reason,
         producer_wake_ids=producer_wake_ids,
@@ -7740,6 +7768,11 @@ def run_edli_event_reactor_cycle(
         allow_paused_forecast_snapshot_completion=(
             allow_paused_forecast_snapshot_completion
         ),
+        # A reserved completion cut starts after these durable wakes already
+        # existed, so its current q/book reads include their committed truth.
+        # Only a later wake revision may supersede that cut. Submit-time q/book
+        # revalidation remains the independent final authority.
+        ignore_preexisting_wakes=completion_reserved_at_start,
     )
 
     # SCOPE: admission of the one global cut already owed after a monitor
