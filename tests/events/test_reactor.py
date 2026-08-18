@@ -5682,7 +5682,7 @@ def test_reserved_monitor_completion_reaches_runtime_setup_under_monitor_pressur
         pass
 
     monkeypatch.setattr(main, "_settings_section", lambda *_args, **_kwargs: {})
-    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: False)
+    monkeypatch.setattr(main, "_defer_for_held_position_monitor", lambda _job: True)
     monkeypatch.setattr(riskguard, "get_current_level", lambda: RiskLevel.GREEN)
     monkeypatch.setattr(
         reactor_module,

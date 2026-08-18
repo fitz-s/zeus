@@ -7743,14 +7743,24 @@ def run_edli_event_reactor_cycle(
         ),
     )
 
-    if _defer_for_held_position_monitor("edli_event_reactor"):
+    # SCOPE: admission of the one global cut already owed after a monitor
+    # handoff. DRAIN: that cut reaches the bounded in-reactor fairness probe;
+    # ordinary monitor pressure may still preempt the first unreserved cycle.
+    # RESET: a non-cancelled terminal cut clears the completion token.
+    if (
+        not _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+        and _defer_for_held_position_monitor("edli_event_reactor")
+    ):
         return False
     if active_lock.locked():
         _log.warning("EDLI reactor skipped: previous EDLI reactor cycle is still running")
         return False
     if not producer_fast_path and _urgent_wake_pending():
         return False
-    if _defer_for_held_position_monitor("edli_event_reactor"):
+    if (
+        not _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+        and _defer_for_held_position_monitor("edli_event_reactor")
+    ):
         return False
     from src.riskguard.risk_level import RiskLevel
     from src.riskguard.riskguard import get_current_level
@@ -7906,7 +7916,10 @@ def run_edli_event_reactor_cycle(
         if not producer_fast_path and _urgent_wake_pending():
             active_lock.release()
             return False
-        if _defer_for_held_position_monitor("edli_event_reactor"):
+        if (
+            not _GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
+            and _defer_for_held_position_monitor("edli_event_reactor")
+        ):
             active_lock.release()
             return False
         if _yield_for_held_position_monitor("runtime_db_setup"):
