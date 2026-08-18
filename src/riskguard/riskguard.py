@@ -6,7 +6,7 @@ and emits durable risk actions into zeus.db when the canonical table exists.
 Graduated response: GREEN → YELLOW → ORANGE → RED.
 
 # Created: (pre-audit)
-# Last reused or audited: 2026-08-16
+# Last reused or audited: 2026-08-17
 # Authority basis: connection-leak audit 2026-05-10 — 51 open zeus-world.db-wal
 #   handles observed on PID 18538. Root cause: tick() and tick_with_portfolio()
 #   opened zeus_conn / risk_conn without try/finally, so any exception in the
@@ -20,6 +20,9 @@ Graduated response: GREEN → YELLOW → ORANGE → RED.
 #   fail-open GREEN, never weakens RED; (3) get_current_level() floors a degraded
 #   row (riskguard_degraded_reason) to DATA_DEGRADED so the SINGLE authority never
 #   surfaces a degraded GREEN as clean — kills the status-vs-gate split-brain.
+#   2026-08-17 Brier strategy gates require independent target dates; correlated
+#   city/metric cells from one forecast day remain visible but cannot fabricate
+#   the minimum evidence count that blocks current positive-growth actions.
 """
 
 import hashlib
@@ -3903,6 +3906,18 @@ def _brier_probability_cohort_keys(row: dict) -> tuple[str, ...]:
     return tuple(keys)
 
 
+def _brier_independent_target_date(row: Mapping[str, object]) -> str | None:
+    """Return the canonical independent evidence unit for a weather outcome."""
+
+    raw = str(row.get("target_date") or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw).date().isoformat()
+    except ValueError:
+        return None
+
+
 def _probability_semantics_revisions(row: Mapping[str, object]) -> tuple[str, ...]:
     """Return the exact immutable probability-law revisions on one fill."""
 
@@ -3922,18 +3937,23 @@ def _brier_evidence_ready_rows(rows: list[dict]) -> list[dict]:
     different probability semantics cannot acquire statistical authority by
     being pooled merely because both actions used the same EV decision law.
     An explicitly recorded shared probability mechanism may still pool its
-    member strategies.
+    member strategies. The minimum evidence unit is a distinct target date;
+    correlated city/metric cells remain in the score but cannot inflate the
+    admission sample count.
     """
 
     keyed_rows = [(row, _brier_probability_cohort_keys(row)) for row in rows]
-    counts: dict[str, int] = {}
-    for _row, keys in keyed_rows:
+    target_dates: dict[str, set[str]] = {}
+    for row, keys in keyed_rows:
+        target_date = _brier_independent_target_date(row)
+        if target_date is None:
+            continue
         for key in keys:
-            counts[key] = counts.get(key, 0) + 1
+            target_dates.setdefault(key, set()).add(target_date)
     ready = {
         key
-        for key, count in counts.items()
-        if count >= _STRATEGY_BRIER_MIN_SAMPLE
+        for key, dates in target_dates.items()
+        if len(dates) >= _STRATEGY_BRIER_MIN_SAMPLE
     }
     return [row for row, keys in keyed_rows if any(key in ready for key in keys)]
 
@@ -3974,18 +3994,43 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
         )
         bucket = buckets.setdefault(bucket_key, {}).setdefault(
             cohort_key,
-            {"p": [], "o": [], "revisions": revisions},
+            {
+                "p": [],
+                "o": [],
+                "revisions": revisions,
+                "target_dates": set(),
+                "missing_target_date_count": 0,
+            },
         )
         bucket["p"].append(float(row["p_posterior"]))  # type: ignore[index, union-attr]
         bucket["o"].append(int(row["outcome"]))  # type: ignore[index, union-attr]
+        target_date = _brier_independent_target_date(row)
+        if target_date is None:
+            bucket["missing_target_date_count"] = int(
+                bucket["missing_target_date_count"]
+            ) + 1
+        else:
+            bucket["target_dates"].add(target_date)  # type: ignore[union-attr]
         mechanism_key = _probability_mechanism_key(row)
         if mechanism_key is not None and strategy in CANONICAL_STRATEGY_KEYS:
             mechanism_bucket = mechanism_buckets.setdefault(
                 mechanism_key,
-                {"p": [], "o": [], "strategy_counts": {}},
+                {
+                    "p": [],
+                    "o": [],
+                    "strategy_counts": {},
+                    "target_dates": set(),
+                    "missing_target_date_count": 0,
+                },
             )
             mechanism_bucket["p"].append(float(row["p_posterior"]))  # type: ignore[index, union-attr]
             mechanism_bucket["o"].append(int(row["outcome"]))  # type: ignore[index, union-attr]
+            if target_date is None:
+                mechanism_bucket["missing_target_date_count"] = int(
+                    mechanism_bucket["missing_target_date_count"]
+                ) + 1
+            else:
+                mechanism_bucket["target_dates"].add(target_date)  # type: ignore[union-attr]
             strategy_counts = mechanism_bucket["strategy_counts"]  # type: ignore[index]
             strategy_counts[strategy] = int(strategy_counts.get(strategy, 0)) + 1
 
@@ -3995,17 +4040,28 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
         cohort_payloads: dict[str, dict[str, object]] = {}
         all_p: list[float] = []
         all_o: list[int] = []
+        all_target_dates: set[str] = set()
+        missing_target_date_count = 0
         degraded_cohorts: list[dict[str, object]] = []
         for cohort_key, bucket in sorted(cohort_buckets.items()):
             p_values = list(bucket["p"])  # type: ignore[index]
             outcomes = list(bucket["o"])  # type: ignore[index]
+            cohort_target_dates = set(bucket["target_dates"])  # type: ignore[arg-type]
+            cohort_missing_target_dates = int(
+                bucket["missing_target_date_count"]
+            )
             all_p.extend(p_values)
             all_o.extend(outcomes)
+            all_target_dates.update(cohort_target_dates)
+            missing_target_date_count += cohort_missing_target_dates
             score = brier_score(p_values, outcomes)
             level = evaluate_brier(score, thresholds)
             sample_size = len(p_values)
+            independent_target_date_count = len(cohort_target_dates)
             cohort_payload: dict[str, object] = {
                 "sample_size": sample_size,
+                "independent_target_date_count": independent_target_date_count,
+                "missing_target_date_count": cohort_missing_target_dates,
                 "brier": round(float(score), 6),
                 "level": level.value,
                 "cohort": cohort_key,
@@ -4013,7 +4069,7 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
             revisions = tuple(bucket.get("revisions") or ())
             if revisions:
                 cohort_payload["probability_semantics_revisions"] = list(revisions)
-            if sample_size < _STRATEGY_BRIER_MIN_SAMPLE:
+            if independent_target_date_count < _STRATEGY_BRIER_MIN_SAMPLE:
                 cohort_payload["level"] = RiskLevel.GREEN.value
                 cohort_payload["thin_sample_no_verdict"] = True
             elif level != RiskLevel.GREEN:
@@ -4023,6 +4079,8 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
         aggregate_score = brier_score(all_p, all_o) if all_p else 0.0
         aggregate_payload: dict[str, object] = {
             "sample_size": len(all_p),
+            "independent_target_date_count": len(all_target_dates),
+            "missing_target_date_count": missing_target_date_count,
             "brier": round(float(aggregate_score), 6),
             "level": RiskLevel.GREEN.value,
             "cohorts": cohort_payloads,
@@ -4058,6 +4116,14 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
             )
             degraded_payload: dict[str, object] = {
                 "sample_size": len(degraded_p),
+                "independent_target_date_count": len(
+                    {
+                        target_date
+                        for cohort_key, bucket in cohort_buckets.items()
+                        if cohort_key in degraded_cohort_keys
+                        for target_date in bucket["target_dates"]  # type: ignore[union-attr]
+                    }
+                ),
                 "brier": round(float(brier_score(degraded_p, degraded_o)), 6),
                 "level": degraded_level.value,
                 "cohorts": [str(payload["cohort"]) for payload in degraded_cohorts],
@@ -4083,13 +4149,16 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
         score = brier_score(p_values, outcomes)
         level = evaluate_brier(score, thresholds)
         sample_size = len(p_values)
+        independent_target_date_count = len(bucket["target_dates"])  # type: ignore[arg-type]
         payload = {
             "sample_size": sample_size,
+            "independent_target_date_count": independent_target_date_count,
+            "missing_target_date_count": int(bucket["missing_target_date_count"]),
             "brier": round(float(score), 6),
             "level": level.value,
             "strategy_counts": strategy_counts,
         }
-        if sample_size < _STRATEGY_BRIER_MIN_SAMPLE:
+        if independent_target_date_count < _STRATEGY_BRIER_MIN_SAMPLE:
             payload["level"] = RiskLevel.GREEN.value
             payload["thin_sample_no_verdict"] = True
             by_mechanism[mechanism] = payload
@@ -4103,6 +4172,7 @@ def _strategy_brier_breakdown(rows: list[dict], thresholds: dict) -> dict[str, o
                 continue
             degraded[strategy] = {
                 "sample_size": sample_size,
+                "independent_target_date_count": independent_target_date_count,
                 "brier": round(float(score), 6),
                 "level": level.value,
                 "cohort": mechanism,

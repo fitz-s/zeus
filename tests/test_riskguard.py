@@ -5,6 +5,7 @@
 # Lifecycle: created=2026-03-30; last_reviewed=2026-08-17; last_reused=2026-08-17
 # Purpose: Guard RiskGuard protective metrics, policy resolution, source authority, and portfolio loader invariants.
 # Reuse: Run after RiskGuard risk details, portfolio loader, settlement source, bankroll, or risk-action changes.
+# 2026-08-17: Brier strategy-gate evidence is independent by target date.
 """Tests for RiskGuard metrics, policy resolution, and risk levels."""
 
 import json
@@ -1550,6 +1551,7 @@ def _settlement_row(
     outcome: int,
     pnl: float = 0.0,
     decision_law_id: str | None = "predicted_bin_ev_v1",
+    target_date: str = "2026-04-01",
 ) -> dict:
     return {
         "trade_id": trade_id,
@@ -1569,10 +1571,14 @@ def _settlement_row(
         "pnl": pnl,
         "city": "NYC",
         "range_label": "29C",
-        "target_date": "2026-04-01",
+        "target_date": target_date,
         "direction": "buy_yes",
         "settled_at": "2026-04-02T00:00:00+00:00",
     }
+
+
+def _independent_target_date(index: int) -> str:
+    return (datetime(2026, 1, 1) + timedelta(days=index)).date().isoformat()
 
 
 
@@ -3392,6 +3398,7 @@ class TestRiskGuardOrangeLocalization:
                 strategy="opening_inertia",
                 p_posterior=0.58,
                 outcome=0,
+                target_date=_independent_target_date(i),
             )
             for i in range(classified_degraded)
         ] + [
@@ -3400,6 +3407,7 @@ class TestRiskGuardOrangeLocalization:
                 strategy="center_buy",
                 p_posterior=0.80,
                 outcome=1,
+                target_date=_independent_target_date(45 + i),
             )
             for i in range(5)
         ] + [
@@ -3408,6 +3416,7 @@ class TestRiskGuardOrangeLocalization:
                 strategy="legacy_unattributed",
                 p_posterior=0.58,
                 outcome=0,
+                target_date=_independent_target_date(50 + i),
             )
             for i in range(unclassified_count)
         ]
@@ -3615,6 +3624,7 @@ class TestRiskGuardOrangeLocalization:
                 strategy="opening_inertia",
                 p_posterior=0.95,
                 outcome=0,
+                target_date=_independent_target_date(i),
             )
             for i in range(45)
         ] + [
@@ -3623,6 +3633,7 @@ class TestRiskGuardOrangeLocalization:
                 strategy="center_buy",
                 p_posterior=0.80,
                 outcome=1,
+                target_date=_independent_target_date(45 + i),
             )
             for i in range(5)
         ]
@@ -3683,6 +3694,7 @@ class TestRiskGuardOrangeLocalization:
                 strategy="opening_inertia",
                 p_posterior=0.95,
                 outcome=0,
+                target_date=_independent_target_date(i),
             )
             for i in range(45)
         ] + [
@@ -3691,6 +3703,7 @@ class TestRiskGuardOrangeLocalization:
                 strategy="center_buy",
                 p_posterior=0.80,
                 outcome=1,
+                target_date=_independent_target_date(45 + i),
             )
             for i in range(5)
         ]
@@ -4113,10 +4126,20 @@ class TestStrategyBrierMinSample:
 
     def test_single_loss_does_not_convict_a_strategy(self):
         rows = [
-            {"strategy": "forecast_qkernel_entry", "p_posterior": 0.79, "outcome": 0},
+            {
+                "strategy": "forecast_qkernel_entry",
+                "target_date": "2026-08-01",
+                "p_posterior": 0.79,
+                "outcome": 0,
+            },
         ] + [
-            {"strategy": "center_buy", "p_posterior": 0.80, "outcome": 1}
-            for _ in range(12)
+            {
+                "strategy": "center_buy",
+                "target_date": f"2026-08-{day:02d}",
+                "p_posterior": 0.80,
+                "outcome": 1,
+            }
+            for day in range(1, 13)
         ]
         out = riskguard_module._strategy_brier_breakdown(
             rows, {"brier_yellow": 0.25, "brier_orange": 0.30, "brier_red": 0.35},
@@ -4130,22 +4153,56 @@ class TestStrategyBrierMinSample:
     def test_floor_boundary_convicts_at_min_sample(self):
         n = riskguard_module._STRATEGY_BRIER_MIN_SAMPLE
         bad = [
-            {"strategy": "opening_inertia", "p_posterior": 0.58, "outcome": 0}
-            for _ in range(n)
+            {
+                "strategy": "opening_inertia",
+                "target_date": f"2026-08-{day:02d}",
+                "p_posterior": 0.58,
+                "outcome": 0,
+            }
+            for day in range(1, n + 1)
         ]
         out = riskguard_module._strategy_brier_breakdown(
             bad, {"brier_yellow": 0.25, "brier_orange": 0.30, "brier_red": 0.35},
         )
         oi = out["by_strategy"]["opening_inertia"]
         assert oi["sample_size"] == n
+        assert oi["independent_target_date_count"] == n
         assert oi["level"] != "GREEN"
         assert "opening_inertia" in out["degraded_strategies"]
+
+    def test_same_target_date_cells_do_not_fabricate_minimum_evidence(self):
+        n = riskguard_module._STRATEGY_BRIER_MIN_SAMPLE
+        bad = [
+            {
+                "strategy": "forecast_qkernel_entry",
+                "target_date": "2026-08-15",
+                "p_posterior": 0.80,
+                "outcome": 0,
+            }
+            for _ in range(n * 3)
+        ]
+
+        assert riskguard_module._brier_evidence_ready_rows(bad) == []
+        out = riskguard_module._strategy_brier_breakdown(
+            bad,
+            {"brier_yellow": 0.25, "brier_orange": 0.30, "brier_red": 0.35},
+        )
+        qkernel = out["by_strategy"]["forecast_qkernel_entry"]
+        assert qkernel["sample_size"] == n * 3
+        assert qkernel["independent_target_date_count"] == 1
+        assert qkernel["thin_sample_no_verdict"] is True
+        assert "forecast_qkernel_entry" not in out["degraded_strategies"]
 
     def test_one_below_floor_does_not_convict(self):
         n = riskguard_module._STRATEGY_BRIER_MIN_SAMPLE - 1
         bad = [
-            {"strategy": "opening_inertia", "p_posterior": 0.58, "outcome": 0}
-            for _ in range(n)
+            {
+                "strategy": "opening_inertia",
+                "target_date": f"2026-08-{day:02d}",
+                "p_posterior": 0.58,
+                "outcome": 0,
+            }
+            for day in range(1, n + 1)
         ]
         out = riskguard_module._strategy_brier_breakdown(
             bad, {"brier_yellow": 0.25, "brier_orange": 0.30, "brier_red": 0.35},
@@ -4189,19 +4246,21 @@ class TestStrategyBrierMinSampleContinued:
                 "strategy": "forecast_qkernel_entry",
                 "decision_law_id": "predicted_bin_ev_v1",
                 "probability_semantics_revisions": (old_revision,),
+                "target_date": f"2026-07-{day:02d}",
                 "p_posterior": 0.8,
                 "outcome": 0,
             }
-            for _ in range(10)
+            for day in range(1, 11)
         ] + [
             {
                 "strategy": "forecast_qkernel_entry",
                 "decision_law_id": "predicted_bin_ev_v1",
                 "probability_semantics_revisions": (current_revision,),
+                "target_date": f"2026-08-{day:02d}",
                 "p_posterior": 0.8,
                 "outcome": 1,
             }
-            for _ in range(10)
+            for day in range(1, 11)
         ]
 
         ready = riskguard_module._brier_evidence_ready_rows(rows)
@@ -4323,6 +4382,7 @@ class TestStrategyBrierMinSampleContinued:
                 "decision_law_id": "predicted_bin_ev_v1",
                 "decision_law_identity_ready": True,
                 "decision_snapshot_id": f"metar_fast:ZGGG:day0:{i}",
+                "target_date": f"2026-07-{i + 1:02d}",
                 "p_posterior": 0.99,
                 "outcome": 0,
             }
@@ -4333,6 +4393,7 @@ class TestStrategyBrierMinSampleContinued:
                 "decision_law_id": "predicted_bin_ev_v1",
                 "decision_law_identity_ready": True,
                 "decision_snapshot_id": f"metar_fast:LIMC:capture:{i}",
+                "target_date": f"2026-07-{i + 8:02d}",
                 "p_posterior": 0.90,
                 "outcome": 0,
             }
@@ -4410,6 +4471,7 @@ class TestStrategyBrierMinSampleContinued:
                 strategy="",
                 p_posterior=p_posterior,
                 outcome=0,
+                target_date=f"2026-08-{i + 1:02d}",
             )
             for i in range(riskguard_module._STRATEGY_BRIER_MIN_SAMPLE)
         ]
@@ -4512,6 +4574,7 @@ class TestStrategyBrierMinSampleContinued:
                 strategy="forecast_qkernel_entry",
                 p_posterior=0.9033,
                 outcome=0,
+                target_date=f"2026-08-{i + 1:02d}",
             )
             for i in range(sample_size)
         ]
@@ -6179,12 +6242,14 @@ class TestRiskGuardExecutionQualityLocalization:
             _settlement_row(
                 trade_id=f"opening-{i}", strategy="opening_inertia",
                 p_posterior=0.58, outcome=0,
+                target_date=_independent_target_date(i),
             )
             for i in range(45)
         ] + [
             _settlement_row(
                 trade_id=f"center-{i}", strategy="center_buy",
                 p_posterior=0.80, outcome=1,
+                target_date=_independent_target_date(45 + i),
             )
             for i in range(5)
         ]
@@ -7191,6 +7256,7 @@ class TestStrategyPolicyResolver:
                 strategy="opening_inertia",
                 p_posterior=0.53,
                 outcome=0,
+                target_date=_independent_target_date(i),
             )
             for i in range(45)
         ] + [
@@ -7199,6 +7265,7 @@ class TestStrategyPolicyResolver:
                 strategy="center_buy",
                 p_posterior=0.80,
                 outcome=1,
+                target_date=_independent_target_date(45 + i),
             )
             for i in range(5)
         ]
@@ -7273,6 +7340,7 @@ class TestStrategyPolicyResolver:
                 strategy="opening_inertia",
                 p_posterior=0.53,
                 outcome=0,
+                target_date=_independent_target_date(i),
             )
             for i in range(45)
         ] + [
@@ -7281,6 +7349,7 @@ class TestStrategyPolicyResolver:
                 strategy="center_buy",
                 p_posterior=0.80,
                 outcome=1,
+                target_date=_independent_target_date(45 + i),
             )
             for i in range(5)
         ]
