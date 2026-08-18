@@ -35033,6 +35033,7 @@ def _prepare_current_global_probability_family(
     source_available_at = ""
     bundle = None
     day0_source_clock_bound_identity = ""
+    current_day0_redecision_only = False
     if is_day0:
         city = runtime_cities_by_name().get(str(family.city))
         if city is None:
@@ -35203,6 +35204,54 @@ def _prepare_current_global_probability_family(
                         )
                     )
         if final_daily_observation is None:
+            current_day0_redecision_only = bool(
+                provisional_day0_fact is not None
+                and (
+                    local_target == local_now.date()
+                    or post_local_incomplete_monitor_authority
+                )
+                and probability_use
+                in {
+                    _CurrentProbabilityUse.HELD_MONITOR,
+                    _CurrentProbabilityUse.REDUCE_ONLY_EXIT,
+                }
+            )
+        if final_daily_observation is None and current_day0_redecision_only:
+            # SCOPE: this already-held Day0 family's monitor and reduce-only
+            # submit revalidation. ENTRY still requires the replacement bundle.
+            # DRAIN: the strict remaining-window builder below consumes a fresh,
+            # complete expected-provider vector bundle on every redecision.
+            # RESET: missing/stale vectors or the next local day fail closed;
+            # final-daily evidence upgrades to the exact simplex instead.
+            source_cycle_raw = str(
+                provisional_day0_fact.get("observation_time") or ""
+            ).strip()
+            source_available_at = str(
+                provisional_day0_fact.get("observation_available_at")
+                or source_cycle_raw
+            ).strip()
+            day0_base_identity = stable_hash(
+                {
+                    "authority_scope": "held_exposure_current_day0_only_v1",
+                    "city": family.city,
+                    "target_date": str(family.target_date),
+                    "metric": family.metric,
+                    "observation_source": provisional_day0_fact.get(
+                        "observation_source"
+                    ),
+                    "station_id": provisional_day0_fact.get("station_id"),
+                    "unit": provisional_day0_fact.get("unit"),
+                    "observation_time": source_cycle_raw,
+                    "observation_available_at": source_available_at,
+                    "observed_extreme_native": provisional_day0_fact.get(
+                        "observed_extreme_native"
+                    ),
+                    "raw_payload_sha256": provisional_day0_fact.get(
+                        "raw_payload_sha256"
+                    ),
+                }
+            )
+        elif final_daily_observation is None:
             readiness = latest_replacement_readiness(
                 forecast_conn,
                 city=family.city,
@@ -35415,11 +35464,16 @@ def _prepare_current_global_probability_family(
                 probability_base_identity=day0_base_identity,
                 allow_equivalent_conditioning_clock_advance=not entry_authority,
             )
-            if provisional_day0_observation:
-                if bundle is None:
+            if current_day0_redecision_only:
+                current_day0_payload[
+                    "_edli_day0_redecision_authority_scope"
+                ] = "held_exposure_current_day0_only_v1"
+            if provisional_day0_observation and bundle is None:
+                if not current_day0_redecision_only:
                     raise ValueError(
                         "GLOBAL_DAY0_PROVISIONAL_REPLACEMENT_BUNDLE_MISSING"
                     )
+            elif provisional_day0_observation:
                 if fast_residual_conditioning is not None:
                     _assert_provisional_day0_replacement_bundle(
                         bundle,
@@ -35443,41 +35497,42 @@ def _prepare_current_global_probability_family(
                         bundle,
                         current_day0_payload,
                     )
-            predictive_sigma_c = _amber_inflated_predictive_sigma_c(
-                bundle,
-                family=family,
-                decision_time=decision_time,
-            )
-            if predictive_sigma_c is None:
-                raise ValueError(
-                    "GLOBAL_DAY0_SOURCE_CLOCK_PREDICTIVE_SIGMA_MISSING"
+            if bundle is not None:
+                predictive_sigma_c = _amber_inflated_predictive_sigma_c(
+                    bundle,
+                    family=family,
+                    decision_time=decision_time,
                 )
-            settlement_unit = str(
-                getattr(city, "settlement_unit", "") or ""
-            ).strip().upper()
-            predictive_sigma_native = (
-                float(predictive_sigma_c) * 9.0 / 5.0
-                if settlement_unit == "F"
-                else float(predictive_sigma_c)
-            )
-            if not (
-                settlement_unit in {"C", "F"}
-                and predictive_sigma_native > 0.0
-                and math.isfinite(predictive_sigma_native)
-            ):
-                raise ValueError(
-                    "GLOBAL_DAY0_SOURCE_CLOCK_PREDICTIVE_SIGMA_INVALID"
+                if predictive_sigma_c is None:
+                    raise ValueError(
+                        "GLOBAL_DAY0_SOURCE_CLOCK_PREDICTIVE_SIGMA_MISSING"
+                    )
+                settlement_unit = str(
+                    getattr(city, "settlement_unit", "") or ""
+                ).strip().upper()
+                predictive_sigma_native = (
+                    float(predictive_sigma_c) * 9.0 / 5.0
+                    if settlement_unit == "F"
+                    else float(predictive_sigma_c)
                 )
-            current_day0_payload.update(
-                {
-                    "_edli_day0_source_clock_predictive_sigma_native": (
-                        predictive_sigma_native
-                    ),
-                    "_edli_day0_source_clock_predictive_sigma_basis": (
-                        "replacement_current_evidence_predictive_sigma_v1"
-                    ),
-                }
-            )
+                if not (
+                    settlement_unit in {"C", "F"}
+                    and predictive_sigma_native > 0.0
+                    and math.isfinite(predictive_sigma_native)
+                ):
+                    raise ValueError(
+                        "GLOBAL_DAY0_SOURCE_CLOCK_PREDICTIVE_SIGMA_INVALID"
+                    )
+                current_day0_payload.update(
+                    {
+                        "_edli_day0_source_clock_predictive_sigma_native": (
+                            predictive_sigma_native
+                        ),
+                        "_edli_day0_source_clock_predictive_sigma_basis": (
+                            "replacement_current_evidence_predictive_sigma_v1"
+                        ),
+                    }
+                )
         payload.update(current_day0_payload)
         if day0_payload_out is not None:
             day0_payload_out.update(current_day0_payload)
@@ -35904,7 +35959,16 @@ def _prepare_current_global_probability_family(
                     "probability_authority": probability_authority,
                     "q_source": "day0_remaining_day",
                     "_edli_q_source": "day0_remaining_day",
-                    "_edli_day0_q_mode": "remaining_day",
+                    "_edli_day0_q_mode": (
+                        "post_local_provisional_tail"
+                        if post_local_incomplete_monitor_authority
+                        and provisional_day0_observation
+                        else (
+                            "post_local_incomplete_settlement_tail"
+                            if post_local_incomplete_monitor_authority
+                            else "remaining_day"
+                        )
+                    ),
                 }
             )
     else:
@@ -35918,6 +35982,38 @@ def _prepare_current_global_probability_family(
     if components is None:
         raise ValueError("GLOBAL_CURRENT_POSTERIOR_SIMPLEX_INVALID")
     samples, point_q, band_basis = components
+    if (
+        current_day0_redecision_only
+        and local_target < local_now.date()
+    ):
+        raw_capture_times = payload.get(
+            "_edli_day0_remaining_capture_times_utc"
+        )
+        if not isinstance(raw_capture_times, list) or not raw_capture_times:
+            raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_CAPTURE_MISSING")
+        target_end = datetime.combine(
+            local_target + timedelta(days=1),
+            time.min,
+            tzinfo=ZoneInfo(str(city.timezone)),
+        ).astimezone(UTC)
+        try:
+            capture_times = tuple(
+                datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+                for value in raw_capture_times
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "GLOBAL_DAY0_POST_LOCAL_VECTOR_CAPTURE_INVALID"
+            ) from exc
+        if any(
+            captured.tzinfo is None
+            or captured.astimezone(UTC) > target_end
+            for captured in capture_times
+        ):
+            raise ValueError("GLOBAL_DAY0_POST_LOCAL_VECTOR_CAPTURE_AFTER_TARGET")
+        payload["_edli_day0_post_local_vector_cutoff_utc"] = (
+            target_end.isoformat()
+        )
     if exact_yes_payoffs:
         column_by_bin = {
             binding.bin_id: index for index, binding in enumerate(bindings)
@@ -35954,7 +36050,10 @@ def _prepare_current_global_probability_family(
             decision_time=decision_time,
         )
         current_caps = day0_caps
-        if probability_authority == "day0_remaining_day_global_probability_v1":
+        if (
+            probability_authority == "day0_remaining_day_global_probability_v1"
+            and not current_day0_redecision_only
+        ):
             bound_bundle = bundle
             if bound_bundle is None:
                 readiness = latest_replacement_readiness(
@@ -36054,7 +36153,7 @@ def _prepare_current_global_probability_family(
                     ),
                 }
             )
-        if not provisional_day0_observation:
+        if not provisional_day0_observation and not current_day0_redecision_only:
             candidate_payoff_q_lcb_caps = current_caps
     if (
         current_day0_payload is not None
@@ -36090,6 +36189,8 @@ def _prepare_current_global_probability_family(
             "_edli_day0_source_clock_bound_posterior_identity",
             "_edli_day0_source_clock_bound_identity",
             "_edli_day0_source_clock_bound_basis",
+            "_edli_day0_redecision_authority_scope",
+            "_edli_day0_post_local_vector_cutoff_utc",
             "_edli_day0_provisional_revision_likelihood",
             "_edli_day0_provisional_boundary_survival_probability",
             "_edli_day0_post_peak_confidence_source",
@@ -36172,10 +36273,17 @@ def _prepare_current_global_probability_family(
             "source_clock_bound_identity": (
                 day0_source_clock_bound_identity or None
             ),
+            "redecision_authority_scope": payload.get(
+                "_edli_day0_redecision_authority_scope"
+            ),
+            "post_local_vector_cutoff_utc": payload.get(
+                "_edli_day0_post_local_vector_cutoff_utc"
+            ),
         }
         source_truth_identity = stable_hash(source_truth)
         if (
-            not provisional_day0_observation
+            bundle is None
+            or not provisional_day0_observation
             or probability_authority
             == "day0_remaining_day_global_probability_v1"
         ):

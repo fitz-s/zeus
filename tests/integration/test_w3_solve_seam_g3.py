@@ -8452,6 +8452,7 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
     )
 
     remaining_calls = 0
+    remaining_capture = {"value": "2026-07-11T07:10:00+00:00"}
 
     def remaining_components(*_args, **kwargs):
         nonlocal remaining_calls
@@ -8465,7 +8466,7 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
                 ],
                 "_edli_day0_remaining_models": 3,
                 "_edli_day0_remaining_capture_times_utc": [
-                    "2026-07-11T07:10:00+00:00"
+                    remaining_capture["value"]
                 ],
             }
         )
@@ -8571,12 +8572,30 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
     assert day0_payload[
         "_edli_day0_provisional_boundary_survival_probability"
     ] == pytest.approx(0.95)
-    assert day0_payload["_edli_day0_source_clock_bound_posterior_identity"]
-    assert day0_payload["_edli_day0_source_clock_bound_identity"]
+    assert day0_payload["_edli_day0_redecision_authority_scope"] == (
+        "held_exposure_current_day0_only_v1"
+    )
     assert day0_payload["_edli_global_day0_binding"][
         "evidence_finality"
     ] == "PROVISIONAL_CURRENT_SNAPSHOT"
     assert "_edli_day0_exact_yes_payoffs" not in day0_payload
+    assert bundle_reads == 0
+    assert replacement_calls == 0
+
+    reduce_only = era._prepare_current_global_probability_family(
+        event,
+        forecast_conn=forecast,
+        topology_conn=forecast,
+        observation_conn=observations,
+        decision_time=decision_at,
+        max_age=_dt.timedelta(seconds=30),
+        allow_provisional_day0_replacement=True,
+        probability_use=era._CurrentProbabilityUse.REDUCE_ONLY_EXIT,
+    )
+    assert reduce_only.probability_witness.yes_point_q.tolist() == pytest.approx(
+        [0.2, 0.5, 0.3]
+    )
+    assert bundle_reads == 0
 
     post_day_payload: dict[str, object] = {}
     post_day = era._prepare_current_global_probability_family(
@@ -8602,6 +8621,31 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
     assert post_day_payload["_edli_day0_q_mode"] == (
         "post_local_provisional_tail"
     )
+    assert post_day_payload["_edli_day0_redecision_authority_scope"] == (
+        "held_exposure_current_day0_only_v1"
+    )
+    assert post_day_payload["_edli_day0_post_local_vector_cutoff_utc"] == (
+        "2026-07-11T16:00:00+00:00"
+    )
+
+    remaining_capture["value"] = "2026-07-11T17:00:00+00:00"
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_POST_LOCAL_VECTOR_CAPTURE_AFTER_TARGET",
+    ):
+        era._prepare_current_global_probability_family(
+            event,
+            forecast_conn=forecast,
+            topology_conn=forecast,
+            observation_conn=observations,
+            decision_time=_dt.datetime(
+                2026, 7, 12, 0, 30, tzinfo=_dt.timezone.utc
+            ),
+            max_age=_dt.timedelta(seconds=30),
+            allow_provisional_day0_replacement=True,
+            probability_use=era._CurrentProbabilityUse.HELD_MONITOR,
+        )
+    remaining_capture["value"] = "2026-07-11T07:10:00+00:00"
 
     with pytest.raises(
         ValueError,
@@ -8618,9 +8662,9 @@ def test_provisional_hko_held_probability_uses_revision_aware_remaining_simplex(
             probability_use=era._CurrentProbabilityUse.ENTRY,
         )
 
-    assert remaining_calls == 2
-    assert replacement_calls == 2
-    assert bundle_reads == 2
+    assert remaining_calls == 4
+    assert replacement_calls == 0
+    assert bundle_reads == 0
 
     def unavailable_remaining_components(*_args, **_kwargs):
         raise ValueError("DAY0_REMAINING_DAY_MEMBERS_UNAVAILABLE")
