@@ -13737,7 +13737,15 @@ def run_edli_continuous_redecision_screen_cycle(*, screen_lock) -> None:
                     already_pending_keys=pending,
                     event_type=REDECISION_EVENT_TYPE,
                     restrict_to_families=emit_families,
-                    phase_filter_exempt_families=set(),
+                    # A pulled rest and a held position are existing capital
+                    # obligations, not new-entry discovery.  They must keep
+                    # re-deciding after the family enters Day0; otherwise the
+                    # forecast-phase filter drops the escalation event after a
+                    # venue-confirmed cancel and the next generic price event
+                    # can recreate the same maker rest.
+                    phase_filter_exempt_families=(
+                        set(rest_pull_families) | set(held_reemit_families)
+                    ),
                 )
             else:
                 events_to_emit = []

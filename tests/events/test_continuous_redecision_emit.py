@@ -2209,6 +2209,18 @@ def test_redecision_screen_separates_entry_from_held_reemit():
     )
 
 
+def test_redecision_screen_keeps_day0_capital_obligations_in_reemit_scope():
+    """Day0 phase filtering cannot erase rest-pull escalation or held redecision."""
+
+    screen_src = inspect.getsource(reactor.run_edli_continuous_redecision_screen_cycle)
+
+    assert (
+        "phase_filter_exempt_families=(\n"
+        "                        set(rest_pull_families) | set(held_reemit_families)\n"
+        "                    )"
+    ) in screen_src
+
+
 def test_rest_pull_condition_scope_uses_rest_family_identity_without_belief():
     """Open maker-rest pulls must not disappear when the entry belief subset is empty."""
 
