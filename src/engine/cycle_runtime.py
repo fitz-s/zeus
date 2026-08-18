@@ -9555,15 +9555,29 @@ def execute_monitoring_phase(
                     _incomplete_reason,
                 )
 
-            monitor_canonical_written = _emit_monitor_refreshed_canonical_if_available(
-                conn,
-                pos,
-                deps=deps,
-                exit_decision=exit_decision,
-                final_should_exit=should_exit,
-                final_exit_reason=exit_reason,
-                final_exit_trigger=exit_trigger,
-            )
+            if _incomplete_reason is not None and not should_exit:
+                _revoke_monitor_action_authority(pos)
+                monitor_canonical_written = (
+                    _emit_monitor_refreshed_canonical_if_available(
+                        conn,
+                        pos,
+                        deps=deps,
+                        decision_unavailable_reason=_incomplete_reason,
+                        decision_unavailable_trigger="INCOMPLETE_EXIT_CONTEXT",
+                    )
+                )
+            else:
+                monitor_canonical_written = (
+                    _emit_monitor_refreshed_canonical_if_available(
+                        conn,
+                        pos,
+                        deps=deps,
+                        exit_decision=exit_decision,
+                        final_should_exit=should_exit,
+                        final_exit_reason=exit_reason,
+                        final_exit_trigger=exit_trigger,
+                    )
+                )
             if not monitor_canonical_written:
                 monitor_canonical_failed = True
                 summary["monitor_canonical_write_failed"] = (

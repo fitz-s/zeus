@@ -20155,6 +20155,79 @@ def test_monitor_degraded_attempt_is_not_an_economic_hold_decision():
     assert payload["exit_decision_trigger"] == "MONITOR_INPUTS_UNAVAILABLE"
 
 
+def test_incomplete_exit_context_is_not_persisted_as_economic_hold(monkeypatch):
+    from src.engine import cycle_runtime
+
+    position = _make_position(
+        trade_id="monitor-incomplete-no-economic-hold",
+        state="holding",
+        chain_state="synced",
+    )
+    emitted = []
+    results = []
+
+    def refresh(*_args):
+        context = _monitor_test_edge_context(position)
+        context.fresh_prob = None
+        context.fresh_prob_is_fresh = False
+        position.last_monitor_prob = None
+        position.last_monitor_prob_is_fresh = False
+        return context
+
+    def emit(*_args, **kwargs):
+        emitted.append(kwargs)
+        return True
+
+    monkeypatch.setattr("src.engine.monitor_refresh.refresh_position", refresh)
+    monkeypatch.setattr(
+        Position,
+        "evaluate_exit",
+        lambda *_args, **_kwargs: ExitDecision(
+            False,
+            "EVIDENCE_UNAVAILABLE",
+            trigger="EVIDENCE_UNAVAILABLE",
+            applied_validations=["evidence_unavailable_third_state"],
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        emit,
+    )
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, result: results.append(result)},
+    )()
+    summary = {"monitors": 0, "exits": 0}
+
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(position),
+        artifact,
+        _monitor_test_tracker(),
+        summary,
+        deps=_monitor_test_deps("test_incomplete_no_economic_hold"),
+        run_exit_preflight=False,
+    )
+
+    assert len(emitted) == 1
+    assert "exit_decision" not in emitted[0]
+    assert emitted[0]["decision_unavailable_reason"].startswith(
+        "INCOMPLETE_EXIT_CONTEXT"
+    )
+    assert emitted[0]["decision_unavailable_trigger"] == (
+        "INCOMPLETE_EXIT_CONTEXT"
+    )
+    assert position.last_monitor_prob_is_fresh is False
+    assert position.last_monitor_market_price_is_fresh is False
+    assert results[0].fresh_prob is None
+    assert results[0].fresh_edge is None
+    assert summary["monitor_incomplete_exit_context"] == 1
+    assert summary["monitors"] == 1
+
+
 def test_monitor_absolute_deadline_includes_pending_exit_preflight(monkeypatch):
     from src.engine import cycle_runtime
     from src.execution import exit_lifecycle
