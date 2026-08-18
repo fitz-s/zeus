@@ -8730,6 +8730,7 @@ def run_edli_event_reactor_cycle(
             ),
             held_sell_reauction_requests=held_sell_completion_cut_requests,
             held_family_provider=held_family_provider,
+            construction_work_context=construct_context,
         )
         _construct_checkpoint("after_adapter")
 

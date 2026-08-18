@@ -297,6 +297,7 @@ from src.strategy.market_fusion import MODEL_ONLY_POSTERIOR_MODE
 if TYPE_CHECKING:
     from src.risk_allocator import AuctionCapitalAuthority
     from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
+    from src.engine.global_auction_universe import WorkContext
 from src.strategy.market_phase import (
     MarketPhase,
     FORECAST_ONLY_ADMIT_PHASES as _FORECAST_ONLY_ADMIT_PHASES,
@@ -4768,6 +4769,7 @@ def _durable_unmaterialized_live_cap_reservations(
     conn: sqlite3.Connection | None,
     *,
     trade_conn: sqlite3.Connection | None = None,
+    work_context: "WorkContext | None" = None,
 ) -> tuple[tuple[str, str, float], ...]:
     """Return durable live-cap exposure not yet represented by position truth.
 
@@ -4779,72 +4781,186 @@ def _durable_unmaterialized_live_cap_reservations(
     """
     if conn is None:
         return ()
+
+    from src.engine.global_auction_universe import (
+        WorkDeferred,
+        bounded_work_sqlite,
+    )
+
+    def bounded_read(read_conn: sqlite3.Connection, stage: str):
+        if work_context is None:
+            return contextlib.nullcontext(read_conn)
+        return bounded_work_sqlite(
+            read_conn,
+            work_context,
+            stage=f"durable_live_cap:{stage}",
+            shared_connection=True,
+        )
+
     try:
-        if not (
-            _adapter_table_exists(conn, "edli_live_cap_usage")
-            and _adapter_table_exists(conn, "edli_live_order_events")
-        ):
-            return ()
-        rows = conn.execute(
-            """
-            WITH live_cap AS (
+        with bounded_read(conn, "candidates") as read_conn:
+            if not (
+                _adapter_table_exists(read_conn, "edli_live_cap_usage")
+                and _adapter_table_exists(read_conn, "edli_live_order_events")
+            ):
+                return ()
+            raw_candidates = read_conn.execute(
+                """
                 SELECT
                     usage_id,
-                    event_id,
                     final_intent_id,
                     execution_command_id,
-                    reserved_notional_usd,
-                    event_id || ':' || COALESCE(final_intent_id, '') AS aggregate_id
+                    event_id || ':' || COALESCE(final_intent_id, '') AS aggregate_id,
+                    reserved_notional_usd
                 FROM edli_live_cap_usage
                 WHERE reservation_status IN ('RESERVED', 'CONSUMED')
                   AND reserved_notional_usd > 0
-            ),
-            observed AS (
-                SELECT DISTINCT aggregate_id
-                FROM edli_live_order_events
-                WHERE event_type = 'UserTradeObserved'
-                  AND json_extract(payload_json, '$.fill_authority_state') = 'FILL_CONFIRMED'
-            ),
-            absence_reconciled AS (
-                SELECT DISTINCT aggregate_id
-                FROM edli_live_order_events
-                WHERE event_type = 'Reconciled'
-                  AND (
-                    json_extract(payload_json, '$.cap_transition_recommendation') = 'RELEASED'
-                    OR json_type(payload_json, '$.authenticated_absence_proof') IS NOT NULL
-                  )
-            ),
-            pre_submit AS (
-                SELECT aggregate_id, payload_json
-                FROM edli_live_order_events
-                WHERE event_type = 'PreSubmitRevalidated'
-            ),
-            decision_audit AS (
-                SELECT aggregate_id, payload_json
-                FROM edli_live_order_events
-                WHERE event_type = 'DecisionProofAccepted'
+                ORDER BY usage_id
+                """
+            ).fetchall()
+        candidates = tuple(
+            (
+                str(
+                    row[0]
+                    if not isinstance(row, sqlite3.Row)
+                    else row["usage_id"]
+                ),
+                str(
+                    row[1]
+                    if not isinstance(row, sqlite3.Row)
+                    else row["final_intent_id"] or ""
+                ),
+                str(
+                    row[2]
+                    if not isinstance(row, sqlite3.Row)
+                    else row["execution_command_id"] or ""
+                ),
+                str(
+                    row[3]
+                    if not isinstance(row, sqlite3.Row)
+                    else row["aggregate_id"]
+                ),
+                float(
+                    row[4]
+                    if not isinstance(row, sqlite3.Row)
+                    else row["reserved_notional_usd"]
+                ),
             )
-            SELECT
-                live_cap.usage_id,
-                live_cap.final_intent_id,
-                live_cap.execution_command_id,
-                COALESCE(
-                    NULLIF(json_extract(pre_submit.payload_json, '$.city'), ''),
-                    NULLIF(json_extract(decision_audit.payload_json, '$.decision_audit.city'), ''),
-                    ?
-                ) AS city,
-                live_cap.reserved_notional_usd
-            FROM live_cap
-            LEFT JOIN observed ON observed.aggregate_id = live_cap.aggregate_id
-            LEFT JOIN absence_reconciled ON absence_reconciled.aggregate_id = live_cap.aggregate_id
-            LEFT JOIN pre_submit ON pre_submit.aggregate_id = live_cap.aggregate_id
-            LEFT JOIN decision_audit ON decision_audit.aggregate_id = live_cap.aggregate_id
-            WHERE observed.aggregate_id IS NULL
-              AND absence_reconciled.aggregate_id IS NULL
-            ORDER BY live_cap.usage_id
-            """,
-            (_DURABLE_LIVE_CAP_UNKNOWN_CITY,),
-        ).fetchall()
+            for row in raw_candidates
+        )
+        requested_pairs = tuple((row[2], row[1]) for row in candidates)
+        if trade_conn is None:
+            trade_truth_pairs = frozenset()
+        else:
+            with bounded_read(trade_conn, "trade_truth") as read_trade_conn:
+                trade_truth_pairs = _durable_live_cap_represented_pairs(
+                    read_trade_conn,
+                    requested_pairs,
+                )
+
+        unresolved = tuple(
+            row
+            for row in candidates
+            if (row[2], row[1]) not in trade_truth_pairs
+        )
+        out: list[tuple[str, str, float]] = []
+        with bounded_read(conn, "order_evidence") as read_conn:
+            evidence_by_aggregate: dict[str, list[tuple[str, str]]] = {}
+            aggregate_ids = tuple(dict.fromkeys(row[3] for row in unresolved))
+            variable_limit = read_conn.getlimit(
+                sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER
+            )
+            for offset in range(0, len(aggregate_ids), variable_limit):
+                chunk = aggregate_ids[offset : offset + variable_limit]
+                placeholders = ",".join("?" for _ in chunk)
+                evidence_rows = read_conn.execute(
+                    f"""
+                    SELECT aggregate_id, event_type, payload_json
+                    FROM edli_live_order_events
+                    WHERE aggregate_id IN ({placeholders})
+                      AND event_type IN (
+                          'UserTradeObserved',
+                          'Reconciled',
+                          'PreSubmitRevalidated',
+                          'DecisionProofAccepted'
+                      )
+                    ORDER BY aggregate_id, event_sequence DESC
+                    """,
+                    chunk,
+                ).fetchall()
+                for evidence_row in evidence_rows:
+                    aggregate_id = str(
+                        evidence_row[0]
+                        if not isinstance(evidence_row, sqlite3.Row)
+                        else evidence_row["aggregate_id"]
+                    )
+                    event_type = str(
+                        evidence_row[1]
+                        if not isinstance(evidence_row, sqlite3.Row)
+                        else evidence_row["event_type"]
+                    )
+                    payload_json = str(
+                        evidence_row[2]
+                        if not isinstance(evidence_row, sqlite3.Row)
+                        else evidence_row["payload_json"]
+                    )
+                    evidence_by_aggregate.setdefault(aggregate_id, []).append(
+                        (event_type, payload_json)
+                    )
+            for (
+                usage_id,
+                _final_intent_id,
+                _execution_command_id,
+                aggregate_id,
+                reserved,
+            ) in unresolved:
+                pre_submit_city = ""
+                decision_city = ""
+                materialized_or_absent = False
+                for event_type, payload_json in evidence_by_aggregate.get(
+                    aggregate_id,
+                    (),
+                ):
+                    payload = json.loads(payload_json)
+                    if not isinstance(payload, dict):
+                        raise ValueError(
+                            "DURABLE_LIVE_CAP_EVENT_PAYLOAD_NOT_OBJECT"
+                        )
+                    if (
+                        event_type == "UserTradeObserved"
+                        and payload.get("fill_authority_state") == "FILL_CONFIRMED"
+                    ):
+                        materialized_or_absent = True
+                        break
+                    if event_type == "Reconciled" and (
+                        payload.get("cap_transition_recommendation") == "RELEASED"
+                        or "authenticated_absence_proof" in payload
+                    ):
+                        materialized_or_absent = True
+                        break
+                    if event_type == "PreSubmitRevalidated" and not pre_submit_city:
+                        pre_submit_city = str(payload.get("city") or "").strip()
+                    elif event_type == "DecisionProofAccepted" and not decision_city:
+                        decision_audit = payload.get("decision_audit")
+                        if isinstance(decision_audit, dict):
+                            decision_city = str(
+                                decision_audit.get("city") or ""
+                            ).strip()
+                if materialized_or_absent:
+                    continue
+                if usage_id and reserved > 0.0:
+                    out.append(
+                        (
+                            f"durable_live_cap:{usage_id}",
+                            pre_submit_city
+                            or decision_city
+                            or _DURABLE_LIVE_CAP_UNKNOWN_CITY,
+                            reserved,
+                        )
+                    )
+        return tuple(out)
+    except WorkDeferred:
+        raise
     except Exception as exc:  # noqa: BLE001 - sizing must fail closed on exposure ambiguity.
         import logging
 
@@ -4856,38 +4972,6 @@ def _durable_unmaterialized_live_cap_reservations(
         raise RuntimeError(
             f"DURABLE_LIVE_CAP_EXPOSURE_SEED_UNAVAILABLE:{type(exc).__name__}:{exc}"
         ) from exc
-    trade_truth_pairs = _durable_live_cap_represented_pairs(
-        trade_conn,
-        (
-            (
-                str(
-                    row[2]
-                    if not isinstance(row, sqlite3.Row)
-                    else row["execution_command_id"] or ""
-                ),
-                str(
-                    row[1]
-                    if not isinstance(row, sqlite3.Row)
-                    else row["final_intent_id"] or ""
-                ),
-            )
-            for row in rows
-        ),
-    )
-    out: list[tuple[str, str, float]] = []
-    for row in rows:
-        usage_id = str(row[0] if not isinstance(row, sqlite3.Row) else row["usage_id"])
-        final_intent_id = str(row[1] if not isinstance(row, sqlite3.Row) else row["final_intent_id"] or "")
-        execution_command_id = str(row[2] if not isinstance(row, sqlite3.Row) else row["execution_command_id"] or "")
-        city = str(row[3] if not isinstance(row, sqlite3.Row) else row["city"])
-        reserved = float(row[4] if not isinstance(row, sqlite3.Row) else row["reserved_notional_usd"])
-        if (execution_command_id, final_intent_id) in trade_truth_pairs:
-            continue
-        if usage_id and reserved > 0.0:
-            out.append((f"durable_live_cap:{usage_id}", city, reserved))
-    return tuple(out)
-
-
 def _same_token_pending_entry_usd(
     conn: sqlite3.Connection | None,
     *,
@@ -5716,11 +5800,13 @@ def _seed_portfolio_reservations_from_durable_live_cap(
     conn: sqlite3.Connection | None,
     *,
     trade_conn: sqlite3.Connection | None = None,
+    work_context: "WorkContext | None" = None,
 ) -> int:
     seeded = 0
     for reservation_id, city, reserved_usd in _durable_unmaterialized_live_cap_reservations(
         conn,
         trade_conn=trade_conn,
+        work_context=work_context,
     ):
         ledger.seed_committed(reservation_id, city, reserved_usd)
         seeded += 1
@@ -7140,6 +7226,7 @@ def event_bound_live_adapter_from_trade_conn(
     selection_completion_sell_keys: frozenset[tuple[str, str]] = frozenset(),
     held_sell_reauction_requests: tuple[object, ...] = (),
     held_family_provider: Callable[[], object] | None = None,
+    construction_work_context: "WorkContext | None" = None,
 ) -> Callable[[OpportunityEvent, datetime], EventSubmissionReceipt]:
     """Build the event-bound live certificate chain up to the executor boundary.
 
@@ -7264,6 +7351,7 @@ def event_bound_live_adapter_from_trade_conn(
         portfolio_reservation,
         live_cap_conn,
         trade_conn=trade_conn,
+        work_context=construction_work_context,
     )
 
     def _submit_global_sell(

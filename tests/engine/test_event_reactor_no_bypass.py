@@ -3952,6 +3952,67 @@ def test_107_durable_live_cap_seed_counts_only_unmaterialized_live_exposure():
     )
 
 
+def test_107_durable_live_cap_seed_counts_retrying_aggregate_once():
+    """Retry history cannot multiply one durable capital reservation."""
+
+    conn = _live_cap_seed_conn()
+    _insert_live_cap_usage(
+        conn,
+        usage_id="usage-retried",
+        event_id="event-retried",
+        final_intent_id="intent-retried",
+        usd=12.5,
+    )
+    aggregate_id = "event-retried:intent-retried"
+    _insert_live_order_event(
+        conn,
+        aggregate_id=aggregate_id,
+        seq=1,
+        event_type="PreSubmitRevalidated",
+        payload={"city": "Paris"},
+    )
+    _insert_live_order_event(
+        conn,
+        aggregate_id=aggregate_id,
+        seq=2,
+        event_type="DecisionProofAccepted",
+        payload={"decision_audit": {"city": "Berlin"}},
+    )
+    _insert_live_order_event(
+        conn,
+        aggregate_id=aggregate_id,
+        seq=3,
+        event_type="PreSubmitRevalidated",
+        payload={"city": "Chicago"},
+    )
+    _insert_live_order_event(
+        conn,
+        aggregate_id=aggregate_id,
+        seq=4,
+        event_type="DecisionProofAccepted",
+        payload={"decision_audit": {"city": "Madrid"}},
+    )
+
+    assert _durable_unmaterialized_live_cap_reservations(conn) == (
+        ("durable_live_cap:usage-retried", "Chicago", pytest.approx(12.5)),
+    )
+
+
+def test_107_durable_live_cap_seed_obeys_reactor_construction_deadline():
+    """Capital reconstruction cannot outlive the reactor/monitor work cut."""
+
+    from src.engine.global_auction_universe import WorkContext, WorkDeferred
+
+    conn = _live_cap_seed_conn()
+    context = WorkContext(deadline_monotonic=0.0, monotonic=lambda: 1.0)
+
+    with pytest.raises(WorkDeferred):
+        _durable_unmaterialized_live_cap_reservations(
+            conn,
+            work_context=context,
+        )
+
+
 def test_107_durable_live_cap_seed_excludes_trade_truth_materialized_exposure():
     """Live-cap seed must not double-count orders already terminal or materialized.
 
