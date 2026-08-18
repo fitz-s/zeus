@@ -7505,8 +7505,8 @@ def test_reserved_global_sell_reauction_deadline_is_an_actuation_contract(
     completed = False
     monkeypatch.setattr(
         reactor_wake,
-        "held_sell_reauction_requests_completed",
-        lambda _requests: completed,
+        "held_sell_reauction_request_completion_status",
+        lambda _request: "ACTUATED" if completed else None,
     )
 
     write_obligation(obligation)
@@ -7739,8 +7739,8 @@ def test_expired_global_sell_debt_refreshes_q_and_book_before_reauction(
     )
     monkeypatch.setattr(
         reactor_wake,
-        "held_sell_reauction_requests_completed",
-        lambda _requests: False,
+        "held_sell_reauction_request_completion_status",
+        lambda _request: None,
     )
     refreshes = []
 
@@ -12526,6 +12526,70 @@ def test_day0_closed_non_accepting_market_skips_exit_monitor_chain_missing(monke
     assert monitor_results[0].fresh_edge is None
 
 
+def test_closed_market_canonical_failure_has_no_artifact_or_monitor_count(monkeypatch):
+    """A closed venue is terminal only after its canonical monitor event commits."""
+    from src.engine import cycle_runtime
+
+    pos = _make_position(
+        trade_id="closed-canonical-failure",
+        state="day0_window",
+        chain_state="synced",
+        city="Chicago",
+        target_date="2026-04-01",
+        market_id="0xclosedfailure",
+        condition_id="0xclosedfailure",
+    )
+    results = []
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, result: results.append(result)},
+    )()
+    deps = type(
+        "Deps",
+        (),
+        {
+            "MonitorResult": type(
+                "MonitorResult",
+                (),
+                {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)},
+            ),
+            "logger": logging.getLogger("test_closed_canonical_failure"),
+            "cities_by_name": {
+                "Chicago": type("City", (), {"timezone": "America/Chicago"})()
+            },
+            "_utcnow": staticmethod(
+                lambda: datetime(2026, 4, 1, 18, 30, tzinfo=timezone.utc)
+            ),
+        },
+    )
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_closed_non_accepting_market_info",
+        lambda *_args, **_kwargs: {"source": "clob_market_info"},
+    )
+    monkeypatch.setattr(
+        "src.execution.exit_lifecycle.mark_market_closed_hold_to_settlement",
+        lambda *_args, **_kwargs: False,
+    )
+
+    summary = {"monitors": 0, "exits": 0}
+    cycle_runtime.execute_monitoring_phase(
+        None,
+        object(),
+        _make_portfolio(pos),
+        artifact,
+        _monitor_test_tracker(),
+        summary,
+        deps=deps,
+        run_exit_preflight=False,
+    )
+
+    assert results == []
+    assert summary["monitors"] == 0
+    assert summary["monitor_canonical_write_failed"] == 1
+
+
 def test_day0_closed_market_detection_uses_static_market_end_when_clob_info_missing():
     """Missing post-close CLOB info must not send held positions into stale quote retry."""
     from src.engine import cycle_runtime
@@ -13721,7 +13785,7 @@ def test_held_book_stale_server_timestamp_is_not_executable(monkeypatch):
 def test_monitoring_batch_transport_failure_recovers_one_without_singular_fanout(
     monkeypatch,
 ):
-    """A failed batch recovers one bounded position; the next cycle retries all."""
+    """A failed batch terminalizes its reserved gap; the next cycle retries all."""
     from src.engine import cycle_runtime, monitor_refresh
 
     positions = [
@@ -13791,6 +13855,9 @@ def test_monitoring_batch_transport_failure_recovers_one_without_singular_fanout
     )
     def emit_monitor_refreshed(_conn, position, **_kwargs):
         canonical_refreshes.append(position.trade_id)
+        position._canonical_monitor_refreshed_at = (
+            f"2026-08-18T00:00:{len(canonical_refreshes):02d}+00:00"
+        )
         return True
 
     monkeypatch.setattr(
@@ -13815,14 +13882,15 @@ def test_monitoring_batch_transport_failure_recovers_one_without_singular_fanout
 
     assert singular_calls == [positions[0].token_id]
     assert refreshes == [positions[0].trade_id]
-    assert canonical_refreshes == refreshes
+    assert canonical_refreshes == [position.trade_id for position in positions]
     assert summary["held_monitor_orderbook_prefetch_transport_failed"] is True
     assert summary["held_monitor_positions_deferred_for_orderbook_gap"] == 1
     assert summary["held_monitor_batch_failure_singular_recovered"] == 1
     assert summary["held_monitor_batch_failure_singular_recovered_position"] == (
         positions[0].trade_id
     )
-    assert summary["monitors"] == 1
+    assert summary["monitor_data_degraded_attempts"] == 1
+    assert summary["monitors"] == 2
 
     clob.fail_batch = False
     recovered_summary = {"monitors": 0, "exits": 0}
@@ -13838,12 +13906,21 @@ def test_monitoring_batch_transport_failure_recovers_one_without_singular_fanout
         held_position_monitor_budget_seconds=10.0,
     )
 
-    assert singular_calls == [positions[0].token_id]
+    assert singular_calls == [
+        positions[0].token_id,
+        positions[0].token_id,
+        positions[1].token_id,
+    ]
     assert refreshes == [
         positions[0].trade_id,
         *(position.trade_id for position in positions),
     ]
-    assert canonical_refreshes == refreshes
+    assert canonical_refreshes == [
+        positions[0].trade_id,
+        positions[1].trade_id,
+        positions[0].trade_id,
+        positions[1].trade_id,
+    ]
     assert recovered_summary["monitors"] == 2
     assert not recovered_summary.get(
         "held_monitor_orderbook_prefetch_transport_failed", False
@@ -14023,7 +14100,12 @@ def test_monitoring_failed_singular_recovery_does_not_fan_out(monkeypatch):
     assert singular_calls == [positions[0].token_id]
     assert summary["held_monitor_positions_deferred_for_orderbook_gap"] == 2
     assert summary["held_monitor_batch_failure_singular_unavailable"] == 1
-    assert summary["monitors"] == 0
+    assert summary["monitor_data_degraded_attempts"] == 2
+    assert summary["monitors"] == 2
+    assert positions[0].last_monitor_prob_is_fresh is False
+    assert positions[0].last_monitor_market_price_is_fresh is False
+    assert positions[1].last_monitor_prob_is_fresh is False
+    assert positions[1].last_monitor_market_price_is_fresh is False
 
 
 def test_monitoring_batch_transport_does_not_retry_after_deadline(
@@ -14779,8 +14861,8 @@ def test_chain_risk_hard_fact_monitor_holds_true_active_phase(tmp_path, monkeypa
     assert current["phase"] == LifecyclePhase.DAY0_WINDOW.value
     assert current["chain_state"] == "synced"
     assert current["chain_shares"] == pytest.approx(18.1)
-    assert current["last_monitor_prob"] == pytest.approx(0.0)
-    assert current["last_monitor_prob_is_fresh"] == 1
+    assert current["last_monitor_prob"] is None
+    assert current["last_monitor_prob_is_fresh"] == 0
     event = conn.execute(
         """
         SELECT phase_before, phase_after, payload_json
@@ -14793,6 +14875,7 @@ def test_chain_risk_hard_fact_monitor_holds_true_active_phase(tmp_path, monkeypa
     assert event["phase_before"] == LifecyclePhase.DAY0_WINDOW.value
     assert event["phase_after"] == LifecyclePhase.DAY0_WINDOW.value
     payload = json.loads(event["payload_json"])
+    assert payload["exit_decision_available"] is False
     assert payload["exit_decision_reason"].startswith("DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED")
     assert payload["phase_after"] == LifecyclePhase.DAY0_WINDOW.value
     assert monitor_results[0].should_exit is False
@@ -19999,6 +20082,74 @@ def test_monitor_hold_append_failure_has_no_hold_artifact_or_monitor_count(monke
     assert summary["monitor_canonical_write_failed"] == 1
 
 
+def test_monitor_degraded_append_failure_has_no_artifact_or_monitor_count(monkeypatch):
+    """Unavailable inputs only terminalize when the canonical event commits."""
+    from src.engine import cycle_runtime
+
+    position = _make_position(trade_id="monitor-degraded-append-failure")
+    position.last_monitor_prob = 0.91
+    position.last_monitor_prob_is_fresh = True
+    position.last_monitor_edge = 0.4
+    position.last_monitor_market_price = 0.5
+    position.last_monitor_market_price_is_fresh = True
+    results = []
+    artifact = type(
+        "Artifact",
+        (),
+        {"add_monitor_result": lambda self, result: results.append(result)},
+    )()
+    summary = {"monitors": 0}
+    monkeypatch.setattr(
+        cycle_runtime,
+        "_emit_monitor_refreshed_canonical_if_available",
+        lambda *_args, **_kwargs: False,
+    )
+
+    assert cycle_runtime._record_monitor_data_degraded_attempt(
+        None,
+        position,
+        artifact=artifact,
+        deps=_monitor_test_deps("test_monitor_degraded_append_failure"),
+        summary=summary,
+        stage="refresh_deadline",
+    ) is False
+    assert results == []
+    assert summary["monitors"] == 0
+    assert summary["monitor_canonical_write_failed"] == 1
+    assert position.last_monitor_prob_is_fresh is False
+    assert position.last_monitor_market_price_is_fresh is False
+
+
+def test_monitor_degraded_attempt_is_not_an_economic_hold_decision():
+    from src.engine.lifecycle_events import build_monitor_refreshed_canonical_write
+
+    position = _make_position(trade_id="monitor-data-degraded-payload")
+    position.strategy_key = "forecast_qkernel_entry"
+    position.entered_at = "2026-08-18T00:00:00+00:00"
+    position.last_monitor_prob = 0.91
+    position.last_monitor_prob_is_fresh = False
+    position.last_monitor_edge = None
+    position.last_monitor_market_price = None
+    position.last_monitor_market_price_is_fresh = False
+    events, _projection = build_monitor_refreshed_canonical_write(
+        position,
+        sequence_no=1,
+        phase_after="active",
+        decision_unavailable_reason="MONITOR_INPUTS_UNAVAILABLE:REFRESH_DEADLINE",
+        decision_unavailable_trigger="MONITOR_INPUTS_UNAVAILABLE",
+    )
+
+    payload = json.loads(events[0]["payload_json"])
+    assert payload["last_monitor_prob_is_fresh"] is False
+    assert payload["last_monitor_market_price_is_fresh"] is False
+    assert payload["exit_decision_available"] is False
+    assert payload["exit_decision_should_exit"] is False
+    assert payload["exit_decision_reason"] == (
+        "MONITOR_INPUTS_UNAVAILABLE:REFRESH_DEADLINE"
+    )
+    assert payload["exit_decision_trigger"] == "MONITOR_INPUTS_UNAVAILABLE"
+
+
 def test_monitor_absolute_deadline_includes_pending_exit_preflight(monkeypatch):
     from src.engine import cycle_runtime
     from src.execution import exit_lifecycle
@@ -21969,6 +22120,49 @@ def test_global_sell_debt_lineage_timeout_is_typed_deferred(monkeypatch):
     conn.close()
 
 
+def test_expired_global_sell_attempt_requires_fresh_successor(monkeypatch):
+    from src.execution import exit_lifecycle
+    from src.runtime import reactor_wake
+
+    obligation = {
+        "schema_version": 4,
+        "scope_identity": "expired-successor-scope",
+        "request_id": "expired-successor-request",
+        "material_identity": "expired-successor-material",
+        "generation": "expired-successor-generation",
+        "attempt_identity": "expired-successor-attempt",
+        "position_id": "expired-successor-position",
+        "held_token_id": "expired-successor-token",
+        "completion_deadline_at": "2026-08-18T12:00:00+00:00",
+    }
+    request = SimpleNamespace(
+        request_id=obligation["request_id"],
+        material_identity=obligation["material_identity"],
+        generation=obligation["generation"],
+        attempt_identity=obligation["attempt_identity"],
+    )
+    monkeypatch.setattr(
+        exit_lifecycle,
+        "_utcnow",
+        lambda: datetime(2026, 8, 18, 12, 0, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        reactor_wake,
+        "latest_v4_held_sell_reauction_request",
+        lambda _scope: request,
+    )
+    terminal_status = [reactor_wake.DEADLINE_EXPIRED]
+    monkeypatch.setattr(
+        reactor_wake,
+        "held_sell_reauction_request_completion_status",
+        lambda _request: terminal_status[0],
+    )
+
+    assert exit_lifecycle._held_sell_reauction_recovery_due(obligation) is True
+    terminal_status[0] = "ACTUATED"
+    assert exit_lifecycle._held_sell_reauction_recovery_due(obligation) is False
+
+
 def test_global_sell_debt_deferral_preserves_primary_monitor_refresh(monkeypatch):
     """Auxiliary debt deferral cannot blind an otherwise refreshable holding."""
     from src.engine import cycle_runtime, monitor_refresh
@@ -22132,7 +22326,7 @@ def test_held_sell_recovery_read_hard_deadline_kills_blocked_lineage(tmp_path):
         "missing-lineage-hard-deadline",
         timeout_seconds=1.0,
         path=tmp_path,
-    ) == (None, False)
+    ) == (None, False, "")
     assert reactor_wake._HELD_SELL_REAUCTION_RECOVERY_CHILD is None
     assert reactor_wake._HELD_SELL_REAUCTION_RECOVERY_CHILD_LOCK.acquire(
         blocking=False
@@ -22329,7 +22523,9 @@ def test_monitor_refresh_deadline_defers_before_canonical_emit(monkeypatch):
         held_position_monitor_budget_seconds=6.0,
     )
 
-    assert canonical_emits == []
+    assert canonical_emits == [True]
+    assert summary["monitor_canonical_write_failed"] == 1
+    assert summary["monitors"] == 0
     assert summary["held_monitor_defer_reason"] == "MONITOR_DEADLINE_EXPIRED_AFTER_REFRESH"
     assert summary["held_monitor_deadline_deferred_positions"] == 1
     assert summary["held_monitor_primary_belief_deferred_position_ids"] == [
@@ -22477,13 +22673,16 @@ def test_one_position_deadline_does_not_blind_remaining_held_book(monkeypatch):
 
     assert refreshes == [position.trade_id for position in positions]
     assert evaluated == [positions[1].trade_id]
-    assert canonical_emits == [positions[1].trade_id]
+    assert canonical_emits == [position.trade_id for position in positions]
     assert positions[0].last_monitor_at != "attempt-1"
     assert positions[0].concurrent_evidence == "must-survive-refresh-rollback"
+    assert positions[0].last_monitor_prob_is_fresh is False
+    assert positions[0].last_monitor_market_price_is_fresh is False
     assert summary["held_monitor_per_position_deadline_deferred"] == 1
     assert summary["held_monitor_positions_deferred"] == 1
     assert summary["held_monitor_primary_belief_read_completed"] == 1
-    assert summary["monitors"] == 1
+    assert summary["monitor_data_degraded_attempts"] == 1
+    assert summary["monitors"] == 2
 
 
 def test_refresh_exception_restores_owned_state_and_continues_held_book(monkeypatch):
@@ -22545,11 +22744,14 @@ def test_refresh_exception_restores_owned_state_and_continues_held_book(monkeypa
     )
 
     assert positions[0].last_monitor_prob == original_prob
+    assert positions[0].last_monitor_prob_is_fresh is False
+    assert positions[0].last_monitor_market_price_is_fresh is False
     assert "partial-refresh-must-rollback" not in positions[0].applied_validations
     assert positions[0].concurrent_evidence == "must-survive-refresh-exception"
     assert evaluated == [positions[1].trade_id]
     assert summary["monitor_failed"] == 1
-    assert summary["monitors"] == 1
+    assert summary["monitor_data_degraded_attempts"] == 1
+    assert summary["monitors"] == 2
 
 
 def test_admitted_refresh_exception_does_not_poison_statistical_tail(monkeypatch):
@@ -22642,12 +22844,15 @@ def test_admitted_refresh_exception_does_not_poison_statistical_tail(monkeypatch
     )
 
     assert refreshes == [position.trade_id for position in positions]
-    assert evaluated == canonical_emits == [
+    assert evaluated == [
         positions[1].trade_id,
         positions[2].trade_id,
         positions[3].trade_id,
     ]
+    assert canonical_emits == [position.trade_id for position in positions]
     assert positions[0].last_monitor_prob == original_prob
+    assert positions[0].last_monitor_prob_is_fresh is False
+    assert positions[0].last_monitor_market_price_is_fresh is False
     assert "partial-refresh-must-rollback" not in positions[0].applied_validations
     assert positions[0].concurrent_evidence == "must-survive-refresh-exception"
     assert summary["held_monitor_primary_belief_failed_position_ids"] == [
@@ -22661,7 +22866,8 @@ def test_admitted_refresh_exception_does_not_poison_statistical_tail(monkeypatch
     ]
     assert summary["held_monitor_positions_deferred"] == 1
     assert summary["monitor_failed"] == 1
-    assert summary["monitors"] == 3
+    assert summary["monitor_data_degraded_attempts"] == 1
+    assert summary["monitors"] == 4
 
 
 def test_closed_market_metadata_child_timeout_continues_held_book(monkeypatch):
@@ -22735,10 +22941,15 @@ def test_closed_market_metadata_child_timeout_continues_held_book(monkeypatch):
 
     assert metadata_calls == [position.trade_id for position in positions]
     assert refreshes == []
-    assert canonical_emits == []
+    assert canonical_emits == [positions[0].trade_id]
     assert positions[0].state == "holding"
+    assert positions[0].last_monitor_prob_is_fresh is False
+    assert positions[0].last_monitor_market_price_is_fresh is False
     assert summary["held_monitor_per_position_deadline_deferred"] == 1
     assert summary["held_monitor_positions_deferred"] == 1
+    assert summary["monitor_data_degraded_attempts"] == 1
+    assert summary["monitor_closed_market_pending_settlement_attempts"] == 1
+    assert summary["monitors"] == 2
 
 
 @pytest.mark.parametrize("failure_mode", ("timeout", "exception"))
@@ -22843,11 +23054,12 @@ def test_admitted_metadata_failure_does_not_poison_statistical_tail(
         positions[1].trade_id,
     ]
     assert metadata_calls == [position.trade_id for position in positions]
-    assert refreshes == canonical_emits == [
+    assert refreshes == [
         positions[1].trade_id,
         positions[2].trade_id,
         positions[3].trade_id,
     ]
+    assert canonical_emits == [position.trade_id for position in positions]
     assert summary["held_monitor_primary_belief_expired_position_ids"] == (
         [positions[0].trade_id] if failure_mode == "timeout" else []
     )
@@ -22860,7 +23072,8 @@ def test_admitted_metadata_failure_does_not_poison_statistical_tail(
     assert summary.get("held_monitor_defer_reason") != (
         "primary_belief_admitted_slice_failed"
     )
-    assert summary["monitors"] == 3
+    assert summary["monitor_data_degraded_attempts"] == 1
+    assert summary["monitors"] == 4
 
 
 def test_market_velocity_uses_causal_source_time_not_legacy_text_order(tmp_path):

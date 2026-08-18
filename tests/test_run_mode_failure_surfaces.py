@@ -4436,9 +4436,10 @@ def test_monitor_probability_freshness_exposes_canonical_closed_market_hold(
                         "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
                         "exit_order_submitted": False,
                         "exit_failure": False,
+                        "exit_decision_available": False,
                         "applied_validations": [
                             "MARKET_CLOSED_AWAITING_SETTLEMENT",
-                            "closed_market_hold_preserved_monitor_evidence",
+                            "closed_market_hold_no_action_authority",
                         ],
                     }
                 ),
@@ -4486,9 +4487,10 @@ def test_monitor_probability_freshness_exposes_closed_hold_on_stale_projection(
                         "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
                         "exit_order_submitted": False,
                         "exit_failure": False,
+                        "exit_decision_available": False,
                         "applied_validations": [
                             "MARKET_CLOSED_AWAITING_SETTLEMENT",
-                            "closed_market_hold_preserved_monitor_evidence",
+                            "closed_market_hold_no_action_authority",
                         ],
                     }
                 ),
@@ -4538,9 +4540,10 @@ def test_monitor_probability_freshness_fresh_bid_revokes_closed_hold(
                         "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
                         "exit_order_submitted": False,
                         "exit_failure": False,
+                        "exit_decision_available": False,
                         "applied_validations": [
                             "MARKET_CLOSED_AWAITING_SETTLEMENT",
-                            "closed_market_hold_preserved_monitor_evidence",
+                            "closed_market_hold_no_action_authority",
                         ],
                     }
                 ),
@@ -4603,9 +4606,10 @@ def test_monitor_probability_freshness_closed_hold_survives_later_stale_event(
                         "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
                         "exit_order_submitted": False,
                         "exit_failure": False,
+                        "exit_decision_available": False,
                         "applied_validations": [
                             "MARKET_CLOSED_AWAITING_SETTLEMENT",
-                            "closed_market_hold_preserved_monitor_evidence",
+                            "closed_market_hold_no_action_authority",
                         ],
                     }
                 ),
@@ -4655,9 +4659,10 @@ def test_monitor_probability_freshness_exit_submit_revokes_closed_hold(
                         "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
                         "exit_order_submitted": False,
                         "exit_failure": False,
+                        "exit_decision_available": False,
                         "applied_validations": [
                             "MARKET_CLOSED_AWAITING_SETTLEMENT",
-                            "closed_market_hold_preserved_monitor_evidence",
+                            "closed_market_hold_no_action_authority",
                         ],
                     }
                 ),
@@ -4728,9 +4733,10 @@ def test_monitor_probability_freshness_presubmit_exit_rejection_keeps_closed_hol
                         "hold_reason": "MARKET_CLOSED_AWAITING_SETTLEMENT",
                         "exit_order_submitted": False,
                         "exit_failure": False,
+                        "exit_decision_available": False,
                         "applied_validations": [
                             "MARKET_CLOSED_AWAITING_SETTLEMENT",
-                            "closed_market_hold_preserved_monitor_evidence",
+                            "closed_market_hold_no_action_authority",
                         ],
                     }
                 ),

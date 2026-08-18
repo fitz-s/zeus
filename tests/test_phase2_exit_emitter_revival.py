@@ -615,6 +615,11 @@ class TestDay0StaticClosedBehavioral:
             ),
         )
         monkeypatch.setattr(
+            cycle_runtime,
+            "_closed_non_accepting_market_info",
+            lambda *_args, **_kwargs: {"source": "clob_market_info"},
+        )
+        monkeypatch.setattr(
             cycle_runtime, "_emit_monitor_refreshed_canonical_if_available",
             lambda conn_, pos_, *, deps, **kwargs: True,
         )
@@ -661,10 +666,10 @@ class TestDay0StaticClosedBehavioral:
         assert summary.get("monitor_skipped_closed_market_pending_settlement", 0) == 0
         assert summary.get("day0_hard_fact_closed_market_monitors", 0) == 1
         assert summary.get("day0_hard_fact_closed_market_hold_to_settlement", 0) == 1
-        assert results and results[0].fresh_prob == pytest.approx(0.0)
+        assert results and results[0].fresh_prob is None
         assert "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED" in results[0].exit_reason
-        assert pos.last_monitor_prob == pytest.approx(0.0)
-        assert pos.last_monitor_prob_is_fresh is True
+        assert pos.last_monitor_prob is None
+        assert pos.last_monitor_prob_is_fresh is False
         assert pos.last_monitor_market_price is None
         assert pos.last_monitor_market_price_is_fresh is False
         hold_event = conn.execute(
@@ -680,9 +685,11 @@ class TestDay0StaticClosedBehavioral:
             (pos.trade_id,),
         ).fetchone()
         assert hold_event is not None
-        assert json.loads(hold_event["payload_json"])["semantic_event"] == (
+        hold_payload = json.loads(hold_event["payload_json"])
+        assert hold_payload["semantic_event"] == (
             "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
         )
+        assert hold_payload["exit_decision_available"] is False
 
 
 # ---------------------------------------------------------------------------

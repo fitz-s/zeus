@@ -3190,6 +3190,10 @@ def _monitor_probability_freshness_surface(
                            IN (0, 'false')
                        AND json_extract(e.payload_json, '$.exit_failure')
                            IN (0, 'false')
+                       AND json_extract(
+                               e.payload_json,
+                               '$.exit_decision_available'
+                           ) IN (0, 'false')
                        AND EXISTS (
                            SELECT 1
                              FROM json_each(
@@ -3210,7 +3214,7 @@ def _monitor_probability_freshness_surface(
                                  )
                              )
                             WHERE json_each.value
-                                = 'closed_market_hold_preserved_monitor_evidence'
+                                = 'closed_market_hold_no_action_authority'
                        )
                      ORDER BY e.sequence_no DESC, datetime(e.occurred_at) DESC
                      LIMIT 1
@@ -3590,7 +3594,8 @@ def _monitor_probability_freshness_surface(
                 and latest_payload.get("exit_failure") is False
                 and isinstance(validations, list)
                 and "MARKET_CLOSED_AWAITING_SETTLEMENT" in validations
-                and "closed_market_hold_preserved_monitor_evidence" in validations
+                and "closed_market_hold_no_action_authority" in validations
+                and latest_payload.get("exit_decision_available") is False
             )
 
         day0_daily_extrema_unconditioned_sample, semantic_err = _sqlite_ro_rows(

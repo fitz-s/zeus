@@ -11186,7 +11186,7 @@ def test_red_intent_preserves_existing_order_projection(conn):
     ).fetchone()[0] == 1
 
 
-def test_market_closed_hold_preserves_last_fresh_monitor_values(conn):
+def test_market_closed_hold_revokes_last_monitor_action_authority(conn):
     from src.engine.lifecycle_events import build_position_current_projection
     from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
     from src.state.portfolio import Position
@@ -11264,14 +11264,14 @@ def test_market_closed_hold_preserves_last_fresh_monitor_values(conn):
         """,
         (persisted.trade_id,),
     ).fetchone()
-    assert current["last_monitor_prob"] == pytest.approx(0.91)
-    assert current["last_monitor_prob_is_fresh"] == 1
-    assert current["last_monitor_edge"] == pytest.approx(0.16)
-    assert current["last_monitor_market_price"] == pytest.approx(0.75)
-    assert current["last_monitor_market_price_is_fresh"] == 1
-    assert float(current["last_monitor_best_bid"]) == pytest.approx(0.74)
-    assert float(current["last_monitor_best_ask"]) == pytest.approx(0.76)
-    assert float(current["last_monitor_market_vig"]) == pytest.approx(0.02)
+    assert current["last_monitor_prob"] == pytest.approx(0.0)
+    assert current["last_monitor_prob_is_fresh"] == 0
+    assert current["last_monitor_edge"] is None
+    assert current["last_monitor_market_price"] is None
+    assert current["last_monitor_market_price_is_fresh"] == 0
+    assert current["last_monitor_best_bid"] is None
+    assert current["last_monitor_best_ask"] is None
+    assert current["last_monitor_market_vig"] is None
 
     event = conn.execute(
         """
@@ -11285,11 +11285,13 @@ def test_market_closed_hold_preserves_last_fresh_monitor_values(conn):
     ).fetchone()
     payload = json.loads(event["payload_json"])
     assert payload["semantic_event"] == "MARKET_CLOSED_HOLD_TO_SETTLEMENT"
-    assert payload["last_monitor_prob"] == pytest.approx(0.91)
-    assert payload["last_monitor_market_price"] == pytest.approx(0.75)
-    assert payload["last_monitor_prob_is_fresh"] is True
-    assert payload["last_monitor_market_price_is_fresh"] is True
-    assert "closed_market_hold_preserved_monitor_evidence" in payload["applied_validations"]
+    assert payload["last_monitor_prob"] == pytest.approx(0.0)
+    assert payload["last_monitor_market_price"] is None
+    assert payload["last_monitor_prob_is_fresh"] is False
+    assert payload["last_monitor_market_price_is_fresh"] is False
+    assert payload["exit_decision_available"] is False
+    assert payload["exit_decision_reason"] == "MARKET_CLOSED_AWAITING_SETTLEMENT"
+    assert "closed_market_hold_no_action_authority" in payload["applied_validations"]
 
 
 def test_position_projection_round_trips_zero_monitor_bid(conn):

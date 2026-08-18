@@ -1037,7 +1037,9 @@ def _held_sell_reauction_recovery_due(
 
     The deadline is an actuation contract, not telemetry. A queued request may
     wait only until that deadline; a missing or mismatched queue attempt is an
-    immediate crash-recovery debt. Any latest terminal receipt retires the debt.
+    immediate crash-recovery debt. A DEADLINE_EXPIRED receipt terminalizes only
+    that attempt; the economic SELL obligation remains debt until a fresh
+    successor reaches an authoritative terminal outcome.
     """
 
     try:
@@ -1063,7 +1065,8 @@ def _held_sell_reauction_recovery_due(
 
     try:
         from src.runtime.reactor_wake import (
-            held_sell_reauction_requests_completed,
+            DEADLINE_EXPIRED,
+            held_sell_reauction_request_completion_status,
             held_sell_reauction_recovery_snapshot_hard_deadline,
             latest_v4_held_sell_reauction_request,
         )
@@ -1084,12 +1087,15 @@ def _held_sell_reauction_recovery_due(
                 request.generation,
                 request.attempt_identity,
             )
-            completed = held_sell_reauction_requests_completed((request,))
+            completion_status = held_sell_reauction_request_completion_status(
+                request
+            )
+            completed = completion_status is not None
         else:
             remaining = float(deadline_monotonic) - _time_module.monotonic()
             if remaining < 0.01:
                 raise TimeoutError("held SELL recovery classification deadline expired")
-            current, completed = (
+            current, completed, completion_status = (
                 held_sell_reauction_recovery_snapshot_hard_deadline(
                     scope_identity,
                     timeout_seconds=min(
@@ -1101,7 +1107,7 @@ def _held_sell_reauction_recovery_due(
             if current is None:
                 return True
         if completed:
-            return False
+            return completion_status == DEADLINE_EXPIRED
         if current != expected:
             return True
         return now > deadline_utc
@@ -3205,7 +3211,7 @@ def mark_market_closed_hold_to_settlement(
     error: str = "market_closed_non_accepting_orders",
     conn: sqlite3.Connection | None = None,
     preserve_exit_reason: bool = False,
-) -> None:
+) -> bool:
     """Record a market-closed hold without manufacturing a sell failure.
 
     Once the market is closed, quote freshness is no longer a solvable exit
@@ -3258,14 +3264,24 @@ def mark_market_closed_hold_to_settlement(
         validations.append("monitor_probability_provenance_missing")
     if reason not in validations:
         validations.append(reason)
+    if "closed_market_hold_no_action_authority" not in validations:
+        validations.append("closed_market_hold_no_action_authority")
     position.applied_validations = validations
-    _dual_write_market_closed_hold_if_available(
+    position.last_monitor_prob_is_fresh = False
+    position.last_monitor_market_price_is_fresh = False
+    position.last_monitor_edge = None
+    position.last_monitor_market_price = None
+    position.last_monitor_best_bid = None
+    position.last_monitor_best_ask = None
+    position.last_monitor_market_vig = None
+    canonical_written = _dual_write_market_closed_hold_if_available(
         conn,
         position,
         reason=reason,
         error=error,
         preserve_exit_reason=preserve_exit_reason,
     )
+    return conn is None or canonical_written
 
 
 def _restore_last_monitor_snapshot_for_closed_hold(
@@ -3376,16 +3392,15 @@ def _dual_write_market_closed_hold_if_available(
         )
         sequence_no = _next_canonical_sequence_no(conn, trade_id)
         occurred_at = datetime.now(timezone.utc).isoformat()
-        _restore_last_monitor_snapshot_for_closed_hold(conn, position)
         position.last_monitor_at = occurred_at
-        if "closed_market_hold_preserved_monitor_evidence" not in position.applied_validations:
-            position.applied_validations.append("closed_market_hold_preserved_monitor_evidence")
         phase_after = _runtime_state_value(position) or LifecyclePhase.DAY0_WINDOW.value
         events, projection = build_monitor_refreshed_canonical_write(
             position,
             sequence_no=sequence_no,
             phase_after=phase_after,
             source_module="src.execution.exit_lifecycle",
+            decision_unavailable_reason=reason,
+            decision_unavailable_trigger=reason,
         )
         event = dict(events[0])
         payload = json.loads(str(event.get("payload_json") or "{}"))

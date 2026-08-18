@@ -624,6 +624,8 @@ def build_monitor_refreshed_canonical_write(
     final_should_exit: bool | None = None,
     final_exit_reason: str | None = None,
     final_exit_trigger: str | None = None,
+    decision_unavailable_reason: str | None = None,
+    decision_unavailable_trigger: str | None = None,
 ) -> tuple[list[dict], dict]:
     """Persist a no-transition monitor refresh for an open position."""
     if phase_after not in {ACTIVE, DAY0_WINDOW, PENDING_EXIT}:
@@ -700,7 +702,25 @@ def build_monitor_refreshed_canonical_write(
         payload_dict["held_sell_reauction_obligation"] = dict(
             held_sell_reauction_obligation
         )
-    if exit_decision is not None:
+    if exit_decision is not None and decision_unavailable_reason is not None:
+        raise ValueError("monitor decision cannot be both available and unavailable")
+    if decision_unavailable_reason is not None:
+        payload_dict.update(
+            {
+                "exit_decision_available": False,
+                "exit_decision_should_exit": False,
+                "exit_decision_reason": str(decision_unavailable_reason),
+                "exit_decision_trigger": str(
+                    decision_unavailable_trigger or decision_unavailable_reason
+                ),
+                "exit_decision_urgency": "",
+                "exit_decision_selected_method": "",
+                "exit_decision_neg_edge_count": _nullable(
+                    getattr(position, "neg_edge_count", None)
+                ),
+            }
+        )
+    elif exit_decision is not None:
         exit_validations = list(
             getattr(exit_decision, "applied_validations", []) or []
         )

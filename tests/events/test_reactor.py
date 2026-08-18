@@ -7941,6 +7941,10 @@ def test_v4_expired_held_sell_deadline_terminalizes_exact_attempt_without_venue(
     assert reactor_wake.held_sell_reauction_requests_completed(
         (request,), path=path
     )
+    assert reactor_wake.held_sell_reauction_request_completion_status(
+        request,
+        path=path,
+    ) == reactor_wake.DEADLINE_EXPIRED
 
 
 def test_v4_deadline_receipt_cannot_ack_another_attempt(tmp_path):

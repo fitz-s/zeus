@@ -3310,6 +3310,8 @@ def _emit_monitor_refreshed_canonical_if_available(
     final_should_exit: bool | None = None,
     final_exit_reason: str | None = None,
     final_exit_trigger: str | None = None,
+    decision_unavailable_reason: str | None = None,
+    decision_unavailable_trigger: str | None = None,
 ) -> bool:
     if conn is None:
         return True
@@ -3442,6 +3444,8 @@ def _emit_monitor_refreshed_canonical_if_available(
                 final_should_exit=final_should_exit,
                 final_exit_reason=final_exit_reason,
                 final_exit_trigger=final_exit_trigger,
+                decision_unavailable_reason=decision_unavailable_reason,
+                decision_unavailable_trigger=decision_unavailable_trigger,
             )
             append_many_and_project(conn, events, projection)
             conn.commit()
@@ -3569,6 +3573,77 @@ def _record_monitor_hold_decision(
     summary[counter] = summary.get(counter, 0) + 1
     summary["monitors"] = summary.get("monitors", 0) + 1
     return canonical_written
+
+
+def _revoke_monitor_action_authority(pos) -> None:
+    """Make a monitor result observational only until fresh inputs return."""
+
+    pos.last_monitor_prob_is_fresh = False
+    pos.last_monitor_market_price_is_fresh = False
+    pos.last_monitor_edge = None
+    pos.last_monitor_market_price = None
+    pos.last_monitor_best_bid = None
+    pos.last_monitor_best_ask = None
+    pos.last_monitor_market_vig = None
+
+
+def _record_monitor_data_degraded_attempt(
+    conn,
+    pos,
+    *,
+    artifact,
+    deps,
+    summary: dict,
+    stage: str,
+) -> bool:
+    """Persist one attempted redecision without inventing action authority.
+
+    A bounded q/book/metadata read that returns unavailable is still a real
+    monitor attempt. Leaving the prior MONITOR_REFRESHED timestamp untouched
+    makes the fair scheduler select the same failed head forever and blinds the
+    rest of the held book. Revoke both freshness witnesses before persisting so
+    the event cannot authorize BUY, SELL, or an economic HOLD; family-scoped
+    DATA_DEGRADED remains responsible for repairing the missing input.
+    """
+
+    _revoke_monitor_action_authority(pos)
+    pos.applied_validations = list(
+        dict.fromkeys(
+            [
+                *(getattr(pos, "applied_validations", []) or []),
+                "monitor_attempt_data_degraded_no_action_authority",
+            ]
+        )
+    )
+    normalized_stage = str(stage or "unknown").strip().upper()[:96]
+    reason = f"MONITOR_INPUTS_UNAVAILABLE:{normalized_stage}"
+    canonical_written = _emit_monitor_refreshed_canonical_if_available(
+        conn,
+        pos,
+        deps=deps,
+        decision_unavailable_reason=reason,
+        decision_unavailable_trigger="MONITOR_INPUTS_UNAVAILABLE",
+    )
+    if not canonical_written:
+        summary["monitor_canonical_write_failed"] = (
+            summary.get("monitor_canonical_write_failed", 0) + 1
+        )
+        return False
+    artifact.add_monitor_result(
+        deps.MonitorResult(
+            position_id=pos.trade_id,
+            fresh_prob=None,
+            fresh_edge=None,
+            should_exit=False,
+            exit_reason=reason,
+            neg_edge_count=pos.neg_edge_count,
+        )
+    )
+    summary["monitor_data_degraded_attempts"] = (
+        summary.get("monitor_data_degraded_attempts", 0) + 1
+    )
+    summary["monitors"] = summary.get("monitors", 0) + 1
+    return True
 
 
 _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS = frozenset(
@@ -7587,6 +7662,7 @@ def execute_monitoring_phase(
     network_prefetch_deferred_token_ids: set[str] = set()
     network_prefetch_singular_fallback_attempted = False
     network_prefetch_singular_fallback_position_id = None
+    degraded_attempt_position_ids: set[int] = set()
     durable_debt_network_attempted = False
     summary["held_monitor_budget_reservation_count"] = monitor_reservation_count
     summary["held_monitor_durable_debt_position"] = (
@@ -8044,6 +8120,19 @@ def execute_monitoring_phase(
                 summary.get("held_monitor_positions_deferred_for_orderbook_gap", 0)
                 + 1
             )
+            if (
+                id(pos) in budget_reserved_position_ids
+                and id(pos) not in degraded_attempt_position_ids
+                and _record_monitor_data_degraded_attempt(
+                    conn,
+                    pos,
+                    artifact=artifact,
+                    deps=deps,
+                    summary=summary,
+                    stage="orderbook_batch_unavailable",
+                )
+            ):
+                degraded_attempt_position_ids.add(id(pos))
             continue
         if held_token_id in network_book_tokens and not local_dead_bin_deadline_rescue:
             if network_prefetch_started:
@@ -8068,6 +8157,19 @@ def execute_monitoring_phase(
                     )
                     + 1
                 )
+                if (
+                    id(pos) in budget_reserved_position_ids
+                    and id(pos) not in degraded_attempt_position_ids
+                    and _record_monitor_data_degraded_attempt(
+                        conn,
+                        pos,
+                        artifact=artifact,
+                        deps=deps,
+                        summary=summary,
+                        stage="orderbook_unavailable",
+                    )
+                ):
+                    degraded_attempt_position_ids.add(id(pos))
                 continue
             is_durable_debt_network_attempt = (
                 durable_debt_position_id == id(pos)
@@ -8285,6 +8387,20 @@ def execute_monitoring_phase(
                         summary[
                             "held_monitor_batch_failure_singular_unavailable"
                         ] = 1
+                        if (
+                            id(fallback_pos) in budget_reserved_position_ids
+                            and id(fallback_pos)
+                            not in degraded_attempt_position_ids
+                            and _record_monitor_data_degraded_attempt(
+                                conn,
+                                fallback_pos,
+                                artifact=artifact,
+                                deps=deps,
+                                summary=summary,
+                                stage="orderbook_singular_unavailable",
+                            )
+                        ):
+                            degraded_attempt_position_ids.add(id(fallback_pos))
                     network_prefetch_unavailable = (
                         held_token_id in network_prefetch_deferred_token_ids
                     )
@@ -8534,6 +8650,14 @@ def execute_monitoring_phase(
                 ),
             )
             if deadline_expiry is not None:
+                _record_monitor_data_degraded_attempt(
+                    conn,
+                    pos,
+                    artifact=artifact,
+                    deps=deps,
+                    summary=summary,
+                    stage="closed_market_metadata_deadline",
+                )
                 if deadline_expiry == "global":
                     break
                 continue
@@ -8560,9 +8684,16 @@ def execute_monitoring_phase(
                     "EXIT_DEAD_BIN",
                     "HOLD_STRUCTURAL_WIN",
                 }:
-                    from src.state.portfolio import ExitDecision as _ExitDecision
-
                     hard_fact_win = _hard_fact.action == "HOLD_STRUCTURAL_WIN"
+                    hard_fact_trigger = (
+                        "DAY0_HARD_FACT_STRUCTURAL_WIN_MARKET_CLOSED"
+                        if hard_fact_win
+                        else "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED"
+                    )
+                    hard_fact_reason = (
+                        f"{hard_fact_trigger} "
+                        f"({_hard_fact.reason}; source={_hard_fact.source})"
+                    )
                     pos.state = "day0_window"
                     pos.pre_exit_state = ""
                     pos.exit_state = ""
@@ -8574,7 +8705,7 @@ def execute_monitoring_phase(
                         f"{closed_market_info.get('source') or 'market_closed_non_accepting_orders'}"
                     )[:500]
                     pos.last_monitor_prob = 1.0 if hard_fact_win else 0.0
-                    pos.last_monitor_prob_is_fresh = True
+                    pos.last_monitor_prob_is_fresh = False
                     pos.last_monitor_edge = None
                     pos.last_monitor_market_price = None
                     pos.last_monitor_market_price_is_fresh = False
@@ -8590,44 +8721,15 @@ def execute_monitoring_phase(
                                     if hard_fact_win
                                     else "day0_hard_fact_bin_dead_closed_market"
                                 ),
+                                hard_fact_reason,
                             ]
                         )
                     )
-                    exit_decision = _ExitDecision(
-                        False,
-                        (
-                            "DAY0_HARD_FACT_STRUCTURAL_WIN_MARKET_CLOSED "
-                            if hard_fact_win
-                            else "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED "
-                        )
-                        + f"({_hard_fact.reason}; source={_hard_fact.source})",
-                        urgency="normal",
-                        trigger=(
-                            "DAY0_HARD_FACT_STRUCTURAL_WIN_MARKET_CLOSED"
-                            if hard_fact_win
-                            else "DAY0_HARD_FACT_BIN_DEAD_MARKET_CLOSED"
-                        ),
-                        selected_method=pos.selected_method or pos.entry_method,
-                        applied_validations=list(pos.applied_validations),
-                    )
-                    canonical_written = _emit_monitor_refreshed_canonical_if_available(
-                        conn,
-                        pos,
-                        deps=deps,
-                        exit_decision=exit_decision,
-                        final_should_exit=False,
-                        final_exit_reason=exit_decision.reason,
-                        final_exit_trigger=exit_decision.trigger,
-                    )
-                    if not canonical_written:
-                        summary["monitor_canonical_write_failed"] = (
-                            summary.get("monitor_canonical_write_failed", 0) + 1
-                        )
                     from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
 
-                    mark_market_closed_hold_to_settlement(
+                    canonical_written = mark_market_closed_hold_to_settlement(
                         pos,
-                        reason=exit_decision.trigger,
+                        reason=hard_fact_trigger,
                         error=str(
                             closed_market_info.get("source")
                             or "market_closed_non_accepting_orders"
@@ -8642,10 +8744,10 @@ def execute_monitoring_phase(
                         artifact.add_monitor_result(
                             deps.MonitorResult(
                                 position_id=pos.trade_id,
-                                fresh_prob=pos.last_monitor_prob,
+                                fresh_prob=None,
                                 fresh_edge=None,
                                 should_exit=False,
-                                exit_reason=exit_decision.reason,
+                                exit_reason=hard_fact_reason,
                                 neg_edge_count=pos.neg_edge_count,
                             )
                         )
@@ -8653,10 +8755,14 @@ def execute_monitoring_phase(
                             summary.get("day0_hard_fact_closed_market_monitors", 0) + 1
                         )
                         summary["monitors"] += 1
+                    else:
+                        summary["monitor_canonical_write_failed"] = (
+                            summary.get("monitor_canonical_write_failed", 0) + 1
+                        )
                     continue
                 from src.execution.exit_lifecycle import mark_market_closed_hold_to_settlement
 
-                mark_market_closed_hold_to_settlement(
+                closed_hold_written = mark_market_closed_hold_to_settlement(
                     pos,
                     reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
                     error=str(closed_market_info.get("source") or "market_closed_non_accepting_orders"),
@@ -8664,16 +8770,29 @@ def execute_monitoring_phase(
                     preserve_exit_reason=True,
                 )
                 portfolio_dirty = True
-                artifact.add_monitor_result(
-                    deps.MonitorResult(
-                        position_id=pos.trade_id,
-                        fresh_prob=pos.last_monitor_prob,
-                        fresh_edge=None,
-                        should_exit=False,
-                        exit_reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
-                        neg_edge_count=pos.neg_edge_count,
+                if closed_hold_written:
+                    artifact.add_monitor_result(
+                        deps.MonitorResult(
+                            position_id=pos.trade_id,
+                            fresh_prob=None,
+                            fresh_edge=None,
+                            should_exit=False,
+                            exit_reason="MARKET_CLOSED_AWAITING_SETTLEMENT",
+                            neg_edge_count=pos.neg_edge_count,
+                        )
                     )
-                )
+                    summary["monitor_closed_market_pending_settlement_attempts"] = (
+                        summary.get(
+                            "monitor_closed_market_pending_settlement_attempts",
+                            0,
+                        )
+                        + 1
+                    )
+                    summary["monitors"] = summary.get("monitors", 0) + 1
+                else:
+                    summary["monitor_canonical_write_failed"] = (
+                        summary.get("monitor_canonical_write_failed", 0) + 1
+                    )
                 summary["monitor_skipped_closed_market_pending_settlement"] = (
                     summary.get("monitor_skipped_closed_market_pending_settlement", 0) + 1
                 )
@@ -8685,7 +8804,6 @@ def execute_monitoring_phase(
                         **closed_market_info,
                     }
                 )
-                summary["monitors"] += 1
                 continue
 
             # Earlier pending-exit/Day0 lifecycle work may have opened a TRADE
@@ -8773,6 +8891,14 @@ def execute_monitoring_phase(
             )
             if deadline_expiry is not None:
                 restore_refresh_state(pos, refresh_position_state)
+                _record_monitor_data_degraded_attempt(
+                    conn,
+                    pos,
+                    artifact=artifact,
+                    deps=deps,
+                    summary=summary,
+                    stage="refresh_deadline",
+                )
                 if deadline_expiry == "global":
                     break
                 continue
@@ -8832,6 +8958,14 @@ def execute_monitoring_phase(
                 )
                 if deadline_expiry is not None:
                     restore_refresh_state(pos, refresh_position_state)
+                    _record_monitor_data_degraded_attempt(
+                        conn,
+                        pos,
+                        artifact=artifact,
+                        deps=deps,
+                        summary=summary,
+                        stage="pending_exit_retry_quote_deadline",
+                    )
                     if deadline_expiry == "global":
                         break
                     continue
@@ -9611,6 +9745,20 @@ def execute_monitoring_phase(
                 )
             deps.logger.error("Monitor failed for %s: %s", pos.trade_id, e, exc_info=True)
             summary["monitor_failed"] = summary.get("monitor_failed", 0) + 1
+            if (
+                admitted_child_stage is not None
+                and not monitor_result_written
+                and not monitor_canonical_failed
+            ):
+                monitor_result_written = _record_monitor_data_degraded_attempt(
+                    conn,
+                    pos,
+                    artifact=artifact,
+                    deps=deps,
+                    summary=summary,
+                    stage=admitted_child_stage,
+                )
+                monitor_canonical_failed = not monitor_result_written
             reason_prefix = "time_context_failed" if hours_to_settlement is None else f"refresh_failed:{e.__class__.__name__}"
             if hours_to_settlement is None:
                 try:

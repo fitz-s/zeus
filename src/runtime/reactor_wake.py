@@ -117,16 +117,18 @@ def _held_sell_reauction_recovery_read_worker(
                 request.attempt_identity,
             )
         )
-        completed = bool(
-            request is not None
-            and held_sell_reauction_requests_completed((request,), path=path)
+        completion_status = (
+            held_sell_reauction_request_completion_status(request, path=path)
+            if request is not None
+            else None
         )
         send_conn.send(
             json.dumps(
                 {
                     "status": "ok",
                     "current": current,
-                    "completed": completed,
+                    "completed": completion_status is not None,
+                    "completion_status": completion_status or "",
                 },
                 separators=(",", ":"),
             )
@@ -2439,12 +2441,29 @@ def held_sell_reauction_requests_completed(
     return True
 
 
+def held_sell_reauction_request_completion_status(
+    request: HeldSellReauctionRequest,
+    *,
+    path: Path | None = None,
+) -> str | None:
+    """Return the exact attempt's valid terminal status, if one exists."""
+
+    if not held_sell_reauction_requests_completed((request,), path=path):
+        return None
+    receipt = _read_held_sell_reauction_receipt(
+        request.request_id,
+        path=path,
+        attempt_identity=request.attempt_identity,
+    )
+    return str(receipt.status) if receipt is not None else None
+
+
 def held_sell_reauction_recovery_snapshot_hard_deadline(
     scope_identity: str,
     *,
     timeout_seconds: float,
     path: Path | None = None,
-) -> tuple[tuple[str, str, str, str] | None, bool]:
+) -> tuple[tuple[str, str, str, str] | None, bool, str]:
     """Read one V4 lineage/receipt snapshot without retaining the caller.
 
     This is a read-only recovery classifier. Killing its child can lose no
@@ -2535,7 +2554,11 @@ def held_sell_reauction_recovery_snapshot_hard_deadline(
         )
         if current is not None and len(current) != 4:
             raise RuntimeError("HELD_SELL_REAUCTION_RECOVERY_READ_INVALID")
-        return current, bool(payload.get("completed"))
+        return (
+            current,
+            bool(payload.get("completed")),
+            str(payload.get("completion_status") or ""),
+        )
     finally:
         if send_conn is not None:
             try:
