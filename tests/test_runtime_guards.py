@@ -1111,6 +1111,102 @@ def test_local_monitor_book_rejects_blocked_future_invalidated_and_identity_mism
     conn.close()
 
 
+def test_monitor_book_readers_reject_missing_asset_status_drift_and_offset_invalidation(
+    tmp_path,
+):
+    from src.engine import cycle_runtime, monitor_refresh
+    from src.state.snapshot_repo import (
+        init_snapshot_schema,
+        record_snapshot_invalidation,
+    )
+
+    conn = get_connection(tmp_path / "monitor-book-exact-truth.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    now_utc = datetime(2026, 8, 18, 16, 0, 1, tzinfo=timezone.utc)
+    fresh_at = now_utc - timedelta(seconds=1)
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="missing-asset",
+        selected_outcome_token_id="missing-asset-token",
+        yes_token_id="missing-asset-token",
+        no_token_id="missing-asset-no",
+        condition_id="missing-asset-condition",
+        captured_at=fresh_at,
+        executable_allowed=True,
+        orderbook_depth={
+            "bids": [{"price": "0.40", "size": "10"}],
+            "asks": [{"price": "0.42", "size": "10"}],
+        },
+    )
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="status-drift",
+        selected_outcome_token_id="status-drift-token",
+        yes_token_id="status-drift-token",
+        no_token_id="status-drift-no",
+        condition_id="status-drift-condition",
+        captured_at=fresh_at,
+        executable_allowed=False,
+    )
+    conn.execute(
+        "UPDATE executable_market_snapshot_latest "
+        "SET tradeability_status_json = ? WHERE condition_id = ?",
+        ('{"executable_allowed":true}', "status-drift-condition"),
+    )
+    offset_capture = datetime.fromisoformat("2026-08-18T16:00:00+00:00")
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="offset-invalidation",
+        selected_outcome_token_id="offset-token",
+        yes_token_id="offset-token",
+        no_token_id="offset-no",
+        condition_id="offset-condition",
+        captured_at=offset_capture,
+        executable_allowed=True,
+    )
+    conn.commit()
+    record_snapshot_invalidation(
+        conn,
+        condition_id="offset-condition",
+        token_id="offset-token",
+        reason="same_instant_different_offset",
+        invalidated_at=datetime.fromisoformat("2026-08-18T11:00:00-05:00"),
+    )
+    positions = (
+        _position(
+            condition_id="missing-asset-condition",
+            token_id="missing-asset-token",
+        ),
+        _position(
+            condition_id="status-drift-condition",
+            token_id="status-drift-token",
+        ),
+        _position(condition_id="offset-condition", token_id="offset-token"),
+    )
+    summary = {}
+    deps = types.SimpleNamespace(
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None)
+    )
+
+    assert cycle_runtime._fresh_local_held_monitor_orderbooks(
+        conn,
+        positions,
+        now_utc=now_utc,
+        summary=summary,
+        deps=deps,
+    ) == {}
+    for pos in positions:
+        assert monitor_refresh._fresh_canonical_monitor_orderbook(
+            conn,
+            pos,
+            pos.token_id,
+            now_utc=now_utc,
+        ) is None
+    conn.close()
+
+
 def test_day0_monitor_quote_refresh_uses_executable_bid_when_asks_absent(monkeypatch):
     from src.engine import monitor_refresh
 
@@ -1523,6 +1619,7 @@ def _insert_executable_snapshot(
                 orderbook_depth
                 if orderbook_depth is not None
                 else {
+                    "asset_id": selected_outcome_token_id,
                     "bids": [{"price": top_bid, "size": bid_size}],
                     "asks": [{"price": top_ask, "size": ask_size}],
                 }

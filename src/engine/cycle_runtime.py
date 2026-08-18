@@ -4927,8 +4927,12 @@ def _fresh_local_held_monitor_orderbooks(
                AND snapshot.accepting_orders IS latest.accepting_orders
                AND snapshot.captured_at = latest.captured_at
                AND snapshot.freshness_deadline = latest.freshness_deadline
-             WHERE latest.freshness_deadline >= ?
-               AND latest.captured_at <= ?
+               AND snapshot.tradeability_status_json IS
+                   latest.tradeability_status_json
+             WHERE julianday(latest.freshness_deadline) IS NOT NULL
+               AND julianday(latest.captured_at) IS NOT NULL
+               AND julianday(latest.freshness_deadline) >= julianday(?)
+               AND julianday(latest.captured_at) <= julianday(?)
                AND NOT EXISTS (
                     SELECT 1
                       FROM executable_market_snapshot_invalidations AS invalidation
@@ -4940,8 +4944,15 @@ def _fresh_local_held_monitor_orderbooks(
                                 latest.no_token_id
                             )
                        )
-                       AND invalidation.invalidated_at >= latest.captured_at
-                       AND invalidation.invalidated_at <= ?
+                       AND (
+                            julianday(invalidation.invalidated_at) IS NULL
+                            OR (
+                                julianday(invalidation.invalidated_at) >=
+                                    julianday(latest.captured_at)
+                                AND julianday(invalidation.invalidated_at) <=
+                                    julianday(?)
+                            )
+                       )
                )
             """,
             params,
@@ -4997,7 +5008,7 @@ def _fresh_local_held_monitor_orderbooks(
             or book.get("token_id")
             or ""
         ).strip()
-        if token_id and (not asset_id or asset_id == token_id):
+        if token_id and asset_id == token_id:
             books[token_id] = book
             captured_at = _parse_utc_timestamp(raw_captured_at)
             if captured_at is not None:

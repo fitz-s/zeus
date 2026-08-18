@@ -656,6 +656,7 @@ def _fresh_canonical_monitor_orderbook(
 
     candidates: list[tuple[datetime, dict, str]] = []
     invalidated_at_values: list[datetime] = []
+    invalidation_parse_failed = False
     try:
         for reader in readers:
             try:
@@ -691,6 +692,8 @@ def _fresh_canonical_monitor_orderbook(
                            AND snapshot.accepting_orders IS latest.accepting_orders
                            AND snapshot.captured_at = latest.captured_at
                            AND snapshot.freshness_deadline = latest.freshness_deadline
+                           AND snapshot.tradeability_status_json IS
+                               latest.tradeability_status_json
                          WHERE latest.condition_id = ?
                            AND latest.selected_outcome_token_id = ?
                          LIMIT 1
@@ -743,6 +746,7 @@ def _fresh_canonical_monitor_orderbook(
                             invalidated_at.astimezone(timezone.utc)
                         )
                     except (TypeError, ValueError):
+                        invalidation_parse_failed = True
                         continue
                 book = json.loads(str(row[8]))
                 if not isinstance(book, dict):
@@ -753,10 +757,9 @@ def _fresh_canonical_monitor_orderbook(
                     or book.get("token_id")
                     or ""
                 ).strip()
-                if asset_id and asset_id != token_id:
+                if asset_id != token_id:
                     continue
                 book = dict(book)
-                book.setdefault("asset_id", token_id)
                 book.setdefault("min_order_size", row[7])
                 if reader is not conn or not caller_has_uncommitted_state:
                     candidates.append((captured_at, book, captured_at.isoformat()))
@@ -771,6 +774,8 @@ def _fresh_canonical_monitor_orderbook(
     finally:
         if owned_reader is not None:
             owned_reader.close()
+    if invalidation_parse_failed:
+        return None
     candidates = [
         candidate
         for candidate in candidates
