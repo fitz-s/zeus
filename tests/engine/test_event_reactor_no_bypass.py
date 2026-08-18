@@ -1,5 +1,5 @@
 # Created: 2026-05-24
-# Last reused/audited: 2026-08-10
+# Last reused/audited: 2026-08-18
 # Authority basis: Operator GOAL 2026-06-04 — full-family q/FDR + executable-mask for illiquid bins; never trade an assumed/renormalized subset
 #   2026-06-08 audit (no-bypass 4-test slice): re-authored test_runtime_receipt_uses_selected_no_snapshot_not_yes_side_ask
 #   to the complement-immunity ban (014408394f/cbc454e17e); updated two selector tests to the buy_no independent-YES-posterior
@@ -3828,6 +3828,18 @@ def _live_cap_seed_conn() -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE INDEX idx_edli_live_order_events_aggregate
+            ON edli_live_order_events(aggregate_id, event_sequence)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX idx_edli_live_order_events_type
+            ON edli_live_order_events(event_type, occurred_at)
+        """
+    )
     return conn
 
 
@@ -4185,6 +4197,41 @@ def test_107_durable_live_cap_seed_batches_trade_truth_for_runtime_scale():
     assert sum("FROM VENUE_COMMANDS" in statement.upper() for statement in trade_reads) == 1
     assert sum("FROM POSITION_CURRENT" in statement.upper() for statement in trade_reads) == 1
     assert len(trade_reads) <= 6
+
+
+def test_107_durable_live_cap_seed_forces_aggregate_index():
+    """The 89 GB live DB must not scan event-type history for 2K aggregates."""
+
+    conn = _live_cap_seed_conn()
+    _insert_live_cap_usage(
+        conn,
+        usage_id="usage-pending",
+        event_id="event-pending",
+        final_intent_id="intent-pending",
+        usd=12.5,
+    )
+    _insert_live_order_event(
+        conn,
+        aggregate_id="event-pending:intent-pending",
+        seq=1,
+        event_type="PreSubmitRevalidated",
+        payload={"city": "Chicago"},
+    )
+
+    traced: list[str] = []
+    conn.set_trace_callback(traced.append)
+    rows = _durable_unmaterialized_live_cap_reservations(conn)
+    conn.set_trace_callback(None)
+
+    assert rows == (("durable_live_cap:usage-pending", "Chicago", pytest.approx(12.5)),)
+    evidence_reads = [
+        statement
+        for statement in traced
+        if "FROM edli_live_order_events" in statement
+        and "UserTradeObserved" in statement
+    ]
+    assert len(evidence_reads) == 1
+    assert "INDEXED BY idx_edli_live_order_events_aggregate" in evidence_reads[0]
 
 
 def test_107_durable_live_cap_seed_is_committed_and_rollback_immune():

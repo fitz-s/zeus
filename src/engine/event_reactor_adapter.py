@@ -4889,7 +4889,7 @@ def _durable_unmaterialized_live_cap_reservations(
                 evidence_rows = read_conn.execute(
                     f"""
                     SELECT aggregate_id, event_type, payload_json
-                    FROM edli_live_order_events
+                    FROM edli_live_order_events INDEXED BY idx_edli_live_order_events_aggregate
                     WHERE aggregate_id IN ({placeholders})
                       AND event_type IN (
                           'UserTradeObserved',

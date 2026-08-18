@@ -2081,3 +2081,25 @@ publication barrier.
   next pass normalizes the winning hint; an empty universe is mutation-free;
   focused download tests, topology/planning gates, compilation, and `git
   diff --check` pass before a data-ingest-only hot-fix restart.
+
+### Slice B107 — Bound durable live-cap reconstruction by aggregate identity (2026-08-18)
+
+- Live defect: two consecutive post-restart global auctions exhausted their
+  45-second construction deadline in `durable_live_cap:order_evidence`. The
+  canonical 89 GB world DB held 2,089 relevant cap aggregates and 59,427 order
+  events; SQLite chose the event-type index plus a temp sort. The exact read took
+  27.25 seconds without runtime contention and starved the global order path.
+- First-principles invariant: current in-flight capital must remain fail-closed,
+  but its bounded reconstruction must search the exact aggregate identities that
+  own that capital rather than scan unrelated event-type history.
+- Minimal repair: bind the evidence query to the existing canonical
+  `(aggregate_id, event_sequence)` index. No rows, event classes, terminal-state
+  interpretation, exposure amount, or deadline semantics change.
+- SCOPE: only durable live-cap order-evidence lookup during reactor construction.
+  DRAIN: the next cycle reconstructs all unresolved reservations through their
+  aggregate IDs. RESET: resolved/released cap rows leave the candidate set through
+  the existing ledger/reconciliation paths.
+- Acceptance: the production-shape A/B read falls from 27.25 seconds to 0.44
+  seconds; the focused exposure tests preserve all reservations and prove the
+  aggregate index is present in the executed query; compilation, planning lock,
+  and `git diff --check` pass before exact-SHA hot-fix deployment.
