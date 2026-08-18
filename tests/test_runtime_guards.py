@@ -12174,7 +12174,7 @@ def test_openmeteo_request_embargo_is_shared_and_attributed(monkeypatch, tmp_pat
     assert reason is not None and reason.startswith("request_retry_until=")
     payload = json.loads(path.read_text(encoding="utf-8"))
     entry = payload["requests"]["request-a"]
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 2
     assert entry["endpoint"] == "api.open-meteo.com/v1/forecast"
     assert entry["job"] == "source-clock"
     assert entry["priority"] == "maintenance"
@@ -12897,12 +12897,12 @@ def test_openmeteo_request_state_is_bounded_and_migrates_v1(monkeypatch, tmp_pat
         tracker.record_request_success(str(number), endpoint="forecast", job="bounded")
 
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 2
     assert payload["day_count"] == 17
     assert len(payload["requests"]) <= MAX_REQUEST_STATES
 
 
-def test_openmeteo_v2_global_cooldown_migrates_to_attributable_scopes(
+def test_openmeteo_v2_state_adds_attributable_scope_map(
     monkeypatch, tmp_path
 ):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
@@ -12911,7 +12911,7 @@ def test_openmeteo_v2_global_cooldown_migrates_to_attributable_scopes(
     state = OpenMeteoQuotaTracker._default_state(now)
     state["schema_version"] = 2
     state.pop("blocked_until_by_endpoint")
-    state["blocked_until"] = (now + timedelta(hours=3)).isoformat()
+    state["blocked_until"] = None
     path.write_text(json.dumps(state), encoding="utf-8")
     tracker = OpenMeteoQuotaTracker(state_path=path)
 
@@ -12923,7 +12923,7 @@ def test_openmeteo_v2_global_cooldown_migrates_to_attributable_scopes(
     assert (allowed, reason) == (True, None)
     assert lease_id
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 2
     assert payload["blocked_until"] is None
     assert payload["blocked_until_by_endpoint"] == {}
 

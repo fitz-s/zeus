@@ -22,7 +22,7 @@ MINUTE_LIMIT = 600
 WARN_THRESHOLD = 0.80
 HARD_THRESHOLD = 0.95
 RATE_LIMIT_COOLDOWN_SECONDS = 60
-REQUEST_STATE_SCHEMA_VERSION = 3
+REQUEST_STATE_SCHEMA_VERSION = 2
 MAX_REQUEST_STATES = 512
 REQUEST_STATE_TTL = timedelta(hours=24)
 REQUEST_RETRY_BASE_SECONDS = 2.0
@@ -156,14 +156,9 @@ class OpenMeteoQuotaTracker:
         changed = False
         defaults = cls._default_state(now)
         schema_version = int(state.get("schema_version") or 0)
-        if schema_version in {1, 2}:
+        if schema_version == 1:
             state["schema_version"] = REQUEST_STATE_SCHEMA_VERSION
-            if schema_version == 1:
-                state["requests"] = {}
-            # v1/v2 cooldowns had no endpoint identity. Clear the coarse embargo once;
-            # the next provider rejection recreates it at the exact host scope.
-            state["blocked_until"] = None
-            state["blocked_until_by_endpoint"] = {}
+            state["requests"] = {}
             changed = True
         elif schema_version != REQUEST_STATE_SCHEMA_VERSION:
             state.clear()
