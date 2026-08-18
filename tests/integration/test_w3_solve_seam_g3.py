@@ -1,5 +1,5 @@
 # Created: 2026-07-03
-# Last reused/audited: 2026-08-17
+# Last reused/audited: 2026-08-18
 # Authority basis: current global auction, posterior-mean Fractional Kelly,
 #                  Day0 global-cut routing, and auditable SELL holding bindings
 """Current global auction, q-kernel, and live actuation integration contracts."""
@@ -19679,6 +19679,61 @@ def test_global_current_buy_no_receipt_separates_action_and_point_parents():
     )
     assert maker.rest_escalation_deadline_minutes == pytest.approx(20.0)
     assert maker.p_fill_lcb == pytest.approx(0.19)
+
+
+def test_global_current_buy_rebinds_obsolete_out_of_band_local_quote():
+    """An exact current global curve replaces only the selected stale quote."""
+
+    _family, proofs, _payload = _corpus()[0]
+    proof = next(row for row in proofs if row.direction == "buy_no")
+    proof = replace(
+        proof,
+        execution_price=None,
+        missing_reason=(
+            "LIVE_UNIT_PRICE_OUT_OF_BOUNDS:live order unit price outside "
+            "absolute inclusive [0.05, 0.95] submit band: price=0.96384"
+        ),
+    )
+    cert = {
+        "side": "NO",
+        "payoff_q_point": 0.4265,
+        "payoff_q_lcb": 0.40,
+        "payoff_q_action": 0.4265,
+        "edge_lcb": 0.26,
+        "edge_expected": 0.2865,
+        "false_edge_rate": 0.1,
+        "global_probability_functional": "POSTERIOR_PREDICTIVE_MEAN",
+        "global_execution_mode": "TAKER_LIMIT",
+    }
+
+    rebound = era._bind_global_current_state_economics_to_proof(proof, cert)
+
+    assert rebound.missing_reason is None
+    assert rebound.q_posterior == pytest.approx(0.4265)
+    assert rebound.q_lcb_5pct == pytest.approx(0.40)
+    assert rebound.execution_price is None
+
+    snapshot = SimpleNamespace(snapshot_id="current-global-jit")
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            era,
+            "_persist_global_candidate_executable_snapshot",
+            lambda *_args, **_kwargs: (
+                snapshot,
+                {"snapshot_id": snapshot.snapshot_id},
+            ),
+        )
+        current = era._bind_global_candidate_executable_snapshot(
+            sqlite3.connect(":memory:"),
+            proof=rebound,
+            candidate=SimpleNamespace(),
+            decision=SimpleNamespace(shares="42", cost_usd="5.88"),
+            decision_time=_dt.datetime.now(_dt.timezone.utc),
+        )
+
+    assert current.execution_price.value == pytest.approx(0.14)
+    assert current.c_cost_95pct == pytest.approx(0.14)
+    assert current.executable_snapshot_id == snapshot.snapshot_id
 
 
 def test_current_global_day0_payload_replaces_local_transform_and_provenance():

@@ -15573,7 +15573,7 @@ def _bind_global_current_state_economics_to_proof(
 
 
 def _global_current_state_may_rebind_scalar_rejection(reason: str | None) -> bool:
-    """Let the sealed global objective replace only obsolete scalar admission."""
+    """Let the sealed global objective replace only obsolete local scalars."""
 
     text = str(reason or "").strip()
     if not text:
@@ -15583,7 +15583,10 @@ def _global_current_state_may_rebind_scalar_rejection(reason: str | None) -> boo
     )
 
     return _qkernel_may_clear_legacy_missing_reason(text) or text.startswith(
-        "ADMISSION_NEAR_SETTLED_PRICE"
+        (
+            "ADMISSION_NEAR_SETTLED_PRICE",
+            "LIVE_UNIT_PRICE_OUT_OF_BOUNDS:",
+        )
     )
 
 

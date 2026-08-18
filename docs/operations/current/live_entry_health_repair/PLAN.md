@@ -2103,3 +2103,25 @@ publication barrier.
   seconds; the focused exposure tests preserve all reservations and prove the
   aggregate index is present in the executed query; compilation, planning lock,
   and `git diff --check` pass before exact-SHA hot-fix deployment.
+
+### Slice B108 — Rebind a selected BUY from its current global book (2026-08-18)
+
+- Live defect: the current complete auction selected an executable NO BUY at
+  `0.14`, but its older local proof retained an out-of-band `0.96384` quote.
+  Selection explicitly admitted that stale local scalar for current global-book
+  rebinding, then the bind layer rejected the same reason as non-rebindable and
+  batch-blocked every sibling before venue I/O.
+- First-principles invariant: the globally selected action is authorized by its
+  current full CLOB curve, not an obsolete local quote. Only that selected proof
+  may replace the old scalar; the current JIT snapshot, absolute `[0.05, 0.95]`
+  price band, and final SDK boundary remain cumulative requirements.
+- SCOPE: the exact selected global BUY whose local proof reason starts with
+  `LIVE_UNIT_PRICE_OUT_OF_BOUNDS`. DRAIN: bind the selected current global curve,
+  persist its JIT snapshot, and run ordinary pre-submit validation. RESET: every
+  new cut rebuilds the local and global books; a still-out-of-band current quote
+  is rejected by the unchanged price boundaries.
+- Acceptance: an obsolete `0.96384` local quote is cleared only for the selected
+  proof, then a current `0.14` JIT snapshot becomes execution-cost authority;
+  unrelated missing reasons remain fail-closed. Focused global actuation tests,
+  compilation, planning lock, topology freshness, and `git diff --check` pass
+  before exact-SHA hot-fix deployment.
