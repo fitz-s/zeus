@@ -699,18 +699,19 @@ def _utc_datetime(value: datetime | str) -> datetime:
     return parsed.astimezone(UTC)
 
 
-def _fetch_nbm_standard_meta_stamped_payloads(
+def _fetch_standard_meta_stamped_payloads(
     *,
+    model: str,
     locations: Sequence[tuple[float, float, str, Sequence[date]]],
     run: datetime,
     source_available_at: datetime | str | None,
     forecast_hours: int,
     deadline_monotonic: float | None,
 ) -> tuple[tuple[Mapping[str, object], ...], _StandardMetaStampedTransport]:
-    """Fetch current hourly NBM from the standard API under an atomic metadata window."""
+    """Fetch one current model from the standard API under an atomic metadata window."""
 
     if source_available_at is None:
-        raise ValueError("NBM standard fallback requires frozen source availability")
+        raise ValueError(f"{model} standard fallback requires frozen source availability")
     from src.data.openmeteo_client import fetch  # noqa: PLC0415
     from src.data.openmeteo_ecmwf_ifs9_anchor import STANDARD_FORECAST_URL  # noqa: PLC0415
     from src.data.openmeteo_model_updates import fetch_model_updates  # noqa: PLC0415
@@ -722,14 +723,14 @@ def _fetch_nbm_standard_meta_stamped_payloads(
         deadline_kwargs = _deadline_fetch_kwargs(deadline_monotonic)
         timeout_seconds = float(deadline_kwargs.get("timeout", 30.0))
         updates = fetch_model_updates(
-            ("ncep_nbm_conus",),
+            (model,),
             timeout_seconds=timeout_seconds,
             max_workers=1,
         )
         if len(updates) != 1:
-            raise ValueError(f"NBM metadata response count must be 1, got {len(updates)}")
-        if str(updates[0].model) != "ncep_nbm_conus":
-            raise ValueError(f"NBM metadata identity mismatch: {updates[0].model!r}")
+            raise ValueError(f"{model} metadata response count must be 1, got {len(updates)}")
+        if str(updates[0].model) != model:
+            raise ValueError(f"{model} metadata identity mismatch: {updates[0].model!r}")
         return updates[0]
 
     meta_before = _meta()
@@ -738,17 +739,17 @@ def _fetch_nbm_standard_meta_stamped_payloads(
     before_modified = meta_before.last_run_modification_time
     if before_run != expected_run or before_available != expected_available:
         raise ValueError(
-            "NBM standard fallback refused: provider metadata no longer matches frozen run"
+            f"{model} standard fallback refused: provider metadata no longer matches frozen run"
         )
     if before_modified is None:
-        raise ValueError("NBM standard fallback refused: modification timestamp missing")
+        raise ValueError(f"{model} standard fallback refused: modification timestamp missing")
     before_modified = before_modified.astimezone(UTC)
 
     params = {
         "latitude": ",".join(str(latitude) for latitude, _, _, _ in locations),
         "longitude": ",".join(str(longitude) for _, longitude, _, _ in locations),
         "hourly": "temperature_2m",
-        "models": OPENMETEO_MODEL_IDS.get("ncep_nbm_conus", "ncep_nbm_conus"),
+        "models": OPENMETEO_MODEL_IDS.get(model, model),
         "forecast_hours": forecast_hours,
         "temperature_unit": "celsius",
         "timezone": ",".join(timezone_name for _, _, timezone_name, _ in locations),
@@ -757,7 +758,7 @@ def _fetch_nbm_standard_meta_stamped_payloads(
     payload = fetch(
         STANDARD_FORECAST_URL,
         params,
-        endpoint_label="bayes_precision_fusion_nbm_standard_meta_stamped",
+        endpoint_label=f"bayes_precision_fusion_{model}_standard_meta_stamped",
         quota=_BPF_OPENMETEO_QUOTA_TRACKER,
         fast_fail_429=True,
         **_deadline_fetch_kwargs(deadline_monotonic),
@@ -769,7 +770,7 @@ def _fetch_nbm_standard_meta_stamped_payloads(
         or len(payloads) != len(locations)
         or any(not isinstance(item, Mapping) for item in payloads)
     ):
-        raise ValueError("NBM standard fallback multi-location response shape mismatch")
+        raise ValueError(f"{model} standard fallback multi-location response shape mismatch")
 
     meta_after = _meta()
     after_modified = meta_after.last_run_modification_time
@@ -779,7 +780,7 @@ def _fetch_nbm_standard_meta_stamped_payloads(
         or after_modified is None
         or after_modified.astimezone(UTC) != before_modified
     ):
-        raise ValueError("NBM standard fallback discarded: provider metadata changed mid-fetch")
+        raise ValueError(f"{model} standard fallback discarded: provider metadata changed mid-fetch")
     return tuple(payloads), _StandardMetaStampedTransport(
         run=before_run,
         source_available_at=before_available,
@@ -851,16 +852,12 @@ def _default_live_fetch_batched(
     except Exception as exc:
         batched_error_text = str(exc)
         batched_outcome = _typed_transport_outcome(exc)
-        if _is_quota_transport_error(batched_error_text):
-            _LOG.warning(
-                "BAYES_PRECISION_FUSION batched single_runs fetch hit quota/rate-limit "
-                "(no per-model retry): %s",
-                exc,
-            )
-            return {_BATCH_TRANSPORT_ERROR_KEY: _batch_transport_error(exc)}
-        if models == ["ncep_nbm_conus"]:
+        single_runs_quota = _is_quota_transport_error(batched_error_text)
+        if len(models) == 1 and (models == ["ncep_nbm_conus"] or single_runs_quota):
+            model = models[0]
             try:
-                payloads, meta_stamp = _fetch_nbm_standard_meta_stamped_payloads(
+                payloads, meta_stamp = _fetch_standard_meta_stamped_payloads(
+                    model=model,
                     locations=(
                         (
                             latitude,
@@ -881,7 +878,7 @@ def _default_live_fetch_batched(
                     timezone_name,
                 )
                 parsed[_BATCH_TRANSPORT_PROVENANCE_KEY] = {
-                    "ncep_nbm_conus": meta_stamp,
+                    model: meta_stamp,
                 }
                 return parsed
             except Exception as fallback_exc:
@@ -890,8 +887,15 @@ def _default_live_fetch_batched(
                         _BATCH_TRANSPORT_ERROR_KEY: _batch_transport_error(fallback_exc)
                     }
                 batched_error_text = (
-                    f"{batched_error_text}; nbm_standard_meta_stamped_failed={fallback_exc}"
+                    f"{batched_error_text}; standard_meta_stamped_failed={fallback_exc}"
                 )
+        if single_runs_quota:
+            _LOG.warning(
+                "BAYES_PRECISION_FUSION batched single_runs fetch hit quota/rate-limit "
+                "(no same-host per-model retry): %s",
+                exc,
+            )
+            return {_BATCH_TRANSPORT_ERROR_KEY: (batched_error_text, batched_outcome)}
         if not allow_per_model_fallback:
             _LOG.warning(
                 "BAYES_PRECISION_FUSION batched single_runs fetch failed; "
@@ -1042,9 +1046,12 @@ def _default_live_fetch_locations_batched(
             )
         ]
     except Exception as exc:
-        if models == ["ncep_nbm_conus"] and not _is_quota_transport_error(exc):
+        single_runs_quota = _is_quota_transport_error(exc)
+        if len(models) == 1 and (models == ["ncep_nbm_conus"] or single_runs_quota):
+            model = models[0]
             try:
-                payloads, meta_stamp = _fetch_nbm_standard_meta_stamped_payloads(
+                payloads, meta_stamp = _fetch_standard_meta_stamped_payloads(
+                    model=model,
                     locations=locations,
                     run=run,
                     source_available_at=source_available_at,
@@ -1061,7 +1068,7 @@ def _default_live_fetch_locations_batched(
                                 timezone_name,
                             ),
                             _BATCH_TRANSPORT_PROVENANCE_KEY: {
-                                "ncep_nbm_conus": meta_stamp,
+                                model: meta_stamp,
                             },
                         }
                         for target_local_date in target_local_dates
@@ -1077,7 +1084,7 @@ def _default_live_fetch_locations_batched(
                     exc = fallback_exc
                 else:
                     exc = RuntimeError(
-                        f"{exc}; nbm_standard_meta_stamped_failed={fallback_exc}"
+                        f"{exc}; standard_meta_stamped_failed={fallback_exc}"
                     )
         if models != ["ncep_nbm_conus"] and _can_split_location_batch(
             exc,

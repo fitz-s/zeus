@@ -574,6 +574,95 @@ def test_nbm_hourly_run_falls_back_to_atomic_meta_stamped_standard_api(
     assert stamp.modification_time == modified
 
 
+def test_single_runs_quota_uses_atomic_meta_stamped_standard_api_for_same_model(
+    monkeypatch,
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+    import src.data.openmeteo_model_updates as metadata
+
+    model = "ecmwf_ifs"
+    run = datetime(2026, 8, 18, 6, tzinfo=UTC)
+    available = datetime(2026, 8, 18, 13, 1, 20, tzinfo=UTC)
+    modified = datetime(2026, 8, 18, 12, 31, 9, tzinfo=UTC)
+    update = metadata.OpenMeteoModelUpdate(
+        model=model,
+        last_run_initialisation_time=run,
+        last_run_availability_time=available,
+        last_run_modification_time=modified,
+    )
+    fetches: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(metadata, "fetch_model_updates", lambda *_args, **_kwargs: (update,))
+
+    def _fetch(url, params, **_kwargs):
+        fetches.append((url, params))
+        if "single-runs" in url:
+            raise RuntimeError("429 Too Many Requests")
+        return {
+            "hourly": {
+                "time": ["2026-08-19T00:00", "2026-08-19T12:00", "2026-08-19T21:00"],
+                "temperature_2m": [20.0, 31.0, 24.0],
+            }
+        }
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+    got = dl._default_live_fetch_locations_batched(
+        models=[model],
+        locations=[(32.0853, 34.7818, "Asia/Jerusalem", (date(2026, 8, 19),))],
+        run=run,
+        source_available_at=available,
+        forecast_hours=120,
+    )
+
+    result = got[0][date(2026, 8, 19)]
+    assert result[model] == (31.0, 20.0)
+    assert result[dl._BATCH_TRANSPORT_PROVENANCE_KEY][model].run == run
+    assert len(fetches) == 2
+    assert "single-runs" in fetches[0][0]
+    assert fetches[1][0].endswith("/v1/forecast")
+    assert fetches[1][1]["models"] == dl.OPENMETEO_MODEL_IDS.get(model, model)
+    assert "run" not in fetches[1][1]
+
+
+def test_single_runs_quota_rejects_standard_payload_when_frozen_run_mismatches(
+    monkeypatch,
+) -> None:
+    import src.data.bayes_precision_fusion_download as dl
+    import src.data.openmeteo_client as client
+    import src.data.openmeteo_model_updates as metadata
+
+    model = "icon_global"
+    frozen_run = datetime(2026, 8, 18, 6, tzinfo=UTC)
+    available = datetime(2026, 8, 18, 15, 44, 39, tzinfo=UTC)
+    update = metadata.OpenMeteoModelUpdate(
+        model=model,
+        last_run_initialisation_time=datetime(2026, 8, 18, 12, tzinfo=UTC),
+        last_run_availability_time=available,
+        last_run_modification_time=datetime(2026, 8, 18, 15, 30, tzinfo=UTC),
+    )
+    monkeypatch.setattr(metadata, "fetch_model_updates", lambda *_args, **_kwargs: (update,))
+
+    def _fetch(url, _params, **_kwargs):
+        if "single-runs" in url:
+            raise RuntimeError("429 Too Many Requests")
+        raise AssertionError("mismatched metadata must reject before standard fetch")
+
+    monkeypatch.setattr(client, "fetch", _fetch)
+    got = dl._default_live_fetch_locations_batched(
+        models=[model],
+        locations=[(32.0853, 34.7818, "Asia/Jerusalem", (date(2026, 8, 19),))],
+        run=frozen_run,
+        source_available_at=available,
+        forecast_hours=120,
+    )
+
+    result = got[0][date(2026, 8, 19)]
+    assert model not in result
+    assert "provider metadata no longer matches frozen run" in result[
+        dl._BATCH_TRANSPORT_ERROR_KEY
+    ][0]
+
+
 def test_nbm_standard_fallback_discards_payload_when_metadata_changes(
     monkeypatch,
 ) -> None:
