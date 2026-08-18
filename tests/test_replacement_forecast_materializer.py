@@ -12,6 +12,7 @@ import json
 import sqlite3
 import subprocess
 import sys
+import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -2227,7 +2228,9 @@ def test_materialize_script_batch_reuses_connection_and_wakes_each_commit(
     monkeypatch.setattr(cli, "_forecast_writer_lock", _writer_lock)
 
     def _prepare(*_args, **_kwargs):
-        assert lock_held is True
+        assert lock_held is False
+        with _kwargs["writer_lock"]():
+            assert lock_held is True
         return cli._DurablePreparationReceipt(
             schema_ready=True,
             anchor_artifact_id=None,
@@ -2485,6 +2488,198 @@ def test_materialize_script_initial_compute_precedes_writer_lock(
     assert witness_lock_states == [False, True]
     assert statements.index("BEGIN") < statements.index("ROLLBACK")
     assert statements.index("ROLLBACK") < statements.index("BEGIN IMMEDIATE")
+
+
+def test_materialize_script_releases_live_flock_while_sqlite_writer_is_busy(
+    tmp_path, monkeypatch
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    db_path = tmp_path / "forecasts.db"
+    reader = sqlite3.connect(db_path)
+    holder = sqlite3.connect(db_path)
+    reader.execute("PRAGMA journal_mode=WAL")
+    reader.execute("CREATE TABLE frontier (value INTEGER NOT NULL)")
+    reader.commit()
+    reader.execute("PRAGMA busy_timeout = 4321")
+    holder.execute("BEGIN IMMEDIATE")
+    prepared = object()
+    lock_held = False
+    lock_durations: list[float] = []
+
+    monkeypatch.setattr(cli, "_IMMEDIATE_BUSY_TIMEOUT_MS", 1)
+    monkeypatch.setattr(cli, "_IMMEDIATE_RETRY_LIMIT", 3)
+    monkeypatch.setattr(cli, "_IMMEDIATE_RETRY_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(cli, "prepare_replacement_forecast_live", lambda *_args: prepared)
+    monkeypatch.setattr(cli, "_target_dependency_witness", lambda *_args: "stable")
+    monkeypatch.setattr(
+        cli,
+        "_revalidate_target_dependency_witness",
+        lambda *_args: "stable",
+    )
+    monkeypatch.setattr(
+        cli,
+        "write_prepared_replacement_forecast_live",
+        lambda *_args: _ready_materialization_result(),
+    )
+
+    @contextmanager
+    def writer_lock():
+        nonlocal lock_held
+        assert lock_held is False
+        lock_held = True
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            lock_durations.append(time.monotonic() - started)
+            lock_held = False
+            if len(lock_durations) == 1:
+                holder.rollback()
+
+    result = cli._commit_from_read_snapshot(
+        reader,
+        SimpleNamespace(
+            city="London",
+            target_date=date(2026, 7, 19),
+            temperature_metric="high",
+        ),
+        writer_lock=writer_lock,
+    )
+
+    assert result.ok is True
+    assert len(lock_durations) == 2
+    assert lock_durations[0] < 0.1
+    assert reader.execute("PRAGMA busy_timeout").fetchone()[0] == 4321
+    reader.close()
+    holder.close()
+
+
+def test_materialize_schema_prelude_releases_live_flock_on_sqlite_contention(
+    tmp_path, monkeypatch
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    db_path = tmp_path / "forecasts.db"
+    reader = sqlite3.connect(db_path)
+    holder = sqlite3.connect(db_path)
+    reader.execute("PRAGMA journal_mode=WAL")
+    reader.commit()
+    reader.execute("PRAGMA busy_timeout = 7654")
+    holder.execute("BEGIN IMMEDIATE")
+    lock_durations: list[float] = []
+    manifest = object()
+
+    monkeypatch.setattr(cli, "_IMMEDIATE_BUSY_TIMEOUT_MS", 1)
+    monkeypatch.setattr(cli, "_IMMEDIATE_RETRY_LIMIT", 3)
+    monkeypatch.setattr(cli, "_IMMEDIATE_RETRY_DELAY_SECONDS", 0.0)
+    monkeypatch.setattr(cli, "write_manifest_to_db", lambda *_args, **_kwargs: 17)
+
+    @contextmanager
+    def writer_lock():
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            lock_durations.append(time.monotonic() - started)
+            if len(lock_durations) == 1:
+                holder.rollback()
+
+    receipt = cli._prepare_live_schema_and_manifest(
+        reader,
+        init_schema=False,
+        schema_ready=True,
+        openmeteo_manifest=manifest,
+        anchor_artifact_id=None,
+        writer_lock=writer_lock,
+    )
+
+    assert receipt.anchor_artifact_id == 17
+    assert len(lock_durations) == 2
+    assert lock_durations[0] < 0.1
+    assert reader.execute("PRAGMA busy_timeout").fetchone()[0] == 7654
+    reader.close()
+    holder.close()
+
+
+def test_materialize_writer_contention_exhaustion_is_retryable(
+    tmp_path, monkeypatch
+) -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    db_path = tmp_path / "forecasts.db"
+    reader = sqlite3.connect(db_path)
+    holder = sqlite3.connect(db_path)
+    reader.execute("PRAGMA journal_mode=WAL")
+    reader.commit()
+    reader.execute("PRAGMA busy_timeout = 9876")
+    holder.execute("BEGIN IMMEDIATE")
+    lock_calls = 0
+
+    monkeypatch.setattr(cli, "_IMMEDIATE_BUSY_TIMEOUT_MS", 1)
+    monkeypatch.setattr(cli, "_IMMEDIATE_RETRY_LIMIT", 2)
+    monkeypatch.setattr(cli, "_IMMEDIATE_RETRY_DELAY_SECONDS", 0.0)
+
+    @contextmanager
+    def writer_lock():
+        nonlocal lock_calls
+        lock_calls += 1
+        yield
+
+    with pytest.raises(
+        cli.ReplacementForecastWriteDeferred,
+        match="^REPLACEMENT_FORECAST_WRITE_DEFERRED$",
+    ) as raised:
+        with cli._immediate_writer_transaction(reader, writer_lock):
+            pytest.fail("busy SQLite writer must prevent transaction entry")
+
+    response = cli._error_response(raised.value)
+    assert lock_calls == 2
+    assert reader.in_transaction is False
+    assert reader.execute("PRAGMA busy_timeout").fetchone()[0] == 9876
+    assert response["reason_codes"] == ["REPLACEMENT_FORECAST_WRITE_DEFERRED"]
+    holder.rollback()
+    reader.close()
+    holder.close()
+
+
+def test_materialize_transaction_body_busy_is_retryable() -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("PRAGMA busy_timeout = 2468")
+
+    with pytest.raises(
+        cli.ReplacementForecastWriteDeferred,
+        match="^REPLACEMENT_FORECAST_WRITE_DEFERRED$",
+    ):
+        with cli._immediate_writer_transaction(conn, nullcontext):
+            raise sqlite3.OperationalError("database is locked during commit")
+
+    assert conn.in_transaction is False
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 2468
+    conn.close()
+
+
+def test_materialize_transaction_body_blocking_error_is_not_lock_contention() -> None:
+    import scripts.materialize_replacement_forecast_live as cli
+
+    conn = sqlite3.connect(":memory:")
+    lock_calls = 0
+
+    @contextmanager
+    def writer_lock():
+        nonlocal lock_calls
+        lock_calls += 1
+        yield
+
+    with pytest.raises(BlockingIOError, match="permanent body error"):
+        with cli._immediate_writer_transaction(conn, writer_lock):
+            raise BlockingIOError("permanent body error")
+
+    assert lock_calls == 1
+    assert conn.in_transaction is False
+    conn.close()
 
 
 def test_materialize_script_recomputes_when_snapshot_changes(

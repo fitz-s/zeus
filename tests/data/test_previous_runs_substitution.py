@@ -1260,6 +1260,66 @@ def test_materialization_queue_timeout_moves_request_to_failed(tmp_path) -> None
     ]
 
 
+def test_materialization_queue_requeues_transient_writer_contention(tmp_path) -> None:
+    import src.data.replacement_forecast_live_materialization_queue as queue_mod
+
+    request_dir = tmp_path / "requests"
+    processed_dir = tmp_path / "processed"
+    failed_dir = tmp_path / "failed"
+    request_dir.mkdir()
+    request_path = request_dir / "London.2026-06-25.high.busy.json"
+    request = {
+        "city": "London",
+        "target_date": "2026-06-25",
+        "temperature_metric": "high",
+        "source_cycle_time": "2026-06-24T12:00:00+00:00",
+        "computed_at": "2026-06-24T20:20:45+00:00",
+        "baseline_source_run_id": "b0-run",
+        "openmeteo_source_run_id": "om9-run",
+        "openmeteo_payload_json": "payload.json",
+        "precision_metadata_json": "precision.json",
+        "bins": [{"bin_id": "30C"}],
+    }
+    request_path.write_text(json.dumps(request), encoding="utf-8")
+    concurrent_request = {
+        **request,
+        "computed_at": "2026-06-24T20:20:46+00:00",
+    }
+
+    def _busy_runner(argv):
+        request_path.write_text(json.dumps(concurrent_request), encoding="utf-8")
+        return subprocess.CompletedProcess(
+            list(argv),
+            2,
+            stdout="",
+            stderr=(
+                '{"status":"ERROR","reason_codes":'
+                '["REPLACEMENT_FORECAST_WRITE_DEFERRED"]}\n'
+            ),
+        )
+
+    report = queue_mod.process_replacement_forecast_live_materialization_queue(
+        request_dir=request_dir,
+        processed_dir=processed_dir,
+        failed_dir=failed_dir,
+        forecast_db=tmp_path / "forecasts.db",
+        raw_manifest_dir=None,
+        limit=1,
+        runner=_busy_runner,
+    )
+
+    assert report.status == "PROCESSED"
+    assert report.processed_count == 0
+    assert report.failed_count == 0
+    assert request_path.exists()
+    assert json.loads(request_path.read_text(encoding="utf-8")) == concurrent_request
+    recovered = tuple(request_dir.glob("*.recovered-*.json"))
+    assert len(recovered) == 1
+    assert json.loads(recovered[0].read_text(encoding="utf-8")) == request
+    assert "REPLACEMENT_FORECAST_WRITE_DEFERRED" in report.reason_codes
+    assert not failed_dir.exists() or not tuple(failed_dir.iterdir())
+
+
 def test_materialization_queue_bounds_stale_day0_owner_receipts_per_family(tmp_path) -> None:
     import src.data.replacement_forecast_live_materialization_queue as queue_mod
 

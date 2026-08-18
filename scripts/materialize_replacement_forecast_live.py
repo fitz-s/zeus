@@ -10,7 +10,9 @@ import argparse
 import contextlib
 import json
 import logging
+import sqlite3
 import sys
+import time
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from io import StringIO
@@ -56,7 +58,15 @@ from src.data.raw_forecast_artifact_manifest import read_manifest, write_manifes
 
 UTC = timezone.utc
 _SNAPSHOT_RETRY_LIMIT = 3
+_IMMEDIATE_BUSY_TIMEOUT_MS = 10
+_IMMEDIATE_RETRY_LIMIT = 100
+_IMMEDIATE_RETRY_DELAY_SECONDS = 0.05
 _WriterLockFactory = Callable[[], ContextManager[None]]
+_WRITE_DEFERRED_REASON = "REPLACEMENT_FORECAST_WRITE_DEFERRED"
+
+
+class ReplacementForecastWriteDeferred(RuntimeError):
+    """The canonical writer was busy; the queue must retry this request."""
 
 
 @contextlib.contextmanager
@@ -68,6 +78,83 @@ def _forecast_writer_lock():
 
     with db_writer_lock(ZEUS_FORECASTS_DB_PATH, WriteClass.LIVE):
         yield
+
+
+def _is_sqlite_writer_contention(exc: sqlite3.OperationalError) -> bool:
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(error_code, int) and error_code & 0xFF in {
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    }:
+        return True
+    message = str(exc).casefold()
+    return "locked" in message or "busy" in message
+
+
+@contextlib.contextmanager
+def _bounded_sqlite_writer_wait(conn):
+    """Temporarily bound this connection's SQLite writer wait."""
+
+    prior_timeout_ms = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+    conn.execute(f"PRAGMA busy_timeout = {_IMMEDIATE_BUSY_TIMEOUT_MS}")
+    try:
+        yield
+    finally:
+        conn.execute(f"PRAGMA busy_timeout = {prior_timeout_ms}")
+
+
+@contextlib.contextmanager
+def _immediate_writer_transaction(conn, writer_lock: _WriterLockFactory):
+    """Retry SQLite ownership outside the priority LIVE flock."""
+
+    last_contention: BaseException | None = None
+    with _bounded_sqlite_writer_wait(conn):
+        for attempt in range(_IMMEDIATE_RETRY_LIMIT):
+            contention: BaseException | None = None
+            lock_stack = contextlib.ExitStack()
+            try:
+                lock_stack.enter_context(writer_lock())
+            except BlockingIOError as exc:
+                lock_stack.close()
+                contention = exc
+            else:
+                with lock_stack:
+                    try:
+                        conn.execute("BEGIN IMMEDIATE")
+                    except sqlite3.OperationalError as exc:
+                        if not _is_sqlite_writer_contention(exc):
+                            raise
+                        contention = exc
+                    else:
+                        try:
+                            yield
+                        except sqlite3.OperationalError as exc:
+                            if conn.in_transaction:
+                                conn.rollback()
+                            if _is_sqlite_writer_contention(exc):
+                                raise ReplacementForecastWriteDeferred(
+                                    _WRITE_DEFERRED_REASON
+                                ) from exc
+                            raise
+                        except BaseException:
+                            if conn.in_transaction:
+                                conn.rollback()
+                            raise
+                        finally:
+                            if conn.in_transaction:
+                                conn.rollback()
+                        return
+            last_contention = contention
+            if attempt + 1 < _IMMEDIATE_RETRY_LIMIT:
+                time.sleep(_IMMEDIATE_RETRY_DELAY_SECONDS)
+
+    # SCOPE: this materializer's one pending write transaction only.
+    # DRAIN: every failed acquisition releases the LIVE flock before a bounded
+    # retry; the queue retries the item on its normal cadence after exhaustion.
+    # RESET: any later attempt that obtains both locks enters the transaction.
+    raise ReplacementForecastWriteDeferred(
+        _WRITE_DEFERRED_REASON
+    ) from last_contention
 
 
 def _attach_world_read_only(conn) -> None:
@@ -611,6 +698,7 @@ def _prepare_live_schema_and_manifest(
     schema_ready: bool,
     openmeteo_manifest: object | None,
     anchor_artifact_id: int | None,
+    writer_lock: _WriterLockFactory | None = None,
 ) -> _DurablePreparationReceipt:
     if schema_ready and openmeteo_manifest is None:
         return _DurablePreparationReceipt(
@@ -618,31 +706,38 @@ def _prepare_live_schema_and_manifest(
             anchor_artifact_id=anchor_artifact_id,
             manifest_committed=False,
         )
-    conn.execute("BEGIN IMMEDIATE")
+    transaction = (
+        _immediate_writer_transaction(conn, writer_lock)
+        if writer_lock is not None
+        else contextlib.nullcontext()
+    )
+    if writer_lock is None:
+        conn.execute("BEGIN IMMEDIATE")
     try:
-        if init_schema:
-            from src.state.db import _create_readiness_state
-            from src.state.schema.v2_schema import (
-                ensure_replacement_forecast_live_schema,
-            )
+        with transaction:
+            if init_schema:
+                from src.state.db import _create_readiness_state
+                from src.state.schema.v2_schema import (
+                    ensure_replacement_forecast_live_schema,
+                )
 
-            ensure_replacement_forecast_live_schema(conn)
-            _create_readiness_state(conn)
-        if not schema_ready:
-            _ensure_replacement_identity_columns(conn)
-        if openmeteo_manifest is not None:
-            anchor_artifact_id = write_manifest_to_db(
-                conn,
-                openmeteo_manifest,
-                root=ROOT,
-                verify_artifact=False,
+                ensure_replacement_forecast_live_schema(conn)
+                _create_readiness_state(conn)
+            if not schema_ready:
+                _ensure_replacement_identity_columns(conn)
+            if openmeteo_manifest is not None:
+                anchor_artifact_id = write_manifest_to_db(
+                    conn,
+                    openmeteo_manifest,
+                    root=ROOT,
+                    verify_artifact=False,
+                )
+            conn.commit()
+            return _DurablePreparationReceipt(
+                schema_ready=True,
+                anchor_artifact_id=anchor_artifact_id,
+                manifest_committed=openmeteo_manifest is not None,
             )
-        conn.commit()
-        return _DurablePreparationReceipt(
-            schema_ready=True,
-            anchor_artifact_id=anchor_artifact_id,
-            manifest_committed=openmeteo_manifest is not None,
-        )
     except Exception:
         if conn.in_transaction:
             conn.rollback()
@@ -674,8 +769,7 @@ def _commit_from_read_snapshot(
         # snapshot revalidation and durable write own the process-global writer
         # flock; otherwise four concurrent materializers can blind Day0 exits by
         # starving observation/vector writers for the whole fusion compute.
-        with writer_lock():
-            conn.execute("BEGIN IMMEDIATE")
+        with _immediate_writer_transaction(conn, writer_lock):
             try:
                 try:
                     current_witness = _revalidate_target_dependency_witness(
@@ -754,6 +848,8 @@ def _error_response(
         "error_type": exc.__class__.__name__,
         "error": str(exc),
     }
+    if isinstance(exc, ReplacementForecastWriteDeferred):
+        response["reason_codes"] = [_WRITE_DEFERRED_REASON]
     if receipt is not None:
         response.update(
             {
@@ -925,14 +1021,14 @@ def _materialize(
     receipt: _DurablePreparationReceipt | None = None
     try:
         if commit:
-            with effective_writer_lock():
-                receipt = _prepare_live_schema_and_manifest(
-                    conn,
-                    init_schema=init_schema,
-                    schema_ready=schema_ready,
-                    openmeteo_manifest=openmeteo_manifest,
-                    anchor_artifact_id=anchor_artifact_id,
-                )
+            receipt = _prepare_live_schema_and_manifest(
+                conn,
+                init_schema=init_schema,
+                schema_ready=schema_ready,
+                openmeteo_manifest=openmeteo_manifest,
+                anchor_artifact_id=anchor_artifact_id,
+                writer_lock=effective_writer_lock,
+            )
             _ensure_replacement_frontier_indexes(conn)
             conn.commit()
             anchor_artifact_id = receipt.anchor_artifact_id
@@ -1090,14 +1186,14 @@ def main(argv: list[str] | None = None) -> int:
             schema_ready = False
             if args.commit:
                 try:
-                    with _forecast_writer_lock():
-                        receipt = _prepare_live_schema_and_manifest(
-                            conn,
-                            init_schema=args.init_schema,
-                            schema_ready=False,
-                            openmeteo_manifest=None,
-                            anchor_artifact_id=None,
-                        )
+                    receipt = _prepare_live_schema_and_manifest(
+                        conn,
+                        init_schema=args.init_schema,
+                        schema_ready=False,
+                        openmeteo_manifest=None,
+                        anchor_artifact_id=None,
+                        writer_lock=_forecast_writer_lock,
+                    )
                     schema_ready = receipt.schema_ready
                 except Exception as exc:
                     stderr = json.dumps(_error_response(exc), sort_keys=True) + "\n"

@@ -1115,6 +1115,7 @@ _STALE_DAY0_ENQUEUE_OWNER_REASON = "STALE_DAY0_ENQUEUE_OWNER"
 _STALE_DAY0_OWNER_SUPERSEDED_REASON = (
     "REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_SUPERSEDED_BY_DAY0_OWNER"
 )
+_WRITE_DEFERRED_REASON = "REPLACEMENT_FORECAST_WRITE_DEFERRED"
 _ATTEMPT_CLOCK_FIELDS = frozenset({"computed_at", "expires_at"})
 _ATTEMPT_INPUT_PATH_FIELDS = (
     "openmeteo_payload_json",
@@ -1459,17 +1460,18 @@ def _write_blocked_attempt_marker(
 
 
 def _subprocess_result_reason_codes(completed: subprocess.CompletedProcess[str]) -> tuple[str, ...]:
-    for line in reversed((completed.stdout or "").splitlines()):
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, Mapping):
-            continue
-        reasons = payload.get("reason_codes")
-        if not isinstance(reasons, list):
-            return ()
-        return tuple(str(reason) for reason in reasons)
+    for stream in (completed.stdout or "", completed.stderr or ""):
+        for line in reversed(stream.splitlines()):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, Mapping):
+                continue
+            reasons = payload.get("reason_codes")
+            if not isinstance(reasons, list):
+                continue
+            return tuple(str(reason) for reason in reasons)
     return ()
 
 
@@ -1620,11 +1622,19 @@ def _claim_age_seconds(batch_path: Path) -> float:
 
 def _restore_claimed_request(path: Path, request_path: Path, batch_name: str) -> Path:
     request_path.mkdir(parents=True, exist_ok=True)
-    target = request_path / path.name
-    if target.exists():
-        target = request_path / f"{path.stem}.recovered-{batch_name}{path.suffix}"
-    os.replace(path, target)
-    return target
+    attempt = 0
+    while True:
+        suffix = "" if attempt == 0 else f".recovered-{batch_name}-{attempt}"
+        target = request_path / f"{path.stem}{suffix}{path.suffix}"
+        try:
+            os.link(path, target)
+        except FileExistsError:
+            attempt += 1
+            continue
+        _fsync_directory(request_path)
+        path.unlink()
+        _fsync_directory(path.parent)
+        return target
 
 
 def _remove_empty_claim_batch(batch_path: Path) -> None:
@@ -2238,6 +2248,7 @@ def process_replacement_forecast_live_materialization_queue(
             limit=claim.claimed_count,
             runner=runner,
             marker_dir=request_path.parent / "blocked_attempts",
+            retry_path=request_path,
         )
     finally:
         _remove_empty_claim_batch(claim.batch_path)
@@ -2281,6 +2292,7 @@ def _process_claimed_materialization_batch(
     limit: int = 10,
     runner: Runner | None = None,
     marker_dir: Path | None = None,
+    retry_path: Path | None = None,
 ) -> ReplacementForecastLiveMaterializationQueueReport:
     if not request_path.exists():
         return ReplacementForecastLiveMaterializationQueueReport(
@@ -2322,6 +2334,7 @@ def _process_claimed_materialization_batch(
     failed: list[str] = []
     unchanged_blocked: list[str] = []
     stale_day0_superseded: list[str] = []
+    write_deferred: list[str] = []
     pending: list[_PendingMaterialization] = []
     marker_dir = marker_dir or request_path.parent / "blocked_attempts"
     for input_json in requests[:limit]:
@@ -2486,6 +2499,16 @@ def _process_claimed_materialization_batch(
             )
             processed.append(str(receipt))
             unchanged_blocked.append(str(receipt))
+        elif _WRITE_DEFERRED_REASON in result_reason_codes:
+            if retry_path is None or input_json.parent == retry_path:
+                restored = input_json
+            else:
+                restored = _restore_claimed_request(
+                    input_json,
+                    retry_path,
+                    request_path.name,
+                )
+            write_deferred.append(str(restored))
         else:
             moved = _move_request(input_json, failed_path)
             _write_sidecar(moved, payload)
@@ -2499,6 +2522,12 @@ def _process_claimed_materialization_batch(
         reasons.append(_UNCHANGED_BLOCKED_SKIP_REASON)
     if stale_day0_superseded:
         reasons.append(_STALE_DAY0_OWNER_SUPERSEDED_REASON)
+    if write_deferred:
+        reasons.append(_WRITE_DEFERRED_REASON)
+        _LOG.warning(
+            "replacement forecast writes deferred by transient contention: count=%d",
+            len(write_deferred),
+        )
     if failed:
         reasons.append("REPLACEMENT_LIVE_MATERIALIZATION_REQUEST_FAILED")
     if committed_posterior_count > reactor_wake_published_count:
