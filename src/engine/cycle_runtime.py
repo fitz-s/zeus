@@ -4876,7 +4876,8 @@ def _fresh_local_held_monitor_orderbooks(
         return {}
     values_sql = ",".join("(?, ?)" for _ in scope)
     params = [part for pair in scope for part in pair]
-    params.append(now_utc.astimezone(timezone.utc).isoformat())
+    checked_at = now_utc.astimezone(timezone.utc).isoformat()
+    params.extend((checked_at, checked_at, checked_at))
     progress_handler_installed = False
     if deadline_monotonic is not None:
         if time.monotonic() >= float(deadline_monotonic):
@@ -4892,6 +4893,12 @@ def _fresh_local_held_monitor_orderbooks(
             )
             progress_handler_installed = True
     try:
+        invalidation_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='executable_market_snapshot_invalidations' LIMIT 1"
+        ).fetchone()
+        if invalidation_table is None:
+            return {}
         rows = conn.execute(
             f"""
             WITH requested(condition_id, token_id) AS (
@@ -4899,17 +4906,43 @@ def _fresh_local_held_monitor_orderbooks(
             )
             SELECT latest.selected_outcome_token_id,
                    snapshot.orderbook_depth_json,
-                   latest.captured_at
+                   latest.captured_at,
+                   latest.active,
+                   latest.closed,
+                   latest.accepting_orders,
+                   latest.tradeability_status_json
               FROM requested
               JOIN executable_market_snapshot_latest AS latest
                 ON latest.condition_id = requested.condition_id
                AND latest.selected_outcome_token_id = requested.token_id
               JOIN executable_market_snapshots AS snapshot
                 ON snapshot.snapshot_id = latest.snapshot_id
-             WHERE latest.active = 1
-               AND latest.closed = 0
-               AND latest.accepting_orders = 1
-               AND latest.freshness_deadline >= ?
+               AND snapshot.condition_id = latest.condition_id
+               AND snapshot.selected_outcome_token_id =
+                   latest.selected_outcome_token_id
+               AND snapshot.yes_token_id = latest.yes_token_id
+               AND snapshot.no_token_id = latest.no_token_id
+               AND snapshot.active = latest.active
+               AND snapshot.closed = latest.closed
+               AND snapshot.accepting_orders IS latest.accepting_orders
+               AND snapshot.captured_at = latest.captured_at
+               AND snapshot.freshness_deadline = latest.freshness_deadline
+             WHERE latest.freshness_deadline >= ?
+               AND latest.captured_at <= ?
+               AND NOT EXISTS (
+                    SELECT 1
+                      FROM executable_market_snapshot_invalidations AS invalidation
+                     WHERE (
+                            invalidation.condition_id = latest.condition_id
+                            OR invalidation.token_id IN (
+                                latest.selected_outcome_token_id,
+                                latest.yes_token_id,
+                                latest.no_token_id
+                            )
+                       )
+                       AND invalidation.invalidated_at >= latest.captured_at
+                       AND invalidation.invalidated_at <= ?
+               )
             """,
             params,
         ).fetchall()
@@ -4942,9 +4975,18 @@ def _fresh_local_held_monitor_orderbooks(
 
     books: dict[str, dict] = {}
     captured_times: list[datetime] = []
+    from src.engine.monitor_refresh import _monitor_snapshot_is_executable
+
     for row in rows:
         try:
             token_id, raw_book, raw_captured_at = row[0], row[1], row[2]
+            if not _monitor_snapshot_is_executable(
+                active=row[3],
+                closed=row[4],
+                accepting_orders=row[5],
+                tradeability_status_json=row[6],
+            ):
+                continue
             book = json.loads(str(raw_book))
         except (IndexError, TypeError, ValueError, json.JSONDecodeError):
             continue

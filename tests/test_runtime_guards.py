@@ -757,6 +757,8 @@ def test_canonical_monitor_book_prefers_fresher_independent_commit(tmp_path):
         top_bid="0.55",
         top_ask="0.57",
         captured_at=new_at,
+        active=False,
+        executable_allowed=True,
     )
     writer.commit()
     writer.close()
@@ -819,6 +821,16 @@ def test_canonical_monitor_book_rejects_stale_invalidated_and_wrong_token(tmp_pa
         captured_at=fresh_at,
         accepting_orders=False,
     )
+    _insert_executable_snapshot(
+        conn,
+        snapshot_id="canonical-monitor-explicitly-blocked",
+        selected_outcome_token_id="blocked-token",
+        yes_token_id="blocked-token",
+        no_token_id="blocked-no",
+        condition_id="cond-canonical-monitor-explicitly-blocked",
+        captured_at=fresh_at,
+        executable_allowed=False,
+    )
     conn.commit()
     record_snapshot_invalidation(
         conn,
@@ -843,6 +855,10 @@ def test_canonical_monitor_book_rejects_stale_invalidated_and_wrong_token(tmp_pa
         condition_id="cond-canonical-monitor-not-accepting",
         token_id="closed-token",
     )
+    explicitly_blocked_pos = _position(
+        condition_id="cond-canonical-monitor-explicitly-blocked",
+        token_id="blocked-token",
+    )
 
     assert conn.in_transaction
 
@@ -851,6 +867,15 @@ def test_canonical_monitor_book_rejects_stale_invalidated_and_wrong_token(tmp_pa
             conn,
             invalidated_pos,
             "yes123",
+            now_utc=now_utc,
+        )
+        is None
+    )
+    assert (
+        monitor_refresh._fresh_canonical_monitor_orderbook(
+            conn,
+            explicitly_blocked_pos,
+            "blocked-token",
             now_utc=now_utc,
         )
         is None
@@ -955,6 +980,8 @@ def test_held_monitor_uses_fresh_local_depth_before_network(monkeypatch, tmp_pat
         top_bid="0.40",
         top_ask="0.44",
         captured_at=captured_at,
+        active=False,
+        executable_allowed=True,
     )
 
     class NoNetworkClob:
@@ -987,6 +1014,100 @@ def test_held_monitor_uses_fresh_local_depth_before_network(monkeypatch, tmp_pat
     assert quote.best_ask == pytest.approx(0.44)
     assert summary["held_monitor_orderbooks_local"] == 1
     assert summary["held_monitor_orderbooks_network_requested"] == 0
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("status", "active", "closed", "accepting_orders", "expected"),
+    (
+        ('{"executable_allowed":true}', False, False, 1, True),
+        ('{"executable_allowed":false}', True, False, 1, False),
+        ('{"reason":"missing_authority"}', True, False, 1, False),
+        ("not-json", True, False, 1, False),
+        (None, True, False, 1, True),
+        (None, False, False, 1, False),
+    ),
+)
+def test_monitor_snapshot_tradeability_requires_normalized_authority_or_legacy_null(
+    status,
+    active,
+    closed,
+    accepting_orders,
+    expected,
+):
+    from src.engine.monitor_refresh import _monitor_snapshot_is_executable
+
+    assert _monitor_snapshot_is_executable(
+        active=active,
+        closed=closed,
+        accepting_orders=accepting_orders,
+        tradeability_status_json=status,
+    ) is expected
+
+
+def test_local_monitor_book_rejects_blocked_future_invalidated_and_identity_mismatch(
+    tmp_path,
+):
+    from src.engine import cycle_runtime
+    from src.state.snapshot_repo import (
+        init_snapshot_schema,
+        record_snapshot_invalidation,
+    )
+
+    conn = get_connection(tmp_path / "local-monitor-rejections.db")
+    init_schema(conn)
+    init_schema_trade_only(conn)
+    init_snapshot_schema(conn)
+    now_utc = datetime.now(timezone.utc)
+    fresh_at = now_utc - timedelta(seconds=2)
+    cases = (
+        ("blocked", fresh_at, False),
+        ("future", now_utc + timedelta(seconds=2), True),
+        ("invalidated", fresh_at, True),
+        ("identity", fresh_at, True),
+    )
+    positions = []
+    for name, captured_at, executable_allowed in cases:
+        token_id = f"{name}-token"
+        condition_id = f"{name}-condition"
+        _insert_executable_snapshot(
+            conn,
+            snapshot_id=f"local-{name}",
+            selected_outcome_token_id=token_id,
+            yes_token_id=token_id,
+            no_token_id=f"{name}-no",
+            condition_id=condition_id,
+            captured_at=captured_at,
+            executable_allowed=executable_allowed,
+        )
+        positions.append(_position(condition_id=condition_id, token_id=token_id))
+    conn.execute(
+        "UPDATE executable_market_snapshot_latest SET snapshot_id = ? "
+        "WHERE condition_id = ? AND selected_outcome_token_id = ?",
+        ("local-blocked", "identity-condition", "identity-token"),
+    )
+    conn.commit()
+    record_snapshot_invalidation(
+        conn,
+        condition_id="invalidated-condition",
+        token_id="invalidated-token",
+        reason="test_market_channel_change",
+        invalidated_at=now_utc - timedelta(seconds=1),
+    )
+    summary = {}
+    deps = types.SimpleNamespace(
+        logger=types.SimpleNamespace(warning=lambda *args, **kwargs: None)
+    )
+
+    books = cycle_runtime._fresh_local_held_monitor_orderbooks(
+        conn,
+        positions,
+        now_utc=now_utc,
+        summary=summary,
+        deps=deps,
+    )
+
+    assert books == {}
     conn.close()
 
 
@@ -1358,8 +1479,14 @@ def _insert_executable_snapshot(
     fee_details: dict | None = None,
     min_tick_size: str = "0.01",
     accepting_orders: bool = True,
+    active: bool = True,
+    closed: bool = False,
+    executable_allowed: bool | None = None,
 ) -> None:
-    from src.contracts.executable_market_snapshot import ExecutableMarketSnapshot
+    from src.contracts.executable_market_snapshot import (
+        ExecutableMarketSnapshot,
+        ExecutableTradeabilityStatus,
+    )
     from src.state.snapshot_repo import insert_snapshot
 
     captured_at = captured_at or datetime.now(timezone.utc)
@@ -1377,8 +1504,8 @@ def _insert_executable_snapshot(
             selected_outcome_token_id=selected_outcome_token_id,
             outcome_label=outcome_label,
             enable_orderbook=True,
-            active=True,
-            closed=False,
+            active=active,
+            closed=closed,
             accepting_orders=accepting_orders,
             market_start_at=None,
             market_end_at=None,
@@ -1406,6 +1533,19 @@ def _insert_executable_snapshot(
             authority_tier="CLOB",
             captured_at=captured_at,
             freshness_deadline=captured_at + timedelta(seconds=30),
+            tradeability_status=(
+                ExecutableTradeabilityStatus(
+                    child_active=active,
+                    child_closed=closed,
+                    accepting_orders=accepting_orders,
+                    clob_archived=False,
+                    clob_enable_order_book=True,
+                    executable_allowed=executable_allowed,
+                    reason="test_normalized_tradeability",
+                )
+                if executable_allowed is not None
+                else None
+            ),
         ),
     )
 

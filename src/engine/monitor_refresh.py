@@ -573,6 +573,32 @@ class HeldTokenMonitorQuote:
     bid_ladder: tuple[tuple[float, float], ...] = ()
 
 
+def _monitor_snapshot_is_executable(
+    *,
+    active: object,
+    closed: object,
+    accepting_orders: object,
+    tradeability_status_json: object,
+) -> bool:
+    """Use normalized CLOB tradeability before legacy Gamma routing flags."""
+
+    if tradeability_status_json is None:
+        return bool(active) and not bool(closed) and accepting_orders == 1
+    try:
+        status = (
+            tradeability_status_json
+            if isinstance(tradeability_status_json, dict)
+            else json.loads(str(tradeability_status_json))
+        )
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    if isinstance(status, dict) and isinstance(
+        status.get("executable_allowed"), bool
+    ):
+        return status["executable_allowed"]
+    return False
+
+
 def _book_min_order_size(book: dict | None) -> float | None:
     if not isinstance(book, dict):
         return None
@@ -650,7 +676,8 @@ def _fresh_canonical_monitor_orderbook(
                                latest.closed,
                                latest.accepting_orders,
                                snapshot.min_order_size,
-                               snapshot.orderbook_depth_json
+                               snapshot.orderbook_depth_json,
+                               latest.tradeability_status_json
                           FROM executable_market_snapshot_latest AS latest
                           JOIN executable_market_snapshots AS snapshot
                             ON snapshot.snapshot_id = latest.snapshot_id
@@ -670,11 +697,11 @@ def _fresh_canonical_monitor_orderbook(
                         """,
                         (condition_id, token_id),
                     ).fetchone()
-                    if (
-                        row is None
-                        or int(row[4]) != 1
-                        or int(row[5]) != 0
-                        or int(row[6]) != 1
+                    if row is None or not _monitor_snapshot_is_executable(
+                        active=row[4],
+                        closed=row[5],
+                        accepting_orders=row[6],
+                        tradeability_status_json=row[9],
                     ):
                         continue
                     captured_at = datetime.fromisoformat(
