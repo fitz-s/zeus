@@ -32558,6 +32558,8 @@ def _day0_replacement_conditioning(
     provisional: bool,
     metric: str,
     unit: str,
+    decision_time: datetime,
+    entry_authority: bool,
 ) -> Mapping[str, object]:
     """Return the current observation conditioning carried by replacement q."""
 
@@ -32583,6 +32585,49 @@ def _day0_replacement_conditioning(
         or conditioned_unit != expected_unit
     ):
         raise ValueError("GLOBAL_DAY0_REPLACEMENT_CONDITIONING_INVALID")
+    if entry_authority:
+        from src.data.day0_fast_obs import (
+            FAST_LANE_ENTRY_MAX_CACHE_AGE_S,
+            FAST_OBS_SOURCE_ID,
+        )
+        from src.events.day0_authority import DAY0_WU_FAST_RESIDUAL_SOURCE
+
+        conditioned_source = str(conditioning.get("source") or "").strip().lower()
+        fast_sources = {
+            FAST_OBS_SOURCE_ID.lower(),
+            "same_station_fast_tail",
+            DAY0_WU_FAST_RESIDUAL_SOURCE.lower(),
+        }
+        if conditioned_source in fast_sources:
+            try:
+                observation_time = datetime.fromisoformat(
+                    str(conditioning.get("observation_time") or "").replace(
+                        "Z", "+00:00"
+                    )
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_CLOCK_INVALID"
+                ) from exc
+            if (
+                decision_time.tzinfo is None
+                or observation_time.tzinfo is None
+                or observation_time.astimezone(UTC) > decision_time.astimezone(UTC)
+            ):
+                raise ValueError(
+                    "GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_CLOCK_INVALID"
+                )
+            age_seconds = (
+                decision_time.astimezone(UTC) - observation_time.astimezone(UTC)
+            ).total_seconds()
+            if age_seconds > FAST_LANE_ENTRY_MAX_CACHE_AGE_S:
+                # SCOPE: only new ENTRY risk for this Day0 family; held redecision
+                # and reduce-only SELL continue on their independent authority.
+                # DRAIN: the station fast lane publishes its next causal print and
+                # the normal materializer writes a posterior carrying that clock.
+                # RESET: the next global cut and submit rebind reproduce an active
+                # conditioning age inside the existing 15-minute entry contract.
+                raise ValueError("GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE")
     return {
         **conditioning,
         "metric": conditioned_metric,
@@ -35266,6 +35311,8 @@ def _prepare_current_global_probability_family(
                         provisional=provisional_day0_observation,
                         metric=str(family.metric),
                         unit=str(omega.resolution.measurement_unit),
+                        decision_time=decision_time,
+                        entry_authority=entry_authority,
                     )
                     if bundle is not None
                     else None

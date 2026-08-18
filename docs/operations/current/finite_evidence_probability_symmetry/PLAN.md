@@ -4,6 +4,27 @@ Date: 2026-07-11
 Branch: `live` (was `p2-pending-exit-restart-redecision`; renamed at main→live cutover)
 Status: active
 
+## 2026-08-17 Persisted fast observations retain the 15-minute ENTRY lifetime
+
+Shanghai Aug-18 HIGH NO filled at 03:33:54 UTC from a Day0 probability whose
+persisted fast-station conditioning clock was 03:06:41.  The next ZSPD report
+was not decision-time truth at submit: it became provider-available only at
+03:35:17, moved the running HIGH from 30C to 31C, materialized at 03:35:20,
+and correctly reversed NO probability before the reduce-only SELL.  The loss
+was therefore not look-ahead or a same-certificate buy/sell contradiction.
+
+The defect was a lifetime split.  `FAST_LANE_ENTRY_MAX_CACHE_AGE_S` already
+limits fast-lane ENTRY authority to 15 minutes while evidence remains in the
+in-process memo, but the same observation could survive for hours after being
+persisted into `forecast_posteriors`.  A persisted `aviationweather_metar`,
+`same_station_fast_tail`, or `wu_api+same_station_fast_tail` conditioning now
+uses that same inclusive 15-minute age at every global ENTRY build and submit
+rebind.  SCOPE is only new risk in the affected Day0 family.  DRAIN is the next
+causal station print and normal materialization.  RESET is the next complete
+global cut carrying conditioning inside 15 minutes.  Held-position redecision
+and reduce-only SELL remain executable, and unrelated families continue to
+compete for the single global order.
+
 ## 2026-08-17 Side-effect-free rejected commands need a fresh carrier
 
 A Warsaw maker continuation remained the global positive-growth winner after

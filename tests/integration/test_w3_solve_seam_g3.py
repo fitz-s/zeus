@@ -5772,6 +5772,105 @@ def test_global_day0_actuation_rebinds_stale_carrier_to_current_conditioning():
     assert rebound["_edli_global_day0_binding"]["posterior_id"] == 29914
 
 
+def test_day0_fast_conditioning_expires_for_entry_but_not_held_redecision():
+    bundle = SimpleNamespace(
+        provenance_json={
+            "day0_conditioning": {
+                "active": True,
+                "metric": "high",
+                "observation_time": "2026-08-18T03:06:41+00:00",
+                "observed_extreme_c": 30.0,
+                "sample_count": 23,
+                "source": "aviationweather_metar",
+                "unit": "C",
+            }
+        }
+    )
+    decision_time = _dt.datetime(
+        2026, 8, 18, 3, 33, 36, tzinfo=_dt.timezone.utc
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE",
+    ):
+        era._day0_replacement_conditioning(
+            bundle,
+            provisional=False,
+            metric="high",
+            unit="C",
+            decision_time=decision_time,
+            entry_authority=True,
+        )
+
+    held = era._day0_replacement_conditioning(
+        bundle,
+        provisional=False,
+        metric="high",
+        unit="C",
+        decision_time=decision_time,
+        entry_authority=False,
+    )
+    assert held["observed_extreme_c"] == pytest.approx(30.0)
+
+
+@pytest.mark.parametrize(
+    ("provisional", "key", "source"),
+    [
+        (False, "day0_conditioning", "aviationweather_metar"),
+        (True, "day0_provisional_observation", "wu_api+same_station_fast_tail"),
+    ],
+)
+def test_day0_fast_conditioning_entry_age_boundary_is_inclusive(
+    provisional,
+    key,
+    source,
+):
+    observed_at = _dt.datetime(
+        2026, 8, 18, 3, 0, tzinfo=_dt.timezone.utc
+    )
+    bundle = SimpleNamespace(
+        provenance_json={
+            key: {
+                "active": True,
+                "metric": "high",
+                "observation_time": observed_at.isoformat(),
+                "observed_extreme_c": 30.0,
+                "sample_count": 20,
+                "source": source,
+                "unit": "C",
+            }
+        }
+    )
+    from src.data.day0_fast_obs import FAST_LANE_ENTRY_MAX_CACHE_AGE_S
+
+    at_limit = observed_at + _dt.timedelta(
+        seconds=FAST_LANE_ENTRY_MAX_CACHE_AGE_S
+    )
+    conditioned = era._day0_replacement_conditioning(
+        bundle,
+        provisional=provisional,
+        metric="high",
+        unit="C",
+        decision_time=at_limit,
+        entry_authority=True,
+    )
+    assert conditioned["source"] == source
+
+    with pytest.raises(
+        ValueError,
+        match="GLOBAL_DAY0_FAST_OBSERVATION_ENTRY_STALE",
+    ):
+        era._day0_replacement_conditioning(
+            bundle,
+            provisional=provisional,
+            metric="high",
+            unit="C",
+            decision_time=at_limit + _dt.timedelta(microseconds=1),
+            entry_authority=True,
+        )
+
+
 def test_global_day0_plateau_advances_physical_clock_without_promoting_proxy_value():
     """A same-value fast print shrinks q(t), but settlement truth stays canonical."""
     from src.state.schema.observation_prints_schema import append_print, ensure_table
