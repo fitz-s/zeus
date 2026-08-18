@@ -3573,6 +3573,11 @@ def _record_monitor_hold_decision(
     )
     summary[counter] = summary.get(counter, 0) + 1
     summary["monitors"] = summary.get("monitors", 0) + 1
+    _append_held_monitor_coverage_position_id(
+        summary,
+        "held_monitor_canonical_position_ids",
+        pos,
+    )
     return canonical_written
 
 
@@ -3657,7 +3662,27 @@ def _record_monitor_data_degraded_attempt(
         summary.get("monitor_data_degraded_attempts", 0) + 1
     )
     summary["monitors"] = summary.get("monitors", 0) + 1
+    _append_held_monitor_coverage_position_id(
+        summary,
+        "held_monitor_canonical_position_ids",
+        pos,
+    )
     return True
+
+
+def _append_held_monitor_coverage_position_id(
+    summary: dict,
+    field: str,
+    pos,
+) -> None:
+    """Append one stable position identity to a pass-local coverage set."""
+
+    position_id = str(getattr(pos, "trade_id", "") or "").strip()
+    if not position_id:
+        return
+    position_ids = summary.setdefault(field, [])
+    if position_id not in position_ids:
+        position_ids.append(position_id)
 
 
 _FAMILY_OVERLAY_STATISTICAL_EXIT_TRIGGERS = frozenset(
@@ -7277,6 +7302,13 @@ def execute_monitoring_phase(
         _held_position_monitor_reservation_count(len(monitor_positions)),
     )
     summary["held_monitor_candidates"] = len(monitor_positions)
+    summary["held_monitor_candidate_position_ids"] = [
+        str(getattr(position, "trade_id", "") or "").strip()
+        for position in monitor_positions
+        if str(getattr(position, "trade_id", "") or "").strip()
+    ]
+    summary["held_monitor_canonical_position_ids"] = []
+    summary["held_monitor_discharged_position_ids"] = []
     if urgent_preemption_requested():
         summary["held_monitor_preempted"] = True
         summary["held_monitor_positions_deferred"] = len(monitor_positions)
@@ -7933,9 +7965,19 @@ def execute_monitoring_phase(
         state_value = _position_state_value(pos)
         if is_terminal_state(state_value):
             summary["monitor_skipped_terminal"] = summary.get("monitor_skipped_terminal", 0) + 1
+            _append_held_monitor_coverage_position_id(
+                summary,
+                "held_monitor_discharged_position_ids",
+                pos,
+            )
             continue
         if pos.state == "economically_closed":
             summary["monitor_skipped_economic_close"] = summary.get("monitor_skipped_economic_close", 0) + 1
+            _append_held_monitor_coverage_position_id(
+                summary,
+                "held_monitor_discharged_position_ids",
+                pos,
+            )
             continue
         if False:
             _ = pos.entry_method
@@ -7949,6 +7991,11 @@ def execute_monitoring_phase(
                     tracker_dirty = True
                     portfolio_dirty = True
                     summary["exit_chain_missing_closed"] = summary.get("exit_chain_missing_closed", 0) + 1
+                    _append_held_monitor_coverage_position_id(
+                        summary,
+                        "held_monitor_discharged_position_ids",
+                        pos,
+                    )
                 continue
             if pending_exit_resolution["action"] == "skip":
                 summary["monitor_skipped_exit_pending_missing"] = summary.get("monitor_skipped_exit_pending_missing", 0) + 1
@@ -7966,6 +8013,11 @@ def execute_monitoring_phase(
                 )
         if pos.state == "admin_closed":
             summary["monitor_skipped_admin_close"] = summary.get("monitor_skipped_admin_close", 0) + 1
+            _append_held_monitor_coverage_position_id(
+                summary,
+                "held_monitor_discharged_position_ids",
+                pos,
+            )
             continue
         pending_exit_monitor_only = False
         monitoring_non_executable_dust = False
@@ -8774,6 +8826,11 @@ def execute_monitoring_phase(
                             summary.get("day0_hard_fact_closed_market_monitors", 0) + 1
                         )
                         summary["monitors"] += 1
+                        _append_held_monitor_coverage_position_id(
+                            summary,
+                            "held_monitor_canonical_position_ids",
+                            pos,
+                        )
                     else:
                         vars(pos).clear()
                         vars(pos).update(hard_fact_position_before)
@@ -8810,6 +8867,11 @@ def execute_monitoring_phase(
                         + 1
                     )
                     summary["monitors"] = summary.get("monitors", 0) + 1
+                    _append_held_monitor_coverage_position_id(
+                        summary,
+                        "held_monitor_canonical_position_ids",
+                        pos,
+                    )
                     summary["monitor_skipped_closed_market_pending_settlement"] = (
                         summary.get("monitor_skipped_closed_market_pending_settlement", 0) + 1
                     )
@@ -9676,6 +9738,11 @@ def execute_monitoring_phase(
                 )
                 monitor_result_written = True
                 summary["monitors"] += 1
+                _append_held_monitor_coverage_position_id(
+                    summary,
+                    "held_monitor_canonical_position_ids",
+                    pos,
+                )
 
             if should_exit:
                 pos.exit_trigger = exit_trigger

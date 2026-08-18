@@ -11144,29 +11144,73 @@ def test_durable_monitor_recovery_has_an_independent_scheduler_executor() -> Non
     assert "id=\"exit_monitor_recovery\"" in source
 
 
-def test_full_book_monitor_success_requires_canonical_progress() -> None:
+def test_full_book_monitor_success_requires_complete_canonical_coverage() -> None:
     from src.execution.exit_lifecycle import (
-        _full_book_monitor_made_canonical_progress,
+        _full_book_monitor_completed_canonical_coverage,
     )
 
-    assert _full_book_monitor_made_canonical_progress(
+    assert _full_book_monitor_completed_canonical_coverage(
         {"monitors": 0},
         open_position_count=0,
     )
-    assert _full_book_monitor_made_canonical_progress(
-        {"monitors": 1},
-        open_position_count=4,
-    )
-    assert not _full_book_monitor_made_canonical_progress(
+    assert not _full_book_monitor_completed_canonical_coverage(
         {"monitors": 0},
         open_position_count=4,
     )
-    assert not _full_book_monitor_made_canonical_progress(
-        {"monitors": 1, "monitor_canonical_write_failed": 1},
+    assert _full_book_monitor_completed_canonical_coverage(
+        {
+            "monitors": 0,
+            "held_monitor_candidates": 0,
+            "held_monitor_candidate_position_ids": [],
+        },
         open_position_count=4,
     )
-    assert not _full_book_monitor_made_canonical_progress(
-        {"monitors": 1, "held_monitor_preempted": True},
+    assert not _full_book_monitor_completed_canonical_coverage(
+        {
+            "monitors": 4,
+            "held_monitor_candidates": 4,
+            "held_monitor_candidate_position_ids": ["p1", "p2", "p3", "p4"],
+            "held_monitor_canonical_position_ids": ["p1"],
+        },
+        open_position_count=4,
+    )
+    assert _full_book_monitor_completed_canonical_coverage(
+        {
+            "monitors": 4,
+            "held_monitor_candidates": 4,
+            "held_monitor_candidate_position_ids": ["p1", "p2", "p3", "p4"],
+            "held_monitor_canonical_position_ids": ["p1", "p2", "p3", "p4"],
+        },
+        open_position_count=4,
+    )
+    assert _full_book_monitor_completed_canonical_coverage(
+        {
+            "monitors": 3,
+            "held_monitor_candidates": 4,
+            "held_monitor_candidate_position_ids": ["p1", "p2", "p3", "p4"],
+            "held_monitor_canonical_position_ids": ["p1", "p2", "p3"],
+            "held_monitor_discharged_position_ids": ["p4"],
+        },
+        open_position_count=4,
+    )
+    assert not _full_book_monitor_completed_canonical_coverage(
+        {
+            "monitors": 4,
+            "held_monitor_candidates": 4,
+            "held_monitor_candidate_position_ids": ["p1", "p2", "p3", "p4"],
+            "held_monitor_canonical_position_ids": ["p1", "p2", "p3", "p4"],
+            "monitor_canonical_write_failed": 1,
+        },
+        open_position_count=4,
+    )
+    assert not _full_book_monitor_completed_canonical_coverage(
+        {
+            "monitors": 4,
+            "held_monitor_candidates": 4,
+            "held_monitor_candidate_position_ids": ["p1", "p2", "p3", "p4"],
+            "held_monitor_canonical_position_ids": ["p1", "p2", "p3", "p4"],
+            "held_monitor_preempted": True,
+        },
         open_position_count=4,
     )
 

@@ -12145,17 +12145,34 @@ def _check_monitor_cadence_watchdog(conn, summary: dict) -> dict | None:
     return record
 
 
-def _full_book_monitor_made_canonical_progress(
+def _full_book_monitor_completed_canonical_coverage(
     summary: Mapping[str, object],
     *,
     open_position_count: int,
 ) -> bool:
-    """Whether one admitted full-book pass produced useful held coverage."""
+    """Whether one admitted full-book pass discharged every held obligation."""
 
     if open_position_count <= 0:
         return True
+    if "held_monitor_candidate_position_ids" not in summary:
+        return False
+    candidate_ids = {
+        str(value).strip()
+        for value in summary.get("held_monitor_candidate_position_ids", ()) or ()
+        if str(value).strip()
+    }
+    completed_ids = {
+        str(value).strip()
+        for field in (
+            "held_monitor_canonical_position_ids",
+            "held_monitor_discharged_position_ids",
+        )
+        for value in summary.get(field, ()) or ()
+        if str(value).strip()
+    }
     return (
-        int(summary.get("monitors") or 0) > 0
+        int(summary.get("held_monitor_candidates") or 0) == len(candidate_ids)
+        and candidate_ids.issubset(completed_ids)
         and int(summary.get("monitor_canonical_write_failed") or 0) == 0
         and not bool(summary.get("held_monitor_preempted"))
     )
@@ -12454,6 +12471,26 @@ def run_exit_monitor_cycle(
                 )
                 summary["monitoring_error"] = str(exc)
 
+            succeeded = "monitoring_error" not in summary
+            if (
+                succeeded
+                and target_families is None
+                and not _full_book_monitor_completed_canonical_coverage(
+                    summary,
+                    open_position_count=full_book_open_position_count,
+                )
+            ):
+                # SCOPE: this admitted periodic full-book pass only. DRAIN: a
+                # later pass writes canonical MONITOR_REFRESHED decisions for
+                # every admitted candidate, or proves that a candidate became
+                # terminal/economically closed. RESET: exact full coverage (or
+                # zero current open positions) returns True so the dispatcher
+                # may clear its one-turn urgent-yield guard.
+                summary["monitoring_error"] = (
+                    "FULL_BOOK_MONITOR_CANONICAL_COVERAGE_INCOMPLETE"
+                )
+                succeeded = False
+
             artifact.completed_at = datetime.now(timezone.utc).isoformat()
 
             # INV-17 / DT#1: commit the DB transaction (monitoring state
@@ -12484,24 +12521,6 @@ def run_exit_monitor_cycle(
                 db_op=_db_op,
                 json_exports=[_export_portfolio, _export_tracker],
             )
-            succeeded = "monitoring_error" not in summary
-            if (
-                succeeded
-                and target_families is None
-                and not _full_book_monitor_made_canonical_progress(
-                    summary,
-                    open_position_count=full_book_open_position_count,
-                )
-            ):
-                # SCOPE: this admitted periodic full-book pass only. DRAIN: a
-                # later pass writes at least one canonical MONITOR_REFRESHED
-                # tranche without preemption/write failure. RESET: that
-                # canonical progress (or zero current open positions) returns
-                # True so the dispatcher may clear its fairness debt.
-                summary["monitoring_error"] = (
-                    "FULL_BOOK_MONITOR_CANONICAL_PROGRESS_MISSING"
-                )
-                succeeded = False
             mark_held_position_monitor_complete()
             monitor_completion_marked = True
 

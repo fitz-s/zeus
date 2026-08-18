@@ -2198,3 +2198,26 @@ publication barrier.
   retains reduce-only evaluation. Focused runtime antibodies, compilation,
   planning lock, topology freshness, and `git diff --check` must pass before
   exact-SHA hot-fix deployment.
+### Slice B111 — Full-book success requires complete canonical coverage (2026-08-18)
+
+- Live defect: exit-monitor artifact `463626` admitted 31 held candidates, wrote
+  30 canonical monitor decisions, deferred one position after an orderbook gap,
+  and still returned success. The completion predicate required only one monitor
+  write, so the dispatcher cleared its one-turn urgent-yield guard even though
+  one capital obligation remained unrefreshed.
+- First-principles invariant: a full-book pass succeeds only when every admitted
+  positive-exposure candidate receives a canonical MONITOR_REFRESHED decision or
+  is discharged by an explicit terminal/economic-close transition in that pass.
+  Partial progress remains durable evidence, but cannot erase full-book fairness
+  debt or authorize another urgent yield.
+- SCOPE: completion classification for one periodic full-book monitor pass.
+  DRAIN: the next recurring/recovery pass retries every still-open uncovered
+  candidate under a fresh q/book deadline. RESET: complete canonical coverage or
+  a canonical zero-exposure book returns success and re-enables one-turn urgent
+  preemption.
+- Forbidden: treating a missing orderbook as zero, stale-as-fresh substitution,
+  suppressing urgent Day0 work permanently, changing q/edge/exit thresholds, or
+  counting ambiguous pending-exit skips as completed coverage. Acceptance: the
+  1-of-4 partial counterexample fails, 4-of-4 succeeds, an explicit same-pass
+  chain-missing close discharges its obligation, and canonical-write/preemption
+  failures remain incomplete before focused/broader tests and hot-fix deployment.
