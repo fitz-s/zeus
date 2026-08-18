@@ -4878,6 +4878,41 @@ antibody that emits no aggregate `ENTRY_ORDER_VOIDED`.
 Allowed files for this hot-fix are `src/execution/command_recovery.py`,
 `tests/test_command_recovery.py`, and this plan.
 
+## 2026-08-17 Restore the evidenced 1/8 sizing law after an unproved rollback
+
+The latest complete live global cut compared 1,694 fixed BUY/SELL proposals
+across 114 families with current q, book, wealth, held-position, and reserved
+capital evidence.  It completed normally and selected CASH/HOLD because no
+remaining order had positive current economics; this was not scheduler or
+coverage starvation.  The same receipt exposed
+`fractional_kelly_multiplier=0.03125`, contradicting this plan's still-active
+1/8 acceptance criterion and the prior live proof that 1/32 alone rejected
+positive-growth minimum lots while most capital remained idle.
+
+The 2026-08-14 code/config rollback to 1/32 carries no loss, drawdown,
+calibration, or correlated-exposure evidence and did not supersede the active
+plan.  Restore the governed fraction to 1/8 while retaining the independent
+1/4 correlated ceiling, single-position, city, portfolio-heat, current-q/book,
+free-cash, and JIT reproduction gates.  This widens only the feasible size of a
+proposal that already wins the unified posterior-mean expected-log-growth
+comparison; it does not turn a non-positive proposal into an order.
+
+SCOPE is live fractional-Kelly sizing for otherwise admissible global
+proposals.  DRAIN is a clean daemon reload followed by the next complete global
+cut.  RESET is every fresh cut and submit-time recapture; changed probability,
+book, wealth, depth, or exposure can reduce the size or select CASH.  Acceptance
+requires exact 1/8 boot/config antibodies, the independent correlated-ceiling
+antibody, a live receipt carrying `fractional_kelly_multiplier=0.125`, and an
+actual venue order/fill or a complete current-economic rejection.  Expected EV
+is not reported as realized capital gain.
+
+Allowed files for this governed retune are `src/main.py`,
+`config/settings.example.json`, `tests/test_boot_guard_kelly_ceiling.py`,
+`tests/test_kelly.py`, `docs/reference/zeus_risk_strategy_reference.md`,
+`architecture/test_topology.yaml`, and this plan.  The ignored operator-owned
+`config/settings.json` is updated atomically only at live deployment so the
+boot guard and runtime value change together.
+
 ## 2026-08-17 Empty provider payload cannot cover a held probability scope
 
 Live NYC LOW reconstruction found a current-cycle raw artifact whose complete

@@ -802,15 +802,15 @@ def _replacement_qkernel_live_probability_authority_enabled(cfg: dict) -> bool:
     return True
 
 
-GOVERNED_KELLY_MULTIPLIER = 1.0 / 32.0
+GOVERNED_KELLY_MULTIPLIER = 1.0 / 8.0
 
 
 def assert_kelly_multiplier_matches_governed_fraction(cfg: dict) -> None:
-    """Fail closed unless live sizing uses the operator-governed 1/32 Kelly.
+    """Fail closed unless live sizing uses the operator-governed 1/8 Kelly.
 
     SCOPE: process-wide daemon boot; a mismatched Kelly config prevents entry,
     monitoring, and exit jobs from starting until the operator restores it.
-    DRAIN: restore ``sizing.kelly_multiplier`` to 0.03125 in the active
+    DRAIN: restore ``sizing.kelly_multiplier`` to 0.125 in the active
     operator config, then restart so every in-memory settings object reloads.
     RESET: this guard is recomputed on every boot and clears only on an exact
     finite match; there is no strategy, side, or runtime override.
@@ -820,20 +820,20 @@ def assert_kelly_multiplier_matches_governed_fraction(cfg: dict) -> None:
     if raw_mult is None:
         raise RuntimeError(
             "KELLY_MULT_GOVERNANCE_MISMATCH: missing "
-            "sizing.kelly_multiplier; required=0.03125 (1/32)"
+            "sizing.kelly_multiplier; required=0.125 (1/8)"
         )
     if isinstance(raw_mult, bool) or not isinstance(raw_mult, (int, float)):
         raise RuntimeError(
             "KELLY_MULT_GOVERNANCE_MISMATCH: "
             f"sizing.kelly_multiplier must be a JSON number, got "
-            f"{type(raw_mult).__name__}; required=0.03125 (1/32)"
+            f"{type(raw_mult).__name__}; required=0.125 (1/8)"
         )
     kelly_mult = float(raw_mult)
     if not math.isfinite(kelly_mult) or kelly_mult != GOVERNED_KELLY_MULTIPLIER:
         raise RuntimeError(
             "KELLY_MULT_GOVERNANCE_MISMATCH: "
             f"sizing.kelly_multiplier={kelly_mult!r}; "
-            f"required={GOVERNED_KELLY_MULTIPLIER} (1/32)"
+            f"required={GOVERNED_KELLY_MULTIPLIER} (1/8)"
         )
 
 
@@ -908,7 +908,7 @@ def _run_boot_guards(raw_cfg: dict) -> list:
       1. assert_calibration_pin_shape_is_dict  — model_keys must be dict/absent
       2. assert_frozen_as_of_not_stale         — WARN>10d, FATAL>21d
       3. assert_kelly_multiplier_matches_governed_fraction
-                                               — kelly_multiplier == 1/32
+                                               — kelly_multiplier == 1/8
       4. assert_kelly_multiplier_within_correlated_ceiling
                                                — kelly_multiplier ≤ max_correlated_pct
                                                  (over-size door / iron rule 5)
@@ -947,7 +947,7 @@ def _run_boot_guards(raw_cfg: dict) -> list:
         results.append((
             "kelly_mult_governed_fraction",
             True,
-            "kelly_multiplier == 0.03125 (1/32) — governed fraction intact",
+            "kelly_multiplier == 0.125 (1/8) — governed fraction intact",
         ))
     except (RuntimeError, TypeError, ValueError) as exc:
         results.append(("kelly_mult_governed_fraction", False, str(exc)))

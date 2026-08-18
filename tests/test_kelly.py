@@ -67,8 +67,8 @@ class TestKellySize:
         )
 
 
-class TestKellyMultiplierGovernance:
-    """Pins the operator-governed live Kelly multiplier at 1/32.
+class TestKellyMultiplierRetuneAugust2026:
+    """Pins the governed live Kelly multiplier at 1/8.
 
     Regression for operator-governed sizing (see
     ``config/settings.json::sizing._kelly_multiplier_note``).
@@ -80,7 +80,7 @@ class TestKellyMultiplierGovernance:
     at a representative f*=0.40.
     """
 
-    def test_live_config_kelly_multiplier_is_1_over_32_within_bounds(self):
+    def test_live_config_kelly_multiplier_is_1_over_8_within_bounds(self):
         import json
         from pathlib import Path
 
@@ -88,8 +88,8 @@ class TestKellyMultiplierGovernance:
         cfg = json.loads(settings_path.read_text())
         mult = cfg["sizing"]["kelly_multiplier"]
 
-        assert mult == pytest.approx(1.0 / 32.0)
-        assert mult == pytest.approx(0.03125)
+        assert mult == pytest.approx(1.0 / 8.0)
+        assert mult == pytest.approx(0.125)
 
         # cascade_bound [0.01, 1.0] -- config/provenance_registry.yaml::kelly_mult
         assert 0.01 <= mult <= 1.0
@@ -101,15 +101,15 @@ class TestKellyMultiplierGovernance:
     def test_live_formula_stake_at_bankroll_1269_f_star_040(self):
         """f* = (0.64 - 0.40) / (1 - 0.40) = 0.40 exactly.
 
-        stake = bankroll x kelly_multiplier x f* = 1269.0 x 0.03125 x 0.40
-              = 15.8625
+        stake = bankroll x kelly_multiplier x f* = 1269.0 x 0.125 x 0.40
+              = 63.45
         """
         bankroll = 1269.0
-        mult = 0.03125
+        mult = 0.125
         size = kelly_size(0.64, _ep(0.40), bankroll, kelly_mult=mult)
 
         assert size == pytest.approx(bankroll * mult * 0.40, rel=1e-9)
-        assert size == pytest.approx(15.86, abs=0.01)
+        assert size == pytest.approx(63.45, abs=0.01)
 
 
 class TestDynamicKellyMult:
