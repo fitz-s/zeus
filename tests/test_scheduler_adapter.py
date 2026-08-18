@@ -1865,6 +1865,23 @@ def test_replacement_maintenance_quota_cooldown_is_partial_but_reseeds(
     }
 
 
+def test_held_current_target_repair_covers_day0_and_future_exposure(
+    monkeypatch,
+) -> None:
+    import src.ingest_main as ingest_main
+
+    day0_scope = ("NYC", "2026-08-17", "low")
+    future_scope = ("Busan", "2026-08-19", "high")
+    monkeypatch.setattr(
+        "src.data.replacement_forecast_seed_discovery.held_position_family_priorities",
+        lambda: {day0_scope: 0, future_scope: 1},
+    )
+
+    assert ingest_main._all_held_current_target_scopes() == tuple(
+        sorted((day0_scope, future_scope))
+    )
+
+
 @pytest.mark.parametrize(
     ("held_status", "written_manifest_count"),
     (
@@ -1889,8 +1906,13 @@ def test_replacement_maintenance_repairs_held_anchor_during_broad_cooldown(
     )
     monkeypatch.setattr(
         ingest_main,
-        "_all_held_day0_current_target_scopes",
+        "_all_held_current_target_scopes",
         lambda: (held_scope,),
+    )
+    monkeypatch.setattr(
+        ingest_main,
+        "_held_day0_current_target_scopes",
+        lambda scopes: scopes,
     )
     monkeypatch.setattr(
         "src.data.bayes_precision_fusion_download."
@@ -1963,6 +1985,127 @@ def test_replacement_maintenance_repairs_held_anchor_during_broad_cooldown(
         ("fusion", (held_scope,), 1),
         ("cycle", (held_scope,), 1),
     ]
+
+
+@pytest.mark.parametrize(
+    ("critical_timeout", "timeout_s"),
+    ((False, 120.0), (True, 120.0), (False, 1.0)),
+)
+def test_replacement_maintenance_partitions_all_held_scopes_by_quota_lane(
+    monkeypatch, critical_timeout, timeout_s,
+) -> None:
+    import src.data.replacement_forecast_production as prod
+    import src.ingest_main as ingest_main
+
+    day0_scope = ("NYC", "2026-08-17", "low")
+    future_scope = ("Busan", "2026-08-19", "high")
+    monkeypatch.setattr(ingest_main.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(
+        ingest_main,
+        "_replacement_current_target_poll_timeout_seconds",
+        lambda _poll_seconds: timeout_s,
+    )
+    monkeypatch.setattr(
+        ingest_main,
+        "_REPLACEMENT_MAINTENANCE_NEXT_MONOTONIC",
+        200.0,
+    )
+    monkeypatch.setattr(
+        ingest_main,
+        "_all_held_current_target_scopes",
+        lambda: (day0_scope, future_scope),
+    )
+    monkeypatch.setattr(
+        ingest_main,
+        "_held_day0_current_target_scopes",
+        lambda scopes: tuple(scope for scope in scopes if scope == day0_scope),
+    )
+    monkeypatch.setattr(
+        "src.data.bayes_precision_fusion_download."
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: 120,
+    )
+    monkeypatch.setattr(
+        prod,
+        "_replacement_forecast_live_materialization_queue_config",
+        lambda: {"download_current_targets_enabled": True},
+    )
+    downloads: list[dict[str, object]] = []
+
+    def _download(_cfg, **kwargs):
+        downloads.append(kwargs)
+        if critical_timeout and kwargs.get("quota_critical"):
+            raise TimeoutError("critical lane deadline")
+        return {
+            "status": (
+                "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED"
+                if kwargs.get("quota_critical")
+                else "CURRENT_TARGETS_ALREADY_COVERED"
+            ),
+            "written_manifest_count": 0,
+        }
+
+    monkeypatch.setattr(
+        prod,
+        "_download_replacement_forecast_current_targets_if_needed",
+        _download,
+    )
+    reseeds: list[tuple[str, object, object]] = []
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_fusion_upgrade_reseeds_if_needed",
+        lambda _cfg, *, scopes=None, limit=None: (
+            reseeds.append(("fusion", scopes, limit))
+            or {"status": "FUSION_UPGRADE_TRIGGER", "seeds_enqueued": len(scopes or ())}
+        ),
+    )
+    monkeypatch.setattr(
+        prod,
+        "_enqueue_cycle_advance_reseeds_if_needed",
+        lambda _cfg, *, scopes=None, limit=None: (
+            reseeds.append(("cycle", scopes, limit))
+            or {"status": "CYCLE_ADVANCE_TRIGGER", "seeds_enqueued": len(scopes or ())}
+        ),
+    )
+
+    result = ingest_main._replacement_maintenance_tick.__wrapped__()
+
+    lane_budget = min(10.0, timeout_s / 2.0)
+    assert downloads == [
+        {
+            "max_wall_clock_seconds": lane_budget,
+            "required_scopes": (day0_scope,),
+            "quota_critical": True,
+        },
+        {
+            "max_wall_clock_seconds": lane_budget,
+            "required_scopes": (future_scope,),
+        },
+    ]
+    reseed_scopes = (
+        (future_scope,)
+        if critical_timeout
+        else tuple(sorted((day0_scope, future_scope)))
+    )
+    assert reseeds == [
+        ("fusion", reseed_scopes, len(reseed_scopes)),
+        ("cycle", reseed_scopes, len(reseed_scopes)),
+    ]
+    assert result["held_current_target_download"]["status"] == (
+        "CURRENT_TARGET_DOWNLOAD_TIMEOUT"
+        if critical_timeout
+        else "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED"
+    )
+    assert result["held_ordinary_current_target_download"]["status"] == (
+        "CURRENT_TARGETS_ALREADY_COVERED"
+    )
+    assert result["broad_maintenance_status"] == "REPLACEMENT_MAINTENANCE_NOT_DUE"
+    if critical_timeout:
+        assert result["maintenance_errors"] == (
+            "held_current_target:CURRENT_TARGET_DOWNLOAD_TIMEOUT",
+        )
+    else:
+        assert "maintenance_errors" not in result
 
 
 def test_replacement_maintenance_repairs_full_extras_before_reseed(

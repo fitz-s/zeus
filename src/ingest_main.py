@@ -279,8 +279,8 @@ def _held_day0_current_target_scopes(
     return tuple(scope for scope in scopes if priorities.get(scope) == 0)
 
 
-def _all_held_day0_current_target_scopes() -> tuple[tuple[str, str, str], ...]:
-    """Current canonical Day0/pending-exit families, in deterministic order."""
+def _all_held_current_target_scopes() -> tuple[tuple[str, str, str], ...]:
+    """Every canonical open-exposure family, in deterministic order."""
 
     try:
         from src.data.replacement_forecast_seed_discovery import (
@@ -290,12 +290,12 @@ def _all_held_day0_current_target_scopes() -> tuple[tuple[str, str, str], ...]:
         priorities = held_position_family_priorities()
     except Exception as exc:  # noqa: BLE001 - missing proof cannot widen quota scope
         logger.warning(
-            "HELD_DAY0_CURRENT_TARGET_UNIVERSE_READ_FAILED exc=%s: %s",
+            "HELD_CURRENT_TARGET_UNIVERSE_READ_FAILED exc=%s: %s",
             type(exc).__name__,
             exc,
         )
         return ()
-    return tuple(sorted(scope for scope, priority in priorities.items() if priority == 0))
+    return tuple(sorted(priorities))
 
 
 def _day0_family_admission_for_scopes(
@@ -2587,7 +2587,7 @@ def _replacement_maintenance_tick():
 
     cfg = _replacement_forecast_live_materialization_queue_config()
     cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
-    held_scopes = _all_held_day0_current_target_scopes()
+    held_scopes = _all_held_current_target_scopes()
     timeout_s = _replacement_current_target_poll_timeout_seconds(
         _replacement_availability_poll_seconds()
     )
@@ -2597,48 +2597,85 @@ def _replacement_maintenance_tick():
         return max(0.0, deadline_monotonic - time.monotonic())
 
     held_report = None
-    held_reseed_scopes: tuple[tuple[str, str, str], ...] = ()
-    if held_scopes and _remaining_budget() > 0.0:
-        # SCOPE: exact canonical day0_window/pending_exit families only.
+    held_ordinary_report = None
+    held_reseed_scope_set: set[tuple[str, str, str]] = set()
+    if held_scopes:
+        # SCOPE: exact canonical open-exposure families only.
         # DRAIN: each maintenance tick repairs their current anchor and enqueues
         # targeted materialization below, even without a new source-clock edge.
         # RESET: current materializable anchor coverage plus current reseed markers.
-        try:
-            held_report = _download_replacement_forecast_current_targets_if_needed(
-                cfg,
-                max_wall_clock_seconds=min(10.0, _remaining_budget()),
-                required_scopes=held_scopes,
-                quota_critical=True,
-            )
-        except TimeoutError as exc:
-            held_report = {
-                "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
-                "timeout_seconds": timeout_s,
-                "error": str(exc)[:240],
-            }
-        except Exception as exc:  # noqa: BLE001 - broad repair remains independent
-            logger.warning(
-                "replacement maintenance held-anchor repair failed: %s",
-                exc,
-                exc_info=True,
-            )
-            held_report = {
-                "status": "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
-                "error": f"{type(exc).__name__}: {str(exc)[:220]}",
-            }
-        held_status = (
-            str(held_report.get("status") or "")
-            if isinstance(held_report, dict)
-            else ""
+        critical_scopes = _held_day0_current_target_scopes(held_scopes)
+        critical_set = set(critical_scopes)
+        ordinary_scopes = tuple(
+            scope for scope in held_scopes if scope not in critical_set
         )
-        if (
-            held_status == "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED"
-            or int((held_report or {}).get("written_manifest_count") or 0) > 0
+        partition_count = int(bool(critical_scopes)) + int(bool(ordinary_scopes))
+        held_lane_budget = min(
+            10.0,
+            timeout_s / max(1, partition_count),
+        )
+        partition_reports: list[tuple[str, tuple[tuple[str, str, str], ...], object]] = []
+        for lane, scopes, quota_critical in (
+            ("critical", critical_scopes, True),
+            ("ordinary", ordinary_scopes, False),
         ):
-            held_reseed_scopes = held_scopes
+            if not scopes:
+                continue
+            kwargs: dict[str, object] = {
+                "max_wall_clock_seconds": held_lane_budget,
+                "required_scopes": scopes,
+            }
+            if quota_critical:
+                kwargs["quota_critical"] = True
+            try:
+                partition_report = (
+                    _download_replacement_forecast_current_targets_if_needed(
+                        cfg,
+                        **kwargs,
+                    )
+                )
+            except TimeoutError as exc:
+                partition_report = {
+                    "status": "CURRENT_TARGET_DOWNLOAD_TIMEOUT",
+                    "timeout_seconds": timeout_s,
+                    "error": str(exc)[:240],
+                }
+            except Exception as exc:  # noqa: BLE001 - partitions remain independent
+                logger.warning(
+                    "replacement maintenance held-anchor %s repair failed: %s",
+                    lane,
+                    exc,
+                    exc_info=True,
+                )
+                partition_report = {
+                    "status": "CURRENT_TARGET_DOWNLOAD_FAILSOFT",
+                    "error": f"{type(exc).__name__}: {str(exc)[:220]}",
+                }
+            partition_reports.append((lane, scopes, partition_report))
+            partition_status = (
+                str(partition_report.get("status") or "")
+                if isinstance(partition_report, dict)
+                else ""
+            )
+            if partition_status in {
+                "CURRENT_TARGET_CRITICAL_SCOPES_ALREADY_COVERED",
+                "CURRENT_TARGETS_ALREADY_COVERED",
+                "CURRENT_TARGETS_HAVE_RAW_MANIFESTS",
+            } or (
+                isinstance(partition_report, dict)
+                and int(partition_report.get("written_manifest_count") or 0) > 0
+            ):
+                held_reseed_scope_set.update(scopes)
+        for lane, _scopes, partition_report in partition_reports:
+            if lane == "critical":
+                held_report = partition_report
+            else:
+                held_ordinary_report = partition_report
+
+    held_reseed_scopes = tuple(sorted(held_reseed_scope_set))
 
     broad_due = _replacement_maintenance_due()
-    if not broad_due and held_report is None:
+    if not broad_due and held_report is None and held_ordinary_report is None:
         return {"status": "REPLACEMENT_MAINTENANCE_NOT_DUE"}
 
     if not broad_due:
@@ -2719,6 +2756,10 @@ def _replacement_maintenance_tick():
         report["held_current_target_download"] = (
             _compact_replacement_current_target_report(held_report)
         )
+    if held_ordinary_report is not None:
+        report["held_ordinary_current_target_download"] = (
+            _compact_replacement_current_target_report(held_ordinary_report)
+        )
     if extras_report is not None:
         report["bayes_precision_fusion_extra_status"] = extras_report.get("status")
         report["bayes_precision_fusion_extra_rows_written"] = extras_report.get(
@@ -2796,6 +2837,14 @@ def _replacement_maintenance_tick():
                 ),
             ),
             _replacement_maintenance_lane_error(
+                "held_ordinary_current_target",
+                held_ordinary_report,
+                ok_statuses=_REPLACEMENT_MAINTENANCE_CURRENT_TARGET_OK_STATUSES,
+                retryable_statuses=(
+                    _REPLACEMENT_MAINTENANCE_CURRENT_TARGET_RETRYABLE_STATUSES
+                ),
+            ),
+            _replacement_maintenance_lane_error(
                 "current_target",
                 download_report,
                 ok_statuses=_REPLACEMENT_MAINTENANCE_CURRENT_TARGET_OK_STATUSES,
@@ -2818,7 +2867,12 @@ def _replacement_maintenance_tick():
     download_timeboxed = any(
         isinstance(lane_report, dict)
         and bool(lane_report.get("timeboxed_incomplete"))
-        for lane_report in (held_report, download_report, extras_report)
+        for lane_report in (
+            held_report,
+            held_ordinary_report,
+            download_report,
+            extras_report,
+        )
     )
     if not broad_due:
         report["broad_maintenance_status"] = "REPLACEMENT_MAINTENANCE_NOT_DUE"
@@ -3104,7 +3158,9 @@ def _replacement_availability_poll_tick():
         # The current provider center is the first q input and already has a
         # run-authoritative live-API ladder. Capture it before waiting for the
         # slower Single Runs archive used by the multimodel BPF inputs.
-        held_anchor_scopes = _all_held_day0_current_target_scopes()
+        held_anchor_scopes = _held_day0_current_target_scopes(
+            _all_held_current_target_scopes()
+        )
         if held_anchor_scopes:
             source_clock_held_anchor_report = _download_current_targets(
                 max_wall_clock_seconds=min(
