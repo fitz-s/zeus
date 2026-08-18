@@ -419,7 +419,7 @@ def fetch(
                 error = OpenMeteoHTTPStatusError(resp, outcome)
                 if outcome.retry_class is OpenMeteoRetryClass.RATE_LIMITED:
                     wait = _rate_limit_wait(outcome, attempt)
-                    tracker.note_rate_limited(int(wait))
+                    tracker.note_rate_limited(int(wait), endpoint=endpoint)
                     tracker.record_request_retry(
                         request_id,
                         endpoint=endpoint,

@@ -12174,7 +12174,7 @@ def test_openmeteo_request_embargo_is_shared_and_attributed(monkeypatch, tmp_pat
     assert reason is not None and reason.startswith("request_retry_until=")
     payload = json.loads(path.read_text(encoding="utf-8"))
     entry = payload["requests"]["request-a"]
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert entry["endpoint"] == "api.open-meteo.com/v1/forecast"
     assert entry["job"] == "source-clock"
     assert entry["priority"] == "maintenance"
@@ -12616,7 +12616,9 @@ def test_openmeteo_429_persists_cooldown_without_sleeping(monkeypatch, tmp_path)
         )
 
     assert slept == []
-    assert tracker.cooldown_remaining_seconds() > 0
+    assert tracker.cooldown_remaining_seconds(
+        "api.open-meteo.com/v1/forecast"
+    ) > 0
 
 
 
@@ -12700,7 +12702,45 @@ def test_openmeteo_daily_429_blocks_until_next_utc_day(monkeypatch, tmp_path):
         )
 
     assert raised.value.outcome.reason == "daily_api_request_limit_exceeded"
-    assert tracker.cooldown_remaining_seconds() > 3600
+    assert tracker.cooldown_remaining_seconds(
+        "api.open-meteo.com/v1/forecast"
+    ) > 3600
+
+
+def test_openmeteo_daily_429_is_scoped_to_provider_host(monkeypatch, tmp_path):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    tracker = OpenMeteoQuotaTracker(state_path=tmp_path / "openmeteo_quota.json")
+
+    class _SingleRunsLimitedClient:
+        def get(self, *_args, **_kwargs):
+            return httpx.Response(
+                429,
+                json={"reason": "Daily API request limit exceeded. Please try again tomorrow."},
+                request=httpx.Request("GET", "https://single-runs-api.open-meteo.com"),
+            )
+
+    with pytest.raises(openmeteo_client.OpenMeteoHTTPStatusError):
+        openmeteo_client.fetch(
+            "https://single-runs-api.open-meteo.com/v1/forecast",
+            {"latitude": 2, "longitude": 1, "run": "2026-08-18T00:00"},
+            max_retries=1,
+            quota=tracker,
+            client=_SingleRunsLimitedClient(),
+        )
+
+    allowed, reason, lease_id = tracker.acquire_request(
+        "standard-host",
+        endpoint="api.open-meteo.com/v1/forecast",
+    )
+    assert (allowed, reason) == (True, None)
+    assert lease_id
+    blocked, blocked_reason, blocked_lease = tracker.acquire_request(
+        "different-single-runs-request",
+        endpoint="single-runs-api.open-meteo.com/v1/forecast",
+    )
+    assert blocked is False
+    assert blocked_reason is not None and blocked_reason.startswith("cooldown_until=")
+    assert blocked_lease is None
 
 
 def test_openmeteo_generic_400_is_terminal_and_persisted_across_polls(
@@ -12827,7 +12867,9 @@ def test_openmeteo_429_honors_retry_after_in_typed_route_embargo(monkeypatch, tm
         )
     assert raised.value.outcome.retry_class is openmeteo_client.OpenMeteoRetryClass.RATE_LIMITED
     assert raised.value.outcome.retry_after_seconds == 30.0
-    assert tracker.cooldown_remaining_seconds() >= 59
+    assert tracker.cooldown_remaining_seconds(
+        "api.open-meteo.com/v1/forecast"
+    ) >= 59
 
 
 def test_openmeteo_request_state_is_bounded_and_migrates_v1(monkeypatch, tmp_path):
@@ -12855,9 +12897,35 @@ def test_openmeteo_request_state_is_bounded_and_migrates_v1(monkeypatch, tmp_pat
         tracker.record_request_success(str(number), endpoint="forecast", job="bounded")
 
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["day_count"] == 17
     assert len(payload["requests"]) <= MAX_REQUEST_STATES
+
+
+def test_openmeteo_v2_global_cooldown_migrates_to_attributable_scopes(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    now = datetime.now(timezone.utc)
+    path = tmp_path / "openmeteo_quota.json"
+    state = OpenMeteoQuotaTracker._default_state(now)
+    state["schema_version"] = 2
+    state.pop("blocked_until_by_endpoint")
+    state["blocked_until"] = (now + timedelta(hours=3)).isoformat()
+    path.write_text(json.dumps(state), encoding="utf-8")
+    tracker = OpenMeteoQuotaTracker(state_path=path)
+
+    allowed, reason, lease_id = tracker.acquire_request(
+        "standard-after-migration",
+        endpoint="api.open-meteo.com/v1/forecast",
+    )
+
+    assert (allowed, reason) == (True, None)
+    assert lease_id
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["schema_version"] == 3
+    assert payload["blocked_until"] is None
+    assert payload["blocked_until_by_endpoint"] == {}
 
 
 def test_openmeteo_quota_reserves_capacity_for_source_clock():
@@ -12896,7 +12964,11 @@ def test_openmeteo_fetch_fast_fail_429_marks_cooldown_without_sleep(monkeypatch,
 
     slept: list[float] = []
     monkeypatch.setattr(openmeteo_client.quota_tracker, "acquire_call", lambda _label="": True)
-    monkeypatch.setattr(openmeteo_client.quota_tracker, "note_rate_limited", lambda wait: None)
+    monkeypatch.setattr(
+        openmeteo_client.quota_tracker,
+        "note_rate_limited",
+        lambda wait, **_kwargs: None,
+    )
     monkeypatch.setattr(openmeteo_client, "_SHARED_HTTP_CLIENT", _Client())
     monkeypatch.setattr(openmeteo_client.time, "sleep", lambda seconds: slept.append(float(seconds)))
 
