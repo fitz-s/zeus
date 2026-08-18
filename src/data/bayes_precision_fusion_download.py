@@ -593,10 +593,31 @@ def bayes_precision_fusion_quota_cooldown_seconds() -> int:
     return 0 if 0 in waits else int(min(waits))
 
 
+def bayes_precision_fusion_held_quota_cooldown_seconds() -> int:
+    """Return the cooldown after applying the held-capital quota reserve."""
+
+    with _BPF_OPENMETEO_QUOTA_TRACKER.critical_lane():
+        waits = (
+            _BPF_OPENMETEO_QUOTA_TRACKER.retry_after_seconds(
+                "single-runs-api.open-meteo.com/v1/forecast"
+            ),
+            _BPF_OPENMETEO_QUOTA_TRACKER.retry_after_seconds(
+                "api.open-meteo.com/v1/forecast"
+            ),
+        )
+    return 0 if 0 in waits else int(min(waits))
+
+
 def bayes_precision_fusion_source_clock_quota_priority():
     """Reserve Open-Meteo capacity for newly published source runs."""
 
     return _BPF_OPENMETEO_QUOTA_TRACKER.priority_lane()
+
+
+def bayes_precision_fusion_held_quota_priority():
+    """Reserve the final Open-Meteo tranche for held-position refresh."""
+
+    return _BPF_OPENMETEO_QUOTA_TRACKER.critical_lane()
 
 
 @dataclass(frozen=True)

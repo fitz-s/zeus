@@ -2279,3 +2279,26 @@ publication barrier.
   unrelated entry families. Acceptance: canonical 4-of-4 with one no-authority
   identity remains incomplete; batch/singular degraded attempts persist exact
   identities; complete fresh coverage and explicit discharge remain successful.
+
+### Slice B113 — Spend the held-capital quota reserve on held source capture (2026-08-18)
+
+- Live defect: held-family source-clock targets were ordered ahead of broad
+  discovery, but every BPF request still entered only the ordinary
+  `priority_lane`. Near its daily ceiling the governor could therefore preserve
+  the final held-capital tranche while refusing the exact held refresh it was
+  reserved for; live logs confirmed held capture reservations were labelled
+  `priority`, never `critical`.
+- First-principles invariant: a source-clock chunk containing any canonical held
+  family consumes the `critical_lane`; a chunk containing only discovery targets
+  remains in `priority_lane`. Explicit provider cooldowns and hard caps remain
+  non-bypassable.
+- SCOPE: Open-Meteo quota admission for source-clock BPF chunks containing held
+  families. DRAIN: recurring availability polls retry the critical chunk and
+  publish the normal source-commit wake. RESET: once the held rows land, exact
+  coverage removes them from subsequent chunks and ordinary source-clock quota
+  admission resumes.
+- Acceptance: a deterministic relationship test proves the held Seoul city
+  chunk is downloaded under `critical_lane`, the Paris-only discovery chunk uses
+  `priority_lane`, and a priority-only cooldown defers Paris without suppressing
+  Seoul. Freshness, provider identity, materialization, q, sizing, price, and
+  venue I/O remain unchanged.

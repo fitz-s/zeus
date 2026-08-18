@@ -1184,6 +1184,8 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
         from src.data.bayes_precision_fusion_download import (  # noqa: PLC0415
             BayesPrecisionFusionDownloadTarget,
             bayes_precision_fusion_quota_cooldown_seconds,
+            bayes_precision_fusion_held_quota_cooldown_seconds,
+            bayes_precision_fusion_held_quota_priority,
             bayes_precision_fusion_source_clock_quota_priority,
             download_bayes_precision_fusion_extra_raw_inputs,
         )
@@ -1219,14 +1221,26 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 "updated_sources": updated_sources,
             }
 
+        held_priority = held_position_family_priorities()
         cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
         if cooldown_seconds > 0:
-            return {
-                "status": "SOURCE_CLOCK_BPF_SCOPED_QUOTA_COOLDOWN_SKIPPED",
-                "updated_sources": updated_sources,
-                "affected_cities": affected_cities,
-                "cooldown_seconds": cooldown_seconds,
-            }
+            affected_city_set = set(affected_cities)
+            has_held_target = any(
+                priority < 2 and city in affected_city_set
+                for (city, _target_date, _metric), priority in held_priority.items()
+            )
+            held_cooldown_seconds = (
+                bayes_precision_fusion_held_quota_cooldown_seconds()
+                if has_held_target
+                else cooldown_seconds
+            )
+            if held_cooldown_seconds > 0:
+                return {
+                    "status": "SOURCE_CLOCK_BPF_SCOPED_QUOTA_COOLDOWN_SKIPPED",
+                    "updated_sources": updated_sources,
+                    "affected_cities": affected_cities,
+                    "cooldown_seconds": held_cooldown_seconds,
+                }
 
         now = datetime.now(timezone.utc)
         source_cycles: dict[str, datetime] = {}
@@ -1291,7 +1305,6 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 "unresolved_sources": unresolved_sources,
             }
 
-        held_priority = held_position_family_priorities()
         all_target_keys = tuple(
             replacement_forecast_current_target_keys(Path(str(forecast_db)))
         )
@@ -1565,7 +1578,19 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
             cycle: datetime,
             chunk: list[BayesPrecisionFusionDownloadTarget],
         ) -> tuple[str, dict[str, object]]:
-            cooldown_seconds = bayes_precision_fusion_quota_cooldown_seconds()
+            held_chunk = any(
+                held_priority.get(
+                    (target.city, target.target_date, target.metric),
+                    2,
+                )
+                < 2
+                for target in chunk
+            )
+            cooldown_seconds = (
+                bayes_precision_fusion_held_quota_cooldown_seconds()
+                if held_chunk
+                else bayes_precision_fusion_quota_cooldown_seconds()
+            )
             if quota_abort.is_set() or cooldown_seconds > 0:
                 quota_abort.set()
                 return source, {
@@ -1587,7 +1612,12 @@ def _download_bayes_precision_fusion_source_clock_raw_inputs_if_needed(
                 if deadline is not None
                 else None
             )
-            with bayes_precision_fusion_source_clock_quota_priority():
+            quota_context = (
+                bayes_precision_fusion_held_quota_priority()
+                if held_chunk
+                else bayes_precision_fusion_source_clock_quota_priority()
+            )
+            with quota_context:
                 report = download_bayes_precision_fusion_extra_raw_inputs(
                     forecast_db=Path(str(forecast_db)),
                     cycle=cycle,

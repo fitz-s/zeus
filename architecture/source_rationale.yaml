@@ -1344,7 +1344,7 @@ files:
   src/data/bayes_precision_fusion_download.py:
     zone: K2_runtime
     authority_role: replacement_raw_forecast_capture
-    why: Captures exact current and previous Open-Meteo model runs into raw forecast evidence; it does not derive probabilities or place orders.
+    why: Captures exact current and previous Open-Meteo model runs into raw forecast evidence and exposes distinct source-clock and held-capital quota lanes; it does not derive probabilities or place orders.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:
@@ -1358,7 +1358,7 @@ files:
   src/data/replacement_forecast_production.py:
     zone: K2_runtime
     authority_role: replacement_forecast_runtime_orchestrator
-    why: Orchestrates source-clock capture, current-target materialization, and commit notifications while leaving probability math, market truth, and order authority to their owning modules. Bounded extra-model passes rotate across city-date groups after each attempted prefix so an unavailable early provider scope cannot indefinitely starve later current targets.
+    why: Orchestrates source-clock capture, current-target materialization, and commit notifications while leaving probability math, market truth, and order authority to their owning modules. Bounded extra-model passes rotate across city-date groups after each attempted prefix so an unavailable early provider scope cannot indefinitely starve later current targets; chunks containing held families consume the held-capital quota tranche instead of competing in the ordinary source-clock lane.
     hazards:
     - SOURCE_TRUTH_PLANE_COLLAPSE
     downstream:

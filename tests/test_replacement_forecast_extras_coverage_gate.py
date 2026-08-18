@@ -660,9 +660,12 @@ def test_source_clock_scoped_capture_refuses_unresolved_source_cycle(
     }
 
 
+@pytest.mark.parametrize("priority_cooldown", [0, 37])
 def test_source_clock_scoped_capture_prioritizes_held_families(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, priority_cooldown
 ) -> None:
+    import threading
+
     import src.data.bayes_precision_fusion_download as dl
     import src.data.openmeteo_model_updates as updates
     import src.data.replacement_forecast_current_target_plan as target_plan
@@ -684,26 +687,47 @@ def test_source_clock_scoped_capture_prioritizes_held_families(
         target_plan.ReplacementForecastTargetKey("Seoul", "2026-07-17", "high"),
         target_plan.ReplacementForecastTargetKey("Seoul", "2026-07-16", "high"),
     )
-    seen: list[tuple[str, str, str]] = []
-    priority_active = [False]
+    seen: list[tuple[str, str, str, str]] = []
+    active_lane = threading.local()
 
     class _PriorityLane:
         def __enter__(self):
-            priority_active[0] = True
+            active_lane.name = "priority"
 
         def __exit__(self, *_exc):
-            priority_active[0] = False
+            active_lane.name = None
+
+    class _CriticalLane:
+        def __enter__(self):
+            active_lane.name = "critical"
+
+        def __exit__(self, *_exc):
+            active_lane.name = None
 
     monkeypatch.setitem(
         prod.settings["edli"],
         "replacement_0_1_bayes_precision_fusion_capture_enabled",
         True,
     )
-    monkeypatch.setattr(dl, "bayes_precision_fusion_quota_cooldown_seconds", lambda: 0)
+    monkeypatch.setattr(
+        dl,
+        "bayes_precision_fusion_quota_cooldown_seconds",
+        lambda: priority_cooldown,
+    )
+    monkeypatch.setattr(
+        dl,
+        "bayes_precision_fusion_held_quota_cooldown_seconds",
+        lambda: 0,
+    )
     monkeypatch.setattr(
         dl,
         "bayes_precision_fusion_source_clock_quota_priority",
         _PriorityLane,
+    )
+    monkeypatch.setattr(
+        dl,
+        "bayes_precision_fusion_held_quota_priority",
+        _CriticalLane,
     )
     monkeypatch.setattr(
         updates,
@@ -732,9 +756,10 @@ def test_source_clock_scoped_capture_prioritizes_held_families(
         lambda _sources: {"Paris", "Seoul"},
     )
     def _download(**kwargs):
-        assert priority_active[0] is True
+        lane = active_lane.name
+        assert lane in {"critical", "priority"}
         seen.extend(
-            (target.city, target.target_date, target.metric)
+            (target.city, target.target_date, target.metric, lane)
             for target in kwargs["targets"]
         )
         return {
@@ -753,17 +778,21 @@ def test_source_clock_scoped_capture_prioritizes_held_families(
         max_wall_clock_seconds=5.0,
     )
 
-    assert seen == [
-        ("Seoul", "2026-07-17", "high"),
-        ("Seoul", "2026-07-16", "high"),
-        ("Paris", "2026-07-16", "high"),
+    expected_seen = [
+        ("Seoul", "2026-07-17", "high", "critical"),
+        ("Seoul", "2026-07-16", "high", "critical"),
     ]
+    if priority_cooldown == 0:
+        expected_seen.append(("Paris", "2026-07-16", "high", "priority"))
+    assert seen == expected_seen
     assert report["priority_probe_families"] == (
         ("Seoul", "2026-07-17"),
         ("Seoul", "2026-07-16"),
     )
     assert report["status"] == (
         "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_RAW_INPUTS_DOWNLOADED"
+        if priority_cooldown == 0
+        else "SOURCE_CLOCK_SCOPED_BAYES_PRECISION_FUSION_EXTRA_TRANSPORT_RETRYABLE"
     )
 
 
