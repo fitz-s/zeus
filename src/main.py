@@ -542,6 +542,21 @@ def _canonical_monitor_entry_block_scope(
     }
 
 
+def _exact_held_sell_completion_pending() -> bool:
+    """Fail closed unless durable reduce-only auction debt is exactly readable."""
+
+    from src.runtime.reactor_wake import exact_held_sell_completion_wake_ids
+
+    try:
+        return bool(exact_held_sell_completion_wake_ids(fail_on_error=True))
+    except (OSError, ValueError):
+        logger.warning(
+            "exact held-SELL completion debt unreadable; retaining monitor priority",
+            exc_info=True,
+        )
+        return False
+
+
 def _defer_for_held_position_monitor(job_name: str) -> bool:
     """Give initial held monitoring first access to DB I/O and reactor work.
 
@@ -553,26 +568,45 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     if job_name not in _HELD_POSITION_MONITOR_BOOTSTRAP_DEFER_JOBS:
         return False
 
+    monitor_debt_pending = (
+        _held_position_monitor_canonical_debt.is_set()
+        or _periodic_held_position_monitor_fairness_debt.is_set()
+    )
+    exact_held_sell_pending = bool(
+        job_name == "edli_event_reactor"
+        and monitor_debt_pending
+        and _exact_held_sell_completion_pending()
+    )
+
     if (
         job_name == "edli_event_reactor"
         and _held_position_monitor_canonical_debt.is_set()
     ):
         monitor_block_reason = _held_position_monitor_entry_block_reason()
         if monitor_block_reason is not None:
-            # SCOPE: one replayable EDLI auction while current held exposure
-            # lacks canonical redecision authority. A reduce-only auction is
-            # not useful authority when the q/book inputs needed to compare
-            # SELL/HOLD/CASH are exactly the overdue monitor debt, and it must
-            # not interrupt the monitor's bounded DB/network cut. DRAIN: the
-            # dedicated monitor recovery cadence owns the current-capital lane
-            # and refreshes the full held book. RESET: a canonical clean read
-            # clears this event and the next auction re-enters normally.
-            logger.warning(
-                "edli_event_reactor deferred: canonical held-position monitor "
-                "debt owns current-capital redecision (%s)",
-                monitor_block_reason,
-            )
-            return True
+            # SCOPE: ordinary replayable EDLI auctions while current held
+            # exposure lacks canonical redecision authority. An already
+            # durable exact held-SELL request is the output of a completed
+            # fresh q/book redecision, not a competitor for that evidence; it
+            # must reach the existing reduce-only SELL/HOLD/CASH cut before its
+            # actuation clock expires. DRAIN: exact debt runs one reduce-only
+            # cut; otherwise the dedicated monitor recovery cadence refreshes
+            # the full held book. RESET: its exact receipt removes the bypass,
+            # or a canonical clean read clears this event. Unreadable wake debt
+            # fails closed through _exact_held_sell_completion_pending().
+            if exact_held_sell_pending:
+                logger.info(
+                    "edli_event_reactor retaining exact held-SELL completion "
+                    "while canonical monitor debt remains (%s)",
+                    monitor_block_reason,
+                )
+            else:
+                logger.warning(
+                    "edli_event_reactor deferred: canonical held-position monitor "
+                    "debt owns current-capital redecision (%s)",
+                    monitor_block_reason,
+                )
+                return True
         else:
             _held_position_monitor_canonical_debt.clear()
 
@@ -585,6 +619,7 @@ def _defer_for_held_position_monitor(job_name: str) -> bool:
     if (
         job_name == "edli_event_reactor"
         and _periodic_held_position_monitor_fairness_debt.is_set()
+        and not exact_held_sell_pending
     ):
         logger.warning(
             "edli_event_reactor deferred: periodic full-book monitor fairness debt"
@@ -6265,11 +6300,35 @@ def _edli_reactor_wake_poll_once() -> bool:
         read_reactor_wake,
     )
 
+    ordinary_reactor_blocked_by_monitor_debt = (
+        _periodic_held_position_monitor_fairness_debt.is_set()
+        or (
+            _held_position_monitor_canonical_debt.is_set()
+            and _held_position_monitor_entry_block_reason() is not None
+        )
+    )
+    exact_held_sell_wake_ids: frozenset[str] = frozenset()
+    if ordinary_reactor_blocked_by_monitor_debt:
+        try:
+            exact_held_sell_wake_ids = frozenset(
+                exact_held_sell_completion_wake_ids(fail_on_error=True)
+            )
+        except (OSError, ValueError):
+            logger.warning(
+                "exact held-SELL completion selection unreadable; retaining wake debt",
+                exc_info=True,
+            )
+            return False
+        if not exact_held_sell_wake_ids:
+            return False
+
     excluded_wake_ids = frozenset(
         _exit_monitor_excluded_wake_ids()
         | _collateral_authority_wake_backoff_ids()
+    ) - exact_held_sell_wake_ids
+    global_yield_ids = (
+        _edli_global_completion_yield.consume() - exact_held_sell_wake_ids
     )
-    global_yield_ids = _edli_global_completion_yield.consume()
     day0_post_monitor_yield_ids = _edli_day0_post_monitor_yield.consume()
     paused_forecast_post_monitor_yield_ids = (
         _edli_paused_forecast_post_monitor_yield.consume()
@@ -6297,28 +6356,40 @@ def _edli_reactor_wake_poll_once() -> bool:
                 exclude_wake_ids=excluded_wake_ids,
                 prefer_exact_held_sell=True,
                 prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
-                fail_on_error=prefer_forecast_carrier_progress,
+                fail_on_error=True,
             )
         else:
             prefer_forecast_carrier_progress = paused_forecast_carrier_priority_allowed
             wake = (
                 read_reactor_wake(
                     exclude_wake_ids=excluded_wake_ids,
+                    prefer_exact_held_sell=ordinary_reactor_blocked_by_monitor_debt,
                     prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
-                    fail_on_error=prefer_forecast_carrier_progress,
+                    fail_on_error=(
+                        prefer_forecast_carrier_progress
+                        or ordinary_reactor_blocked_by_monitor_debt
+                    ),
                 )
                 if excluded_wake_ids
                 else read_reactor_wake(
+                    prefer_exact_held_sell=ordinary_reactor_blocked_by_monitor_debt,
                     prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
-                    fail_on_error=prefer_forecast_carrier_progress,
+                    fail_on_error=(
+                        prefer_forecast_carrier_progress
+                        or ordinary_reactor_blocked_by_monitor_debt
+                    ),
                 )
             )
         if wake is not None and wake.wake_id in global_yield_ids:
             excluded_wake_ids = frozenset(excluded_wake_ids | global_yield_ids)
             wake = read_reactor_wake(
                 exclude_wake_ids=excluded_wake_ids,
+                prefer_exact_held_sell=ordinary_reactor_blocked_by_monitor_debt,
                 prefer_forecast_carrier_progress=prefer_forecast_carrier_progress,
-                fail_on_error=prefer_forecast_carrier_progress,
+                fail_on_error=(
+                    prefer_forecast_carrier_progress
+                    or ordinary_reactor_blocked_by_monitor_debt
+                ),
             )
         if (
             terminal_day0_cleanup_yield
@@ -6348,6 +6419,17 @@ def _edli_reactor_wake_poll_once() -> bool:
             "paused forecast carrier selection unavailable; retaining wake debt",
             exc_info=True,
         )
+        return False
+    if (
+        ordinary_reactor_blocked_by_monitor_debt
+        and (
+            wake is None
+            or wake.wake_id not in exact_held_sell_wake_ids
+        )
+    ):
+        # The exact snapshot that licensed the monitor-debt bypass changed
+        # before selection. Never spend that authority on an ordinary entry or
+        # replay wake; the next poll re-reads the durable debt.
         return False
     if wake is None or wake.wake_id == _edli_last_reactor_wake_id:
         return False

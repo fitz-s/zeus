@@ -11387,6 +11387,11 @@ def test_canonical_monitor_debt_defers_reactor_until_current_capital_refresh(
         "_held_position_monitor_entry_block_reason",
         lambda: "held_position_monitor_cadence_overdue",
     )
+    monkeypatch.setattr(
+        main_module,
+        "_exact_held_sell_completion_pending",
+        lambda: False,
+    )
 
     assert main_module._defer_for_held_position_monitor("edli_event_reactor") is True
     assert canonical_debt.is_set() is True
@@ -11398,6 +11403,185 @@ def test_canonical_monitor_debt_defers_reactor_until_current_capital_refresh(
     )
     assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
     assert canonical_debt.is_set() is False
+
+
+def test_canonical_monitor_debt_runs_exact_held_sell_completion(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+
+    canonical_debt = type(main_module._held_position_monitor_canonical_debt)()
+    canonical_debt.set()
+    fairness_debt = type(
+        main_module._periodic_held_position_monitor_fairness_debt
+    )()
+    fairness_debt.set()
+    bootstrap_complete = type(main_module._held_position_monitor_bootstrap_complete)()
+    bootstrap_complete.set()
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_debt",
+        canonical_debt,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_periodic_held_position_monitor_fairness_debt",
+        fairness_debt,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_bootstrap_complete",
+        bootstrap_complete,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_entry_block_reason",
+        lambda: "held_position_monitor_cadence_overdue",
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_exact_held_sell_completion_pending",
+        lambda: True,
+    )
+
+    assert main_module._defer_for_held_position_monitor("edli_event_reactor") is False
+    assert canonical_debt.is_set() is True
+    assert fairness_debt.is_set() is True
+
+
+def test_reactor_poll_selects_exact_held_sell_debt_over_monitor_exclusion(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    reads: list[dict] = []
+    canonical_debt = type(main_module._held_position_monitor_canonical_debt)()
+    canonical_debt.set()
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_debt",
+        canonical_debt,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_entry_block_reason",
+        lambda: "held_position_monitor_cadence_overdue",
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda _job: False,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_exit_monitor_excluded_wake_ids",
+        lambda: frozenset({"exact-held-sell"}),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_collateral_authority_wake_backoff_ids",
+        lambda: frozenset(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_paused_forecast_carrier_priority_allowed",
+        lambda **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "exact_held_sell_completion_wake_ids",
+        lambda **kwargs: (
+            frozenset({"exact-held-sell"})
+            if kwargs == {"fail_on_error": True}
+            else pytest.fail("exact debt selection must fail closed")
+        ),
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "read_reactor_wake",
+        lambda **kwargs: reads.append(kwargs) or None,
+    )
+
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert reads == [
+        {
+            "prefer_exact_held_sell": True,
+            "prefer_forecast_carrier_progress": False,
+            "fail_on_error": True,
+        }
+    ]
+
+
+def test_reactor_poll_never_spends_exact_snapshot_on_selected_ordinary_wake(
+    monkeypatch,
+) -> None:
+    import src.main as main_module
+    import src.runtime.reactor_wake as wake_module
+
+    canonical_debt = type(main_module._held_position_monitor_canonical_debt)()
+    canonical_debt.set()
+    ordinary = wake_module.ReactorWake(
+        "ordinary-price-wake",
+        "2026-08-18T17:36:45+00:00",
+        "price_channel",
+        "market_price_advanced",
+    )
+    reads: list[dict] = []
+    monkeypatch.setattr(
+        main_module,
+        "_defer_for_held_position_monitor",
+        lambda _job: False,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_canonical_debt",
+        canonical_debt,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_held_position_monitor_entry_block_reason",
+        lambda: "held_position_monitor_cadence_overdue",
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "exact_held_sell_completion_wake_ids",
+        lambda **_kwargs: frozenset({"exact-held-sell"}),
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "read_reactor_wake",
+        lambda **kwargs: reads.append(kwargs) or ordinary,
+    )
+    monkeypatch.setattr(
+        wake_module,
+        "coalescible_reactor_wakes",
+        lambda _wake: pytest.fail("ordinary wake must not spend exact bypass"),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_exit_monitor_excluded_wake_ids",
+        lambda: frozenset(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_collateral_authority_wake_backoff_ids",
+        lambda: frozenset(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_paused_forecast_carrier_priority_allowed",
+        lambda **_kwargs: False,
+    )
+
+    assert main_module._edli_reactor_wake_poll_once() is False
+    assert reads == [
+        {
+            "prefer_exact_held_sell": True,
+            "prefer_forecast_carrier_progress": False,
+            "fail_on_error": True,
+        }
+    ]
 
 
 def test_canonical_monitor_debt_blocks_only_exact_weather_families(
