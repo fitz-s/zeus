@@ -7391,16 +7391,15 @@ def _global_auction_monitor_cancellation_probe(
             except Exception:  # noqa: BLE001 - scheduler hint failure cannot veto trading.
                 debt_pending = False
         if completion_due_at_start:
-            if debt_pending and not exact_held_completion:
-                # SCOPE: only this in-flight selection. DRAIN: the already-set
-                # completion debt keeps one economic cut queued after monitor
-                # handoff. RESET: successful full-book handoff clears monitor
-                # debt; a later non-cancelled cut clears completion debt.
-                cancelled_this_cycle = True
-                logging.getLogger("zeus.events.reactor").info(
-                    "global auction completion yielded to held-monitor fairness debt"
-                )
-            return cancelled_this_cycle
+            # SCOPE: this one reserved global economic cut. DRAIN: monitor debt
+            # remains independently queued and runs after the cut; the cut
+            # itself rebuilds held q/book proposals and submit-time authority.
+            # RESET: a non-cancelled result clears completion debt, while a
+            # genuinely newer Day0 fact still cancels through the hard-authority
+            # probe and leaves completion debt armed. Scheduler debt is not a
+            # market fact and cannot repeatedly preempt the very completion it
+            # reserved.
+            return False
         if monitor_pending is None and not debt_pending:
             return False
         pending = debt_pending

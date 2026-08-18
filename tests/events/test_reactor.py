@@ -6169,7 +6169,8 @@ def test_monitor_preempts_once_then_next_auction_must_complete(monkeypatch):
 
         due_at_start, completion_probe = (
             reactor._global_auction_monitor_cancellation_probe(
-                lambda: pending[0]
+                lambda: pending[0],
+                monitor_debt_pending=lambda: pending[0],
             )
         )
         assert due_at_start is True
@@ -6209,7 +6210,7 @@ def test_monitor_does_not_preempt_when_completion_wake_is_not_durable(
     assert cancellation_probe() is False
 
 
-def test_monitor_fairness_debt_cancels_reserved_completion_without_new_wake(
+def test_monitor_fairness_debt_does_not_cancel_reserved_completion(
     monkeypatch,
 ):
     from src.events import reactor
@@ -6229,8 +6230,8 @@ def test_monitor_fairness_debt_cancels_reserved_completion_without_new_wake(
             )
         )
         assert due_at_start is True
-        assert cancellation_probe() is True
-        assert cancellation_probe() is True
+        assert cancellation_probe() is False
+        assert cancellation_probe() is False
         assert reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.is_set()
     finally:
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()

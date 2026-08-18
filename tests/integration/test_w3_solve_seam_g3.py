@@ -16994,27 +16994,31 @@ def test_global_scope_reports_a_held_family_without_probability_carrier(
     assert missing == [("Held", "2026-07-08", "high")]
 
 
-def test_completion_auction_debt_interrupts_forecast_sql_for_monitor_handoff(
+def test_reserved_completion_auction_ignores_scheduler_monitor_debt(
     monkeypatch,
 ):
     from src.events import reactor
+
+    monitor_debt = threading.Event()
+    available = _global_scope_event(city="Alpha", source_run_id="run-alpha")
 
     class SlowTrigger:
         def __init__(self, *_args, **_kwargs):
             pass
 
         def build_committed_snapshot_events(self, **kwargs):
+            monitor_debt.set()
             kwargs["forecasts_conn"].execute(
                 """
                 WITH RECURSIVE counter(value) AS (
                     VALUES(0)
                     UNION ALL
-                    SELECT value + 1 FROM counter WHERE value < 100000000
+                    SELECT value + 1 FROM counter WHERE value < 10000
                 )
                 SELECT SUM(value) FROM counter
                 """
             ).fetchone()
-            pytest.fail("monitor cancellation must interrupt the scope SQL")
+            return (available,)
 
     monkeypatch.setattr(universe, "ForecastSnapshotReadyTrigger", SlowTrigger)
     monkeypatch.setattr(
@@ -17033,7 +17037,6 @@ def test_completion_auction_debt_interrupts_forecast_sql_for_monitor_handoff(
         return 0
 
     forecasts_conn.set_progress_handler(prior_progress_handler, 1_000)
-    monitor_debt = threading.Event()
     monkeypatch.setattr(
         reactor,
         "request_global_auction_completion",
@@ -17047,28 +17050,22 @@ def test_completion_auction_debt_interrupts_forecast_sql_for_monitor_handoff(
             completion_due=True,
         )
     )
-    timer = threading.Timer(0.05, monitor_debt.set)
-    timer.start()
     started = time.monotonic()
     try:
-        with pytest.raises(
-            universe.GlobalAuctionScopeCancelled,
-            match="GLOBAL_SELECTION_CANCELLED",
-        ):
-            universe.scan_current_global_auction_scope(
-                world_conn=world_conn,
-                forecasts_conn=forecasts_conn,
-                decision_at_utc=_dt.datetime(
-                    2026, 7, 10, 12, 0, tzinfo=_dt.timezone.utc
-                ),
-                cancelled=cancellation_probe,
-            )
+        scope = universe.scan_current_global_auction_scope(
+            world_conn=world_conn,
+            forecasts_conn=forecasts_conn,
+            decision_at_utc=_dt.datetime(
+                2026, 7, 10, 12, 0, tzinfo=_dt.timezone.utc
+            ),
+            cancelled=cancellation_probe,
+        )
     finally:
-        timer.cancel()
-        timer.join()
         reactor._GLOBAL_AUCTION_MONITOR_COMPLETION_DUE.clear()
 
     assert due_at_start is True
+    assert monitor_debt.is_set()
+    assert scope.events == (available,)
     assert time.monotonic() - started < 1.0
     calls_before_probe = prior_handler_calls
     forecasts_conn.execute(
