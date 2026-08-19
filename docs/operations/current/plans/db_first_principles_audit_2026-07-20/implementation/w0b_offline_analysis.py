@@ -7,7 +7,7 @@ re-anchor is meant to repair. Proves no over-repair and characterizes the delta.
 Not in the live process; one-shot evidence; no writes."""
 import sqlite3
 
-DB = "/Users/leofitz/zeus/state/zeus_trades.db"
+DB = "state/zeus_trades.db"
 
 CANONICAL_CTE = """
         canonical_trade_fact AS (
