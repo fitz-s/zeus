@@ -28,7 +28,8 @@ ROOT = Path(__file__).resolve().parents[1]
 LIVE_PROBABILITY_PATHS = (
     "src/engine/evaluator.py",
     "src/engine/monitor_refresh.py",
-    "src/engine/replacement_forecast_hook_factory.py",
+    # src/engine/replacement_forecast_hook_factory.py removed (fe5afb2d2, alternate
+    # live semantics extirpation); entry dropped from this scan list.
     "src/events/candidate_evaluation.py",
     "src/events/continuous_redecision.py",
     "src/events/opportunity_selector.py",

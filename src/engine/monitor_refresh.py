@@ -1766,7 +1766,7 @@ def _attempt_held_belief_readthrough(
         if result is None or not result.live_eligible:
             return None
         # Index the held bin by its venue range-label, exactly like load_replacement_belief.
-        from src.engine.position_belief import _match_bin  # noqa: PLC0415
+        from src.engine.position_belief import _match_bin, held_side_bounds  # noqa: PLC0415
 
         if result.q_lcb_map is None or result.q_ucb_map is None:
             return None
@@ -1782,10 +1782,7 @@ def _attempt_held_belief_readthrough(
             return None
         direction = str(getattr(pos.direction, "value", pos.direction))
         held = _held_side_probability_from_yes_bin_probability(q_yes, direction)
-        if direction == "buy_yes":
-            held_lcb, held_ucb = q_yes_lcb, q_yes_ucb
-        else:
-            held_lcb, held_ucb = 1.0 - q_yes_ucb, 1.0 - q_yes_lcb
+        held_lcb, held_ucb = held_side_bounds(q_yes_lcb, q_yes_ucb, direction)
         logger.info(
             "monitor held-belief READ-THROUGH recompute OK city=%s target_date=%s metric=%s "
             "providers=%d/%d q_held=%.4f band=[%.4f,%.4f] "

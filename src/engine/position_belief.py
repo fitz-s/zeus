@@ -601,6 +601,29 @@ def _observed_running_extreme_native(
             pass
 
 
+def held_side_bounds(
+    q_yes_lcb: float, q_yes_ucb: float, direction: object
+) -> tuple[float, float]:
+    """Convert YES-bin confidence bounds into held-side bounds — the ONE place
+    this complement is taken (K1 single authority; see module docstring).
+
+    Order-reversal law: complementing a probability band swaps which YES
+    bound feeds which held bound. buy_yes passes the YES bounds through
+    unchanged. buy_no must cross them: held_lcb = 1 - q_yes_ucb (the YES
+    UPPER bound yields the held LOWER bound) and held_ucb = 1 - q_yes_lcb
+    (the YES LOWER bound yields the held UPPER bound). Swapping this —
+    1 - q_yes_lcb for held_lcb, or 1 - q_yes_ucb for held_ucb — overstates
+    confidence in the held direction; it is exactly the defect
+    tests/test_probability_complement_ast_guard.py exists to catch.
+    """
+    direction = str(getattr(direction, "value", direction))
+    if direction not in ("buy_yes", "buy_no"):
+        raise ValueError(f"unsupported direction {direction!r}")
+    if direction == "buy_yes":
+        return q_yes_lcb, q_yes_ucb
+    return 1.0 - q_yes_ucb, 1.0 - q_yes_lcb
+
+
 def load_replacement_belief(
     *,
     city: str,
@@ -925,8 +948,7 @@ def load_replacement_belief(
         fresh = False
         freshness_basis = _raw_input_lag_basis(raw_input_lag_reason) or "replacement_raw_input_hwm"
     held = q_yes if direction == "buy_yes" else 1.0 - q_yes
-    held_lcb = q_yes_lcb if direction == "buy_yes" else 1.0 - q_yes_ucb
-    held_ucb = q_yes_ucb if direction == "buy_yes" else 1.0 - q_yes_lcb
+    held_lcb, held_ucb = held_side_bounds(q_yes_lcb, q_yes_ucb, direction)
     return ReplacementBelief(
         held_side_prob=held,
         held_side_lcb=held_lcb,
