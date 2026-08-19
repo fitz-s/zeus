@@ -42,6 +42,18 @@ from src.state.portfolio import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _stable_host_power_truth(monkeypatch):
+    monkeypatch.setattr(
+        riskguard_module,
+        "_pmset_battery_status",
+        lambda: (
+            "Now drawing from 'AC Power'\n"
+            " -InternalBattery-0 (id=1)\t80%; charging; present: true\n"
+        ),
+    )
+
+
 class TestForwardCapitalAudit:
     def test_activity_excludes_preboundary_entry_decisions(self):
         from scripts.audit_realtime_pnl import _cohort_activity
@@ -8653,3 +8665,128 @@ def test_storage_capacity_read_failure_fails_closed(monkeypatch, tmp_path):
 
     assert snapshot["level"] == RiskLevel.DATA_DEGRADED.value
     assert snapshot["status"] == "CAPACITY_UNAVAILABLE"
+
+
+def test_host_power_runway_uses_time_to_preserve_execution_authority():
+    snapshot = riskguard_module.host_power_runway_snapshot(
+        "Now drawing from 'Battery Power'\n"
+        " -InternalBattery-0 (id=1)\t25%; discharging; 0:29 remaining present: true\n"
+    )
+
+    assert snapshot["level"] == RiskLevel.ORANGE.value
+    assert snapshot["reason"] == "HOST_EXECUTION_RUNWAY_SEVERE"
+    assert snapshot["battery_percent"] == 25
+    assert snapshot["remaining_minutes"] == 29.0
+
+
+def test_host_power_runway_red_precedes_forced_low_power_hibernate():
+    snapshot = riskguard_module.host_power_runway_snapshot(
+        "Now drawing from 'Battery Power'\n"
+        " -InternalBattery-0 (id=1)\t4%; discharging; 0:18 remaining present: true\n"
+    )
+
+    assert snapshot["level"] == RiskLevel.RED.value
+    assert snapshot["reason"] == "HOST_EXECUTION_RUNWAY_CRITICAL"
+
+
+def test_host_power_runway_resets_on_ac_power():
+    snapshot = riskguard_module.host_power_runway_snapshot(
+        "Now drawing from 'AC Power'\n"
+        " -InternalBattery-0 (id=1)\t4%; charging; 0:12 remaining present: true\n"
+    )
+
+    assert snapshot["level"] == RiskLevel.GREEN.value
+    assert snapshot["status"] == "AC_POWER"
+
+
+def test_host_power_runway_unreadable_truth_fails_closed(monkeypatch):
+    monkeypatch.setattr(
+        riskguard_module,
+        "_pmset_battery_status",
+        lambda: (_ for _ in ()).throw(OSError("pmset unavailable")),
+    )
+    monkeypatch.setattr(riskguard_module.sys, "platform", "darwin")
+
+    snapshot = riskguard_module.host_power_runway_snapshot()
+
+    assert snapshot["level"] == RiskLevel.DATA_DEGRADED.value
+    assert snapshot["status"] == "POWER_TRUTH_UNAVAILABLE"
+
+
+def test_host_power_red_flows_through_existing_risk_authority(monkeypatch):
+    risk_conn = sqlite3.connect(":memory:")
+    risk_conn.row_factory = sqlite3.Row
+    trade_conn = sqlite3.connect(":memory:")
+    trade_conn.row_factory = sqlite3.Row
+
+    monkeypatch.setattr(
+        riskguard_module,
+        "host_power_runway_snapshot",
+        lambda: {"level": RiskLevel.RED.value},
+    )
+    monkeypatch.setattr(
+        riskguard_module,
+        "_bankroll_of_record_for_riskguard",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        riskguard_module,
+        "_collateral_identity_level",
+        lambda _conn: RiskLevel.GREEN,
+    )
+    monkeypatch.setattr(
+        riskguard_module,
+        "storage_capacity_snapshot",
+        lambda: {"level": RiskLevel.GREEN.value},
+    )
+    monkeypatch.setattr(riskguard_module, "get_connection", lambda *_a, **_k: risk_conn)
+    monkeypatch.setattr(
+        riskguard_module,
+        "_get_runtime_trade_connection",
+        lambda: trade_conn,
+    )
+
+    level = riskguard_module.tick_with_portfolio(
+        PortfolioState(bankroll=100.0, authority="canonical_db")
+    )
+
+    assert level is RiskLevel.RED
+
+
+def test_host_power_red_is_not_weakened_by_dependency_lock_attestation(
+    monkeypatch,
+    tmp_path,
+):
+    risk_db = tmp_path / "risk_state.db"
+    conn = get_connection(risk_db)
+    riskguard_module.init_risk_db(conn)
+    _insert_risk_state_row(
+        conn,
+        checked_at=datetime.now(timezone.utc).isoformat(),
+        level=RiskLevel.GREEN.value,
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(
+        riskguard_module,
+        "get_connection",
+        lambda *_a, **_k: get_connection(risk_db),
+    )
+    monkeypatch.setattr(
+        riskguard_module,
+        "host_power_runway_snapshot",
+        lambda: {"level": RiskLevel.RED.value},
+    )
+
+    level = riskguard_module._persist_dependency_db_locked_attestation(
+        sqlite3.OperationalError("database is locked")
+    )
+
+    row = get_connection(risk_db).execute(
+        "SELECT level, details_json FROM risk_state ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    details = json.loads(row["details_json"])
+    assert level is RiskLevel.RED
+    assert row["level"] == RiskLevel.RED.value
+    assert details["host_power_floor_applied"] is True
