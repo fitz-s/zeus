@@ -425,9 +425,9 @@ def test_no_client_call_while_any_connection_open(monkeypatch, tmp_path):
     db_path = tmp_path / "recovery-fixture.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
-    init_schema(seed_conn)
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     init_collateral_schema(seed_conn)
     h._insert(seed_conn, command_id="cmd-iface")
     h._advance_to_submitting(seed_conn, command_id="cmd-iface", venue_order_id="vord-iface")
@@ -461,9 +461,9 @@ def test_live_tick_scope_runs_light_partial_remainder_recovery(monkeypatch, tmp_
     db_path = tmp_path / "recovery-live-tick.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
-    init_schema(seed_conn)
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     init_collateral_schema(seed_conn)
     h._insert(seed_conn, command_id="cmd-live-tick")
     h._advance_to_submitting(seed_conn, command_id="cmd-live-tick", venue_order_id="vord-live-tick")
@@ -504,8 +504,8 @@ def test_live_tick_scope_projects_acked_entry_order_before_full_sweep(monkeypatc
     db_path = tmp_path / "recovery-live-entry-projection.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    from src.state.db import init_schema
-    init_schema(seed_conn)
+    from src.state.db import init_schema, init_schema_trade_only
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     h._insert(
         seed_conn,
         command_id="cmd-live-projection",
@@ -589,8 +589,8 @@ def test_live_tick_scope_projects_filled_entry_order_before_full_sweep(monkeypat
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
     from src.state.collateral_ledger import init_collateral_schema
-    from src.state.db import init_schema
-    init_schema(seed_conn)
+    from src.state.db import init_schema, init_schema_trade_only
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     init_collateral_schema(seed_conn)
     event_id = "edli_evt_live_tick_filled_entry"
     final_intent_id = f"edli_intent:{event_id}:tok-yes"
@@ -766,8 +766,8 @@ def test_restart_preflight_scope_projects_acked_entry_order_before_preflight(mon
     db_path = tmp_path / "recovery-restart-entry-projection.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    from src.state.db import init_schema
-    init_schema(seed_conn)
+    from src.state.db import init_schema, init_schema_trade_only
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     h._insert(
         seed_conn,
         command_id="cmd-restart-projection",
@@ -999,8 +999,8 @@ def test_boot_fast_scope_skips_historical_fill_maintenance(monkeypatch, tmp_path
     db_path = tmp_path / "recovery-boot-fast.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    from src.state.db import init_schema
-    init_schema(seed_conn)
+    from src.state.db import init_schema, init_schema_trade_only
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     h._insert(seed_conn, command_id="cmd-boot-fast")
     h._advance_to_submitting(seed_conn, command_id="cmd-boot-fast", venue_order_id="vord-boot-fast")
     seed_conn.commit()
@@ -1031,12 +1031,12 @@ def test_boot_fast_scope_skips_historical_fill_maintenance(monkeypatch, tmp_path
 def test_scoped_recovery_persists_execution_fact_repair(monkeypatch, tmp_path, scope):
     """Every production recovery scope must persist allocator-critical fill facts."""
     from src.execution import command_recovery, venue_sync_contract
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     db_path = tmp_path / f"recovery-execution-fact-{scope}.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    init_schema(seed_conn)
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     seed_conn.execute("CREATE TABLE recovery_probe (scope TEXT PRIMARY KEY)")
     seed_conn.commit()
     seed_conn.close()
@@ -1084,8 +1084,8 @@ def test_boot_fast_scope_projects_confirmed_exit_fill_without_full_maker_scan(mo
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
     from src.state.collateral_ledger import init_collateral_schema
-    from src.state.db import init_schema
-    init_schema(seed_conn)
+    from src.state.db import init_schema, init_schema_trade_only
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     init_collateral_schema(seed_conn)
     token = "boot-fast-exit-fill-token"
     h.seed_position_baseline(
@@ -1179,8 +1179,8 @@ def test_live_tick_scope_projects_live_order_positive_matched_size(monkeypatch, 
     db_path = tmp_path / "recovery-live-tick-live-partial.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    from src.state.db import init_schema
-    init_schema(seed_conn)
+    from src.state.db import init_schema, init_schema_trade_only
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     h._insert(seed_conn, command_id="cmd-live-partial", size=10.58, price=0.67)
     h._advance_to_acked(
         seed_conn,
@@ -1281,8 +1281,8 @@ def test_live_tick_scope_terminalizes_cancelled_partial_remainder(monkeypatch, t
     db_path = tmp_path / "recovery-live-tick-partial-remainder.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    from src.state.db import init_schema
-    init_schema(seed_conn)
+    from src.state.db import init_schema, init_schema_trade_only
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     h._insert(seed_conn, command_id="cmd-partial", size=5.0)
     h._advance_to_partial(seed_conn, command_id="cmd-partial", venue_order_id="vord-partial")
     h._append_confirmed_trade_fact(
@@ -1336,8 +1336,8 @@ def test_live_tick_scope_projects_confirmed_exit_fills(monkeypatch, tmp_path):
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
     from src.state.collateral_ledger import init_collateral_schema
-    from src.state.db import init_schema
-    init_schema(seed_conn)
+    from src.state.db import init_schema, init_schema_trade_only
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     init_collateral_schema(seed_conn)
     token = "live-tick-exit-fill-token"
     h.seed_position_baseline(
@@ -1453,9 +1453,9 @@ def test_restart_preflight_scope_projects_confirmed_exit_fills_before_preflight(
     db_path = tmp_path / "recovery-restart-exit-fill.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
-    init_schema(seed_conn)
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     init_collateral_schema(seed_conn)
     token = "restart-exit-fill-token"
     h.seed_position_baseline(
@@ -1761,13 +1761,13 @@ def test_live_tick_closes_pending_exit_remainder_from_complete_account_trades(
     import tests.test_exchange_reconcile as h
     from src.execution import command_recovery, venue_sync_contract
     from src.state.collateral_ledger import init_collateral_schema
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.venue_command_repo import append_order_fact
 
     db_path = tmp_path / "recovery-live-pending-exit-partial.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    init_schema(seed_conn)
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     init_collateral_schema(seed_conn)
     command_id = "cmd-live-pending-exit-partial"
     order_id = "ord-live-pending-exit-partial"
@@ -2161,10 +2161,10 @@ def test_restart_preflight_projects_matched_exit_fills_before_preflight(monkeypa
     db_path = tmp_path / "recovery-restart-matched-exit-fill.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
 
-    init_schema(seed_conn)
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     init_collateral_schema(seed_conn)
     token = "restart-matched-exit-fill-token"
     h.seed_position_baseline(
@@ -2554,9 +2554,9 @@ def test_live_tick_scope_still_clears_cancel_acked_zero_fill_pending_entry(monke
     db_path = tmp_path / "recovery-live-tick-cancelled.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
     from src.state.collateral_ledger import init_collateral_schema
-    init_schema(seed_conn)
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     init_collateral_schema(seed_conn)
     h._insert(seed_conn, command_id="cmd-cancelled", size=10.35, price=0.60)
     h._advance_to_acked(
@@ -2642,9 +2642,9 @@ def test_live_tick_scope_clears_terminal_point_order_zero_fill_pending_entry(mon
     db_path = tmp_path / "recovery-live-tick-terminal-point.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
-    init_schema(seed_conn)
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     h._insert(seed_conn, command_id="cmd-terminal-point", size=21.99, price=0.98)
     h._advance_to_acked(
         seed_conn,
@@ -2736,12 +2736,12 @@ def test_live_tick_scope_releases_terminal_point_order_zero_fill_pending_exit(mo
 
     import tests.test_command_recovery as h
     from src.execution import command_recovery, venue_sync_contract
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     db_path = tmp_path / "recovery-live-tick-terminal-exit.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    init_schema(seed_conn)
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     h._insert(seed_conn, command_id="cmd-entry", position_id="pos-001")
     h._advance_to_acked(seed_conn, command_id="cmd-entry", venue_order_id="vord-entry")
     h._seed_pending_entry_projection(
@@ -2851,12 +2851,12 @@ def test_live_tick_scope_closes_pending_exit_from_unknown_point_confirmed_maker_
 
     import tests.test_command_recovery as h
     from src.execution import command_recovery, venue_sync_contract
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     db_path = tmp_path / "recovery-live-tick-terminal-exit-confirmed-trade.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    init_schema(seed_conn)
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     h._insert(seed_conn, command_id="cmd-entry", position_id="pos-001")
     h._advance_to_acked(seed_conn, command_id="cmd-entry", venue_order_id="vord-entry")
     h._seed_pending_entry_projection(
@@ -3009,8 +3009,8 @@ def test_no_connection_spans_more_than_one_pass(monkeypatch, tmp_path):
     db_path = tmp_path / "recovery-span.db"
     seed_conn = sqlite3.connect(str(db_path))
     seed_conn.row_factory = sqlite3.Row
-    from src.state.db import init_schema
-    init_schema(seed_conn)
+    from src.state.db import init_schema, init_schema_trade_only
+    init_schema(seed_conn); init_schema_trade_only(seed_conn)
     h._insert(seed_conn, command_id="cmd-span")
     h._advance_to_submitting(seed_conn, command_id="cmd-span", venue_order_id="vord-span")
     seed_conn.commit()
@@ -3347,7 +3347,7 @@ def test_golden_scheduled_lane_matches_legacy_lane(monkeypatch, tmp_path):
     """
     import tests.test_command_recovery as h
     from src.execution import command_recovery, venue_sync_contract
-    from src.state.db import init_schema
+    from src.state.db import init_schema, init_schema_trade_only
 
     order_payload = {"orderID": "vord-gold", "status": "LIVE"}
 
@@ -3355,7 +3355,7 @@ def test_golden_scheduled_lane_matches_legacy_lane(monkeypatch, tmp_path):
     legacy_path = tmp_path / "legacy.db"
     conn_a = sqlite3.connect(str(legacy_path))
     conn_a.row_factory = sqlite3.Row
-    init_schema(conn_a)
+    init_schema(conn_a); init_schema_trade_only(conn_a)
     _seed_recovery_scenario(conn_a)
     legacy_client = _RecordingClient(_Recorder(), orders={"vord-gold": order_payload})
     command_recovery.reconcile_unresolved_commands(conn_a, legacy_client)
@@ -3368,7 +3368,7 @@ def test_golden_scheduled_lane_matches_legacy_lane(monkeypatch, tmp_path):
     sched_path = tmp_path / "scheduled.db"
     conn_b = sqlite3.connect(str(sched_path))
     conn_b.row_factory = sqlite3.Row
-    init_schema(conn_b)
+    init_schema(conn_b); init_schema_trade_only(conn_b)
     _seed_recovery_scenario(conn_b)
     conn_b.close()
 
