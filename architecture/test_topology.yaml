@@ -373,7 +373,7 @@ test_trust_policy:
     tests/test_day0_first_principles_antibodies.py: {created: "2026-06-10", last_used: "2026-07-16"}
     tests/test_day0_hard_fact_exit.py: {created: "2026-06-10", last_used: "2026-07-29", note: "Hard-fact exit shares the measured per-city METAR margin with the fast probability lane; monitor reseed consumes the shared canonical Day0 conditioning payload. A canonical monitor writer timeout preserves a decided hard-fact exit and attempts its durable exit path; Wellington and Ankara bounded seven-day zero-margin measurements trigger a dead-bin exit at the absorbing boundary while unmeasured cities remain excluded fail-closed."}
     tests/test_day0_oracle_matched_reading_basis.py: {created: "2026-06-13", last_used: "2026-06-13"}
-    tests/test_day0_remaining_day_pricing.py: {created: "2026-06-10", last_used: "2026-08-08"}
+    tests/test_day0_remaining_day_pricing.py: {created: "2026-06-10", last_used: "2026-08-19", note: "Day0 remaining-window probability law, including conditional path noise limited to instrument plus observation latency, frozen Singapore realized-loss reconstruction, source-clock sigma retained as current-evidence confidence authority rather than reinjected point-q noise, invalid source authority failing closed, and stale observations widening the conditional path."}
     tests/test_day0_window.py: {created: "2026-04-01", last_used: "2026-07-24", note: "Causal remaining-window selection excludes an hourly grid point already observed at the exact boundary while retaining the terminal sub-hour fallback."}
     tests/test_diurnal_peak_prob_monotone.py: {created: "2026-06-10", last_used: "2026-06-10"}
     tests/test_edli_status_pulse_submit_counter.py: {created: "2026-06-09", last_used: "2026-06-10"}

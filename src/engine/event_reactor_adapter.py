@@ -1,5 +1,6 @@
-# Last reused/audited: 2026-07-24
-#   Single-live readiness owner binding after retired hook-factory removal.
+# Last reused/audited: 2026-08-19
+#   Conditional Day0 remaining-path uncertainty no longer reuses the
+#   unconditional full-day source-clock predictive width as temperature noise.
 # Last reused/audited: 2026-06-12 (external deep-review fixes A-E: A taker depth
 #   twin-authority — fail closed LIVE_DEPTH_AUTHORITY_MISSING when the fresh-price
 #   witness does not match the swept snapshot depth; B free-cash bound under injected
@@ -38441,14 +38442,15 @@ def _day0_process_sigma_native(
     """Day0 observation/process width in the settlement native unit.
 
     Day0 remaining-day q is conditioned on a fixed observed running boundary.
-    This width belongs to the still-unobserved trajectory: instrument noise plus
-    publication-latency uncertainty are applied before the physical max/min with
-    that boundary.  Peak timing is already represented by the explicit
-    remaining-hour trajectories; turning temporal maturity into an additional
-    symmetric temperature sigma double-counts that uncertainty and systematically
-    creates anti-modal NO probability.  The helper is shared by point q and q_lcb
-    bootstrap, so a single-model remaining-day bundle still carries a real
-    positive predictive width instead of failing with MU_SIGMA_NOT_STASHED.
+    This width belongs to the still-unobserved conditional trajectory:
+    instrument noise plus publication-latency uncertainty are applied before the
+    physical max/min with that boundary.  Peak timing and provider disagreement
+    are already represented by the explicit remaining-hour trajectories.  The
+    replacement carrier's ``sigma_pred`` describes the unconditional full-day
+    extreme and remains confidence/source authority; injecting it again as
+    conditional path noise would double-count a different random variable and
+    systematically manufacture anti-modal NO probability.  The helper is shared
+    by point q and q_lcb bootstrap.
     """
     try:
         from src.signal.forecast_uncertainty import sigma_instrument
@@ -38476,12 +38478,11 @@ def _day0_process_sigma_native(
             return None
         if not (source_clock_sigma > 0.0 and np.isfinite(source_clock_sigma)):
             return None
-        sigma = max(sigma, source_clock_sigma)
-        payload["_edli_day0_process_sigma_basis"] = (
-            "source_clock_predictive_error_floor_plus_observation_latency_v1"
-        )
     if not (sigma > 0.0 and np.isfinite(sigma)):
         return None
+    payload["_edli_day0_process_sigma_basis"] = (
+        "conditional_remaining_path_instrument_plus_observation_latency_v2"
+    )
     payload["_edli_day0_process_sigma_native"] = sigma
     return sigma
 

@@ -2446,3 +2446,62 @@ publication barrier.
   same with an empty current-market key set. Direct callers, B114 parser,
   scheduler, compilation, lint, registries, and diff checks pass before exact-SHA
   deploy and live 18Z held-row/posterior/monitor proof.
+
+### Slice B119 — Separate conditional Day0 path error from full-day source-clock width (2026-08-19)
+
+- Live defect: the remaining-day operator conditions fresh hourly provider paths
+  on the current temperature, but then floors their future-path noise with the
+  replacement carrier's unconditional full-day extreme `sigma_pred`. Singapore
+  33°C therefore used three current remaining maxima near
+  `32.42/32.43/32.76°C` but widened them by `2.575°C`, assigned only `0.1508`
+  to the exact 33°C bin, and bought NO with `q=0.8492`; 33°C settled YES.
+  The revision has 18 actual candidates across 13 independent city-date
+  clusters, only three wins, and realized capital evidence of approximately
+  `-$65.54` on `$102.09` committed. Reusing the full-day width after current-state
+  conditioning is a category error, not an observation-latency allowance.
+- First-principles invariant: source-clock `sigma_pred` remains the immutable
+  full-day carrier and confidence-bound authority, but it is not a temperature
+  perturbation for the conditional random variable "remaining excursion after
+  the current observation." Remaining-path point q and its bootstrap use the
+  current provider-path distribution plus instrument and observation-latency
+  uncertainty exactly once. The old losing law retains its rejected semantics
+  revision; the changed probability operator receives a new revision and fresh
+  forward attribution.
+- SCOPE: Day0 `remaining_day` point q, bootstrap samples, qkernel spine sigma,
+  and their semantic identity. Forecast/non-Day0 q, persisted source-clock
+  posterior/bounds, deterministic absorbing payoffs, settlement geometry,
+  market prices, Kelly, strategy allocation, SELL/HOLD, and venue I/O are
+  unchanged. DRAIN: every fresh Day0 observation rebuilds the conditional
+  simplex and submit-time JIT reproduces it. RESET: leaving Day0 uses the normal
+  source-clock q; missing remaining vectors, invalid source-clock carrier, or
+  stale observation remains fail-closed.
+- Files authorized: `src/engine/event_reactor_adapter.py`,
+  `src/events/day0_authority.py`, `tests/test_day0_remaining_day_pricing.py`,
+  `tests/integration/test_w3_solve_seam_g3.py`, this packet, and the existing
+  source/test registries. The durable probability-law clarification belongs in
+  `docs/authority/replacement_final_form_2026_06_09.md`.
+- Forbidden: delete or ignore the source-clock authority/bounds, use market price
+  as a probability anchor, fit from post-decision outcomes, relax the rejected
+  old revision, manufacture a confidence cap, or rename the law without changing
+  the operator.
+- Acceptance: a source-clock sigma larger than current instrument/latency noise
+  remains recorded but no longer widens the conditional path; fresh C-unit
+  evidence has zero extra member sigma while stale-observation margin still
+  widens it; invalid bound source-clock sigma still fails closed; point q and
+  bootstrap use the same conditional sigma; the Singapore frozen witness
+  reproduces old NO `0.8492` and demonstrates the changed operator from the same
+  three paths without hindsight input. Focused Day0/qkernel/global-auction tests,
+  semantic-revision identity tests, compilation, changed-surface registries,
+  planning/freshness gates, and `git diff --check` must pass before any hot-fix
+  deployment. Live closeout requires exact-SHA load plus a new decision receipt;
+  profitability remains forward settlement evidence, never inferred from code.
+- Verification: 177 unique focused Day0, qkernel, global-auction, riskguard,
+  command-boundary, family-scope, and materialization tests pass; the complete
+  remaining-day pricing file is `122/122`. Compilation, bounded Ruff, freshness,
+  map-maintenance, planning-evidence, and diff checks pass. An independent
+  verifier found no B119 finding and separately reproduced the source-authority
+  fail-closed path. Its broader hard-fact probe had one environment-only
+  `unable to open database file` failure outside B119. Repo-wide source topology
+  remains blocked by the same malformed current-live YAML scalar at line 1285,
+  and the repo-wide test registry reports the existing unrelated drift; neither
+  touches this changed behavior or its registered antibody.

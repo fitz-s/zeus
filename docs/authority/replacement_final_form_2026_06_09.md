@@ -3,7 +3,7 @@
 **Status:** Live replacement probability law. Runtime rows use `forecast_posteriors.runtime_layer='live'`; no second row-authority label or alternate runtime layer exists.
 **Supersedes:** `BAYES_PRECISION_FUSION_SPEC.md` (deleted).  
 **Created:** 2026-06-09  
-**Last audited:** 2026-07-15 (source-clock live q retains absolute ENS/provider-center disagreement and its executable band combines finite-member and distribution-free moment ambiguity symmetrically for YES/NO)
+**Last audited:** 2026-08-19 (Day0 remaining-path point q separates conditional path error from the immutable full-day source-clock width; the carrier and confidence bound remain mandatory)
 **Authority basis:** Commits 140d75ff6d · 6860f00a21 · edc598b440 · 94b584cc3f · 49492f1528 · 2b6936d3b5 · 9c594c9fc3 · df8199ef8e · e80c101c4c · 8541bc93cd · 8f20d39863 · a70436d478 · a1c2163e46 plus June 18 live-runtime cleanup. Historical experiment reports remain evidence only; they do not define the live execution layer.
 
 ---
@@ -159,6 +159,37 @@ current center and variance; it does not add a fitted tail or a market anchor.
 YES and NO are exact complements of this one probability world. Side selection
 therefore depends only on executable cost and the same posterior-mean expected
 log-wealth objective, never on a side-specific probability recipe.
+
+#### Day0 conditional remaining-path operator
+
+Once a causal target-day observation and complete unresolved-hour provider
+trajectories exist, Day0 point q is a different conditional random variable from
+the source-clock full-day extreme:
+
+```
+provider_path_s = remaining_extreme(
+    condition(hourly_path_s, current_temperature, observation_time)
+)
+future_s        = provider_path_s + instrument_error + observation_latency_error
+final_s         = extreme(observed_running_boundary, future_s)
+```
+
+The provider-path distribution carries current provider disagreement and the
+explicit remaining diurnal shape. Instrument and observation-latency errors are
+applied once before the physical max/min. The source-clock `sigma_pred` remains
+mandatory immutable carrier and confidence-bound evidence, but it describes the
+unconditional full-day extreme and must not be injected again as symmetric
+temperature noise on the conditional remaining paths. Doing so mixes two random
+variables, double-counts uncertainty, and mechanically depresses every exact-bin
+YES probability into anti-modal NO probability.
+
+The source-clock posterior, finite-member/moment band, topology, and causal
+identity remain bound into the Day0 witness and are reproduced at submit. A
+missing or invalid source-clock carrier still fails closed; this separation is
+not permission to fall back to historical residual width, an unbound path set,
+or a market-price anchor. Any change to this conditional operator increments
+`DAY0_PROBABILITY_SEMANTICS_REVISION`, so settlement attribution never pools the
+new law with an older realized-capital record.
 
 ### 1f. Finite current-evidence tail limit
 

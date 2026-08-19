@@ -1,6 +1,6 @@
 # Created: 2026-06-10
-# Last reused or audited: 2026-08-12
-# Lifecycle: created=2026-06-10; last_reviewed=2026-08-12; last_reused=2026-08-12
+# Last reused or audited: 2026-08-19
+# Lifecycle: created=2026-06-10; last_reviewed=2026-08-19; last_reused=2026-08-19
 # Purpose: Protect causal Day0 remaining-window probability construction.
 # Reuse: Run before changing Day0 hourly members, state diagnostics, or bootstrap pricing.
 # Authority basis: operator green-light 2026-06-10 item B (remaining-day
@@ -986,7 +986,7 @@ class TestRemainingDayMembers:
             "ecmwf_ifs",
         ]
 
-    def test_source_clock_predictive_sigma_is_day0_process_floor(self):
+    def test_source_clock_predictive_sigma_is_not_conditional_path_noise(self):
         import src.engine.event_reactor_adapter as era
 
         payload = {
@@ -1003,16 +1003,105 @@ class TestRemainingDayMembers:
             decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
         )
 
-        assert sigma == pytest.approx(1.4)
+        assert sigma == pytest.approx(0.28)
         assert payload["_edli_day0_process_sigma_basis"] == (
-            "source_clock_predictive_error_floor_plus_observation_latency_v1"
+            "conditional_remaining_path_instrument_plus_observation_latency_v2"
         )
         assert era._day0_extra_member_sigma_native(
             payload=payload,
             family=family,
             unit="C",
             decision_time=datetime(2026, 6, 10, 15, 0, tzinfo=UTC),
-        ) > 0.0
+        ) == 0.0
+
+        stale_payload = dict(payload)
+        stale_payload.pop("_edli_day0_process_sigma_native")
+        stale_payload.pop("_edli_day0_process_sigma_basis")
+        stale_extra = era._day0_extra_member_sigma_native(
+            payload=stale_payload,
+            family=family,
+            unit="C",
+            decision_time=datetime(2026, 6, 10, 17, 0, tzinfo=UTC),
+        )
+        assert 0.0 < stale_extra < 1.4
+
+    def test_singapore_frozen_paths_do_not_reuse_full_day_sigma(
+        self,
+        monkeypatch,
+    ):
+        """The changed law uses only inputs frozen before the losing fill."""
+
+        import src.engine.event_reactor_adapter as era
+        from src.contracts.settlement_semantics import SettlementSemantics
+
+        monkeypatch.setattr("src.config.ensemble_n_mc", lambda: 5000)
+        city = SimpleNamespace(
+            name="Singapore",
+            settlement_source_type="wu_icao",
+            settlement_unit="C",
+            wu_station="WSSS",
+        )
+        bins = [
+            Bin(low=35.0, high=35.0, unit="C", label="35C"),
+            Bin(low=None, high=28.0, unit="C", label="28C or below"),
+            Bin(low=36.0, high=36.0, unit="C", label="36C"),
+            Bin(low=32.0, high=32.0, unit="C", label="32C"),
+            Bin(low=37.0, high=37.0, unit="C", label="37C"),
+            Bin(low=38.0, high=None, unit="C", label="38C or higher"),
+            Bin(low=31.0, high=31.0, unit="C", label="31C"),
+            Bin(low=33.0, high=33.0, unit="C", label="33C"),
+            Bin(low=29.0, high=29.0, unit="C", label="29C"),
+            Bin(low=34.0, high=34.0, unit="C", label="34C"),
+            Bin(low=30.0, high=30.0, unit="C", label="30C"),
+        ]
+        members = np.asarray(
+            [32.43149622898139, 32.420572502832, 32.76006549252497]
+        )
+        payload = {
+            "city": "Singapore",
+            "metric": "high",
+            "rounded_value": 31,
+            "high_so_far": 31.0,
+            "evidence_finality": "MONOTONE_SETTLEMENT_BOUND",
+            "observation_time": "2026-08-18T03:30:00+00:00",
+            "_edli_day0_source_clock_predictive_sigma_native": (
+                2.5754064459731634
+            ),
+        }
+        decision_time = datetime(2026, 8, 18, 3, 43, 40, tzinfo=UTC)
+        family = SimpleNamespace(city="Singapore")
+        conditional_extra = era._day0_extra_member_sigma_native(
+            payload=payload,
+            family=family,
+            unit="C",
+            decision_time=decision_time,
+        )
+        changed = era._day0_remaining_p_raw_vector(
+            members,
+            city=city,
+            settlement_semantics=SettlementSemantics.for_city(city),
+            bins=bins,
+            payload=dict(payload),
+            extra_member_sigma=conditional_extra,
+        )
+
+        full_day_extra = float(np.sqrt(2.5754064459731634**2 - 0.28**2))
+        old = era._day0_remaining_p_raw_vector(
+            members,
+            city=city,
+            settlement_semantics=SettlementSemantics.for_city(city),
+            bins=bins,
+            payload=dict(payload),
+            extra_member_sigma=full_day_extra,
+        )
+
+        exact_33_index = 7
+        assert conditional_extra == 0.0
+        # The historical receipt reported 0.8492; deterministic replay uses a
+        # bounded Monte Carlo draw, so retain the economic witness with a tight
+        # sampling tolerance rather than pretending the draw itself is truth.
+        assert 1.0 - old[exact_33_index] == pytest.approx(0.8492, abs=0.005)
+        assert 1.0 - changed[exact_33_index] == pytest.approx(0.4686, abs=0.001)
 
     def test_invalid_bound_source_clock_sigma_fails_closed(self):
         import src.engine.event_reactor_adapter as era
@@ -2220,9 +2309,9 @@ class TestRemainingDayMembers:
                 "_edli_day0_source_clock_predictive_sigma_basis": (
                     "replacement_current_evidence_predictive_sigma_v1"
                 ),
-                "_edli_day0_process_sigma_native": 1.2,
+                "_edli_day0_process_sigma_native": 0.28,
                 "_edli_day0_process_sigma_basis": (
-                    "source_clock_predictive_error_floor_plus_observation_latency_v1"
+                    "conditional_remaining_path_instrument_plus_observation_latency_v2"
                 ),
             }
         )
@@ -2245,7 +2334,7 @@ class TestRemainingDayMembers:
             "icon_global",
         ]
         assert authority["source_clock_predictive_sigma_native"] == 1.2
-        assert authority["process_sigma_native"] == 1.2
+        assert authority["process_sigma_native"] == 0.28
 
     def test_f_city_members_are_converted_at_the_seam(self, monkeypatch):
         vectors = [_vector(model="ncep_nbm_conus", temps=[25.0] * 24)]
