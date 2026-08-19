@@ -399,6 +399,51 @@ def test_day0_input_revision_enqueues_observation_conditioned_seed(
     assert observed == day0_payload
 
 
+def test_scoped_reseed_uses_db_family_manifests_without_global_tree_scan(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A held-family repair must reach enqueue independent of manifest-tree size."""
+    db, kwargs = _revision_upgrade_kwargs(tmp_path)
+    kwargs.pop("manifests")
+    from src.data import replacement_cycle_advance_trigger as cycle_advance
+    from src.data import replacement_forecast_seed_discovery as discovery
+
+    family_manifests = (object(),)
+    monkeypatch.setattr(
+        discovery,
+        "_load_manifests",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("scoped repair must not scan the global manifest tree")
+        ),
+    )
+    monkeypatch.setattr(
+        cycle_advance,
+        "_family_manifests_from_db",
+        lambda *_args, **_kwargs: family_manifests,
+    )
+    monkeypatch.setattr(
+        trigger,
+        "scope_capture_offers_larger_provider_set",
+        lambda *_args, **_kwargs: _revision_upgrade_verdict(),
+    )
+    observed: dict[str, object] = {}
+
+    def _build(_conn, **build_kwargs):
+        observed["manifests"] = build_kwargs["manifests"]
+        path = Path(build_kwargs["seed_file"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n", encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(trigger, "_build_and_write_upgrade_seed", _build)
+
+    report = trigger.enqueue_fusion_upgrade_reseeds(**kwargs)
+
+    assert report["seeds_enqueued"] == 1
+    assert observed["manifests"] is family_manifests
+
+
 def test_unchanged_or_unrelated_raw_revision_is_noop() -> None:
     conn = _conn()
     cyc = "2026-06-12T06:00:00+00:00"
